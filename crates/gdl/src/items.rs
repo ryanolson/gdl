@@ -39,10 +39,18 @@ pub(crate) fn failed<T: Send + 'static>(error: Error) -> Items<T> {
 /// input in a loop inside one call; over an always-ready producer that loop
 /// would never return to the attempt boundary, which is where cancel and
 /// deadline are checked.
-pub(crate) fn fuse<T: Send + 'static>(inner: Items<T>, guard: DropGuard) -> Items<T> {
+///
+/// `scope` is the producing node's own scope. A node that ends its stream
+/// cleanly after its scope was cancelled (by itself, or by its attempt) or
+/// after the deadline is reported as interrupted, not as success, just as at
+/// an attempt boundary: whether a backward node follows must not change the
+/// outcome.
+pub(crate) fn fuse<T: Send + 'static>(inner: Items<T>, scope: &Cx) -> Items<T> {
     Box::pin(Fuse {
         inner: Some(inner),
-        guard: Some(guard),
+        guard: Some(scope.cancel_on_drop()),
+        token: scope.cancel_token(),
+        deadline_at: scope.deadline().map(|deadline| deadline.instant()),
         ready_run: 0,
     })
 }
@@ -53,6 +61,8 @@ const YIELD_INTERVAL: u16 = 1024;
 struct Fuse<T> {
     inner: Option<Items<T>>,
     guard: Option<DropGuard>,
+    token: CancellationToken,
+    deadline_at: Option<Instant>,
     ready_run: u16,
 }
 
@@ -75,7 +85,13 @@ impl<T> Stream for Fuse<T> {
         let polled = inner.as_mut().poll_next(cx);
         match polled {
             Poll::Ready(Some(Ok(_))) => this.ready_run += 1,
-            Poll::Ready(Some(Err(_)) | None) => end(&mut this.inner, &mut this.guard),
+            Poll::Ready(Some(Err(_))) => end(&mut this.inner, &mut this.guard),
+            Poll::Ready(None) => {
+                // Checked before ending: ending cancels the scope itself.
+                let interruption = interrupted(&this.token, this.deadline_at);
+                end(&mut this.inner, &mut this.guard);
+                return Poll::Ready(interruption.map(Err));
+            }
             Poll::Pending => this.ready_run = 0,
         }
         polled
@@ -235,7 +251,7 @@ mod tests {
         let attempt = Cx::new();
         let producer = attempt.child();
         let inner = items(futures::stream::iter([Ok(1), Err(Error::node("x")), Ok(2)]));
-        let mut out = fuse(inner, producer.cancel_on_drop());
+        let mut out = fuse(inner, &producer);
         assert_eq!(out.next().await.map(|r| r.ok()), Some(Some(1)));
         assert!(!producer.is_cancelled());
         assert!(out.next().await.is_some_and(|r| r.is_err()));

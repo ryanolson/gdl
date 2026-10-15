@@ -236,8 +236,7 @@ where
         // local composition.
         let scope = attempt.child();
         let out = self.node.backward(&scope, items);
-        self.rest
-            .walk(pos + 1, end, attempt, fuse(out, scope.cancel_on_drop()))
+        self.rest.walk(pos + 1, end, attempt, fuse(out, &scope))
     }
 
     fn enter(

@@ -686,3 +686,72 @@ async fn an_interruption_during_the_inner_call_stops_the_backward_stages() {
         "no backward stage may start"
     );
 }
+
+/// A sink that cancels the context it was given, then ends its stream
+/// cleanly.
+struct CancelsItself;
+
+impl gdl::Sink for CancelsItself {
+    type Req = Pre;
+    type Item = Raw;
+
+    async fn generate(&self, cx: Cx, _req: Pre) -> gdl::Result<gdl::Items<Raw>> {
+        Ok(gdl::items(
+            futures::stream::once(async move {
+                cx.cancel();
+            })
+            .filter_map(|()| futures::future::ready(None)),
+        ))
+    }
+}
+
+/// A backward node that passes items through unchanged.
+struct Identity;
+
+impl gdl::Backward for Identity {
+    type In = Raw;
+    type Out = Raw;
+
+    fn backward(&self, _cx: &Cx, input: gdl::Items<Raw>) -> gdl::Items<Raw> {
+        input
+    }
+}
+
+#[tokio::test]
+async fn a_node_that_cancels_itself_is_reported_cancelled_with_or_without_backward_nodes() {
+    use std::sync::Arc;
+
+    let pre = || Pre {
+        text: "z".into(),
+        attempt: 0,
+        plan: Plan::default(),
+    };
+    let bare = gdl::Hop::new((), gdl::SinkStage::new(Arc::new(CancelsItself)), ());
+    let out = bare.generate(Cx::new(), pre()).await.expect("attempt");
+    let bare_end = collect(out).await;
+
+    let parent = Cx::new();
+    let with_backward = gdl::Hop::new(
+        (),
+        gdl::SinkStage::new(Arc::new(CancelsItself)),
+        (Arc::new(Identity), ()),
+    );
+    let out = with_backward
+        .generate(parent.clone(), pre())
+        .await
+        .expect("attempt");
+    let backward_end = collect(out).await;
+
+    let cancelled = vec![Err(ErrorKind::Cancelled)];
+    let kinds = |all: Vec<gdl::Result<Raw>>| {
+        all.into_iter()
+            .map(|r| r.map_err(|e| e.kind()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(kinds(bare_end), cancelled, "without a backward node");
+    assert_eq!(kinds(backward_end), cancelled, "with a backward node");
+    assert!(
+        !parent.is_cancelled(),
+        "the node's cancel stays in its scope"
+    );
+}

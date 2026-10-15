@@ -217,7 +217,7 @@ where
         attempt.check()?;
         let scope = attempt.child();
         let items = self.inner.call(scope.clone(), value).await?;
-        let items = fuse(items, scope.cancel_on_drop());
+        let items = fuse(items, &scope);
         attempt.check()?;
         match self.bwd.walk(1, usize::MAX, attempt, items) {
             BwdExit::Here(items) => Ok(items),
@@ -460,7 +460,7 @@ where
             produced = self.inner.call(scope.clone(), value) => produced,
         };
         let items = match produced {
-            Ok(items) => fuse(items, scope.cancel_on_drop()),
+            Ok(items) => fuse(items, &scope),
             Err(error) => return finish_failed(out, error).await,
         };
         match self.bwd.walk(1, self.plan.inner_end, &cx, items) {

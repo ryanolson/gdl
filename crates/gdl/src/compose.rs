@@ -56,7 +56,7 @@ where
             // still holds that item.
             let scope = attempt.child();
             let items = self.inner.call(scope.clone(), req).await?;
-            let items = fuse(items, scope.cancel_on_drop());
+            let items = fuse(items, &scope);
             // As before the inner end: no backward stage starts for an
             // attempt interrupted while the inner end was finishing.
             attempt.check()?;
@@ -223,7 +223,7 @@ where
         }
         let scope = attempt.child();
         let out = self.0.backward(&scope, items);
-        self.1.apply(attempt, fuse(out, scope.cancel_on_drop()))
+        self.1.apply(attempt, fuse(out, &scope))
     }
 }
 
