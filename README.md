@@ -127,7 +127,7 @@ The design and its rulings are in `agent-docs/plan.md`.
 
 ## Cost
 
-On one aarch64 workstation, over loopback TCP, a request with one hop over two segments takes the same time as the same request written directly on velo (204 us). gdl adds two tasks and 48 allocations to each request. Item throughput is 2% to 9% lower than direct velo. velo's rate for a single stream, about 12 K items/s here, limits both. The measurements and the method are in `agent-docs/perf/m3-remote.md`.
+On one aarch64 workstation, over loopback TCP, a request with one hop over two segments takes about the same time as the same request written directly on velo (about 200 us to 250 us; the run-to-run variance is larger than the difference). gdl adds two tasks and 48 allocations to each request, and 80 ns to 400 ns of encoding per item at each crossing. Item throughput is 0% to 11% lower than direct velo, about the size of the run-to-run variance. velo's rate for a single stream, about 11 K items/s here, limits both. The measurements and the method are in `agent-docs/perf/m3-remote.md`.
 
 ## Repository layout
 
