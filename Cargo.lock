@@ -448,6 +448,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gdl-gen"
+version = "0.1.0"
+dependencies = [
+ "gdl",
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
 name = "gdl-macros"
 version = "0.1.0"
 dependencies = [

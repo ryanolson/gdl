@@ -43,6 +43,10 @@ impl Roster {
     /// service. Files are written whole and renamed into place, so a reader
     /// never sees a partial one. Instances that start after this returns are
     /// not in the roster.
+    ///
+    /// The directory belongs to one deployment. Files are never removed, so
+    /// a directory reused across runs names instances that are gone, and
+    /// requests routed to them fail.
     pub async fn rendezvous<'a>(
         dir: &Path,
         segment: &str,
