@@ -98,6 +98,20 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
             continue;
         }
         let package = emit::package(manifest, segment);
+        // A generated crate depends on the contract and on implementations
+        // by package name; Cargo cannot hold two path packages of one name.
+        if package == spec.contract.package {
+            problems.push(format!(
+                "segment `{segment}` becomes package `{package}`, the contract's name"
+            ));
+        }
+        for (node, bind) in &spec.bind {
+            if package == bind.package {
+                problems.push(format!(
+                    "segment `{segment}` becomes package `{package}`, the name of [bind.{node}]'s crate"
+                ));
+            }
+        }
         if let Some(other) = packages.insert(package.clone(), segment) {
             problems.push(format!(
                 "segments `{other}` and `{segment}` both become package `{package}`"
@@ -402,6 +416,31 @@ mod tests {
         assert!(
             error
                 .contains("segments `worker-a` and `worker_a` both become package `tiny-worker-a`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_segment_package_may_not_take_a_dependency_name() {
+        // `tiny-contract` and `tiny-nodes` are the contract and the
+        // implementation; Cargo cannot build two path packages of one name.
+        let placement = gdl::Placement::new()
+            .segment("contract", ["S"])
+            .segment("nodes", ["D"]);
+        let spec = spec(placement, &[("D", "x::D")]);
+        let error = validate(&spec, &manifest())
+            .expect_err("collision")
+            .to_string();
+        assert!(
+            error.contains(
+                "segment `contract` becomes package `tiny-contract`, the contract's name"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains(
+                "segment `nodes` becomes package `tiny-nodes`, the name of [bind.D]'s crate"
+            ),
             "{error}"
         );
     }

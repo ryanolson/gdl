@@ -1,0 +1,3 @@
+- **P2 — [crates/gdl-gen/src/lib.rs:100](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/lib.rs:100): Package collision validation excludes dependencies.** Renaming the chat example’s `front` segment to `contract` passes validation but generates `chat-contract` version `0.0.0`, depending on the existing `chat-contract` version `0.0.0` at another path. Cargo cannot represent both path packages in its lockfile, so successful generation produces an unbuildable crate. The same problem occurs when a generated package matches a hosted implementation package. Check generated names against contract and implementation package names before emission, report all collisions, and add regression coverage.
+
+ACTIONABLE: 1

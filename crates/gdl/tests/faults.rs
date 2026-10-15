@@ -722,36 +722,56 @@ async fn a_stop_reaches_a_remote_sink_whose_generate_is_still_pending() {
 /// are blocked on the stalled consumer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_producer_blocked_on_a_stalled_consumer_ends_at_the_deadline() {
-    let nodes = vec![
-        tight_velo_node().await,
-        tight_velo_node().await,
-        tight_velo_node().await,
+    let instances = vec![
+        ("front".to_string(), tight_velo_node().await),
+        ("engine".to_string(), tight_velo_node().await),
     ];
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "C", "F", "E", "G"])
+        .segment("engine", ["D"]);
     let events = Events::new();
-    let cluster = deploy(&nodes, &three_segments(), &events, RuntimeConfig::default());
+    // The engine allows 600 ms of clock skew, so its deadline for the
+    // request falls about 600 ms before the front's. In between, nothing
+    // downstream cancels the engine's producer: only its own deadline can
+    // end the blocked send.
+    let cluster = deploy_configured(&instances, &placement, &events, &|segment| {
+        if segment == "engine" {
+            RuntimeConfig {
+                clock_skew: ms(600),
+                ..RuntimeConfig::default()
+            }
+        } else {
+            RuntimeConfig::default()
+        }
+    });
     let plan = Plan {
         endless: true,
         ..Plan::default()
     };
+    let started = tokio::time::Instant::now();
     let mut out = cluster
         .segment("front")
-        .call(Cx::new().with_timeout(ms(300)), prompt("sb", plan))
+        .call(Cx::new().with_timeout(ms(1_500)), prompt("sb", plan))
         .await
         .expect("call");
     assert!(out.next().await.is_some_and(|item| item.is_ok()));
-    // Hold `out` unread past the deadline.
-    tokio::time::sleep(ms(600)).await;
-    for name in ["engine", "post"] {
-        let segment = cluster.segment(name);
-        let deadline = tokio::time::Instant::now() + WAIT;
-        while segment.admitted() > 0 || segment.egress_in_use() > 0 {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "{name} still holds the request while the consumer is stalled"
-            );
-            tokio::time::sleep(ms(10)).await;
-        }
+    // Hold `out` unread: with 4 credits and a 1 KiB slot budget, the
+    // engine's endless producer is blocked in its send long before its
+    // deadline.
+    let engine = cluster.segment("engine");
+    assert_eq!(engine.egress_in_use(), 1, "the producer is running");
+    while engine.admitted() > 0 || engine.egress_in_use() > 0 {
+        assert!(
+            started.elapsed() < ms(1_350),
+            "the engine still holds the request after its own deadline, before the front's"
+        );
+        tokio::time::sleep(ms(10)).await;
     }
+    assert!(
+        started.elapsed() >= ms(700),
+        "released at {:?}, before the engine's deadline: something else ended it",
+        started.elapsed()
+    );
     drop(out);
     assert!(settles(&cluster).await);
 }
