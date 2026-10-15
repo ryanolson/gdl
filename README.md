@@ -103,6 +103,8 @@ The generator owns the directory of each segment crate. Each generated file star
    uppercase = true
    ```
 
+   If a segment runs more than one instance, give the count of instances in an `[instances]` table, for example `engine = 2`, in every config file. All instances must agree on these counts.
+
 4. Start `chat-engine` and `chat-post`, each with its config file.
 5. Start `chat-front` with its config file, and write a request to its stdin:
 
