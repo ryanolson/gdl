@@ -14,6 +14,7 @@
 //! [node.Format]           # optional: Format's Build::Config
 //! ```
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chat_post::{Nodes, SEGMENT, SEGMENTS, start};
@@ -69,15 +70,14 @@ async fn run() -> Result<(), Failure> {
     };
     let node = gdl::bind_node(config.listen).await?;
     let wait = Duration::from_millis(config.rendezvous_ms);
-    let me = node.peer_info();
     let expect = SEGMENTS.iter().copied();
-    let roster = gdl::Roster::rendezvous(&config.roster, SEGMENT, &me, expect, wait).await?;
-    let segment = start(node, &roster, config.runtime, nodes)?;
-    // Every segment serves before any request is sent: a request must not
-    // reach a segment that has not registered its handlers yet.
-    let ready = config.roster.join("ready");
-    let expect = SEGMENTS.iter().copied();
-    gdl::Roster::rendezvous(&ready, SEGMENT, &me, expect, wait).await?;
+    let roster = gdl::Roster::rendezvous(&config.roster, SEGMENT, &node, expect, wait).await?;
+    let segment = start(Arc::clone(&node), &roster, config.runtime, nodes)?;
+    // No request may leave before every instance it can be routed to
+    // has registered its handlers.
+    roster
+        .ready(&config.roster.join("ready"), SEGMENT, &node, wait)
+        .await?;
     eprintln!("{SEGMENT}: ready");
     tokio::signal::ctrl_c().await?;
     drop(segment);

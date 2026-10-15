@@ -15,10 +15,16 @@ use crate::spec::Spec;
 /// The manifest of `spec`'s contract. `target` is the cargo target directory
 /// to build in; reusing one across runs keeps the build incremental.
 pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
-    let work = target
-        .join("gdl-gen")
-        .join(dump_name(&spec.contract.package));
-    std::fs::create_dir_all(work.join("src")).map_err(|e| io(&work, e))?;
+    // The program's source is private to this run, so concurrent runs over
+    // one target directory cannot rewrite each other's program between
+    // writing it and building it. Only the build cache is shared.
+    let private = Private::new(target.join("gdl-gen").join(format!(
+        "dump-{}-{}-{}",
+        spec.contract.package,
+        std::process::id(),
+        RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )))?;
+    let work = private.path();
     let contract = absolute(&spec.contract.path)?;
     let manifest = format!(
         "[package]\n\
@@ -39,8 +45,8 @@ pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
         "fn main() {{\n    print!(\"{{}}\", {module}::manifest().to_toml());\n}}\n",
         module = spec.contract.module,
     );
-    write_if_changed(&work.join("Cargo.toml"), &manifest)?;
-    write_if_changed(&work.join("src/main.rs"), &main)?;
+    write(&work.join("Cargo.toml"), &manifest)?;
+    write(&work.join("src/main.rs"), &main)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
@@ -60,17 +66,30 @@ pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
     gdl::Manifest::from_toml(&text).map_err(|e| Error::new(format!("reading the manifest: {e}")))
 }
 
-/// One dump program per contract package, so two contracts sharing a
-/// target directory do not rebuild each other's.
-fn dump_name(package: &str) -> String {
-    format!("dump-{package}")
+/// Runs in this process, so two renders in one process get two directories.
+static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A directory removed when dropped.
+struct Private(PathBuf);
+
+impl Private {
+    fn new(path: PathBuf) -> Result<Self, Error> {
+        std::fs::create_dir_all(path.join("src")).map_err(|e| io(&path, e))?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
 }
 
-/// Rewriting an unchanged file would make cargo rebuild the dump program.
-fn write_if_changed(path: &Path, text: &str) -> Result<(), Error> {
-    if std::fs::read_to_string(path).is_ok_and(|old| old == text) {
-        return Ok(());
+impl Drop for Private {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+fn write(path: &Path, text: &str) -> Result<(), Error> {
     std::fs::write(path, text).map_err(|e| io(path, e))
 }
 

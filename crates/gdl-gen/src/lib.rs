@@ -9,21 +9,22 @@
 //! it on its own). Each segment crate depends only on the implementation
 //! crates of the nodes it hosts.
 //!
-//! Every generated file is marked [`MARKER`]. Generation replaces marked
-//! files and removes marked files it no longer produces; `--check` reports
-//! any difference instead of writing.
+//! The generator owns each segment crate's directory: every file in it is
+//! generated, and carries a do-not-edit marker on its first line. [`write`]
+//! replaces generated files and removes marked files it no longer produces;
+//! [`drift`] reports any difference instead of writing.
 
 mod dump;
 mod emit;
 mod paths;
 mod spec;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub use emit::{MARKER, package};
-pub use spec::{Bind, Contract, GdlDep, Spec};
+use emit::MARKER;
+pub use spec::Spec;
 
 /// A generation failure, with everything wrong at once where possible.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,8 +55,7 @@ pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
     render_manifest(spec, &manifest, out)
 }
 
-/// [`render`] from a manifest already in hand.
-pub fn render_manifest(spec: &Spec, manifest: &gdl::Manifest, out: &Path) -> Result<Files, Error> {
+fn render_manifest(spec: &Spec, manifest: &gdl::Manifest, out: &Path) -> Result<Files, Error> {
     let layout = validate(spec, manifest)?;
     let out = dump::absolute(out)?;
     emit::files(spec, manifest, &layout, &out)
@@ -63,7 +63,7 @@ pub fn render_manifest(spec: &Spec, manifest: &gdl::Manifest, out: &Path) -> Res
 
 /// Check the placement and the bindings against the manifest, reporting
 /// every problem found.
-pub fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error> {
+fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error> {
     let mut problems = Vec::new();
     let layout = match gdl::layout(manifest, &spec.placement) {
         Ok(layout) => Some(layout),
@@ -72,6 +72,20 @@ pub fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Er
             None
         }
     };
+    if !manifest
+        .name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        problems.push(format!(
+            "graph `{}`: its name starts every package name, so it must start with a letter",
+            manifest.name
+        ));
+    }
+    // Package names are what Cargo sees: two segments that differ only in
+    // case or in `-` against `_` would build one package twice.
+    let mut packages: BTreeMap<String, &str> = BTreeMap::new();
     for (segment, _) in spec.placement.segments() {
         let valid = !segment.is_empty()
             && segment
@@ -81,8 +95,16 @@ pub fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Er
             problems.push(format!(
                 "segment `{segment}`: a segment name is letters, digits, `-`, and `_`"
             ));
+            continue;
+        }
+        let package = emit::package(manifest, segment);
+        if let Some(other) = packages.insert(package.clone(), segment) {
+            problems.push(format!(
+                "segments `{other}` and `{segment}` both become package `{package}`"
+            ));
         }
     }
+    let mut sources: BTreeMap<&str, (PathBuf, &str)> = BTreeMap::new();
     for (node, bind) in &spec.bind {
         match manifest.node(node) {
             None => problems.push(format!("[bind.{node}]: the graph has no node `{node}`")),
@@ -93,6 +115,17 @@ pub fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Er
         }
         if bind.ty.trim().is_empty() {
             problems.push(format!("[bind.{node}]: `type` is empty"));
+        }
+        let path = paths::normalize(&bind.path);
+        match sources.get(bind.package.as_str()) {
+            Some((first, other)) if *first != path => problems.push(format!(
+                "[bind.{other}] and [bind.{node}] give package `{}` two paths",
+                bind.package
+            )),
+            Some(_) => {}
+            None => {
+                sources.insert(&bind.package, (path, node));
+            }
         }
     }
     for node in &manifest.nodes {
@@ -113,8 +146,22 @@ pub fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Er
 }
 
 /// Write `files` under `out`, and remove generated files there that are no
-/// longer produced. Returns the removed paths.
+/// longer produced. Returns the removed paths. Refuses, writing nothing, if
+/// a segment crate's directory holds a file the generator did not write:
+/// whatever it is, it changes that crate's build.
 pub fn write(out: &Path, files: &Files) -> Result<Vec<PathBuf>, Error> {
+    let survey = survey(out, files)?;
+    if !survey.foreign.is_empty() {
+        let list: Vec<String> = survey
+            .foreign
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        return Err(Error::new(format!(
+            "these files in generated crates were not generated; move them out first:\n{}",
+            list.join("\n")
+        )));
+    }
     for (path, text) in files {
         let path = out.join(path);
         if let Some(dir) = path.parent() {
@@ -125,19 +172,16 @@ pub fn write(out: &Path, files: &Files) -> Result<Vec<PathBuf>, Error> {
         }
         std::fs::write(&path, text).map_err(|e| io(&path, e))?;
     }
-    let stale: Vec<PathBuf> = generated_under(out)?
-        .into_iter()
-        .filter(|path| !files.contains_key(path))
-        .collect();
-    for path in &stale {
+    for path in &survey.stale {
         let full = out.join(path);
         std::fs::remove_file(&full).map_err(|e| io(&full, e))?;
     }
-    Ok(stale)
+    Ok(survey.stale)
 }
 
 /// How the files under `out` differ from `files`: one line per missing,
-/// changed, or stale generated file. Empty when they match.
+/// changed, stale (generated, no longer produced), or unexpected (in a
+/// generated crate, not generated) file. Empty when they match.
 pub fn drift(out: &Path, files: &Files) -> Result<Vec<String>, Error> {
     let mut found = Vec::new();
     for (path, text) in files {
@@ -147,21 +191,48 @@ pub fn drift(out: &Path, files: &Files) -> Result<Vec<String>, Error> {
             Ok(_) => {}
         }
     }
-    for path in generated_under(out)? {
-        if !files.contains_key(&path) {
-            found.push(format!("stale: {}", path.display()));
-        }
-    }
+    let survey = survey(out, files)?;
+    found.extend(
+        survey
+            .stale
+            .iter()
+            .map(|p| format!("stale: {}", p.display())),
+    );
+    found.extend(
+        survey
+            .foreign
+            .iter()
+            .map(|p| format!("unexpected: {}", p.display())),
+    );
     Ok(found)
 }
 
-/// Generated files under `out`, relative to it. A file is generated when its
-/// first line carries the marker. Build output is skipped.
-fn generated_under(out: &Path) -> Result<Vec<PathBuf>, Error> {
-    let mut found = Vec::new();
+/// Files under `out` that `files` does not hold.
+struct Survey {
+    /// Marked as generated: output of an earlier generation.
+    stale: Vec<PathBuf>,
+    /// Unmarked, inside a generated crate's directory.
+    foreign: Vec<PathBuf>,
+}
+
+/// Walk `out`, skipping cargo build directories (they hold a
+/// `CACHEDIR.TAG`), whatever their name: a segment may be called `target`.
+fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
+    let crates: BTreeSet<&Path> = files
+        .keys()
+        .filter(|path| path.components().count() > 1)
+        .filter_map(|path| path.iter().next().map(Path::new))
+        .collect();
+    let mut survey = Survey {
+        stale: Vec::new(),
+        foreign: Vec::new(),
+    };
     let mut dirs = vec![PathBuf::new()];
     while let Some(dir) = dirs.pop() {
         let full = out.join(&dir);
+        if full.join("CACHEDIR.TAG").exists() {
+            continue;
+        }
         let entries = match std::fs::read_dir(&full) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -172,23 +243,31 @@ fn generated_under(out: &Path) -> Result<Vec<PathBuf>, Error> {
             let path = dir.join(entry.file_name());
             let kind = entry.file_type().map_err(|e| io(&full, e))?;
             if kind.is_dir() {
-                if entry.file_name() != "target" {
-                    dirs.push(path);
-                }
-            } else if kind.is_file() {
-                let text = std::fs::read_to_string(out.join(&path)).unwrap_or_default();
-                if text
-                    .lines()
-                    .next()
-                    .is_some_and(|line| line.contains(MARKER))
-                {
-                    found.push(path);
-                }
+                dirs.push(path);
+                continue;
+            }
+            if files.contains_key(&path) {
+                continue;
+            }
+            let text = std::fs::read_to_string(out.join(&path)).unwrap_or_default();
+            let marked = text
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains(MARKER));
+            let in_crate = path
+                .iter()
+                .next()
+                .is_some_and(|first| crates.contains(Path::new(first)));
+            if marked {
+                survey.stale.push(path);
+            } else if in_crate {
+                survey.foreign.push(path);
             }
         }
     }
-    found.sort();
-    Ok(found)
+    survey.stale.sort();
+    survey.foreign.sort();
+    Ok(survey)
 }
 
 fn io(path: &Path, error: std::io::Error) -> Error {
@@ -198,6 +277,7 @@ fn io(path: &Path, error: std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::{Bind, Contract, GdlDep};
     use gdl::{HopInfo, Manifest, NodeInfo, Role, TypeInfo};
 
     /// `S => D`: a source and one sink.
@@ -285,6 +365,54 @@ mod tests {
     }
 
     #[test]
+    fn segments_that_become_one_package_are_refused() {
+        let placement = gdl::Placement::new()
+            .segment("front", ["S"])
+            .segment("worker-a", ["D"])
+            .segment("worker_a", Vec::<String>::new());
+        let spec = spec(placement, &[("D", "x::D")]);
+        let error = validate(&spec, &manifest())
+            .expect_err("collision")
+            .to_string();
+        assert!(
+            error
+                .contains("segments `worker-a` and `worker_a` both become package `tiny-worker-a`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_package_bound_from_two_paths_is_refused() {
+        let mut manifest = manifest();
+        manifest.nodes.push(NodeInfo {
+            name: "F".into(),
+            role: Role::Backward,
+            binding: Some("f".into()),
+        });
+        manifest.hops[0].backward.push("F".into());
+        manifest.hops[0]
+            .backward_types
+            .push(TypeInfo::new("Item", true));
+        let placement = gdl::Placement::new()
+            .segment("front", ["S", "F"])
+            .segment("engine", ["D"]);
+        let mut spec = spec(placement, &[("D", "x::D"), ("F", "x::F")]);
+        spec.bind.get_mut("F").expect("F").path = "/elsewhere/nodes".into();
+        let error = validate(&spec, &manifest)
+            .expect_err("two paths")
+            .to_string();
+        assert!(
+            error.contains("[bind.D] and [bind.F] give package `tiny-nodes` two paths"),
+            "{error}"
+        );
+        spec.bind.get_mut("F").expect("F").path = "/work/./nodes".into();
+        assert!(
+            validate(&spec, &manifest).is_ok(),
+            "the same path, spelled two ways"
+        );
+    }
+
+    #[test]
     fn a_placement_error_is_reported() {
         let placement = gdl::Placement::new().segment("front", ["S"]);
         let spec = spec(placement, &[("D", "x::D")]);
@@ -307,36 +435,60 @@ mod tests {
         std::fs::create_dir_all(out.join("gone/src")).expect("dir");
         std::fs::write(out.join("gone/src/lib.rs"), format!("// {MARKER}.\n")).expect("stale");
         std::fs::write(out.join("notes.txt"), "not generated\n").expect("user file");
+        // Unmarked, but inside a generated crate, where Cargo would use it.
+        std::fs::write(out.join("front/build.rs"), "fn main() {}\n").expect("build script");
         assert_eq!(
             drift(&out, &files).expect("drift"),
             [
                 "differs: engine/src/lib.rs",
                 "missing: front/Cargo.toml",
                 "stale: gone/src/lib.rs",
+                "unexpected: front/build.rs",
             ]
         );
+        let refused = write(&out, &files).expect_err("a foreign file in a crate");
+        assert!(refused.to_string().contains("front/build.rs"), "{refused}");
+        assert!(
+            out.join("gone/src/lib.rs").exists(),
+            "a refused write changes nothing"
+        );
 
+        std::fs::remove_file(out.join("front/build.rs")).expect("remove");
         let removed = write(&out, &files).expect("rewrite");
         assert_eq!(removed, [PathBuf::from("gone/src/lib.rs")]);
         assert_eq!(drift(&out, &files).expect("drift"), Vec::<String>::new());
         assert!(
             out.join("notes.txt").exists(),
-            "a file without the marker is kept"
+            "a file outside the crates is kept"
         );
+
+        // A cargo build directory is skipped, whatever its name.
+        std::fs::create_dir_all(out.join("engine/target/debug")).expect("dir");
+        std::fs::write(
+            out.join("engine/target/CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .expect("tag");
+        std::fs::write(out.join("engine/target/debug/out"), "build output\n").expect("output");
+        assert_eq!(drift(&out, &files).expect("drift"), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]
-    fn only_the_source_segment_serves_and_depends_on_json() {
+    fn only_the_source_segment_serves_json_lines() {
         let out = std::path::Path::new("/work/segments");
         let spec = spec(split(), &[("D", "tiny_nodes::D")]);
         let files = render_manifest(&spec, &manifest(), out).expect("render");
         let front = &files[&PathBuf::from("front/src/main.rs")];
         let engine = &files[&PathBuf::from("engine/src/main.rs")];
-        assert!(front.contains("serve(&segment).await"));
-        assert!(!engine.contains("serve("));
-        assert!(files[&PathBuf::from("front/Cargo.toml")].contains("serde_json"));
-        assert!(!files[&PathBuf::from("engine/Cargo.toml")].contains("serde_json"));
+        assert!(front.contains("gdl::serve_json_lines("));
+        assert!(!engine.contains("serve_json_lines"));
+        assert!(files[&PathBuf::from("front/Cargo.toml")].contains("json-lines"));
+        assert!(!files[&PathBuf::from("engine/Cargo.toml")].contains("json-lines"));
+        assert!(
+            !front.contains("peer_info"),
+            "generated code calls no velo method"
+        );
         assert!(!files[&PathBuf::from("front/Cargo.toml")].contains("tiny-nodes"));
         assert!(files[&PathBuf::from("engine/Cargo.toml")].contains("tiny-nodes"));
     }

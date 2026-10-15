@@ -19,6 +19,7 @@
 //! one JSON request per line on stdin and answers each with one line per
 //! item, `{"item": ...}`, then `{"done": null}` or `{"error": "..."}`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chat_front::{Nodes, SEGMENT, SEGMENTS, start};
@@ -77,17 +78,21 @@ async fn run() -> Result<(), Failure> {
     };
     let node = gdl::bind_node(config.listen).await?;
     let wait = Duration::from_millis(config.rendezvous_ms);
-    let me = node.peer_info();
     let expect = SEGMENTS.iter().copied();
-    let roster = gdl::Roster::rendezvous(&config.roster, SEGMENT, &me, expect, wait).await?;
-    let segment = start(node, &roster, config.runtime, nodes)?;
-    // Every segment serves before any request is sent: a request must not
-    // reach a segment that has not registered its handlers yet.
-    let ready = config.roster.join("ready");
-    let expect = SEGMENTS.iter().copied();
-    gdl::Roster::rendezvous(&ready, SEGMENT, &me, expect, wait).await?;
+    let roster = gdl::Roster::rendezvous(&config.roster, SEGMENT, &node, expect, wait).await?;
+    let segment = start(Arc::clone(&node), &roster, config.runtime, nodes)?;
+    // No request may leave before every instance it can be routed to
+    // has registered its handlers.
+    roster
+        .ready(&config.roster.join("ready"), SEGMENT, &node, wait)
+        .await?;
     eprintln!("{SEGMENT}: ready");
-    serve(&segment).await
+    let input = tokio::io::BufReader::new(tokio::io::stdin());
+    let call = |request: chat_front::contract::SourceReq| {
+        segment.call::<_, chat_front::contract::SourceItem>(gdl::Cx::new(), request)
+    };
+    gdl::serve_json_lines(input, tokio::io::stdout(), call).await?;
+    Ok(())
 }
 
 /// Build one implementation from its config table.
@@ -98,59 +103,4 @@ async fn build<T: gdl::Build>(node: &str, config: Option<toml::Table>) -> Result
     T::build(config)
         .await
         .map_err(|e| format!("building {node}: {e}").into())
-}
-
-/// Answer one JSON request per stdin line, one request at a time.
-async fn serve<H>(segment: &gdl::Segment<H>) -> Result<(), Failure>
-where
-    H: gdl::Next<chat_front::contract::SourceReq, chat_front::contract::SourceItem>,
-{
-    use futures::StreamExt;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
-    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
-    let mut stdout = tokio::io::stdout();
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let reply = |value: serde_json::Value| {
-            let mut line = value.to_string();
-            line.push('\n');
-            line
-        };
-        let request = match serde_json::from_str::<chat_front::contract::SourceReq>(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                let line = reply(serde_json::json!({ "error": format!("bad request: {error}") }));
-                stdout.write_all(line.as_bytes()).await?;
-                stdout.flush().await?;
-                continue;
-            }
-        };
-        let call = segment.call::<_, chat_front::contract::SourceItem>(gdl::Cx::new(), request);
-        let mut items = match call.await {
-            Ok(items) => items,
-            Err(error) => {
-                let line = reply(serde_json::json!({ "error": error.to_string() }));
-                stdout.write_all(line.as_bytes()).await?;
-                stdout.flush().await?;
-                continue;
-            }
-        };
-        let mut end = serde_json::json!({ "done": null });
-        while let Some(item) = items.next().await {
-            let line = match item {
-                Ok(item) => reply(serde_json::json!({ "item": item })),
-                Err(error) => {
-                    end = serde_json::json!({ "error": error.to_string() });
-                    break;
-                }
-            };
-            stdout.write_all(line.as_bytes()).await?;
-        }
-        stdout.write_all(reply(end).as_bytes()).await?;
-        stdout.flush().await?;
-    }
-    Ok(())
 }

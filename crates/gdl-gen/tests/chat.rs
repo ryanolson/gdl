@@ -193,3 +193,90 @@ fn three_segment_binaries_answer_requests() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn gdl_gen(dir: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_gdl-gen"))
+        .current_dir(dir)
+        .args(args)
+        .arg("--target-dir")
+        .arg(target("gdl-gen-tests"))
+        .output()
+        .expect("gdl-gen")
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("gdl-gen-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    dir
+}
+
+#[test]
+fn the_check_does_not_depend_on_where_it_runs() {
+    // A rustfmt config that would reformat everything, where the generator
+    // runs: generated code must not pick it up.
+    let dir = scratch("cwd");
+    std::fs::write(
+        dir.join("rustfmt.toml"),
+        "max_width = 40\nhard_tabs = true\n",
+    )
+    .expect("config");
+    let spec = example().join("gdl.toml");
+    let out = example().join("segments");
+    let output = gdl_gen(
+        &dir,
+        &[
+            "--spec".as_ref(),
+            spec.as_os_str(),
+            "--out".as_ref(),
+            out.as_os_str(),
+            "--check".as_ref(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_check_reports_a_file_added_to_a_generated_crate() {
+    let out = scratch("foreign");
+    let spec = example().join("gdl.toml");
+    let generate = gdl_gen(
+        &root(),
+        &[
+            "--spec".as_ref(),
+            spec.as_os_str(),
+            "--out".as_ref(),
+            out.as_os_str(),
+        ],
+    );
+    assert!(
+        generate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generate.stderr)
+    );
+    let check = || {
+        gdl_gen(
+            &root(),
+            &[
+                "--spec".as_ref(),
+                spec.as_os_str(),
+                "--out".as_ref(),
+                out.as_os_str(),
+                "--check".as_ref(),
+            ],
+        )
+    };
+    assert!(check().status.success());
+    // Cargo runs a build script it finds, marked or not.
+    std::fs::write(out.join("front/build.rs"), "fn main() {}\n").expect("build script");
+    let output = check();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unexpected: front/build.rs"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&out);
+}

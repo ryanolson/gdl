@@ -56,7 +56,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let target = args
         .target
         .or_else(|| std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| spec.dir.join("target"));
+        .unwrap_or_else(|| spec.dir().join("target"));
     let files = gdl_gen::render(&spec, &args.out, &target)?;
     if args.check {
         let drift = gdl_gen::drift(&args.out, &files)?;

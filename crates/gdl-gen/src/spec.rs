@@ -29,33 +29,33 @@ use crate::Error;
 #[derive(Debug, Clone)]
 pub struct Spec {
     /// The spec file's own path, as given.
-    pub file: PathBuf,
+    pub(crate) file: PathBuf,
     /// The spec file's directory; relative paths in it resolve from here.
-    pub dir: PathBuf,
+    pub(crate) dir: PathBuf,
     /// The contract crate.
-    pub contract: Contract,
+    pub(crate) contract: Contract,
     /// How generated crates depend on gdl.
-    pub gdl: GdlDep,
+    pub(crate) gdl: GdlDep,
     /// The placement: the `[segment.*]` tables.
-    pub placement: gdl::Placement,
+    pub(crate) placement: gdl::Placement,
     /// Node name to implementation.
-    pub bind: BTreeMap<String, Bind>,
+    pub(crate) bind: BTreeMap<String, Bind>,
 }
 
 /// The contract crate.
 #[derive(Debug, Clone)]
-pub struct Contract {
+pub(crate) struct Contract {
     /// The package name.
-    pub package: String,
+    pub(crate) package: String,
     /// Its directory, resolved.
-    pub path: PathBuf,
+    pub(crate) path: PathBuf,
     /// The Rust path of the module holding the `graph!` expansion.
-    pub module: String,
+    pub(crate) module: String,
 }
 
 /// How generated crates depend on gdl.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GdlDep {
+pub(crate) enum GdlDep {
     /// A path dependency, resolved.
     Path(PathBuf),
     /// A registry version requirement.
@@ -64,13 +64,13 @@ pub enum GdlDep {
 
 /// One node's implementation.
 #[derive(Debug, Clone)]
-pub struct Bind {
+pub(crate) struct Bind {
     /// The implementation's package name.
-    pub package: String,
+    pub(crate) package: String,
     /// Its directory, resolved.
-    pub path: PathBuf,
+    pub(crate) path: PathBuf,
     /// The implementing type's Rust path.
-    pub ty: String,
+    pub(crate) ty: String,
 }
 
 #[derive(Deserialize)]
@@ -109,12 +109,34 @@ struct RawBind {
 }
 
 impl Spec {
-    /// Read and resolve the spec at `file`.
+    /// The spec file's directory; relative paths in it resolve from here.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Read and resolve the spec at `file`. Each bound crate's manifest
+    /// must name the package the spec gives for it.
     pub fn load(file: &Path) -> Result<Self, Error> {
         let text = std::fs::read_to_string(file)
             .map_err(|e| Error::new(format!("reading {}: {e}", file.display())))?;
         let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
-        Self::parse(&text, file, &dir)
+        let spec = Self::parse(&text, file, &dir)?;
+        let mut wrong = Vec::new();
+        for (node, bind) in &spec.bind {
+            let found = package_name(&bind.path)?;
+            if found != bind.package {
+                wrong.push(format!(
+                    "[bind.{node}]: {} holds package `{found}`, not `{}`",
+                    bind.path.display(),
+                    bind.package
+                ));
+            }
+        }
+        if wrong.is_empty() {
+            Ok(spec)
+        } else {
+            Err(Error::new(wrong.join("\n")))
+        }
     }
 
     fn parse(text: &str, file: &Path, dir: &Path) -> Result<Self, Error> {
@@ -241,6 +263,33 @@ mod tests {
             panic!("a misspelled key parsed");
         };
         assert!(error.to_string().contains("typ"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_binding_must_name_the_package_at_its_path() {
+        let dir = contract_dir("package");
+        std::fs::create_dir_all(dir.join("front")).expect("dir");
+        std::fs::write(
+            dir.join("front/Cargo.toml"),
+            "[package]\nname = \"other-nodes\"\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join("gdl.toml"),
+            "[contract]\npath = \"contract\"\n[gdl]\nversion = \"0.1\"\n\
+             [bind.B]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::B\"\n",
+        )
+        .expect("write");
+        let Err(error) = Spec::load(&dir.join("gdl.toml")) else {
+            panic!("a binding naming the wrong package loaded");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("holds package `other-nodes`, not `front-nodes`"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
