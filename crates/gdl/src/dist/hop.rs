@@ -264,6 +264,10 @@ where
                 }
             };
             retire.retire(reason);
+            // The rest of the attempt here (the outer end's backward nodes,
+            // anything they started) ends with it, read or not. A deadline
+            // still reads as a deadline: boundaries check it before cancel.
+            watched.cancel();
         });
         // Open the intermediate runs nearest-to-the-outer-end first, so each
         // run's reply anchor already exists when it attaches. A failure

@@ -280,3 +280,117 @@ fn the_check_reports_a_file_added_to_a_generated_crate() {
     assert!(stderr.contains("unexpected: front/build.rs"), "{stderr}");
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// Generate the example into a scratch directory with the CLI.
+fn generate_into(out: &Path, check: bool) -> std::process::Output {
+    let spec = example().join("gdl.toml");
+    let mut args: Vec<&std::ffi::OsStr> = vec![
+        "--spec".as_ref(),
+        spec.as_os_str(),
+        "--out".as_ref(),
+        out.as_os_str(),
+    ];
+    if check {
+        args.push("--check".as_ref());
+    }
+    gdl_gen(&root(), &args)
+}
+
+#[test]
+fn a_cache_marker_does_not_hide_a_generated_crate() {
+    let out = scratch("cachedir");
+    assert!(generate_into(&out, false).status.success());
+    std::fs::write(
+        out.join("front/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .expect("tag");
+    std::fs::write(out.join("front/build.rs"), "fn main() {}\n").expect("build script");
+    let output = generate_into(&out, true);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("unexpected: front/build.rs"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn a_standalone_build_of_a_generated_crate_is_not_drift() {
+    let out = scratch("standalone");
+    assert!(generate_into(&out, false).status.success());
+    // What building one generated crate on its own leaves behind: a
+    // lockfile, and a build directory.
+    let lock = cargo()
+        .args(["generate-lockfile", "--offline", "--manifest-path"])
+        .arg(out.join("front/Cargo.toml"))
+        .output()
+        .expect("cargo generate-lockfile");
+    assert!(
+        lock.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lock.stderr)
+    );
+    assert!(out.join("front/Cargo.lock").exists());
+    std::fs::create_dir_all(out.join("front/target/debug")).expect("dir");
+    std::fs::write(
+        out.join("front/target/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .expect("tag");
+    std::fs::write(out.join("front/target/debug/chat-front"), "binary\n").expect("output");
+    let check = generate_into(&out, true);
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let regenerate = generate_into(&out, false);
+    assert!(
+        regenerate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&regenerate.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn every_problem_in_a_spec_is_reported_at_once() {
+    let dir = scratch("problems");
+    let example = example();
+    let path = |p: &str| toml::Value::String(example.join(p).display().to_string());
+    let gdl = toml::Value::String(root().join("crates/gdl").display().to_string());
+    let text = format!(
+        "[contract]\npath = {contract}\n[gdl]\npath = {gdl}\n\
+         [segment.front]\nnodes = [\"Frontend\", \"Preprocess\", \"Truncate\", \"Number\"]\n\
+         [segment.engine]\nnodes = [\"Engine\"]\n\
+         [bind.Preprocess]\ncrate = \"chat-front-nodes\"\npath = {front}\ntype = \"chat_front_nodes::Preprocess\"\n\
+         [bind.Truncate]\ncrate = \"chat-front-nodes\"\npath = {front}\ntype = \"chat_front_nodes::Truncate\"\n\
+         [bind.Number]\ncrate = \"chat-front-nodes\"\npath = {front}\ntype = \"chat_front_nodes::Number\"\n\
+         [bind.Engine]\ncrate = \"chat-front-nodes\"\npath = {engine}\ntype = \"chat_engine_mock::Engine\"\n\
+         [bind.Detokenize]\ncrate = \"chat-post-nodes\"\npath = {missing}\ntype = \"chat_post_nodes::Detokenize\"\n\
+         [bind.Format]\ncrate = \"chat-post-nodes\"\npath = {missing}\ntype = \"chat_post_nodes::Format\"\n",
+        contract = path("contract"),
+        front = path("front-nodes"),
+        engine = path("engine-mock"),
+        missing = path("no-such-crate"),
+    );
+    std::fs::write(dir.join("gdl.toml"), text).expect("spec");
+    let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("the spec parses");
+    let Err(error) = gdl_gen::render(&spec, &dir.join("segments"), &target("gdl-gen-tests")) else {
+        panic!("a spec with three problems rendered");
+    };
+    let error = error.to_string();
+    for expected in [
+        // A binding naming the wrong package.
+        "holds package `chat-engine-mock`, not `chat-front-nodes`",
+        // A binding whose crate does not exist.
+        "[bind.Detokenize]: reading",
+        // A placement that leaves nodes out.
+        "node `Detokenize` is in no segment",
+    ] {
+        assert!(
+            error.contains(expected),
+            "{expected:?} missing from:\n{error}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

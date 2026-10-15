@@ -40,6 +40,9 @@ pub struct Spec {
     pub(crate) placement: gdl::Placement,
     /// Node name to implementation.
     pub(crate) bind: BTreeMap<String, Bind>,
+    /// What inspecting the bound crates found wrong. Reported with every
+    /// other problem when the spec is validated, not one at a time here.
+    pub(crate) problems: Vec<String>,
 }
 
 /// The contract crate.
@@ -115,28 +118,26 @@ impl Spec {
     }
 
     /// Read and resolve the spec at `file`. Each bound crate's manifest
-    /// must name the package the spec gives for it.
+    /// must name the package the spec gives for it; what is wrong with the
+    /// bound crates is reported when the spec is validated, with every other
+    /// problem.
     pub fn load(file: &Path) -> Result<Self, Error> {
         let text = std::fs::read_to_string(file)
             .map_err(|e| Error::new(format!("reading {}: {e}", file.display())))?;
         let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
-        let spec = Self::parse(&text, file, &dir)?;
-        let mut wrong = Vec::new();
+        let mut spec = Self::parse(&text, file, &dir)?;
         for (node, bind) in &spec.bind {
-            let found = package_name(&bind.path)?;
-            if found != bind.package {
-                wrong.push(format!(
+            match package_name(&bind.path) {
+                Err(error) => spec.problems.push(format!("[bind.{node}]: {error}")),
+                Ok(found) if found != bind.package => spec.problems.push(format!(
                     "[bind.{node}]: {} holds package `{found}`, not `{}`",
                     bind.path.display(),
                     bind.package
-                ));
+                )),
+                Ok(_) => {}
             }
         }
-        if wrong.is_empty() {
-            Ok(spec)
-        } else {
-            Err(Error::new(wrong.join("\n")))
-        }
+        Ok(spec)
     }
 
     fn parse(text: &str, file: &Path, dir: &Path) -> Result<Self, Error> {
@@ -184,6 +185,7 @@ impl Spec {
             gdl,
             placement,
             bind,
+            problems: Vec::new(),
         })
     }
 }
@@ -267,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn a_binding_must_name_the_package_at_its_path() {
+    fn every_bad_binding_is_found() {
         let dir = contract_dir("package");
         std::fs::create_dir_all(dir.join("front")).expect("dir");
         std::fs::write(
@@ -278,17 +280,17 @@ mod tests {
         std::fs::write(
             dir.join("gdl.toml"),
             "[contract]\npath = \"contract\"\n[gdl]\nversion = \"0.1\"\n\
-             [bind.B]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::B\"\n",
+             [bind.B]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::B\"\n\
+             [bind.C]\ncrate = \"gone-nodes\"\npath = \"gone\"\ntype = \"gone_nodes::C\"\n",
         )
         .expect("write");
-        let Err(error) = Spec::load(&dir.join("gdl.toml")) else {
-            panic!("a binding naming the wrong package loaded");
-        };
+        let spec = Spec::load(&dir.join("gdl.toml")).expect("the spec itself parses");
+        assert_eq!(spec.problems.len(), 2, "{:#?}", spec.problems);
+        assert!(spec.problems[0].contains("holds package `other-nodes`, not `front-nodes`"));
         assert!(
-            error
-                .to_string()
-                .contains("holds package `other-nodes`, not `front-nodes`"),
-            "{error}"
+            spec.problems[1].starts_with("[bind.C]: reading"),
+            "{}",
+            spec.problems[1]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

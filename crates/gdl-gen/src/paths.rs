@@ -10,11 +10,16 @@ pub fn normalize(path: &Path) -> PathBuf {
     for component in path.components() {
         match component {
             Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
+            Component::ParentDir => match out.components().next_back() {
+                // A step up from a name removes the name.
+                Some(Component::Normal(_)) => {
+                    out.pop();
                 }
-            }
+                // Above the root is the root.
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                // Nothing left to remove: the step stays.
+                _ => out.push(".."),
+            },
             other => out.push(other),
         }
     }
@@ -56,6 +61,16 @@ mod tests {
     #[test]
     fn normalize_applies_parent_steps() {
         assert_eq!(normalize(Path::new("/a/b/../c/./d")), Path::new("/a/c/d"));
+    }
+
+    #[test]
+    fn normalize_keeps_parent_steps_it_cannot_apply() {
+        assert_eq!(
+            normalize(Path::new("../../nodes")),
+            Path::new("../../nodes")
+        );
+        assert_eq!(normalize(Path::new("a/../../b")), Path::new("../b"));
+        assert_eq!(normalize(Path::new("/../a")), Path::new("/a"));
     }
 
     #[test]

@@ -1145,3 +1145,33 @@ async fn opening_a_local_backward_run_is_bounded_by_the_setup_timeout() {
         started.elapsed()
     );
 }
+
+// ----- milestone 3 review, pass 5 -----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_outer_backward_node_context_ends_at_the_deadline_while_the_stream_is_held() {
+    let nodes = nodes(2).await;
+    let events = Events::new();
+    let cluster = deploy(&nodes, &two_segments(), &events, RuntimeConfig::default());
+    let plan = Plan {
+        endless: true,
+        item_delay_ms: 2,
+        ..Plan::default()
+    };
+    // E runs in the outer end's segment, after the crossing.
+    let mut cx = Cx::new().with_timeout(ms(300));
+    cx.insert_meta("E", "watch:outer-e");
+    let _held = cluster
+        .segment("front")
+        .call(cx, prompt("ob", plan))
+        .await
+        .expect("call");
+    let ended = tokio::time::Instant::now() + ms(2_000);
+    while !ended_helpers().lock().expect("helpers").contains("outer-e") {
+        assert!(
+            tokio::time::Instant::now() < ended,
+            "E's helper outlived the request's deadline"
+        );
+        tokio::time::sleep(ms(10)).await;
+    }
+}

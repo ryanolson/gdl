@@ -165,6 +165,21 @@ impl RuntimeConfig {
                 ));
             }
         }
+        // Both are semaphore sizes; tokio panics on a larger one.
+        for (name, limit) in [
+            ("admission_limit", self.admission_limit),
+            ("egress_limit", self.egress_limit),
+        ] {
+            if limit > tokio::sync::Semaphore::MAX_PERMITS {
+                return Err(Error::new(
+                    ErrorKind::Placement,
+                    format!(
+                        "runtime setting `{name}` must be at most {}",
+                        tokio::sync::Semaphore::MAX_PERMITS
+                    ),
+                ));
+            }
+        }
         if self.heartbeat_interval == Some(Duration::ZERO) {
             return Err(Error::new(
                 ErrorKind::Placement,
@@ -475,6 +490,21 @@ mod tests {
                 panic!("accepted {text:?}");
             };
             let key = text.split(' ').next().unwrap_or_default();
+            assert!(error.to_string().contains(key), "{error}");
+        }
+    }
+
+    #[test]
+    fn runtime_config_refuses_more_permits_than_a_semaphore_holds() {
+        let most = tokio::sync::Semaphore::MAX_PERMITS;
+        for key in ["admission_limit", "egress_limit"] {
+            let fits: RuntimeConfig =
+                toml::from_str(&format!("{key} = {most}\n")).expect("the most a semaphore holds");
+            assert!(fits.validate().is_ok());
+            let Err(error) = toml::from_str::<RuntimeConfig>(&format!("{key} = {}\n", most + 1))
+            else {
+                panic!("{key} above the semaphore's limit was accepted");
+            };
             assert!(error.to_string().contains(key), "{error}");
         }
     }

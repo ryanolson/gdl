@@ -551,12 +551,30 @@ fn shaped<I: Send + 'static, O: Send + 'static>(
             items(futures::stream::once(async move { Err(error) }))
         }
         Some("ignore") => items(futures::stream::once(async move { Ok(prefix) })),
+        Some(mode) if mode.starts_with("watch:") => {
+            // A helper started under the node's context, as a node that
+            // offloads work would: it must end when that context does.
+            let key = mode["watch:".len()..].to_string();
+            let watched = cx.clone();
+            tokio::spawn(async move {
+                watched.cancelled().await;
+                ended_helpers().lock().expect("helpers").insert(key);
+            });
+            items(input.map(move |item| item.map(&map)))
+        }
         Some("prefix") => items(
             futures::stream::once(async move { Ok(prefix) })
                 .chain(input.map(move |item| item.map(&map))),
         ),
         _ => items(input.map(move |item| item.map(&map))),
     }
+}
+
+/// Helpers started by `watch:<key>` mode whose node context has ended.
+pub fn ended_helpers() -> &'static Mutex<std::collections::BTreeSet<String>> {
+    static ENDED: std::sync::OnceLock<Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    ENDED.get_or_init(Mutex::default)
 }
 
 // ----- assembly -----

@@ -64,7 +64,7 @@ fn render_manifest(spec: &Spec, manifest: &gdl::Manifest, out: &Path) -> Result<
 /// Check the placement and the bindings against the manifest, reporting
 /// every problem found.
 fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error> {
-    let mut problems = Vec::new();
+    let mut problems = spec.problems.clone();
     let layout = match gdl::layout(manifest, &spec.placement) {
         Ok(layout) => Some(layout),
         Err(errors) => {
@@ -116,7 +116,7 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
         if bind.ty.trim().is_empty() {
             problems.push(format!("[bind.{node}]: `type` is empty"));
         }
-        let path = paths::normalize(&bind.path);
+        let path = dump::absolute(&bind.path).unwrap_or_else(|_| paths::normalize(&bind.path));
         match sources.get(bind.package.as_str()) {
             Some((first, other)) if *first != path => problems.push(format!(
                 "[bind.{other}] and [bind.{node}] give package `{}` two paths",
@@ -215,8 +215,12 @@ struct Survey {
     foreign: Vec<PathBuf>,
 }
 
-/// Walk `out`, skipping cargo build directories (they hold a
-/// `CACHEDIR.TAG`), whatever their name: a segment may be called `target`.
+/// Walk `out`. A cargo build directory is skipped: one holding a
+/// `CACHEDIR.TAG` and no generated file. Its name does not decide (a segment
+/// may be called `target`), and a tag alone does not either (a tag beside a
+/// generated crate's sources must not hide them). A crate's `Cargo.lock` is
+/// left to whoever builds the crate on its own: a lockfile changes no source
+/// and pins only what that build resolved.
 fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
     let crates: BTreeSet<&Path> = files
         .keys()
@@ -230,7 +234,8 @@ fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
     let mut dirs = vec![PathBuf::new()];
     while let Some(dir) = dirs.pop() {
         let full = out.join(&dir);
-        if full.join("CACHEDIR.TAG").exists() {
+        let generated_below = files.keys().any(|path| path.starts_with(&dir));
+        if full.join("CACHEDIR.TAG").exists() && !generated_below {
             continue;
         }
         let entries = match std::fs::read_dir(&full) {
@@ -246,7 +251,10 @@ fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
                 dirs.push(path);
                 continue;
             }
-            if files.contains_key(&path) {
+            let lockfile = path.file_name().is_some_and(|name| name == "Cargo.lock")
+                && dir.components().count() == 1
+                && crates.contains(dir.as_path());
+            if files.contains_key(&path) || lockfile {
                 continue;
             }
             let text = std::fs::read_to_string(out.join(&path)).unwrap_or_default();
@@ -327,6 +335,7 @@ mod tests {
                     ((*node).to_string(), bind)
                 })
                 .collect(),
+            problems: Vec::new(),
         }
     }
 
@@ -409,6 +418,13 @@ mod tests {
         assert!(
             validate(&spec, &manifest).is_ok(),
             "the same path, spelled two ways"
+        );
+        // Relative: two different directories, however many steps up.
+        spec.bind.get_mut("D").expect("D").path = "../../nodes".into();
+        spec.bind.get_mut("F").expect("F").path = "nodes".into();
+        assert!(
+            validate(&spec, &manifest).is_err(),
+            "`../../nodes` is not `nodes`"
         );
     }
 
