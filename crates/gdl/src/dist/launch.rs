@@ -42,6 +42,12 @@ impl Roster {
                 "a segment name used for rendezvous has a `.`",
             ));
         }
+        if let Some((name, _)) = expect.iter().find(|(_, count)| *count == 0) {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                format!("segment `{name}` is expected with no instances; every segment needs one"),
+            ));
+        }
         publish(dir, segment, &peer(node))?;
         let deadline = tokio::time::Instant::now() + wait;
         loop {
@@ -293,6 +299,21 @@ mod membership {
         assert_eq!(ids(&a).len(), 3);
         assert_eq!(ids(&a), ids(&b));
         assert_eq!(ids(&a), ids(&c));
+
+        // An expected count of zero would let a deployment without a
+        // segment report ready.
+        let lone = node().await;
+        let other = dir.join("zero");
+        let Err(error) =
+            Roster::rendezvous(&other, "front", &lone, [("front", 1), ("engine", 0)], wait).await
+        else {
+            panic!("a deployment expecting no engine met");
+        };
+        assert!(error.to_string().contains("`engine`"), "{error}");
+        assert!(
+            !other.exists(),
+            "an instance was published before the counts were checked"
+        );
 
         let third = node().await;
         let Err(error) = Roster::rendezvous(&dir, "engine", &third, expect, wait).await else {

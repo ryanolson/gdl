@@ -33,13 +33,26 @@ where
     F: FnMut(Req) -> Fut,
     Fut: Future<Output = Result<Items<Item>>>,
 {
-    let mut lines = input.lines();
-    while let Some(line) = lines.next_line().await? {
+    let mut input = input;
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        if input.read_until(b'\n', &mut bytes).await? == 0 {
+            return Ok(());
+        }
+        // A line that is not text is a bad request, not the end of serving:
+        // only a failure to read ends it.
+        let line = String::from_utf8_lossy(&bytes);
         if line.trim().is_empty() {
             continue;
         }
-        let end = match serde_json::from_str::<Req>(&line) {
-            Err(error) => failure(format!("bad request: {error}")),
+        let parsed = std::str::from_utf8(&bytes)
+            .map_err(|e| format!("bad request: {e}"))
+            .and_then(|text| {
+                serde_json::from_str::<Req>(text).map_err(|e| format!("bad request: {e}"))
+            });
+        let end = match parsed {
+            Err(error) => failure(error),
             Ok(request) => match call(request).await {
                 Err(error) => failure(error.to_string()),
                 Ok(items) => answer(items, &mut output).await?,
@@ -48,7 +61,6 @@ where
         write_line(&mut output, &end).await?;
         output.flush().await?;
     }
-    Ok(())
 }
 
 /// Write each item; return the line that ends the answer.
@@ -135,7 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_request_gets_one_answer_and_serving_goes_on() {
-        let input: &[u8] = b"2\n\n0\nnot json\n99\n1\n";
+        let input: &[u8] = b"2\n\n0\nnot json\n99\n\xff\n1\n";
         let mut output = Vec::new();
         serve_json_lines(input, &mut output, call)
             .await
@@ -144,7 +156,7 @@ mod tests {
             .expect("utf8")
             .lines()
             .collect();
-        assert_eq!(lines.len(), 8, "{lines:#?}");
+        assert_eq!(lines.len(), 9, "{lines:#?}");
         assert_eq!(
             &lines[..3],
             [r#"{"item":{}}"#, r#"{"item":{}}"#, r#"{"done":null}"#]
@@ -160,6 +172,11 @@ mod tests {
             "{}",
             lines[5]
         );
-        assert_eq!(&lines[6..], [r#"{"item":{}}"#, r#"{"done":null}"#]);
+        assert!(
+            lines[6].starts_with(r#"{"error":"bad request: "#),
+            "{}",
+            lines[6]
+        );
+        assert_eq!(&lines[7..], [r#"{"item":{}}"#, r#"{"done":null}"#]);
     }
 }

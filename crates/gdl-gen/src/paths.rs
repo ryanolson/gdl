@@ -1,8 +1,26 @@
-//! Lexical path arithmetic. Generated manifests hold paths relative to the
-//! generated crate, so the output is the same wherever it is generated from;
-//! the paths need not exist yet, so nothing here touches the file system.
+//! Path arithmetic. Generated manifests hold paths relative to the
+//! generated crate, so the output is the same wherever it is generated from.
+//! Paths are resolved as the file system resolves them ([`resolve`]) before
+//! any comparison: lexically, `link/..` is the directory holding `link`,
+//! while the file system takes it to the parent of `link`'s target.
 
 use std::path::{Component, Path, PathBuf};
+
+/// `path` as the file system resolves it: absolute, symlinks followed in
+/// the part that exists, the rest (which cannot hold a symlink) applied
+/// lexically.
+pub fn resolve(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let parts: Vec<Component<'_>> = absolute.components().collect();
+    for split in (1..=parts.len()).rev() {
+        let existing: PathBuf = parts[..split].iter().collect();
+        if let Ok(mut resolved) = existing.canonicalize() {
+            resolved.extend(&parts[split..]);
+            return Ok(normalize(&resolved));
+        }
+    }
+    Ok(normalize(&absolute))
+}
 
 /// `path` with `.` removed and each `..` applied to the component before it.
 pub fn normalize(path: &Path) -> PathBuf {
@@ -71,6 +89,29 @@ mod tests {
         );
         assert_eq!(normalize(Path::new("a/../../b")), Path::new("../b"));
         assert_eq!(normalize(Path::new("/../a")), Path::new("/a"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolving_follows_a_symlink_before_a_parent_step() {
+        let root = std::env::temp_dir().join(format!("gdl-gen-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("vendor/a")).expect("dir");
+        std::fs::create_dir_all(root.join("vendor/nodes")).expect("dir");
+        std::fs::create_dir_all(root.join("project")).expect("dir");
+        std::os::unix::fs::symlink(root.join("vendor/a"), root.join("project/link")).expect("link");
+        let root = root.canonicalize().expect("root");
+        // `link/..` is `vendor`, as the file system resolves it.
+        assert_eq!(
+            resolve(&root.join("project/link/../nodes")).expect("resolve"),
+            root.join("vendor/nodes")
+        );
+        // A path that does not exist yet resolves through its existing part.
+        assert_eq!(
+            resolve(&root.join("project/link/../out/front")).expect("resolve"),
+            root.join("vendor/out/front")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -403,10 +403,15 @@ where
                     };
                     let sent =
                         bounded(&cx, hop.rt.send_forward(&hop.plan.fwd_segments[at], onward)).await;
-                    // The hand-off is complete: the next stage owns the reply.
-                    drop(share);
-                    if let Err(error) = sent {
-                        hop.fail(&cx, &envelope.reply, error).await;
+                    match sent {
+                        // The next stage owns the reply now.
+                        Ok(()) => drop(share),
+                        // This stage still owns it until the failure is
+                        // delivered, and counts against admission until then.
+                        Err(error) => {
+                            hop.fail(&cx, &envelope.reply, error).await;
+                            drop(share);
+                        }
                     }
                 }
                 Err(error) => hop.fail(&cx, &envelope.reply, error).await,
@@ -614,6 +619,10 @@ where
     /// Deliver `error` to `reply`, unless the request is over: then its
     /// consumer has the reason already.
     async fn fail(&self, cx: &Cx, reply: &ReplyTo, error: Error) {
+        #[cfg(feature = "fault-injection")]
+        if let Some(delay) = self.rt.config.faults.delay_failure_delivery {
+            tokio::time::sleep(delay).await;
+        }
         let attach = setup(
             cx,
             self.rt.config.setup_timeout,

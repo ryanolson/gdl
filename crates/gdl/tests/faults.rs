@@ -1012,6 +1012,11 @@ async fn a_zero_limit_is_refused_at_deployment() {
             heartbeat_interval: Some(Duration::ZERO),
             ..RuntimeConfig::default()
         },
+        // velo carries the interval in whole milliseconds: this becomes zero.
+        RuntimeConfig {
+            heartbeat_interval: Some(Duration::from_micros(500)),
+            ..RuntimeConfig::default()
+        },
     ] {
         let result = gdl::Deployment::new(
             Arc::clone(&node),
@@ -1185,4 +1190,63 @@ async fn an_outer_backward_node_context_ends_at_the_deadline_while_the_stream_is
         );
         tokio::time::sleep(ms(10)).await;
     }
+}
+
+// ----- milestone 3 review, pass 7 -----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stage_delivering_a_refused_hand_off_keeps_its_admission() {
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "F", "E", "G"])
+        .segment("side", ["C"])
+        .segment("engine", ["D"]);
+    let nodes = nodes(3).await;
+    let instances: Vec<(String, Arc<velo::Velo>)> = ["front", "side", "engine"]
+        .into_iter()
+        .map(String::from)
+        .zip(nodes.iter().cloned())
+        .collect();
+    let events = Events::new();
+    let cluster = deploy_configured(&instances, &placement, &events, &|segment| match segment {
+        // One request at a time: the second hand-off is refused.
+        "engine" => RuntimeConfig {
+            admission_limit: 1,
+            ..RuntimeConfig::default()
+        },
+        "side" => RuntimeConfig {
+            faults: Faults {
+                delay_failure_delivery: Some(ms(1_500)),
+                ..Faults::default()
+            },
+            ..RuntimeConfig::default()
+        },
+        _ => RuntimeConfig::default(),
+    });
+    let busy = Plan {
+        endless: true,
+        item_delay_ms: 5,
+        ..Plan::default()
+    };
+    let _first = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("r1", busy))
+        .await
+        .expect("first");
+    let plan = Plan {
+        tokens: 1,
+        ..Plan::default()
+    };
+    let second = cluster.segment("front").call(Cx::new(), prompt("r2", plan));
+    let watch = async {
+        // The engine refuses after its admission wait; side then delivers
+        // the failure, slowly. Meanwhile it still owns the request.
+        tokio::time::sleep(ms(800)).await;
+        cluster.segment("side").admitted()
+    };
+    let (result, admitted) = tokio::join!(second, watch);
+    assert!(result.is_err());
+    assert_eq!(
+        admitted, 1,
+        "side gave up its admission while it still owned the reply"
+    );
 }

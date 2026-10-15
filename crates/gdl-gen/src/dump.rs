@@ -94,9 +94,7 @@ fn write(path: &Path, text: &str) -> Result<(), Error> {
 }
 
 pub(crate) fn absolute(path: &Path) -> Result<PathBuf, Error> {
-    std::path::absolute(path)
-        .map(|p| crate::paths::normalize(&p))
-        .map_err(|e| io(path, e))
+    crate::paths::resolve(path).map_err(|e| io(path, e))
 }
 
 pub(crate) fn toml_string(text: &str) -> String {

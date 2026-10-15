@@ -72,6 +72,9 @@ pub struct Faults {
     /// Shift this instance's wall clock by this many nanoseconds (positive:
     /// ahead), as an unsynchronized machine would.
     pub clock_offset_nanos: i64,
+    /// Hold a stage's delivery of a failure this long before it attaches,
+    /// as a slow consumer would.
+    pub delay_failure_delivery: Option<Duration>,
 }
 
 impl Default for RuntimeConfig {
@@ -180,10 +183,15 @@ impl RuntimeConfig {
                 ));
             }
         }
-        if self.heartbeat_interval == Some(Duration::ZERO) {
+        // velo carries the interval in whole milliseconds, so anything
+        // shorter becomes zero on the way.
+        if self
+            .heartbeat_interval
+            .is_some_and(|interval| interval < Duration::from_millis(1))
+        {
             return Err(Error::new(
                 ErrorKind::Placement,
-                "runtime setting `heartbeat_interval_ms` must be more than 0",
+                "runtime setting `heartbeat_interval_ms` must be at least 1",
             ));
         }
         Ok(())
