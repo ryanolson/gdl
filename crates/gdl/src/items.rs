@@ -205,8 +205,13 @@ impl<T> Stream for Bounded<T> {
             return Poll::Ready(Some(Err(Error::deadline_exceeded())));
         }
         if this.cancelled.poll(cx).is_ready() {
+            // The deadline timer fires on a whole-millisecond tick, and an
+            // exhausted cooperative budget can hold it back; a deadline that
+            // has passed is the cause to report even if its timer has not
+            // fired yet.
+            let error = interrupted(this.token, *this.deadline_at).unwrap_or_else(Error::cancelled);
             end(this.inner, this.guard);
-            return Poll::Ready(Some(Err(Error::cancelled())));
+            return Poll::Ready(Some(Err(error)));
         }
         Poll::Pending
     }
@@ -408,6 +413,26 @@ mod tests {
             items(futures::stream::pending::<Result<u32>>()),
         );
         tokio::time::advance(Duration::from_millis(10)).await;
+        attempt.cancel();
+        assert_eq!(
+            out.next().await.map(|r| r.map_err(|e| e.kind())),
+            Some(Err(ErrorKind::DeadlineExceeded))
+        );
+    }
+
+    /// Tokio's timer fires on whole-millisecond ticks: a deadline 1.5 ms
+    /// out has passed at 1.6 ms, but its timer has not fired.
+    #[tokio::test(start_paused = true)]
+    async fn a_passed_deadline_whose_timer_has_not_fired_is_still_reported_first() {
+        let cx = Cx::new().with_timeout(Duration::from_micros(1_500));
+        let (attempt, guard) = attempt_of(&cx);
+        let mut out = bound(
+            &attempt,
+            guard,
+            items(futures::stream::pending::<Result<u32>>()),
+        );
+        assert!(futures::poll!(out.next()).is_pending());
+        tokio::time::advance(Duration::from_micros(1_600)).await;
         attempt.cancel();
         assert_eq!(
             out.next().await.map(|r| r.map_err(|e| e.kind())),

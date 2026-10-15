@@ -150,7 +150,13 @@ impl Cx {
             Some(deadline) => tokio::select! {
                 biased;
                 () = tokio::time::sleep_until(deadline.instant()) => Error::deadline_exceeded(),
-                () = self.scope.cancel.cancelled() => Error::cancelled(),
+                // The timer fires on a whole-millisecond tick; a deadline
+                // that has passed is reported even if its timer has not.
+                () = self.scope.cancel.cancelled() => if deadline.is_expired() {
+                    Error::deadline_exceeded()
+                } else {
+                    Error::cancelled()
+                },
             },
             None => {
                 self.scope.cancel.cancelled().await;
@@ -464,6 +470,14 @@ mod tests {
         .expect("live");
         let latest = mono_before + Duration::from_millis(200) - skew;
         assert!(d.instant() <= latest, "the stall extended the deadline");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn done_reports_a_passed_deadline_whose_timer_has_not_fired() {
+        let cx = Cx::new().with_timeout(Duration::from_micros(1_500));
+        tokio::time::advance(Duration::from_micros(1_600)).await;
+        cx.cancel();
+        assert_eq!(cx.done().await.kind(), crate::ErrorKind::DeadlineExceeded);
     }
 
     #[tokio::test(start_paused = true)]
