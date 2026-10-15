@@ -86,7 +86,8 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
     // Package names are what Cargo sees: two segments that differ only in
     // case or in `-` against `_` would build one package twice.
     let mut packages: BTreeMap<String, &str> = BTreeMap::new();
-    for (segment, _) in spec.placement.segments() {
+    for (segment, nodes) in spec.placement.segments() {
+        let hosted: BTreeSet<&str> = nodes.iter().map(String::as_str).collect();
         let valid = !segment.is_empty()
             && segment
                 .chars()
@@ -110,6 +111,34 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
                 problems.push(format!(
                     "segment `{segment}` becomes package `{package}`, the name of [bind.{node}]'s crate"
                 ));
+            }
+        }
+        // Rust code names crates by library name; each crate the segment's
+        // code sees must have its own.
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        let mut see = |lib: &str, what: String, problems: &mut Vec<String>| {
+            if let Some(first) = seen.get(lib) {
+                if *first != what {
+                    problems.push(format!(
+                        "segment `{segment}`: crate name `{lib}` is both {first} and {what}"
+                    ));
+                }
+            } else {
+                seen.insert(lib.to_string(), what);
+            }
+        };
+        see(
+            &package.replace('-', "_"),
+            "the segment's library".into(),
+            &mut problems,
+        );
+        see(&spec.contract.lib, "the contract".into(), &mut problems);
+        for fixed in ["gdl", "serde", "tokio", "toml"] {
+            see(fixed, format!("the `{fixed}` dependency"), &mut problems);
+        }
+        for (node, bind) in &spec.bind {
+            if hosted.contains(node.as_str()) {
+                see(&bind.lib, format!("[bind.{node}]'s crate"), &mut problems);
             }
         }
         if let Some(other) = packages.insert(package.clone(), segment) {
@@ -349,6 +378,7 @@ mod tests {
             dir: "/work".into(),
             contract: Contract {
                 package: "tiny-contract".into(),
+                lib: "tiny_contract".into(),
                 path: "/work/contract".into(),
                 module: "tiny_contract".into(),
             },
@@ -359,6 +389,7 @@ mod tests {
                 .map(|(node, ty)| {
                     let bind = Bind {
                         package: "tiny-nodes".into(),
+                        lib: "tiny_nodes".into(),
                         path: "/work/nodes".into(),
                         ty: (*ty).into(),
                     };
@@ -443,6 +474,31 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_dependency_may_not_share_a_segment_crate_name() {
+        // Package `tiny_front` is a different package from the generated
+        // `tiny-front`, but both are the crate `tiny_front` in Rust, and
+        // the generated binary would see two crates of that name.
+        let mut spec = spec(split(), &[("D", "x::D")]);
+        let bind = spec.bind.get_mut("D").expect("D");
+        bind.package = "tiny_engine".into();
+        bind.lib = "tiny_engine".into();
+        let error = validate(&spec, &manifest())
+            .expect_err("collision")
+            .to_string();
+        assert!(
+            error.contains("segment `engine`: crate name `tiny_engine` is both the segment's library and [bind.D]'s crate"),
+            "{error}"
+        );
+        // An explicit library name counts, not the package name.
+        let bind = spec.bind.get_mut("D").expect("D");
+        bind.package = "tiny-nodes".into();
+        bind.lib = "tiny_engine".into();
+        assert!(validate(&spec, &manifest()).is_err());
+        spec.bind.get_mut("D").expect("D").lib = "tiny_nodes".into();
+        assert!(validate(&spec, &manifest()).is_ok());
     }
 
     #[test]

@@ -50,6 +50,8 @@ pub struct Spec {
 pub(crate) struct Contract {
     /// The package name.
     pub(crate) package: String,
+    /// Its library's crate name, as Rust code names it.
+    pub(crate) lib: String,
     /// Its directory, resolved.
     pub(crate) path: PathBuf,
     /// The Rust path of the module holding the `graph!` expansion.
@@ -70,6 +72,9 @@ pub(crate) enum GdlDep {
 pub(crate) struct Bind {
     /// The implementation's package name.
     pub(crate) package: String,
+    /// Its library's crate name, as Rust code names it: `[lib] name` in its
+    /// manifest, or the package name with `-` as `_`.
+    pub(crate) lib: String,
     /// Its directory, resolved.
     pub(crate) path: PathBuf,
     /// The implementing type's Rust path.
@@ -126,17 +131,20 @@ impl Spec {
             .map_err(|e| Error::new(format!("reading {}: {e}", file.display())))?;
         let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
         let mut spec = Self::parse(&text, file, &dir)?;
-        for (node, bind) in &spec.bind {
-            match package_name(&bind.path) {
-                Err(error) => spec.problems.push(format!("[bind.{node}]: {error}")),
-                Ok(found) if found != bind.package => spec.problems.push(format!(
-                    "[bind.{node}]: {} holds package `{found}`, not `{}`",
+        let mut problems = Vec::new();
+        for (node, bind) in &mut spec.bind {
+            match crate_names(&bind.path) {
+                Err(error) => problems.push(format!("[bind.{node}]: {error}")),
+                Ok(names) if names.package != bind.package => problems.push(format!(
+                    "[bind.{node}]: {} holds package `{}`, not `{}`",
                     bind.path.display(),
+                    names.package,
                     bind.package
                 )),
-                Ok(_) => {}
+                Ok(names) => bind.lib = names.lib,
             }
         }
+        spec.problems = problems;
         Ok(spec)
     }
 
@@ -144,11 +152,8 @@ impl Spec {
         let raw: Raw =
             toml::from_str(text).map_err(|e| Error::new(format!("{}: {e}", file.display())))?;
         let contract_path = dir.join(&raw.contract.path);
-        let package = package_name(&contract_path)?;
-        let module = raw
-            .contract
-            .module
-            .unwrap_or_else(|| package.replace('-', "_"));
+        let CrateNames { package, lib } = crate_names(&contract_path)?;
+        let module = raw.contract.module.unwrap_or_else(|| lib.clone());
         let gdl = match (raw.gdl.path, raw.gdl.version) {
             (Some(path), None) => GdlDep::Path(dir.join(path)),
             (None, Some(version)) => GdlDep::Version(version),
@@ -167,6 +172,8 @@ impl Spec {
             .into_iter()
             .map(|(node, b)| {
                 let bind = Bind {
+                    // Read from the crate's manifest when the spec is loaded.
+                    lib: b.package.replace('-', "_"),
                     package: b.package,
                     path: dir.join(b.path),
                     ty: b.ty,
@@ -179,6 +186,7 @@ impl Spec {
             dir: dir.to_path_buf(),
             contract: Contract {
                 package,
+                lib,
                 path: contract_path,
                 module,
             },
@@ -190,19 +198,31 @@ impl Spec {
     }
 }
 
-/// A crate's package name, from its `Cargo.toml`.
-fn package_name(dir: &Path) -> Result<String, Error> {
+/// What a crate is called: by Cargo, and by Rust code.
+struct CrateNames {
+    package: String,
+    lib: String,
+}
+
+/// A crate's names, from its `Cargo.toml`.
+fn crate_names(dir: &Path) -> Result<CrateNames, Error> {
     let manifest = dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&manifest)
         .map_err(|e| Error::new(format!("reading {}: {e}", manifest.display())))?;
     let table: toml::Table =
         toml::from_str(&text).map_err(|e| Error::new(format!("{}: {e}", manifest.display())))?;
-    table
+    let package = table
         .get("package")
         .and_then(|p| p.get("name"))
         .and_then(toml::Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| Error::new(format!("{} has no [package] name", manifest.display())))
+        .ok_or_else(|| Error::new(format!("{} has no [package] name", manifest.display())))?;
+    let lib = table
+        .get("lib")
+        .and_then(|l| l.get("name"))
+        .and_then(toml::Value::as_str)
+        .map_or_else(|| package.replace('-', "_"), str::to_string);
+    Ok(CrateNames { package, lib })
 }
 
 #[cfg(test)]

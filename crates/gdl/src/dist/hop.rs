@@ -13,7 +13,7 @@ use super::runtime::{Entries, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use crate::cx::{Cx, Deadline};
 use crate::error::{Error, ErrorKind, Result};
-use crate::items::{Items, bound, fuse, items};
+use crate::items::{CHECK_INTERVAL, Items, bound, fuse, items};
 use crate::placement::HopLayout;
 use crate::role::Next;
 
@@ -506,7 +506,14 @@ where
                     cx: &cx,
                     anchor: Some(inbound.canceller()),
                 };
-                match deliver(&out, WireItem::Open, &stop, &mut stopped, &upstream).await {
+                let (stop_open, done_open) = (stop.cancelled(), cx.done());
+                tokio::pin!(stop_open, done_open);
+                let watch = Watch {
+                    stop: stop_open.as_mut(),
+                    stopped: &mut stopped,
+                    done: done_open.as_mut(),
+                };
+                match deliver(&out, WireItem::Open, watch, &upstream).await {
                     Delivery::Sent => {}
                     Delivery::Gone => return upstream.cancel(),
                     Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
@@ -602,7 +609,14 @@ where
         };
         // The inner end's stream exists: downstream runs may activate.
         let upstream = Upstream { cx, anchor: None };
-        match deliver(&out, WireItem::Open, &stop, &mut stopped, &upstream).await {
+        let (stop_open, done_open) = (stop.cancelled(), cx.done());
+        tokio::pin!(stop_open, done_open);
+        let watch = Watch {
+            stop: stop_open.as_mut(),
+            stopped: &mut stopped,
+            done: done_open.as_mut(),
+        };
+        match deliver(&out, WireItem::Open, watch, &upstream).await {
             Delivery::Sent => {}
             Delivery::Gone => return upstream.cancel(),
             Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
@@ -646,23 +660,59 @@ async fn pump(mut bytes: Items<Vec<u8>>, out: Outbound, cx: &Cx, upstream: Optio
         anchor: upstream,
     };
     let cancel = out.cancel_token();
-    let stop = out.stop_token();
+    let stop_token = out.stop_token();
+    // Built once per stream: a fresh future registers again when polled,
+    // the deadline with the runtime's shared timer and the tokens in their
+    // waiter lists, which would be a lock per item that every stream of the
+    // runtime contends on.
+    let cancelled = cancel.cancelled();
+    let stop = stop_token.cancelled();
+    let done = cx.done();
+    tokio::pin!(cancelled, stop, done);
     let mut stopped = false;
+    let mut ready_run: u8 = 0;
     loop {
-        let item = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return upstream.cancel(),
-            () = stop.cancelled(), if !stopped => {
-                stopped = true;
-                upstream.request_stop();
-                continue;
+        // An item already there is taken without polling the watchers. They
+        // are polled every `CHECK_INTERVAL` items and whenever the input has
+        // to wait, as at an attempt boundary: a ready producer can overrun a
+        // cancel, a stop, or the deadline by at most that many items, and a
+        // send that has to wait watches all of them (`deliver`).
+        let ready = if ready_run < CHECK_INTERVAL {
+            match futures::poll!(bytes.next()) {
+                Poll::Ready(item) => Some(item),
+                Poll::Pending => None,
             }
-            reason = cx.done() => return finish_failed(out, reason).await,
-            item = bytes.next() => item,
+        } else {
+            None
+        };
+        let item = match ready {
+            Some(item) => {
+                ready_run += 1;
+                item
+            }
+            None => {
+                ready_run = 0;
+                tokio::select! {
+                    biased;
+                    () = &mut cancelled => return upstream.cancel(),
+                    () = &mut stop, if !stopped => {
+                        stopped = true;
+                        upstream.request_stop();
+                        continue;
+                    }
+                    reason = &mut done => return finish_failed(out, reason).await,
+                    item = bytes.next() => item,
+                }
+            }
         };
         match item {
             Some(Ok(item)) => {
-                match deliver(&out, WireItem::Item(item), &stop, &mut stopped, &upstream).await {
+                let watch = Watch {
+                    stop: stop.as_mut(),
+                    stopped: &mut stopped,
+                    done: done.as_mut(),
+                };
+                match deliver(&out, WireItem::Item(item), watch, &upstream).await {
                     Delivery::Sent => {}
                     Delivery::Gone => return upstream.cancel(),
                     Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
@@ -709,13 +759,21 @@ enum Delivery {
 /// has to wait for the consumer also watches stop, cancel, and the deadline,
 /// so a stalled consumer cannot hold this stage past its deadline and the
 /// common path builds no timer.
-async fn deliver(
+async fn deliver<S, D>(
     out: &Outbound,
     item: WireItem,
-    stop: &tokio_util::sync::CancellationToken,
-    stopped: &mut bool,
+    watch: Watch<'_, S, D>,
     upstream: &Upstream<'_>,
-) -> Delivery {
+) -> Delivery
+where
+    S: Future<Output = ()>,
+    D: Future<Output = Error>,
+{
+    let Watch {
+        mut stop,
+        stopped,
+        mut done,
+    } = watch;
     let send = out.send(item);
     tokio::pin!(send);
     if let Poll::Ready(sent) = futures::poll!(&mut send) {
@@ -728,8 +786,8 @@ async fn deliver(
     loop {
         tokio::select! {
             biased;
-            reason = upstream.cx.done() => return Delivery::Interrupted(reason),
-            () = stop.cancelled(), if !*stopped => {
+            reason = done.as_mut() => return Delivery::Interrupted(reason),
+            () = stop.as_mut(), if !*stopped => {
                 *stopped = true;
                 upstream.request_stop();
             }
@@ -738,6 +796,14 @@ async fn deliver(
             }
         }
     }
+}
+
+/// The stream-long futures a blocked send watches: the consumer's stop and
+/// the request's end. The caller builds them once and lends them per send.
+struct Watch<'a, S, D> {
+    stop: Pin<&'a mut S>,
+    stopped: &'a mut bool,
+    done: Pin<&'a mut D>,
 }
 
 /// How long a stage tries to deliver its terminal failure. A consumer that is

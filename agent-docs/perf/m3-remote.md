@@ -1,6 +1,9 @@
 # Milestone 3 measurements: crossing segments
 
-Measured 2026-10-15 with `cargo bench -p gdl --bench remote`: release profile, one process, 4 tokio worker threads, velo 0.19.0 nodes on loopback TCP with default settings, aarch64 workstation. Tasks spawned per request come from a second run built with `RUSTFLAGS="--cfg tokio_unstable"`, the only way tokio exposes that count.
+Measured 2026-10-15 on one aarch64 workstation: release profile, one process, 4 tokio worker threads, velo 0.19.0 nodes on loopback TCP with default settings. Two bench targets, kept apart so that instrumentation is never timed:
+
+- `cargo bench -p gdl --bench remote`: latency, throughput, codec cost, and CPU time per item, with no counting allocator.
+- `cargo bench -p gdl --bench footprint`: allocations, tasks, and heap per request, with a counting allocator that forwards every operation (`realloc` included) to the system allocator unchanged. Tasks spawned per request come from a build with `RUSTFLAGS="--cfg tokio_unstable"`, the only way tokio exposes that count.
 
 Every benchmark request is checked: no errors, exactly the requested item count and size, and an explicit `Finalized` on the direct baseline. A failed or truncated stream panics instead of being counted.
 
@@ -14,32 +17,39 @@ Every benchmark request is checked: no errors, exactly the requested item count 
 
 | Path | Latency | Allocations | Tasks spawned |
 |---|---|---|---|
-| Reference, local | 20 us | 67 | 1 |
-| Reference, 2 segments | 265 us | 213 | 7 |
-| Reference, 3 segments | 492 us | 351 | 12 |
-| Lean, 2 segments | 204 us | 146 | 6 |
-| velo direct (ticket) | 204 us | 98 | 4 |
-| velo direct, plain attach | 294 us | 130 | 5 |
+| Reference, local | 21 us | 67 | 1 |
+| Reference, 2 segments | 314 us | 214 | 7 |
+| Reference, 3 segments | 618 us | 350 | 12 |
+| Lean, 2 segments | 257 us | 146 | 6 |
+| velo direct (ticket) | 202 us | 98 | 4 |
+| velo direct, plain attach | 252 us | 130 | 5 |
 
-Loopback latency varies by about 10% between runs.
+Loopback latency for one request at a time varies widely between runs: in the previous run, the lean graph and direct velo were both at 204 us. Treat a gap under about 50 us here as noise.
 
 ## Throughput, 1,000 items per request
 
-| Item size | Lean, 2 segments | velo direct (ticket) | Gap per item |
+| Item size | Lean, 2 segments | velo direct (ticket) | Difference |
 |---|---|---|---|
-| 16 B | 11.4 K items/s | 12.1 K items/s | about 5 us (6%) |
-| 1 KiB | 10.8 K items/s | 11.9 K items/s | about 8 us (9%) |
-| 16 KiB | 10.2 K items/s | 10.4 K items/s | about 2 us (2%) |
+| 16 B | 10.6 K items/s | 11.0 K items/s | -4% |
+| 1 KiB | 10.8 K items/s | 10.7 K items/s | +1% |
+| 16 KiB | 10.0 K items/s | 10.2 K items/s | -2% |
+| 16 B, 32 streams at once | 234 K items/s | 241 K items/s | -3% |
 
-Reference graph: local 941 K items/s; 2 segments 11.0 K items/s; 3 segments 10.6 K items/s.
+Reference graph: local 420 K items/s; 2 segments 10.6 K items/s; 3 segments 10.7 K items/s.
+
+## CPU time per item
+
+32 streams at once of 1,000 items of 16 B, process CPU time (all threads, both ends of each stream) over 20 rounds: lean 2 segments 3.02 us, velo direct 2.50 us in this run. Across nine earlier runs of three pump variants, direct alone ranged from 2.09 to 2.55 us, and gdl minus direct from -0.1 to 0.4 us. Differences under about 0.5 us per item are below what this setup resolves.
 
 ## Codec per item, in process
 
 | Item size | velo direct | gdl crossing | Added per crossing |
 |---|---|---|---|
-| 16 B | 67 ns | 149 ns | 82 ns |
-| 1 KiB | 133 ns | 244 ns | 111 ns |
-| 16 KiB | 448 ns | 890 ns | 442 ns |
+| 16 B | 44 ns | 125 ns | 81 ns |
+| 1 KiB | 105 ns | 212 ns | 107 ns |
+| 16 KiB | 400 ns | 816 ns | 416 ns |
+
+Without the counting allocator, both paths run faster than the first measurement (67 and 149 ns at 16 B), and the cost a crossing adds is about the same.
 
 ## Held while in flight
 
@@ -51,7 +61,7 @@ Each path opens 256 requests of 1,000 items, reads one item from each, and holds
 | Lean past its deadline, 16 B | 1,000 | 0 | 0.8 KiB |
 | velo direct (ticket), 16 B | 1,000 | 1 | 51.3 KiB |
 | Lean, 1 KiB | 1,000 | 2 | 1,046 KiB |
-| Lean past its deadline, 1 KiB | 1,000 | 0 | 0.8 KiB |
+| Lean past its deadline, 1 KiB | 1,000 | 0 | 0.6 KiB |
 | velo direct (ticket), 1 KiB | 1,000 | 1 | 1,036 KiB |
 | Lean, 16 KiB | 131 | 4 | 2,096 KiB |
 | Lean past its deadline, 16 KiB | 131 | 0 | 0.7 KiB |
@@ -61,11 +71,12 @@ After the requests are dropped, every path returns to within a few hundred KiB a
 
 ## Reading
 
-- **Per request, a two-segment gdl hop costs what direct velo costs** (204 vs 204 us), plus 2 spawned tasks and 48 allocations. gdl's producer pump matches the baseline's producer task. The two extra tasks are the outer end's watcher (ruling 17), which releases a held, unread stream at its deadline or cancel, and velo's unattached-anchor timer, which gdl configures on every anchor so that one whose producer never arrives is removed (velo `streaming/anchor.rs:1222-1225`).
-- **A held stream past its deadline holds under 1 KiB and no tasks.** Before the watcher dropped the anchor itself (review pass 2), the frames already in the consumer's receive buffer stayed until the stream was read or dropped.
+- **Per request, a two-segment gdl hop costs about what direct velo costs**, within the run-to-run variance of loopback latency, plus 2 spawned tasks and 48 allocations. gdl's producer pump matches the baseline's producer task. The two extra tasks are the outer end's watcher (ruling 17), which releases a held, unread stream at its deadline or cancel, and velo's unattached-anchor timer, which gdl configures on every anchor so that one whose producer never arrives is removed (velo `streaming/anchor.rs:1222-1225`).
+- **A held stream past its deadline holds under 1 KiB and no tasks.**
 - **While in flight, an unread stream holds velo's buffer, and gdl adds 5 to 10 KiB.** At 16 B and 1 KiB, every producer, gdl or direct, sends the whole 1,000-item stream into velo before backpressure stops it. At 16 KiB, every producer stops at 131 items, about 2 MiB, velo's per-stream budget. A deployment that expects many held streams sizes velo's `MuxConfig`; ruling 15's egress quota bounds how many streams produce at once.
-- **The codec adds 82 to 442 ns per item per crossing**: the edge encode, plus the extra copy into and out of the `WireItem` frame.
-- **Per item, gdl is 2 to 9% below direct velo**, about the size of the run-to-run variance. Both are bounded by velo's single-stream rate here, about 12 K items/s (drafted as a velo issue in `agent-docs/velo-issues.md`). The codec explains 0.1 to 0.4 us of the 2 to 8 us gap; the rest is not attributed. An earlier version of this document blamed gdl for a 20 us gap at 16 KiB. That run compared against velo's plain attach, and the gap was the difference between the two ways velo opens a stream.
-- **Per request, the third segment adds one round trip and one crossing** (492 us), because the outer end opens the intermediate run before dispatch.
+- **The codec adds 81 to 416 ns per item per crossing**: the edge encode, plus the extra copy into and out of the `WireItem` frame.
+- **Per item, gdl is within about 4% of direct velo**, one stream or 32 at once, about the size of the run-to-run variance. Both are bounded by velo's single-stream rate here, about 11 K items/s (drafted as a velo issue in `agent-docs/velo-issues.md`). An earlier version of this document blamed gdl for a 20 us gap at 16 KiB; that run compared against velo's plain attach.
+- **The producer's pump takes an item that is already there without polling its watchers** (stop, cancel, deadline), and polls them every 64 items or when it has to wait, as the attempt boundary does. Before, each item built fresh watcher futures, so each item registered and removed a timer under tokio's shared timer lock. Neither CPU time per item nor 32-stream throughput showed a difference beyond the noise above, so no speedup is claimed; the change removes a per-item lock that every stream of a runtime would contend on.
+- **Per request, the third segment adds one round trip and one crossing**, because the outer end opens the intermediate run before dispatch.
 
 Local per-item and per-request costs for composition alone are in `agent-docs/reviews/m1-r*.md` (`benches/hop.rs`).

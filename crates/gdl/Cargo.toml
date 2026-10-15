@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "remote"
 harness = false
+
+[[bench]]
+name = "footprint"
+harness = false
