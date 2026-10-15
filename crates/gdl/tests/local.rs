@@ -304,3 +304,91 @@ async fn a_cancelled_context_refuses_new_attempts() {
     assert_eq!(error.kind(), ErrorKind::Cancelled);
     assert!(!events.has("B:start:n"));
 }
+
+/// A backward node that holds an error until the sink's own scope has been
+/// cancelled, then forwards it.
+struct HoldErrorUntilSinkCancelled {
+    events: std::sync::Arc<Events>,
+    sink_key: String,
+}
+
+impl gdl::Backward for HoldErrorUntilSinkCancelled {
+    type In = Raw;
+    type Out = Raw;
+
+    fn backward(&self, _cx: &Cx, input: gdl::Items<Raw>) -> gdl::Items<Raw> {
+        let events = std::sync::Arc::clone(&self.events);
+        let key = self.sink_key.clone();
+        gdl::items(input.then(move |item| {
+            let events = std::sync::Arc::clone(&events);
+            let key = key.clone();
+            async move {
+                if item.is_err() {
+                    events.cx_of(&key).cancelled().await;
+                }
+                item
+            }
+        }))
+    }
+}
+
+#[tokio::test]
+async fn an_error_cancels_the_node_that_produced_it_even_when_held_downstream() {
+    use std::sync::Arc;
+
+    let events = Events::new();
+    let hop = gdl::Hop::new(
+        (),
+        gdl::SinkStage::new(Arc::new(NodeD {
+            events: Arc::clone(&events),
+        })),
+        (
+            Arc::new(HoldErrorUntilSinkCancelled {
+                events: Arc::clone(&events),
+                sink_key: "D:h#0".into(),
+            }),
+            (),
+        ),
+    );
+    let parent = Cx::new();
+    let failing = Pre {
+        text: "h".into(),
+        attempt: 0,
+        plan: Plan {
+            tokens: 3,
+            fail_at: Some(0),
+            hold_after_error: true,
+            ..Plan::default()
+        },
+    };
+    let sibling = Pre {
+        text: "s".into(),
+        attempt: 1,
+        plan: Plan {
+            endless: true,
+            item_delay_ms: 1,
+            ..Plan::default()
+        },
+    };
+    let failed = hop
+        .generate(parent.clone(), failing)
+        .await
+        .expect("attempt");
+    let mut running = hop
+        .generate(parent.clone(), sibling)
+        .await
+        .expect("attempt");
+    // The original error arrives once the sink, and only the sink, is
+    // cancelled.
+    let all = collect(failed).await;
+    assert_eq!(
+        all.iter()
+            .map(|r| r.as_ref().map_err(|e| e.kind()).copied())
+            .collect::<Vec<_>>(),
+        vec![Err(ErrorKind::Node)]
+    );
+    events.wait_for("D:cancelled:h#0", WAIT).await;
+    assert!(running.next().await.is_some_and(|item| item.is_ok()));
+    assert!(!events.cx_of("D:s#1").is_cancelled());
+    assert!(!parent.is_cancelled());
+}

@@ -23,15 +23,21 @@ where
 }
 
 /// A node boundary: the stream ends after its first `Err`, so the next node
-/// never sees an item a terminal error should have stopped. That is all it
-/// does; cancel and deadline are enforced once per attempt by [`bound`],
-/// not at every node.
-pub(crate) fn fuse<T: Send + 'static>(inner: Items<T>) -> Items<T> {
-    Box::pin(Fuse { inner: Some(inner) })
+/// never sees an item a terminal error should have stopped, and any ending
+/// (or dropping the stream) cancels the producing node's own scope through
+/// `guard`. Cancelling at the producer, not the attempt, matters: the next
+/// node may still be holding the error, and must be able to deliver it.
+/// Cancel and deadline are enforced once per attempt by [`bound`], not here.
+pub(crate) fn fuse<T: Send + 'static>(inner: Items<T>, guard: DropGuard) -> Items<T> {
+    Box::pin(Fuse {
+        inner: Some(inner),
+        guard: Some(guard),
+    })
 }
 
 struct Fuse<T> {
     inner: Option<Items<T>>,
+    guard: Option<DropGuard>,
 }
 
 impl<T> Stream for Fuse<T> {
@@ -43,7 +49,8 @@ impl<T> Stream for Fuse<T> {
         };
         let polled = inner.as_mut().poll_next(cx);
         if matches!(polled, Poll::Ready(Some(Err(_)) | None)) {
-            self.inner = None;
+            let this = &mut *self;
+            end(&mut this.inner, &mut this.guard);
         }
         polled
     }
@@ -110,14 +117,7 @@ impl<T> Stream for Bounded<T> {
         *this.since_check += 1;
         if *this.since_check >= CHECK_INTERVAL {
             *this.since_check = 0;
-            let ended = if this.token.is_cancelled() {
-                Some(Error::cancelled())
-            } else if this.deadline_at.is_some_and(|at| Instant::now() >= at) {
-                Some(Error::deadline_exceeded())
-            } else {
-                None
-            };
-            if let Some(error) = ended {
+            if let Some(error) = interrupted(this.token, *this.deadline_at) {
                 end(this.inner, this.guard);
                 return Poll::Ready(Some(Err(error)));
             }
@@ -130,8 +130,13 @@ impl<T> Stream for Bounded<T> {
                 return Poll::Ready(Some(Err(error)));
             }
             Poll::Ready(None) => {
+                // A producer that honors its cancel or deadline often ends
+                // cleanly; the end must still be reported as the interruption
+                // it was, not as success. One check per stream, off the
+                // per-item path.
+                let interruption = interrupted(this.token, *this.deadline_at);
                 end(this.inner, this.guard);
-                return Poll::Ready(None);
+                return Poll::Ready(interruption.map(Err));
             }
             Poll::Pending => {}
         }
@@ -147,6 +152,16 @@ impl<T> Stream for Bounded<T> {
             return Poll::Ready(Some(Err(Error::deadline_exceeded())));
         }
         Poll::Pending
+    }
+}
+
+fn interrupted(token: &CancellationToken, deadline_at: Option<Instant>) -> Option<Error> {
+    if deadline_at.is_some_and(|at| Instant::now() >= at) {
+        Some(Error::deadline_exceeded())
+    } else if token.is_cancelled() {
+        Some(Error::cancelled())
+    } else {
+        None
     }
 }
 
@@ -175,10 +190,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_fused_stream_ends_after_the_first_error() {
+    async fn a_fused_stream_ends_after_the_first_error_and_cancels_its_producer() {
+        let attempt = Cx::new();
+        let producer = attempt.child();
         let inner = items(futures::stream::iter([Ok(1), Err(Error::node("x")), Ok(2)]));
-        let all: Vec<_> = fuse(inner).collect().await;
-        assert_eq!(kinds(all), vec![Ok(1), Err(ErrorKind::Node)]);
+        let mut out = fuse(inner, producer.cancel_on_drop());
+        assert_eq!(out.next().await.map(|r| r.ok()), Some(Some(1)));
+        assert!(!producer.is_cancelled());
+        assert!(out.next().await.is_some_and(|r| r.is_err()));
+        assert!(
+            producer.is_cancelled(),
+            "the error ended the producer's scope"
+        );
+        assert!(!attempt.is_cancelled());
+        assert!(out.next().await.is_none());
     }
 
     #[tokio::test]
@@ -264,6 +289,55 @@ mod tests {
         assert_eq!(
             first.map(|r| r.map_err(|e| e.kind())),
             Some(Err(ErrorKind::Cancelled))
+        );
+    }
+
+    /// A producer that ends cleanly as soon as it sees its cancel.
+    fn ends_on_cancel(attempt: &Cx) -> (Items<u32>, tokio::sync::oneshot::Receiver<()>) {
+        let (ended_tx, ended_rx) = tokio::sync::oneshot::channel();
+        let watched = attempt.clone();
+        let producer = futures::stream::once(async move {
+            watched.cancelled().await;
+            let _ = ended_tx.send(());
+        })
+        .filter_map(|()| async { None::<Result<u32>> });
+        (items(producer), ended_rx)
+    }
+
+    #[tokio::test]
+    async fn a_cancel_is_not_reported_as_a_clean_end() {
+        let (attempt, guard) = attempt_of(&Cx::new());
+        let (producer, ended) = ends_on_cancel(&attempt);
+        let mut out = bound(&attempt, guard, producer);
+        // Register the consumer, then cancel and let the producer finish
+        // before the consumer polls again.
+        assert!(futures::poll!(out.next()).is_pending());
+        attempt.cancel();
+        // The producer only finishes when polled, so drive it through the
+        // boundary's inner stream by polling once more after the cancel.
+        let next = out.next().await;
+        let _ = ended.await;
+        assert_eq!(
+            next.map(|r| r.map_err(|e| e.kind())),
+            Some(Err(ErrorKind::Cancelled))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_passed_deadline_is_not_reported_as_a_clean_end() {
+        let cx = Cx::new().with_timeout(Duration::from_millis(5));
+        let (attempt, guard) = attempt_of(&cx);
+        // A producer that ends cleanly once the deadline has passed.
+        let deadline = cx.deadline().expect("deadline").instant();
+        let producer = futures::stream::once(async move {
+            tokio::time::sleep_until(deadline).await;
+        })
+        .filter_map(|()| async { None::<Result<u32>> });
+        let mut out = bound(&attempt, guard, items(producer));
+        tokio::time::advance(Duration::from_millis(10)).await;
+        assert_eq!(
+            out.next().await.map(|r| r.map_err(|e| e.kind())),
+            Some(Err(ErrorKind::DeadlineExceeded))
         );
     }
 

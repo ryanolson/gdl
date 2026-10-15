@@ -42,8 +42,20 @@ where
         let guard = attempt.cancel_on_drop();
         let run = async {
             let req = self.fwd.run(&attempt, req).await?;
-            let items = self.inner.call(attempt.clone(), req).await?;
-            Ok::<_, crate::Error>(self.bwd.apply(&attempt, items))
+            if B::EMPTY {
+                // The inner end's output is the attempt's output; the empty
+                // chain passes it through unchanged.
+                let items = self.inner.call(attempt.clone(), req).await?;
+                return Ok::<_, crate::Error>(self.bwd.apply(&attempt, items));
+            }
+            // The inner end runs in its own scope below the attempt, so a
+            // terminal item from it stops it even while a backward node
+            // still holds that item.
+            let scope = attempt.child();
+            let items = self.inner.call(scope.clone(), req).await?;
+            Ok(self
+                .bwd
+                .apply(&attempt, fuse(items, scope.cancel_on_drop())))
         };
         let items = tokio::select! {
             result = run => result?,
@@ -154,21 +166,27 @@ where
 /// Zero or more backward nodes, as a cons list in the order the response
 /// passes through them: `(Arc<B>, Rest)` applies `B` first.
 ///
-/// Each node's input is fused, so no node sees an item after an error. The
-/// last node's output is fused by the hop's attempt boundary, so every node
-/// output is fused exactly once.
+/// Every node output is fused exactly once: each node but the last runs in
+/// its own scope below the attempt and its output is fused against that
+/// scope; the last node's output is fused by the hop's attempt boundary.
 pub trait BackwardChain<In>: Clone + Send + Sync + 'static {
     /// The item type after the whole chain.
     type Out: Send + 'static;
 
-    /// Wrap one response stream in the chain.
-    fn apply(&self, cx: &Cx, items: Items<In>) -> Items<Self::Out>;
+    /// Whether the chain has no nodes.
+    const EMPTY: bool;
+
+    /// Wrap one response stream, already fused, in the chain. `attempt` is
+    /// the hop's attempt context.
+    fn apply(&self, attempt: &Cx, items: Items<In>) -> Items<Self::Out>;
 }
 
 impl<In: Send + 'static> BackwardChain<In> for () {
     type Out = In;
 
-    fn apply(&self, _cx: &Cx, items: Items<In>) -> Items<In> {
+    const EMPTY: bool = true;
+
+    fn apply(&self, _attempt: &Cx, items: Items<In>) -> Items<In> {
         items
     }
 }
@@ -180,9 +198,15 @@ where
 {
     type Out = R::Out;
 
-    fn apply(&self, cx: &Cx, items: Items<B::In>) -> Items<R::Out> {
-        let items = self.0.backward(cx, fuse(items));
-        self.1.apply(cx, items)
+    const EMPTY: bool = false;
+
+    fn apply(&self, attempt: &Cx, items: Items<B::In>) -> Items<R::Out> {
+        if R::EMPTY {
+            return self.1.apply(attempt, self.0.backward(attempt, items));
+        }
+        let scope = attempt.child();
+        let out = self.0.backward(&scope, items);
+        self.1.apply(attempt, fuse(out, scope.cancel_on_drop()))
     }
 }
 

@@ -518,12 +518,28 @@ fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
             ));
         }
     }
-    let mut used = BTreeSet::new();
+    // Each node fills exactly one place: the source is the first hop's outer
+    // end, an operator is one hop's inner end and the next hop's outer end,
+    // and every other node appears once. Counting catches an operator that
+    // owns two hops, or nests under itself.
+    let mut places: BTreeMap<&str, usize> = BTreeMap::new();
     for hop in &manifest.hops {
-        for node in hop.forward.iter().chain(&hop.backward) {
-            if !used.insert(node.as_str()) {
-                bad(format!("node `{node}` appears twice in the topology"));
-            }
+        for node in std::iter::once(&hop.outer)
+            .chain(std::iter::once(&hop.inner))
+            .chain(&hop.forward)
+            .chain(&hop.backward)
+        {
+            *places.entry(node.as_str()).or_default() += 1;
+        }
+    }
+    for node in &manifest.nodes {
+        let expected = if node.role == Role::Operator { 2 } else { 1 };
+        let found = places.get(node.name.as_str()).copied().unwrap_or(0);
+        if found > expected {
+            bad(format!(
+                "node `{}` fills {found} places in the topology; a {:?} fills {expected}",
+                node.name, node.role
+            ));
         }
     }
     for node in &manifest.nodes {

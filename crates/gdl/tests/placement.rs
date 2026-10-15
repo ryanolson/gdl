@@ -323,3 +323,48 @@ fn every_partition_of_the_reference_graph_has_a_consistent_layout() {
         }
     }
 }
+
+#[test]
+fn an_operator_may_own_only_one_downstream_hop() {
+    let single = Placement::new().segment("a", REFERENCE_NODES);
+
+    // B -> B: an operator nested under itself.
+    let mut self_nested = all_wire();
+    self_nested.hops.insert(
+        1,
+        gdl::HopInfo {
+            outer: "B".into(),
+            forward: vec![],
+            inner: "B".into(),
+            backward: vec![],
+            forward_types: vec![gdl::TypeInfo::new("Pre", true)],
+            backward_types: vec![gdl::TypeInfo::new("Out", true)],
+        },
+    );
+    assert!(matches!(
+        errors(&self_nested, &single)[..],
+        [PlacementError::InvalidManifest(_), ..]
+    ));
+
+    // B reappears further down: A -> B, B -> X, X -> B, B -> D.
+    let mut repeated = all_wire();
+    repeated.nodes.push(gdl::NodeInfo {
+        name: "X".into(),
+        role: Role::Operator,
+    });
+    let hop = |outer: &str, inner: &str| gdl::HopInfo {
+        outer: outer.into(),
+        forward: vec![],
+        inner: inner.into(),
+        backward: vec![],
+        forward_types: vec![gdl::TypeInfo::new("Pre", true)],
+        backward_types: vec![gdl::TypeInfo::new("Out", true)],
+    };
+    repeated.hops.insert(1, hop("B", "X"));
+    repeated.hops.insert(2, hop("X", "B"));
+    let with_x = Placement::new().segment("a", ["A", "B", "C", "D", "E", "F", "G", "X"]);
+    assert!(matches!(
+        errors(&repeated, &with_x)[..],
+        [PlacementError::InvalidManifest(_), ..]
+    ));
+}
