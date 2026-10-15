@@ -79,6 +79,8 @@ Node roles:
 
 Deadline protocol: the source sets an absolute deadline in wall-clock nanoseconds. Envelopes carry it unchanged. Sending remaining time instead would let every delayed hop restart the budget. Each receiver converts conservatively on arrival: `local_deadline = mono_now + max(0, deadline_wall - wall_now - skew)`, and rejects the request at once if the result is `mono_now`. `skew` is the assumed maximum pairwise clock error between segments (configured; default 50 ms, as NTP gives on one network). With clocks within `skew`, no receiver runs past the source's deadline; a receiver may stop up to `2 x skew` early. Milestone 3 tests both clock-offset directions.
 
+Deadline enforcement at a stream boundary: the boundary polls a timer while its producer is pending, and reads the clock every 64 ready items. An unpolled timer never fires, so a producer that is always ready would otherwise run past its deadline forever; reading the clock on every item would put a clock read on the hottest path. A ready producer can therefore overrun its deadline by at most 64 items (found in milestone 1).
+
 Attempt rules:
 
 1. `next.generate(cx, req)` creates an attempt with a child scope of `cx`. Cancelling the parent cancels every attempt. Cancelling one attempt (dropping its stream, or dropping the pending `generate` future) does not affect the parent or sibling attempts.
@@ -271,7 +273,7 @@ gdl::graph! {
 
 The macro emits node markers, the `Bindings` typestate, the typed graph structure (section 6), `manifest() -> gdl::Manifest`, and `CONTRACT_HASH`.
 
-- **Wire capability.** For each edge type the expansion calls an autoref probe on the concrete type (`(&&Probe::<Raw>::new()).codec()`), which yields `Some(Codec)` when the type implements `Serialize + DeserializeOwned` and `None` otherwise. A probe inside a generic helper would always pick the fallback, so the macro emits it only at concrete types. Tests cover type aliases, concrete generics, serialize-only types, borrowing deserialize, and non-wire types.
+- **Wire capability.** For each edge type the expansion calls an autoref probe on the concrete type (`(&&Probe::<Raw>::new()).codec()`), which yields `Some(Codec)` when the type implements `Serialize + DeserializeOwned` and `None` otherwise. A probe inside a generic helper would always pick the fallback, so the macro emits it only at concrete types. Tests cover type aliases, concrete generics, serialize-only types, and non-wire types. A type that deserializes only by borrowing from its input cannot be classified: its higher-ranked `Deserialize` bound fails after method selection, so the probe is a compile error rather than `None` (found in milestone 1, `crates/gdl/tests/ui/borrowed-message.rs`). Message types must own their data.
 - **Schema version.** Rust type names cannot fingerprint a serde representation. `CONTRACT_HASH` covers node names, roles, topology, type names, and the `schema` number, and a change to any message type's wire form requires a `schema` bump. Contract evolution rules are later work.
 
 ### 9.2 Placement config

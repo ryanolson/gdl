@@ -1,0 +1,25 @@
+[package]
+name = "gdl"
+description = "Graph definition language and runtime for distributed request/response streaming pipelines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures = { workspace = true }
+pin-project-lite = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+trybuild = { workspace = true }
+
+[lints]
+workspace = true
