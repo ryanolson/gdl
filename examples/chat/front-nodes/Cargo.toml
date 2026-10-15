@@ -1,0 +1,12 @@
+[package]
+name = "chat-front-nodes"
+description = "The chat example's front-end nodes"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+chat-contract = { path = "../contract" }
+futures = { workspace = true }
+gdl = { workspace = true }
+serde = { workspace = true }

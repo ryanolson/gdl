@@ -1,0 +1,26 @@
+# The chat example: a contract, the crates implementing its nodes, and the
+# segment crates gdl-gen generates from `gdl.toml`. Its own workspace, as a
+# deployment's would be.
+[workspace]
+members = [
+    "contract",
+    "engine-mock",
+    "front-nodes",
+    "post-nodes",
+    "segments/engine",
+    "segments/front",
+    "segments/post",
+    "sentinel",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+futures = "0.3"
+gdl = { path = "../../crates/gdl" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["time"] }

@@ -1,0 +1,49 @@
+# The chat example's placement: which segment hosts which node, and which
+# crate implements each node. Generate the segment crates with:
+#
+#     cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --out examples/chat/segments
+
+[contract]
+path = "contract"
+
+[gdl]
+path = "../../crates/gdl"
+
+[segment.front]
+nodes = ["Frontend", "Preprocess", "Truncate", "Number"]
+
+[segment.engine]
+nodes = ["Engine"]
+
+[segment.post]
+nodes = ["Detokenize", "Format"]
+
+[bind.Preprocess]
+crate = "chat-front-nodes"
+path = "front-nodes"
+type = "chat_front_nodes::Preprocess"
+
+[bind.Truncate]
+crate = "chat-front-nodes"
+path = "front-nodes"
+type = "chat_front_nodes::Truncate"
+
+[bind.Number]
+crate = "chat-front-nodes"
+path = "front-nodes"
+type = "chat_front_nodes::Number"
+
+[bind.Engine]
+crate = "chat-engine-mock"
+path = "engine-mock"
+type = "chat_engine_mock::Engine"
+
+[bind.Detokenize]
+crate = "chat-post-nodes"
+path = "post-nodes"
+type = "chat_post_nodes::Detokenize"
+
+[bind.Format]
+crate = "chat-post-nodes"
+path = "post-nodes"
+type = "chat_post_nodes::Format"

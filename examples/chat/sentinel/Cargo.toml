@@ -1,0 +1,6 @@
+[package]
+name = "chat-sentinel"
+description = "Stands in for a heavy native dependency of the engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
