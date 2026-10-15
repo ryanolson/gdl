@@ -242,19 +242,6 @@ where
     async fn run_remote(self: &Arc<Self>, attempt: &Cx, req: F::In) -> Result<Items<B::Out>> {
         let rt = &self.rt;
         let (mut inbound, mut reply) = rt.fabric.mint();
-        // The caller may hold the response stream without reading it; the
-        // anchor must still be released at the deadline, not when the stream
-        // is next polled or finally dropped.
-        if let Some(deadline) = attempt.deadline() {
-            let watcher = inbound.canceller();
-            let ended = attempt.clone();
-            tokio::spawn(async move {
-                tokio::select! {
-                    () = tokio::time::sleep_until(deadline.instant()) => watcher.cancel(),
-                    () = ended.cancelled() => {}
-                }
-            });
-        }
         // Open the intermediate runs nearest-to-the-outer-end first, so each
         // run's reply anchor already exists when it attaches. A failure
         // returns here; dropping `inbound` then cancels every run already
@@ -323,7 +310,28 @@ where
                 },
             }
         }
-        let bytes = inbound_items(inbound, Some(attempt.clone()));
+        // The caller may hold the response stream without reading it. Stop,
+        // cancel, and the deadline must still reach the producer, and the
+        // anchor's buffer must still be released, without waiting for the
+        // stream to be read or dropped: a watcher does both. It ends with the
+        // attempt, which the response stream cancels when it ends.
+        let (inbound, retire) = inbound.share();
+        let watched = attempt.clone();
+        tokio::spawn(async move {
+            let mut stopped = false;
+            let reason = loop {
+                tokio::select! {
+                    biased;
+                    reason = watched.done() => break reason,
+                    () = watched.stopping(), if !stopped => {
+                        stopped = true;
+                        retire.request_stop();
+                    }
+                }
+            };
+            retire.retire(reason);
+        });
+        let bytes = inbound_items(inbound, None);
         match self
             .bwd
             .enter(1, self.plan.outer_start, usize::MAX, attempt, bytes)?
@@ -375,7 +383,7 @@ where
                     }
                     None => {
                         let error = internal("a run reached an inner end it did not expect");
-                        hop.fail(&envelope.reply, error).await;
+                        hop.fail(&cx, &envelope.reply, error).await;
                     }
                 },
                 Ok(FwdExit::Leave { at, bytes }) => {
@@ -388,17 +396,15 @@ where
                         reply: envelope.reply.clone(),
                         payload: bytes,
                     };
-                    let sent = hop
-                        .rt
-                        .send_forward(&hop.plan.fwd_segments[at], onward)
-                        .await;
+                    let sent =
+                        bounded(&cx, hop.rt.send_forward(&hop.plan.fwd_segments[at], onward)).await;
                     // The hand-off is complete: the next stage owns the reply.
                     drop(share);
                     if let Err(error) = sent {
-                        hop.fail(&envelope.reply, error).await;
+                        hop.fail(&cx, &envelope.reply, error).await;
                     }
                 }
-                Err(error) => hop.fail(&envelope.reply, error).await,
+                Err(error) => hop.fail(&cx, &envelope.reply, error).await,
             }
         });
         #[cfg(feature = "fault-injection")]
@@ -435,10 +441,14 @@ where
         share: Option<super::admission::Share>,
     ) -> Result<ReplyTo> {
         let rt = &self.rt;
-        let egress = rt.egress.acquire().await?;
-        let out = tokio::time::timeout(rt.config.setup_timeout, rt.fabric.attach(&reply))
-            .await
-            .map_err(|_| setup_timeout("attach"))??;
+        let egress = bounded(&cx, rt.egress.acquire()).await?;
+        let out = setup(
+            &cx,
+            rt.config.setup_timeout,
+            "attach",
+            rt.fabric.attach(&reply),
+        )
+        .await?;
         rt.served
             .runs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -527,11 +537,15 @@ where
             cx.done().await;
             return;
         }
-        let attach =
-            tokio::time::timeout(self.rt.config.setup_timeout, self.rt.fabric.attach(&reply));
+        let attach = setup(
+            &cx,
+            self.rt.config.setup_timeout,
+            "attach",
+            self.rt.fabric.attach(&reply),
+        );
         // Losing the attach means another stage already owns the reply (or it
         // is gone); this stage exits and its work ends with it.
-        let Ok(Ok(out)) = attach.await else {
+        let Ok(out) = attach.await else {
             return;
         };
         self.produce_inner(&cx, value, out).await;
@@ -582,10 +596,16 @@ where
     }
 
     /// Deliver a failure to a reply this stage owns.
-    async fn fail(&self, reply: &ReplyTo, error: Error) {
-        let attach =
-            tokio::time::timeout(self.rt.config.setup_timeout, self.rt.fabric.attach(reply));
-        if let Ok(Ok(out)) = attach.await {
+    /// Deliver `error` to `reply`, unless the request is over: then its
+    /// consumer has the reason already.
+    async fn fail(&self, cx: &Cx, reply: &ReplyTo, error: Error) {
+        let attach = setup(
+            cx,
+            self.rt.config.setup_timeout,
+            "attach",
+            self.rt.fabric.attach(reply),
+        );
+        if let Ok(out) = attach.await {
             finish_failed(out, error).await;
         }
     }
@@ -708,19 +728,38 @@ async fn finish_failed(out: Outbound, error: Error) {
 
 /// An inbound anchor as a stream of encoded items. With `stop_from`, a stop
 /// requested on that context is passed to the anchor's producer.
-fn inbound_items(inbound: Inbound, stop_from: Option<Cx>) -> Items<Vec<u8>> {
+fn inbound_items<S>(inbound: S, stop_from: Option<Cx>) -> Items<Vec<u8>>
+where
+    S: Stream<Item = Frame> + StopSource + Unpin + Send + 'static,
+{
     let stopping: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = stop_from.map(|cx| {
         Box::pin(async move { cx.stopping().await }) as Pin<Box<dyn Future<Output = ()> + Send>>
     });
     items(InboundItems { inbound, stopping })
 }
 
-struct InboundItems {
-    inbound: Inbound,
+struct InboundItems<S> {
+    inbound: S,
     stopping: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
-impl Stream for InboundItems {
+/// An inbound stream that can pass a stop to its producer.
+trait StopSource {
+    fn request_stop(&self);
+}
+
+impl StopSource for Inbound {
+    fn request_stop(&self) {
+        Inbound::request_stop(self);
+    }
+}
+
+impl StopSource for super::fabric::SharedInbound {
+    // Its retirer's watcher forwards stop; nothing reads it from here.
+    fn request_stop(&self) {}
+}
+
+impl<S: Stream<Item = Frame> + StopSource + Unpin> Stream for InboundItems<S> {
     type Item = Result<Vec<u8>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -757,6 +796,31 @@ fn internal(why: &str) -> Error {
 
 fn truncated(why: &str) -> Error {
     Error::new(ErrorKind::Truncated, why)
+}
+
+/// A setup step, bounded by the request (its deadline and cancel) as well
+/// as the setup timeout: setup work in another segment that outlives its
+/// request holds that segment's admission share and task for nothing.
+async fn setup<T>(
+    cx: &Cx,
+    limit: std::time::Duration,
+    step: &str,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::select! {
+        biased;
+        reason = cx.done() => Err(reason),
+        done = tokio::time::timeout(limit, work) => done.map_err(|_| setup_timeout(step))?,
+    }
+}
+
+/// A step that has its own bound, bounded by the request as well.
+async fn bounded<T>(cx: &Cx, work: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::select! {
+        biased;
+        reason = cx.done() => Err(reason),
+        done = work => done,
+    }
 }
 
 fn setup_timeout(step: &str) -> Error {

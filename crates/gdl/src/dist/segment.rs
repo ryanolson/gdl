@@ -34,6 +34,20 @@ impl Deployment {
         roster: &Roster,
         config: RuntimeConfig,
     ) -> Result<Self> {
+        // A zero limit refuses everything, and the attempt ledger would
+        // keep an entry for every refused root.
+        for (name, limit) in [
+            ("admission_limit", config.admission_limit),
+            ("attempt_limit", config.attempt_limit),
+            ("egress_limit", config.egress_limit),
+        ] {
+            if limit == 0 {
+                return Err(Error::new(
+                    ErrorKind::Placement,
+                    format!("runtime setting `{name}` must be at least 1"),
+                ));
+            }
+        }
         let layout = layout(manifest, placement)?;
         if !placement.segments().any(|(name, _)| name == segment) {
             return Err(Error::new(

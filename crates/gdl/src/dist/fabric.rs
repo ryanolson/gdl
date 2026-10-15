@@ -4,8 +4,8 @@
 //! (plan section 8): no second transport exists.
 
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use futures::Stream;
@@ -192,6 +192,92 @@ impl Inbound {
     /// A handle that cancels the producer from anywhere.
     pub(crate) fn canceller(&self) -> Canceller {
         Canceller(self.controller.clone())
+    }
+
+    /// Split into a stream for the consumer and a handle that can end it
+    /// from another task.
+    ///
+    /// Cancelling through the controller stops the producer, but frames
+    /// already in this anchor's receive buffer stay until the anchor is read
+    /// or dropped, and a consumer that holds the stream without reading does
+    /// neither. Retiring drops the anchor itself, so its buffer goes with
+    /// it, and the consumer's next read is the reason instead.
+    pub(crate) fn share(self) -> (SharedInbound, Retirer) {
+        let controller = self.controller.clone();
+        let slot = Arc::new(Mutex::new(Slot::Live {
+            inbound: self,
+            waker: None,
+        }));
+        let retirer = Retirer {
+            slot: Arc::downgrade(&slot),
+            controller,
+        };
+        (SharedInbound(slot), retirer)
+    }
+}
+
+/// An inbound stream that a [`Retirer`] can end. The lock is uncontended
+/// except at retirement, and costs far less than the remote item it guards.
+pub(crate) struct SharedInbound(Arc<Mutex<Slot>>);
+
+enum Slot {
+    Live {
+        inbound: Inbound,
+        /// The consumer's waker from its last pending read: retiring drops
+        /// the channel that would have woken it.
+        waker: Option<Waker>,
+    },
+    /// The reason is delivered once, as the stream's last frame.
+    Retired(Option<Error>),
+}
+
+impl Stream for SharedInbound {
+    type Item = Frame;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Frame>> {
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *slot {
+            Slot::Live { inbound, waker } => {
+                let polled = Pin::new(inbound).poll_next(cx);
+                if polled.is_pending() && !waker.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
+                    *waker = Some(cx.waker().clone());
+                }
+                polled
+            }
+            Slot::Retired(reason) => Poll::Ready(reason.take().map(Frame::Broken)),
+        }
+    }
+}
+
+/// Ends a [`SharedInbound`] from outside the consumer.
+pub(crate) struct Retirer {
+    slot: Weak<Mutex<Slot>>,
+    controller: StreamController,
+}
+
+impl Retirer {
+    /// Ask the producer to finish gracefully.
+    pub(crate) fn request_stop(&self) {
+        self.controller.request_stop();
+    }
+
+    /// Drop the anchor, cancelling its producer and releasing its buffer;
+    /// the consumer's next read is `reason`.
+    pub(crate) fn retire(&self, reason: Error) {
+        let Some(slot) = self.slot.upgrade() else {
+            return;
+        };
+        let retired = {
+            let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *slot, Slot::Retired(Some(reason)))
+        };
+        // Dropped outside the lock: dropping the anchor cancels the producer.
+        if let Slot::Live { inbound, waker } = retired {
+            drop(inbound);
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
     }
 }
 

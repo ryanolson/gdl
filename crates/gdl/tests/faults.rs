@@ -824,9 +824,10 @@ async fn completed_requests_leave_no_tasks_behind() {
             assert!(all.iter().all(Result::is_ok), "{all:?}");
         }
     };
-    // The fabric opens connections and their tasks lazily, so the count is
-    // taken once it is steady after a first batch, and must come back to
-    // it after a batch ten times larger.
+    // The fabric opens connections and their tasks lazily, and a short
+    // warm-up does not always open all of them, so the count is taken once
+    // it is steady after a full batch, and must come back to it after a
+    // second. A task kept per request would add one per request.
     let metrics = tokio::runtime::Handle::current().metrics();
     let steady = || async {
         let mut last = metrics.num_alive_tasks();
@@ -839,7 +840,7 @@ async fn completed_requests_leave_no_tasks_behind() {
             last = now;
         }
     };
-    for i in 0..20 {
+    for i in 0..200 {
         run(format!("warm{i}")).await;
     }
     assert!(settles(&cluster).await);
@@ -852,9 +853,159 @@ async fn completed_requests_leave_no_tasks_behind() {
     while metrics.num_alive_tasks() > baseline {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "{} tasks alive, {baseline} after the first batch",
+            "{} tasks alive, {baseline} after the first batch of 200",
             metrics.num_alive_tasks()
         );
         tokio::time::sleep(ms(10)).await;
+    }
+}
+
+// ----- milestone 3 review, pass 2 -----
+
+fn two_segments() -> Placement {
+    Placement::new()
+        .segment("front", ["A", "B", "C", "F", "E", "G"])
+        .segment("engine", ["D"])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_reaches_the_remote_sink_while_the_stream_is_held_unread() {
+    let nodes = nodes(2).await;
+    let events = Events::new();
+    let cluster = deploy(&nodes, &two_segments(), &events, RuntimeConfig::default());
+    let plan = Plan {
+        endless: true,
+        item_delay_ms: 2,
+        ..Plan::default()
+    };
+    let cx = Cx::new();
+    let _held = cluster
+        .segment("front")
+        .call(cx.clone(), prompt("hc", plan))
+        .await
+        .expect("call");
+    cx.cancel();
+    events.wait_for("D:cancelled:c(hc)#0", WAIT).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_reaches_the_remote_sink_while_the_stream_is_held_unread() {
+    let nodes = nodes(2).await;
+    let events = Events::new();
+    let cluster = deploy(&nodes, &two_segments(), &events, RuntimeConfig::default());
+    let plan = Plan {
+        endless: true,
+        item_delay_ms: 2,
+        ..Plan::default()
+    };
+    let cx = Cx::new();
+    let _held = cluster
+        .segment("front")
+        .call(cx.clone(), prompt("hs", plan))
+        .await
+        .expect("call");
+    cx.request_stop();
+    events.wait_for("D:stopped:c(hs)#0", WAIT).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_stream_delivers_nothing_buffered_after_its_deadline() {
+    let nodes = nodes(2).await;
+    let events = Events::new();
+    let cluster = deploy(&nodes, &two_segments(), &events, RuntimeConfig::default());
+    // More than the boundary's check interval, all buffered by the time the
+    // deadline passes: unreleased, they would be delivered before the
+    // boundary noticed the deadline.
+    let plan = Plan {
+        tokens: 500,
+        ..Plan::default()
+    };
+    let mut out = cluster
+        .segment("front")
+        .call(Cx::new().with_timeout(ms(300)), prompt("hb", plan))
+        .await
+        .expect("call");
+    assert!(matches!(out.next().await, Some(Ok(_))));
+    tokio::time::sleep(ms(600)).await;
+    let next = out.next().await;
+    assert_eq!(
+        next.as_ref()
+            .map(|item| item.as_ref().map_err(|e| e.kind())),
+        Some(Err(ErrorKind::DeadlineExceeded)),
+        "{next:?}"
+    );
+    drop(out);
+    assert!(settles(&cluster).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delayed_hand_off_ack_does_not_hold_remote_work_past_the_deadline() {
+    let nodes = nodes(3).await;
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "F", "E", "G"])
+        .segment("side", ["C"])
+        .segment("engine", ["D"]);
+    let events = Events::new();
+    let config = RuntimeConfig {
+        faults: Faults {
+            delay_forward_ack: Some(ms(4_000)),
+            ..Faults::default()
+        },
+        ..RuntimeConfig::default()
+    };
+    let cluster = deploy(&nodes, &placement, &events, config);
+    let plan = Plan {
+        tokens: 1,
+        ..Plan::default()
+    };
+    let result = cluster
+        .segment("front")
+        .call(Cx::new().with_timeout(ms(300)), prompt("da", plan))
+        .await;
+    assert_eq!(
+        result.err().map(|e| e.kind()),
+        Some(ErrorKind::DeadlineExceeded)
+    );
+    // The side segment handed the request on and is waiting for the delayed
+    // acknowledgement; the request's deadline, not the delay, must end that.
+    let released = tokio::time::Instant::now() + ms(1_500);
+    while cluster.segment("side").admitted() > 0 {
+        assert!(
+            tokio::time::Instant::now() < released,
+            "the side segment still holds the request after its deadline"
+        );
+        tokio::time::sleep(ms(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_zero_limit_is_refused_at_deployment() {
+    let node = velo_node().await;
+    let placement = Placement::new().segment("all", REFERENCE_NODES);
+    let mut roster = gdl::Roster::new();
+    roster.add("all", node.peer_info());
+    for config in [
+        RuntimeConfig {
+            attempt_limit: 0,
+            ..RuntimeConfig::default()
+        },
+        RuntimeConfig {
+            admission_limit: 0,
+            ..RuntimeConfig::default()
+        },
+        RuntimeConfig {
+            egress_limit: 0,
+            ..RuntimeConfig::default()
+        },
+    ] {
+        let result = gdl::Deployment::new(
+            Arc::clone(&node),
+            &reference_manifest(|_| true),
+            &placement,
+            "all",
+            &roster,
+            config,
+        );
+        assert!(result.is_err(), "a zero limit was accepted");
     }
 }
