@@ -440,12 +440,20 @@ async fn stop_drains_output_already_buffered_across_segments() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_producer_whose_node_goes_away_ends_the_stream_with_an_error() {
     let nodes = nodes(3).await;
+    // Named explicitly: `deploy` assigns nodes in the placement's
+    // (alphabetical) segment order, which is easy to misread.
+    let engine = Arc::clone(&nodes[1]);
+    let instances = vec![
+        ("front".to_string(), Arc::clone(&nodes[0])),
+        ("engine".to_string(), Arc::clone(&engine)),
+        ("post".to_string(), Arc::clone(&nodes[2])),
+    ];
     let events = Events::new();
     let config = RuntimeConfig {
         heartbeat_interval: Some(ms(100)),
         ..RuntimeConfig::default()
     };
-    let cluster = deploy(&nodes, &three_segments(), &events, config);
+    let cluster = deploy_instances(&instances, &three_segments(), &events, config);
     let plan = Plan {
         endless: true,
         item_delay_ms: 5,
@@ -457,11 +465,14 @@ async fn a_producer_whose_node_goes_away_ends_the_stream_with_an_error() {
         .await
         .expect("call");
     assert!(out.next().await.is_some_and(|item| item.is_ok()));
-    // The engine's node shuts down mid-stream.
-    nodes[1]
+    // The producer's node shuts down mid-stream. The error must come from
+    // that, through post, well before the default deadline could end it.
+    engine
         .shutdown(velo::ShutdownPolicy::Timeout(ms(200)))
         .await;
-    let rest = collect(out).await;
+    let rest = tokio::time::timeout(ms(3_000), collect(out))
+        .await
+        .expect("the stream ends soon after its producer dies");
     let last = rest.last().expect("a terminal item");
     assert!(last.is_err(), "the stream must not end cleanly: {rest:?}");
 }

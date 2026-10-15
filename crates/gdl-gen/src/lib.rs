@@ -215,12 +215,13 @@ struct Survey {
     foreign: Vec<PathBuf>,
 }
 
-/// Walk `out`. A cargo build directory is skipped: one holding a
-/// `CACHEDIR.TAG` and no generated file. Its name does not decide (a segment
-/// may be called `target`), and a tag alone does not either (a tag beside a
-/// generated crate's sources must not hide them). A crate's `Cargo.lock` is
-/// left to whoever builds the crate on its own: a lockfile changes no source
-/// and pins only what that build resolved.
+/// Walk `out`. The one directory skipped is a crate's own build directory,
+/// `<crate>/target` holding a `CACHEDIR.TAG`, which is what building the
+/// crate on its own leaves. Neither the name alone (a segment may be called
+/// `target`) nor a tag alone (Cargo still builds a tagged `src/bin`) marks a
+/// directory as build output. Likewise a crate's `Cargo.lock` is left to
+/// whoever builds the crate on its own: it changes no source and pins only
+/// what that build resolved.
 fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
     let crates: BTreeSet<&Path> = files
         .keys()
@@ -234,8 +235,14 @@ fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
     let mut dirs = vec![PathBuf::new()];
     while let Some(dir) = dirs.pop() {
         let full = out.join(&dir);
-        let generated_below = files.keys().any(|path| path.starts_with(&dir));
-        if full.join("CACHEDIR.TAG").exists() && !generated_below {
+        let mut parts = dir.iter();
+        let build_dir = match (parts.next(), parts.next(), parts.next()) {
+            (Some(krate), Some(name), None) => {
+                crates.contains(Path::new(krate)) && name == "target"
+            }
+            _ => false,
+        };
+        if build_dir && full.join("CACHEDIR.TAG").exists() {
             continue;
         }
         let entries = match std::fs::read_dir(&full) {

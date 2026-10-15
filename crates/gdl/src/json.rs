@@ -61,12 +61,22 @@ async fn answer<Item: Serialize, W: AsyncWrite + Unpin>(
             Ok(item) => item,
             Err(error) => return Ok(failure(error.to_string())),
         };
-        match serde_json::to_value(&item) {
-            Ok(item) => write_line(output, &serde_json::json!({ "item": item })).await?,
+        // Serialized straight to text: going through `serde_json::Value`
+        // would refuse integers beyond 64 bits, which JSON text holds.
+        match serde_json::to_string(&ItemLine { item: &item }) {
+            Ok(mut line) => {
+                line.push('\n');
+                output.write_all(line.as_bytes()).await?;
+            }
             Err(error) => return Ok(failure(format!("an item has no JSON form: {error}"))),
         }
     }
     Ok(serde_json::json!({ "done": null }))
+}
+
+#[derive(Serialize)]
+struct ItemLine<'a, T> {
+    item: &'a T,
 }
 
 fn failure(message: String) -> serde_json::Value {
@@ -103,6 +113,24 @@ mod tests {
                 (0..n).map(|_| Ok(BTreeMap::new())),
             ))),
         }
+    }
+
+    #[tokio::test]
+    async fn integers_beyond_64_bits_are_served() {
+        let call =
+            |_: u32| async { Ok(items(futures::stream::iter([Ok((u128::MAX, i128::MIN))]))) };
+        let mut output = Vec::new();
+        serve_json_lines(&b"1\n"[..], &mut output, call)
+            .await
+            .expect("serve");
+        assert_eq!(
+            std::str::from_utf8(&output).expect("utf8"),
+            format!(
+                "{{\"item\":[{},{}]}}\n{{\"done\":null}}\n",
+                u128::MAX,
+                i128::MIN
+            )
+        );
     }
 
     #[tokio::test]

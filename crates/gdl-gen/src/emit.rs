@@ -402,6 +402,10 @@ impl Unit<'_> {
             ),
             ("rendezvous_ms = 30000".to_string(), "optional".to_string()),
             (
+                "[instances]".to_string(),
+                "optional: instances per segment, 1 by default".to_string(),
+            ),
+            (
                 "[runtime]".to_string(),
                 "optional: gdl::RuntimeConfig".to_string(),
             ),
@@ -461,6 +465,11 @@ impl Unit<'_> {
         let _ = writeln!(text, "    roster: std::path::PathBuf,");
         let _ = writeln!(text, "    #[serde(default = \"rendezvous_ms\")]");
         let _ = writeln!(text, "    rendezvous_ms: u64,");
+        let _ = writeln!(text, "    #[serde(default)]");
+        let _ = writeln!(
+            text,
+            "    instances: std::collections::BTreeMap<String, usize>,"
+        );
         let _ = writeln!(text, "    #[serde(default)]");
         let _ = writeln!(text, "    runtime: gdl::RuntimeConfig,");
         let _ = writeln!(text, "    #[serde(default)]");
@@ -522,7 +531,20 @@ impl Unit<'_> {
             text,
             "    let wait = Duration::from_millis(config.rendezvous_ms);"
         );
-        let _ = writeln!(text, "    let expect = SEGMENTS.iter().copied();");
+        let _ = writeln!(
+            text,
+            "    if let Some(unknown) = config.instances.keys().find(|s| !SEGMENTS.contains(&s.as_str())) {{"
+        );
+        let _ = writeln!(
+            text,
+            "        return Err(format!(\"[instances]: no segment `{{unknown}}`\").into());"
+        );
+        let _ = writeln!(text, "    }}");
+        let _ = writeln!(text, "    // Every instance waits for the same membership.");
+        let _ = writeln!(
+            text,
+            "    let expect = SEGMENTS.iter().map(|s| (*s, config.instances.get(*s).copied().unwrap_or(1)));"
+        );
         let _ = writeln!(
             text,
             "    let roster = gdl::Roster::rendezvous(&config.roster, SEGMENT, &node, expect, wait).await?;"

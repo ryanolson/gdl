@@ -13,15 +13,17 @@ use crate::error::{Error, ErrorKind, Result};
 
 impl Roster {
     /// Meet the other segments through a shared directory: publish `node`
-    /// as an instance of `segment` in `dir`, then wait until every segment
-    /// in `expect` has published at least one instance, and return every
-    /// instance found.
+    /// as an instance of `segment` in `dir`, then wait until each segment in
+    /// `expect` has published exactly its expected number of instances, and
+    /// return them all. More instances than expected is an error.
     ///
-    /// An instance id is fresh on every start, so peers cannot be listed
-    /// ahead of time; a directory is the smallest exchange that needs no
-    /// service. Files are written whole and renamed into place, so a reader
-    /// never sees a partial one. Instances that publish after this returns
-    /// are not in the roster, and nothing routes to them.
+    /// The counts are what make every instance's roster the same: an
+    /// instance that waited for "at least one" of each could miss a peer
+    /// another instance routes to, and its readiness barrier would then not
+    /// cover that peer. An instance id is fresh on every start, so peers
+    /// cannot be listed ahead of time; a directory is the smallest exchange
+    /// that needs no service. Files are written whole and renamed into
+    /// place, so a reader never sees a partial one.
     ///
     /// The directory belongs to one deployment. Files are never removed, so
     /// a directory reused across runs names instances that are gone, and
@@ -30,11 +32,11 @@ impl Roster {
         dir: &Path,
         segment: &str,
         node: &Velo,
-        expect: impl IntoIterator<Item = &'a str>,
+        expect: impl IntoIterator<Item = (&'a str, usize)>,
         wait: Duration,
     ) -> Result<Roster> {
-        let expect: Vec<&str> = expect.into_iter().collect();
-        if segment.contains('.') || expect.iter().any(|s| s.contains('.')) {
+        let expect: Vec<(&str, usize)> = expect.into_iter().collect();
+        if segment.contains('.') || expect.iter().any(|(s, _)| s.contains('.')) {
             return Err(Error::new(
                 ErrorKind::Placement,
                 "a segment name used for rendezvous has a `.`",
@@ -44,14 +46,34 @@ impl Roster {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             let roster = read_roster(dir)?;
-            let missing: Vec<&str> = expect.iter().copied().filter(|s| !roster.has(s)).collect();
+            let mut missing = Vec::new();
+            for (name, want) in &expect {
+                let found = roster.instances(name).len();
+                if found > *want {
+                    return Err(Error::new(
+                        ErrorKind::Placement,
+                        format!(
+                            "{found} instances of `{name}` in {}, {want} expected; \
+                             the directory must be fresh for each deployment",
+                            dir.display()
+                        ),
+                    ));
+                }
+                if found < *want {
+                    missing.push(format!("{name} ({found} of {want})"));
+                }
+            }
             if missing.is_empty() {
                 return Ok(roster);
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(Error::new(
                     ErrorKind::Transport,
-                    format!("no instance of {missing:?} appeared in {}", dir.display()),
+                    format!(
+                        "instances missing in {}: {}",
+                        dir.display(),
+                        missing.join(", ")
+                    ),
                 ));
             }
             tokio::time::sleep(POLL).await;
@@ -165,8 +187,8 @@ mod tests {
         let (a, b) = (node().await, node().await);
         let wait = Duration::from_secs(5);
         let (ra, rb) = tokio::join!(
-            Roster::rendezvous(&dir, "front", &a, ["front", "engine"], wait),
-            Roster::rendezvous(&dir, "engine", &b, ["front", "engine"], wait),
+            Roster::rendezvous(&dir, "front", &a, [("front", 1), ("engine", 1)], wait),
+            Roster::rendezvous(&dir, "engine", &b, [("front", 1), ("engine", 1)], wait),
         );
         for roster in [ra.expect("a"), rb.expect("b")] {
             assert_eq!(
@@ -186,7 +208,8 @@ mod tests {
         let dir = scratch("missing");
         let a = node().await;
         let wait = Duration::from_millis(200);
-        let result = Roster::rendezvous(&dir, "front", &a, ["front", "engine"], wait).await;
+        let result =
+            Roster::rendezvous(&dir, "front", &a, [("front", 1), ("engine", 1)], wait).await;
         let Err(error) = result else {
             panic!("engine never appears, yet the rendezvous succeeded");
         };
@@ -200,7 +223,7 @@ mod tests {
         let ready = dir.join("ready");
         let (front, first, second) = (node().await, node().await, node().await);
         let wait = Duration::from_secs(5);
-        let expect = ["front", "engine"];
+        let expect = [("front", 1), ("engine", 2)];
         let (roster, _, _) = tokio::join!(
             Roster::rendezvous(&dir, "front", &front, expect, wait),
             Roster::rendezvous(&dir, "engine", &first, expect, wait),
@@ -227,6 +250,58 @@ mod tests {
             .ready(&ready, "engine", &second, wait)
             .await
             .expect("every instance is serving");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod membership {
+    use super::*;
+    use crate::dist::fabric::bind_node;
+
+    async fn node() -> std::sync::Arc<Velo> {
+        bind_node(([127, 0, 0, 1], 0).into()).await.expect("node")
+    }
+
+    fn ids(roster: &Roster) -> BTreeSet<String> {
+        roster
+            .peers()
+            .map(|p| p.instance_id().to_string())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_instance_gets_the_same_roster() {
+        let dir = std::env::temp_dir().join(format!("gdl-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (front, first, second) = (node().await, node().await, node().await);
+        let expect = [("front", 1), ("engine", 2)];
+        let (wait, short) = (Duration::from_secs(5), Duration::from_millis(200));
+        // The front and one engine instance start first; the front must not
+        // settle for the roster it sees then.
+        let (early, _) = tokio::join!(
+            Roster::rendezvous(&dir, "front", &front, expect, short),
+            Roster::rendezvous(&dir, "engine", &first, expect, short),
+        );
+        assert!(early.is_err(), "the front settled before the second engine");
+        let (a, b, c) = tokio::join!(
+            Roster::rendezvous(&dir, "front", &front, expect, wait),
+            Roster::rendezvous(&dir, "engine", &first, expect, wait),
+            Roster::rendezvous(&dir, "engine", &second, expect, wait),
+        );
+        let (a, b, c) = (a.expect("front"), b.expect("first"), c.expect("second"));
+        assert_eq!(ids(&a).len(), 3);
+        assert_eq!(ids(&a), ids(&b));
+        assert_eq!(ids(&a), ids(&c));
+
+        let third = node().await;
+        let Err(error) = Roster::rendezvous(&dir, "engine", &third, expect, wait).await else {
+            panic!("a third engine instance joined a deployment of two");
+        };
+        assert!(
+            error.to_string().contains("3 instances of `engine`"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

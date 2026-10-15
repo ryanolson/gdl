@@ -212,10 +212,6 @@ impl Roster {
         self.segments.get(segment).map_or(&[], Vec::as_slice)
     }
 
-    pub(crate) fn has(&self, segment: &str) -> bool {
-        self.segments.contains_key(segment)
-    }
-
     pub(crate) fn peers(&self) -> impl Iterator<Item = &PeerInfo> {
         self.segments.values().flatten()
     }

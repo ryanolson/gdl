@@ -9,6 +9,7 @@
 //! listen = "127.0.0.1:0"  # this instance's address
 //! roster = "/run/roster"  # fresh for each deployment, shared by every instance
 //! rendezvous_ms = 30000   # optional
+//! [instances]             # optional: instances per segment, 1 by default
 //! [runtime]               # optional: gdl::RuntimeConfig
 //! [node.Engine]           # optional: Engine's Build::Config
 //! ```
@@ -27,6 +28,8 @@ struct Config {
     roster: std::path::PathBuf,
     #[serde(default = "rendezvous_ms")]
     rendezvous_ms: u64,
+    #[serde(default)]
+    instances: std::collections::BTreeMap<String, usize>,
     #[serde(default)]
     runtime: gdl::RuntimeConfig,
     #[serde(default)]
@@ -65,7 +68,17 @@ async fn run() -> Result<(), Failure> {
     };
     let node = gdl::bind_node(config.listen).await?;
     let wait = Duration::from_millis(config.rendezvous_ms);
-    let expect = SEGMENTS.iter().copied();
+    if let Some(unknown) = config
+        .instances
+        .keys()
+        .find(|s| !SEGMENTS.contains(&s.as_str()))
+    {
+        return Err(format!("[instances]: no segment `{unknown}`").into());
+    }
+    // Every instance waits for the same membership.
+    let expect = SEGMENTS
+        .iter()
+        .map(|s| (*s, config.instances.get(*s).copied().unwrap_or(1)));
     let roster = gdl::Roster::rendezvous(&config.roster, SEGMENT, &node, expect, wait).await?;
     let segment = start(Arc::clone(&node), &roster, config.runtime, nodes)?;
     // No request may leave before every instance it can be routed to
