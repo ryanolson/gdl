@@ -74,10 +74,10 @@ async fn run() -> Result<(), Failure> {
         .ok_or("usage: chat-front <config.toml>")?;
     let config: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
     let nodes = Nodes {
-        preprocess: build::<chat_front_nodes::Preprocess>("Preprocess", config.node.preprocess)
+        preprocess: build::<::chat_front_nodes::Preprocess>("Preprocess", config.node.preprocess)
             .await?,
-        truncate: build::<chat_front_nodes::Truncate>("Truncate", config.node.truncate).await?,
-        number: build::<chat_front_nodes::Number>("Number", config.node.number).await?,
+        truncate: build::<::chat_front_nodes::Truncate>("Truncate", config.node.truncate).await?,
+        number: build::<::chat_front_nodes::Number>("Number", config.node.number).await?,
     };
     let node = gdl::bind_node(config.listen).await?;
     let wait = Duration::from_millis(config.rendezvous_ms);

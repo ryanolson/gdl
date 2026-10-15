@@ -34,6 +34,10 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use serde::{Deserialize, Serialize};
 use setup::*;
 
+/// Nothing is counted while timing.
+#[inline(always)]
+fn produced() {}
+
 /// The shape of gdl's crossing frame (`dist::envelope::WireItem`, which is
 /// crate-private), for the in-process codec comparison.
 #[derive(Serialize, Deserialize)]

@@ -59,6 +59,14 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
+/// Blobs built by either producer: with requests held unread, what each
+/// produced beyond what was read is what backpressure failed to hold back.
+static PRODUCED: AtomicU64 = AtomicU64::new(0);
+
+fn produced() {
+    PRODUCED.fetch_add(1, Ordering::Relaxed);
+}
+
 // ----- the report -----
 
 #[cfg(tokio_unstable)]

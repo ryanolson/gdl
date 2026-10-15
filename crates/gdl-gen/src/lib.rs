@@ -146,6 +146,36 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
                 );
             }
         }
+        // Cargo names dependencies by package: each key in the generated
+        // manifest must be distinct too, whatever the libraries are called.
+        let mut keys: BTreeMap<String, String> = BTreeMap::new();
+        let mut key = |name: &str, what: String, problems: &mut Vec<String>| match keys.get(name) {
+            Some(first) if *first != what => problems.push(format!(
+                "segment `{segment}`: dependency `{name}` is both {first} and {what}"
+            )),
+            Some(_) => {}
+            None => {
+                keys.insert(name.to_string(), what);
+            }
+        };
+        for fixed in ["gdl", "serde", "tokio", "toml"] {
+            key(fixed, format!("the `{fixed}` dependency"), &mut problems);
+        }
+        key(&spec.contract.package, "the contract".into(), &mut problems);
+        for (node, bind) in &spec.bind {
+            if hosted.contains(node.as_str()) {
+                let first = spec
+                    .bind
+                    .iter()
+                    .find(|(n, b)| hosted.contains(n.as_str()) && b.package == bind.package)
+                    .map_or(node.as_str(), |(n, _)| n.as_str());
+                key(
+                    &bind.package,
+                    format!("[bind.{first}]'s package"),
+                    &mut problems,
+                );
+            }
+        }
         if let Some(other) = packages.insert(package.clone(), segment) {
             problems.push(format!(
                 "segments `{other}` and `{segment}` both become package `{package}`"
@@ -163,6 +193,13 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
         }
         if bind.ty.trim().is_empty() {
             problems.push(format!("[bind.{node}]: `type` is empty"));
+        } else if bind.ty.trim_start_matches("::").split("::").next() != Some(bind.lib.as_str()) {
+            // The bound crate is the only one of the node's that the
+            // segment depends on; a type from anywhere else cannot resolve.
+            problems.push(format!(
+                "[bind.{node}]: type `{}` is not in crate `{}`",
+                bind.ty, bind.lib
+            ));
         }
         let path = dump::absolute(&bind.path).unwrap_or_else(|_| paths::normalize(&bind.path));
         match sources.get(bind.package.as_str()) {
@@ -422,7 +459,7 @@ mod tests {
         let placement = gdl::Placement::new()
             .segment("front.end", ["S"])
             .segment("engine", ["D"]);
-        let spec = spec(placement, &[("S", "x::S"), ("Q", "x::Q")]);
+        let spec = spec(placement, &[("S", "tiny_nodes::S"), ("Q", "tiny_nodes::Q")]);
         let error = validate(&spec, &manifest())
             .expect_err("invalid")
             .to_string();
@@ -445,7 +482,7 @@ mod tests {
             .segment("front", ["S"])
             .segment("worker-a", ["D"])
             .segment("worker_a", Vec::<String>::new());
-        let spec = spec(placement, &[("D", "x::D")]);
+        let spec = spec(placement, &[("D", "tiny_nodes::D")]);
         let error = validate(&spec, &manifest())
             .expect_err("collision")
             .to_string();
@@ -463,7 +500,7 @@ mod tests {
         let placement = gdl::Placement::new()
             .segment("contract", ["S"])
             .segment("nodes", ["D"]);
-        let spec = spec(placement, &[("D", "x::D")]);
+        let spec = spec(placement, &[("D", "tiny_nodes::D")]);
         let error = validate(&spec, &manifest())
             .expect_err("collision")
             .to_string();
@@ -486,7 +523,7 @@ mod tests {
         // Package `tiny_front` is a different package from the generated
         // `tiny-front`, but both are the crate `tiny_front` in Rust, and
         // the generated binary would see two crates of that name.
-        let mut spec = spec(split(), &[("D", "x::D")]);
+        let mut spec = spec(split(), &[("D", "tiny_nodes::D")]);
         let bind = spec.bind.get_mut("D").expect("D");
         bind.package = "tiny_engine".into();
         bind.lib = "tiny_engine".into();
@@ -507,6 +544,50 @@ mod tests {
     }
 
     #[test]
+    fn a_type_must_come_from_its_bound_crate() {
+        let spec = spec(split(), &[("D", "contract::D")]);
+        let error = validate(&spec, &manifest())
+            .expect_err("foreign type")
+            .to_string();
+        assert!(
+            error.contains("[bind.D]: type `contract::D` is not in crate `tiny_nodes`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_dependency_may_not_take_a_reserved_key() {
+        // Package `tokio`, library `engine_impl`: distinct crate names, but
+        // the generated manifest would list `tokio` twice.
+        let mut spec = spec(split(), &[("D", "engine_impl::D")]);
+        let bind = spec.bind.get_mut("D").expect("D");
+        bind.package = "tokio".into();
+        bind.lib = "engine_impl".into();
+        let error = validate(&spec, &manifest())
+            .expect_err("duplicate key")
+            .to_string();
+        assert!(
+            error.contains("segment `engine`: dependency `tokio` is both the `tokio` dependency and [bind.D]'s package"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn generated_code_names_implementations_from_the_crate_root() {
+        let spec = spec(split(), &[("D", "tiny_nodes::D")]);
+        let files =
+            render_manifest(&spec, &manifest(), Path::new("/work/segments")).expect("render");
+        let lib = &files[&PathBuf::from("engine/src/lib.rs")];
+        let main = &files[&PathBuf::from("engine/src/main.rs")];
+        assert!(lib.contains("pub d: ::tiny_nodes::D"), "{lib}");
+        assert!(
+            lib.contains("pub use ::tiny_contract as contract;"),
+            "{lib}"
+        );
+        assert!(main.contains("build::<::tiny_nodes::D>"), "{main}");
+    }
+
+    #[test]
     fn a_package_bound_from_two_paths_is_refused() {
         let mut manifest = manifest();
         manifest.nodes.push(NodeInfo {
@@ -521,7 +602,7 @@ mod tests {
         let placement = gdl::Placement::new()
             .segment("front", ["S", "F"])
             .segment("engine", ["D"]);
-        let mut spec = spec(placement, &[("D", "x::D"), ("F", "x::F")]);
+        let mut spec = spec(placement, &[("D", "tiny_nodes::D"), ("F", "tiny_nodes::F")]);
         spec.bind.get_mut("F").expect("F").path = "/elsewhere/nodes".into();
         let error = validate(&spec, &manifest)
             .expect_err("two paths")
@@ -547,7 +628,7 @@ mod tests {
     #[test]
     fn a_placement_error_is_reported() {
         let placement = gdl::Placement::new().segment("front", ["S"]);
-        let spec = spec(placement, &[("D", "x::D")]);
+        let spec = spec(placement, &[("D", "tiny_nodes::D")]);
         assert!(validate(&spec, &manifest()).is_err());
     }
 

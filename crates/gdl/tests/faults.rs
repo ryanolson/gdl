@@ -1278,3 +1278,60 @@ async fn a_stage_delivering_a_refused_hand_off_keeps_its_admission() {
         "side gave up its admission while it still owned the reply"
     );
 }
+
+// ----- milestone 3 review, pass 11 -----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receiver_waiting_for_egress_gives_up_at_the_setup_timeout() {
+    let nodes = nodes(2).await;
+    let instances = vec![
+        ("front".to_string(), Arc::clone(&nodes[0])),
+        ("engine".to_string(), Arc::clone(&nodes[1])),
+    ];
+    let events = Events::new();
+    let cluster = deploy_configured(&instances, &two_segments(), &events, &|segment| {
+        if segment == "engine" {
+            RuntimeConfig {
+                egress_limit: 1,
+                admission_wait: ms(3_000),
+                setup_timeout: ms(200),
+                ..RuntimeConfig::default()
+            }
+        } else {
+            RuntimeConfig {
+                setup_timeout: ms(200),
+                ..RuntimeConfig::default()
+            }
+        }
+    });
+    let busy = Plan {
+        endless: true,
+        item_delay_ms: 5,
+        ..Plan::default()
+    };
+    // Holds the engine's only egress permit.
+    let _first = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("w1", busy))
+        .await
+        .expect("first");
+    let plan = Plan {
+        tokens: 1,
+        ..Plan::default()
+    };
+    // No deadline of its own: only the setup timeout bounds the engine's
+    // wait for egress, and it must, well before the 3 s admission wait.
+    let started = tokio::time::Instant::now();
+    let result = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("w2", plan))
+        .await;
+    assert!(result.is_err());
+    while cluster.segment("engine").admitted() > 1 {
+        assert!(
+            started.elapsed() < ms(1_500),
+            "the engine waited for egress past its setup timeout"
+        );
+        tokio::time::sleep(ms(10)).await;
+    }
+}

@@ -4,7 +4,6 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -13,12 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use super::common::*;
 
-/// Blobs built by either producer: with requests held unread, what each
-/// produced beyond what was read is what backpressure failed to hold back.
-pub static PRODUCED: AtomicU64 = AtomicU64::new(0);
-
+/// One blob for either producer. Each bench decides what building one
+/// costs beyond the blob: nothing in the timed bench, a count in footprint.
 pub fn blob(size: usize) -> Blob {
-    PRODUCED.fetch_add(1, Ordering::Relaxed);
+    super::produced();
     Blob(vec![7; size])
 }
 

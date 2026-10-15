@@ -357,12 +357,18 @@ where
         // anything, and every wait below ends at its deadline.
         let root = envelope.cx.root();
         let cx = envelope.cx.arrive(rt.config.clock_skew, || rt.wall_now())?;
-        let share = bounded(&cx, rt.admission.admit(root)).await?;
+        let share = setup(
+            &cx,
+            rt.config.setup_timeout,
+            "admission",
+            rt.admission.admit(root),
+        )
+        .await?;
         // A run that ends at the inner end here will produce a stream; it
         // takes its egress permit before acknowledging, so a full instance
         // refuses instead of stalling.
         let egress = if self.plan.reaches_inner(usize::from(envelope.pos)) {
-            Some(bounded(&cx, rt.egress.acquire()).await?)
+            Some(setup(&cx, rt.config.setup_timeout, "egress", rt.egress.acquire()).await?)
         } else {
             None
         };
@@ -430,7 +436,13 @@ where
         rt.check_identity(open.version, open.identity)?;
         let root = open.cx.root();
         let cx = open.cx.arrive(rt.config.clock_skew, || rt.wall_now())?;
-        let share = bounded(&cx, rt.admission.admit(root)).await?;
+        let share = setup(
+            &cx,
+            rt.config.setup_timeout,
+            "admission",
+            rt.admission.admit(root),
+        )
+        .await?;
         let input = self
             .open_run(cx, usize::from(open.pos), open.reply, Some(share))
             .await?;
@@ -452,7 +464,7 @@ where
         share: Option<super::admission::Share>,
     ) -> Result<ReplyTo> {
         let rt = &self.rt;
-        let egress = bounded(&cx, rt.egress.acquire()).await?;
+        let egress = setup(&cx, rt.config.setup_timeout, "egress", rt.egress.acquire()).await?;
         let out = setup(
             &cx,
             rt.config.setup_timeout,

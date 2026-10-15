@@ -67,9 +67,9 @@ async fn run() -> Result<(), Failure> {
         .ok_or("usage: chat-post <config.toml>")?;
     let config: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
     let nodes = Nodes {
-        detokenize: build::<chat_post_nodes::Detokenize>("Detokenize", config.node.detokenize)
+        detokenize: build::<::chat_post_nodes::Detokenize>("Detokenize", config.node.detokenize)
             .await?,
-        format: build::<chat_post_nodes::Format>("Format", config.node.format).await?,
+        format: build::<::chat_post_nodes::Format>("Format", config.node.format).await?,
     };
     let node = gdl::bind_node(config.listen).await?;
     let wait = Duration::from_millis(config.rendezvous_ms);

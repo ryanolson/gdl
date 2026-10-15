@@ -64,7 +64,7 @@ async fn run() -> Result<(), Failure> {
         .ok_or("usage: chat-engine <config.toml>")?;
     let config: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
     let nodes = Nodes {
-        engine: build::<chat_engine_mock::Engine>("Engine", config.node.engine).await?,
+        engine: build::<::chat_engine_mock::Engine>("Engine", config.node.engine).await?,
     };
     let node = gdl::bind_node(config.listen).await?;
     let wait = Duration::from_millis(config.rendezvous_ms);

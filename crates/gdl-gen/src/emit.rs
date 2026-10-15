@@ -295,7 +295,14 @@ impl Unit<'_> {
         let _ = writeln!(text);
         let _ = writeln!(text, "use std::sync::Arc;");
         let _ = writeln!(text);
-        let _ = writeln!(text, "pub use {} as contract;", self.spec.contract.module);
+        // Paths from the crate root (`::`), here and for every
+        // implementation: a hosted crate called `contract` must not be
+        // shadowed by this alias.
+        let _ = writeln!(
+            text,
+            "pub use ::{} as contract;",
+            self.spec.contract.module.trim_start_matches("::")
+        );
         let _ = writeln!(text);
         let _ = writeln!(text, "/// This segment's name in the placement.");
         let _ = writeln!(text, "pub const SEGMENT: &str = \"{}\";", self.segment);
@@ -329,7 +336,7 @@ impl Unit<'_> {
             let _ = writeln!(text, "pub struct Nodes {{");
             for node in &hosted {
                 let _ = writeln!(text, "    /// Node `{}`.", node.name);
-                let _ = writeln!(text, "    pub {}: {},", node.binding, node.ty);
+                let _ = writeln!(text, "    pub {}: ::{},", node.binding, node.ty);
             }
             let _ = writeln!(text, "}}");
         }
@@ -520,7 +527,7 @@ impl Unit<'_> {
             for node in &hosted {
                 let _ = writeln!(
                     text,
-                    "        {}: build::<{}>(\"{}\", config.node.{}).await?,",
+                    "        {}: build::<::{}>(\"{}\", config.node.{}).await?,",
                     node.binding, node.ty, node.name, node.binding
                 );
             }

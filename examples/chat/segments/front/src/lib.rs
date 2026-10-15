@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-pub use chat_contract as contract;
+pub use ::chat_contract as contract;
 
 /// This segment's name in the placement.
 pub const SEGMENT: &str = "front";
@@ -30,11 +30,11 @@ nodes = ["Detokenize", "Format"]
 /// The implementations of the nodes this segment hosts.
 pub struct Nodes {
     /// Node `Preprocess`.
-    pub preprocess: chat_front_nodes::Preprocess,
+    pub preprocess: ::chat_front_nodes::Preprocess,
     /// Node `Truncate`.
-    pub truncate: chat_front_nodes::Truncate,
+    pub truncate: ::chat_front_nodes::Truncate,
     /// Node `Number`.
-    pub number: chat_front_nodes::Number,
+    pub number: ::chat_front_nodes::Number,
 }
 
 /// Deploy this segment on `node`. Every segment's instances must be in
