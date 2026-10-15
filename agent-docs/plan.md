@@ -79,7 +79,7 @@ Node roles:
 
 Deadline protocol: the source sets an absolute deadline in wall-clock nanoseconds. Envelopes carry it unchanged. Sending remaining time instead would let every delayed hop restart the budget. Each receiver converts conservatively on arrival: `local_deadline = mono_now + max(0, deadline_wall - wall_now - skew)`, and rejects the request at once if the result is `mono_now`. `skew` is the assumed maximum pairwise clock error between segments (configured; default 50 ms, as NTP gives on one network). With clocks within `skew`, no receiver runs past the source's deadline; a receiver may stop up to `2 x skew` early. Milestone 3 tests both clock-offset directions.
 
-Deadline enforcement at a stream boundary: the boundary polls a timer while its producer is pending, and reads the clock every 64 ready items. An unpolled timer never fires, so a producer that is always ready would otherwise run past its deadline forever; reading the clock on every item would put a clock read on the hottest path. A ready producer can therefore overrun its deadline by at most 64 items (found in milestone 1).
+Cancel and deadline enforcement at an attempt boundary: the boundary polls the cancel and deadline futures while its producer is pending, and checks the cancel flag and the clock every 64 ready items. An unpolled timer never fires, so a producer that is always ready would otherwise run past its deadline forever, and both reads are too costly per item (`CancellationToken::is_cancelled` takes a mutex). A ready producer can therefore overrun a cancel or a deadline by at most 64 items. Node boundaries inside an attempt only fuse after an error (found in milestone 1; `agent-docs/reviews/m1-r1.md`).
 
 Attempt rules:
 

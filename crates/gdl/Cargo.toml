@@ -18,9 +18,14 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 trybuild = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "hop"
+harness = false

@@ -12,6 +12,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,6 +48,16 @@ pub struct Plan {
     pub endless: bool,
     /// D sleeps this long in `generate` for this attempt, before returning.
     pub slow_attempt: Option<(u32, u64)>,
+    /// D uses this item delay instead of `item_delay_ms` for this attempt:
+    /// its stream exists at once but its items are slow.
+    pub slow_items: Option<(u32, u64)>,
+    /// After emitting an `Err`, D waits for its context to end instead of
+    /// trying to emit more, so a test can see whether the attempt was
+    /// cancelled while the consumer still holds the stream.
+    pub hold_after_error: bool,
+    /// After its `tokens` items, D waits for a stop or the end of its
+    /// context instead of finishing.
+    pub hold_at_end: bool,
     /// How B calls its `next`.
     pub mode: Mode,
 }
@@ -100,6 +111,7 @@ pub const STOP_MARK: u32 = 999;
 pub struct Events {
     log: Mutex<Vec<String>>,
     changed: Notify,
+    contexts: Mutex<HashMap<String, Cx>>,
 }
 
 impl Events {
@@ -110,6 +122,25 @@ impl Events {
     pub fn record(&self, event: impl Into<String>) {
         self.log.lock().expect("events lock").push(event.into());
         self.changed.notify_waiters();
+    }
+
+    /// Publish the context a node received, so a test can check the actual
+    /// state of its cancellation scope rather than infer it from events.
+    pub fn publish_cx(&self, key: impl Into<String>, cx: &Cx) {
+        self.contexts
+            .lock()
+            .expect("contexts lock")
+            .insert(key.into(), cx.clone());
+    }
+
+    /// The context a node published under `key`.
+    pub fn cx_of(&self, key: &str) -> Cx {
+        self.contexts
+            .lock()
+            .expect("contexts lock")
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| panic!("no context published as {key:?}"))
     }
 
     pub fn snapshot(&self) -> Vec<String> {
@@ -310,6 +341,7 @@ impl Sink for NodeD {
     async fn generate(&self, cx: Cx, req: Pre) -> Result<Items<Raw>> {
         let key = format!("{}#{}", req.text, req.attempt);
         let events = Arc::clone(&self.events);
+        events.publish_cx(format!("D:{key}"), &cx);
         events.record(format!("D:start:{key}"));
         let plan = req.plan;
 
@@ -317,8 +349,9 @@ impl Sink for NodeD {
             && attempt == req.attempt
         {
             // Dropping a pending attempt drops this future rather than waking
-            // it, so the abandonment is observed through a drop guard.
-            let abandoned = OnDrop::new(Arc::clone(&events), format!("D:cancelled:{key}"));
+            // it. The drop guard shows the future was destroyed; tests check
+            // the published context to see that the attempt was cancelled.
+            let abandoned = OnDrop::new(Arc::clone(&events), format!("D:abandoned:{key}"));
             tokio::select! {
                 () = cx.cancelled() => return Err(Error::cancelled()),
                 () = tokio::time::sleep(ms(delay)) => {}
@@ -332,6 +365,10 @@ impl Sink for NodeD {
             })));
         }
 
+        let item_delay = match plan.slow_items {
+            Some((attempt, delay)) if attempt == req.attempt => delay,
+            _ => plan.item_delay_ms,
+        };
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
             let mut index = 0;
@@ -339,11 +376,7 @@ impl Sink for NodeD {
                 tokio::select! {
                     biased;
                     reason = cx.done() => {
-                        let what = match reason.kind() {
-                            ErrorKind::DeadlineExceeded => "deadline",
-                            _ => "cancelled",
-                        };
-                        events.record(format!("D:{what}:{key}"));
+                        events.record(format!("D:{}:{key}", end_label(&reason)));
                         return;
                     }
                     () = cx.stopping() => {
@@ -352,9 +385,10 @@ impl Sink for NodeD {
                         events.record(format!("D:stopped:{key}"));
                         return;
                     }
-                    () = tokio::time::sleep(ms(plan.item_delay_ms)) => {}
+                    () = tokio::time::sleep(ms(item_delay)) => {}
                 }
-                let item = if plan.fail_at == Some(index) {
+                let failing = plan.fail_at == Some(index);
+                let item = if failing {
                     Err(Error::node(format!("D failed at {index}")))
                 } else {
                     Ok(Raw(index))
@@ -363,11 +397,38 @@ impl Sink for NodeD {
                     events.record(format!("D:dropped:{key}"));
                     return;
                 }
+                if failing && plan.hold_after_error {
+                    let reason = cx.done().await;
+                    events.record(format!("D:{}:{key}", end_label(&reason)));
+                    return;
+                }
                 index += 1;
+            }
+            if plan.hold_at_end {
+                events.record(format!("D:held:{key}"));
+                tokio::select! {
+                    biased;
+                    reason = cx.done() => {
+                        events.record(format!("D:{}:{key}", end_label(&reason)));
+                        return;
+                    }
+                    () = cx.stopping() => {
+                        let _ = tx.send(Ok(Raw(STOP_MARK))).await;
+                        events.record(format!("D:stopped:{key}"));
+                        return;
+                    }
+                }
             }
             events.record(format!("D:done:{key}"));
         });
         Ok(receiver(rx))
+    }
+}
+
+fn end_label(reason: &Error) -> &'static str {
+    match reason.kind() {
+        ErrorKind::DeadlineExceeded => "deadline",
+        _ => "cancelled",
     }
 }
 
@@ -405,6 +466,22 @@ impl Backward for NodeG {
 }
 
 // ----- assembly -----
+
+/// Hop 1 on its own (C, D, F, E), as B's `next`.
+pub fn sink_hop(events: &Arc<Events>) -> impl Next<Pre, Out> {
+    Hop::new(
+        (
+            Arc::new(NodeC {
+                events: Arc::clone(events),
+            }),
+            (),
+        ),
+        SinkStage::new(Arc::new(NodeD {
+            events: Arc::clone(events),
+        })),
+        (Arc::new(NodeF), (Arc::new(NodeE), ())),
+    )
+}
 
 /// The whole reference graph in one segment.
 pub fn local_graph(events: &Arc<Events>) -> Source<impl Next<Prompt, Chunk>> {

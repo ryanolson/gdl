@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::cx::Cx;
 use crate::error::Result;
-use crate::items::{Items, bound};
+use crate::items::{Items, bound, fuse};
 use crate::role::{Backward, Forward, Next, Operator, Sink};
 
 /// A hop: a forward chain, an inner end, and a backward chain. As the `next`
@@ -38,7 +38,7 @@ where
         let attempt = cx.child();
         // Dropping this future before it returns drops the guard and cancels
         // the attempt; on success the guard moves into the response stream,
-        // so dropping the stream cancels it instead.
+        // which cancels the attempt when the stream ends or is dropped.
         let guard = attempt.cancel_on_drop();
         let run = async {
             let req = self.fwd.run(&attempt, req).await?;
@@ -49,7 +49,7 @@ where
             result = run => result?,
             reason = attempt.done() => return Err(reason),
         };
-        Ok(bound(&attempt, Some(guard), items))
+        Ok(bound(&attempt, guard, items))
     }
 }
 
@@ -82,8 +82,7 @@ impl<S: Sink> Inner<S::Req> for SinkStage<S> {
     type Item = S::Item;
 
     async fn call(&self, cx: Cx, req: S::Req) -> Result<Items<S::Item>> {
-        let items = self.0.generate(cx.clone(), req).await?;
-        Ok(bound(&cx, None, items))
+        self.0.generate(cx, req).await
     }
 }
 
@@ -117,8 +116,7 @@ where
     type Item = O::UpItem;
 
     async fn call(&self, cx: Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
-        let items = self.op.generate(cx.clone(), req, self.next.clone()).await?;
-        Ok(bound(&cx, None, items))
+        self.op.generate(cx, req, self.next.clone()).await
     }
 }
 
@@ -155,6 +153,10 @@ where
 
 /// Zero or more backward nodes, as a cons list in the order the response
 /// passes through them: `(Arc<B>, Rest)` applies `B` first.
+///
+/// Each node's input is fused, so no node sees an item after an error. The
+/// last node's output is fused by the hop's attempt boundary, so every node
+/// output is fused exactly once.
 pub trait BackwardChain<In>: Clone + Send + Sync + 'static {
     /// The item type after the whole chain.
     type Out: Send + 'static;
@@ -179,7 +181,7 @@ where
     type Out = R::Out;
 
     fn apply(&self, cx: &Cx, items: Items<B::In>) -> Items<R::Out> {
-        let items = bound(cx, None, self.0.backward(cx, items));
+        let items = self.0.backward(cx, fuse(items));
         self.1.apply(cx, items)
     }
 }

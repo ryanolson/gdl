@@ -4,23 +4,18 @@ mod common;
 
 use common::*;
 use futures::StreamExt;
-use gdl::{Cx, ErrorKind};
+use gdl::{Cx, ErrorKind, Next};
 
 #[tokio::test]
 async fn items_pass_through_every_stage_in_order() {
     let events = Events::new();
     let graph = local_graph(&events);
+    let plan = Plan {
+        tokens: 3,
+        ..Plan::default()
+    };
     let out = graph
-        .call(
-            Cx::new(),
-            prompt(
-                "p",
-                Plan {
-                    tokens: 3,
-                    ..Plan::default()
-                },
-            ),
-        )
+        .call(Cx::new(), prompt("p", plan))
         .await
         .expect("call");
     assert_eq!(collect(out).await, expected(0..3));
@@ -50,9 +45,10 @@ async fn an_operator_retries_from_inside_its_stream() {
 }
 
 #[tokio::test]
-async fn dropping_one_concurrent_attempt_leaves_the_other_running() {
+async fn dropping_a_pending_concurrent_attempt_cancels_it_and_not_its_sibling() {
     let events = Events::new();
     let graph = local_graph(&events);
+    let root = Cx::new();
     let plan = Plan {
         tokens: 3,
         item_delay_ms: 5,
@@ -61,14 +57,43 @@ async fn dropping_one_concurrent_attempt_leaves_the_other_running() {
         ..Plan::default()
     };
     let out = graph
-        .call(Cx::new(), prompt("h", plan))
+        .call(root.clone(), prompt("h", plan))
         .await
         .expect("call");
     assert_eq!(collect(out).await, expected(0..3));
     assert!(events.has("B:hedge:winner:0"));
-    // The losing attempt was cancelled; the winner ran to completion.
-    events.wait_for("D:cancelled:c(h)#1", WAIT).await;
+    events.wait_for("D:abandoned:c(h)#1", WAIT).await;
+    assert!(events.cx_of("D:c(h)#1").is_cancelled(), "the loser's scope");
     events.wait_for("D:done:c(h)#0", WAIT).await;
+    assert!(!root.is_cancelled());
+}
+
+#[tokio::test]
+async fn dropping_an_established_concurrent_stream_cancels_it_and_not_its_sibling() {
+    let events = Events::new();
+    let graph = local_graph(&events);
+    let root = Cx::new();
+    let plan = Plan {
+        tokens: 3,
+        item_delay_ms: 5,
+        slow_items: Some((1, 60_000)),
+        mode: Mode::Hedge,
+        ..Plan::default()
+    };
+    let out = graph
+        .call(root.clone(), prompt("v", plan))
+        .await
+        .expect("call");
+    assert_eq!(collect(out).await, expected(0..3));
+    assert!(events.has("B:hedge:winner:0"));
+    // The loser returned its stream (its items were slow, not its
+    // `generate`), and that stream was dropped mid-flight.
+    assert!(events.has("D:start:c(v)#1"));
+    assert!(!events.has("D:abandoned:c(v)#1"));
+    events.wait_for("D:cancelled:c(v)#1", WAIT).await;
+    assert!(events.cx_of("D:c(v)#1").is_cancelled());
+    events.wait_for("D:done:c(v)#0", WAIT).await;
+    assert!(!root.is_cancelled());
 }
 
 #[tokio::test]
@@ -87,7 +112,9 @@ async fn dropping_a_pending_generate_cancels_only_that_attempt() {
         .expect("call");
     assert_eq!(collect(out).await, expected(0..2));
     assert!(events.has("B:abandoned:0"));
-    events.wait_for("D:cancelled:c(a)#0", WAIT).await;
+    events.wait_for("D:abandoned:c(a)#0", WAIT).await;
+    assert!(events.cx_of("D:c(a)#0").is_cancelled());
+    // Attempt 1 ran to completion; attempt 0's cancel did not reach it.
     events.wait_for("D:done:c(a)#1", WAIT).await;
 }
 
@@ -107,6 +134,7 @@ async fn dropping_the_source_stream_cancels_the_sink() {
     assert_eq!(out.next().await, Some(Ok("g(b(e(f0)))".to_string())));
     drop(out);
     events.wait_for("D:cancelled:c(d)#0", WAIT).await;
+    assert!(events.cx_of("D:c(d)#0").is_cancelled());
 }
 
 #[tokio::test]
@@ -135,25 +163,26 @@ async fn cancelling_the_root_context_ends_the_stream_and_the_sink() {
 }
 
 #[tokio::test]
-async fn stop_delivers_the_buffered_tail_then_ends_cleanly() {
+async fn stop_drains_buffered_output_in_order_then_ends_cleanly() {
     let events = Events::new();
     let graph = local_graph(&events);
     let cx = Cx::new();
     let plan = Plan {
-        endless: true,
-        item_delay_ms: 1,
+        tokens: 3,
+        hold_at_end: true,
         ..Plan::default()
     };
-    let mut out = graph
+    let out = graph
         .call(cx.clone(), prompt("s", plan))
         .await
         .expect("call");
-    assert!(out.next().await.is_some_and(|item| item.is_ok()));
+    // D has written all three items into its buffer and is waiting; nothing
+    // has been read yet.
+    events.wait_for("D:held:c(s)#0", WAIT).await;
     cx.request_stop();
-    let rest = collect(out).await;
-    // Every remaining item is a success, and the last is D's tail.
-    assert!(rest.iter().all(|item| item.is_ok()), "{rest:?}");
-    assert_eq!(rest.last(), Some(&Ok(format!("g(b(e(f{STOP_MARK})))"))));
+    let mut want = expected(0..3);
+    want.push(Ok(format!("g(b(e(f{STOP_MARK})))")));
+    assert_eq!(collect(out).await, want);
     events.wait_for("D:stopped:c(s)#0", WAIT).await;
 }
 
@@ -192,7 +221,8 @@ async fn a_deadline_that_passes_before_the_stream_exists_fails_the_call() {
         Err(error) => error,
     };
     assert_eq!(error.kind(), ErrorKind::DeadlineExceeded);
-    events.wait_for("D:cancelled:c(x)#0", WAIT).await;
+    events.wait_for("D:abandoned:c(x)#0", WAIT).await;
+    assert!(events.cx_of("D:c(x)#0").is_cancelled());
 }
 
 #[tokio::test]
@@ -212,9 +242,53 @@ async fn nothing_is_delivered_after_an_error() {
     assert_eq!(all.len(), 3, "{all:?}");
     assert_eq!(&all[..2], &expected(0..2)[..]);
     assert_eq!(all[2].as_ref().map_err(|e| e.kind()), Err(ErrorKind::Node));
-    // Ending the stream after the error cancelled D, which was still trying
-    // to emit.
-    events.wait_for("D:cancelled:c(e)#0", WAIT).await;
+}
+
+#[tokio::test]
+async fn a_terminal_error_cancels_its_attempt_while_the_stream_is_still_held() {
+    let events = Events::new();
+    let hop = sink_hop(&events);
+    let parent = Cx::new();
+    let failing = Pre {
+        text: "x".into(),
+        attempt: 0,
+        plan: Plan {
+            tokens: 3,
+            fail_at: Some(0),
+            hold_after_error: true,
+            ..Plan::default()
+        },
+    };
+    let sibling = Pre {
+        text: "y".into(),
+        attempt: 1,
+        plan: Plan {
+            endless: true,
+            item_delay_ms: 1,
+            ..Plan::default()
+        },
+    };
+    let mut failed = hop
+        .generate(parent.clone(), failing)
+        .await
+        .expect("attempt");
+    let mut running = hop
+        .generate(parent.clone(), sibling)
+        .await
+        .expect("attempt");
+
+    let first = failed.next().await.expect("an item");
+    assert_eq!(first.map_err(|e| e.kind()), Err(ErrorKind::Node));
+    assert!(failed.next().await.is_none());
+    // `failed` is still held: the error alone must end the attempt.
+    events.wait_for("D:cancelled:c(x)#0", WAIT).await;
+    assert!(events.cx_of("D:c(x)#0").is_cancelled());
+
+    // The sibling attempt and the parent are untouched.
+    assert!(running.next().await.is_some_and(|item| item.is_ok()));
+    assert!(!events.cx_of("D:c(y)#1").is_cancelled());
+    assert!(!parent.is_cancelled());
+    drop(failed);
 }
 
 #[tokio::test]

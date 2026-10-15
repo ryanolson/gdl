@@ -10,6 +10,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+criterion = { version = "0.7", default-features = false, features = ["async_tokio"] }
 futures = "0.3"
 pin-project-lite = "0.2"
 rmp-serde = "1"
