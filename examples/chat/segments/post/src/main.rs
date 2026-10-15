@@ -7,7 +7,7 @@
 //!
 //! ```toml
 //! listen = "127.0.0.1:0"  # this instance's address
-//! roster = "/run/roster"  # a directory every instance shares
+//! roster = "/run/roster"  # fresh for each deployment, shared by every instance
 //! rendezvous_ms = 30000   # optional
 //! [runtime]               # optional: gdl::RuntimeConfig
 //! [node.Detokenize]       # optional: Detokenize's Build::Config

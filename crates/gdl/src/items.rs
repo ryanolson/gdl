@@ -27,6 +27,30 @@ pub(crate) fn failed<T: Send + 'static>(error: Error) -> Items<T> {
     Box::pin(futures::stream::once(async move { Err(error) }))
 }
 
+/// The stream up to and including its first `Err`. The input is dropped at
+/// that error, not when the result is: an input holding a remote anchor
+/// releases it at once.
+pub(crate) fn until_error<T: Send + 'static>(inner: Items<T>) -> Items<T> {
+    Box::pin(UntilError(Some(inner)))
+}
+
+struct UntilError<T>(Option<Items<T>>);
+
+impl<T> Stream for UntilError<T> {
+    type Item = Result<T>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let Some(inner) = self.0.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let polled = inner.as_mut().poll_next(cx);
+        if matches!(polled, Poll::Ready(Some(Err(_)) | None)) {
+            self.0 = None;
+        }
+        polled
+    }
+}
+
 /// A node boundary: the stream ends after its first `Err`, so the next node
 /// never sees an item a terminal error should have stopped, and any ending
 /// (or dropping the stream) cancels the producing node's own scope through

@@ -13,7 +13,7 @@ use futures::StreamExt;
 
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
-use crate::items::{Items, fuse, items};
+use crate::items::{Items, fuse, items, until_error};
 use crate::role::{Backward, Forward, Next, Operator, Sink};
 use crate::wire::Codec;
 
@@ -371,7 +371,8 @@ fn encode_stream<T: Send + 'static>(codec: Option<Codec<T>>, input: Items<T>) ->
 
 fn decode_stream<T: Send + 'static>(codec: Option<Codec<T>>, input: Items<Vec<u8>>) -> Items<T> {
     match codec {
-        Some(codec) => items(input.map(move |bytes| codec.decode(&bytes?))),
+        // A crossing is a boundary like any other: nothing follows an error.
+        Some(codec) => until_error(items(input.map(move |bytes| codec.decode(&bytes?)))),
         None => items(futures::stream::once(async { Err(not_wire()) })),
     }
 }
@@ -400,4 +401,44 @@ mod sealed {
     impl<T> Sealed for super::BwdEnd<T> {}
     impl<S> Sealed for super::DSink<S> {}
     impl<O, H> Sealed for super::DOperator<O, H> {}
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    /// Sets its flag when dropped.
+    struct Dropped(Arc<AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn decoding_ends_at_the_first_error_and_releases_its_input() {
+        let codec = crate::wire_codec!(u32).expect("u32 is a wire type");
+        let good = codec.encode(&7).expect("encode");
+        let released = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&released));
+        let input = items(
+            // 0xc1 is the one byte msgpack never uses.
+            futures::stream::iter([Ok(vec![0xc1]), Ok(good)]).map(move |item| {
+                let _guard = &guard;
+                item
+            }),
+        );
+        let mut decoded = decode_stream(Some(codec), input);
+        let first = decoded.next().await;
+        assert!(matches!(first, Some(Err(_))), "{first:?}");
+        assert!(
+            released.load(Ordering::SeqCst),
+            "the input outlived its error"
+        );
+        assert!(decoded.next().await.is_none(), "an item followed the error");
+    }
 }

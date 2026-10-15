@@ -374,7 +374,7 @@ impl Unit<'_> {
             ),
             (
                 "roster = \"/run/roster\"".to_string(),
-                "a directory every instance shares".to_string(),
+                "fresh for each deployment, shared by every instance".to_string(),
             ),
             ("rendezvous_ms = 30000".to_string(), "optional".to_string()),
             (

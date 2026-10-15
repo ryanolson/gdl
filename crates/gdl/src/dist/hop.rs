@@ -241,7 +241,30 @@ where
     /// The outer end's side of a hop that leaves its segment.
     async fn run_remote(self: &Arc<Self>, attempt: &Cx, req: F::In) -> Result<Items<B::Out>> {
         let rt = &self.rt;
-        let (mut inbound, mut reply) = rt.fabric.mint();
+        let (inbound, mut reply) = rt.fabric.mint();
+        // From here on, a stop, a cancel, and the deadline must reach the
+        // producer without waiting for anyone to read: during provisioning
+        // and dispatch nothing reads yet, and afterwards the caller may hold
+        // the response stream unread. A watcher forwards stop, and at the
+        // deadline or cancel drops the anchor, releasing its buffer and
+        // cancelling the producer. It ends with the attempt, which the
+        // response stream cancels when it ends.
+        let (mut inbound, retire) = inbound.share();
+        let watched = attempt.clone();
+        tokio::spawn(async move {
+            let mut stopped = false;
+            let reason = loop {
+                tokio::select! {
+                    biased;
+                    reason = watched.done() => break reason,
+                    () = watched.stopping(), if !stopped => {
+                        stopped = true;
+                        retire.request_stop();
+                    }
+                }
+            };
+            retire.retire(reason);
+        });
         // Open the intermediate runs nearest-to-the-outer-end first, so each
         // run's reply anchor already exists when it attaches. A failure
         // returns here; dropping `inbound` then cancels every run already
@@ -289,48 +312,21 @@ where
         // As in local composition, no backward node of the outer end runs
         // before the inner end has its stream: wait for the open signal, or
         // return the failure that came instead.
-        let mut stop_sent = false;
-        loop {
-            tokio::select! {
-                biased;
-                reason = attempt.done() => return Err(reason),
-                () = attempt.stopping(), if !stop_sent => {
-                    stop_sent = true;
-                    inbound.request_stop();
-                }
-                frame = inbound.next() => match frame {
-                    Some(Frame::Open) => break,
-                    Some(Frame::Fail(error) | Frame::Broken(error)) => return Err(error),
-                    Some(Frame::End) | None => {
-                        return Err(truncated("the producer ended before opening"));
-                    }
-                    Some(Frame::Item(_)) => {
-                        return Err(internal("an item arrived before the open signal"));
-                    }
-                },
+        let first = tokio::select! {
+            biased;
+            reason = attempt.done() => return Err(reason),
+            frame = inbound.next() => frame,
+        };
+        match first {
+            Some(Frame::Open) => {}
+            Some(Frame::Fail(error) | Frame::Broken(error)) => return Err(error),
+            Some(Frame::End) | None => {
+                return Err(truncated("the producer ended before opening"));
+            }
+            Some(Frame::Item(_)) => {
+                return Err(internal("an item arrived before the open signal"));
             }
         }
-        // The caller may hold the response stream without reading it. Stop,
-        // cancel, and the deadline must still reach the producer, and the
-        // anchor's buffer must still be released, without waiting for the
-        // stream to be read or dropped: a watcher does both. It ends with the
-        // attempt, which the response stream cancels when it ends.
-        let (inbound, retire) = inbound.share();
-        let watched = attempt.clone();
-        tokio::spawn(async move {
-            let mut stopped = false;
-            let reason = loop {
-                tokio::select! {
-                    biased;
-                    reason = watched.done() => break reason,
-                    () = watched.stopping(), if !stopped => {
-                        stopped = true;
-                        retire.request_stop();
-                    }
-                }
-            };
-            retire.retire(reason);
-        });
         let bytes = inbound_items(inbound, None);
         match self
             .bwd
@@ -351,13 +347,16 @@ where
             tokio::time::sleep(delay).await;
         }
         rt.check_identity(envelope.version, envelope.identity)?;
-        let share = rt.admission.admit(envelope.cx.root()).await?;
+        // The context first: an expired request is refused before it takes
+        // anything, and every wait below ends at its deadline.
+        let root = envelope.cx.root();
         let cx = envelope.cx.arrive(rt.config.clock_skew, || rt.wall_now())?;
+        let share = bounded(&cx, rt.admission.admit(root)).await?;
         // A run that ends at the inner end here will produce a stream; it
         // takes its egress permit before acknowledging, so a full instance
         // refuses instead of stalling.
         let egress = if self.plan.reaches_inner(usize::from(envelope.pos)) {
-            Some(rt.egress.acquire().await?)
+            Some(bounded(&cx, rt.egress.acquire()).await?)
         } else {
             None
         };
@@ -418,8 +417,9 @@ where
     async fn accept_open(self: &Arc<Self>, open: Open) -> Result<ReplyTo> {
         let rt = &self.rt;
         rt.check_identity(open.version, open.identity)?;
-        let share = rt.admission.admit(open.cx.root()).await?;
+        let root = open.cx.root();
         let cx = open.cx.arrive(rt.config.clock_skew, || rt.wall_now())?;
+        let share = bounded(&cx, rt.admission.admit(root)).await?;
         let input = self
             .open_run(cx, usize::from(open.pos), open.reply, Some(share))
             .await?;
@@ -491,8 +491,14 @@ where
             // The open signal travels on: the next run, or the outer end,
             // activates only once the inner end's stream exists.
             Some(Frame::Open) => {
-                if out.send(WireItem::Open).await.is_err() {
-                    return;
+                let upstream = Upstream {
+                    cx: &cx,
+                    anchor: Some(inbound.canceller()),
+                };
+                match deliver(&out, WireItem::Open, &stop, &mut stopped, &upstream).await {
+                    Delivery::Sent => {}
+                    Delivery::Gone => return upstream.cancel(),
+                    Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
                 }
             }
             Some(Frame::Fail(error) | Frame::Broken(error)) => {
@@ -584,8 +590,11 @@ where
             Err(error) => return finish_failed(out, error).await,
         };
         // The inner end's stream exists: downstream runs may activate.
-        if out.send(WireItem::Open).await.is_err() {
-            return;
+        let upstream = Upstream { cx, anchor: None };
+        match deliver(&out, WireItem::Open, &stop, &mut stopped, &upstream).await {
+            Delivery::Sent => {}
+            Delivery::Gone => return upstream.cancel(),
+            Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
         }
         match self.bwd.walk(1, self.plan.inner_end, cx, items) {
             BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None).await,

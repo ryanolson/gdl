@@ -61,7 +61,7 @@ After the requests are dropped, every path returns to within a few hundred KiB a
 
 ## Reading
 
-- **Per request, a two-segment gdl hop costs what direct velo costs** (204 vs 204 us), plus 2 spawned tasks and 48 allocations. The tasks are the producer's pump and the outer end's watcher (ruling 17), which releases a held, unread stream at its deadline or cancel.
+- **Per request, a two-segment gdl hop costs what direct velo costs** (204 vs 204 us), plus 2 spawned tasks and 48 allocations. gdl's producer pump matches the baseline's producer task. The two extra tasks are the outer end's watcher (ruling 17), which releases a held, unread stream at its deadline or cancel, and velo's unattached-anchor timer, which gdl configures on every anchor so that one whose producer never arrives is removed (velo `streaming/anchor.rs:1222-1225`).
 - **A held stream past its deadline holds under 1 KiB and no tasks.** Before the watcher dropped the anchor itself (review pass 2), the frames already in the consumer's receive buffer stayed until the stream was read or dropped.
 - **While in flight, an unread stream holds velo's buffer, and gdl adds 5 to 10 KiB.** At 16 B and 1 KiB, every producer, gdl or direct, sends the whole 1,000-item stream into velo before backpressure stops it. At 16 KiB, every producer stops at 131 items, about 2 MiB, velo's per-stream budget. A deployment that expects many held streams sizes velo's `MuxConfig`; ruling 15's egress quota bounds how many streams produce at once.
 - **The codec adds 82 to 442 ns per item per crossing**: the edge encode, plus the extra copy into and out of the `WireItem` frame.

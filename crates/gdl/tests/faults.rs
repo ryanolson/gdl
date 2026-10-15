@@ -1009,3 +1009,78 @@ async fn a_zero_limit_is_refused_at_deployment() {
         assert!(result.is_err(), "a zero limit was accepted");
     }
 }
+
+// ----- milestone 3 review, pass 3 -----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_reaches_the_remote_sink_while_its_hand_off_is_unacknowledged() {
+    let nodes = nodes(2).await;
+    let events = Events::new();
+    let config = RuntimeConfig {
+        faults: Faults {
+            delay_forward_ack: Some(ms(3_000)),
+            ..Faults::default()
+        },
+        ..RuntimeConfig::default()
+    };
+    let cluster = deploy(&nodes, &two_segments(), &events, config);
+    let plan = Plan {
+        tokens: 1,
+        stop_aware_start: true,
+        ..Plan::default()
+    };
+    let cx = Cx::new();
+    let call = cluster
+        .segment("front")
+        .call(cx.clone(), prompt("sa", plan));
+    let stop = async {
+        events.wait_for("D:start:c(sa)#0", WAIT).await;
+        cx.request_stop();
+        // Well before the acknowledgement arrives.
+        events
+            .wait_for("D:stopped-at-start:c(sa)#0", ms(1_000))
+            .await;
+    };
+    let (result, ()) = tokio::join!(call, stop);
+    drop(result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_waiting_for_egress_does_not_hold_its_share_past_the_deadline() {
+    let nodes = nodes(2).await;
+    let events = Events::new();
+    let config = RuntimeConfig {
+        egress_limit: 1,
+        admission_wait: ms(3_000),
+        ..RuntimeConfig::default()
+    };
+    let cluster = deploy(&nodes, &two_segments(), &events, config);
+    let busy = Plan {
+        endless: true,
+        item_delay_ms: 5,
+        ..Plan::default()
+    };
+    // Holds the engine's only egress permit.
+    let _first = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("e1", busy))
+        .await
+        .expect("first");
+    let plan = Plan {
+        tokens: 1,
+        ..Plan::default()
+    };
+    let result = cluster
+        .segment("front")
+        .call(Cx::new().with_timeout(ms(300)), prompt("e2", plan))
+        .await;
+    assert!(result.is_err());
+    let released = tokio::time::Instant::now() + ms(1_000);
+    while cluster.segment("engine").admitted() > 1 {
+        assert!(
+            tokio::time::Instant::now() < released,
+            "the engine still holds the second request after its deadline"
+        );
+        tokio::time::sleep(ms(10)).await;
+    }
+}
