@@ -136,6 +136,11 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
         for fixed in ["gdl", "serde", "tokio", "toml"] {
             see(fixed, format!("the `{fixed}` dependency"), &mut problems);
         }
+        // Every crate sees these; a dependency of the same name would
+        // shadow the standard library in the generated code.
+        for builtin in ["std", "core", "alloc"] {
+            see(builtin, "the standard library".into(), &mut problems);
+        }
         // One package may implement several nodes: it is one crate.
         for (node, bind) in &spec.bind {
             if hosted.contains(node.as_str()) {
@@ -599,6 +604,22 @@ mod tests {
         )
         .expect("rooted");
         assert_eq!(plain, rooted);
+    }
+
+    #[test]
+    fn a_crate_may_not_take_a_standard_library_name() {
+        for name in ["std", "core", "alloc"] {
+            let ty = format!("{name}::D");
+            let mut spec = spec(split(), &[("D", &ty)]);
+            spec.bind.get_mut("D").expect("D").lib = name.into();
+            let error = validate(&spec, &manifest())
+                .expect_err("shadows")
+                .to_string();
+            assert!(
+                error.contains(&format!("crate name `{name}` is both the standard library")),
+                "{error}"
+            );
+        }
     }
 
     #[test]
