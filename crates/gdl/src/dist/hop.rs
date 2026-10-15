@@ -620,8 +620,9 @@ where
     /// consumer has the reason already.
     async fn fail(&self, cx: &Cx, reply: &ReplyTo, error: Error) {
         #[cfg(feature = "fault-injection")]
-        if let Some(delay) = self.rt.config.faults.delay_failure_delivery {
-            tokio::time::sleep(delay).await;
+        if let Some(gate) = &self.rt.config.faults.failure_gate {
+            gate.arrived.notify_one();
+            gate.release.notified().await;
         }
         let attach = setup(
             cx,

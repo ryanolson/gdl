@@ -1207,20 +1207,24 @@ async fn a_stage_delivering_a_refused_hand_off_keeps_its_admission() {
         .zip(nodes.iter().cloned())
         .collect();
     let events = Events::new();
-    let cluster = deploy_configured(&instances, &placement, &events, &|segment| match segment {
-        // One request at a time: the second hand-off is refused.
-        "engine" => RuntimeConfig {
-            admission_limit: 1,
-            ..RuntimeConfig::default()
-        },
-        "side" => RuntimeConfig {
-            faults: Faults {
-                delay_failure_delivery: Some(ms(1_500)),
-                ..Faults::default()
+    let gate = Arc::new(gdl::Gate::default());
+    let side_gate = Arc::clone(&gate);
+    let cluster = deploy_configured(&instances, &placement, &events, &move |segment| {
+        match segment {
+            // One request at a time: the second hand-off is refused.
+            "engine" => RuntimeConfig {
+                admission_limit: 1,
+                ..RuntimeConfig::default()
             },
-            ..RuntimeConfig::default()
-        },
-        _ => RuntimeConfig::default(),
+            "side" => RuntimeConfig {
+                faults: Faults {
+                    failure_gate: Some(Arc::clone(&side_gate)),
+                    ..Faults::default()
+                },
+                ..RuntimeConfig::default()
+            },
+            _ => RuntimeConfig::default(),
+        }
     });
     let busy = Plan {
         endless: true,
@@ -1238,10 +1242,14 @@ async fn a_stage_delivering_a_refused_hand_off_keeps_its_admission() {
     };
     let second = cluster.segment("front").call(Cx::new(), prompt("r2", plan));
     let watch = async {
-        // The engine refuses after its admission wait; side then delivers
-        // the failure, slowly. Meanwhile it still owns the request.
-        tokio::time::sleep(ms(800)).await;
-        cluster.segment("side").admitted()
+        // Side is delivering the refusal, held at the gate: it still owns
+        // the reply, so it still counts against admission.
+        tokio::time::timeout(WAIT, gate.arrived.notified())
+            .await
+            .expect("side starts delivering the failure");
+        let admitted = cluster.segment("side").admitted();
+        gate.release.notify_one();
+        admitted
     };
     let (result, admitted) = tokio::join!(second, watch);
     assert!(result.is_err());

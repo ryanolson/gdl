@@ -72,9 +72,21 @@ pub struct Faults {
     /// Shift this instance's wall clock by this many nanoseconds (positive:
     /// ahead), as an unsynchronized machine would.
     pub clock_offset_nanos: i64,
-    /// Hold a stage's delivery of a failure this long before it attaches,
-    /// as a slow consumer would.
-    pub delay_failure_delivery: Option<Duration>,
+    /// Hold each stage's delivery of a failure at this gate before it
+    /// attaches, as a slow consumer would; the test observes the hold and
+    /// ends it.
+    pub failure_gate: Option<Arc<Gate>>,
+}
+
+/// A point a runtime step stops at until a test lets it go. Available only
+/// with the `fault-injection` feature.
+#[cfg(feature = "fault-injection")]
+#[derive(Debug, Default)]
+pub struct Gate {
+    /// Signalled once for each arrival at the gate.
+    pub arrived: tokio::sync::Notify,
+    /// Signal once to let one arrival through.
+    pub release: tokio::sync::Notify,
 }
 
 impl Default for RuntimeConfig {

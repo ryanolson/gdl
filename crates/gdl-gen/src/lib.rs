@@ -211,7 +211,8 @@ pub fn drift(out: &Path, files: &Files) -> Result<Vec<String>, Error> {
 struct Survey {
     /// Marked as generated: output of an earlier generation.
     stale: Vec<PathBuf>,
-    /// Unmarked, inside a generated crate's directory.
+    /// Unmarked, inside a generated crate's directory or at a path the
+    /// generator writes.
     foreign: Vec<PathBuf>,
 }
 
@@ -261,7 +262,7 @@ fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
             let lockfile = path.file_name().is_some_and(|name| name == "Cargo.lock")
                 && dir.components().count() == 1
                 && crates.contains(dir.as_path());
-            if files.contains_key(&path) || lockfile {
+            if lockfile {
                 continue;
             }
             let text = std::fs::read_to_string(out.join(&path)).unwrap_or_default();
@@ -269,6 +270,14 @@ fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
                 .lines()
                 .next()
                 .is_some_and(|line| line.contains(MARKER));
+            // A file at a path the generator writes is the generator's only
+            // if it says so; a handwritten one there is never replaced.
+            if files.contains_key(&path) {
+                if !marked {
+                    survey.foreign.push(path);
+                }
+                continue;
+            }
             let in_crate = path
                 .iter()
                 .next()
@@ -494,6 +503,31 @@ mod tests {
         .expect("tag");
         std::fs::write(out.join("engine/target/debug/out"), "build output\n").expect("output");
         assert_eq!(drift(&out, &files).expect("drift"), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn generation_never_replaces_a_file_it_did_not_write() {
+        let out = std::env::temp_dir().join(format!("gdl-gen-collide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(out.join("front/src")).expect("dir");
+        let handwritten = "[package]\nname = \"mine\"\n";
+        std::fs::write(out.join("front/Cargo.toml"), handwritten).expect("write");
+        let spec = spec(split(), &[("D", "tiny_nodes::D")]);
+        let files = render_manifest(&spec, &manifest(), &out).expect("render");
+        let refused = write(&out, &files).expect_err("a handwritten file is in the way");
+        assert!(
+            refused.to_string().contains("front/Cargo.toml"),
+            "{refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("front/Cargo.toml")).expect("read"),
+            handwritten
+        );
+        assert!(
+            !out.join("engine").exists(),
+            "a refused write writes nothing"
+        );
         let _ = std::fs::remove_dir_all(&out);
     }
 

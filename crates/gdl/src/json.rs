@@ -76,9 +76,12 @@ async fn answer<Item: Serialize, W: AsyncWrite + Unpin>(
         // Serialized straight to text: going through `serde_json::Value`
         // would refuse integers beyond 64 bits, which JSON text holds.
         match serde_json::to_string(&ItemLine { item: &item }) {
+            // Flushed per item: a stream that stays open after an item must
+            // not keep that item in a buffered writer.
             Ok(mut line) => {
                 line.push('\n');
                 output.write_all(line.as_bytes()).await?;
+                output.flush().await?;
             }
             Err(error) => return Ok(failure(format!("an item has no JSON form: {error}"))),
         }
@@ -125,6 +128,47 @@ mod tests {
                 (0..n).map(|_| Ok(BTreeMap::new())),
             ))),
         }
+    }
+
+    #[tokio::test]
+    async fn each_item_reaches_the_reader_as_it_is_produced() {
+        // The second item waits until the reader has the first: through a
+        // buffered writer, an item written but not flushed would never come.
+        let (reader, writer) = tokio::io::duplex(64 * 1024);
+        let (seen, first_read) = tokio::sync::oneshot::channel::<()>();
+        let mut first_read = Some(first_read);
+        let call = move |_: u32| {
+            let first_read = first_read.take();
+            async move {
+                let rest = futures::stream::once(async move {
+                    if let Some(first_read) = first_read {
+                        let _ = first_read.await;
+                    }
+                    Ok(2u32)
+                });
+                Ok(items(futures::stream::iter([Ok(1u32)]).chain(rest)))
+            }
+        };
+        let serving = tokio::spawn(async move {
+            let output = tokio::io::BufWriter::new(writer);
+            serve_json_lines(&b"1\n"[..], output, call).await
+        });
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("the first item arrives while the stream is still open")
+            .expect("read");
+        assert_eq!(first.as_deref(), Some(r#"{"item":1}"#));
+        let _ = seen.send(());
+        assert_eq!(
+            lines.next_line().await.expect("read").as_deref(),
+            Some(r#"{"item":2}"#)
+        );
+        assert_eq!(
+            lines.next_line().await.expect("read").as_deref(),
+            Some(r#"{"done":null}"#)
+        );
+        serving.await.expect("join").expect("serve");
     }
 
     #[tokio::test]
