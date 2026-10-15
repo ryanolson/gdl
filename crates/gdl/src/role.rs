@@ -7,6 +7,12 @@ use crate::error::Result;
 use crate::items::Items;
 
 /// The inner end of a graph: takes a request, returns a response stream.
+///
+/// The context each node receives is how the runtime stops the node: when it
+/// is cancelled or asked to stop, the node should end its work and its
+/// stream. A node reports a failure by emitting an `Err` item, not by
+/// cancelling its context; a node that cancels its own context must still
+/// end its stream, and the runtime reports that ending as `Cancelled`.
 pub trait Sink: Send + Sync + 'static {
     /// The request type.
     type Req: Send + 'static;

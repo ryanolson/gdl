@@ -34,6 +34,10 @@ where
     B: BackwardChain<I::Item>,
 {
     async fn generate(&self, cx: Cx, req: Req) -> Result<Items<B::Out>> {
+        // Every attempt spends cooperative budget: an operator retrying
+        // attempts that fail at once would otherwise loop without ever
+        // yielding, starving the task that would cancel it.
+        tokio::task::coop::consume_budget().await;
         cx.check()?;
         let attempt = cx.child();
         // Dropping this future before it returns drops the guard and cancels
@@ -45,22 +49,17 @@ where
             // A forward stage can finish in the same instant the attempt is
             // interrupted; the inner end must not start for a dead attempt.
             attempt.check()?;
-            if B::EMPTY {
-                // The inner end's output is the attempt's output; the empty
-                // chain passes it through unchanged.
-                let items = self.inner.call(attempt.clone(), req).await?;
-                return Ok::<_, crate::Error>(self.bwd.apply(&attempt, items));
-            }
-            // The inner end runs in its own scope below the attempt, so a
-            // terminal item from it stops it even while a backward node
-            // still holds that item.
+            // The inner end always runs in its own scope below the attempt:
+            // a terminal item from it stops it even while a backward node
+            // still holds that item, and a node that cancels its own context
+            // gets the same outcome whether or not backward nodes follow.
             let scope = attempt.child();
             let items = self.inner.call(scope.clone(), req).await?;
             let items = fuse(items, &scope);
             // As before the inner end: no backward stage starts for an
             // attempt interrupted while the inner end was finishing.
             attempt.check()?;
-            Ok(self.bwd.apply(&attempt, items))
+            Ok::<_, crate::Error>(self.bwd.apply(&attempt, items))
         };
         let items = tokio::select! {
             biased;

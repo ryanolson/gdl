@@ -755,3 +755,83 @@ async fn a_node_that_cancels_itself_is_reported_cancelled_with_or_without_backwa
         "the node's cancel stays in its scope"
     );
 }
+
+/// A sink that cancels the context it was given and never ends its stream.
+struct CancelsItselfAndHangs;
+
+impl gdl::Sink for CancelsItselfAndHangs {
+    type Req = Pre;
+    type Item = Raw;
+
+    async fn generate(&self, cx: Cx, _req: Pre) -> gdl::Result<gdl::Items<Raw>> {
+        cx.cancel();
+        Ok(gdl::items(futures::stream::pending()))
+    }
+}
+
+/// A node's context is how the runtime stops it, not how it reports
+/// failure: a node that cancels its own context and keeps its stream open
+/// gets the same outcome whatever follows it, and the request still ends at
+/// its deadline. Before this was uniform, the bare hop cancelled the whole
+/// attempt and the hop with a backward node did not.
+#[tokio::test]
+async fn a_node_cancelling_its_own_context_behaves_the_same_whatever_follows_it() {
+    use std::sync::Arc;
+
+    let pre = || Pre {
+        text: "y".into(),
+        attempt: 0,
+        plan: Plan::default(),
+    };
+    let bare = gdl::Hop::new((), gdl::SinkStage::new(Arc::new(CancelsItselfAndHangs)), ());
+    let with_backward = gdl::Hop::new(
+        (),
+        gdl::SinkStage::new(Arc::new(CancelsItselfAndHangs)),
+        (Arc::new(Identity), ()),
+    );
+    let kinds = |all: Vec<gdl::Result<Raw>>| {
+        all.into_iter()
+            .map(|r| r.map_err(|e| e.kind()))
+            .collect::<Vec<_>>()
+    };
+    let first = Cx::new().with_timeout(ms(100));
+    let out = bare.generate(first.clone(), pre()).await.expect("attempt");
+    let bare_end = kinds(collect(out).await);
+    let second = Cx::new().with_timeout(ms(100));
+    let out = with_backward
+        .generate(second.clone(), pre())
+        .await
+        .expect("attempt");
+    let backward_end = kinds(collect(out).await);
+    assert_eq!(bare_end, backward_end);
+    assert_eq!(bare_end, vec![Err(ErrorKind::DeadlineExceeded)]);
+    assert!(!first.is_cancelled() && !second.is_cancelled());
+}
+
+#[test]
+fn an_operator_retrying_instant_failures_does_not_starve_its_canceller() {
+    let ended = within(WAIT, async {
+        let events = Events::new();
+        let graph = local_graph(&events);
+        let cx = Cx::new();
+        let canceller = {
+            let cx = cx.clone();
+            let events = std::sync::Arc::clone(&events);
+            tokio::spawn(async move {
+                events.wait_for("D:fail:c(storm)#0", WAIT).await;
+                cx.cancel();
+            })
+        };
+        let plan = Plan {
+            tokens: 1,
+            fail_attempts: u32::MAX,
+            mode: Mode::Retry { max: u32::MAX },
+            ..Plan::default()
+        };
+        let out = graph.call(cx, prompt("storm", plan)).await.expect("call");
+        let all = collect(out).await;
+        let _ = canceller.await;
+        all.last().and_then(|r| r.as_ref().err()).map(|e| e.kind())
+    });
+    assert_eq!(ended, Some(Some(ErrorKind::Cancelled)));
+}

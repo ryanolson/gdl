@@ -136,6 +136,8 @@ where
     B: DBackward<In = I::Item>,
 {
     async fn generate(&self, cx: Cx, req: F::In) -> Result<Items<B::Out>> {
+        // As in local composition: every attempt spends cooperative budget.
+        tokio::task::coop::consume_budget().await;
         cx.check()?;
         let attempt = cx.child();
         // Dropping this future before it returns cancels the attempt; after
