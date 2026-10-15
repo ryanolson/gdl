@@ -307,6 +307,17 @@ Runtime config, separate from placement: the roster, admission limits, timeouts,
 
 `gdl-gen --check` regenerates into a temporary directory and fails if the committed output differs. Generated files carry a `do not edit` marker.
 
+**Addendum 2026-10-15 (milestone 5, as built).** The interface above was a sketch; this is what shipped (milestone 5 review pass 1, finding 10):
+
+- Command: `gdl-gen --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]`. The flag is `--spec`, not `--config`: the file is the generator's input, and the runtime config is a separate file per segment.
+- The spec has `[contract]` (`path`, optional `module`), `[gdl]` (exactly one of `path` and `version`, which is how generated crates depend on gdl), the `[segment.*]` tables, and one `[bind.<Node>]` table per node (`crate`, `path`, `type`). Loading checks that each bound path holds the named package.
+- The manifest crosses from the dump program as TOML (`Manifest::to_toml`), not JSON: gdl already depends on `toml`, so the dump program needs no dependency but the contract. The program's source directory is private to each run; only the build cache is shared.
+- `NodeInfo::binding` carries each node's `Bindings` setter name, so the generator does not repeat the macro's naming rule. `graph!` also emits `SourceReq` and `SourceItem`.
+- Validation adds: segment names are letters, digits, `-`, and `_`; no two segments may become one package name; a package bound from two paths is refused; every problem is reported at once.
+- Generated Rust is formatted by rustfmt with a config of the generator's own, so output does not depend on where it runs. The generator owns each segment crate's directory: `--check` reports missing, changed, stale (marked, no longer produced), and unexpected (unmarked, inside a crate) files, and generation refuses to run over an unexpected one. Cargo build directories are recognized by `CACHEDIR.TAG`.
+- The binary's config has `listen`, `roster` (a directory fresh for each deployment), `rendezvous_ms`, `[runtime]` (`RuntimeConfig`, durations in milliseconds, validated at parse), and `[node.<Node>]` (each node's `Build::Config`). It meets the other segments with `Roster::rendezvous`, starts, then waits with `Roster::ready` until every instance it can route to is serving. Generated code makes no velo call.
+- On the segment that hosts the source, when the source's types are serde types, the binary serves JSON lines through `gdl::serve_json_lines` (gdl feature `json-lines`), tested once in gdl rather than generated into each crate.
+
 ### 9.4 Validation
 
 | Check | Caught when |

@@ -10,7 +10,9 @@
 |------|----------|
 | `agent-docs/plan.md` | The design and milestone plan, including design rulings |
 | `agent-docs/reviews/` | Review records for each milestone |
-| `crates/` | Workspace crates (see `agent-docs/plan.md` for the crate map) |
+| `agent-docs/perf/` | Measurements, with the command that produced them |
+| `crates/` | `gdl` (runtime), `gdl-macros` (`graph!`), `gdl-gen` (segment crate generator) |
+| `examples/chat` | A separate workspace: a contract, its implementations, and generated segments. Regenerate with `cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --out examples/chat/segments`; never edit `segments/` by hand |
 
 ## Build, lint, test
 
