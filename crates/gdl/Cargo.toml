@@ -39,3 +39,7 @@ workspace = true
 [[bench]]
 name = "hop"
 harness = false
+
+[[bench]]
+name = "remote"
+harness = false

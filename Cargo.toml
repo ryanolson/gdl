@@ -25,7 +25,7 @@ trybuild = "1"
 velo = { version = "=0.19.0", default-features = false }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 missing_docs = "warn"
 
 [workspace.lints.clippy]
