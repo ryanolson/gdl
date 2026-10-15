@@ -92,6 +92,11 @@ impl HopPlan {
         run_end(&self.fwd_segments, pos)
     }
 
+    /// Whether a forward run starting at `pos` reaches the inner end.
+    fn reaches_inner(&self, pos: usize) -> bool {
+        self.fwd_end(pos) == self.fwd_segments.len()
+    }
+
     /// The first backward position after `pos` that is not in `pos`'s segment.
     fn bwd_end(&self, pos: usize) -> usize {
         run_end(&self.bwd_segments, pos)
@@ -251,9 +256,10 @@ where
         match self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await? {
             FwdExit::Here(value) => {
                 attempt.check()?;
+                let egress = rt.egress.acquire().await?;
                 let hop = Arc::clone(self);
                 let cx = attempt.clone();
-                tokio::spawn(async move { hop.run_inner(cx, value, reply, None).await });
+                tokio::spawn(async move { hop.run_inner(cx, value, reply, None, egress).await });
             }
             FwdExit::Leave { at, bytes } => {
                 let envelope = Forward {
@@ -291,6 +297,14 @@ where
         rt.check_identity(envelope.version, envelope.identity)?;
         let share = rt.admission.admit(envelope.cx.root()).await?;
         let cx = envelope.cx.arrive(rt.config.clock_skew)?;
+        // A run that ends at the inner end here will produce a stream; it
+        // takes its egress permit before acknowledging, so a full instance
+        // refuses instead of stalling.
+        let egress = if self.plan.reaches_inner(usize::from(envelope.pos)) {
+            Some(rt.egress.acquire().await?)
+        } else {
+            None
+        };
         rt.served
             .forwards
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -304,9 +318,16 @@ where
                 walked = hop.fwd.enter(1, pos, end, &cx, &envelope.payload) => walked,
             };
             match walked {
-                Ok(FwdExit::Here(value)) => {
-                    hop.run_inner(cx, value, envelope.reply, Some(share)).await;
-                }
+                Ok(FwdExit::Here(value)) => match egress {
+                    Some(egress) => {
+                        hop.run_inner(cx, value, envelope.reply, Some(share), egress)
+                            .await;
+                    }
+                    None => {
+                        let error = internal("a run reached an inner end it did not expect");
+                        hop.fail(&envelope.reply, error).await;
+                    }
+                },
                 Ok(FwdExit::Leave { at, bytes }) => {
                     let onward = Forward {
                         version: VERSION,
@@ -364,6 +385,7 @@ where
         share: Option<super::admission::Share>,
     ) -> Result<ReplyTo> {
         let rt = &self.rt;
+        let egress = rt.egress.acquire().await?;
         let out = tokio::time::timeout(rt.config.setup_timeout, rt.fabric.attach(&reply))
             .await
             .map_err(|_| setup_timeout("attach"))??;
@@ -375,8 +397,11 @@ where
         let hop = Arc::clone(self);
         let end = self.plan.bwd_end(pos);
         tokio::spawn(async move {
-            let _share = share;
             hop.run_prepared(cx, pos, end, inbound, out).await;
+            // The request's work here is done; only the egress permit
+            // outlives it.
+            drop(share);
+            egress.retire().await;
         });
         Ok(input)
     }
@@ -429,6 +454,7 @@ where
         value: I::Req,
         reply: ReplyTo,
         share: Option<super::admission::Share>,
+        egress: super::admission::EgressPermit,
     ) {
         let _share = share;
         #[cfg(feature = "fault-injection")]
@@ -448,6 +474,15 @@ where
             cx.cancel();
             return;
         }
+        // From here the stream has sent output, so its permit lives through
+        // the grace period after it ends, whichever way it ends. The
+        // request's admission share does not: its work here is done.
+        self.produce_inner(&cx, value, out).await;
+        drop(_share);
+        egress.retire().await;
+    }
+
+    async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound) {
         let cancel = out.cancel_token();
         let scope = cx.child();
         let produced = tokio::select! {
@@ -463,8 +498,8 @@ where
             Ok(items) => fuse(items, &scope),
             Err(error) => return finish_failed(out, error).await,
         };
-        match self.bwd.walk(1, self.plan.inner_end, &cx, items) {
-            BwdExit::Leave { bytes, .. } => pump(bytes, out, &cx, None).await,
+        match self.bwd.walk(1, self.plan.inner_end, cx, items) {
+            BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None).await,
             BwdExit::Here(_) => {
                 finish_failed(out, internal("the inner end's run reached the outer end")).await;
             }

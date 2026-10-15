@@ -103,6 +103,63 @@ impl Admission {
     }
 }
 
+/// The aggregate egress quota of one instance.
+///
+/// velo keeps a stream's unsent output (up to its slot byte budget, plus its
+/// credit window) after the producer finishes, and exposes no signal for when
+/// that output is gone. So every stream this instance produces holds a permit
+/// from before it attaches until a grace period after it ends; the bytes one
+/// instance can leave behind are then bounded by the limit times velo's
+/// per-stream budget, however clients behave.
+pub(crate) struct Egress {
+    permits: Arc<Semaphore>,
+    limit: usize,
+    wait: Duration,
+    grace: Duration,
+}
+
+impl Egress {
+    pub(crate) fn new(limit: usize, wait: Duration, grace: Duration) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(limit)),
+            limit,
+            wait,
+            grace,
+        }
+    }
+
+    /// One producing stream's permit, or a refusal after a bounded wait.
+    pub(crate) async fn acquire(&self) -> Result<EgressPermit> {
+        let permit = tokio::time::timeout(self.wait, Arc::clone(&self.permits).acquire_owned())
+            .await
+            .map_err(|_| overloaded("the instance's egress quota is in use"))?
+            .map_err(|_| overloaded("egress is closed"))?;
+        Ok(EgressPermit {
+            _permit: permit,
+            grace: self.grace,
+        })
+    }
+
+    /// Permits currently held.
+    pub(crate) fn in_use(&self) -> usize {
+        self.limit - self.permits.available_permits()
+    }
+}
+
+/// One producing stream's share of the egress quota.
+pub(crate) struct EgressPermit {
+    _permit: OwnedSemaphorePermit,
+    grace: Duration,
+}
+
+impl EgressPermit {
+    /// Keep the permit through the grace period after a stream that sent
+    /// output ends; a stream that never attached drops it at once instead.
+    pub(crate) async fn retire(self) {
+        tokio::time::sleep(self.grace).await;
+    }
+}
+
 fn overloaded(why: &str) -> Error {
     Error::new(ErrorKind::Overloaded, why)
 }

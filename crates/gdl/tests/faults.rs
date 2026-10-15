@@ -506,3 +506,45 @@ async fn instances_of_one_segment_share_the_load() {
     assert_eq!(served, vec![3, 3], "round robin over two engine instances");
     assert!(settles(&cluster).await);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn finished_streams_hold_egress_until_their_grace_period_ends() {
+    let nodes = nodes(3).await;
+    let events = Events::new();
+    let config = RuntimeConfig {
+        egress_limit: 1,
+        egress_grace: ms(400),
+        admission_wait: ms(50),
+        ..RuntimeConfig::default()
+    };
+    let cluster = deploy(&nodes, &three_segments(), &events, config);
+    let plan = || Plan {
+        tokens: 2,
+        ..Plan::default()
+    };
+    let front = cluster.segment("front");
+
+    let out = front
+        .call(Cx::new(), prompt("e1", plan()))
+        .await
+        .expect("first");
+    assert_eq!(collect(out).await, expected(0..2));
+    // The first request has finished, but its streams may still have output
+    // in velo's buffers: the producing instances keep their permits.
+    assert_eq!(cluster.segment("engine").egress_in_use(), 1);
+    assert_eq!(cluster.segment("post").egress_in_use(), 1);
+    let refused = front.call(Cx::new(), prompt("e2", plan())).await;
+    assert_eq!(refused.err().map(|e| e.kind()), Some(ErrorKind::Overloaded));
+
+    // After the grace period the quota is free again.
+    tokio::time::sleep(ms(600)).await;
+    for (_, segment) in &cluster.segments {
+        assert_eq!(segment.egress_in_use(), 0);
+    }
+    let out = front
+        .call(Cx::new(), prompt("e3", plan()))
+        .await
+        .expect("third");
+    assert_eq!(collect(out).await, expected(0..2));
+    assert!(settles(&cluster).await);
+}

@@ -144,6 +144,12 @@ impl<H> Segment<H> {
         )
     }
 
+    /// Egress permits this instance holds: producing streams, and finished
+    /// ones still in their grace period.
+    pub fn egress_in_use(&self) -> usize {
+        self.rt.egress.in_use()
+    }
+
     /// Anchors this instance's velo node currently holds.
     pub fn active_anchors(&self) -> usize {
         self.rt.fabric.active_anchors()
