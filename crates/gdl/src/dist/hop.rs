@@ -272,7 +272,9 @@ where
         for (pos, segment) in &self.plan.provisioning {
             reply = if *segment == rt.segment {
                 // A child scope: the run's end must not end the attempt.
-                self.open_run(attempt.child(), *pos, reply, None).await?
+                // Bounded as a remote opening is, by the setup timeout.
+                let opening = self.open_run(attempt.child(), *pos, reply, None);
+                setup(attempt, rt.config.setup_timeout, "open", opening).await?
             } else {
                 let open = Open {
                     version: VERSION,

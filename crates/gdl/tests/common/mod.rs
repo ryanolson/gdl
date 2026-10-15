@@ -848,6 +848,17 @@ pub fn deploy_instances(
     events: &Arc<Events>,
     config: RuntimeConfig,
 ) -> Cluster<impl Next<Prompt, Chunk> + Register + use<>> {
+    deploy_configured(instances, placement, events, &|_| config.clone())
+}
+
+/// Deploy the reference graph with each segment's runtime settings chosen
+/// by `config`.
+pub fn deploy_configured(
+    instances: &[(String, Arc<velo::Velo>)],
+    placement: &gdl::Placement,
+    events: &Arc<Events>,
+    config: &dyn Fn(&str) -> RuntimeConfig,
+) -> Cluster<impl Next<Prompt, Chunk> + Register + use<>> {
     let manifest = reference_manifest(|_| true);
     let mut roster = Roster::new();
     for (name, node) in instances {
@@ -862,7 +873,7 @@ pub fn deploy_instances(
                 placement,
                 name,
                 &roster,
-                config.clone(),
+                config(name),
             )
             .expect("deployment");
             let root = reference_graph(&deployment, events).expect("graph");
@@ -876,10 +887,12 @@ pub fn deploy_instances(
 pub async fn settles<H>(cluster: &Cluster<H>) -> bool {
     let deadline = tokio::time::Instant::now() + WAIT;
     loop {
-        let busy = cluster
-            .segments
-            .iter()
-            .any(|(_, s)| s.admitted() > 0 || s.attempting() > 0 || s.active_anchors() > 0);
+        let busy = cluster.segments.iter().any(|(_, s)| {
+            s.admitted() > 0
+                || s.attempting() > 0
+                || s.active_anchors() > 0
+                || s.egress_in_use() > 0
+        });
         if !busy {
             return true;
         }

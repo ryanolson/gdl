@@ -997,6 +997,10 @@ async fn a_zero_limit_is_refused_at_deployment() {
             egress_limit: 0,
             ..RuntimeConfig::default()
         },
+        RuntimeConfig {
+            heartbeat_interval: Some(Duration::ZERO),
+            ..RuntimeConfig::default()
+        },
     ] {
         let result = gdl::Deployment::new(
             Arc::clone(&node),
@@ -1083,4 +1087,61 @@ async fn an_entry_waiting_for_egress_does_not_hold_its_share_past_the_deadline()
         );
         tokio::time::sleep(ms(10)).await;
     }
+}
+
+// ----- milestone 3 review, pass 4 -----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opening_a_local_backward_run_is_bounded_by_the_setup_timeout() {
+    // F's run is in the outer end's segment, between two remote runs, so
+    // the outer end opens it by direct call.
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "C", "F", "G"])
+        .segment("engine", ["D"])
+        .segment("post", ["E"]);
+    let nodes = nodes(3).await;
+    let instances: Vec<(String, Arc<velo::Velo>)> = ["front", "engine", "post"]
+        .into_iter()
+        .map(String::from)
+        .zip(nodes.iter().cloned())
+        .collect();
+    let events = Events::new();
+    let cluster = deploy_configured(&instances, &placement, &events, &|segment| {
+        if segment == "front" {
+            RuntimeConfig {
+                egress_limit: 1,
+                admission_wait: ms(3_000),
+                setup_timeout: ms(200),
+                ..RuntimeConfig::default()
+            }
+        } else {
+            RuntimeConfig::default()
+        }
+    });
+    let busy = Plan {
+        endless: true,
+        item_delay_ms: 5,
+        ..Plan::default()
+    };
+    // Its F run holds the front's only egress permit.
+    let _first = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("l1", busy))
+        .await
+        .expect("first");
+    let plan = Plan {
+        tokens: 1,
+        ..Plan::default()
+    };
+    let started = tokio::time::Instant::now();
+    let result = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("l2", plan))
+        .await;
+    assert!(result.is_err());
+    assert!(
+        started.elapsed() < ms(1_000),
+        "opening the local run waited {:?}",
+        started.elapsed()
+    );
 }

@@ -11,6 +11,9 @@ publish.workspace = true
 # Hooks that delay or drop runtime steps, for the fault tests. Never enable
 # in a deployment.
 fault-injection = []
+# `serve_json_lines`: a graph's source served as JSON lines, for the binary
+# of a segment that hosts the source.
+json-lines = ["dep:serde_json", "tokio/io-util"]
 
 [dependencies]
 dashmap = { workspace = true }
@@ -20,6 +23,7 @@ pin-project-lite = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
+serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 velo = { workspace = true }
@@ -27,7 +31,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-gdl = { path = ".", features = ["fault-injection"] }
+gdl = { path = ".", features = ["fault-injection", "json-lines"] }
 criterion = { workspace = true }
 velo = { workspace = true }
 serde = { workspace = true }

@@ -16,6 +16,8 @@ mod dist;
 mod error;
 mod hash;
 mod items;
+#[cfg(feature = "json-lines")]
+mod json;
 mod manifest;
 mod placement;
 mod role;
@@ -34,6 +36,8 @@ pub use dist::{
 };
 pub use error::{Error, ErrorKind, Result};
 pub use items::{Items, items};
+#[cfg(feature = "json-lines")]
+pub use json::serve_json_lines;
 pub use manifest::{HopInfo, Manifest, NodeInfo, TypeInfo};
 pub use placement::{
     CrossingReport, HopLayout, Layout, Placement, PlacementError, PlacementErrors, Run, WireReason,

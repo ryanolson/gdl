@@ -22,7 +22,7 @@ use crate::placement::Layout;
 /// keys keep their defaults; unknown keys are an error, so a misspelled
 /// setting is not silently ignored.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(from = "Settings")]
+#[serde(try_from = "Settings")]
 pub struct RuntimeConfig {
     /// Root requests one instance serves at once.
     pub admission_limit: usize,
@@ -125,9 +125,11 @@ impl Default for Settings {
     }
 }
 
-impl From<Settings> for RuntimeConfig {
-    fn from(s: Settings) -> Self {
-        Self {
+impl TryFrom<Settings> for RuntimeConfig {
+    type Error = Error;
+
+    fn try_from(s: Settings) -> Result<Self> {
+        let config = Self {
             admission_limit: s.admission_limit,
             admission_wait: Duration::from_millis(s.admission_wait_ms),
             attempt_limit: s.attempt_limit,
@@ -139,7 +141,37 @@ impl From<Settings> for RuntimeConfig {
             heartbeat_interval: s.heartbeat_interval_ms.map(Duration::from_millis),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl RuntimeConfig {
+    /// Refuse settings the runtime cannot run with: a zero limit refuses
+    /// everything (and a zero attempt limit would keep a ledger entry for
+    /// every refused root), and velo builds its heartbeat timer with the
+    /// interval, which tokio refuses with a panic when it is zero.
+    pub(crate) fn validate(&self) -> Result<()> {
+        for (name, limit) in [
+            ("admission_limit", self.admission_limit),
+            ("attempt_limit", self.attempt_limit),
+            ("egress_limit", self.egress_limit),
+        ] {
+            if limit == 0 {
+                return Err(Error::new(
+                    ErrorKind::Placement,
+                    format!("runtime setting `{name}` must be at least 1"),
+                ));
+            }
         }
+        if self.heartbeat_interval == Some(Duration::ZERO) {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                "runtime setting `heartbeat_interval_ms` must be more than 0",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -169,7 +201,7 @@ impl Roster {
         self.segments.contains_key(segment)
     }
 
-    fn peers(&self) -> impl Iterator<Item = &PeerInfo> {
+    pub(crate) fn peers(&self) -> impl Iterator<Item = &PeerInfo> {
         self.segments.values().flatten()
     }
 }
@@ -427,6 +459,24 @@ mod tests {
         let empty: RuntimeConfig = toml::from_str("").expect("empty");
         assert_eq!(empty.admission_wait, defaults.admission_wait);
         assert_eq!(empty.heartbeat_interval, None);
+    }
+
+    #[test]
+    fn runtime_config_rejects_a_setting_velo_cannot_run_with() {
+        // velo builds its heartbeat timer with this period, and tokio panics
+        // on a zero one when a stream attaches.
+        for text in [
+            "heartbeat_interval_ms = 0\n",
+            "admission_limit = 0\n",
+            "attempt_limit = 0\n",
+            "egress_limit = 0\n",
+        ] {
+            let Err(error) = toml::from_str::<RuntimeConfig>(text) else {
+                panic!("accepted {text:?}");
+            };
+            let key = text.split(' ').next().unwrap_or_default();
+            assert!(error.to_string().contains(key), "{error}");
+        }
     }
 
     #[test]

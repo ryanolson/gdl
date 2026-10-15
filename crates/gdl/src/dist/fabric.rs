@@ -21,6 +21,30 @@ use velo::{
 use super::envelope::WireItem;
 use crate::error::{Error, ErrorKind, Result};
 
+/// A velo node whose TCP transport and stream listener bind `listen`. Port
+/// zero picks a free port; the node's address carries the bound one.
+pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Arc<Velo>> {
+    let transport = |e: &dyn std::fmt::Display| Error::new(ErrorKind::Transport, e.to_string());
+    let listener = std::net::TcpListener::bind(listen).map_err(|e| transport(&e))?;
+    let tcp = velo::transports::tcp::TcpTransportBuilder::new()
+        .from_listener(listener)
+        .map_err(|e| transport(&e))?
+        .build()
+        .map_err(|e| transport(&e))?;
+    Velo::builder()
+        .add_transport(Arc::new(tcp))
+        .stream_bind_addr(listen.ip())
+        .build()
+        .await
+        .map_err(|e| transport(&e))
+}
+
+/// How other nodes reach `node`. velo merges the address afresh on every
+/// call, and the merged bytes differ between calls; take it once per use.
+pub(crate) fn peer(node: &Velo) -> PeerInfo {
+    node.peer_info()
+}
+
 /// Where a run delivers its output: an anchor handle, plus the ticket that
 /// lets a remote producer open the stream without an attach round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
