@@ -225,6 +225,13 @@ where
                 bytes: encode_stream(self.codec, items),
             };
         }
+        // As in local composition: an interrupted request starts no further
+        // backward node, and the reason travels on in its place.
+        if let Err(reason) = attempt.check() {
+            return self
+                .rest
+                .walk(pos + 1, end, attempt, crate::items::failed(reason));
+        }
         // Each node runs in its own scope, ended by the fuse after it, as in
         // local composition.
         let scope = attempt.child();

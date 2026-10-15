@@ -56,9 +56,11 @@ where
             // still holds that item.
             let scope = attempt.child();
             let items = self.inner.call(scope.clone(), req).await?;
-            Ok(self
-                .bwd
-                .apply(&attempt, fuse(items, scope.cancel_on_drop())))
+            let items = fuse(items, scope.cancel_on_drop());
+            // As before the inner end: no backward stage starts for an
+            // attempt interrupted while the inner end was finishing.
+            attempt.check()?;
+            Ok(self.bwd.apply(&attempt, items))
         };
         let items = tokio::select! {
             biased;
@@ -211,6 +213,11 @@ where
     const EMPTY: bool = false;
 
     fn apply(&self, attempt: &Cx, items: Items<B::In>) -> Items<R::Out> {
+        // A backward node's constructor may have side effects; an interrupted
+        // attempt skips every remaining node and carries the reason through.
+        if let Err(reason) = attempt.check() {
+            return self.1.apply(attempt, crate::items::failed(reason));
+        }
         if R::EMPTY {
             return self.1.apply(attempt, self.0.backward(attempt, items));
         }

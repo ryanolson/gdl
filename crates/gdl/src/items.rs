@@ -22,6 +22,11 @@ where
     Box::pin(stream)
 }
 
+/// A stream of one terminal error.
+pub(crate) fn failed<T: Send + 'static>(error: Error) -> Items<T> {
+    Box::pin(futures::stream::once(async move { Err(error) }))
+}
+
 /// A node boundary: the stream ends after its first `Err`, so the next node
 /// never sees an item a terminal error should have stopped, and any ending
 /// (or dropping the stream) cancels the producing node's own scope through
@@ -96,6 +101,7 @@ pub(crate) fn bound<T: Send + 'static>(cx: &Cx, guard: DropGuard, inner: Items<T
         deadline: deadline_at.map(tokio::time::sleep_until),
         deadline_at,
         since_check: 0,
+        ready_run: 0,
     })
 }
 
@@ -123,6 +129,10 @@ pin_project! {
         deadline: Option<Sleep>,
         deadline_at: Option<Instant>,
         since_check: u8,
+        // Consecutive ready items; the boundary yields every
+        // `YIELD_INTERVAL` so a consumer draining an always-ready attempt
+        // cannot starve the task that would cancel it.
+        ready_run: u16,
     }
 }
 
@@ -134,6 +144,11 @@ impl<T> Stream for Bounded<T> {
         let Some(inner) = this.inner.as_mut() else {
             return Poll::Ready(None);
         };
+        if *this.ready_run >= YIELD_INTERVAL {
+            *this.ready_run = 0;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
 
         *this.since_check += 1;
         if *this.since_check >= CHECK_INTERVAL {
@@ -145,7 +160,10 @@ impl<T> Stream for Bounded<T> {
         }
 
         match inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(item))) => return Poll::Ready(Some(Ok(item))),
+            Poll::Ready(Some(Ok(item))) => {
+                *this.ready_run += 1;
+                return Poll::Ready(Some(Ok(item)));
+            }
             Poll::Ready(Some(Err(error))) => {
                 end(this.inner, this.guard);
                 return Poll::Ready(Some(Err(error)));
@@ -159,7 +177,7 @@ impl<T> Stream for Bounded<T> {
                 end(this.inner, this.guard);
                 return Poll::Ready(interruption.map(Err));
             }
-            Poll::Pending => {}
+            Poll::Pending => *this.ready_run = 0,
         }
 
         // The deadline is polled first: when both have happened it is the

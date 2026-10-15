@@ -217,10 +217,9 @@ where
         attempt.check()?;
         let scope = attempt.child();
         let items = self.inner.call(scope.clone(), value).await?;
-        match self
-            .bwd
-            .walk(1, usize::MAX, attempt, fuse(items, scope.cancel_on_drop()))
-        {
+        let items = fuse(items, scope.cancel_on_drop());
+        attempt.check()?;
+        match self.bwd.walk(1, usize::MAX, attempt, items) {
             BwdExit::Here(items) => Ok(items),
             BwdExit::Leave { .. } => Err(internal("a local hop left its segment")),
         }

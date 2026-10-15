@@ -582,3 +582,107 @@ fn a_backward_node_that_never_yields_still_ends_at_the_deadline() {
     });
     assert_eq!(ended, Some(Some(Err(ErrorKind::DeadlineExceeded))));
 }
+
+#[test]
+fn draining_an_always_ready_attempt_does_not_starve_its_canceller() {
+    use std::sync::Arc;
+
+    let ended = within(WAIT, async {
+        let hop = gdl::Hop::new((), gdl::SinkStage::new(Arc::new(Firehose)), ());
+        let cx = Cx::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let canceller = {
+            let cx = cx.clone();
+            let started = Arc::clone(&started);
+            tokio::spawn(async move {
+                started.notified().await;
+                cx.cancel();
+            })
+        };
+        let mut out = hop
+            .generate(
+                cx,
+                Pre {
+                    text: "q".into(),
+                    attempt: 0,
+                    plan: Plan::default(),
+                },
+            )
+            .await
+            .expect("attempt");
+        started.notify_one();
+        let mut last = None;
+        while let Some(item) = out.next().await {
+            if item.is_err() {
+                last = Some(item.map_err(|e| e.kind()));
+                break;
+            }
+        }
+        let _ = canceller.await;
+        last
+    });
+    assert_eq!(ended, Some(Some(Err(ErrorKind::Cancelled))));
+}
+
+/// A sink that cancels the request just before it returns its stream.
+struct CancelsAsItReturns {
+    root: Cx,
+}
+
+impl gdl::Sink for CancelsAsItReturns {
+    type Req = Pre;
+    type Item = Raw;
+
+    async fn generate(&self, _cx: Cx, _req: Pre) -> gdl::Result<gdl::Items<Raw>> {
+        self.root.cancel();
+        Ok(gdl::items(futures::stream::iter([Ok(Raw(1))])))
+    }
+}
+
+/// A backward node that records each time it is invoked.
+struct RecordsInvocation {
+    events: std::sync::Arc<Events>,
+}
+
+impl gdl::Backward for RecordsInvocation {
+    type In = Raw;
+    type Out = Raw;
+
+    fn backward(&self, _cx: &Cx, input: gdl::Items<Raw>) -> gdl::Items<Raw> {
+        self.events.record("backward:invoked");
+        input
+    }
+}
+
+#[tokio::test]
+async fn an_interruption_during_the_inner_call_stops_the_backward_stages() {
+    use std::sync::Arc;
+
+    let events = Events::new();
+    let root = Cx::new();
+    let hop = gdl::Hop::new(
+        (),
+        gdl::SinkStage::new(Arc::new(CancelsAsItReturns { root: root.clone() })),
+        (
+            Arc::new(RecordsInvocation {
+                events: Arc::clone(&events),
+            }),
+            (),
+        ),
+    );
+    let result = hop
+        .generate(
+            root,
+            Pre {
+                text: "r".into(),
+                attempt: 0,
+                plan: Plan::default(),
+            },
+        )
+        .await;
+    assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Cancelled));
+    assert!(
+        !events.has("backward:invoked"),
+        "no backward stage may start"
+    );
+}
