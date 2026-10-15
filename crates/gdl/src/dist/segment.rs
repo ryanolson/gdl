@@ -144,8 +144,7 @@ impl<H> Segment<H> {
         )
     }
 
-    /// Egress permits this instance holds: producing streams, and finished
-    /// ones still in their grace period.
+    /// Egress permits this instance holds: one per stream it is producing.
     pub fn egress_in_use(&self) -> usize {
         self.rt.egress.in_use()
     }

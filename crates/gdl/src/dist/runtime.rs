@@ -30,12 +30,8 @@ pub struct RuntimeConfig {
     pub anchor_timeout: Duration,
     /// The assumed maximum clock difference between segments.
     pub clock_skew: Duration,
-    /// Streams one instance may produce at once, counting each stream until
-    /// `egress_grace` after it ends.
+    /// Streams one instance may be producing at once.
     pub egress_limit: usize,
-    /// How long a finished stream keeps its egress permit: velo may still
-    /// hold its unsent output that long.
-    pub egress_grace: Duration,
     /// How often producers send heartbeats; a dead producer is detected
     /// after about three missed intervals. `None` keeps velo's default.
     pub heartbeat_interval: Option<Duration>,
@@ -76,7 +72,6 @@ impl Default for RuntimeConfig {
             anchor_timeout: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
             egress_limit: 1024,
-            egress_grace: Duration::from_secs(5),
             heartbeat_interval: None,
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
@@ -233,11 +228,7 @@ impl Runtime {
                 config.admission_wait,
                 config.attempt_limit,
             ),
-            egress: Egress::new(
-                config.egress_limit,
-                config.admission_wait,
-                config.egress_grace,
-            ),
+            egress: Egress::new(config.egress_limit, config.admission_wait),
             picker: Picker::new(roster),
             names: Names {
                 forward: format!("gdl-fwd-{tag}"),

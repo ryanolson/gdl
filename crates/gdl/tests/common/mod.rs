@@ -395,7 +395,9 @@ impl Sink for NodeD {
                         events.record(format!("D:stopped:{key}"));
                         return;
                     }
-                    () = tokio::time::sleep(ms(item_delay)) => {}
+                    // No timer when there is no delay: a zero sleep still
+                    // waits for the next timer tick (about a millisecond).
+                    () = pause(item_delay) => {}
                 }
                 let failing = plan.fail_at == Some(index);
                 let item = if failing {
@@ -432,6 +434,12 @@ impl Sink for NodeD {
             events.record(format!("D:done:{key}"));
         });
         Ok(receiver(rx))
+    }
+}
+
+async fn pause(delay_ms: u64) {
+    if delay_ms > 0 {
+        tokio::time::sleep(ms(delay_ms)).await;
     }
 }
 

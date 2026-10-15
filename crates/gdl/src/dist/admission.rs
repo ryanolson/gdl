@@ -103,28 +103,32 @@ impl Admission {
     }
 }
 
-/// The aggregate egress quota of one instance.
+/// The egress quota of one instance: how many streams it may be producing
+/// at once. Each producing stream holds a permit from before it attaches
+/// until it ends, so a full instance refuses new work instead of buffering
+/// for it.
 ///
-/// velo keeps a stream's unsent output (up to its slot byte budget, plus its
-/// credit window) after the producer finishes, and exposes no signal for when
-/// that output is gone. So every stream this instance produces holds a permit
-/// from before it attaches until a grace period after it ends; the bytes one
-/// instance can leave behind are then bounded by the limit times velo's
-/// per-stream budget, however clients behave.
+/// What this does not bound: velo keeps a finished stream's unsent output
+/// (up to its slot byte budget plus its credit window) until the consumer
+/// reads it or cancels, and offers no signal for when that output is gone.
+/// The consumer always ends: every gdl consumer holds the request's
+/// deadline. A grace period after the end was tried and removed; it capped
+/// an instance at `limit / grace` requests per second (measured: 1,024
+/// permits and 5 s refused traffic within seconds at benchmark rates) and
+/// still bounded nothing for a consumer that stalls longer than the grace.
+/// See `agent-docs/plan.md`, ruling 15.
 pub(crate) struct Egress {
     permits: Arc<Semaphore>,
     limit: usize,
     wait: Duration,
-    grace: Duration,
 }
 
 impl Egress {
-    pub(crate) fn new(limit: usize, wait: Duration, grace: Duration) -> Self {
+    pub(crate) fn new(limit: usize, wait: Duration) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(limit)),
             limit,
             wait,
-            grace,
         }
     }
 
@@ -134,10 +138,7 @@ impl Egress {
             .await
             .map_err(|_| overloaded("the instance's egress quota is in use"))?
             .map_err(|_| overloaded("egress is closed"))?;
-        Ok(EgressPermit {
-            _permit: permit,
-            grace: self.grace,
-        })
+        Ok(EgressPermit { _permit: permit })
     }
 
     /// Permits currently held.
@@ -146,18 +147,10 @@ impl Egress {
     }
 }
 
-/// One producing stream's share of the egress quota.
+/// One producing stream's share of the egress quota, released when the
+/// stream ends.
 pub(crate) struct EgressPermit {
     _permit: OwnedSemaphorePermit,
-    grace: Duration,
-}
-
-impl EgressPermit {
-    /// Keep the permit through the grace period after a stream that sent
-    /// output ends; a stream that never attached drops it at once instead.
-    pub(crate) async fn retire(self) {
-        tokio::time::sleep(self.grace).await;
-    }
 }
 
 fn overloaded(why: &str) -> Error {

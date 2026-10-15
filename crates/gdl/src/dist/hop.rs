@@ -400,10 +400,8 @@ where
         let end = self.plan.bwd_end(pos);
         tokio::spawn(async move {
             hop.run_prepared(cx, pos, end, inbound, out).await;
-            // The request's work here is done; only the egress permit
-            // outlives it.
             drop(share);
-            egress.retire().await;
+            drop(egress);
         });
         Ok(input)
     }
@@ -476,12 +474,8 @@ where
             cx.cancel();
             return;
         }
-        // From here the stream has sent output, so its permit lives through
-        // the grace period after it ends, whichever way it ends. The
-        // request's admission share does not: its work here is done.
         self.produce_inner(&cx, value, out).await;
-        drop(_share);
-        egress.retire().await;
+        drop(egress);
     }
 
     async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound) {

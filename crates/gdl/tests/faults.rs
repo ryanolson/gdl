@@ -508,41 +508,50 @@ async fn instances_of_one_segment_share_the_load() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn finished_streams_hold_egress_until_their_grace_period_ends() {
+async fn producing_streams_are_bounded_by_the_egress_quota() {
     let nodes = nodes(3).await;
     let events = Events::new();
     let config = RuntimeConfig {
         egress_limit: 1,
-        egress_grace: ms(400),
         admission_wait: ms(50),
         ..RuntimeConfig::default()
     };
     let cluster = deploy(&nodes, &three_segments(), &events, config);
-    let plan = || Plan {
+    let front = cluster.segment("front");
+    let busy = Plan {
+        endless: true,
+        item_delay_ms: 2,
+        ..Plan::default()
+    };
+
+    let mut first = front
+        .call(Cx::new(), prompt("q1", busy.clone()))
+        .await
+        .expect("first");
+    assert!(first.next().await.is_some_and(|item| item.is_ok()));
+    // The engine and the post segment each produce one stream for it.
+    assert_eq!(cluster.segment("engine").egress_in_use(), 1);
+    assert_eq!(cluster.segment("post").egress_in_use(), 1);
+    let refused = front.call(Cx::new(), prompt("q2", busy.clone())).await;
+    assert_eq!(refused.err().map(|e| e.kind()), Some(ErrorKind::Overloaded));
+
+    // Ending the first request frees the quota.
+    drop(first);
+    assert!(settles(&cluster).await);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while cluster.segments.iter().any(|(_, s)| s.egress_in_use() > 0) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "egress was not released"
+        );
+        tokio::time::sleep(ms(5)).await;
+    }
+    let plan = Plan {
         tokens: 2,
         ..Plan::default()
     };
-    let front = cluster.segment("front");
-
     let out = front
-        .call(Cx::new(), prompt("e1", plan()))
-        .await
-        .expect("first");
-    assert_eq!(collect(out).await, expected(0..2));
-    // The first request has finished, but its streams may still have output
-    // in velo's buffers: the producing instances keep their permits.
-    assert_eq!(cluster.segment("engine").egress_in_use(), 1);
-    assert_eq!(cluster.segment("post").egress_in_use(), 1);
-    let refused = front.call(Cx::new(), prompt("e2", plan())).await;
-    assert_eq!(refused.err().map(|e| e.kind()), Some(ErrorKind::Overloaded));
-
-    // After the grace period the quota is free again.
-    tokio::time::sleep(ms(600)).await;
-    for (_, segment) in &cluster.segments {
-        assert_eq!(segment.egress_in_use(), 0);
-    }
-    let out = front
-        .call(Cx::new(), prompt("e3", plan()))
+        .call(Cx::new(), prompt("q3", plan))
         .await
         .expect("third");
     assert_eq!(collect(out).await, expected(0..2));
