@@ -5,10 +5,14 @@
 //!
 //! - **Matched:** a lean graph (`S => D`, the sink emitting `n` blobs of
 //!   `size` bytes) split over two segments, against the same request and
-//!   stream written directly on velo. Both sides do the same work per item:
-//!   build a blob of `size` bytes and send it; neither logs. The difference
-//!   is gdl's own cost: the edge codec, the `WireItem` frame, the pump task,
-//!   and the boundary wrappers. Measured at 16 B, 1 KiB, and 16 KiB.
+//!   stream written directly on velo, opened the same way gdl opens it
+//!   (velo's ticket path, with no attach round trip). Both sides do the same
+//!   work per item: build a blob of `size` bytes and send it; neither logs.
+//!   The difference is gdl's own cost: the edge codec, the `WireItem` frame,
+//!   the pump and watcher tasks, and the boundary wrappers. Measured at
+//!   16 B, 1 KiB, and 16 KiB. velo's plain attach is reported alongside.
+//! - **Codec:** one item's encode and decode as each side frames it, in
+//!   process, for the copy a crossing adds per item.
 //! - **Reference graph:** the test suites' graph (with its event log off)
 //!   local, over two segments, and over three, for the cost of each extra
 //!   crossing in a graph with real backward chains.
@@ -149,13 +153,14 @@ async fn lean_front() -> LeanCaller {
     std::mem::forget(engine);
     std::mem::forget(nodes);
     let front = Arc::new(front);
-    Box::new(move |ask| {
+    Box::new(move |cx, ask| {
         let front = Arc::clone(&front);
-        Box::pin(async move { front.call(Cx::new(), ask).await })
+        Box::pin(async move { front.call(cx, ask).await })
     })
 }
 
-type LeanCaller = Box<dyn Fn(Ask) -> BoxFuture<'static, gdl::Result<Items<Blob>>> + Send + Sync>;
+type LeanCaller =
+    Box<dyn Fn(Cx, Ask) -> BoxFuture<'static, gdl::Result<Items<Blob>>> + Send + Sync>;
 
 /// The matched baseline on velo alone: a unary request carrying the ask and
 /// an anchor handle; the server attaches and streams the blobs.
@@ -255,8 +260,8 @@ async fn direct_drain(mut anchor: velo::StreamAnchor<Blob>, want: u32, size: u32
     assert_eq!(count, want, "direct: item count");
 }
 
-async fn direct(client: &velo::Velo, target: velo::InstanceId, ask: Ask) {
-    let anchor = direct_open(client, target, ask, false).await;
+async fn direct(client: &velo::Velo, target: velo::InstanceId, ask: Ask, ticket: bool) {
+    let anchor = direct_open(client, target, ask, ticket).await;
     direct_drain(anchor, ask.items, ask.size).await;
 }
 
@@ -346,15 +351,21 @@ async fn setups() -> Setups {
 
 impl Setups {
     async fn lean(&self, ask: Ask) {
-        let out = (self.lean)(ask).await.expect("call");
+        let out = (self.lean)(Cx::new(), ask).await.expect("call");
         drain(out, ask.items, |blob| {
             assert_eq!(blob.0.len(), ask.size as usize, "gdl: item size");
         })
         .await;
     }
 
+    /// The matched baseline: velo's ticket path, the open gdl uses.
     async fn direct(&self, ask: Ask) {
-        direct(&self.direct.0, self.direct.1, ask).await;
+        direct(&self.direct.0, self.direct.1, ask, true).await;
+    }
+
+    /// velo's plain attach, which costs one more round trip to open.
+    async fn direct_attach(&self, ask: Ask) {
+        direct(&self.direct.0, self.direct.1, ask, false).await;
     }
 }
 
@@ -441,18 +452,29 @@ fn report(rt: &tokio::runtime::Runtime, setups: &Setups) {
     });
     per_request(rt, "lean 2 segments", &|| Box::pin(setups.lean(one)));
     per_request(rt, "velo direct", &|| Box::pin(setups.direct(one)));
+    per_request(rt, "velo direct, attach", &|| {
+        Box::pin(setups.direct_attach(one))
+    });
 
     println!("held while in flight ({IN_FLIGHT} requests of 1,000 items, one read):");
     for size in SIZES {
         let ask = Ask { items: 1_000, size };
-        held(rt, &format!("lean, {size} B"), &|| {
-            Box::pin(async move {
-                let mut out = (setups.lean)(ask).await.expect("call");
-                assert!(matches!(out.next().await, Some(Ok(_))), "gdl: first item");
-                out
-            })
-        });
-        for (label, ticket) in [("direct", false), ("direct ticket", true)] {
+        // The second row's requests pass their deadline while held: what
+        // they still hold is what the deadline failed to release.
+        for (label, timeout) in [("lean", None), ("lean, past deadline", Some(200))] {
+            held(rt, &format!("{label}, {size} B"), &|| {
+                Box::pin(async move {
+                    let cx = match timeout {
+                        Some(timeout) => Cx::new().with_timeout(Duration::from_millis(timeout)),
+                        None => Cx::new(),
+                    };
+                    let mut out = (setups.lean)(cx, ask).await.expect("call");
+                    assert!(matches!(out.next().await, Some(Ok(_))), "gdl: first item");
+                    out
+                })
+            });
+        }
+        for (label, ticket) in [("direct", true), ("direct attach", false)] {
             held(rt, &format!("{label}, {size} B"), &|| {
                 Box::pin(async move {
                     let mut anchor =
@@ -534,6 +556,10 @@ fn bench(c: &mut Criterion) {
     });
     latency.bench_function("velo-direct", |b| {
         b.to_async(&rt).iter(|| setups.direct(black_box(one)))
+    });
+    latency.bench_function("velo-direct-attach", |b| {
+        b.to_async(&rt)
+            .iter(|| setups.direct_attach(black_box(one)))
     });
     latency.finish();
 
