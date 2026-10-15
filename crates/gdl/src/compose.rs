@@ -42,6 +42,9 @@ where
         let guard = attempt.cancel_on_drop();
         let run = async {
             let req = self.fwd.run(&attempt, req).await?;
+            // A forward stage can finish in the same instant the attempt is
+            // interrupted; the inner end must not start for a dead attempt.
+            attempt.check()?;
             if B::EMPTY {
                 // The inner end's output is the attempt's output; the empty
                 // chain passes it through unchanged.
@@ -58,9 +61,13 @@ where
                 .apply(&attempt, fuse(items, scope.cancel_on_drop())))
         };
         let items = tokio::select! {
-            result = run => result?,
+            biased;
             reason = attempt.done() => return Err(reason),
+            result = run => result?,
         };
+        // Success is reported only for a live attempt; dropping `items` on
+        // the error path ends whatever the inner end started.
+        attempt.check()?;
         Ok(bound(&attempt, guard, items))
     }
 }

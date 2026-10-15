@@ -392,3 +392,44 @@ async fn an_error_cancels_the_node_that_produced_it_even_when_held_downstream() 
     assert!(!events.cx_of("D:s#1").is_cancelled());
     assert!(!parent.is_cancelled());
 }
+
+/// A forward node whose completion coincides with its attempt's cancel.
+struct CancelsAsItFinishes;
+
+impl gdl::Forward for CancelsAsItFinishes {
+    type In = Pre;
+    type Out = Pre;
+
+    async fn forward(&self, cx: &Cx, req: Pre) -> gdl::Result<Pre> {
+        cx.cancel();
+        Ok(req)
+    }
+}
+
+#[tokio::test]
+async fn an_interruption_during_forward_work_stops_the_hop_before_its_sink() {
+    use std::sync::Arc;
+
+    let events = Events::new();
+    let hop = gdl::Hop::new(
+        (Arc::new(CancelsAsItFinishes), ()),
+        gdl::SinkStage::new(Arc::new(NodeD {
+            events: Arc::clone(&events),
+        })),
+        (),
+    );
+    let pre = Pre {
+        text: "i".into(),
+        attempt: 0,
+        plan: Plan {
+            tokens: 1,
+            ..Plan::default()
+        },
+    };
+    let error = match hop.generate(Cx::new(), pre).await {
+        Ok(_) => panic!("an interrupted attempt must not succeed"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::Cancelled);
+    assert!(!events.has("D:start:i#0"), "the sink must not run");
+}

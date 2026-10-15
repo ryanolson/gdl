@@ -141,15 +141,17 @@ impl<T> Stream for Bounded<T> {
             Poll::Pending => {}
         }
 
-        if this.cancelled.poll(cx).is_ready() {
-            end(this.inner, this.guard);
-            return Poll::Ready(Some(Err(Error::cancelled())));
-        }
+        // The deadline is polled first: when both have happened it is the
+        // cause worth reporting, as everywhere else (see `Cx::check`).
         if let Some(deadline) = this.deadline.as_pin_mut()
             && deadline.poll(cx).is_ready()
         {
             end(this.inner, this.guard);
             return Poll::Ready(Some(Err(Error::deadline_exceeded())));
+        }
+        if this.cancelled.poll(cx).is_ready() {
+            end(this.inner, this.guard);
+            return Poll::Ready(Some(Err(Error::cancelled())));
         }
         Poll::Pending
     }
@@ -335,6 +337,23 @@ mod tests {
         .filter_map(|()| async { None::<Result<u32>> });
         let mut out = bound(&attempt, guard, items(producer));
         tokio::time::advance(Duration::from_millis(10)).await;
+        assert_eq!(
+            out.next().await.map(|r| r.map_err(|e| e.kind())),
+            Some(Err(ErrorKind::DeadlineExceeded))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_producer_reports_the_deadline_ahead_of_a_cancel() {
+        let cx = Cx::new().with_timeout(Duration::from_millis(5));
+        let (attempt, guard) = attempt_of(&cx);
+        let mut out = bound(
+            &attempt,
+            guard,
+            items(futures::stream::pending::<Result<u32>>()),
+        );
+        tokio::time::advance(Duration::from_millis(10)).await;
+        attempt.cancel();
         assert_eq!(
             out.next().await.map(|r| r.map_err(|e| e.kind())),
             Some(Err(ErrorKind::DeadlineExceeded))
