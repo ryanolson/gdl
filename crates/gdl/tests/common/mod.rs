@@ -464,3 +464,88 @@ pub async fn collect<T>(stream: impl Stream<Item = Result<T>>) -> Vec<Result<T>>
         .await
         .expect("stream did not end in time")
 }
+
+// ----- the reference graph as data -----
+
+/// The reference manifest. `wire` decides which edge types are serializable,
+/// so tests can make any edge non-wire.
+pub fn reference_manifest(wire: impl Fn(&str) -> bool) -> gdl::Manifest {
+    use gdl::{HopInfo, Manifest, NodeInfo, Role, TypeInfo};
+    let node = |name: &str, role| NodeInfo {
+        name: name.to_string(),
+        role,
+    };
+    let ty = |name: &str| TypeInfo::new(name, wire(name));
+    let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    Manifest {
+        name: "reference".to_string(),
+        schema: 1,
+        nodes: vec![
+            node("A", Role::Source),
+            node("B", Role::Operator),
+            node("C", Role::Forward),
+            node("D", Role::Sink),
+            node("E", Role::Backward),
+            node("F", Role::Backward),
+            node("G", Role::Backward),
+        ],
+        hops: vec![
+            HopInfo {
+                outer: "A".to_string(),
+                forward: vec![],
+                inner: "B".to_string(),
+                backward: names(&["G"]),
+                forward_types: vec![ty("Prompt")],
+                backward_types: vec![ty("Chunk"), ty("Chunk")],
+            },
+            HopInfo {
+                outer: "B".to_string(),
+                forward: names(&["C"]),
+                inner: "D".to_string(),
+                backward: names(&["F", "E"]),
+                forward_types: vec![ty("Pre"), ty("Pre")],
+                backward_types: vec![ty("Raw"), ty("Tok"), ty("Out")],
+            },
+        ],
+    }
+}
+
+/// The reference graph's nodes.
+pub const REFERENCE_NODES: [&str; 7] = ["A", "B", "C", "D", "E", "F", "G"];
+
+/// Every set partition of `items`, as segment lists. Restricted growth
+/// strings enumerate each partition exactly once (Bell(7) = 877).
+pub fn partitions(items: &[&str]) -> Vec<Vec<Vec<String>>> {
+    fn grow(
+        items: &[&str],
+        index: usize,
+        blocks: &mut Vec<Vec<String>>,
+        out: &mut Vec<Vec<Vec<String>>>,
+    ) {
+        if index == items.len() {
+            out.push(blocks.clone());
+            return;
+        }
+        for block in 0..blocks.len() {
+            blocks[block].push(items[index].to_string());
+            grow(items, index + 1, blocks, out);
+            blocks[block].pop();
+        }
+        blocks.push(vec![items[index].to_string()]);
+        grow(items, index + 1, blocks, out);
+        blocks.pop();
+    }
+    let mut out = Vec::new();
+    grow(items, 0, &mut Vec::new(), &mut out);
+    out
+}
+
+/// A placement with one segment per block, named `s0`, `s1`, ...
+pub fn placement_of(blocks: &[Vec<String>]) -> gdl::Placement {
+    blocks
+        .iter()
+        .enumerate()
+        .fold(gdl::Placement::new(), |placement, (index, nodes)| {
+            placement.segment(format!("s{index}"), nodes.iter().cloned())
+        })
+}

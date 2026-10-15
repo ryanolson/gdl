@@ -13,7 +13,10 @@ mod compose;
 mod cx;
 mod decl;
 mod error;
+mod hash;
 mod items;
+mod manifest;
+mod placement;
 mod role;
 mod wire;
 
@@ -24,6 +27,11 @@ pub use decl::{
 };
 pub use error::{Error, ErrorKind, Result};
 pub use items::{Items, items};
+pub use manifest::{HopInfo, Manifest, NodeInfo, TypeInfo};
+pub use placement::{
+    CrossingReport, HopLayout, Layout, Placement, PlacementError, PlacementErrors, Run, WireReason,
+    layout,
+};
 pub use role::{Backward, Build, Forward, Next, Operator, Sink};
 pub use wire::Codec;
 

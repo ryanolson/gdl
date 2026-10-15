@@ -15,6 +15,7 @@ pin-project-lite = "0.2"
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+toml = "0.9"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7"
 trybuild = "1"
