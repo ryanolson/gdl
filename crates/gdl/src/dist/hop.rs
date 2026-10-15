@@ -11,7 +11,7 @@ use super::envelope::{Forward, Open, VERSION, WireCx, WireItem};
 use super::fabric::{Canceller, Frame, Inbound, Outbound, ReplyTo};
 use super::runtime::{Entries, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
-use crate::cx::Cx;
+use crate::cx::{Cx, Deadline};
 use crate::error::{Error, ErrorKind, Result};
 use crate::items::{Items, bound, fuse, items};
 use crate::placement::HopLayout;
@@ -153,6 +153,12 @@ where
             attempt.check()?;
             return Ok(bound(&attempt, guard, items));
         }
+        // Remote work that no cancel can reach ends only by its deadline, so
+        // no attempt crosses segments without one.
+        let attempt = match attempt.deadline() {
+            Some(_) => attempt,
+            None => attempt.with_deadline(Deadline::after(core.rt.config.default_deadline)),
+        };
         let slot = core.rt.admission.attempt(attempt.id().as_u128())?;
         let items = tokio::select! {
             biased;
@@ -235,14 +241,28 @@ where
     /// The outer end's side of a hop that leaves its segment.
     async fn run_remote(self: &Arc<Self>, attempt: &Cx, req: F::In) -> Result<Items<B::Out>> {
         let rt = &self.rt;
-        let (inbound, mut reply) = rt.fabric.mint();
+        let (mut inbound, mut reply) = rt.fabric.mint();
+        // The caller may hold the response stream without reading it; the
+        // anchor must still be released at the deadline, not when the stream
+        // is next polled or finally dropped.
+        if let Some(deadline) = attempt.deadline() {
+            let watcher = inbound.canceller();
+            let ended = attempt.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = tokio::time::sleep_until(deadline.instant()) => watcher.cancel(),
+                    () = ended.cancelled() => {}
+                }
+            });
+        }
         // Open the intermediate runs nearest-to-the-outer-end first, so each
         // run's reply anchor already exists when it attaches. A failure
         // returns here; dropping `inbound` then cancels every run already
         // opened, through the stream each one attached.
         for (pos, segment) in &self.plan.provisioning {
             reply = if *segment == rt.segment {
-                self.open_run(attempt.clone(), *pos, reply, None).await?
+                // A child scope: the run's end must not end the attempt.
+                self.open_run(attempt.child(), *pos, reply, None).await?
             } else {
                 let open = Open {
                     version: VERSION,
@@ -260,7 +280,9 @@ where
                 attempt.check()?;
                 let egress = rt.egress.acquire().await?;
                 let hop = Arc::clone(self);
-                let cx = attempt.clone();
+                // A child scope: the inner end's task cancels its scope when
+                // it ends, which must not end the attempt reading its output.
+                let cx = attempt.child();
                 tokio::spawn(async move { hop.run_inner(cx, value, reply, None, egress).await });
             }
             FwdExit::Leave { at, bytes } => {
@@ -275,6 +297,30 @@ where
                 };
                 rt.send_forward(&self.plan.fwd_segments[at], envelope)
                     .await?;
+            }
+        }
+        // As in local composition, no backward node of the outer end runs
+        // before the inner end has its stream: wait for the open signal, or
+        // return the failure that came instead.
+        let mut stop_sent = false;
+        loop {
+            tokio::select! {
+                biased;
+                reason = attempt.done() => return Err(reason),
+                () = attempt.stopping(), if !stop_sent => {
+                    stop_sent = true;
+                    inbound.request_stop();
+                }
+                frame = inbound.next() => match frame {
+                    Some(Frame::Open) => break,
+                    Some(Frame::Fail(error) | Frame::Broken(error)) => return Err(error),
+                    Some(Frame::End) | None => {
+                        return Err(truncated("the producer ended before opening"));
+                    }
+                    Some(Frame::Item(_)) => {
+                        return Err(internal("an item arrived before the open signal"));
+                    }
+                },
             }
         }
         let bytes = inbound_items(inbound, Some(attempt.clone()));
@@ -312,6 +358,8 @@ where
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let hop = Arc::clone(self);
         tokio::spawn(async move {
+            // However this task ends, the request's work here ends with it.
+            let _end = cx.cancel_on_drop();
             let pos = usize::from(envelope.pos);
             let end = hop.plan.fwd_end(pos);
             let walked = tokio::select! {
@@ -391,7 +439,6 @@ where
         let out = tokio::time::timeout(rt.config.setup_timeout, rt.fabric.attach(&reply))
             .await
             .map_err(|_| setup_timeout("attach"))??;
-        out.send(WireItem::Open).await?;
         rt.served
             .runs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -399,6 +446,7 @@ where
         let hop = Arc::clone(self);
         let end = self.plan.bwd_end(pos);
         tokio::spawn(async move {
+            let _end = cx.cancel_on_drop();
             hop.run_prepared(cx, pos, end, inbound, out).await;
             drop(share);
             drop(egress);
@@ -415,14 +463,28 @@ where
         out: Outbound,
     ) {
         let cancel = out.cancel_token();
-        let first = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return,
-            reason = cx.done() => return finish_failed(out, reason).await,
-            frame = inbound.next() => frame,
+        let stop = out.stop_token();
+        let mut stopped = false;
+        let first = loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                () = stop.cancelled(), if !stopped => {
+                    stopped = true;
+                    inbound.request_stop();
+                }
+                reason = cx.done() => return finish_failed(out, reason).await,
+                frame = inbound.next() => break frame,
+            }
         };
         match first {
-            Some(Frame::Open) => {}
+            // The open signal travels on: the next run, or the outer end,
+            // activates only once the inner end's stream exists.
+            Some(Frame::Open) => {
+                if out.send(WireItem::Open).await.is_err() {
+                    return;
+                }
+            }
             Some(Frame::Fail(error) | Frame::Broken(error)) => {
                 return finish_failed(out, error).await;
             }
@@ -456,6 +518,9 @@ where
         share: Option<super::admission::Share>,
         egress: super::admission::EgressPermit,
     ) {
+        // However this task ends, the request's work here ends with it,
+        // including anything the inner end started under its context.
+        let _end = cx.cancel_on_drop();
         let _share = share;
         #[cfg(feature = "fault-injection")]
         if self.rt.config.faults.skip_inner_attach {
@@ -467,33 +532,47 @@ where
         // Losing the attach means another stage already owns the reply (or it
         // is gone); this stage exits and its work ends with it.
         let Ok(Ok(out)) = attach.await else {
-            cx.cancel();
             return;
         };
-        if out.send(WireItem::Open).await.is_err() {
-            cx.cancel();
-            return;
-        }
         self.produce_inner(&cx, value, out).await;
         drop(egress);
     }
 
     async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound) {
         let cancel = out.cancel_token();
+        let stop = out.stop_token();
         let scope = cx.child();
-        let produced = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                cx.cancel();
-                return;
+        // Armed before the node runs: an early exit (failure, interruption)
+        // cancels whatever the node started under its context.
+        let armed = scope.cancel_on_drop();
+        let call = self.inner.call(scope.clone(), value);
+        tokio::pin!(call);
+        let mut stopped = false;
+        let produced = loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                // A stop while the node is still setting up its stream is
+                // passed on, and the node is left to finish gracefully.
+                () = stop.cancelled(), if !stopped => {
+                    stopped = true;
+                    cx.request_stop();
+                }
+                reason = cx.done() => return finish_failed(out, reason).await,
+                produced = &mut call => break produced,
             }
-            reason = cx.done() => return finish_failed(out, reason).await,
-            produced = self.inner.call(scope.clone(), value) => produced,
         };
         let items = match produced {
-            Ok(items) => fuse(items, &scope),
+            Ok(items) => {
+                armed.disarm();
+                fuse(items, &scope)
+            }
             Err(error) => return finish_failed(out, error).await,
         };
+        // The inner end's stream exists: downstream runs may activate.
+        if out.send(WireItem::Open).await.is_err() {
+            return;
+        }
         match self.bwd.walk(1, self.plan.inner_end, cx, items) {
             BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None).await,
             BwdExit::Here(_) => {
@@ -517,43 +596,112 @@ where
 /// passed upstream: to `cx`, which the stages feeding this pump run under,
 /// and to `upstream`, the anchor this run reads from.
 async fn pump(mut bytes: Items<Vec<u8>>, out: Outbound, cx: &Cx, upstream: Option<Canceller>) {
+    let upstream = Upstream {
+        cx,
+        anchor: upstream,
+    };
     let cancel = out.cancel_token();
     let stop = out.stop_token();
     let mut stopped = false;
     loop {
-        tokio::select! {
+        let item = tokio::select! {
             biased;
-            () = cancel.cancelled() => {
-                cx.cancel();
-                if let Some(upstream) = &upstream {
-                    upstream.cancel();
-                }
-                return;
-            }
+            () = cancel.cancelled() => return upstream.cancel(),
             () = stop.cancelled(), if !stopped => {
                 stopped = true;
-                cx.request_stop();
-                if let Some(upstream) = &upstream {
-                    upstream.request_stop();
-                }
+                upstream.request_stop();
+                continue;
             }
             reason = cx.done() => return finish_failed(out, reason).await,
-            item = bytes.next() => match item {
-                Some(Ok(item)) => {
-                    if out.send(WireItem::Item(item)).await.is_err() {
-                        cx.cancel();
-                        return;
-                    }
+            item = bytes.next() => item,
+        };
+        match item {
+            Some(Ok(item)) => {
+                match deliver(&out, WireItem::Item(item), &stop, &mut stopped, &upstream).await {
+                    Delivery::Sent => {}
+                    Delivery::Gone => return upstream.cancel(),
+                    Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
                 }
-                Some(Err(error)) => return finish_failed(out, error).await,
-                None => return out.finalize(),
-            },
+            }
+            Some(Err(error)) => return finish_failed(out, error).await,
+            None => return out.finalize(),
         }
     }
 }
 
+/// What a pump stops or cancels when its consumer does.
+struct Upstream<'a> {
+    cx: &'a Cx,
+    anchor: Option<Canceller>,
+}
+
+impl Upstream<'_> {
+    fn cancel(&self) {
+        self.cx.cancel();
+        if let Some(anchor) = &self.anchor {
+            anchor.cancel();
+        }
+    }
+
+    fn request_stop(&self) {
+        self.cx.request_stop();
+        if let Some(anchor) = &self.anchor {
+            anchor.request_stop();
+        }
+    }
+}
+
+enum Delivery {
+    Sent,
+    /// The consumer cancelled or went away.
+    Gone,
+    /// The request's deadline passed, or it was cancelled, while the send
+    /// waited for a consumer that is not reading.
+    Interrupted(Error),
+}
+
+/// Send one item. A send with room completes in one poll; only a send that
+/// has to wait for the consumer also watches stop, cancel, and the deadline,
+/// so a stalled consumer cannot hold this stage past its deadline and the
+/// common path builds no timer.
+async fn deliver(
+    out: &Outbound,
+    item: WireItem,
+    stop: &tokio_util::sync::CancellationToken,
+    stopped: &mut bool,
+    upstream: &Upstream<'_>,
+) -> Delivery {
+    let send = out.send(item);
+    tokio::pin!(send);
+    if let Poll::Ready(sent) = futures::poll!(&mut send) {
+        return if sent.is_ok() {
+            Delivery::Sent
+        } else {
+            Delivery::Gone
+        };
+    }
+    loop {
+        tokio::select! {
+            biased;
+            reason = upstream.cx.done() => return Delivery::Interrupted(reason),
+            () = stop.cancelled(), if !*stopped => {
+                *stopped = true;
+                upstream.request_stop();
+            }
+            sent = &mut send => {
+                return if sent.is_ok() { Delivery::Sent } else { Delivery::Gone };
+            }
+        }
+    }
+}
+
+/// How long a stage tries to deliver its terminal failure. A consumer that is
+/// not reading would otherwise hold the stage forever; past this, the stage
+/// drops its sender and the consumer sees the stream break instead.
+const FAIL_DELIVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
 async fn finish_failed(out: Outbound, error: Error) {
-    if out.send(WireItem::Fail(error)).await.is_ok() {
+    if let Ok(Ok(())) = tokio::time::timeout(FAIL_DELIVERY, out.send(WireItem::Fail(error))).await {
         out.finalize();
     }
 }

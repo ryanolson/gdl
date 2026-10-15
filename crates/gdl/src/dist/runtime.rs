@@ -30,6 +30,11 @@ pub struct RuntimeConfig {
     pub anchor_timeout: Duration,
     /// The assumed maximum clock difference between segments.
     pub clock_skew: Duration,
+    /// The deadline given to a request that crosses segments without one.
+    /// Work in another segment that no cancel can reach (a forward stage
+    /// still running when its caller gives up) ends only by its deadline, so
+    /// no remote work may run without one.
+    pub default_deadline: Duration,
     /// Streams one instance may be producing at once.
     pub egress_limit: usize,
     /// How often producers send heartbeats; a dead producer is detected
@@ -71,6 +76,7 @@ impl Default for RuntimeConfig {
             setup_timeout: Duration::from_secs(10),
             anchor_timeout: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
+            default_deadline: Duration::from_secs(600),
             egress_limit: 1024,
             heartbeat_interval: None,
             #[cfg(feature = "fault-injection")]

@@ -72,13 +72,14 @@ async fn cancel_during_setup_reaches_the_remote_sink() {
         slow_attempt: Some((0, 60_000)),
         ..Plan::default()
     };
-    let out = cluster
-        .segment("front")
-        .call(Cx::new(), prompt("u", plan))
-        .await
-        .expect("call");
-    events.wait_for("D:start:c(u)#0", WAIT).await;
-    drop(out);
+    // The call does not return until the sink has its stream, so cancelling
+    // during setup is dropping the pending call.
+    tokio::select! {
+        _ = cluster.segment("front").call(Cx::new(), prompt("u", plan)) => {
+            panic!("the call returned while the sink was still setting up");
+        }
+        () = events.wait_for("D:start:c(u)#0", WAIT) => {}
+    }
     events.wait_for("D:abandoned:c(u)#0", WAIT).await;
     assert!(settles(&cluster).await);
 }
@@ -96,16 +97,15 @@ async fn remote_forward_work_ends_at_the_deadline() {
         forward_delay_ms: 60_000,
         ..Plan::default()
     };
-    let out = cluster
+    // As in local composition, a failure before the sink has its stream is
+    // the call's error.
+    let result = cluster
         .segment("front")
         .call(Cx::new().with_timeout(ms(200)), prompt("w", plan))
-        .await
-        .expect("call");
-    let all = collect(out).await;
+        .await;
     assert_eq!(
-        last_kind(&all),
-        Some(ErrorKind::DeadlineExceeded),
-        "{all:?}"
+        result.err().map(|e| e.kind()),
+        Some(ErrorKind::DeadlineExceeded)
     );
     events.wait_for("C:abandoned:w", WAIT).await;
     assert!(!events.has("D:start:c(w)#0"));
@@ -225,16 +225,13 @@ async fn a_producer_that_never_opens_ends_the_request_at_its_deadline() {
         tokens: 1,
         ..Plan::default()
     };
-    let out = cluster
+    let result = cluster
         .segment("front")
         .call(Cx::new().with_timeout(ms(300)), prompt("n", plan))
-        .await
-        .expect("call");
-    let all = collect(out).await;
+        .await;
     assert_eq!(
-        last_kind(&all),
-        Some(ErrorKind::DeadlineExceeded),
-        "{all:?}"
+        result.err().map(|e| e.kind()),
+        Some(ErrorKind::DeadlineExceeded)
     );
     assert!(settles(&cluster).await);
 }
@@ -600,5 +597,264 @@ async fn remote_deadlines_never_run_late_with_clocks_off_either_way() {
         let all = consumer.await.expect("consumer");
         assert_eq!(last_kind(&all), Some(ErrorKind::DeadlineExceeded));
         assert!(settles(&cluster).await);
+    }
+}
+
+// ----- milestone 3 review, pass 1 -----
+
+/// Outcome of one call: an error from the call itself, or the items.
+fn outcome(
+    result: gdl::Result<gdl::Items<String>>,
+) -> futures::future::BoxFuture<'static, Result<Vec<Result<String, ErrorKind>>, ErrorKind>> {
+    Box::pin(async move {
+        match result {
+            Err(error) => Err(error.kind()),
+            Ok(out) => Ok(kinds(&collect(out).await)),
+        }
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failing_generate_is_not_masked_by_input_ignoring_backward_nodes() {
+    let nodes = nodes(4).await;
+    let events = Events::new();
+    let cluster = deploy(
+        &nodes,
+        &two_intermediate_runs(),
+        &events,
+        RuntimeConfig::default(),
+    );
+    let local = local_graph(&events);
+    for ignoring in ["F", "E", "G"] {
+        let run = |text: &str| {
+            let mut cx = Cx::new();
+            cx.insert_meta(ignoring, "ignore");
+            let plan = Plan {
+                tokens: 3,
+                fail_generate: true,
+                ..Plan::default()
+            };
+            (cx, prompt(text, plan))
+        };
+        let (cx, req) = run(&format!("la{ignoring}"));
+        let want = outcome(local.call(cx, req).await).await;
+        let (cx, req) = run(&format!("ra{ignoring}"));
+        let got = outcome(cluster.segment("s0").call(cx, req).await).await;
+        assert_eq!(got, want, "{ignoring} ignores its input");
+        assert!(settles(&cluster).await);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_node_context_is_cancelled_however_generate_ends() {
+    let nodes = nodes(3).await;
+    let events = Events::new();
+    let cluster = deploy(&nodes, &three_segments(), &events, RuntimeConfig::default());
+    // generate fails
+    let plan = Plan {
+        helper: true,
+        fail_generate: true,
+        ..Plan::default()
+    };
+    let _ = outcome(
+        cluster
+            .segment("front")
+            .call(Cx::new(), prompt("hf", plan))
+            .await,
+    )
+    .await;
+    events.wait_for("D:helper-ended:c(hf)#0", WAIT).await;
+    // generate is still pending at the deadline
+    let plan = Plan {
+        helper: true,
+        slow_attempt: Some((0, 60_000)),
+        ..Plan::default()
+    };
+    let _ = outcome(
+        cluster
+            .segment("front")
+            .call(Cx::new().with_timeout(ms(200)), prompt("hp", plan))
+            .await,
+    )
+    .await;
+    events.wait_for("D:helper-ended:c(hp)#0", WAIT).await;
+    assert!(settles(&cluster).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_reaches_a_remote_sink_whose_generate_is_still_pending() {
+    let nodes = nodes(3).await;
+    let events = Events::new();
+    let cluster = deploy(&nodes, &three_segments(), &events, RuntimeConfig::default());
+    let cx = Cx::new().with_timeout(ms(5_000));
+    let stopper = {
+        let cx = cx.clone();
+        let events = Arc::clone(&events);
+        tokio::spawn(async move {
+            events.wait_for("D:start:c(st)#0", WAIT).await;
+            cx.request_stop();
+        })
+    };
+    let plan = Plan {
+        stop_aware_start: true,
+        ..Plan::default()
+    };
+    let got = outcome(cluster.segment("front").call(cx, prompt("st", plan)).await).await;
+    stopper.await.expect("stopper");
+    assert_eq!(got, Ok(vec![Ok(format!("g(b(e(f{STOP_MARK})))"))]));
+    events.wait_for("D:stopped-at-start:c(st)#0", WAIT).await;
+    assert!(settles(&cluster).await);
+}
+
+/// The caller keeps its response stream but stops reading it: past the
+/// deadline, the producing segments must let go even though their sends
+/// are blocked on the stalled consumer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_producer_blocked_on_a_stalled_consumer_ends_at_the_deadline() {
+    let nodes = vec![
+        tight_velo_node().await,
+        tight_velo_node().await,
+        tight_velo_node().await,
+    ];
+    let events = Events::new();
+    let cluster = deploy(&nodes, &three_segments(), &events, RuntimeConfig::default());
+    let plan = Plan {
+        endless: true,
+        ..Plan::default()
+    };
+    let mut out = cluster
+        .segment("front")
+        .call(Cx::new().with_timeout(ms(300)), prompt("sb", plan))
+        .await
+        .expect("call");
+    assert!(out.next().await.is_some_and(|item| item.is_ok()));
+    // Hold `out` unread past the deadline.
+    tokio::time::sleep(ms(600)).await;
+    for name in ["engine", "post"] {
+        let segment = cluster.segment(name);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while segment.admitted() > 0 || segment.egress_in_use() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{name} still holds the request while the consumer is stalled"
+            );
+            tokio::time::sleep(ms(10)).await;
+        }
+    }
+    drop(out);
+    assert!(settles(&cluster).await);
+}
+
+/// A producer that finished, with output still buffered, while the caller
+/// holds its stream unread: the reply anchors are released at the deadline,
+/// not when the caller eventually drops the stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn finished_output_is_released_at_the_deadline_while_the_stream_is_held() {
+    let nodes = nodes(3).await;
+    let events = Events::new();
+    let cluster = deploy(&nodes, &three_segments(), &events, RuntimeConfig::default());
+    let plan = Plan {
+        tokens: 200,
+        ..Plan::default()
+    };
+    let out = cluster
+        .segment("front")
+        .call(Cx::new().with_timeout(ms(300)), prompt("fo", plan))
+        .await
+        .expect("call");
+    events.wait_for("D:start:c(fo)#0", WAIT).await;
+    tokio::time::sleep(ms(600)).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while cluster.segments.iter().any(|(_, s)| s.active_anchors() > 0) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "reply anchors outlived the deadline while the stream was held"
+        );
+        tokio::time::sleep(ms(10)).await;
+    }
+    drop(out);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_without_a_deadline_gets_the_runtime_default() {
+    let nodes = nodes(2).await;
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "D", "F", "E", "G"])
+        .segment("side", ["C"]);
+    let events = Events::new();
+    let config = RuntimeConfig {
+        default_deadline: ms(300),
+        ..RuntimeConfig::default()
+    };
+    let cluster = deploy(&nodes, &placement, &events, config);
+    let plan = Plan {
+        tokens: 1,
+        forward_delay_ms: 60_000,
+        ..Plan::default()
+    };
+    // No deadline on the request; the caller abandons it while C is stuck.
+    let out = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("nd", plan))
+        .await;
+    drop(out);
+    events.wait_for("C:abandoned:nd", WAIT).await;
+    assert!(settles(&cluster).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completed_requests_leave_no_tasks_behind() {
+    let nodes = nodes(3).await;
+    let events = Events::new();
+    // The default deadline is far off: a task that waits for it would still
+    // be alive when this test counts.
+    let cluster = deploy(&nodes, &three_segments(), &events, RuntimeConfig::default());
+    let run = |tag: String| {
+        let plan = Plan {
+            tokens: 3,
+            ..Plan::default()
+        };
+        let front = cluster.segment("front");
+        async move {
+            let out = front
+                .call(Cx::new(), prompt(&tag, plan))
+                .await
+                .expect("call");
+            let all = collect(out).await;
+            assert!(all.iter().all(Result::is_ok), "{all:?}");
+        }
+    };
+    // The fabric opens connections and their tasks lazily, so the count is
+    // taken once it is steady after a first batch, and must come back to
+    // it after a batch ten times larger.
+    let metrics = tokio::runtime::Handle::current().metrics();
+    let steady = || async {
+        let mut last = metrics.num_alive_tasks();
+        loop {
+            tokio::time::sleep(ms(100)).await;
+            let now = metrics.num_alive_tasks();
+            if now == last {
+                return now;
+            }
+            last = now;
+        }
+    };
+    for i in 0..20 {
+        run(format!("warm{i}")).await;
+    }
+    assert!(settles(&cluster).await);
+    let baseline = steady().await;
+    for i in 0..200 {
+        run(format!("t{i}")).await;
+    }
+    assert!(settles(&cluster).await);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while metrics.num_alive_tasks() > baseline {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} tasks alive, {baseline} after the first batch",
+            metrics.num_alive_tasks()
+        );
+        tokio::time::sleep(ms(10)).await;
     }
 }

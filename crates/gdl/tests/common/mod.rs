@@ -60,6 +60,13 @@ pub struct Plan {
     pub hold_at_end: bool,
     /// C sleeps this long before passing the request on.
     pub forward_delay_ms: u64,
+    /// D's `generate` fails instead of returning a stream.
+    pub fail_generate: bool,
+    /// D spawns a helper that waits for D's context to be cancelled, then
+    /// records `D:helper-ended`.
+    pub helper: bool,
+    /// D's `generate` waits for a stop, then returns its tail.
+    pub stop_aware_start: bool,
     /// How B calls its `next`.
     pub mode: Mode,
 }
@@ -354,6 +361,29 @@ impl Sink for NodeD {
         events.publish_cx(format!("D:{key}"), &cx);
         events.record(format!("D:start:{key}"));
         let plan = req.plan;
+
+        if plan.helper {
+            let cx = cx.clone();
+            let events = Arc::clone(&events);
+            let key = key.clone();
+            tokio::spawn(async move {
+                cx.cancelled().await;
+                events.record(format!("D:helper-ended:{key}"));
+            });
+        }
+        if plan.fail_generate {
+            events.record(format!("D:generate-failed:{key}"));
+            return Err(Error::node("generate failed"));
+        }
+        if plan.stop_aware_start {
+            tokio::select! {
+                () = cx.stopping() => {
+                    events.record(format!("D:stopped-at-start:{key}"));
+                    return Ok(items(futures::stream::iter([Ok(Raw(STOP_MARK))])));
+                }
+                reason = cx.done() => return Err(reason),
+            }
+        }
 
         if let Some((attempt, delay)) = plan.slow_attempt
             && attempt == req.attempt
@@ -681,6 +711,30 @@ use gdl::{
     BwdEnd, BwdStep, DOperator, DSink, Deployment, FwdEnd, FwdStep, Register, Roster,
     RuntimeConfig, Segment, wire_codec,
 };
+
+/// A velo node whose streams buffer very little: a stalled consumer blocks
+/// its producer after a few small items instead of after a megabyte.
+pub async fn tight_velo_node() -> Arc<velo::Velo> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let transport = velo::transports::tcp::TcpTransportBuilder::new()
+        .from_listener(listener)
+        .expect("listener")
+        .build()
+        .expect("transport");
+    let mux = velo::streaming::MuxConfig {
+        initial_credit: 4,
+        slot_byte_budget: 1024,
+        ..velo::streaming::MuxConfig::default()
+    };
+    velo::Velo::builder()
+        .add_transport(Arc::new(transport))
+        .stream_bind_addr([127, 0, 0, 1].into())
+        .messenger_mux(mux)
+        .expect("mux config")
+        .build()
+        .await
+        .expect("velo node")
+}
 
 /// A velo node on loopback TCP with OS-assigned ports.
 pub async fn velo_node() -> Arc<velo::Velo> {
