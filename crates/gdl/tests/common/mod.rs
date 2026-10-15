@@ -754,16 +754,7 @@ pub async fn tight_velo_node() -> Arc<velo::Velo> {
 
 /// A velo node on loopback TCP with OS-assigned ports.
 pub async fn velo_node() -> Arc<velo::Velo> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let transport = velo::transports::tcp::TcpTransportBuilder::new()
-        .from_listener(listener)
-        .expect("listener")
-        .build()
-        .expect("transport");
-    velo::Velo::builder()
-        .add_transport(Arc::new(transport))
-        .stream_bind_addr([127, 0, 0, 1].into())
-        .build()
+    gdl::bind_node(([127, 0, 0, 1], 0).into())
         .await
         .expect("velo node")
 }

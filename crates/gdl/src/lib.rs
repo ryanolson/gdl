@@ -30,7 +30,7 @@ pub use decl::{
 pub use dist::Faults;
 pub use dist::{
     BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment, Entries,
-    FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment,
+    FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, bind_node,
 };
 pub use error::{Error, ErrorKind, Result};
 pub use items::{Items, items};
@@ -40,6 +40,10 @@ pub use placement::{
     layout,
 };
 pub use role::{Backward, Build, Forward, Next, Operator, Sink};
+/// The velo version this runtime is built on: a deployment's nodes are
+/// velo nodes, and generated segment crates reach velo through here so they
+/// cannot pick a different version.
+pub use velo;
 pub use wire::Codec;
 
 /// Declare a graph: its nodes, their message types, and its topology.

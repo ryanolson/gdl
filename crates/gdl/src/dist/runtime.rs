@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use serde::Deserialize;
 use velo::{InstanceId, PeerInfo};
 
 use super::admission::{Admission, Egress};
@@ -15,7 +16,13 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::placement::Layout;
 
 /// Runtime settings for one segment instance.
-#[derive(Debug, Clone)]
+///
+/// Deserializes from a table whose keys are the field names, with durations
+/// in milliseconds and a `_ms` suffix (`admission_wait_ms = 100`). Missing
+/// keys keep their defaults; unknown keys are an error, so a misspelled
+/// setting is not silently ignored.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "Settings")]
 pub struct RuntimeConfig {
     /// Root requests one instance serves at once.
     pub admission_limit: usize,
@@ -85,6 +92,57 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// The wire form of [`RuntimeConfig`].
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Settings {
+    admission_limit: usize,
+    admission_wait_ms: u64,
+    attempt_limit: usize,
+    setup_timeout_ms: u64,
+    anchor_timeout_ms: u64,
+    clock_skew_ms: u64,
+    default_deadline_ms: u64,
+    egress_limit: usize,
+    heartbeat_interval_ms: Option<u64>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        let config = RuntimeConfig::default();
+        let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        Self {
+            admission_limit: config.admission_limit,
+            admission_wait_ms: ms(config.admission_wait),
+            attempt_limit: config.attempt_limit,
+            setup_timeout_ms: ms(config.setup_timeout),
+            anchor_timeout_ms: ms(config.anchor_timeout),
+            clock_skew_ms: ms(config.clock_skew),
+            default_deadline_ms: ms(config.default_deadline),
+            egress_limit: config.egress_limit,
+            heartbeat_interval_ms: config.heartbeat_interval.map(ms),
+        }
+    }
+}
+
+impl From<Settings> for RuntimeConfig {
+    fn from(s: Settings) -> Self {
+        Self {
+            admission_limit: s.admission_limit,
+            admission_wait: Duration::from_millis(s.admission_wait_ms),
+            attempt_limit: s.attempt_limit,
+            setup_timeout: Duration::from_millis(s.setup_timeout_ms),
+            anchor_timeout: Duration::from_millis(s.anchor_timeout_ms),
+            clock_skew: Duration::from_millis(s.clock_skew_ms),
+            default_deadline: Duration::from_millis(s.default_deadline_ms),
+            egress_limit: s.egress_limit,
+            heartbeat_interval: s.heartbeat_interval_ms.map(Duration::from_millis),
+            #[cfg(feature = "fault-injection")]
+            faults: Faults::default(),
+        }
+    }
+}
+
 /// The instances of every segment, as velo peers.
 #[derive(Debug, Clone, Default)]
 pub struct Roster {
@@ -100,6 +158,15 @@ impl Roster {
     /// Add one instance of `segment`.
     pub fn add(&mut self, segment: impl Into<String>, peer: PeerInfo) {
         self.segments.entry(segment.into()).or_default().push(peer);
+    }
+
+    /// The instances of `segment`.
+    pub fn instances(&self, segment: &str) -> &[PeerInfo] {
+        self.segments.get(segment).map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn has(&self, segment: &str) -> bool {
+        self.segments.contains_key(segment)
     }
 
     fn peers(&self) -> impl Iterator<Item = &PeerInfo> {
@@ -339,4 +406,34 @@ impl Runtime {
 pub(crate) struct Served {
     pub(crate) forwards: AtomicUsize,
     pub(crate) runs: AtomicUsize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_config_reads_milliseconds_and_keeps_defaults() {
+        let config: RuntimeConfig = toml::from_str(
+            "admission_limit = 8\ndefault_deadline_ms = 2500\nheartbeat_interval_ms = 50\n",
+        )
+        .expect("parse");
+        assert_eq!(config.admission_limit, 8);
+        assert_eq!(config.default_deadline, Duration::from_millis(2500));
+        assert_eq!(config.heartbeat_interval, Some(Duration::from_millis(50)));
+        let defaults = RuntimeConfig::default();
+        assert_eq!(config.egress_limit, defaults.egress_limit);
+        assert_eq!(config.setup_timeout, defaults.setup_timeout);
+        let empty: RuntimeConfig = toml::from_str("").expect("empty");
+        assert_eq!(empty.admission_wait, defaults.admission_wait);
+        assert_eq!(empty.heartbeat_interval, None);
+    }
+
+    #[test]
+    fn runtime_config_rejects_an_unknown_key() {
+        let Err(error) = toml::from_str::<RuntimeConfig>("admision_limit = 8\n") else {
+            panic!("a misspelled key parsed");
+        };
+        assert!(error.to_string().contains("admision_limit"), "{error}");
+    }
 }
