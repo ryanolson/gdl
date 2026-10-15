@@ -1,0 +1,5 @@
+error: a graph has exactly one source
+ --> tests/ui/graph-two-sources.rs:8:12
+  |
+8 |     source Z: u32 -> stream u32;
+  |            ^

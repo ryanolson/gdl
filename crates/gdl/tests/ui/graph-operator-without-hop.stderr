@@ -1,0 +1,5 @@
+error: an operator needs its hop in braces: `Op { ... }`
+  --> tests/ui/graph-operator-without-hop.rs:10:20
+   |
+10 |     topology: A => B => D;
+   |                    ^

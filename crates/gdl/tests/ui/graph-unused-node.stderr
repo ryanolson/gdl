@@ -1,0 +1,5 @@
+error: node is declared but not in the topology
+ --> tests/ui/graph-unused-node.rs:8:13
+  |
+8 |     forward C: u32 -> u32;
+  |             ^

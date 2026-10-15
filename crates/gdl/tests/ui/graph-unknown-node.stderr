@@ -1,0 +1,5 @@
+error: unknown node
+ --> tests/ui/graph-unknown-node.rs:9:20
+  |
+9 |     topology: A => X;
+  |                    ^

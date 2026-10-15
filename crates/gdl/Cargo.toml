@@ -14,6 +14,7 @@ fault-injection = []
 
 [dependencies]
 dashmap = { workspace = true }
+gdl-macros = { path = "../gdl-macros" }
 futures = { workspace = true }
 pin-project-lite = { workspace = true }
 rmp-serde = { workspace = true }

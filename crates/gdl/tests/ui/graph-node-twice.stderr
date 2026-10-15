@@ -1,0 +1,5 @@
+error: node appears twice in the topology
+  --> tests/ui/graph-node-twice.rs:10:25
+   |
+10 |     topology: A => C => C => D;
+   |                         ^

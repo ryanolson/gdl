@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gdl"]
+members = ["crates/gdl", "crates/gdl-macros"]
 resolver = "3"
 
 [workspace.package]
