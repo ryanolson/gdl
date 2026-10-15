@@ -548,3 +548,48 @@ async fn finished_streams_hold_egress_until_their_grace_period_ends() {
     assert_eq!(collect(out).await, expected(0..2));
     assert!(settles(&cluster).await);
 }
+
+/// With segment clocks within the configured skew, a remote stage never runs
+/// past the source's deadline, whichever way its clock is off. The remote
+/// sink must stop on its own deadline, before the source's: a stage that
+/// ran late would instead be stopped by the source's cancel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_deadlines_never_run_late_with_clocks_off_either_way() {
+    for offset_ms in [-40_i64, 40] {
+        let nodes = nodes(3).await;
+        let events = Events::new();
+        let config = RuntimeConfig {
+            clock_skew: ms(50),
+            faults: Faults {
+                clock_offset_nanos: offset_ms * 1_000_000,
+                ..Faults::default()
+            },
+            ..RuntimeConfig::default()
+        };
+        let cluster = deploy(&nodes, &three_segments(), &events, config);
+        let cx = Cx::new().with_timeout(ms(400));
+        let source_deadline = cx.deadline().expect("deadline").instant();
+        let plan = Plan {
+            endless: true,
+            item_delay_ms: 2,
+            ..Plan::default()
+        };
+        let text = format!("t{offset_ms}");
+        let out = cluster
+            .segment("front")
+            .call(cx, prompt(&text, plan))
+            .await
+            .expect("call");
+        let consumer = tokio::spawn(collect(out));
+        events
+            .wait_for(&format!("D:deadline:c({text})#0"), WAIT)
+            .await;
+        assert!(
+            tokio::time::Instant::now() <= source_deadline,
+            "offset {offset_ms} ms: the remote sink ran past the source's deadline"
+        );
+        let all = consumer.await.expect("consumer");
+        assert_eq!(last_kind(&all), Some(ErrorKind::DeadlineExceeded));
+        assert!(settles(&cluster).await);
+    }
+}

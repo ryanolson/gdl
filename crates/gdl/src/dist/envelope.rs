@@ -40,12 +40,14 @@ impl WireCx {
     }
 
     /// Rebuild the context on arrival, or fail if its deadline has passed.
-    pub(crate) fn arrive(self, skew: std::time::Duration) -> Result<Cx> {
+    /// `wall_now` is this instance's wall clock, in Unix nanoseconds.
+    pub(crate) fn arrive(self, skew: std::time::Duration, wall_now: u64) -> Result<Cx> {
         let deadline = match self.deadline {
             None => None,
-            Some(unix_nanos) => {
-                Some(Deadline::from_wall(unix_nanos, skew).ok_or_else(Error::deadline_exceeded)?)
-            }
+            Some(unix_nanos) => Some(
+                Deadline::from_wall(unix_nanos, skew, wall_now)
+                    .ok_or_else(Error::deadline_exceeded)?,
+            ),
         };
         Ok(Cx::arrived(
             RequestId::from_u128(self.id),
@@ -133,7 +135,10 @@ mod tests {
         assert_eq!(back.payload, vec![1, 2, 3]);
         let arrived = back
             .cx
-            .arrive(std::time::Duration::from_millis(50))
+            .arrive(
+                std::time::Duration::from_millis(50),
+                crate::cx::wall_now_nanos(),
+            )
             .expect("live");
         assert_eq!(arrived.id(), cx.id());
         assert!(arrived.deadline().is_some());

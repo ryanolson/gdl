@@ -298,7 +298,7 @@ where
         }
         rt.check_identity(envelope.version, envelope.identity)?;
         let share = rt.admission.admit(envelope.cx.root()).await?;
-        let cx = envelope.cx.arrive(rt.config.clock_skew)?;
+        let cx = envelope.cx.arrive(rt.config.clock_skew, rt.wall_now())?;
         // A run that ends at the inner end here will produce a stream; it
         // takes its egress permit before acknowledging, so a full instance
         // refuses instead of stalling.
@@ -365,7 +365,7 @@ where
         let rt = &self.rt;
         rt.check_identity(open.version, open.identity)?;
         let share = rt.admission.admit(open.cx.root()).await?;
-        let cx = open.cx.arrive(rt.config.clock_skew)?;
+        let cx = open.cx.arrive(rt.config.clock_skew, rt.wall_now())?;
         let input = self
             .open_run(cx, usize::from(open.pos), open.reply, Some(share))
             .await?;

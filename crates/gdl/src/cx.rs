@@ -310,8 +310,8 @@ impl Deadline {
     /// the source's deadline; it may stop up to `2 * skew` early. A deadline
     /// within `skew` of now counts as passed, so a late delivery cannot start
     /// work the source has already given up on.
-    pub(crate) fn from_wall(unix_nanos: u64, skew: Duration) -> Option<Self> {
-        Self::from_wall_at(unix_nanos, skew, wall_now_nanos(), Instant::now())
+    pub(crate) fn from_wall(unix_nanos: u64, skew: Duration, wall_now: u64) -> Option<Self> {
+        Self::from_wall_at(unix_nanos, skew, wall_now, Instant::now())
     }
 
     fn from_wall_at(
@@ -329,7 +329,8 @@ impl Deadline {
     }
 }
 
-fn wall_now_nanos() -> u64 {
+/// Nanoseconds since the Unix epoch on this machine's wall clock.
+pub(crate) fn wall_now_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

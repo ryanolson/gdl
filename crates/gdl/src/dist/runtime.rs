@@ -61,6 +61,9 @@ pub struct Faults {
     /// The inner end never attaches to its reply, as a producer that never
     /// opens its ticket would.
     pub skip_inner_attach: bool,
+    /// Shift this instance's wall clock by this many nanoseconds (positive:
+    /// ahead), as an unsynchronized machine would.
+    pub clock_offset_nanos: i64,
 }
 
 impl Default for RuntimeConfig {
@@ -306,6 +309,14 @@ impl Runtime {
             )
             .await?;
         super::envelope::decode::<Result<ReplyTo, Error>>(&reply)?
+    }
+
+    /// This instance's wall clock, in Unix nanoseconds.
+    pub(crate) fn wall_now(&self) -> u64 {
+        let now = crate::cx::wall_now_nanos();
+        #[cfg(feature = "fault-injection")]
+        let now = now.saturating_add_signed(self.config.faults.clock_offset_nanos);
+        now
     }
 
     /// Whether an arriving message belongs to this deployment.
