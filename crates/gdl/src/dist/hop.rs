@@ -294,7 +294,13 @@ where
         match self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await? {
             FwdExit::Here(value) => {
                 attempt.check()?;
-                let egress = rt.egress.acquire().await?;
+                let egress = setup(
+                    attempt,
+                    rt.config.setup_timeout,
+                    "egress",
+                    rt.egress.acquire(),
+                )
+                .await?;
                 let hop = Arc::clone(self);
                 // A child scope: the inner end's task cancels its scope when
                 // it ends, which must not end the attempt reading its output.

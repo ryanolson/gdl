@@ -422,3 +422,32 @@ fn a_cache_marker_in_a_source_directory_hides_nothing() {
     assert!(stderr.contains("stale: gone/src/lib.rs"), "{stderr}");
     let _ = std::fs::remove_dir_all(&out);
 }
+
+#[test]
+fn the_spec_path_may_be_given_any_way() {
+    // From the example's own directory: a bare file name, a `./` path, and
+    // an absolute one must all find the committed output current.
+    let dir = example();
+    let spec_abs = dir.join("gdl.toml");
+    for spec in [
+        std::ffi::OsString::from("gdl.toml"),
+        std::ffi::OsString::from("./gdl.toml"),
+        spec_abs.into_os_string(),
+    ] {
+        let output = gdl_gen(
+            &dir,
+            &[
+                "--spec".as_ref(),
+                spec.as_os_str(),
+                "--out".as_ref(),
+                "segments".as_ref(),
+                "--check".as_ref(),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "--spec {spec:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

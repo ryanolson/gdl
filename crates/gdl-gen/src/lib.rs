@@ -588,6 +588,20 @@ mod tests {
     }
 
     #[test]
+    fn a_type_from_the_crate_root_is_the_same_binding() {
+        let out = Path::new("/work/segments");
+        let plain = render_manifest(&spec(split(), &[("D", "tiny_nodes::D")]), &manifest(), out)
+            .expect("plain");
+        let rooted = render_manifest(
+            &spec(split(), &[("D", "::tiny_nodes::D")]),
+            &manifest(),
+            out,
+        )
+        .expect("rooted");
+        assert_eq!(plain, rooted);
+    }
+
+    #[test]
     fn a_package_bound_from_two_paths_is_refused() {
         let mut manifest = manifest();
         manifest.nodes.push(NodeInfo {

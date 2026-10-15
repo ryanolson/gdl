@@ -30,7 +30,7 @@ pub(crate) fn files(
     out: &Path,
 ) -> Result<BTreeMap<PathBuf, String>, Error> {
     let segments: Vec<&str> = spec.placement.segments().map(|(name, _)| name).collect();
-    let spec_dir = crate::dump::absolute(&spec.dir).unwrap_or_else(|_| spec.dir.clone());
+    let spec_dir = crate::dump::absolute(&spec.dir)?;
     let mut files = BTreeMap::new();
     for (segment, nodes) in spec.placement.segments() {
         let crate_dir = out.join(segment);
@@ -187,7 +187,9 @@ impl Unit<'_> {
                     name: &node.name,
                     binding: node.binding.as_deref().unwrap_or_default(),
                     package: &bind.package,
-                    ty: &bind.ty,
+                    // `::crate::Type` and `crate::Type` are one path; the
+                    // emitted code adds the root itself.
+                    ty: bind.ty.trim_start_matches("::"),
                 }
             })
             .collect()

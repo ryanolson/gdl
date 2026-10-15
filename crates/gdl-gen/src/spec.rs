@@ -129,7 +129,11 @@ impl Spec {
     pub fn load(file: &Path) -> Result<Self, Error> {
         let text = std::fs::read_to_string(file)
             .map_err(|e| Error::new(format!("reading {}: {e}", file.display())))?;
-        let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
+        // A bare file name has an empty parent: the current directory.
+        let dir = match file.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
         let mut spec = Self::parse(&text, file, &dir)?;
         let mut problems = Vec::new();
         for (node, bind) in &mut spec.bind {

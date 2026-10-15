@@ -1335,3 +1335,58 @@ async fn a_receiver_waiting_for_egress_gives_up_at_the_setup_timeout() {
         tokio::time::sleep(ms(10)).await;
     }
 }
+
+// ----- milestone 3 review, pass 12 -----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_local_inner_end_waits_for_egress_within_the_setup_timeout() {
+    // D, the inner end, is in the outer end's segment; its backward run is
+    // remote.
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "C", "D", "G"])
+        .segment("post", ["F", "E"]);
+    let nodes = nodes(2).await;
+    let instances = vec![
+        ("front".to_string(), Arc::clone(&nodes[0])),
+        ("post".to_string(), Arc::clone(&nodes[1])),
+    ];
+    let events = Events::new();
+    let cluster = deploy_configured(&instances, &placement, &events, &|segment| {
+        if segment == "front" {
+            RuntimeConfig {
+                egress_limit: 1,
+                admission_wait: ms(3_000),
+                setup_timeout: ms(200),
+                ..RuntimeConfig::default()
+            }
+        } else {
+            RuntimeConfig::default()
+        }
+    });
+    let busy = Plan {
+        endless: true,
+        item_delay_ms: 5,
+        ..Plan::default()
+    };
+    // Its inner end holds the front's only egress permit.
+    let _first = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("i1", busy))
+        .await
+        .expect("first");
+    let plan = Plan {
+        tokens: 1,
+        ..Plan::default()
+    };
+    let started = tokio::time::Instant::now();
+    let result = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("i2", plan))
+        .await;
+    assert!(result.is_err());
+    assert!(
+        started.elapsed() < ms(1_000),
+        "the local inner end waited {:?} for egress",
+        started.elapsed()
+    );
+}
