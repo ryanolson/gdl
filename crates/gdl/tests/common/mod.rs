@@ -118,6 +118,9 @@ pub const STOP_MARK: u32 = 999;
 /// A shared log of what nodes did. Tests wait on it with a bound.
 #[derive(Default)]
 pub struct Events {
+    /// Records nothing: for benchmarks, where a growing log would be
+    /// measured along with the runtime.
+    quiet: bool,
     log: Mutex<Vec<String>>,
     changed: Notify,
     contexts: Mutex<HashMap<String, Cx>>,
@@ -128,7 +131,17 @@ impl Events {
         Arc::new(Self::default())
     }
 
+    pub fn quiet() -> Arc<Self> {
+        Arc::new(Self {
+            quiet: true,
+            ..Self::default()
+        })
+    }
+
     pub fn record(&self, event: impl Into<String>) {
+        if self.quiet {
+            return;
+        }
         self.log.lock().expect("events lock").push(event.into());
         self.changed.notify_waiters();
     }
@@ -136,6 +149,9 @@ impl Events {
     /// Publish the context a node received, so a test can check the actual
     /// state of its cancellation scope rather than infer it from events.
     pub fn publish_cx(&self, key: impl Into<String>, cx: &Cx) {
+        if self.quiet {
+            return;
+        }
         self.contexts
             .lock()
             .expect("contexts lock")
