@@ -310,8 +310,17 @@ impl Deadline {
     /// the source's deadline; it may stop up to `2 * skew` early. A deadline
     /// within `skew` of now counts as passed, so a late delivery cannot start
     /// work the source has already given up on.
-    pub(crate) fn from_wall(unix_nanos: u64, skew: Duration, wall_now: u64) -> Option<Self> {
-        Self::from_wall_at(unix_nanos, skew, wall_now, Instant::now())
+    ///
+    /// The monotonic clock is read before the wall clock (`wall_now` reads
+    /// it): a delay between the two reads then shortens the budget instead
+    /// of extending it.
+    pub(crate) fn from_wall(
+        unix_nanos: u64,
+        skew: Duration,
+        wall_now: impl FnOnce() -> u64,
+    ) -> Option<Self> {
+        let mono_now = Instant::now();
+        Self::from_wall_at(unix_nanos, skew, wall_now(), mono_now)
     }
 
     fn from_wall_at(
@@ -436,6 +445,25 @@ mod tests {
         let ahead =
             Deadline::from_wall_at(wall + ms(200), skew, wall + ms(40), mono).expect("live");
         assert_eq!(ahead.instant(), mono + Duration::from_millis(110));
+    }
+
+    #[test]
+    fn a_delay_between_the_clock_reads_shortens_the_budget() {
+        let skew = Duration::from_millis(10);
+        let wall_before = wall_now_nanos();
+        let mono_before = Instant::now();
+        let deadline_wall = wall_before + 200_000_000;
+        // The task stalls for 50 ms right after reading the wall clock. Were
+        // the monotonic clock read after the wall clock, the stall would be
+        // added to the budget.
+        let d = Deadline::from_wall(deadline_wall, skew, || {
+            let wall = wall_now_nanos();
+            std::thread::sleep(Duration::from_millis(50));
+            wall
+        })
+        .expect("live");
+        let latest = mono_before + Duration::from_millis(200) - skew;
+        assert!(d.instant() <= latest, "the stall extended the deadline");
     }
 
     #[tokio::test(start_paused = true)]

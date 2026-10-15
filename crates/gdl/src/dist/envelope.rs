@@ -40,8 +40,12 @@ impl WireCx {
     }
 
     /// Rebuild the context on arrival, or fail if its deadline has passed.
-    /// `wall_now` is this instance's wall clock, in Unix nanoseconds.
-    pub(crate) fn arrive(self, skew: std::time::Duration, wall_now: u64) -> Result<Cx> {
+    /// `wall_now` reads this instance's wall clock, in Unix nanoseconds.
+    pub(crate) fn arrive(
+        self,
+        skew: std::time::Duration,
+        wall_now: impl FnOnce() -> u64,
+    ) -> Result<Cx> {
         let deadline = match self.deadline {
             None => None,
             Some(unix_nanos) => Some(
@@ -137,7 +141,7 @@ mod tests {
             .cx
             .arrive(
                 std::time::Duration::from_millis(50),
-                crate::cx::wall_now_nanos(),
+                crate::cx::wall_now_nanos,
             )
             .expect("live");
         assert_eq!(arrived.id(), cx.id());
