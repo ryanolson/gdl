@@ -165,6 +165,9 @@ where
     type Out = R::Out;
 
     async fn run(&self, cx: &Cx, req: F::In) -> Result<R::Out> {
+        // Each forward stage may have side effects; none starts for an
+        // attempt that an earlier stage, or anything else, has interrupted.
+        cx.check()?;
         let req = self.0.forward(cx, req).await?;
         self.1.run(cx, req).await
     }

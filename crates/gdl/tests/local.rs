@@ -433,3 +433,152 @@ async fn an_interruption_during_forward_work_stops_the_hop_before_its_sink() {
     assert_eq!(error.kind(), ErrorKind::Cancelled);
     assert!(!events.has("D:start:i#0"), "the sink must not run");
 }
+
+/// A forward node that records that it ran.
+struct Records {
+    events: std::sync::Arc<Events>,
+    name: &'static str,
+}
+
+impl gdl::Forward for Records {
+    type In = Pre;
+    type Out = Pre;
+
+    async fn forward(&self, _cx: &Cx, req: Pre) -> gdl::Result<Pre> {
+        self.events.record(format!("{}:ran", self.name));
+        Ok(req)
+    }
+}
+
+#[tokio::test]
+async fn an_interruption_in_one_forward_stage_stops_the_next_one() {
+    use std::sync::Arc;
+
+    let events = Events::new();
+    let hop = gdl::Hop::new(
+        (
+            Arc::new(CancelsAsItFinishes),
+            (
+                Arc::new(Records {
+                    events: Arc::clone(&events),
+                    name: "second",
+                }),
+                (),
+            ),
+        ),
+        gdl::SinkStage::new(Arc::new(NodeD {
+            events: Arc::clone(&events),
+        })),
+        (),
+    );
+    let pre = Pre {
+        text: "j".into(),
+        attempt: 0,
+        plan: Plan {
+            tokens: 1,
+            ..Plan::default()
+        },
+    };
+    assert!(hop.generate(Cx::new(), pre).await.is_err());
+    assert!(
+        !events.has("second:ran"),
+        "the second forward stage must not run"
+    );
+    assert!(!events.has("D:start:j#0"), "the sink must not run");
+}
+
+/// A sink whose stream is always ready and never ends.
+struct Firehose;
+
+impl gdl::Sink for Firehose {
+    type Req = Pre;
+    type Item = Raw;
+
+    async fn generate(&self, _cx: Cx, _req: Pre) -> gdl::Result<gdl::Items<Raw>> {
+        Ok(gdl::items(futures::stream::repeat_with(|| Ok(Raw(0)))))
+    }
+}
+
+/// A backward node that drops every item, so it never yields one.
+struct DropsAll;
+
+impl gdl::Backward for DropsAll {
+    type In = Raw;
+    type Out = Raw;
+
+    fn backward(&self, _cx: &Cx, input: gdl::Items<Raw>) -> gdl::Items<Raw> {
+        gdl::items(input.filter_map(|_| futures::future::ready(None)))
+    }
+}
+
+/// Run `work` on its own runtime thread and wait for it with a bound: a
+/// stream that never yields cannot be timed out from inside its own task.
+fn within<T: Send + 'static>(
+    bound: std::time::Duration,
+    work: impl std::future::Future<Output = T> + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _ = tx.send(runtime.block_on(work));
+    });
+    rx.recv_timeout(bound).ok()
+}
+
+#[test]
+fn a_backward_node_that_never_yields_still_ends_on_cancel() {
+    use std::sync::Arc;
+
+    let ended = within(WAIT, async {
+        let hop = gdl::Hop::new(
+            (),
+            gdl::SinkStage::new(Arc::new(Firehose)),
+            (Arc::new(DropsAll), ()),
+        );
+        let cx = Cx::new();
+        let mut out = hop
+            .generate(
+                cx.clone(),
+                Pre {
+                    text: "f".into(),
+                    attempt: 0,
+                    plan: Plan::default(),
+                },
+            )
+            .await
+            .expect("attempt");
+        cx.cancel();
+        out.next().await.map(|r| r.map_err(|e| e.kind()))
+    });
+    assert_eq!(ended, Some(Some(Err(ErrorKind::Cancelled))));
+}
+
+#[test]
+fn a_backward_node_that_never_yields_still_ends_at_the_deadline() {
+    use std::sync::Arc;
+
+    let ended = within(WAIT, async {
+        let hop = gdl::Hop::new(
+            (),
+            gdl::SinkStage::new(Arc::new(Firehose)),
+            (Arc::new(DropsAll), ()),
+        );
+        let cx = Cx::new().with_timeout(ms(20));
+        let mut out = hop
+            .generate(
+                cx,
+                Pre {
+                    text: "g".into(),
+                    attempt: 0,
+                    plan: Plan::default(),
+                },
+            )
+            .await
+            .expect("attempt");
+        out.next().await.map(|r| r.map_err(|e| e.kind()))
+    });
+    assert_eq!(ended, Some(Some(Err(ErrorKind::DeadlineExceeded))));
+}

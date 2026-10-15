@@ -28,29 +28,50 @@ where
 /// `guard`. Cancelling at the producer, not the attempt, matters: the next
 /// node may still be holding the error, and must be able to deliver it.
 /// Cancel and deadline are enforced once per attempt by [`bound`], not here.
+///
+/// It also yields every `YIELD_INTERVAL` consecutive ready items. A node
+/// that consumes items without producing any (a filter, a batcher) polls its
+/// input in a loop inside one call; over an always-ready producer that loop
+/// would never return to the attempt boundary, which is where cancel and
+/// deadline are checked.
 pub(crate) fn fuse<T: Send + 'static>(inner: Items<T>, guard: DropGuard) -> Items<T> {
     Box::pin(Fuse {
         inner: Some(inner),
         guard: Some(guard),
+        ready_run: 0,
     })
 }
+
+/// Consecutive ready items a node boundary passes before it yields.
+const YIELD_INTERVAL: u16 = 1024;
 
 struct Fuse<T> {
     inner: Option<Items<T>>,
     guard: Option<DropGuard>,
+    ready_run: u16,
 }
 
 impl<T> Stream for Fuse<T> {
     type Item = Result<T>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let Some(inner) = self.inner.as_mut() else {
+        if self.inner.is_none() {
+            return Poll::Ready(None);
+        }
+        if self.ready_run >= YIELD_INTERVAL {
+            self.ready_run = 0;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        let this = &mut *self;
+        let Some(inner) = this.inner.as_mut() else {
             return Poll::Ready(None);
         };
         let polled = inner.as_mut().poll_next(cx);
-        if matches!(polled, Poll::Ready(Some(Err(_)) | None)) {
-            let this = &mut *self;
-            end(&mut this.inner, &mut this.guard);
+        match polled {
+            Poll::Ready(Some(Ok(_))) => this.ready_run += 1,
+            Poll::Ready(Some(Err(_)) | None) => end(&mut this.inner, &mut this.guard),
+            Poll::Pending => this.ready_run = 0,
         }
         polled
     }
