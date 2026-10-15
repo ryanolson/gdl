@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{Error, ErrorKind, Result};
 
@@ -23,6 +23,10 @@ use crate::error::{Error, ErrorKind, Result};
 pub(crate) struct Admission {
     permits: Arc<Semaphore>,
     wait: Duration,
+    /// Woken whenever a root is newly admitted, so an entry that waits for a
+    /// permit while another entry of its root takes one joins that entry
+    /// instead of waiting for a second permit the root does not need.
+    admitted: Notify,
     ledger: Arc<DashMap<u128, Held>>,
     attempts: Arc<DashMap<u128, usize>>,
     attempt_limit: usize,
@@ -38,6 +42,7 @@ impl Admission {
         Self {
             permits: Arc::new(Semaphore::new(limit)),
             wait,
+            admitted: Notify::new(),
             ledger: Arc::new(DashMap::new()),
             attempts: Arc::new(DashMap::new()),
             attempt_limit,
@@ -49,19 +54,41 @@ impl Admission {
         if let Some(share) = self.join(root) {
             return Ok(share);
         }
-        let permit = tokio::time::timeout(self.wait, Arc::clone(&self.permits).acquire_owned())
-            .await
-            .map_err(|_| overloaded("no admission permit became free in time"))?
-            .map_err(|_| overloaded("admission is closed"))?;
+        let expiry = tokio::time::sleep(self.wait);
+        let acquire = Arc::clone(&self.permits).acquire_owned();
+        tokio::pin!(expiry, acquire);
+        let permit = loop {
+            // Registered before the check, so an admission between the check
+            // and the wait still wakes this entry.
+            let admitted = self.admitted.notified();
+            tokio::pin!(admitted);
+            admitted.as_mut().enable();
+            if let Some(share) = self.join(root) {
+                return Ok(share);
+            }
+            // Biased so a free permit is taken before the timer is ever
+            // polled: an uncontended admission registers no timer.
+            tokio::select! {
+                biased;
+                permit = &mut acquire => {
+                    break permit.map_err(|_| overloaded("admission is closed"))?;
+                }
+                () = admitted => {}
+                () = &mut expiry => {
+                    return Err(overloaded("no admission permit became free in time"));
+                }
+            }
+        };
         match self.ledger.entry(root) {
-            // Another entry of the same request was admitted while this one
-            // waited; join it and give the extra permit back.
+            // Another entry of the same request was admitted between the
+            // last check and the permit; join it and give the permit back.
             Entry::Occupied(mut held) => held.get_mut().shares += 1,
             Entry::Vacant(slot) => {
                 slot.insert(Held {
                     shares: 1,
                     _permit: permit,
                 });
+                self.admitted.notify_waiters();
             }
         }
         Ok(Share {
@@ -227,6 +254,33 @@ mod tests {
             .await
             .expect("join")
             .expect("admitted after the release");
+        assert_eq!(admission.admitted(), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_entries_of_one_root_share_the_permit_that_frees() {
+        let admission = Arc::new(Admission::new(1, Duration::from_secs(5), 8));
+        let other = admission
+            .admit(1)
+            .await
+            .expect("another root holds the only permit");
+        let entry = || {
+            let admission = Arc::clone(&admission);
+            tokio::spawn(async move { admission.admit(2).await })
+        };
+        let (first, second) = (entry(), entry());
+        // Both entries are waiting for the permit before it frees.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        drop(other);
+        let first = first.await.expect("join").expect("first entry admitted");
+        let second = second
+            .await
+            .expect("join")
+            .expect("second entry joins the first");
+        assert_eq!(admission.admitted(), 1);
+        drop((first, second));
         assert_eq!(admission.admitted(), 0);
     }
 
