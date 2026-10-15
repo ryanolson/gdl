@@ -136,9 +136,14 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
         for fixed in ["gdl", "serde", "tokio", "toml"] {
             see(fixed, format!("the `{fixed}` dependency"), &mut problems);
         }
+        // One package may implement several nodes: it is one crate.
         for (node, bind) in &spec.bind {
             if hosted.contains(node.as_str()) {
-                see(&bind.lib, format!("[bind.{node}]'s crate"), &mut problems);
+                see(
+                    &bind.lib,
+                    format!("package `{}`", bind.package),
+                    &mut problems,
+                );
             }
         }
         if let Some(other) = packages.insert(package.clone(), segment) {
@@ -489,7 +494,7 @@ mod tests {
             .expect_err("collision")
             .to_string();
         assert!(
-            error.contains("segment `engine`: crate name `tiny_engine` is both the segment's library and [bind.D]'s crate"),
+            error.contains("segment `engine`: crate name `tiny_engine` is both the segment's library and package `tiny_engine`"),
             "{error}"
         );
         // An explicit library name counts, not the package name.
