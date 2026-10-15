@@ -433,6 +433,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "futures",
+ "gdl",
  "pin-project-lite",
  "rmp-serde",
  "serde",

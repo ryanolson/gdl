@@ -284,6 +284,10 @@ where
     /// reply and must deliver any failure to it.
     async fn accept_forward(self: &Arc<Self>, envelope: Forward) -> Result<()> {
         let rt = &self.rt;
+        #[cfg(feature = "fault-injection")]
+        if let Some(delay) = rt.config.faults.delay_forward_arrival {
+            tokio::time::sleep(delay).await;
+        }
         rt.check_identity(envelope.version, envelope.identity)?;
         let share = rt.admission.admit(envelope.cx.root()).await?;
         let cx = envelope.cx.arrive(rt.config.clock_skew)?;
@@ -326,6 +330,10 @@ where
                 Err(error) => hop.fail(&envelope.reply, error).await,
             }
         });
+        #[cfg(feature = "fault-injection")]
+        if let Some(delay) = self.rt.config.faults.delay_forward_ack {
+            tokio::time::sleep(delay).await;
+        }
         Ok(())
     }
 
@@ -335,8 +343,14 @@ where
         rt.check_identity(open.version, open.identity)?;
         let share = rt.admission.admit(open.cx.root()).await?;
         let cx = open.cx.arrive(rt.config.clock_skew)?;
-        self.open_run(cx, usize::from(open.pos), open.reply, Some(share))
-            .await
+        let input = self
+            .open_run(cx, usize::from(open.pos), open.reply, Some(share))
+            .await?;
+        #[cfg(feature = "fault-injection")]
+        if let Some(delay) = rt.config.faults.delay_open_reply {
+            tokio::time::sleep(delay).await;
+        }
+        Ok(input)
     }
 
     /// Prepare the backward run that starts at `pos`: attach to its reply
@@ -417,6 +431,11 @@ where
         share: Option<super::admission::Share>,
     ) {
         let _share = share;
+        #[cfg(feature = "fault-injection")]
+        if self.rt.config.faults.skip_inner_attach {
+            cx.done().await;
+            return;
+        }
         let attach =
             tokio::time::timeout(self.rt.config.setup_timeout, self.rt.fabric.attach(&reply));
         // Losing the attach means another stage already owns the reply (or it

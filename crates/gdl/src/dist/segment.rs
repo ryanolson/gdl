@@ -41,7 +41,7 @@ impl Deployment {
                 format!("the placement has no segment `{segment}`"),
             ));
         }
-        let fabric = Fabric::new(velo, config.anchor_timeout);
+        let fabric = Fabric::new(velo, config.anchor_timeout, config.heartbeat_interval);
         let rt = Runtime::new(fabric, layout, segment.to_string(), roster, config)?;
         Ok(Self { rt: Arc::new(rt) })
     }

@@ -58,6 +58,8 @@ pub struct Plan {
     /// After its `tokens` items, D waits for a stop or the end of its
     /// context instead of finishing.
     pub hold_at_end: bool,
+    /// C sleeps this long before passing the request on.
+    pub forward_delay_ms: u64,
     /// How B calls its `next`.
     pub mode: Mode,
 }
@@ -325,6 +327,14 @@ impl Forward for NodeC {
 
     async fn forward(&self, _cx: &Cx, mut req: Pre) -> Result<Pre> {
         self.events.record(format!("C:{}", req.text));
+        if req.plan.forward_delay_ms > 0 {
+            let abandoned = OnDrop::new(
+                Arc::clone(&self.events),
+                format!("C:abandoned:{}", req.text),
+            );
+            tokio::time::sleep(ms(req.plan.forward_delay_ms)).await;
+            abandoned.disarm();
+        }
         req.text = format!("c({})", req.text);
         Ok(req)
     }
@@ -438,8 +448,10 @@ impl Backward for NodeF {
     type In = Raw;
     type Out = Tok;
 
-    fn backward(&self, _cx: &Cx, input: Items<Raw>) -> Items<Tok> {
-        items(input.map(|item| item.map(|Raw(i)| Tok(format!("f{i}")))))
+    fn backward(&self, cx: &Cx, input: Items<Raw>) -> Items<Tok> {
+        shaped(cx, "F", input, Tok("pf".into()), |Raw(i)| {
+            Tok(format!("f{i}"))
+        })
     }
 }
 
@@ -449,8 +461,10 @@ impl Backward for NodeE {
     type In = Tok;
     type Out = Out;
 
-    fn backward(&self, _cx: &Cx, input: Items<Tok>) -> Items<Out> {
-        items(input.map(|item| item.map(|Tok(s)| Out(format!("e({s})")))))
+    fn backward(&self, cx: &Cx, input: Items<Tok>) -> Items<Out> {
+        shaped(cx, "E", input, Out("pe".into()), |Tok(s)| {
+            Out(format!("e({s})"))
+        })
     }
 }
 
@@ -460,8 +474,34 @@ impl Backward for NodeG {
     type In = Chunk;
     type Out = Chunk;
 
-    fn backward(&self, _cx: &Cx, input: Items<Chunk>) -> Items<Chunk> {
-        items(input.map(|item| item.map(|s| format!("g({s})"))))
+    fn backward(&self, cx: &Cx, input: Items<Chunk>) -> Items<Chunk> {
+        shaped(cx, "G", input, "pg".to_string(), |s| format!("g({s})"))
+    }
+}
+
+/// A backward node's behavior, chosen by request metadata under its own name
+/// so it crosses segments: `empty` ends at once, `fail` fails at once,
+/// `ignore` emits one item without reading its input, `prefix` emits one item
+/// before passing its input through. Anything else maps each item.
+fn shaped<I: Send + 'static, O: Send + 'static>(
+    cx: &Cx,
+    name: &str,
+    input: Items<I>,
+    prefix: O,
+    map: impl Fn(I) -> O + Send + Sync + 'static,
+) -> Items<O> {
+    match cx.meta().get(name).map(String::as_str) {
+        Some("empty") => items(futures::stream::empty()),
+        Some("fail") => {
+            let error = Error::node(format!("{name} failed"));
+            items(futures::stream::once(async move { Err(error) }))
+        }
+        Some("ignore") => items(futures::stream::once(async move { Ok(prefix) })),
+        Some("prefix") => items(
+            futures::stream::once(async move { Ok(prefix) })
+                .chain(input.map(move |item| item.map(&map))),
+        ),
+        _ => items(input.map(move |item| item.map(&map))),
     }
 }
 
@@ -719,20 +759,32 @@ pub fn deploy(
     placement: &gdl::Placement,
     events: &Arc<Events>,
     config: RuntimeConfig,
-) -> Cluster<impl Next<Prompt, Chunk> + Register> {
-    let manifest = reference_manifest(|_| true);
+) -> Cluster<impl Next<Prompt, Chunk> + Register + use<>> {
     let names: Vec<String> = placement
         .segments()
         .map(|(name, _)| name.to_string())
         .collect();
     assert!(names.len() <= nodes.len(), "not enough velo nodes");
+    let instances: Vec<(String, Arc<velo::Velo>)> =
+        names.into_iter().zip(nodes.iter().cloned()).collect();
+    deploy_instances(&instances, placement, events, config)
+}
+
+/// Deploy the reference graph with explicit instances: each entry is one
+/// velo node serving the named segment. A segment may have several.
+pub fn deploy_instances(
+    instances: &[(String, Arc<velo::Velo>)],
+    placement: &gdl::Placement,
+    events: &Arc<Events>,
+    config: RuntimeConfig,
+) -> Cluster<impl Next<Prompt, Chunk> + Register + use<>> {
+    let manifest = reference_manifest(|_| true);
     let mut roster = Roster::new();
-    for (name, node) in names.iter().zip(nodes) {
+    for (name, node) in instances {
         roster.add(name.clone(), node.peer_info());
     }
-    let segments = names
+    let segments = instances
         .iter()
-        .zip(nodes)
         .map(|(name, node)| {
             let deployment = Deployment::new(
                 Arc::clone(node),
@@ -748,6 +800,24 @@ pub fn deploy(
         })
         .collect();
     Cluster { segments }
+}
+
+/// Wait until every instance has released everything requests took.
+pub async fn settles<H>(cluster: &Cluster<H>) -> bool {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let busy = cluster
+            .segments
+            .iter()
+            .any(|(_, s)| s.admitted() > 0 || s.attempting() > 0 || s.active_anchors() > 0);
+        if !busy {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(ms(5)).await;
+    }
 }
 
 /// The segment that hosts the source.

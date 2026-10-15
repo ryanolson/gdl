@@ -30,6 +30,31 @@ pub struct RuntimeConfig {
     pub anchor_timeout: Duration,
     /// The assumed maximum clock difference between segments.
     pub clock_skew: Duration,
+    /// How often producers send heartbeats; a dead producer is detected
+    /// after about three missed intervals. `None` keeps velo's default.
+    pub heartbeat_interval: Option<Duration>,
+    /// Test-only delays and drops.
+    #[cfg(feature = "fault-injection")]
+    pub faults: Faults,
+}
+
+/// Steps the fault tests delay or skip. Available only with the
+/// `fault-injection` feature.
+#[cfg(feature = "fault-injection")]
+#[derive(Debug, Clone, Default)]
+pub struct Faults {
+    /// Hold an arriving forward hand-off this long before checking it, as a
+    /// slow network would.
+    pub delay_forward_arrival: Option<Duration>,
+    /// Hold the acknowledgement of an accepted forward hand-off this long, as
+    /// a lost reply would.
+    pub delay_forward_ack: Option<Duration>,
+    /// Hold the reply to an opened backward run this long, as a lost reply
+    /// would.
+    pub delay_open_reply: Option<Duration>,
+    /// The inner end never attaches to its reply, as a producer that never
+    /// opens its ticket would.
+    pub skip_inner_attach: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -41,6 +66,9 @@ impl Default for RuntimeConfig {
             setup_timeout: Duration::from_secs(10),
             anchor_timeout: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
+            heartbeat_interval: None,
+            #[cfg(feature = "fault-injection")]
+            faults: Faults::default(),
         }
     }
 }

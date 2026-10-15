@@ -27,24 +27,6 @@ async fn the_three_segment_placement_matches_the_local_run() {
     events.wait_for("D:done:c(p)#0", WAIT).await;
 }
 
-/// Wait until every segment has released everything the requests took.
-async fn settles<H>(cluster: &Cluster<H>) -> bool {
-    let deadline = tokio::time::Instant::now() + WAIT;
-    loop {
-        let busy = cluster
-            .segments
-            .iter()
-            .any(|(_, s)| s.admitted() > 0 || s.attempting() > 0 || s.active_anchors() > 0);
-        if !busy {
-            return true;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(ms(5)).await;
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_placement_of_the_reference_graph_matches_the_local_run() {
     let mut nodes = Vec::new();

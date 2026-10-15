@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Hooks that delay or drop runtime steps, for the fault tests. Never enable
+# in a deployment.
+fault-injection = []
+
 [dependencies]
 dashmap = { workspace = true }
 futures = { workspace = true }
@@ -21,6 +26,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
+gdl = { path = ".", features = ["fault-injection"] }
 criterion = { workspace = true }
 velo = { workspace = true }
 serde = { workspace = true }

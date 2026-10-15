@@ -48,13 +48,19 @@ impl ReplyTo {
 pub(crate) struct Fabric {
     velo: Arc<Velo>,
     anchor_timeout: Duration,
+    heartbeat_interval: Option<Duration>,
 }
 
 impl Fabric {
-    pub(crate) fn new(velo: Arc<Velo>, anchor_timeout: Duration) -> Self {
+    pub(crate) fn new(
+        velo: Arc<Velo>,
+        anchor_timeout: Duration,
+        heartbeat_interval: Option<Duration>,
+    ) -> Self {
         Self {
             velo,
             anchor_timeout,
+            heartbeat_interval,
         }
     }
 
@@ -87,7 +93,7 @@ impl Fabric {
             .anchor_manager()
             .create_anchor_with_config::<WireItem>(AnchorConfig {
                 unattached_timeout: Some(self.anchor_timeout),
-                ..AnchorConfig::default()
+                heartbeat_interval: self.heartbeat_interval,
             });
         let handle = anchor.handle();
         let ticket = self.velo.prebind_anchor(handle);

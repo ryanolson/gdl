@@ -26,6 +26,8 @@ pub use cx::{Cx, Deadline, RequestId};
 pub use decl::{
     Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, Role, SinkDecl, SourceDecl,
 };
+#[cfg(feature = "fault-injection")]
+pub use dist::Faults;
 pub use dist::{
     BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment, Entries,
     FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment,
