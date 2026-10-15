@@ -626,3 +626,135 @@ pub fn placement_of(blocks: &[Vec<String>]) -> gdl::Placement {
             placement.segment(format!("s{index}"), nodes.iter().cloned())
         })
 }
+
+// ----- distributed -----
+
+use gdl::{
+    BwdEnd, BwdStep, DOperator, DSink, Deployment, FwdEnd, FwdStep, Register, Roster,
+    RuntimeConfig, Segment, wire_codec,
+};
+
+/// A velo node on loopback TCP with OS-assigned ports.
+pub async fn velo_node() -> Arc<velo::Velo> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let transport = velo::transports::tcp::TcpTransportBuilder::new()
+        .from_listener(listener)
+        .expect("listener")
+        .build()
+        .expect("transport");
+    velo::Velo::builder()
+        .add_transport(Arc::new(transport))
+        .stream_bind_addr([127, 0, 0, 1].into())
+        .build()
+        .await
+        .expect("velo node")
+}
+
+/// The reference graph as one segment sees it, with every node bound: a
+/// "fat" build that can serve any segment of any placement.
+pub fn reference_graph(
+    deployment: &Deployment,
+    events: &Arc<Events>,
+) -> gdl::Result<impl Next<Prompt, Chunk> + Register + use<>> {
+    let hop1 = deployment.hop(
+        1,
+        FwdStep::new(
+            Arc::new(NodeC {
+                events: Arc::clone(events),
+            }),
+            wire_codec!(Pre),
+            FwdEnd::new(wire_codec!(Pre)),
+        ),
+        DSink::new(Arc::new(NodeD {
+            events: Arc::clone(events),
+        })),
+        BwdStep::new(
+            Arc::new(NodeF),
+            wire_codec!(Raw),
+            BwdStep::new(
+                Arc::new(NodeE),
+                wire_codec!(Tok),
+                BwdEnd::new(wire_codec!(Out)),
+            ),
+        ),
+    )?;
+    deployment.hop(
+        0,
+        FwdEnd::new(wire_codec!(Prompt)),
+        DOperator::new(
+            Arc::new(NodeB {
+                events: Arc::clone(events),
+            }),
+            hop1,
+        ),
+        BwdStep::new(
+            Arc::new(NodeG),
+            wire_codec!(Chunk),
+            BwdEnd::new(wire_codec!(Chunk)),
+        ),
+    )
+}
+
+/// One running deployment of the reference graph: one segment per velo node.
+pub struct Cluster<H> {
+    pub segments: Vec<(String, Segment<H>)>,
+}
+
+/// The segment hosting `node`.
+impl<H> Cluster<H> {
+    pub fn segment(&self, name: &str) -> &Segment<H> {
+        &self
+            .segments
+            .iter()
+            .find(|(segment, _)| segment == name)
+            .unwrap_or_else(|| panic!("no segment {name}"))
+            .1
+    }
+}
+
+/// Deploy the reference graph under `placement` on `nodes` (one node per
+/// segment, in the placement's segment order).
+pub fn deploy(
+    nodes: &[Arc<velo::Velo>],
+    placement: &gdl::Placement,
+    events: &Arc<Events>,
+    config: RuntimeConfig,
+) -> Cluster<impl Next<Prompt, Chunk> + Register> {
+    let manifest = reference_manifest(|_| true);
+    let names: Vec<String> = placement
+        .segments()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    assert!(names.len() <= nodes.len(), "not enough velo nodes");
+    let mut roster = Roster::new();
+    for (name, node) in names.iter().zip(nodes) {
+        roster.add(name.clone(), node.peer_info());
+    }
+    let segments = names
+        .iter()
+        .zip(nodes)
+        .map(|(name, node)| {
+            let deployment = Deployment::new(
+                Arc::clone(node),
+                &manifest,
+                placement,
+                name,
+                &roster,
+                config.clone(),
+            )
+            .expect("deployment");
+            let root = reference_graph(&deployment, events).expect("graph");
+            (name.clone(), deployment.start(root).expect("start"))
+        })
+        .collect();
+    Cluster { segments }
+}
+
+/// The segment that hosts the source.
+pub fn source_segment(placement: &gdl::Placement) -> String {
+    placement
+        .segments()
+        .find(|(_, nodes)| nodes.iter().any(|n| n == "A"))
+        .map(|(name, _)| name.to_string())
+        .expect("A is placed")
+}

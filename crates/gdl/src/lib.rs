@@ -12,6 +12,7 @@
 mod compose;
 mod cx;
 mod decl;
+mod dist;
 mod error;
 mod hash;
 mod items;
@@ -24,6 +25,10 @@ pub use compose::{BackwardChain, ForwardChain, Hop, Inner, OperatorStage, SinkSt
 pub use cx::{Cx, Deadline, RequestId};
 pub use decl::{
     Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, Role, SinkDecl, SourceDecl,
+};
+pub use dist::{
+    BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment, Entries,
+    FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment,
 };
 pub use error::{Error, ErrorKind, Result};
 pub use items::{Items, items};

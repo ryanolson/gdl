@@ -11,15 +11,18 @@ publish = false
 
 [workspace.dependencies]
 criterion = { version = "0.7", default-features = false, features = ["async_tokio"] }
+dashmap = "6"
 futures = "0.3"
 pin-project-lite = "0.2"
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 thiserror = "2"
 toml = "0.9"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7"
 trybuild = "1"
+velo = { version = "=0.19.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -164,6 +164,23 @@ impl Cx {
         self.scope.cancel.clone()
     }
 
+    /// A context for a request that arrived from another segment: the same
+    /// id, metadata, and deadline, with a fresh root scope that the runtime
+    /// links to the stream that carries the response back.
+    pub(crate) fn arrived(
+        id: RequestId,
+        meta: BTreeMap<String, String>,
+        deadline: Option<Deadline>,
+    ) -> Self {
+        Self {
+            id,
+            meta: Arc::new(meta),
+            deadline,
+            scope: Scope::root(),
+            ext: Extensions::default(),
+        }
+    }
+
     /// A guard that cancels this context when dropped. The runtime holds one
     /// inside every attempt's response stream, so dropping the stream cancels
     /// the attempt.
@@ -283,6 +300,41 @@ impl Deadline {
     pub fn is_expired(self) -> bool {
         Instant::now() >= self.at
     }
+
+    /// Convert a deadline received from another segment, or `None` if it has
+    /// already passed.
+    ///
+    /// The wall-clock deadline crosses segments unchanged; each receiver maps
+    /// it onto its own monotonic clock as `now + (deadline - wall_now - skew)`.
+    /// With segment clocks within `skew` of each other, no receiver runs past
+    /// the source's deadline; it may stop up to `2 * skew` early. A deadline
+    /// within `skew` of now counts as passed, so a late delivery cannot start
+    /// work the source has already given up on.
+    pub(crate) fn from_wall(unix_nanos: u64, skew: Duration) -> Option<Self> {
+        Self::from_wall_at(unix_nanos, skew, wall_now_nanos(), Instant::now())
+    }
+
+    fn from_wall_at(
+        unix_nanos: u64,
+        skew: Duration,
+        wall_now: u64,
+        mono_now: Instant,
+    ) -> Option<Self> {
+        let skew = u64::try_from(skew.as_nanos()).unwrap_or(u64::MAX);
+        let remaining = unix_nanos.saturating_sub(wall_now).saturating_sub(skew);
+        (remaining > 0).then(|| Self {
+            at: mono_now + Duration::from_nanos(remaining),
+            unix_nanos,
+        })
+    }
+}
+
+fn wall_now_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
 }
 
 /// Values stored by type, local to one segment. Copy on write, so a child
@@ -354,6 +406,35 @@ mod tests {
     fn request_ids_are_distinct() {
         let ids: std::collections::HashSet<_> = (0..1000).map(|_| RequestId::mint()).collect();
         assert_eq!(ids.len(), 1000);
+    }
+
+    #[test]
+    fn a_received_deadline_is_shortened_by_the_skew_and_never_extended() {
+        let skew = Duration::from_millis(50);
+        let mono = Instant::now();
+        let wall = 1_000_000_000_000_u64;
+        let ms = |n: u64| n * 1_000_000;
+
+        // 200 ms left by the source's clock: run for 150 ms here.
+        let d = Deadline::from_wall_at(wall + ms(200), skew, wall, mono).expect("live");
+        assert_eq!(d.instant(), mono + Duration::from_millis(150));
+        // The wall-clock form is forwarded unchanged.
+        assert_eq!(d.unix_nanos(), wall + ms(200));
+
+        // Within the skew of now, or already past: rejected on arrival.
+        assert!(Deadline::from_wall_at(wall + ms(50), skew, wall, mono).is_none());
+        assert!(Deadline::from_wall_at(wall - ms(1), skew, wall, mono).is_none());
+
+        // A receiver whose clock runs 40 ms behind the source's sees 40 ms more
+        // remaining; the skew allowance still ends it before the source's
+        // deadline.
+        let behind =
+            Deadline::from_wall_at(wall + ms(200), skew, wall - ms(40), mono).expect("live");
+        assert!(behind.instant() <= mono + Duration::from_millis(200));
+        // A receiver 40 ms ahead stops early, never late.
+        let ahead =
+            Deadline::from_wall_at(wall + ms(200), skew, wall + ms(40), mono).expect("live");
+        assert_eq!(ahead.instant(), mono + Duration::from_millis(110));
     }
 
     #[tokio::test(start_paused = true)]
