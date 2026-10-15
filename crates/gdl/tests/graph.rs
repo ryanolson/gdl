@@ -52,6 +52,22 @@ fn the_generated_manifest_is_the_reference_manifest() {
     );
 }
 
+#[test]
+fn the_manifest_survives_its_toml_form() {
+    let manifest = contract::manifest();
+    let text = manifest.to_toml();
+    assert_eq!(gdl::Manifest::from_toml(&text).expect("parse"), manifest);
+}
+
+#[test]
+fn the_source_types_are_named_by_the_contract() {
+    // Compiles only if the aliases are the source's request and item types.
+    let request: contract::SourceReq = prompt("t", Plan::default());
+    let item: Option<contract::SourceItem> = None::<Chunk>;
+    assert_eq!(request.text, "t");
+    assert!(item.is_none());
+}
+
 #[tokio::test]
 async fn the_generated_local_graph_matches_the_hand_written_one() {
     let events = Events::new();

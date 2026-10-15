@@ -27,6 +27,12 @@ pub struct NodeInfo {
     pub name: String,
     /// The node's role.
     pub role: Role,
+    /// The node's slot in the contract's `Bindings`: the name of its setter
+    /// and field, as `graph!` derives it from the node's name. `None` for the
+    /// source, which takes no binding. Generated code reads it here rather
+    /// than repeating the macro's naming rule.
+    #[serde(default)]
+    pub binding: Option<String>,
 }
 
 /// One hop: outer end, forward chain, inner end, backward chain.
@@ -110,6 +116,19 @@ impl Manifest {
     /// The node with this name.
     pub fn node(&self, name: &str) -> Option<&NodeInfo> {
         self.nodes.iter().find(|node| node.name == name)
+    }
+
+    /// The manifest as TOML, the form the generator reads it in.
+    pub fn to_toml(&self) -> String {
+        // Every field is a string, a number, a unit enum, or a list of
+        // these, all of which TOML holds.
+        toml::to_string(self).expect("a manifest is representable in TOML")
+    }
+
+    /// Read a manifest written by [`Manifest::to_toml`].
+    pub fn from_toml(text: &str) -> Result<Self, crate::Error> {
+        toml::from_str(text)
+            .map_err(|e| crate::Error::new(crate::ErrorKind::Placement, e.to_string()))
     }
 }
 

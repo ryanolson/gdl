@@ -9,7 +9,10 @@
 //! - `manifest()`: the graph as data, with each edge's wire capability
 //!   decided by the probe at the edge's concrete type;
 //! - `assemble()`: the distributed hops for one segment;
-//! - `local()`: the whole graph as nested calls in one process.
+//! - `local()`: the whole graph as nested calls in one process;
+//! - `SourceReq` and `SourceItem`: the source's request and item types, so
+//!   code outside the contract crate (generated segment crates) can name
+//!   the graph's entry types without parsing them out of the macro input.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -24,12 +27,24 @@ pub(crate) fn expand(graph: &Graph) -> TokenStream {
     let manifest = expand_manifest(graph);
     let assemble = expand_assemble(graph);
     let local = expand_local(graph);
+    let source = expand_source_types(graph);
     quote! {
+        #source
         #nodes
         #bindings
         #manifest
         #assemble
         #local
+    }
+}
+
+fn expand_source_types(graph: &Graph) -> TokenStream {
+    let Signature { req, item, .. } = signature(graph);
+    quote! {
+        /// The request type the graph's source sends.
+        pub type SourceReq = #req;
+        /// The item type the graph's source receives.
+        pub type SourceItem = #item;
     }
 }
 
@@ -200,7 +215,19 @@ fn expand_manifest(graph: &Graph) -> TokenStream {
             Role::Sink => quote!(Sink),
             Role::Backward => quote!(Backward),
         };
-        quote! { ::gdl::NodeInfo { name: #name.to_string(), role: ::gdl::Role::#role } }
+        let binding = if node.role() == Role::Source {
+            quote!(None)
+        } else {
+            let binding = field(node).to_string();
+            quote!(Some(#binding.to_string()))
+        };
+        quote! {
+            ::gdl::NodeInfo {
+                name: #name.to_string(),
+                role: ::gdl::Role::#role,
+                binding: #binding,
+            }
+        }
     });
     let hops = graph.hops.iter().map(|hop| {
         let outer = hop.outer.to_string();

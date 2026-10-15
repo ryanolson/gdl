@@ -73,7 +73,9 @@ pub use wire::Codec;
 ///   types, so a mismatched implementation fails to compile there;
 /// - `manifest()`: the graph as data, for placement validation;
 /// - `assemble(&deployment, bindings)`: the hops as one segment runs them;
-/// - `local(bindings)`: the whole graph as nested calls in one process.
+/// - `local(bindings)`: the whole graph as nested calls in one process;
+/// - `SourceReq` and `SourceItem`: aliases for the source's request and item
+///   types.
 ///
 /// Bump `schema` whenever a message type's wire form changes.
 pub use gdl_macros::graph;

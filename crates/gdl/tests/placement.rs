@@ -351,6 +351,7 @@ fn an_operator_may_own_only_one_downstream_hop() {
     repeated.nodes.push(gdl::NodeInfo {
         name: "X".into(),
         role: Role::Operator,
+        binding: Some("x".into()),
     });
     let hop = |outer: &str, inner: &str| gdl::HopInfo {
         outer: outer.into(),

@@ -645,6 +645,7 @@ pub fn reference_manifest(wire: impl Fn(&str) -> bool) -> gdl::Manifest {
     let node = |name: &str, role| NodeInfo {
         name: name.to_string(),
         role,
+        binding: (role != Role::Source).then(|| name.to_lowercase()),
     };
     let ty = |name: &str| TypeInfo::new(name, wire(name));
     let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
