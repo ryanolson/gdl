@@ -276,6 +276,13 @@ The macro emits node markers, the `Bindings` typestate, the typed graph structur
 - **Wire capability.** For each edge type the expansion calls an autoref probe on the concrete type (`(&&Probe::<Raw>::new()).codec()`), which yields `Some(Codec)` when the type implements `Serialize + DeserializeOwned` and `None` otherwise. A probe inside a generic helper would always pick the fallback, so the macro emits it only at concrete types. Tests cover type aliases, concrete generics, serialize-only types, and non-wire types. A type that deserializes only by borrowing from its input cannot be classified: its higher-ranked `Deserialize` bound fails after method selection, so the probe is a compile error rather than `None` (found in milestone 1, `crates/gdl/tests/ui/borrowed-message.rs`). Message types must own their data.
 - **Schema version.** Rust type names cannot fingerprint a serde representation. `CONTRACT_HASH` covers node names, roles, topology, type names, and the `schema` number, and a change to any message type's wire form requires a `schema` bump. Contract evolution rules are later work.
 
+**Addendum (2026-10-16, as built).**
+
+- There is no `CONTRACT_HASH` constant. The hash is computed from the manifest: `manifest().contract_hash()`. It covers the same things as above. The macro also emits `local(bindings)`, `assemble(&deployment, bindings)`, and the `SourceReq` and `SourceItem` aliases.
+- `gdl::graph!` is a `macro_rules!` wrapper that passes `$crate` to the procedural macro. The expansion names gdl only through that path, so a contract crate can depend on gdl under another name.
+- The port types are the caller's tokens. The expansion writes them only at the invocation's own level, never inside the generated `nodes` module, and never next to a name that the expansion introduces. Every name that the expansion introduces starts with `__gdl` or `__Gdl`. Every other path in the expansion is rooted (`::std`, `::core`, or the gdl path).
+- A node's binding name is its name in snake case. The macro rejects a raw node name, a binding name that cannot name a method (`crate`, `self`, `super`), a binding name that `Bindings` already uses (`new`, `default`), and two nodes with the same binding name. Each error points at the node.
+
 ### 9.2 Placement config
 
 ```toml

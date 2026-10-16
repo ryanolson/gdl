@@ -82,10 +82,20 @@ pub use wire::Codec;
 ///   types.
 ///
 /// Bump `schema` whenever a message type's wire form changes.
-pub use gdl_macros::graph;
+///
+/// The expansion reaches gdl through `$crate`, so a contract crate can
+/// depend on gdl under another name. Names starting with `__gdl` or `__Gdl`
+/// are reserved for the expansion.
+#[macro_export]
+macro_rules! graph {
+    ($($graph:tt)*) => {
+        $crate::__private::graph! { $crate; $($graph)* }
+    };
+}
 
 /// Support for macro expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
+    pub use gdl_macros::graph;
 }

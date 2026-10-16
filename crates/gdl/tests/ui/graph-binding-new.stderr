@@ -1,0 +1,5 @@
+error: node `New` gets the binding name `new`, which `Bindings` already uses; rename the node
+ --> tests/ui/graph-binding-new.rs:8:13
+  |
+8 |     sink    New: u32 -> stream u32;
+  |             ^^^
