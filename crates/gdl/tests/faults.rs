@@ -1409,10 +1409,18 @@ async fn a_cancel_ends_work_behind_a_backward_node_that_discards_ready_input() {
         .expect("call");
     tokio::time::sleep(ms(200)).await;
     cx.cancel();
-    // D ends either at its next item (cancelled) or, when backpressure holds
-    // it in a send, when its receiver goes away (dropped).
+    // D ends at its next item (cancelled), when its receiver goes away while
+    // backpressure holds it in a send (dropped), or, in some runs, through
+    // its stop path (stopped). Before the fix it did none of these.
     events
-        .wait_for_any(&["D:cancelled:c(dr)#0", "D:dropped:c(dr)#0"], WAIT)
+        .wait_for_any(
+            &[
+                "D:cancelled:c(dr)#0",
+                "D:dropped:c(dr)#0",
+                "D:stopped:c(dr)#0",
+            ],
+            WAIT,
+        )
         .await;
     drop(held);
     assert!(settles(&cluster).await);
