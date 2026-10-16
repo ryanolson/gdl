@@ -17,7 +17,7 @@ fn three_segments() -> gdl::Layout {
 #[test]
 fn the_reference_graph_as_mermaid() {
     let want = r#"---
-title: reference
+title: "reference"
 ---
 flowchart LR
     n0(["A<br/>source"])
@@ -42,7 +42,7 @@ flowchart LR
 #[test]
 fn the_placed_reference_graph_as_mermaid() {
     let want = r#"---
-title: reference
+title: "reference"
 ---
 flowchart LR
     subgraph s0["engine"]
@@ -179,10 +179,8 @@ fn names_and_types_are_escaped() {
     let layout = layout(&manifest, &placement).expect("layout");
 
     let mermaid = manifest.to_mermaid(Some(&layout));
-    assert!(
-        mermaid.contains("title: odd #quot;graph#quot;"),
-        "{mermaid}"
-    );
+    // The title is YAML front matter, not a label: quoted as YAML.
+    assert!(mermaid.contains(r#"title: "odd \"graph\"""#), "{mermaid}");
     assert!(
         mermaid.contains(r#"subgraph s0["my #quot;seg#quot;"]"#),
         "{mermaid}"
@@ -203,5 +201,17 @@ fn names_and_types_are_escaped() {
     assert!(
         dot.contains(r#"n1 -> n0 [label="Tagged < \"a\\b\" >", style=dashed, constraint=false];"#),
         "{dot}"
+    );
+}
+
+/// A title that YAML would read as something else when unquoted.
+#[test]
+fn the_mermaid_title_is_a_yaml_string() {
+    let mut manifest = reference_manifest(|_| true);
+    manifest.name = "chat: demo # 2".to_string();
+    let mermaid = manifest.to_mermaid(None);
+    assert!(
+        mermaid.starts_with("---\ntitle: \"chat: demo # 2\"\n---\n"),
+        "{mermaid}"
     );
 }

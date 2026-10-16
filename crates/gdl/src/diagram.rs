@@ -85,7 +85,9 @@ impl Manifest {
     pub fn to_mermaid(&self, layout: Option<&Layout>) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "---");
-        let _ = writeln!(out, "title: {}", mermaid_text(&self.name));
+        // Front matter is YAML, where `: ` and ` #` mean something:
+        // quoted as a YAML string, not escaped as a label.
+        let _ = writeln!(out, "title: {}", yaml_string(&self.name));
         let _ = writeln!(out, "---");
         let _ = writeln!(out, "flowchart LR");
         let node = |out: &mut String, indent: &str, index: usize| {
@@ -251,6 +253,26 @@ fn dot_string(text: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A YAML double-quoted string.
+fn yaml_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
         }
     }
     out.push('"');
