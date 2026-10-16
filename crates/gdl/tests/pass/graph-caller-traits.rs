@@ -1,5 +1,5 @@
-// A caller's trait in scope whose method names match a method the expansion
-// calls.
+// Callers' traits in scope whose method or function names match one the
+// expansion calls.
 
 #![allow(dead_code)]
 
@@ -8,6 +8,16 @@ trait MyCodec {
 }
 
 impl<T> MyCodec for T {}
+
+trait MyFrom {
+    fn from(text: &str) -> Self;
+}
+
+impl MyFrom for String {
+    fn from(text: &str) -> Self {
+        text.to_uppercase()
+    }
+}
 
 gdl::graph! {
     name = "g", schema = 1;

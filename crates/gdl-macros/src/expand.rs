@@ -294,7 +294,9 @@ fn expand_bindings(graph: &Graph, krate: &TokenStream) -> TokenStream {
 }
 
 fn string(text: &str) -> TokenStream {
-    quote! { ::std::string::String::from(#text) }
+    // Fully qualified: a caller's trait with a `from` function, in scope at
+    // the invocation, would make `String::from` ambiguous.
+    quote! { <::std::string::String as ::core::convert::From<&::core::primitive::str>>::from(#text) }
 }
 
 fn type_info(ty: &Type, krate: &TokenStream) -> TokenStream {
