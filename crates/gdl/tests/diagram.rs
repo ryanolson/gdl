@@ -267,3 +267,22 @@ fn a_layout_of_another_graph_is_refused() {
         assert_eq!(error.kind(), gdl::ErrorKind::Placement);
     }
 }
+
+/// A manifest is plain data and may come from anywhere: one that names an
+/// undeclared node, or lacks an edge type, is refused rather than drawn.
+#[test]
+fn an_inconsistent_manifest_is_refused() {
+    let mut undeclared = reference_manifest(|_| true);
+    undeclared.hops[1].forward.push("Z".to_string());
+    undeclared.hops[1]
+        .forward_types
+        .push(TypeInfo::new("Pre", true));
+    let mut untyped = reference_manifest(|_| true);
+    untyped.hops[1].backward_types.pop();
+    for manifest in [undeclared, untyped] {
+        for drawn in [manifest.to_dot(None), manifest.to_mermaid(None)] {
+            let error = drawn.expect_err("inconsistent manifest");
+            assert_eq!(error.kind(), gdl::ErrorKind::Placement);
+        }
+    }
+}

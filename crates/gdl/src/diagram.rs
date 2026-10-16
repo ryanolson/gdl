@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 use crate::decl::Role;
 use crate::error::{Error, ErrorKind};
 use crate::manifest::{Manifest, TypeInfo, role_tag};
-use crate::placement::Layout;
+use crate::placement::{Layout, PlacementErrors, check_manifest};
 
 /// The color of an edge that crosses segments.
 const CROSSING: &str = "#d62728";
@@ -25,7 +25,7 @@ impl Manifest {
     /// and edges that cross segments are drawn thick and red. Fails if
     /// `layout` was checked against another contract.
     pub fn to_dot(&self, layout: Option<&Layout>) -> Result<String, Error> {
-        self.check_layout(layout)?;
+        self.check(layout)?;
         let mut out = String::new();
         let _ = writeln!(out, "digraph {} {{", dot_string(&self.name));
         let _ = writeln!(out, "    rankdir=LR;");
@@ -87,7 +87,7 @@ impl Manifest {
     /// subgraph and edges that cross segments are drawn thick and red. Fails
     /// if `layout` was checked against another contract.
     pub fn to_mermaid(&self, layout: Option<&Layout>) -> Result<String, Error> {
-        self.check_layout(layout)?;
+        self.check(layout)?;
         let mut out = String::new();
         let _ = writeln!(out, "---");
         // Front matter is YAML, where `: ` and ` #` mean something:
@@ -147,10 +147,19 @@ impl Manifest {
         Ok(out)
     }
 
-    /// A layout of another contract would place none of this graph's nodes:
-    /// every node would fall outside the clusters, and every edge would
-    /// look as if it stayed in one segment.
-    fn check_layout(&self, layout: Option<&Layout>) -> Result<(), Error> {
+    /// The manifest is checked as `layout` checks it: a manifest is plain
+    /// data, and one that names an undeclared node or lacks an edge type
+    /// cannot be drawn. A layout of another contract would place none of
+    /// this graph's nodes: every node would fall outside the clusters, and
+    /// every edge would look as if it stayed in one segment.
+    fn check(&self, layout: Option<&Layout>) -> Result<(), Error> {
+        let errors = check_manifest(self);
+        if !errors.is_empty() {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                PlacementErrors(errors).to_string(),
+            ));
+        }
         match layout {
             Some(layout) if layout.contract_hash() != self.contract_hash() => Err(Error::new(
                 ErrorKind::Placement,
