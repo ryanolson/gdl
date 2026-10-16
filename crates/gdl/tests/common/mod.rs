@@ -178,17 +178,23 @@ impl Events {
 
     /// Wait until `event` is logged; panic with the log after `within`.
     pub async fn wait_for(&self, event: &str, within: Duration) {
+        self.wait_for_any(&[event], within).await;
+    }
+
+    /// Wait until one of `events` is logged; panic with the log after
+    /// `within`.
+    pub async fn wait_for_any(&self, events: &[&str], within: Duration) {
         let deadline = tokio::time::Instant::now() + within;
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.has(event) {
+            if events.iter().any(|event| self.has(event)) {
                 return;
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
                 panic!(
-                    "timed out waiting for {event:?}; log: {:?}",
+                    "timed out waiting for {events:?}; log: {:?}",
                     self.snapshot()
                 );
             }
@@ -536,7 +542,9 @@ impl Backward for NodeG {
 /// A backward node's behavior, chosen by request metadata under its own name
 /// so it crosses segments: `empty` ends at once, `fail` fails at once,
 /// `ignore` emits one item without reading its input, `prefix` emits one item
-/// before passing its input through. Anything else maps each item.
+/// before passing its input through, `discard` spends about 200 us on each
+/// input item and emits none, as a filter that rejects everything does.
+/// Anything else maps each item.
 fn shaped<I: Send + 'static, O: Send + 'static>(
     cx: &Cx,
     name: &str,
@@ -562,6 +570,10 @@ fn shaped<I: Send + 'static, O: Send + 'static>(
             });
             items(input.map(move |item| item.map(&map)))
         }
+        Some("discard") => items(input.filter_map(|_| {
+            std::thread::sleep(Duration::from_micros(200));
+            futures::future::ready(None)
+        })),
         Some("prefix") => items(
             futures::stream::once(async move { Ok(prefix) })
                 .chain(input.map(move |item| item.map(&map))),

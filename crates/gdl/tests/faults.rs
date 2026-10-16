@@ -1390,3 +1390,30 @@ async fn a_local_inner_end_waits_for_egress_within_the_setup_timeout() {
         started.elapsed()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_ends_work_behind_a_backward_node_that_discards_ready_input() {
+    let nodes = nodes(3).await;
+    let events = Events::new();
+    let cluster = deploy(&nodes, &three_segments(), &events, RuntimeConfig::default());
+    let plan = Plan {
+        endless: true,
+        ..Plan::default()
+    };
+    let mut cx = Cx::new();
+    cx.insert_meta("F", "discard");
+    let held = cluster
+        .segment("front")
+        .call(cx.clone(), prompt("dr", plan))
+        .await
+        .expect("call");
+    tokio::time::sleep(ms(200)).await;
+    cx.cancel();
+    // D ends either at its next item (cancelled) or, when backpressure holds
+    // it in a send, when its receiver goes away (dropped).
+    events
+        .wait_for_any(&["D:cancelled:c(dr)#0", "D:dropped:c(dr)#0"], WAIT)
+        .await;
+    drop(held);
+    assert!(settles(&cluster).await);
+}

@@ -30,22 +30,41 @@ pub(crate) fn failed<T: Send + 'static>(error: Error) -> Items<T> {
 /// The stream up to and including its first `Err`. The input is dropped at
 /// that error, not when the result is: an input holding a remote anchor
 /// releases it at once.
+///
+/// It yields every `YIELD_INTERVAL` consecutive ready items, as a node
+/// boundary does. Its consumer is a node, and a node that consumes without
+/// producing (a filter) loops over its input inside one poll; over remote
+/// input that stays ready, that loop would never return to the pump that
+/// forwards a cancel or a stop.
 pub(crate) fn until_error<T: Send + 'static>(inner: Items<T>) -> Items<T> {
-    Box::pin(UntilError(Some(inner)))
+    Box::pin(UntilError {
+        inner: Some(inner),
+        ready_run: 0,
+    })
 }
 
-struct UntilError<T>(Option<Items<T>>);
+struct UntilError<T> {
+    inner: Option<Items<T>>,
+    ready_run: u16,
+}
 
 impl<T> Stream for UntilError<T> {
     type Item = Result<T>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let Some(inner) = self.0.as_mut() else {
+        if self.ready_run >= YIELD_INTERVAL {
+            self.ready_run = 0;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        let Some(inner) = self.inner.as_mut() else {
             return Poll::Ready(None);
         };
         let polled = inner.as_mut().poll_next(cx);
-        if matches!(polled, Poll::Ready(Some(Err(_)) | None)) {
-            self.0 = None;
+        match polled {
+            Poll::Ready(Some(Ok(_))) => self.ready_run += 1,
+            Poll::Ready(Some(Err(_)) | None) => self.inner = None,
+            Poll::Pending => self.ready_run = 0,
         }
         polled
     }
