@@ -1,0 +1,53 @@
+error[E0308]: mismatched types
+  --> tests/ui/graph-forward-mismatch.rs:5:1
+   |
+ 5 | / gdl::graph! {
+ 6 | |     name = "g", schema = 1;
+ 7 | |     source  A: u32 -> stream u32;
+ 8 | |     forward C: u64 -> u64;
+ 9 | |     sink    D: u64 -> stream u32;
+10 | |     topology: A => C => D;
+11 | | }
+   | |_^ expected `Option<Codec<u64>>`, found `Option<Codec<u32>>`
+   |
+   = note: expected enum `Option<gdl::Codec<u64>>`
+              found enum `Option<gdl::Codec<u32>>`
+   = note: this error originates in the macro `$crate::wire_codec` which comes from the expansion of the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: type mismatch resolving `<FwdStep<__GdlSlotC, FwdEnd<u64>> as DForward>::In == u32`
+  --> tests/ui/graph-forward-mismatch.rs:5:1
+   |
+ 5 | / gdl::graph! {
+ 6 | |     name = "g", schema = 1;
+ 7 | |     source  A: u32 -> stream u32;
+ 8 | |     forward C: u64 -> u64;
+ 9 | |     sink    D: u64 -> stream u32;
+10 | |     topology: A => C => D;
+11 | | }
+   | |_^ expected `u32`, found `u64`
+   |
+   = note: this error originates in the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: type mismatch resolving `<__GdlSlotC as Forward>::In == u32`
+  --> tests/ui/graph-forward-mismatch.rs:5:1
+   |
+ 5 | / gdl::graph! {
+ 6 | |     name = "g", schema = 1;
+ 7 | |     source  A: u32 -> stream u32;
+ 8 | |     forward C: u64 -> u64;
+ 9 | |     sink    D: u64 -> stream u32;
+10 | |     topology: A => C => D;
+11 | | }
+   | |_^ expected `u32`, found `u64`
+   |
+   = note: required for `Hop<(Arc<__GdlSlotC>, ()), SinkStage<__GdlSlotD>, ()>` to implement `Next<u32, u32>`
+   = note: this error originates in the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+ --> tests/ui/graph-forward-mismatch.rs:8:16
+  |
+8 |     forward C: u64 -> u64;
+  |                ^^^ expected `PhantomData<u32>`, found `PhantomData<u64>`
+  |
+  = note: expected struct `PhantomData<u32>`
+             found struct `PhantomData<u64>`

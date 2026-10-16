@@ -1,0 +1,54 @@
+error[E0308]: mismatched types
+  --> tests/ui/graph-backward-mismatch.rs:5:1
+   |
+ 5 | / gdl::graph! {
+ 6 | |     name = "g", schema = 1;
+ 7 | |     source   A: u32 -> stream u32;
+ 8 | |     sink     D: u32 -> stream u32;
+ 9 | |     backward F: u64 -> u32;
+10 | |     topology: A => D => F;
+11 | | }
+   | |_^ expected `Option<Codec<u64>>`, found `Option<Codec<u32>>`
+   |
+   = note: expected enum `Option<gdl::Codec<u64>>`
+              found enum `Option<gdl::Codec<u32>>`
+   = note: this error originates in the macro `$crate::wire_codec` which comes from the expansion of the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: type mismatch resolving `<BwdStep<__GdlSlotF, BwdEnd<u32>> as DBackward>::In == u32`
+  --> tests/ui/graph-backward-mismatch.rs:5:1
+   |
+ 5 | / gdl::graph! {
+ 6 | |     name = "g", schema = 1;
+ 7 | |     source   A: u32 -> stream u32;
+ 8 | |     sink     D: u32 -> stream u32;
+ 9 | |     backward F: u64 -> u32;
+10 | |     topology: A => D => F;
+11 | | }
+   | |_^ expected `u32`, found `u64`
+   |
+   = note: required for `DHop<FwdEnd<u32>, DSink<__GdlSlotD>, BwdStep<__GdlSlotF, BwdEnd<u32>>>` to implement `Next<u32, u32>`
+   = note: this error originates in the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: type mismatch resolving `<__GdlSlotF as Backward>::In == u32`
+  --> tests/ui/graph-backward-mismatch.rs:5:1
+   |
+ 5 | / gdl::graph! {
+ 6 | |     name = "g", schema = 1;
+ 7 | |     source   A: u32 -> stream u32;
+ 8 | |     sink     D: u32 -> stream u32;
+ 9 | |     backward F: u64 -> u32;
+10 | |     topology: A => D => F;
+11 | | }
+   | |_^ expected `u32`, found `u64`
+   |
+   = note: required for `Hop<(), SinkStage<__GdlSlotD>, (Arc<__GdlSlotF>, ())>` to implement `Next<u32, u32>`
+   = note: this error originates in the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+ --> tests/ui/graph-backward-mismatch.rs:9:17
+  |
+9 |     backward F: u64 -> u32;
+  |                 ^^^ expected `PhantomData<u32>`, found `PhantomData<u64>`
+  |
+  = note: expected struct `PhantomData<u32>`
+             found struct `PhantomData<u64>`

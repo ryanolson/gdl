@@ -27,7 +27,8 @@
 //! was given).
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
+use syn::spanned::Spanned;
 use syn::{Ident, Type};
 
 use crate::model::{Graph, Hop, Node, Role};
@@ -40,8 +41,10 @@ pub(crate) fn expand(graph: &Graph, krate: &TokenStream) -> TokenStream {
     let assemble = expand_assemble(graph, krate);
     let local = expand_local(graph, krate);
     let source = expand_source_types(graph);
+    let edges = expand_edges(graph);
     quote! {
         #source
+        #edges
         #nodes
         #bindings
         #manifest
@@ -64,6 +67,64 @@ fn source_types(graph: &Graph) -> (&Type, &Type) {
     match &graph.source().sig {
         Sig::Source { req, item } => (req, item),
         _ => unreachable!("checked: the source is a source"),
+    }
+}
+
+/// One assertion per edge that the type a node declares for it is the type
+/// the node before it sends, spanned at the declaration. Without them a
+/// mismatch surfaces only where the expansion composes the hop, as an error
+/// on the whole invocation that names runtime types.
+fn expand_edges(graph: &Graph) -> TokenStream {
+    let mut checks = Vec::new();
+    let mut check = |sent: &Type, declared: &Type| {
+        checks.push(quote_spanned! { declared.span() =>
+            let _: ::core::marker::PhantomData<#sent> = ::core::marker::PhantomData::<#declared>;
+        });
+    };
+    for hop in &graph.hops {
+        let (down_req, down_item) = match &graph.node(&hop.outer).sig {
+            Sig::Source { req, item } => (req, item),
+            Sig::Operator {
+                down_req,
+                down_item,
+                ..
+            } => (down_req, down_item),
+            _ => unreachable!("checked: the outer end is a source or an operator"),
+        };
+        let mut sent = down_req;
+        for ident in &hop.forward {
+            if let Sig::Forward { input, output } = &graph.node(ident).sig {
+                check(sent, input);
+                sent = output;
+            }
+        }
+        let mut items = match &graph.node(&hop.inner).sig {
+            Sig::Sink { req, item } => {
+                check(sent, req);
+                item
+            }
+            Sig::Operator {
+                up_req, up_item, ..
+            } => {
+                check(sent, up_req);
+                up_item
+            }
+            _ => unreachable!("checked: the inner end is a sink or an operator"),
+        };
+        for ident in &hop.backward {
+            if let Sig::Backward { input, output } = &graph.node(ident).sig {
+                check(items, input);
+                items = output;
+            }
+        }
+        check(items, down_item);
+    }
+    quote! {
+        const _: () = {
+            fn __gdl_edges() {
+                #(#checks)*
+            }
+        };
     }
 }
 
