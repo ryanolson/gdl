@@ -60,6 +60,8 @@ pub struct Plan {
     pub hold_at_end: bool,
     /// C sleeps this long before passing the request on.
     pub forward_delay_ms: u64,
+    /// C cancels its context, then passes the request on.
+    pub cancel_in_forward: bool,
     /// D's `generate` fails instead of returning a stream.
     pub fail_generate: bool,
     /// D spawns a helper that waits for D's context to be cancelled, then
@@ -354,8 +356,11 @@ impl Forward for NodeC {
     type In = Pre;
     type Out = Pre;
 
-    async fn forward(&self, _cx: &Cx, mut req: Pre) -> Result<Pre> {
+    async fn forward(&self, cx: &Cx, mut req: Pre) -> Result<Pre> {
         self.events.record(format!("C:{}", req.text));
+        if req.plan.cancel_in_forward {
+            cx.cancel();
+        }
         if req.plan.forward_delay_ms > 0 {
             let abandoned = OnDrop::new(
                 Arc::clone(&self.events),

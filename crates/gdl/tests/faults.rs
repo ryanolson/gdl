@@ -1417,3 +1417,28 @@ async fn a_cancel_ends_work_behind_a_backward_node_that_discards_ready_input() {
     drop(held);
     assert!(settles(&cluster).await);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_cancelled_by_its_last_local_forward_node_is_not_handed_on() {
+    let nodes = nodes(2).await;
+    let events = Events::new();
+    let cluster = deploy(&nodes, &two_segments(), &events, RuntimeConfig::default());
+    let plan = Plan {
+        tokens: 1,
+        cancel_in_forward: true,
+        ..Plan::default()
+    };
+    let result = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("cf", plan))
+        .await;
+    assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Cancelled));
+    assert!(settles(&cluster).await);
+    // A hand-off already sent would start D after the call returned.
+    tokio::time::sleep(ms(300)).await;
+    assert!(
+        !events.has("D:start:c(cf)#0"),
+        "the remote sink started: {:?}",
+        events.snapshot()
+    );
+}

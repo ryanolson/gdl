@@ -291,9 +291,14 @@ where
                 rt.send_open(segment, open).await?
             };
         }
-        match self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await? {
+        let exit = self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await?;
+        // As in local composition, nothing further starts for an interrupted
+        // request. The last forward node may have ended the attempt, and a
+        // hand-off sent now would start remote work under a context that
+        // does not carry the cancel.
+        attempt.check()?;
+        match exit {
             FwdExit::Here(value) => {
-                attempt.check()?;
                 let egress = setup(
                     attempt,
                     rt.config.setup_timeout,
