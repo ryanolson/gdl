@@ -80,7 +80,7 @@ macro_rules! wire_codec {
     ($ty:ty) => {{
         #[allow(unused_imports)]
         use $crate::__private::{ViaLocal as _, ViaWire as _};
-        (&$crate::__private::Probe::<$ty>::new()).codec()
+        (&$crate::__private::Probe::<$ty>::new()).__gdl_codec()
     }};
 }
 
@@ -108,22 +108,25 @@ pub mod probe {
         }
     }
 
+    // The method name is in the reserved `__gdl` namespace: the call sits in
+    // the caller's scope, where a trait of theirs with a method of the same
+    // name would make it ambiguous.
     pub trait ViaWire<T> {
-        fn codec(&self) -> Option<Codec<T>>;
+        fn __gdl_codec(&self) -> Option<Codec<T>>;
     }
 
     impl<T: Serialize + DeserializeOwned> ViaWire<T> for Probe<T> {
-        fn codec(&self) -> Option<Codec<T>> {
+        fn __gdl_codec(&self) -> Option<Codec<T>> {
             Some(Codec::msgpack())
         }
     }
 
     pub trait ViaLocal<T> {
-        fn codec(&self) -> Option<Codec<T>>;
+        fn __gdl_codec(&self) -> Option<Codec<T>>;
     }
 
     impl<T> ViaLocal<T> for &Probe<T> {
-        fn codec(&self) -> Option<Codec<T>> {
+        fn __gdl_codec(&self) -> Option<Codec<T>> {
             None
         }
     }

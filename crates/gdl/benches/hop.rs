@@ -76,8 +76,9 @@ async fn direct(n: u64) -> u64 {
         .map(|r| r.map(|x| x ^ 1))
         .map(|r| r.map(|x| x + 1))
         .map(|r| r.map(|x| x ^ 1))
-        .fold(0, |acc, r| async move { acc + r.unwrap_or(0) })
+        .fold(Checked::default(), Checked::add)
         .await
+        .expect(n)
 }
 
 async fn through(graph: &Source<impl Next<u64, u64>>, n: u64) -> u64 {
@@ -85,8 +86,31 @@ async fn through(graph: &Source<impl Next<u64, u64>>, n: u64) -> u64 {
         .call(Cx::new(), n)
         .await
         .expect("call")
-        .fold(0, |acc, r| async move { acc + r.unwrap_or(0) })
+        .fold(Checked::default(), Checked::add)
         .await
+        .expect(n)
+}
+
+/// The items a run produced. A failed or short run panics instead of being
+/// measured: an error or an early end would otherwise look like fast work.
+#[derive(Default)]
+struct Checked {
+    count: u64,
+    sum: u64,
+}
+
+impl Checked {
+    async fn add(self, item: gdl::Result<u64>) -> Self {
+        Self {
+            count: self.count + 1,
+            sum: self.sum + item.expect("item"),
+        }
+    }
+
+    fn expect(self, n: u64) -> u64 {
+        assert_eq!(self.count, n, "the run ended early");
+        self.sum
+    }
 }
 
 fn bench(c: &mut Criterion) {

@@ -452,7 +452,7 @@ fn require_wire(
 
 /// Structural checks on a manifest. `graph!` emits consistent manifests; a
 /// hand-written or corrupted one is caught here instead of panicking later.
-fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
+pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
     let mut errors = Vec::new();
     let mut bad = |why: String| errors.push(PlacementError::InvalidManifest(why));
 

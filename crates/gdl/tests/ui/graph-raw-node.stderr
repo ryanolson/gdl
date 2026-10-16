@@ -1,0 +1,5 @@
+error: a node name cannot be a raw identifier
+ --> tests/ui/graph-raw-node.rs:8:13
+  |
+8 |     sink    r#type: u32 -> stream u32;
+  |             ^^^^^^

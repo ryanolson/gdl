@@ -132,7 +132,7 @@ impl Manifest {
     }
 }
 
-fn role_tag(role: Role) -> &'static str {
+pub(crate) fn role_tag(role: Role) -> &'static str {
     match role {
         Role::Source => "source",
         Role::Operator => "operator",

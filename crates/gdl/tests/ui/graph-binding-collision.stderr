@@ -1,0 +1,5 @@
+error: nodes `FooBar` and `foo_bar` both get the binding name `foo_bar`; rename one
+ --> tests/ui/graph-binding-collision.rs:9:13
+  |
+9 |     sink    foo_bar: u32 -> stream u32;
+  |             ^^^^^^^

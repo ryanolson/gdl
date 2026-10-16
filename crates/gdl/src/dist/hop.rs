@@ -109,7 +109,7 @@ fn run_end(segments: &[String], pos: usize) -> usize {
         .unwrap_or(segments.len())
 }
 
-impl<F, I, B> DHop<F, I, B> {
+impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
     pub(crate) fn new(rt: Arc<Runtime>, index: u16, fwd: F, inner: I, bwd: B) -> Result<Self> {
         let hop = rt.layout.hops().get(usize::from(index)).ok_or_else(|| {
             Error::new(
@@ -117,6 +117,42 @@ impl<F, I, B> DHop<F, I, B> {
                 format!("the layout has no hop {index}"),
             )
         })?;
+        // A placeholder answers every call with `NotHosted`: in a slot this
+        // segment hosts, it would fail each request instead of the start.
+        // Slots are checked by position, so the error names the node the
+        // topology puts there, whatever placeholder fills it.
+        let path = |runs: &[crate::placement::Run]| -> Vec<(String, String)> {
+            runs.iter()
+                .flat_map(|run| {
+                    run.stages
+                        .iter()
+                        .map(|stage| (run.segment.clone(), stage.clone()))
+                })
+                .collect()
+        };
+        let forward = path(&hop.forward_runs);
+        let backward = path(&hop.backward_runs);
+        let mut forward_absent = Vec::new();
+        fwd.absent(1, &mut forward_absent);
+        if inner.absent() {
+            forward_absent.push(forward.len() - 1);
+        }
+        let mut backward_absent = Vec::new();
+        bwd.absent(1, &mut backward_absent);
+        let unbound = forward_absent
+            .iter()
+            .filter_map(|&pos| forward.get(pos))
+            .chain(backward_absent.iter().filter_map(|&pos| backward.get(pos)))
+            .find(|(segment, _)| *segment == rt.segment);
+        if let Some((_, name)) = unbound {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                format!(
+                    "segment `{}` hosts node `{name}`, but its binding is absent",
+                    rt.segment
+                ),
+            ));
+        }
         let plan = HopPlan::new(hop);
         Ok(Self(Arc::new(HopCore {
             rt,
@@ -291,9 +327,14 @@ where
                 rt.send_open(segment, open).await?
             };
         }
-        match self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await? {
+        let exit = self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await?;
+        // As in local composition, nothing further starts for an interrupted
+        // request. The last forward node may have ended the attempt, and a
+        // hand-off sent now would start remote work under a context that
+        // does not carry the cancel.
+        attempt.check()?;
+        match exit {
             FwdExit::Here(value) => {
-                attempt.check()?;
                 let egress = setup(
                     attempt,
                     rt.config.setup_timeout,
@@ -339,7 +380,7 @@ where
                 return Err(internal("an item arrived before the open signal"));
             }
         }
-        let bytes = inbound_items(inbound, None);
+        let bytes = inbound_items(inbound);
         match self
             .bwd
             .enter(1, self.plan.outer_start, usize::MAX, attempt, bytes)?
@@ -550,7 +591,7 @@ where
             }
         }
         let upstream = inbound.canceller();
-        let bytes = inbound_items(inbound, None);
+        let bytes = inbound_items(inbound);
         match self.bwd.enter(1, pos, end, &cx, bytes) {
             Ok(BwdExit::Leave { bytes, .. }) => pump(bytes, out, &cx, Some(upstream)).await,
             Ok(BwdExit::Here(_)) => {
@@ -835,51 +876,23 @@ async fn finish_failed(out: Outbound, error: Error) {
     }
 }
 
-/// An inbound anchor as a stream of encoded items. With `stop_from`, a stop
-/// requested on that context is passed to the anchor's producer.
-fn inbound_items<S>(inbound: S, stop_from: Option<Cx>) -> Items<Vec<u8>>
+/// An inbound anchor as a stream of encoded items. A stop does not pass
+/// through here: the watcher or the pump that holds the anchor forwards it.
+fn inbound_items<S>(inbound: S) -> Items<Vec<u8>>
 where
-    S: Stream<Item = Frame> + StopSource + Unpin + Send + 'static,
+    S: Stream<Item = Frame> + Unpin + Send + 'static,
 {
-    let stopping: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = stop_from.map(|cx| {
-        Box::pin(async move { cx.stopping().await }) as Pin<Box<dyn Future<Output = ()> + Send>>
-    });
-    items(InboundItems { inbound, stopping })
+    items(InboundItems(inbound))
 }
 
-struct InboundItems<S> {
-    inbound: S,
-    stopping: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-}
+struct InboundItems<S>(S);
 
-/// An inbound stream that can pass a stop to its producer.
-trait StopSource {
-    fn request_stop(&self);
-}
-
-impl StopSource for Inbound {
-    fn request_stop(&self) {
-        Inbound::request_stop(self);
-    }
-}
-
-impl StopSource for super::fabric::SharedInbound {
-    // Its retirer's watcher forwards stop; nothing reads it from here.
-    fn request_stop(&self) {}
-}
-
-impl<S: Stream<Item = Frame> + StopSource + Unpin> Stream for InboundItems<S> {
+impl<S: Stream<Item = Frame> + Unpin> Stream for InboundItems<S> {
     type Item = Result<Vec<u8>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(stopping) = self.stopping.as_mut()
-            && stopping.as_mut().poll(cx).is_ready()
-        {
-            self.stopping = None;
-            self.inbound.request_stop();
-        }
         loop {
-            return match Pin::new(&mut self.inbound).poll_next(cx) {
+            return match Pin::new(&mut self.0).poll_next(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Some(Frame::Open)) => continue,
                 Poll::Ready(Some(Frame::Item(bytes))) => Poll::Ready(Some(Ok(bytes))),

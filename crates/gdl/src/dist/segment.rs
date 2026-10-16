@@ -8,6 +8,7 @@ use super::envelope::{Forward, Open, decode, encode};
 use super::fabric::Fabric;
 use super::hop::{DHop, Register};
 use super::runtime::{Entries, Roster, Runtime, RuntimeConfig};
+use super::stages::{DBackward, DForward, DInner};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
 use crate::items::Items;
@@ -47,9 +48,31 @@ impl Deployment {
         Ok(Self { rt: Arc::new(rt) })
     }
 
+    /// Fail unless this deployment was made for the contract whose manifest
+    /// hashes to `contract_hash`. A generated `assemble` checks this first:
+    /// another contract's graph of the same shape would otherwise run here
+    /// while its envelopes claim this deployment's contract.
+    pub fn check_contract(&self, contract_hash: u64) -> Result<()> {
+        let expected = self.rt.layout.contract_hash();
+        if contract_hash == expected {
+            return Ok(());
+        }
+        Err(Error::new(
+            ErrorKind::Placement,
+            format!(
+                "this deployment was made for contract {expected:016x}, not for the graph's contract {contract_hash:016x}"
+            ),
+        ))
+    }
+
     /// Assemble hop `index` from its stages. Slots of nodes this segment does
     /// not host are `Absent`.
-    pub fn hop<F, I, B>(&self, index: u16, fwd: F, inner: I, bwd: B) -> Result<DHop<F, I, B>> {
+    pub fn hop<F, I, B>(&self, index: u16, fwd: F, inner: I, bwd: B) -> Result<DHop<F, I, B>>
+    where
+        F: DForward,
+        I: DInner,
+        B: DBackward,
+    {
         DHop::new(Arc::clone(&self.rt), index, fwd, inner, bwd)
     }
 

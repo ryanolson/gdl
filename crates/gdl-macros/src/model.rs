@@ -21,6 +21,9 @@ pub(crate) struct Graph {
 pub(crate) struct Node {
     pub(crate) ident: Ident,
     pub(crate) sig: Sig,
+    /// The node's setter on `Bindings` and its field there: the node's name
+    /// in snake case, raw when it is a keyword. The source has none.
+    pub(crate) binding: Option<Ident>,
 }
 
 pub(crate) struct Hop {
@@ -63,14 +66,28 @@ impl Graph {
                 return Err(syn::Error::new(node.ident.span(), "node declared twice"));
             }
         }
-        let nodes: Vec<Node> = input
-            .nodes
-            .into_iter()
-            .map(|decl| Node {
+        let mut bindings: BTreeMap<String, Ident> = BTreeMap::new();
+        let mut nodes: Vec<Node> = Vec::with_capacity(input.nodes.len());
+        for decl in input.nodes {
+            // The name goes into the manifest and the generated segment
+            // code as written; `r#` would have to be stripped in one and
+            // kept in the other.
+            if decl.ident.to_string().starts_with("r#") {
+                return Err(syn::Error::new(
+                    decl.ident.span(),
+                    "a node name cannot be a raw identifier",
+                ));
+            }
+            let binding = match decl.sig {
+                Sig::Source { .. } => None,
+                _ => Some(binding(&decl.ident, &mut bindings)?),
+            };
+            nodes.push(Node {
                 ident: decl.ident,
                 sig: decl.sig,
-            })
-            .collect();
+                binding,
+            });
+        }
         let sources: Vec<&Node> = nodes.iter().filter(|n| n.role() == Role::Source).collect();
         match sources.as_slice() {
             [_] => {}
@@ -137,6 +154,116 @@ impl Graph {
             .find(|n| n.role() == Role::Source)
             .expect("checked: one source")
     }
+}
+
+/// The binding name of a non-source node, checked against the names the
+/// expansion already uses: `Bindings` has a method per binding, so a binding
+/// must be a method name, unique among the nodes, and not one of the methods
+/// `Bindings` has anyway.
+fn binding(ident: &Ident, taken: &mut BTreeMap<String, Ident>) -> syn::Result<Ident> {
+    let name = ident.to_string();
+    let snake = snake_case(&name);
+    if matches!(snake.as_str(), "crate" | "self" | "super") {
+        return Err(syn::Error::new(
+            ident.span(),
+            format!(
+                "node `{name}` gets the binding name `{snake}`, which cannot name a method; rename the node"
+            ),
+        ));
+    }
+    if matches!(snake.as_str(), "new" | "default") {
+        return Err(syn::Error::new(
+            ident.span(),
+            format!(
+                "node `{name}` gets the binding name `{snake}`, which `Bindings` already uses; rename the node"
+            ),
+        ));
+    }
+    if let Some(first) = taken.get(&snake) {
+        return Err(syn::Error::new(
+            ident.span(),
+            format!("nodes `{first}` and `{name}` both get the binding name `{snake}`; rename one"),
+        ));
+    }
+    taken.insert(snake.clone(), ident.clone());
+    Ok(if is_keyword(&snake) {
+        Ident::new_raw(&snake, ident.span())
+    } else {
+        Ident::new(&snake, ident.span())
+    })
+}
+
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Every keyword a raw identifier can spell: the strict and reserved
+/// keywords of every edition (`crate`, `self`, `super`, and `Self` cannot be
+/// raw, and are rejected above). Escaping a word that is a keyword only in a
+/// later edition costs nothing.
+fn is_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "abstract"
+            | "as"
+            | "async"
+            | "await"
+            | "become"
+            | "box"
+            | "break"
+            | "const"
+            | "continue"
+            | "do"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "final"
+            | "fn"
+            | "for"
+            | "gen"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "macro"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "override"
+            | "priv"
+            | "pub"
+            | "ref"
+            | "return"
+            | "static"
+            | "struct"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "typeof"
+            | "unsafe"
+            | "unsized"
+            | "use"
+            | "virtual"
+            | "where"
+            | "while"
+            | "yield"
+    )
 }
 
 struct Builder<'a> {

@@ -226,3 +226,169 @@ async fn segments_that_bind_only_their_own_nodes_run_the_graph() {
         .expect("call");
     assert_eq!(collect(out).await, expected(0..3));
 }
+
+/// A slot may stay `Absent` only for a node another segment hosts: a
+/// segment that leaves one of its own nodes unbound is refused at assembly,
+/// not on its first request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_segment_that_leaves_a_hosted_node_unbound_is_refused() {
+    let nodes = [velo_node().await, velo_node().await];
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "C", "F", "E", "G"])
+        .segment("engine", ["D"]);
+    let manifest = contract::manifest();
+    let mut roster = Roster::new();
+    for (name, node) in ["front", "engine"].iter().zip(&nodes) {
+        roster.add(*name, node.peer_info());
+    }
+    let deployment = |index: usize, name: &str| {
+        Deployment::new(
+            Arc::clone(&nodes[index]),
+            &manifest,
+            &placement,
+            name,
+            &roster,
+            RuntimeConfig::default(),
+        )
+        .expect("deployment")
+    };
+    let events = Events::new();
+
+    let engine = deployment(1, "engine");
+    match contract::assemble(&engine, contract::Bindings::new()) {
+        Ok(_) => panic!("an engine without D was assembled"),
+        Err(error) => {
+            assert_eq!(error.kind(), gdl::ErrorKind::Placement);
+            assert!(error.to_string().contains("`D`"), "{error}");
+        }
+    }
+
+    let front = deployment(0, "front");
+    let without_c = contract::Bindings::new()
+        .b(NodeB {
+            events: Arc::clone(&events),
+        })
+        .e(NodeE)
+        .f(NodeF)
+        .g(NodeG);
+    match contract::assemble(&front, without_c) {
+        Ok(_) => panic!("a front without C was assembled"),
+        Err(error) => assert!(error.to_string().contains("`C`"), "{error}"),
+    }
+
+    // D is hosted elsewhere, so the front may leave it absent.
+    let front = deployment(0, "front");
+    let without_d = contract::Bindings::new()
+        .b(NodeB {
+            events: Arc::clone(&events),
+        })
+        .c(NodeC {
+            events: Arc::clone(&events),
+        })
+        .e(NodeE)
+        .f(NodeF)
+        .g(NodeG);
+    assert!(contract::assemble(&front, without_d).is_ok());
+}
+
+mod twins {
+    gdl::graph! {
+        name = "twins", schema = 1;
+        source  A: u32 -> stream u32;
+        forward C: u32 -> u32;
+        forward E: u32 -> u32;
+        sink    D: u32 -> stream u32;
+        topology: A => C => E => D;
+    }
+}
+
+struct Echo;
+
+struct Same;
+
+impl gdl::Forward for Same {
+    type In = u32;
+    type Out = u32;
+
+    async fn forward(&self, _cx: &Cx, req: u32) -> gdl::Result<u32> {
+        Ok(req)
+    }
+}
+
+impl gdl::Sink for Echo {
+    type Req = u32;
+    type Item = u32;
+
+    async fn generate(&self, _cx: Cx, req: u32) -> gdl::Result<gdl::Items<u32>> {
+        Ok(gdl::items(futures::stream::iter([Ok(req)])))
+    }
+}
+
+/// The check is by slot, not by the placeholder's name: `C` and `E` have the
+/// same port types, so `E`'s placeholder fits `C`'s slot, and `C` is still
+/// unbound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosted_slot_holding_another_nodes_placeholder_is_refused() {
+    let nodes = [velo_node().await, velo_node().await];
+    let placement = Placement::new()
+        .segment("front", ["A", "C", "D"])
+        .segment("side", ["E"]);
+    let manifest = twins::manifest();
+    let mut roster = Roster::new();
+    for (name, node) in ["front", "side"].iter().zip(&nodes) {
+        roster.add(*name, node.peer_info());
+    }
+    let front = Deployment::new(
+        Arc::clone(&nodes[0]),
+        &manifest,
+        &placement,
+        "front",
+        &roster,
+        RuntimeConfig::default(),
+    )
+    .expect("deployment");
+    let bindings = twins::Bindings::new()
+        .c(gdl::Absent::<twins::nodes::E>::new())
+        .d(Echo);
+    match twins::assemble(&front, bindings) {
+        Ok(_) => panic!("a front with no C was assembled"),
+        Err(error) => assert!(error.to_string().contains("`C`"), "{error}"),
+    }
+}
+
+mod twins_schema2 {
+    gdl::graph! {
+        name = "twins", schema = 2;
+        source  A: u32 -> stream u32;
+        forward C: u32 -> u32;
+        forward E: u32 -> u32;
+        sink    D: u32 -> stream u32;
+        topology: A => C => E => D;
+    }
+}
+
+/// A deployment carries the contract it was made for; assembling another
+/// contract's graph on it is refused, even when the two have the same shape
+/// (here, the same graph at another schema), so its envelopes never claim a
+/// contract that its stages do not run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembling_another_contracts_graph_is_refused() {
+    let node = velo_node().await;
+    let placement = Placement::new().segment("all", ["A", "C", "E", "D"]);
+    let mut roster = Roster::new();
+    roster.add("all", node.peer_info());
+    let deployment = Deployment::new(
+        Arc::clone(&node),
+        &twins::manifest(),
+        &placement,
+        "all",
+        &roster,
+        RuntimeConfig::default(),
+    )
+    .expect("deployment");
+    let bindings = twins_schema2::Bindings::new().c(Same).e(Same).d(Echo);
+    match twins_schema2::assemble(&deployment, bindings) {
+        Ok(_) => panic!("the schema 2 graph was assembled on a schema 1 deployment"),
+        Err(error) => assert!(error.to_string().contains("contract"), "{error}"),
+    }
+}

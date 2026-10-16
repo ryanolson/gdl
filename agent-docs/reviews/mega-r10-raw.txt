@@ -1,0 +1,3 @@
+- **P2 — [crates/gdl/src/diagram.rs:189](/home/ryan/repos/dynamo-gdl/crates/gdl/src/diagram.rs:189): Unplaced rendering bypasses manifest validation.** A hand-written or deserialized manifest whose hop references an undeclared node makes `to_dot(None)` and `to_mermaid(None)` panic at this `expect`. Missing edge types instead silently omit edges through the `zip` at line 209. Reuse the structural validation behind `gdl::layout`, return an error before rendering, and add regression tests for both cases. Static finding; the sandbox blocked compiling a reproducer.
+
+ACTIONABLE: 1

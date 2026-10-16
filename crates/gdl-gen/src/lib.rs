@@ -13,6 +13,9 @@
 //! generated, and carries a do-not-edit marker on its first line. [`write`]
 //! replaces generated files and removes marked files it no longer produces;
 //! [`drift`] reports any difference instead of writing.
+//!
+//! [`diagram`] draws the spec's placed graph as Graphviz DOT or a Mermaid
+//! flowchart.
 
 mod dump;
 mod emit;
@@ -53,6 +56,28 @@ pub type Files = BTreeMap<PathBuf, String>;
 pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
     let manifest = dump::manifest(spec, target)?;
     render_manifest(spec, &manifest, out)
+}
+
+/// A diagram format for [`diagram`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// Graphviz DOT.
+    Dot,
+    /// A Mermaid flowchart.
+    Mermaid,
+}
+
+/// The spec's placed graph as a diagram: each segment a cluster, and each
+/// edge that crosses segments marked. The contract's manifest is built in
+/// `target` (a cargo target directory), as for [`render`].
+pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
+    let manifest = dump::manifest(spec, target)?;
+    let layout = gdl::layout(&manifest, &spec.placement).map_err(|e| Error::new(e.to_string()))?;
+    match format {
+        Format::Dot => manifest.to_dot(Some(&layout)),
+        Format::Mermaid => manifest.to_mermaid(Some(&layout)),
+    }
+    .map_err(|e| Error::new(e.to_string()))
 }
 
 fn render_manifest(spec: &Spec, manifest: &gdl::Manifest, out: &Path) -> Result<Files, Error> {
@@ -198,13 +223,21 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
         }
         if bind.ty.trim().is_empty() {
             problems.push(format!("[bind.{node}]: `type` is empty"));
-        } else if bind.ty.trim_start_matches("::").split("::").next() != Some(bind.lib.as_str()) {
-            // The bound crate is the only one of the node's that the
-            // segment depends on; a type from anywhere else cannot resolve.
-            problems.push(format!(
-                "[bind.{node}]: type `{}` is not in crate `{}`",
-                bind.ty, bind.lib
-            ));
+        } else {
+            match type_crate(&bind.ty) {
+                None => problems.push(format!(
+                    "[bind.{node}]: type `{}` is not a Rust type path",
+                    bind.ty
+                )),
+                // The bound crate is the only one of the node's that the
+                // segment depends on; a type from anywhere else cannot
+                // resolve.
+                Some(krate) if krate != bind.lib => problems.push(format!(
+                    "[bind.{node}]: type `{}` is not in crate `{}`",
+                    bind.ty, bind.lib
+                )),
+                Some(_) => {}
+            }
         }
         let path = dump::absolute(&bind.path).unwrap_or_else(|_| paths::normalize(&bind.path));
         match sources.get(bind.package.as_str()) {
@@ -257,7 +290,7 @@ pub fn write(out: &Path, files: &Files) -> Result<Vec<PathBuf>, Error> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
         }
-        if std::fs::read_to_string(&path).is_ok_and(|old| &old == text) {
+        if std::fs::read_to_string(&path).is_ok_and(|existing| &existing == text) {
             continue;
         }
         std::fs::write(&path, text).map_err(|e| io(&path, e))?;
@@ -277,7 +310,7 @@ pub fn drift(out: &Path, files: &Files) -> Result<Vec<String>, Error> {
     for (path, text) in files {
         match std::fs::read_to_string(out.join(path)) {
             Err(_) => found.push(format!("missing: {}", path.display())),
-            Ok(old) if &old != text => found.push(format!("differs: {}", path.display())),
+            Ok(existing) if &existing != text => found.push(format!("differs: {}", path.display())),
             Ok(_) => {}
         }
     }
@@ -386,6 +419,17 @@ fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
 
 fn io(path: &Path, error: std::io::Error) -> Error {
     Error::new(format!("{}: {error}", path.display()))
+}
+
+/// The crate a binding's type path starts in, as cargo names the library
+/// (without a raw identifier's `r#`), or `None` if the text is not a Rust
+/// path. Parsed rather than split: a library named like a keyword appears
+/// in the path as `r#name`, and an unescaped keyword is not a path at all.
+fn type_crate(ty: &str) -> Option<String> {
+    use syn::ext::IdentExt as _;
+    let path: syn::Path = syn::parse_str(ty.trim()).ok()?;
+    let first = path.segments.first()?;
+    Some(first.ident.unraw().to_string())
 }
 
 #[cfg(test)]
@@ -548,6 +592,24 @@ mod tests {
         assert!(validate(&spec, &manifest()).is_ok());
     }
 
+    /// A library named like a keyword is valid in cargo; Rust names it with
+    /// a raw identifier, and the spec's type must too.
+    #[test]
+    fn a_keyword_library_takes_a_raw_type_path() {
+        let mut spec = spec(split(), &[("D", "r#async::D")]);
+        spec.bind.get_mut("D").expect("D").lib = "async".into();
+        assert!(validate(&spec, &manifest()).is_ok());
+
+        spec.bind.get_mut("D").expect("D").ty = "async::D".into();
+        let error = validate(&spec, &manifest())
+            .expect_err("not a path")
+            .to_string();
+        assert!(
+            error.contains("[bind.D]: type `async::D` is not a Rust type path"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_type_must_come_from_its_bound_crate() {
         let spec = spec(split(), &[("D", "contract::D")]);
@@ -604,6 +666,17 @@ mod tests {
         )
         .expect("rooted");
         assert_eq!(plain, rooted);
+        let spaced = render_manifest(
+            &spec(split(), &[("D", "  ::tiny_nodes::D ")]),
+            &manifest(),
+            out,
+        )
+        .expect("spaced");
+        assert_eq!(plain, spaced);
+        let mut module = spec(split(), &[("D", "tiny_nodes::D")]);
+        module.contract.module = "  ::tiny_contract ".into();
+        let module = render_manifest(&module, &manifest(), out).expect("module");
+        assert_eq!(plain, module);
     }
 
     #[test]
