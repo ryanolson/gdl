@@ -19,8 +19,12 @@
 //! inside the generated `nodes` module (where `super::` and a node's marker
 //! would change what a type names), and never next to a generic parameter
 //! or a local the caller could not know about. Names the expansion
-//! introduces start with `__gdl` or `__Gdl`; every other path it writes is
-//! rooted (`::std`, `::core`, or the gdl path it was given).
+//! introduces start with `__gdl` or `__Gdl`, parameters included (a
+//! parameter name is a pattern, which a caller's constant of that name would
+//! turn into a constant pattern). Each kind of introduced name has its own
+//! prefix, so a node's name can never make two of them equal. Every other
+//! path the expansion writes is rooted (`::std`, `::core`, or the gdl path it
+//! was given).
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -70,7 +74,7 @@ fn bound_nodes(graph: &Graph) -> impl Iterator<Item = &Node> {
 
 /// The type parameter for a node's slot.
 fn generic(node: &Node) -> Ident {
-    format_ident!("__Gdl{}", node.ident)
+    format_ident!("__GdlSlot{}", node.ident)
 }
 
 fn field(node: &Node) -> &Ident {
@@ -83,7 +87,7 @@ fn field(node: &Node) -> &Ident {
 /// parameter nor another local of the generated function.
 fn local_var(node: &Node) -> Ident {
     let name = field(node).to_string();
-    format_ident!("__gdl_{}", name.trim_start_matches("r#"))
+    format_ident!("__gdl_node_{}", name.trim_start_matches("r#"))
 }
 
 fn role_bound(node: &Node, krate: &TokenStream) -> TokenStream {
@@ -154,7 +158,7 @@ fn expand_nodes(graph: &Graph, krate: &TokenStream) -> TokenStream {
         };
         quote! {
             impl #krate::NodeDecl for nodes::#ident {
-                const NAME: &'static str = #name;
+                const NAME: &'static ::core::primitive::str = #name;
                 const ROLE: #krate::Role = #krate::Role::#role;
             }
             #decl
@@ -184,21 +188,21 @@ fn expand_bindings(graph: &Graph, krate: &TokenStream) -> TokenStream {
         let doc = format!("Bind node `{}`.", node.ident);
         let out_generics = generics.iter().enumerate().map(|(i, g)| {
             if i == index {
-                quote!(__GdlBound)
+                quote!(__GdlImpl)
             } else {
                 quote!(#g)
             }
         });
         let moves = fields.iter().enumerate().map(|(i, f)| {
             if i == index {
-                quote! { #f: ::std::sync::Arc::new(implementation) }
+                quote! { #f: ::std::sync::Arc::new(__gdl_implementation) }
             } else {
                 quote! { #f: self.#f }
             }
         });
         quote! {
             #[doc = #doc]
-            pub fn #setter<__GdlBound: #bound>(self, implementation: __GdlBound) -> Bindings<#(#out_generics),*> {
+            pub fn #setter<__GdlImpl: #bound>(self, __gdl_implementation: __GdlImpl) -> Bindings<#(#out_generics),*> {
                 Bindings { #(#moves),* }
             }
         }
@@ -318,7 +322,7 @@ fn signature(graph: &Graph, krate: &TokenStream) -> Signature {
                 quote! { #g: #bound }
             })
             .collect(),
-        unpack: quote! { let Bindings { #(#fields: #locals),* } = bindings; },
+        unpack: quote! { let Bindings { #(#fields: #locals),* } = __gdl_bindings; },
     }
 }
 
@@ -345,15 +349,15 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
             }
         };
         quote! {
-            let #name = deployment.hop(#index_lit, #fwd, #inner, #bwd)?;
+            let #name = __gdl_deployment.hop(#index_lit, #fwd, #inner, #bwd)?;
         }
     });
     quote! {
         /// The graph as one segment of a deployment sees it. Slots for nodes
         /// this segment does not host may stay `Absent`.
         pub fn assemble<#(#generics),*>(
-            deployment: &#krate::Deployment,
-            bindings: Bindings<#(#generics),*>,
+            __gdl_deployment: &#krate::Deployment,
+            __gdl_bindings: Bindings<#(#generics),*>,
         ) -> #krate::Result<impl #krate::Next<#req, #item> + #krate::Register + use<#(#generics),*>>
         where
             #(#bounds,)*
@@ -423,7 +427,7 @@ fn expand_local(graph: &Graph, krate: &TokenStream) -> TokenStream {
     quote! {
         /// The whole graph in one process, as nested calls.
         pub fn local<#(#generics),*>(
-            bindings: Bindings<#(#generics),*>,
+            __gdl_bindings: Bindings<#(#generics),*>,
         ) -> #krate::Source<impl #krate::Next<#req, #item> + use<#(#generics),*>>
         where
             #(#bounds,)*

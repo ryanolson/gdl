@@ -208,21 +208,29 @@ fn snake_case(name: &str) -> String {
     out
 }
 
-/// Keywords that a raw identifier can spell (`crate`, `self`, `super`, and
-/// `Self` cannot be raw, and are rejected above).
+/// Every keyword a raw identifier can spell: the strict and reserved
+/// keywords of every edition (`crate`, `self`, `super`, and `Self` cannot be
+/// raw, and are rejected above). Escaping a word that is a keyword only in a
+/// later edition costs nothing.
 fn is_keyword(word: &str) -> bool {
     matches!(
         word,
-        "as" | "async"
+        "abstract"
+            | "as"
+            | "async"
             | "await"
+            | "become"
+            | "box"
             | "break"
             | "const"
             | "continue"
+            | "do"
             | "dyn"
             | "else"
             | "enum"
             | "extern"
             | "false"
+            | "final"
             | "fn"
             | "for"
             | "gen"
@@ -231,10 +239,13 @@ fn is_keyword(word: &str) -> bool {
             | "in"
             | "let"
             | "loop"
+            | "macro"
             | "match"
             | "mod"
             | "move"
             | "mut"
+            | "override"
+            | "priv"
             | "pub"
             | "ref"
             | "return"
@@ -244,8 +255,11 @@ fn is_keyword(word: &str) -> bool {
             | "true"
             | "try"
             | "type"
+            | "typeof"
             | "unsafe"
+            | "unsized"
             | "use"
+            | "virtual"
             | "where"
             | "while"
             | "yield"
