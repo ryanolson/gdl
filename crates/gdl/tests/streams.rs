@@ -24,7 +24,7 @@ async fn a_streamed_request_flows_through_the_local_reference_graph() {
 }
 
 #[tokio::test]
-async fn an_input_error_ends_the_input_at_every_node() {
+async fn an_input_error_is_the_last_input_a_sink_sees() {
     let events = Events::new();
     let graph = streamed::contract::local(bindings(&events));
     let input = streamed::words_with_error(&events, &["x"], Error::node("bad input"), &["y"]);
