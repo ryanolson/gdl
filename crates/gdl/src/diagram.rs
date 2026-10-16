@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use crate::decl::Role;
+use crate::error::{Error, ErrorKind};
 use crate::manifest::{Manifest, TypeInfo, role_tag};
 use crate::placement::Layout;
 
@@ -21,8 +22,10 @@ const CROSSING: &str = "#d62728";
 
 impl Manifest {
     /// The graph in Graphviz DOT. With `layout`, each segment is a cluster
-    /// and edges that cross segments are drawn thick and red.
-    pub fn to_dot(&self, layout: Option<&Layout>) -> String {
+    /// and edges that cross segments are drawn thick and red. Fails if
+    /// `layout` was checked against another contract.
+    pub fn to_dot(&self, layout: Option<&Layout>) -> Result<String, Error> {
+        self.check_layout(layout)?;
         let mut out = String::new();
         let _ = writeln!(out, "digraph {} {{", dot_string(&self.name));
         let _ = writeln!(out, "    rankdir=LR;");
@@ -77,12 +80,14 @@ impl Manifest {
             );
         }
         out.push_str("}\n");
-        out
+        Ok(out)
     }
 
     /// The graph as a Mermaid flowchart. With `layout`, each segment is a
-    /// subgraph and edges that cross segments are drawn thick and red.
-    pub fn to_mermaid(&self, layout: Option<&Layout>) -> String {
+    /// subgraph and edges that cross segments are drawn thick and red. Fails
+    /// if `layout` was checked against another contract.
+    pub fn to_mermaid(&self, layout: Option<&Layout>) -> Result<String, Error> {
+        self.check_layout(layout)?;
         let mut out = String::new();
         let _ = writeln!(out, "---");
         // Front matter is YAML, where `: ` and ` #` mean something:
@@ -139,7 +144,20 @@ impl Manifest {
                 crossing.join(",")
             );
         }
-        out
+        Ok(out)
+    }
+
+    /// A layout of another contract would place none of this graph's nodes:
+    /// every node would fall outside the clusters, and every edge would
+    /// look as if it stayed in one segment.
+    fn check_layout(&self, layout: Option<&Layout>) -> Result<(), Error> {
+        match layout {
+            Some(layout) if layout.contract_hash() != self.contract_hash() => Err(Error::new(
+                ErrorKind::Placement,
+                "the layout was checked against another contract",
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Each segment of `layout`, in name order, with the indexes of its

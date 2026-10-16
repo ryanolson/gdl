@@ -94,7 +94,7 @@ cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --diagram dot | dot -Tsvg 
 - Each edge has the name of its message type. If the type has no codec, the label says `(no codec)`, because a placement cannot cut that edge.
 - Each segment is a cluster. An edge that crosses segments is thick and red.
 
-In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`. Give them `None` to draw the graph without segments, or a `Layout` from `gdl::layout` to draw it placed.
+In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`. Give them `None` to draw the graph without segments, or a `Layout` from `gdl::layout` to draw it placed. They return an error if the layout was made for another contract.
 
 ## Run the example
 

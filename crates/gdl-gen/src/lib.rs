@@ -73,10 +73,11 @@ pub enum Format {
 pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
     let manifest = dump::manifest(spec, target)?;
     let layout = gdl::layout(&manifest, &spec.placement).map_err(|e| Error::new(e.to_string()))?;
-    Ok(match format {
+    match format {
         Format::Dot => manifest.to_dot(Some(&layout)),
         Format::Mermaid => manifest.to_mermaid(Some(&layout)),
-    })
+    }
+    .map_err(|e| Error::new(e.to_string()))
 }
 
 fn render_manifest(spec: &Spec, manifest: &gdl::Manifest, out: &Path) -> Result<Files, Error> {

@@ -36,7 +36,10 @@ flowchart LR
     n5 -.->|"Tok"| n4
     n4 -.->|"Out"| n1
 "#;
-    assert_eq!(reference_manifest(|_| true).to_mermaid(None), want);
+    assert_eq!(
+        reference_manifest(|_| true).to_mermaid(None).expect("draw"),
+        want
+    );
 }
 
 #[test]
@@ -69,7 +72,10 @@ flowchart LR
     linkStyle 4,5,7 stroke:#d62728,stroke-width:3px
 "#;
     let manifest = reference_manifest(|_| true);
-    assert_eq!(manifest.to_mermaid(Some(&three_segments())), want);
+    assert_eq!(
+        manifest.to_mermaid(Some(&three_segments())).expect("draw"),
+        want
+    );
 }
 
 #[test]
@@ -93,7 +99,10 @@ fn the_reference_graph_as_dot() {
     n4 -> n1 [label="Out", style=dashed, constraint=false];
 }
 "#;
-    assert_eq!(reference_manifest(|_| true).to_dot(None), want);
+    assert_eq!(
+        reference_manifest(|_| true).to_dot(None).expect("draw"),
+        want
+    );
 }
 
 #[test]
@@ -127,7 +136,10 @@ fn the_placed_reference_graph_as_dot() {
 }
 "##;
     let manifest = reference_manifest(|_| true);
-    assert_eq!(manifest.to_dot(Some(&three_segments())), want);
+    assert_eq!(
+        manifest.to_dot(Some(&three_segments())).expect("draw"),
+        want
+    );
 }
 
 /// An edge without a codec says so, since a placement cannot cut it.
@@ -137,11 +149,13 @@ fn an_edge_without_a_codec_is_marked() {
     assert!(
         manifest
             .to_mermaid(None)
+            .expect("draw")
             .contains(r#"n5 -.->|"Tok (no codec)"| n4"#)
     );
     assert!(
         manifest
             .to_dot(None)
+            .expect("draw")
             .contains(r#"n5 -> n4 [label="Tok (no codec)", style=dashed];"#)
     );
 }
@@ -178,7 +192,7 @@ fn names_and_types_are_escaped() {
     let placement = Placement::new().segment("my \"seg\"", ["start", "end"]);
     let layout = layout(&manifest, &placement).expect("layout");
 
-    let mermaid = manifest.to_mermaid(Some(&layout));
+    let mermaid = manifest.to_mermaid(Some(&layout)).expect("draw");
     // The title is YAML front matter, not a label: quoted as YAML.
     assert!(mermaid.contains(r#"title: "odd \"graph\"""#), "{mermaid}");
     assert!(
@@ -195,7 +209,7 @@ fn names_and_types_are_escaped() {
         "{mermaid}"
     );
 
-    let dot = manifest.to_dot(Some(&layout));
+    let dot = manifest.to_dot(Some(&layout)).expect("draw");
     assert!(dot.starts_with(r#"digraph "odd \"graph\"" {"#), "{dot}");
     assert!(dot.contains(r#"label="my \"seg\"";"#), "{dot}");
     assert!(
@@ -209,9 +223,47 @@ fn names_and_types_are_escaped() {
 fn the_mermaid_title_is_a_yaml_string() {
     let mut manifest = reference_manifest(|_| true);
     manifest.name = "chat: demo # 2".to_string();
-    let mermaid = manifest.to_mermaid(None);
+    let mermaid = manifest.to_mermaid(None).expect("draw");
     assert!(
         mermaid.starts_with("---\ntitle: \"chat: demo # 2\"\n---\n"),
         "{mermaid}"
     );
+}
+
+/// A layout checked against another graph is refused: its nodes are not the
+/// manifest's, so neither the clusters nor the crossings would be right.
+#[test]
+fn a_layout_of_another_graph_is_refused() {
+    let other = Manifest {
+        name: "other".to_string(),
+        schema: 1,
+        nodes: vec![
+            NodeInfo {
+                name: "X".to_string(),
+                role: Role::Source,
+                binding: None,
+            },
+            NodeInfo {
+                name: "Y".to_string(),
+                role: Role::Sink,
+                binding: Some("y".to_string()),
+            },
+        ],
+        hops: vec![HopInfo {
+            outer: "X".to_string(),
+            forward: vec![],
+            inner: "Y".to_string(),
+            backward: vec![],
+            forward_types: vec![TypeInfo::new("u32", true)],
+            backward_types: vec![TypeInfo::new("u32", true)],
+        }],
+    };
+    let reference = three_segments();
+    for drawn in [
+        other.to_dot(Some(&reference)),
+        other.to_mermaid(Some(&reference)),
+    ] {
+        let error = drawn.expect_err("another graph's layout");
+        assert_eq!(error.kind(), gdl::ErrorKind::Placement);
+    }
 }
