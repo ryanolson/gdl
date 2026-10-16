@@ -303,7 +303,7 @@ impl Unit<'_> {
         let _ = writeln!(
             text,
             "pub use ::{} as contract;",
-            self.spec.contract.module.trim_start_matches("::")
+            self.spec.contract.module.trim().trim_start_matches("::")
         );
         let _ = writeln!(text);
         let _ = writeln!(text, "/// This segment's name in the placement.");

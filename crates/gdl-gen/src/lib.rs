@@ -673,6 +673,10 @@ mod tests {
         )
         .expect("spaced");
         assert_eq!(plain, spaced);
+        let mut module = spec(split(), &[("D", "tiny_nodes::D")]);
+        module.contract.module = "  ::tiny_contract ".into();
+        let module = render_manifest(&module, &manifest(), out).expect("module");
+        assert_eq!(plain, module);
     }
 
     #[test]
