@@ -425,6 +425,7 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
         where
             #(#bounds,)*
         {
+            __gdl_deployment.check_contract(manifest().contract_hash())?;
             #unpack
             #(#hops)*
             ::core::result::Result::Ok(__gdl_hop_0)

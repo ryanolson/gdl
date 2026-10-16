@@ -304,6 +304,17 @@ mod twins {
 
 struct Echo;
 
+struct Same;
+
+impl gdl::Forward for Same {
+    type In = u32;
+    type Out = u32;
+
+    async fn forward(&self, _cx: &Cx, req: u32) -> gdl::Result<u32> {
+        Ok(req)
+    }
+}
+
 impl gdl::Sink for Echo {
     type Req = u32;
     type Item = u32;
@@ -342,5 +353,42 @@ async fn a_hosted_slot_holding_another_nodes_placeholder_is_refused() {
     match twins::assemble(&front, bindings) {
         Ok(_) => panic!("a front with no C was assembled"),
         Err(error) => assert!(error.to_string().contains("`C`"), "{error}"),
+    }
+}
+
+mod twins_v2 {
+    gdl::graph! {
+        name = "twins", schema = 2;
+        source  A: u32 -> stream u32;
+        forward C: u32 -> u32;
+        forward E: u32 -> u32;
+        sink    D: u32 -> stream u32;
+        topology: A => C => E => D;
+    }
+}
+
+/// A deployment carries the contract it was made for; assembling another
+/// contract's graph on it is refused, even when the two have the same shape
+/// (here, the same graph at another schema), so its envelopes never claim a
+/// contract that its stages do not run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembling_another_contracts_graph_is_refused() {
+    let node = velo_node().await;
+    let placement = Placement::new().segment("all", ["A", "C", "E", "D"]);
+    let mut roster = Roster::new();
+    roster.add("all", node.peer_info());
+    let deployment = Deployment::new(
+        Arc::clone(&node),
+        &twins::manifest(),
+        &placement,
+        "all",
+        &roster,
+        RuntimeConfig::default(),
+    )
+    .expect("deployment");
+    let bindings = twins_v2::Bindings::new().c(Same).e(Same).d(Echo);
+    match twins_v2::assemble(&deployment, bindings) {
+        Ok(_) => panic!("the schema 2 graph was assembled on a schema 1 deployment"),
+        Err(error) => assert!(error.to_string().contains("contract"), "{error}"),
     }
 }

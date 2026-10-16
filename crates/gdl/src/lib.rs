@@ -78,6 +78,8 @@ pub use wire::Codec;
 ///   types, so a mismatched implementation fails to compile there;
 /// - `manifest()`: the graph as data, for placement validation;
 /// - `assemble(&deployment, bindings)`: the hops as one segment runs them;
+///   it fails if the deployment was made for another contract, or if a node
+///   the segment hosts has no binding;
 /// - `local(bindings)`: the whole graph as nested calls in one process;
 /// - `SourceReq` and `SourceItem`: aliases for the source's request and item
 ///   types.

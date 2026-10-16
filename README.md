@@ -42,7 +42,7 @@ The macro checks the topology at compile time. An implementation with the wrong 
 
 - `Bindings`: one slot for each node other than the source, filled with `Bindings::new().preprocess(...).engine(...)`.
 - `local(bindings)`: the whole graph as nested calls in one process.
-- `assemble(&deployment, bindings)`: the part of the graph that one segment runs.
+- `assemble(&deployment, bindings)`: the part of the graph that one segment runs. It fails if the deployment was made for another contract, or if a node that the segment hosts has no binding.
 - `manifest()`: the graph as data, with the wire capability of each edge type.
 - `SourceReq` and `SourceItem`: the source's request and item types.
 
