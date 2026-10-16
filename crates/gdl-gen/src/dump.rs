@@ -15,16 +15,13 @@ use crate::spec::Spec;
 /// The manifest of `spec`'s contract. `target` is the cargo target directory
 /// to build in; reusing one across runs keeps the build incremental.
 pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
-    // The program's source is private to this run, so concurrent runs over
-    // one target directory cannot rewrite each other's program between
-    // writing it and building it. Only the build cache is shared.
-    let private = Private::new(target.join("gdl-gen").join(format!(
-        "dump-{}-{}-{}",
-        spec.contract.package,
-        std::process::id(),
-        RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )))?;
-    let work = private.path();
+    // Every dump in `target` builds the same program at the same path.
+    // Holding the directory's lock from writing the program until it has
+    // run keeps another dump from replacing it in between, which would make
+    // this one print the other contract's manifest.
+    let _lock = lock(target)?;
+    let work = target.join("gdl-gen").join("dump");
+    std::fs::create_dir_all(work.join("src")).map_err(|e| io(&work, e))?;
     let contract = absolute(&spec.contract.path)?;
     let manifest = format!(
         "[package]\n\
@@ -66,29 +63,6 @@ pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
     gdl::Manifest::from_toml(&text).map_err(|e| Error::new(format!("reading the manifest: {e}")))
 }
 
-/// Runs in this process, so two renders in one process get two directories.
-static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// A directory removed when dropped.
-struct Private(PathBuf);
-
-impl Private {
-    fn new(path: PathBuf) -> Result<Self, Error> {
-        std::fs::create_dir_all(path.join("src")).map_err(|e| io(&path, e))?;
-        Ok(Self(path))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Private {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 fn write(path: &Path, text: &str) -> Result<(), Error> {
     std::fs::write(path, text).map_err(|e| io(path, e))
 }
@@ -103,4 +77,51 @@ pub(crate) fn toml_string(text: &str) -> String {
 
 fn io(path: &Path, error: std::io::Error) -> Error {
     Error::new(format!("{}: {error}", path.display()))
+}
+
+/// Exclusive use of the dump program in `target`, until dropped.
+fn lock(target: &Path) -> Result<std::fs::File, Error> {
+    let dir = target.join("gdl-gen");
+    std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
+    let path = dir.join("dump.lock");
+    let file = std::fs::File::create(&path).map_err(|e| io(&path, e))?;
+    file.lock().map_err(|e| io(&path, e))?;
+    Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// Every dump in one target directory builds and runs the same program
+    /// path, so a dump must hold the directory's lock from its build until
+    /// its program has run: otherwise another dump can replace the program
+    /// in between, and this one reads the other contract's manifest.
+    #[test]
+    fn a_dump_waits_while_another_holds_the_target_directory() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let spec = Spec::load(&root.join("examples/chat/gdl.toml")).expect("spec");
+        let target = root.join("target/gdl-gen-tests");
+        // Built once first, so the wait below is the lock and not a build.
+        manifest(&spec, &target).expect("manifest");
+
+        let held = lock(&target).expect("lock");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiting = target.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(manifest(&spec, &waiting).map(|m| m.name));
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(3)).is_err(),
+            "a dump ran while another held the target directory"
+        );
+        drop(held);
+        let name = rx
+            .recv_timeout(Duration::from_secs(120))
+            .expect("the dump finished")
+            .expect("manifest");
+        assert_eq!(name, "chat");
+    }
 }
