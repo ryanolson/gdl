@@ -222,13 +222,21 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
         }
         if bind.ty.trim().is_empty() {
             problems.push(format!("[bind.{node}]: `type` is empty"));
-        } else if bind.ty.trim_start_matches("::").split("::").next() != Some(bind.lib.as_str()) {
-            // The bound crate is the only one of the node's that the
-            // segment depends on; a type from anywhere else cannot resolve.
-            problems.push(format!(
-                "[bind.{node}]: type `{}` is not in crate `{}`",
-                bind.ty, bind.lib
-            ));
+        } else {
+            match type_crate(&bind.ty) {
+                None => problems.push(format!(
+                    "[bind.{node}]: type `{}` is not a Rust type path",
+                    bind.ty
+                )),
+                // The bound crate is the only one of the node's that the
+                // segment depends on; a type from anywhere else cannot
+                // resolve.
+                Some(krate) if krate != bind.lib => problems.push(format!(
+                    "[bind.{node}]: type `{}` is not in crate `{}`",
+                    bind.ty, bind.lib
+                )),
+                Some(_) => {}
+            }
         }
         let path = dump::absolute(&bind.path).unwrap_or_else(|_| paths::normalize(&bind.path));
         match sources.get(bind.package.as_str()) {
@@ -412,6 +420,17 @@ fn io(path: &Path, error: std::io::Error) -> Error {
     Error::new(format!("{}: {error}", path.display()))
 }
 
+/// The crate a binding's type path starts in, as cargo names the library
+/// (without a raw identifier's `r#`), or `None` if the text is not a Rust
+/// path. Parsed rather than split: a library named like a keyword appears
+/// in the path as `r#name`, and an unescaped keyword is not a path at all.
+fn type_crate(ty: &str) -> Option<String> {
+    use syn::ext::IdentExt as _;
+    let path: syn::Path = syn::parse_str(ty.trim()).ok()?;
+    let first = path.segments.first()?;
+    Some(first.ident.unraw().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +589,24 @@ mod tests {
         assert!(validate(&spec, &manifest()).is_err());
         spec.bind.get_mut("D").expect("D").lib = "tiny_nodes".into();
         assert!(validate(&spec, &manifest()).is_ok());
+    }
+
+    /// A library named like a keyword is valid in cargo; Rust names it with
+    /// a raw identifier, and the spec's type must too.
+    #[test]
+    fn a_keyword_library_takes_a_raw_type_path() {
+        let mut spec = spec(split(), &[("D", "r#async::D")]);
+        spec.bind.get_mut("D").expect("D").lib = "async".into();
+        assert!(validate(&spec, &manifest()).is_ok());
+
+        spec.bind.get_mut("D").expect("D").ty = "async::D".into();
+        let error = validate(&spec, &manifest())
+            .expect_err("not a path")
+            .to_string();
+        assert!(
+            error.contains("[bind.D]: type `async::D` is not a Rust type path"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -454,6 +454,7 @@ version = "0.1.0"
 dependencies = [
  "gdl",
  "serde",
+ "syn 2.0.119",
  "toml 0.9.12+spec-1.1.0",
 ]
 
