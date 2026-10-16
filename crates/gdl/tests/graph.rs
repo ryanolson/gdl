@@ -226,3 +226,67 @@ async fn segments_that_bind_only_their_own_nodes_run_the_graph() {
         .expect("call");
     assert_eq!(collect(out).await, expected(0..3));
 }
+
+/// A slot may stay `Absent` only for a node another segment hosts: a
+/// segment that leaves one of its own nodes unbound is refused at assembly,
+/// not on its first request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_segment_that_leaves_a_hosted_node_unbound_is_refused() {
+    let nodes = [velo_node().await, velo_node().await];
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "C", "F", "E", "G"])
+        .segment("engine", ["D"]);
+    let manifest = contract::manifest();
+    let mut roster = Roster::new();
+    for (name, node) in ["front", "engine"].iter().zip(&nodes) {
+        roster.add(*name, node.peer_info());
+    }
+    let deployment = |index: usize, name: &str| {
+        Deployment::new(
+            Arc::clone(&nodes[index]),
+            &manifest,
+            &placement,
+            name,
+            &roster,
+            RuntimeConfig::default(),
+        )
+        .expect("deployment")
+    };
+    let events = Events::new();
+
+    let engine = deployment(1, "engine");
+    match contract::assemble(&engine, contract::Bindings::new()) {
+        Ok(_) => panic!("an engine without D was assembled"),
+        Err(error) => {
+            assert_eq!(error.kind(), gdl::ErrorKind::Placement);
+            assert!(error.to_string().contains("`D`"), "{error}");
+        }
+    }
+
+    let front = deployment(0, "front");
+    let without_c = contract::Bindings::new()
+        .b(NodeB {
+            events: Arc::clone(&events),
+        })
+        .e(NodeE)
+        .f(NodeF)
+        .g(NodeG);
+    match contract::assemble(&front, without_c) {
+        Ok(_) => panic!("a front without C was assembled"),
+        Err(error) => assert!(error.to_string().contains("`C`"), "{error}"),
+    }
+
+    // D is hosted elsewhere, so the front may leave it absent.
+    let front = deployment(0, "front");
+    let without_d = contract::Bindings::new()
+        .b(NodeB {
+            events: Arc::clone(&events),
+        })
+        .c(NodeC {
+            events: Arc::clone(&events),
+        })
+        .e(NodeE)
+        .f(NodeF)
+        .g(NodeG);
+    assert!(contract::assemble(&front, without_d).is_ok());
+}

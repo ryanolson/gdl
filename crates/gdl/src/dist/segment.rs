@@ -8,6 +8,7 @@ use super::envelope::{Forward, Open, decode, encode};
 use super::fabric::Fabric;
 use super::hop::{DHop, Register};
 use super::runtime::{Entries, Roster, Runtime, RuntimeConfig};
+use super::stages::{DBackward, DForward, DInner};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
 use crate::items::Items;
@@ -49,7 +50,12 @@ impl Deployment {
 
     /// Assemble hop `index` from its stages. Slots of nodes this segment does
     /// not host are `Absent`.
-    pub fn hop<F, I, B>(&self, index: u16, fwd: F, inner: I, bwd: B) -> Result<DHop<F, I, B>> {
+    pub fn hop<F, I, B>(&self, index: u16, fwd: F, inner: I, bwd: B) -> Result<DHop<F, I, B>>
+    where
+        F: DForward,
+        I: DInner,
+        B: DBackward,
+    {
         DHop::new(Arc::clone(&self.rt), index, fwd, inner, bwd)
     }
 

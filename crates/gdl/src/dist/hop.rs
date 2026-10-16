@@ -109,7 +109,7 @@ fn run_end(segments: &[String], pos: usize) -> usize {
         .unwrap_or(segments.len())
 }
 
-impl<F, I, B> DHop<F, I, B> {
+impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
     pub(crate) fn new(rt: Arc<Runtime>, index: u16, fwd: F, inner: I, bwd: B) -> Result<Self> {
         let hop = rt.layout.hops().get(usize::from(index)).ok_or_else(|| {
             Error::new(
@@ -117,6 +117,27 @@ impl<F, I, B> DHop<F, I, B> {
                 format!("the layout has no hop {index}"),
             )
         })?;
+        // A placeholder answers every call with `NotHosted`: in a slot this
+        // segment hosts, it would fail each request instead of the start.
+        let mut absent = Vec::new();
+        fwd.absent(&mut absent);
+        inner.absent(&mut absent);
+        bwd.absent(&mut absent);
+        let hosted = |name: &str| {
+            hop.forward_runs
+                .iter()
+                .chain(&hop.backward_runs)
+                .any(|run| run.segment == rt.segment && run.stages.iter().any(|s| s == name))
+        };
+        if let Some(name) = absent.into_iter().find(|name| hosted(name)) {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                format!(
+                    "segment `{}` hosts node `{name}`, but its binding is absent",
+                    rt.segment
+                ),
+            ));
+        }
         let plan = HopPlan::new(hop);
         Ok(Self(Arc::new(HopCore {
             rt,

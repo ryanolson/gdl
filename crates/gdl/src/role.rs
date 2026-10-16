@@ -19,6 +19,12 @@ pub trait Sink: Send + Sync + 'static {
     /// The response item type.
     type Item: Send + 'static;
 
+    /// The node this slot stands in for, when it is the `Absent`
+    /// placeholder: a segment refuses to assemble with a placeholder in a
+    /// slot it hosts, so the placeholder's methods are never called.
+    #[doc(hidden)]
+    const ABSENT: Option<&'static str> = None;
+
     /// Handle one request.
     fn generate(
         &self,
@@ -35,6 +41,12 @@ pub trait Forward: Send + Sync + 'static {
     /// The request type it passes on.
     type Out: Send + 'static;
 
+    /// The node this slot stands in for, when it is the `Absent`
+    /// placeholder: a segment refuses to assemble with a placeholder in a
+    /// slot it hosts, so the placeholder's methods are never called.
+    #[doc(hidden)]
+    const ABSENT: Option<&'static str> = None;
+
     /// Transform one request.
     fn forward(&self, cx: &Cx, req: Self::In) -> impl Future<Output = Result<Self::Out>> + Send;
 }
@@ -46,6 +58,12 @@ pub trait Backward: Send + Sync + 'static {
     type In: Send + 'static;
     /// The item type it passes on.
     type Out: Send + 'static;
+
+    /// The node this slot stands in for, when it is the `Absent`
+    /// placeholder: a segment refuses to assemble with a placeholder in a
+    /// slot it hosts, so the placeholder's methods are never called.
+    #[doc(hidden)]
+    const ABSENT: Option<&'static str> = None;
 
     /// Transform one response stream. The returned stream must own what it
     /// uses: it outlives this call.
@@ -75,6 +93,12 @@ pub trait Operator: Send + Sync + 'static {
     type DownReq: Send + 'static;
     /// The item type it receives from downstream.
     type DownItem: Send + 'static;
+
+    /// The node this slot stands in for, when it is the `Absent`
+    /// placeholder: a segment refuses to assemble with a placeholder in a
+    /// slot it hosts, so the placeholder's methods are never called.
+    #[doc(hidden)]
+    const ABSENT: Option<&'static str> = None;
 
     /// Handle one upstream request.
     fn generate<N>(

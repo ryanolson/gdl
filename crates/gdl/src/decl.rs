@@ -118,6 +118,7 @@ impl<D: NodeDecl> fmt::Debug for Absent<D> {
 impl<D: SinkDecl> Sink for Absent<D> {
     type Req = D::Req;
     type Item = D::Item;
+    const ABSENT: Option<&'static str> = Some(D::NAME);
 
     async fn generate(&self, _cx: Cx, _req: Self::Req) -> Result<Items<Self::Item>> {
         Err(Error::not_hosted(D::NAME))
@@ -127,6 +128,7 @@ impl<D: SinkDecl> Sink for Absent<D> {
 impl<D: ForwardDecl> Forward for Absent<D> {
     type In = D::In;
     type Out = D::Out;
+    const ABSENT: Option<&'static str> = Some(D::NAME);
 
     async fn forward(&self, _cx: &Cx, _req: Self::In) -> Result<Self::Out> {
         Err(Error::not_hosted(D::NAME))
@@ -136,6 +138,7 @@ impl<D: ForwardDecl> Forward for Absent<D> {
 impl<D: BackwardDecl> Backward for Absent<D> {
     type In = D::In;
     type Out = D::Out;
+    const ABSENT: Option<&'static str> = Some(D::NAME);
 
     fn backward(&self, _cx: &Cx, _input: Items<Self::In>) -> Items<Self::Out> {
         Box::pin(futures::stream::once(async {
@@ -149,6 +152,7 @@ impl<D: OperatorDecl> Operator for Absent<D> {
     type UpItem = D::UpItem;
     type DownReq = D::DownReq;
     type DownItem = D::DownItem;
+    const ABSENT: Option<&'static str> = Some(D::NAME);
 
     async fn generate<N>(&self, _cx: Cx, _req: Self::UpReq, _next: N) -> Result<Items<Self::UpItem>>
     where

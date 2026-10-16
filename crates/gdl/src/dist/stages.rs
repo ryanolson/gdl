@@ -43,6 +43,10 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
     /// The request type that reaches the inner end.
     type Out: Send + 'static;
 
+    /// Collect the nodes in this part of the hop whose slot is `Absent`.
+    #[doc(hidden)]
+    fn absent(&self, out: &mut Vec<&'static str>);
+
     #[doc(hidden)]
     fn walk(
         &self,
@@ -97,6 +101,11 @@ where
     type In = F::In;
     type Out = R::Out;
 
+    fn absent(&self, out: &mut Vec<&'static str>) {
+        out.extend(F::ABSENT);
+        self.rest.absent(out);
+    }
+
     async fn walk(&self, pos: usize, end: usize, cx: &Cx, value: F::In) -> Result<FwdExit<R::Out>> {
         if pos >= end {
             return Ok(FwdExit::Leave {
@@ -131,6 +140,8 @@ impl<T: Send + 'static> DForward for FwdEnd<T> {
     type In = T;
     type Out = T;
 
+    fn absent(&self, _out: &mut Vec<&'static str>) {}
+
     async fn walk(&self, pos: usize, end: usize, _cx: &Cx, value: T) -> Result<FwdExit<T>> {
         if pos >= end {
             return Ok(FwdExit::Leave {
@@ -163,6 +174,10 @@ pub trait DBackward: sealed::Sealed + Send + Sync + 'static {
     type In: Send + 'static;
     /// The item type that reaches the outer end.
     type Out: Send + 'static;
+
+    /// Collect the nodes in this part of the hop whose slot is `Absent`.
+    #[doc(hidden)]
+    fn absent(&self, out: &mut Vec<&'static str>);
 
     #[doc(hidden)]
     fn walk(
@@ -218,6 +233,11 @@ where
     type In = B::In;
     type Out = R::Out;
 
+    fn absent(&self, out: &mut Vec<&'static str>) {
+        out.extend(B::ABSENT);
+        self.rest.absent(out);
+    }
+
     fn walk(&self, pos: usize, end: usize, attempt: &Cx, items: Items<B::In>) -> BwdExit<R::Out> {
         if pos >= end {
             return BwdExit::Leave {
@@ -259,6 +279,8 @@ impl<T: Send + 'static> DBackward for BwdEnd<T> {
     type In = T;
     type Out = T;
 
+    fn absent(&self, _out: &mut Vec<&'static str>) {}
+
     fn walk(&self, pos: usize, end: usize, _attempt: &Cx, items: Items<T>) -> BwdExit<T> {
         if pos >= end {
             return BwdExit::Leave {
@@ -292,6 +314,10 @@ pub trait DInner: sealed::Sealed + Send + Sync + 'static {
     /// The item type the inner end produces.
     type Item: Send + 'static;
 
+    /// Collect the nodes in this part of the hop whose slot is `Absent`.
+    #[doc(hidden)]
+    fn absent(&self, out: &mut Vec<&'static str>);
+
     #[doc(hidden)]
     fn call(
         &self,
@@ -316,6 +342,10 @@ impl<S> DSink<S> {
 impl<S: Sink> DInner for DSink<S> {
     type Req = S::Req;
     type Item = S::Item;
+
+    fn absent(&self, out: &mut Vec<&'static str>) {
+        out.extend(S::ABSENT);
+    }
 
     async fn call(&self, cx: Cx, req: S::Req) -> Result<Items<S::Item>> {
         self.0.generate(cx, req).await
@@ -344,6 +374,11 @@ where
 {
     type Req = O::UpReq;
     type Item = O::UpItem;
+
+    /// The operator only: its downstream hop checks its own slots.
+    fn absent(&self, out: &mut Vec<&'static str>) {
+        out.extend(O::ABSENT);
+    }
 
     async fn call(&self, cx: Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
         self.op.generate(cx, req, self.next.clone()).await
