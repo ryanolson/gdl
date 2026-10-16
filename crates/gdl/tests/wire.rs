@@ -126,7 +126,11 @@ fn a_request_and_its_edge_must_agree_on_streaming() {
 
     let value = wire_codec!(u32).expect("wire");
     let bytes = value.encode(&3).expect("encode");
-    assert!(value.join(&bytes, Some(items(futures::stream::empty()))).is_err());
+    assert!(
+        value
+            .join(&bytes, Some(items(futures::stream::empty())))
+            .is_err()
+    );
     let stream = gdl::stream_codec!(u32, u32).expect("wire");
     assert!(stream.join(&bytes, None).is_err());
 }
