@@ -665,6 +665,13 @@ mod tests {
         )
         .expect("rooted");
         assert_eq!(plain, rooted);
+        let spaced = render_manifest(
+            &spec(split(), &[("D", "  ::tiny_nodes::D ")]),
+            &manifest(),
+            out,
+        )
+        .expect("spaced");
+        assert_eq!(plain, spaced);
     }
 
     #[test]

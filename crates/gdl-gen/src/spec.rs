@@ -157,7 +157,7 @@ impl Spec {
             toml::from_str(text).map_err(|e| Error::new(format!("{}: {e}", file.display())))?;
         let contract_path = dir.join(&raw.contract.path);
         let CrateNames { package, lib } = crate_names(&contract_path)?;
-        let module = raw.contract.module.unwrap_or_else(|| lib.clone());
+        let module = raw.contract.module.unwrap_or_else(|| default_module(&lib));
         let gdl = match (raw.gdl.path, raw.gdl.version) {
             (Some(path), None) => GdlDep::Path(dir.join(path)),
             (None, Some(version)) => GdlDep::Version(version),
@@ -227,6 +227,17 @@ fn crate_names(dir: &Path) -> Result<CrateNames, Error> {
         .and_then(toml::Value::as_str)
         .map_or_else(|| package.replace('-', "_"), str::to_string);
     Ok(CrateNames { package, lib })
+}
+
+/// The Rust path of a contract library's root: its name, or `r#name` when
+/// the name is a keyword (cargo accepts a library named `async`, and Rust
+/// reaches it only as `r#async`).
+fn default_module(lib: &str) -> String {
+    if syn::parse_str::<syn::Ident>(lib).is_ok() {
+        lib.to_string()
+    } else {
+        format!("r#{lib}")
+    }
 }
 
 #[cfg(test)]
@@ -325,5 +336,12 @@ mod tests {
         let text = "[contract]\npath = \"contract\"\n[gdl]\n";
         assert!(Spec::parse(text, &dir.join("gdl.toml"), &dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A contract library named like a keyword is reached as `r#name`.
+    #[test]
+    fn the_default_module_escapes_a_keyword_library() {
+        assert_eq!(default_module("chat_contract"), "chat_contract");
+        assert_eq!(default_module("async"), "r#async");
     }
 }

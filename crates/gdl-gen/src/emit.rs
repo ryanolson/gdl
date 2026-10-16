@@ -189,7 +189,7 @@ impl Unit<'_> {
                     package: &bind.package,
                     // `::crate::Type` and `crate::Type` are one path; the
                     // emitted code adds the root itself.
-                    ty: bind.ty.trim_start_matches("::"),
+                    ty: bind.ty.trim().trim_start_matches("::"),
                 }
             })
             .collect()
