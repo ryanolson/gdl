@@ -1,6 +1,6 @@
 # dynamo-gdl plan
 
-Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Measurements: `agent-docs/perf/`.
+Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Streaming requests (section 7.9, milestones 7 to 9) planned 2026-10-16. Measurements: `agent-docs/perf/`.
 
 ## 1. Goal
 
@@ -12,6 +12,8 @@ A general Rust tool to express request/response streaming pipelines as graphs, t
 4. **Run** segments as separate processes over [velo](https://github.com/ai-dynamo/velo) 0.19. Inside a segment, a hop is a plain function call. Between segments, requests travel as velo active messages and responses travel as velo streams.
 
 Non-goals for the first release: streaming requests (bidirectional), fan-out ports, instance-selection policies beyond round robin, service discovery, and non-Rust segments. Section 12 lists these as later work; the design must not block them.
+
+**Addendum 2026-10-16 (owner request).** Streaming requests are no longer a non-goal. A request may carry a stream of items as well as a head value, and both directions stream at once. Section 7.9 has the design, and milestones 7 to 9 build it.
 
 ## 2. Vocabulary
 
@@ -241,6 +243,72 @@ A remote forward node cannot observe cancel in the middle of its transform: no a
 | Unary calls have no deadline and cannot be cancelled remotely | every gdl unary runs under a timeout |
 | A handler context exposes the messenger, not `Velo` | entry handlers capture a `Weak<Velo>` |
 | velo does not publish itself to discovery | the roster is explicit |
+| A reader is bound to the process that minted its anchor: the registry entry, frame channel, and mux slot live in the minter's `AnchorManager`, and no API hands a reader to another process | the consumer of a stream always mints its anchor, in both directions (7.9) |
+| A same-worker attach writes into the anchor's 256-frame channel: no credit window, no byte budget, no watchdog | a same-instance producer can queue up to 256 frames of any size |
+
+### 7.9 Streaming requests
+
+A streaming request carries a head value and a stream of items, and its response streams back at the same time. The prior art is rhino-asr, where one unary call returns the handle of an anchor that the server minted for the client's audio. gdl keeps that direction and closes the gaps it leaves (rulings 19 to 30).
+
+**Type.** `gdl::Streamed<H, T>` holds a public `head: H` and private items. `Streamed::new(head, items)` fuses the items after their first `Err`, and `into_parts` takes it apart. A pure stream is `H = ()`. It is an ordinary request type: the role traits, `Absent`, and local composition do not change. A forward node on a streamed edge maps the head and wraps the items. Streaming is a property of each forward edge, so a forward node may also turn a value into a stream, or a stream into a value.
+
+**Syntax.** A request position takes `Head + stream Item`, or `stream Item` with a head of `()`:
+
+```
+sink     D: Pre + stream Frame -> stream Raw;
+forward  C: Pre + stream Frame -> Pre + stream Frame;
+operator B: (Req + stream Audio -> stream Chunk) over (Pre + stream Frame -> stream Out);
+```
+
+The port type is `Streamed<Pre, Frame>`. Both ends of a forward edge must agree on whether it is streamed, and a response type cannot be streamed. The manifest records the item type of a streamed edge, and the contract hash covers it.
+
+**Codec.** A forward edge's codec splits a value into head bytes and, for a streamed edge, a stream of encoded items, and joins them back. The macro picks the codec from the syntax: `stream_codec!(H, T)` for a streamed edge, which exists when both parts are wire types, and `wire_codec!(T)` otherwise. A `Streamed` named through a type alias is an ordinary type with no codec, so it cannot cross.
+
+**Direction.** The response direction is unchanged (7.2). On the request direction, the stage that reads the items mints their anchor, because velo binds a reader to the process that minted the anchor (7.8):
+
+```
+outer end O                              receiver R (accepts gdl.fwd at pos)
+  walk forward stages; leave at pos
+  egress permit (input producer)
+  gdl.fwd {.., reply, payload = head} ->
+                                          arrive; admission; egress (inner end or relay)
+                                          mint input anchor I (+ticket), last
+                                          spawn the run; ack Some(I)
+  <- Some(I)
+  spawn input pump: open or attach I,
+    pump the items into it
+  wait for Open on anchor_k (7.2)         run: join(head, items of I), then the inner
+                                            end, or forward stages and a relay
+```
+
+A relay is a forward run that hands a streamed request on. It reads its input anchor, runs its forward stages, sends `gdl.fwd` onward, and pumps the transformed items into the next receiver's anchor. Placement `{A,B,G} {C} {D,F,E}` with a streamed hop 1:
+
+```
+s0 B: next.generate(Streamed{pre, frames}); mint anchor_k; watcher
+s0 -> s1 gdl.fwd{pos 1, reply k, head}; s1 mints R1, acks Some(R1)
+s0 pump frames -> R1
+s1 C(head, items of R1) -> s2 gdl.fwd{pos 2, reply k, head'}; s2 mints R2, acks Some(R2)
+s1 pump C's items -> R2 (upstream: R1)
+s2 D(head'', items of R2); Open -> anchor_k; F, E -> anchor_k -> B -> G -> A
+end:   s0 finalizes R1 -> s1 finalizes R2 -> D ends -> s2 finalizes k, retires R2
+early: D ends first -> s2 retires R2 -> s1's pump sees the cancel, cancels R1 -> s0's pump stops
+```
+
+**Lifecycle.**
+
+| Event | What happens |
+|---|---|
+| The input ends | its pump finalizes the input anchor; the node sees a clean end; the response goes on (half-close) |
+| The input yields `Err` | the pump sends `Fail`, then finalizes; the node sees that `Err` as its input's last item |
+| The input producer dies, or its stream ends without `Finalized` | the node's input ends with `Err(Truncated)` (or `Transport`, `Codec`), never a clean end |
+| The receiving run ends (the response ended, failed, was cancelled, or passed its deadline) | it retires its input anchor; the sender's pump sees the cancel and stops without writing anything |
+| The sender's attempt is cancelled or passes its deadline | its pump sends `Fail(reason)` to the input, then finalizes, and stops |
+| The ack is lost | the sender never attaches; the receiver's run ends by the response side or by its deadline, and retires the anchor then |
+| Stop | not a request-side signal: pumps neither react to it nor forward it (ruling 26) |
+
+**Admission and egress.** An input pump is a producer: the sender takes an egress permit before it sends `gdl.fwd`. A receiving inner end holds its admission share and egress until its stream retires, as before. A relay takes egress before it acknowledges and holds its share until its relay ends.
+
+**Deadlock across directions.** The two anchors of a call have independent credit, and velo detects no deadlock between them. Each input pump runs on its own task and is never driven by reading the response, so the runtime adds no coupling. A deadlock the application builds itself (a sink that waits for its output to be read while its caller waits for input credit) is bounded only by the deadline.
 
 ## 8. Transport decision
 
@@ -367,10 +435,13 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 4 | `graph!` macro, manifest emission, wire probe, `Bindings`, typed structure | generated structure matches the hand-written one; trybuild pass and fail cases; manifest snapshot |
 | 5 | `gdl-gen`, generated example segments, `Build`, `--check`, dependency isolation | generated crates build; three segment binaries run end to end, including a node with async, non-default construction; `--check` catches drift; the sentinel crate is absent from the other segments' trees |
 | 6 | README, examples, docs sweep | docs match code |
+| 7 | Streaming requests, local: `Streamed`, the request codec, `graph!` syntax, manifest stream marker and hash, `NotWire` for both parts, request anchors in the crossing report; a placement that crosses a streamed edge is refused until milestone 8 | a streamed reference graph runs locally (on both hops, so an operator forwards its own input); input errors are fused at every node; a sink that ends early releases its input; an operator retries from its own buffer; forward nodes that expand and collapse a stream; trybuild cases for the syntax; the stream marker changes the contract hash |
+| 8 | Streaming requests across segments: the ack carries the input anchor, input pumps, relays, input retirement, admission and egress amendments | all 877 partitions of the streamed reference graph match the local run; fault tests mirror milestone 3's for input (lost ack, dead input producer, receiver that drops its input, early completion, cancel during setup and streaming, held input released at the deadline, a stalled input that does not block another request, relay admission at a limit of one, egress at its limit, a sink that reads input before returning its stream, a cross-direction credit deadlock ended by the deadline); `settles` and the task baseline hold; **measured:** setup latency and per-item input cost, and unary latency unchanged |
+| 9 | Streaming example and generator: no JSON-lines server for a streaming source; an ASR-like example with a relay; docs | generated example crates build and pass `--check`; a test streams audio through the generated segments; docs match code |
 
 ## 12. Later work
 
-- Streaming requests (bidirectional): the request side gets its own anchor in the envelope.
+- Streaming requests (bidirectional): the request side gets its own anchor in the envelope. Addendum 2026-10-16: superseded by section 7.9. The direction here was backwards: velo binds a reader to the process that minted its anchor, so the sender cannot put an anchor of its own in the envelope for the receiver to read. The receiver mints the input anchor and returns it in the `gdl.fwd` ack.
 - Ports: named side calls from an operator to another sink (prefill and encode style fan-out).
 - MPSC fan-in from several producers into one anchor.
 - A local typed continuation for a hop that leaves its outer segment and returns, to avoid the anchor encode.
@@ -392,12 +463,24 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 7 | Toolchain | stay on 1.93.1, velo's pin. Probed 2026-10-15: return-type notation, `impl Trait` in associated types, type-alias `impl Trait`, and dyn-compatible `async fn` are all still unstable on 1.99.0, so a newer stable toolchain would not change the design. Revisit when one of them stabilizes: associated `impl Trait` would let node output streams drop the `Items<T>` box | owner allowed a bump; not needed |
 | 8 | Crossing representation | byte-based: one concrete `WireItem` through velo, typed by monomorphized codec function pointers | round 2 |
 | 9 | Deadline | absolute wall-clock deadline with a configured skew; expired requests are rejected on arrival | round 2 |
-| 10 | Admission | reentrant per root request; released at handoff for forward runs and at stream retirement otherwise. Its claim that source admission bounds buffered bytes is superseded by ruling 14 | round 2, amended round 3 |
+| 10 | Admission | reentrant per root request; released at handoff for forward runs and at stream retirement otherwise. Its claim that source admission bounds buffered bytes is superseded by ruling 14  Addendum 2026-10-16 (streaming requests): a relay (7.9) does not release at the handoff; it holds its share until its relay ends, because it is still reading its input anchor | round 2, amended round 3 and 2026-10-16 |
 | 11 | Provisioned backward runs | prepared before dispatch, activated by their first input frame; runs that revisit O's segment are opened on O's instance by direct call | round 2 |
 | 12 | Backward-run activation | on a gdl `Open` frame sent when the upstream stream is established, never on application data | round 3 |
 | 13 | Deadline conversion | `mono_now + max(0, deadline_wall - wall_now - skew)`; stop up to `2 x skew` early, never late | round 3 |
 | 14 | Resource bounds | per-root limit on outstanding remote attempts; the egress memory bound is a milestone 3 gate (retirement-tracked or expiring quota). The egress part is superseded by ruling 15 | round 3, amended milestone 3 |
-| 15 | Egress | the quota bounds streams while they produce; no grace after the end. An expiring quota was built and removed: with 1,024 permits and a 5 s grace it refused benchmark traffic within seconds (a cap of limit / grace requests per second), and it bounded nothing for a consumer that stalls longer than the grace. Retained output after a producer finishes is released by the consumer's drain or cancel, which the deadline guarantees; a retirement signal is requested from velo. Addendum 2026-10-15 (milestone 3 review pass 1): "which the deadline guarantees" was false as built; the deadline timer ran only while the caller polled the stream, and a request could cross without a deadline. Ruling 17 makes it true. Addendum 2026-10-15 (review pass 8): a stage delivering a failure takes no permit. It writes one frame, bounded by the request and the setup timeout before it attaches and by 100 ms after; taking a permit would queue an error behind live traffic and turn an immediate failure into a deadline | milestone 3, measured; amended review passes 1 and 8 |
+| 15 | Egress | the quota bounds streams while they produce; no grace after the end. An expiring quota was built and removed: with 1,024 permits and a 5 s grace it refused benchmark traffic within seconds (a cap of limit / grace requests per second), and it bounded nothing for a consumer that stalls longer than the grace. Retained output after a producer finishes is released by the consumer's drain or cancel, which the deadline guarantees; a retirement signal is requested from velo. Addendum 2026-10-15 (milestone 3 review pass 1): "which the deadline guarantees" was false as built; the deadline timer ran only while the caller polled the stream, and a request could cross without a deadline. Ruling 17 makes it true. Addendum 2026-10-15 (review pass 8): a stage delivering a failure takes no permit. It writes one frame, bounded by the request and the setup timeout before it attaches and by 100 ms after; taking a permit would queue an error behind live traffic and turn an immediate failure into a deadline. Addendum 2026-10-16 (streaming requests): an input pump is a producer. Its sender takes the permit before it sends `gdl.fwd`, so a refused permit never leaves a receiver waiting for input; a relay takes its permit before it acknowledges | milestone 3, measured; amended review passes 1 and 8 and 2026-10-16 |
 | 16 | Node contexts | a node's context is how the runtime stops the node; a node reports failure with an `Err` item. The inner end always runs in its own scope, so a node that cancels its own context gets the same outcome whatever follows it. Node scopes are not polled on every path (that would put a mutex per node per remote item on the hottest path) | milestone 1 review pass 7 |
 | 17 | Remote deadlines and activation | no attempt crosses segments without a deadline: one without gets `RuntimeConfig::default_deadline` (600 s). The outer end cancels its anchor at the deadline from a watcher task that ends with the attempt, so a held, unread stream is still released. A producer blocked on a full consumer still ends at its deadline, and a terminal failure is delivered for at most 100 ms. The inner end sends `Open` only after its node returns a stream; backward runs forward it; the outer end waits for it, so a setup failure is the call's error, as in local composition. Addendum 2026-10-15 (review pass 2): cancelling the anchor's controller left frames already in its receive buffer until the stream was read or dropped, and a cancel or stop of a held stream did not reach the producer. The watcher now owns the right to drop the anchor itself (`fabric::Retirer`): at the deadline or cancel it drops it, releasing the buffer and cancelling the producer, and the held stream's next read is that reason; it forwards stop as it arrives. Every setup step in another segment (hand-off, attach, egress wait, failure delivery) is bounded by the request as well as the setup timeout. Zero admission, attempt, and egress limits are refused at deployment. Addendum 2026-10-15 (review pass 3): the watcher starts when the outer end mints its anchor, not after `Open`, so stop reaches the producer during provisioning and dispatch too; an arriving hand-off or open reconstructs its context first and bounds admission and egress by it; `Open` goes through the same interruption-aware send as items; a crossing's decoded input ends at its first error | milestone 3 review passes 1 to 3 |
 | 18 | Where deadlines are enforced without a read | a remote attempt's deadline is enforced eagerly, by the outer end's watcher, whether or not anyone reads its stream: the attempt holds another segment's resources on the caller's behalf. Local scopes, including hops that enclose a remote attempt, enforce their deadline at their boundaries when the stream is read, as in purely local composition: an unread `Sleep` never registers, and a timer per local attempt would cost more than the 25 ns per item the local path takes. A consumer that holds a stream unread keeps its own process's scopes until it reads or drops the stream | milestone 3 review pass 6 (finding 1 ruled by design) |
+| 19 | Streaming request shape | a head value and a stream of items, `Streamed<H, T>`; a pure stream is `H = ()`. Role traits do not change | owner, 2026-10-16 |
+| 20 | Which side mints the input anchor | the receiver of `gdl.fwd`, after everything that can refuse; the ack carries its reply-to. `envelope::VERSION` is 2 and version 1 is refused | 2026-10-16 (velo binds readers to their minter) |
+| 21 | Input pump order | the sender starts its input pump as soon as the ack arrives, before it waits for `Open` on anchor_k: a sink may read its input before it returns its stream, and `Open` follows that return (ruling 17) | 2026-10-16 |
+| 22 | Input end | a crossed input ends cleanly only on `Finalized`; anything else ends it with a terminal `Err`. Local input is fused at every node that builds a `Streamed`, so local and remote runs match | 2026-10-16 (rhino-asr treats a dropped sender as a clean end) |
+| 23 | Input retirement | the receiver retires its input anchor when its run ends, for any reason. This bounds a never-attached anchor (a prebind pauses velo's unattached timeout) and releases input held unread | 2026-10-16 |
+| 24 | Late input attach | a failed attach, open, or send on an input anchor ends the pump silently and cancels what feeds it; the response decides the request's outcome | 2026-10-16 |
+| 25 | No request-side `Open` | nothing on the request side is provisioned ahead: the receiver exists before its producer, and the ack is the readiness signal | 2026-10-16 |
+| 26 | Stop and input | stop is not a request-side signal. Pumps neither react to it nor forward it, and receivers never stop an input anchor, as in local composition, where a stop does not end the input. An application that wants stop to end its input ends it from its own context, for example with `take_until(cx.stopping())` | 2026-10-16 |
+| 27 | Replay | `Streamed` is not `Clone`. Retry, hedging, and migration of a streamed request are the operator's job, from its own buffer | 2026-10-16 |
+| 28 | Cross-direction deadlock | not detected. Input pumps run on their own tasks, never driven by response reads; a deadlock the application builds is bounded by the deadline | 2026-10-16 |
+| 29 | Egress hold and wait | accepted as in the unary design. An outer end that holds an input pump's permit while its local inner end waits for another can be refused with `Overloaded` at the limit; the bounded wait means it is refused, never hung. Provisioned local runs and a local inner end already share one quota the same way | 2026-10-16 |
+| 30 | Codec selection for streamed edges | by the graph syntax, not by a third autoref level of the wire probe | 2026-10-16 |
