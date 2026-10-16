@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::decl::Role;
@@ -54,12 +56,26 @@ pub struct HopInfo {
     pub backward_types: Vec<TypeInfo>,
 }
 
-/// A message type as the graph definition named it.
+/// A message type as the graph definition named it. For a streamed
+/// request (`Head + stream Item`), `name` and `wire` describe the head and
+/// `stream` the items.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeInfo {
     /// The type as written in the graph definition.
     pub name: String,
     /// Whether the type has a codec, so an edge carrying it may be cut.
+    pub wire: bool,
+    /// The item type of a streamed request. `None` for any other type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<ItemInfo>,
+}
+
+/// The item type of a streamed request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemInfo {
+    /// The type as written in the graph definition.
+    pub name: String,
+    /// Whether the type has a codec.
     pub wire: bool,
 }
 
@@ -69,6 +85,34 @@ impl TypeInfo {
         Self {
             name: name.into(),
             wire,
+            stream: None,
+        }
+    }
+
+    /// A streamed request's entry: its head type and its item type.
+    pub fn streamed(
+        head: impl Into<String>,
+        head_wire: bool,
+        item: impl Into<String>,
+        item_wire: bool,
+    ) -> Self {
+        Self {
+            name: head.into(),
+            wire: head_wire,
+            stream: Some(ItemInfo {
+                name: item.into(),
+                wire: item_wire,
+            }),
+        }
+    }
+}
+
+impl fmt::Display for TypeInfo {
+    /// The type as the graph definition writes it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.stream {
+            None => f.write_str(&self.name),
+            Some(item) => write!(f, "{} + stream {}", self.name, item.name),
         }
     }
 }
@@ -91,7 +135,8 @@ impl HopInfo {
 
 impl Manifest {
     /// The contract hash: changes when the name, schema, nodes, roles,
-    /// topology, or edge types change. Deployments check it so that segments
+    /// topology, or edge types (including which requests are streamed, and
+    /// their item types) change. Deployments check it so that segments
     /// built from different contracts never exchange traffic.
     pub fn contract_hash(&self) -> u64 {
         let mut h = Fnv::new();
@@ -108,6 +153,13 @@ impl Manifest {
             h.strs(&hop.backward);
             for ty in hop.forward_types.iter().chain(&hop.backward_types) {
                 h.str(&ty.name);
+                match &ty.stream {
+                    None => h.u64(0),
+                    Some(item) => {
+                        h.u64(1);
+                        h.str(&item.name);
+                    }
+                }
             }
         }
         h.finish()

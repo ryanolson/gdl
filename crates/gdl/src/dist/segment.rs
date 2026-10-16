@@ -37,6 +37,18 @@ impl Deployment {
     ) -> Result<Self> {
         config.validate()?;
         let layout = layout(manifest, placement)?;
+        // Streamed requests do not cross segments yet: refuse the placement
+        // now rather than fail each request at the crossing.
+        if let Some(index) = layout
+            .hops()
+            .iter()
+            .position(|hop| hop.request_anchors() > 0)
+        {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                format!("hop {index}: a streamed request cannot cross segments yet"),
+            ));
+        }
         if !placement.segments().any(|(name, _)| name == segment) {
             return Err(Error::new(
                 ErrorKind::Placement,

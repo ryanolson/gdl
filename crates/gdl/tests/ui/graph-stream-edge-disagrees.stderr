@@ -1,0 +1,5 @@
+error: the request on this edge is streamed: declare it as `Head + stream Item`
+ --> tests/ui/graph-stream-edge-disagrees.rs:7:15
+  |
+7 |     sink   D: u32 -> stream u32;
+  |               ^^^

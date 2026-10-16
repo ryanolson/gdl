@@ -12,6 +12,8 @@
 
 #![allow(dead_code)]
 
+pub mod streamed;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

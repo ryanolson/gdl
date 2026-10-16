@@ -2,7 +2,8 @@
 //!
 //! A walk applies stages while they belong to the current run, and leaves at
 //! the first stage that does not, encoding the value or stream with the codec
-//! of the edge it leaves on. Entering a hop at a position decodes with the
+//! of the edge it leaves on. A streamed request leaves as its head's bytes and
+//! a stream of encoded items. Entering a hop at a position decodes with the
 //! codec of the edge entering that position. So inside a run every call is
 //! static, and the only type erasure is the bytes at a crossing.
 
@@ -15,15 +16,20 @@ use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
 use crate::items::{Items, fuse, items, until_error};
 use crate::role::{Backward, Forward, Next, Operator, Sink};
-use crate::wire::Codec;
+use crate::wire::{Codec, RequestCodec};
 
 /// Where a forward walk ended.
 #[doc(hidden)]
 pub enum FwdExit<T> {
     /// The value reached the inner end in this segment.
     Here(T),
-    /// The walk left the run before position `at`, carrying `bytes`.
-    Leave { at: usize, bytes: Vec<u8> },
+    /// The walk left the run before position `at`, carrying the request's
+    /// head and, for a streamed request, its encoded items.
+    Leave {
+        at: usize,
+        head: Vec<u8>,
+        input: Option<Items<Vec<u8>>>,
+    },
 }
 
 /// Where a backward walk ended.
@@ -48,6 +54,11 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
     #[doc(hidden)]
     fn absent(&self, pos: usize, out: &mut Vec<usize>);
 
+    /// Collect, for each forward edge from this part of the hop on, whether
+    /// its codec carries a streamed request.
+    #[doc(hidden)]
+    fn streamed(&self, out: &mut Vec<bool>);
+
     #[doc(hidden)]
     fn walk(
         &self,
@@ -64,40 +75,48 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
         target: usize,
         end: usize,
         cx: &Cx,
-        bytes: &[u8],
+        head: &[u8],
+        input: Option<Items<Vec<u8>>>,
     ) -> impl Future<Output = Result<FwdExit<Self::Out>>> + Send;
 }
 
-/// One forward node of a distributed hop.
-pub struct FwdStep<F: Forward, R> {
+/// One forward node of a distributed hop. `C` is the codec of the edge
+/// entering it: a [`Codec`], or a [`StreamCodec`](crate::StreamCodec) for a
+/// streamed request.
+pub struct FwdStep<F, R, C> {
     node: Arc<F>,
-    codec: Option<Codec<F::In>>,
+    codec: Option<C>,
     rest: R,
 }
 
-impl<F: Forward, R> FwdStep<F, R> {
+impl<F, R, C> FwdStep<F, R, C>
+where
+    F: Forward,
+    C: RequestCodec<Value = F::In>,
+{
     /// A forward node, the codec of the edge entering it, and the rest.
-    pub fn new(node: Arc<F>, codec: Option<Codec<F::In>>, rest: R) -> Self {
+    pub fn new(node: Arc<F>, codec: Option<C>, rest: R) -> Self {
         Self { node, codec, rest }
     }
 }
 
-/// The end of a forward chain: the inner end's input edge.
-pub struct FwdEnd<T> {
-    codec: Option<Codec<T>>,
+/// The end of a forward chain: the inner end's input edge, by its codec.
+pub struct FwdEnd<C> {
+    codec: Option<C>,
 }
 
-impl<T> FwdEnd<T> {
+impl<C: RequestCodec> FwdEnd<C> {
     /// The codec of the edge entering the inner end.
-    pub fn new(codec: Option<Codec<T>>) -> Self {
+    pub fn new(codec: Option<C>) -> Self {
         Self { codec }
     }
 }
 
-impl<F, R> DForward for FwdStep<F, R>
+impl<F, R, C> DForward for FwdStep<F, R, C>
 where
     F: Forward,
     R: DForward<In = F::Out>,
+    C: RequestCodec<Value = F::In>,
 {
     type In = F::In;
     type Out = R::Out;
@@ -109,12 +128,14 @@ where
         self.rest.absent(pos + 1, out);
     }
 
+    fn streamed(&self, out: &mut Vec<bool>) {
+        out.push(C::STREAMED);
+        self.rest.streamed(out);
+    }
+
     async fn walk(&self, pos: usize, end: usize, cx: &Cx, value: F::In) -> Result<FwdExit<R::Out>> {
         if pos >= end {
-            return Ok(FwdExit::Leave {
-                at: pos,
-                bytes: encode(self.codec, &value)?,
-            });
+            return leave(self.codec, pos, value);
         }
         // As in local composition: no forward stage starts for an
         // interrupted request.
@@ -129,28 +150,36 @@ where
         target: usize,
         end: usize,
         cx: &Cx,
-        bytes: &[u8],
+        head: &[u8],
+        input: Option<Items<Vec<u8>>>,
     ) -> Result<FwdExit<R::Out>> {
         if pos == target {
-            let value = decode(self.codec, bytes)?;
+            let value = join(self.codec, head, input)?;
             return self.walk(pos, end, cx, value).await;
         }
-        self.rest.enter(pos + 1, target, end, cx, bytes).await
+        self.rest.enter(pos + 1, target, end, cx, head, input).await
     }
 }
 
-impl<T: Send + 'static> DForward for FwdEnd<T> {
-    type In = T;
-    type Out = T;
+impl<C: RequestCodec> DForward for FwdEnd<C> {
+    type In = C::Value;
+    type Out = C::Value;
 
     fn absent(&self, _pos: usize, _out: &mut Vec<usize>) {}
 
-    async fn walk(&self, pos: usize, end: usize, _cx: &Cx, value: T) -> Result<FwdExit<T>> {
+    fn streamed(&self, out: &mut Vec<bool>) {
+        out.push(C::STREAMED);
+    }
+
+    async fn walk(
+        &self,
+        pos: usize,
+        end: usize,
+        _cx: &Cx,
+        value: C::Value,
+    ) -> Result<FwdExit<C::Value>> {
         if pos >= end {
-            return Ok(FwdExit::Leave {
-                at: pos,
-                bytes: encode(self.codec, &value)?,
-            });
+            return leave(self.codec, pos, value);
         }
         Ok(FwdExit::Here(value))
     }
@@ -161,12 +190,13 @@ impl<T: Send + 'static> DForward for FwdEnd<T> {
         target: usize,
         _end: usize,
         _cx: &Cx,
-        bytes: &[u8],
-    ) -> Result<FwdExit<T>> {
+        head: &[u8],
+        input: Option<Items<Vec<u8>>>,
+    ) -> Result<FwdExit<C::Value>> {
         if pos != target {
             return Err(position_error(target));
         }
-        Ok(FwdExit::Here(decode(self.codec, bytes)?))
+        Ok(FwdExit::Here(join(self.codec, head, input)?))
     }
 }
 
@@ -395,12 +425,21 @@ where
     }
 }
 
-fn encode<T>(codec: Option<Codec<T>>, value: &T) -> Result<Vec<u8>> {
-    codec.ok_or_else(not_wire)?.encode(value)
+fn leave<C: RequestCodec, T>(codec: Option<C>, at: usize, value: C::Value) -> Result<FwdExit<T>> {
+    let split = codec.ok_or_else(not_wire)?.split(value)?;
+    Ok(FwdExit::Leave {
+        at,
+        head: split.head,
+        input: split.input,
+    })
 }
 
-fn decode<T>(codec: Option<Codec<T>>, bytes: &[u8]) -> Result<T> {
-    codec.ok_or_else(not_wire)?.decode(bytes)
+fn join<C: RequestCodec>(
+    codec: Option<C>,
+    head: &[u8],
+    input: Option<Items<Vec<u8>>>,
+) -> Result<C::Value> {
+    codec.ok_or_else(not_wire)?.join(head, input)
 }
 
 fn encode_stream<T: Send + 'static>(codec: Option<Codec<T>>, input: Items<T>) -> Items<Vec<u8>> {
@@ -436,8 +475,8 @@ fn position_error(target: usize) -> Error {
 mod sealed {
     pub trait Sealed {}
 
-    impl<F: crate::role::Forward, R> Sealed for super::FwdStep<F, R> {}
-    impl<T> Sealed for super::FwdEnd<T> {}
+    impl<F, R, C> Sealed for super::FwdStep<F, R, C> {}
+    impl<C> Sealed for super::FwdEnd<C> {}
     impl<B: crate::role::Backward, R> Sealed for super::BwdStep<B, R> {}
     impl<T> Sealed for super::BwdEnd<T> {}
     impl<S> Sealed for super::DSink<S> {}

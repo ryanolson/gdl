@@ -65,3 +65,68 @@ fn the_probe_falls_back_inside_generic_code() {
     }
     assert!(generic::<Plain>().is_none());
 }
+
+#[test]
+fn a_stream_codec_needs_both_parts_to_be_wire() {
+    assert!(gdl::stream_codec!(Plain, u32).is_some());
+    assert!(gdl::stream_codec!(NotSerde, u32).is_none());
+    assert!(gdl::stream_codec!(Plain, NotSerde).is_none());
+    assert!(gdl::stream_codec!(SerializeOnly, u32).is_none());
+}
+
+#[tokio::test]
+async fn a_stream_codec_splits_and_joins_a_streamed_request() {
+    use futures::StreamExt;
+    use gdl::{RequestCodec, Streamed, items};
+
+    let codec = gdl::stream_codec!(Plain, u32).expect("both parts are wire types");
+    let head = Plain {
+        n: 1,
+        s: "h".into(),
+    };
+    let request = Streamed::new(head, items(futures::stream::iter([Ok(4), Ok(5)])));
+    let split = codec.split(request).expect("split");
+    let joined = codec.join(&split.head, split.input).expect("join");
+    let (head, input) = joined.into_parts();
+    assert_eq!(
+        head,
+        Plain {
+            n: 1,
+            s: "h".into()
+        }
+    );
+    let got: Vec<u32> = input.map(|r| r.expect("item")).collect().await;
+    assert_eq!(got, [4, 5]);
+}
+
+#[tokio::test]
+async fn joining_a_stream_ends_at_its_first_bad_item() {
+    use futures::StreamExt;
+    use gdl::{RequestCodec, items};
+
+    let codec = gdl::stream_codec!(Plain, u32).expect("wire");
+    let head = wire_codec!(Plain)
+        .expect("wire")
+        .encode(&Plain {
+            n: 0,
+            s: String::new(),
+        })
+        .expect("encode");
+    let good = wire_codec!(u32).expect("wire").encode(&9).expect("encode");
+    // 0xc1 is the one byte msgpack never uses.
+    let input = items(futures::stream::iter([Ok(vec![0xc1]), Ok(good)]));
+    let (_, mut input) = codec.join(&head, Some(input)).expect("join").into_parts();
+    assert!(matches!(input.next().await, Some(Err(_))));
+    assert!(input.next().await.is_none(), "an item followed the bad one");
+}
+
+#[test]
+fn a_request_and_its_edge_must_agree_on_streaming() {
+    use gdl::{RequestCodec, items};
+
+    let value = wire_codec!(u32).expect("wire");
+    let bytes = value.encode(&3).expect("encode");
+    assert!(value.join(&bytes, Some(items(futures::stream::empty()))).is_err());
+    let stream = gdl::stream_codec!(u32, u32).expect("wire");
+    assert!(stream.join(&bytes, None).is_err());
+}

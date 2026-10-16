@@ -32,7 +32,7 @@ use syn::spanned::Spanned;
 use syn::{Ident, Type};
 
 use crate::model::{Graph, Hop, Node, Role};
-use crate::parse::Sig;
+use crate::parse::{Request, Sig};
 
 pub(crate) fn expand(graph: &Graph, krate: &TokenStream) -> TokenStream {
     let nodes = expand_nodes(graph, krate);
@@ -40,7 +40,7 @@ pub(crate) fn expand(graph: &Graph, krate: &TokenStream) -> TokenStream {
     let manifest = expand_manifest(graph, krate);
     let assemble = expand_assemble(graph, krate);
     let local = expand_local(graph, krate);
-    let source = expand_source_types(graph);
+    let source = expand_source_types(graph, krate);
     let edges = expand_edges(graph);
     quote! {
         #source
@@ -53,8 +53,8 @@ pub(crate) fn expand(graph: &Graph, krate: &TokenStream) -> TokenStream {
     }
 }
 
-fn expand_source_types(graph: &Graph) -> TokenStream {
-    let (req, item) = source_types(graph);
+fn expand_source_types(graph: &Graph, krate: &TokenStream) -> TokenStream {
+    let (req, item) = source_types(graph, krate);
     quote! {
         /// The request type the graph's source sends.
         pub type SourceReq = #req;
@@ -63,10 +63,19 @@ fn expand_source_types(graph: &Graph) -> TokenStream {
     }
 }
 
-fn source_types(graph: &Graph) -> (&Type, &Type) {
+fn source_types<'g>(graph: &'g Graph, krate: &TokenStream) -> (TokenStream, &'g Type) {
     match &graph.source().sig {
-        Sig::Source { req, item } => (req, item),
+        Sig::Source { req, item } => (request(req, krate), item),
         _ => unreachable!("checked: the source is a source"),
+    }
+}
+
+/// A request's port type: the value type, or `Streamed<Head, Item>`.
+fn request(req: &Request, krate: &TokenStream) -> TokenStream {
+    let head = &req.head;
+    match &req.item {
+        None => quote!(#head),
+        Some(item) => quote!(#krate::Streamed<#head, #item>),
     }
 }
 
@@ -76,10 +85,18 @@ fn source_types(graph: &Graph) -> (&Type, &Type) {
 /// on the whole invocation that names runtime types.
 fn expand_edges(graph: &Graph) -> TokenStream {
     let mut checks = Vec::new();
-    let mut check = |sent: &Type, declared: &Type| {
+    let check = |checks: &mut Vec<TokenStream>, sent: &Type, declared: &Type| {
         checks.push(quote_spanned! { declared.span() =>
             let _: ::core::marker::PhantomData<#sent> = ::core::marker::PhantomData::<#declared>;
         });
+    };
+    // The model checked that both ends of an edge agree on whether it is
+    // streamed, so a request is checked part by part.
+    let check_request = |checks: &mut Vec<TokenStream>, sent: &Request, declared: &Request| {
+        check(checks, &sent.head, &declared.head);
+        if let (Some(sent), Some(declared)) = (&sent.item, &declared.item) {
+            check(checks, sent, declared);
+        }
     };
     for hop in &graph.hops {
         let (down_req, down_item) = match &graph.node(&hop.outer).sig {
@@ -94,30 +111,30 @@ fn expand_edges(graph: &Graph) -> TokenStream {
         let mut sent = down_req;
         for ident in &hop.forward {
             if let Sig::Forward { input, output } = &graph.node(ident).sig {
-                check(sent, input);
+                check_request(&mut checks, sent, input);
                 sent = output;
             }
         }
         let mut items = match &graph.node(&hop.inner).sig {
             Sig::Sink { req, item } => {
-                check(sent, req);
+                check_request(&mut checks, sent, req);
                 item
             }
             Sig::Operator {
                 up_req, up_item, ..
             } => {
-                check(sent, up_req);
+                check_request(&mut checks, sent, up_req);
                 up_item
             }
             _ => unreachable!("checked: the inner end is a sink or an operator"),
         };
         for ident in &hop.backward {
             if let Sig::Backward { input, output } = &graph.node(ident).sig {
-                check(items, input);
+                check(&mut checks, items, input);
                 items = output;
             }
         }
-        check(items, down_item);
+        check(&mut checks, items, down_item);
     }
     quote! {
         const _: () = {
@@ -158,11 +175,20 @@ fn role_bound(node: &Node, krate: &TokenStream) -> TokenStream {
             up_item,
             down_req,
             down_item,
-        } => quote! {
-            #krate::Operator<UpReq = #up_req, UpItem = #up_item, DownReq = #down_req, DownItem = #down_item>
-        },
-        Sig::Forward { input, output } => quote! { #krate::Forward<In = #input, Out = #output> },
-        Sig::Sink { req, item } => quote! { #krate::Sink<Req = #req, Item = #item> },
+        } => {
+            let (up_req, down_req) = (request(up_req, krate), request(down_req, krate));
+            quote! {
+                #krate::Operator<UpReq = #up_req, UpItem = #up_item, DownReq = #down_req, DownItem = #down_item>
+            }
+        }
+        Sig::Forward { input, output } => {
+            let (input, output) = (request(input, krate), request(output, krate));
+            quote! { #krate::Forward<In = #input, Out = #output> }
+        }
+        Sig::Sink { req, item } => {
+            let req = request(req, krate);
+            quote! { #krate::Sink<Req = #req, Item = #item> }
+        }
         Sig::Backward { input, output } => {
             quote! { #krate::Backward<In = #input, Out = #output> }
         }
@@ -184,16 +210,21 @@ fn expand_nodes(graph: &Graph, krate: &TokenStream) -> TokenStream {
         let ident = &node.ident;
         let name = ident.to_string();
         let (role, decl) = match &node.sig {
-            Sig::Source { req, item } => (
-                quote!(Source),
-                quote! { impl #krate::SourceDecl for nodes::#ident { type Req = #req; type Item = #item; } },
-            ),
+            Sig::Source { req, item } => {
+                let req = request(req, krate);
+                (
+                    quote!(Source),
+                    quote! { impl #krate::SourceDecl for nodes::#ident { type Req = #req; type Item = #item; } },
+                )
+            }
             Sig::Operator {
                 up_req,
                 up_item,
                 down_req,
                 down_item,
-            } => (
+            } => {
+                let (up_req, down_req) = (request(up_req, krate), request(down_req, krate));
+                (
                 quote!(Operator),
                 quote! {
                     impl #krate::OperatorDecl for nodes::#ident {
@@ -203,15 +234,22 @@ fn expand_nodes(graph: &Graph, krate: &TokenStream) -> TokenStream {
                         type DownItem = #down_item;
                     }
                 },
-            ),
-            Sig::Forward { input, output } => (
-                quote!(Forward),
-                quote! { impl #krate::ForwardDecl for nodes::#ident { type In = #input; type Out = #output; } },
-            ),
-            Sig::Sink { req, item } => (
-                quote!(Sink),
-                quote! { impl #krate::SinkDecl for nodes::#ident { type Req = #req; type Item = #item; } },
-            ),
+                )
+            }
+            Sig::Forward { input, output } => {
+                let (input, output) = (request(input, krate), request(output, krate));
+                (
+                    quote!(Forward),
+                    quote! { impl #krate::ForwardDecl for nodes::#ident { type In = #input; type Out = #output; } },
+                )
+            }
+            Sig::Sink { req, item } => {
+                let req = request(req, krate);
+                (
+                    quote!(Sink),
+                    quote! { impl #krate::SinkDecl for nodes::#ident { type Req = #req; type Item = #item; } },
+                )
+            }
             Sig::Backward { input, output } => (
                 quote!(Backward),
                 quote! { impl #krate::BackwardDecl for nodes::#ident { type In = #input; type Out = #output; } },
@@ -304,6 +342,32 @@ fn type_info(ty: &Type, krate: &TokenStream) -> TokenStream {
     quote! { #krate::TypeInfo::new(#name, #krate::wire_codec!(#ty).is_some()) }
 }
 
+fn request_info(req: &Request, krate: &TokenStream) -> TokenStream {
+    let Some(item) = &req.item else {
+        return type_info(&req.head, krate);
+    };
+    let head = &req.head;
+    let (head_name, item_name) = (quote!(#head).to_string(), quote!(#item).to_string());
+    quote! {
+        #krate::TypeInfo::streamed(
+            #head_name,
+            #krate::wire_codec!(#head).is_some(),
+            #item_name,
+            #krate::wire_codec!(#item).is_some(),
+        )
+    }
+}
+
+/// The codec of a forward edge, chosen by its syntax: a streamed request
+/// gets a stream codec, which exists only when both parts are wire types.
+fn request_codec(req: &Request, krate: &TokenStream) -> TokenStream {
+    let head = &req.head;
+    match &req.item {
+        None => quote! { #krate::wire_codec!(#head) },
+        Some(item) => quote! { #krate::stream_codec!(#head, #item) },
+    }
+}
+
 fn expand_manifest(graph: &Graph, krate: &TokenStream) -> TokenStream {
     let name = string(&graph.name.value());
     let schema = &graph.schema;
@@ -336,7 +400,7 @@ fn expand_manifest(graph: &Graph, krate: &TokenStream) -> TokenStream {
         let inner = string(&hop.inner.to_string());
         let forward = hop.forward.iter().map(|i| string(&i.to_string()));
         let backward = hop.backward.iter().map(|i| string(&i.to_string()));
-        let forward_types = hop.forward_types.iter().map(|t| type_info(t, krate));
+        let forward_types = hop.forward_types.iter().map(|t| request_info(t, krate));
         let backward_types = hop.backward_types.iter().map(|t| type_info(t, krate));
         quote! {
             #krate::HopInfo {
@@ -395,7 +459,7 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
         bounds,
         unpack,
     } = signature(graph, krate);
-    let (req, item) = source_types(graph);
+    let (req, item) = source_types(graph, krate);
     // Innermost hop first, so each operator can take the hop below it.
     let hops = graph.hops.iter().enumerate().rev().map(|(index, hop)| {
         let name = format_ident!("__gdl_hop_{}", index);
@@ -435,10 +499,12 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
 
 fn distributed_forward(graph: &Graph, hop: &Hop, krate: &TokenStream) -> TokenStream {
     let last = hop.forward_types.last().expect("one type per forward edge");
-    let mut chain = quote! { #krate::FwdEnd::new(#krate::wire_codec!(#last)) };
-    for (ident, ty) in hop.forward.iter().zip(&hop.forward_types).rev() {
+    let last = request_codec(last, krate);
+    let mut chain = quote! { #krate::FwdEnd::new(#last) };
+    for (ident, req) in hop.forward.iter().zip(&hop.forward_types).rev() {
         let f = local_var(graph.node(ident));
-        chain = quote! { #krate::FwdStep::new(#f, #krate::wire_codec!(#ty), #chain) };
+        let codec = request_codec(req, krate);
+        chain = quote! { #krate::FwdStep::new(#f, #codec, #chain) };
     }
     chain
 }
@@ -462,7 +528,7 @@ fn expand_local(graph: &Graph, krate: &TokenStream) -> TokenStream {
         bounds,
         unpack,
     } = signature(graph, krate);
-    let (req, item) = source_types(graph);
+    let (req, item) = source_types(graph, krate);
     let hops = graph.hops.iter().enumerate().rev().map(|(index, hop)| {
         let name = format_ident!("__gdl_local_{}", index);
         let mut fwd = quote!(());

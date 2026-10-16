@@ -3,7 +3,11 @@ use std::fmt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use futures::StreamExt;
+
 use crate::error::{Error, ErrorKind, Result};
+use crate::items::{Items, items};
+use crate::streamed::Streamed;
 
 /// How one edge's message type crosses a segment boundary.
 ///
@@ -56,6 +60,125 @@ impl<T> fmt::Debug for Codec<T> {
     }
 }
 
+/// How a forward edge's request crosses a segment boundary: as a value, or
+/// as a head value and a stream of items. Implemented by [`Codec`] and
+/// [`StreamCodec`]; the graph macro picks one from the edge's syntax.
+#[doc(hidden)]
+pub trait RequestCodec: sealed::Sealed + Copy + Send + Sync + 'static {
+    /// The request type on the edge.
+    type Value: Send + 'static;
+    /// Whether the edge carries a stream.
+    const STREAMED: bool;
+
+    /// The request as it crosses.
+    fn split(&self, value: Self::Value) -> Result<Split>;
+
+    /// Rebuild a request from its head's bytes and, for a streamed request,
+    /// its encoded items.
+    fn join(&self, head: &[u8], input: Option<Items<Vec<u8>>>) -> Result<Self::Value>;
+}
+
+/// A request as it crosses: its head's bytes, and for a streamed request its
+/// encoded items.
+#[doc(hidden)]
+pub struct Split {
+    pub head: Vec<u8>,
+    pub input: Option<Items<Vec<u8>>>,
+}
+
+impl<T: Send + 'static> RequestCodec for Codec<T> {
+    type Value = T;
+    const STREAMED: bool = false;
+
+    fn split(&self, value: T) -> Result<Split> {
+        Ok(Split {
+            head: self.encode(&value)?,
+            input: None,
+        })
+    }
+
+    fn join(&self, head: &[u8], input: Option<Items<Vec<u8>>>) -> Result<T> {
+        match input {
+            None => self.decode(head),
+            Some(_) => Err(mismatch()),
+        }
+    }
+}
+
+/// The codec of a streamed request: one for its head and one for its items.
+pub struct StreamCodec<H, T> {
+    head: Codec<H>,
+    item: Codec<T>,
+}
+
+impl<H, T> StreamCodec<H, T> {
+    /// A codec when both parts have one: a request crosses whole or not at
+    /// all.
+    pub fn pair(head: Option<Codec<H>>, item: Option<Codec<T>>) -> Option<Self> {
+        Some(Self {
+            head: head?,
+            item: item?,
+        })
+    }
+}
+
+impl<H, T> Clone for StreamCodec<H, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<H, T> Copy for StreamCodec<H, T> {}
+
+impl<H, T> fmt::Debug for StreamCodec<H, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamCodec")
+            .field("head", &std::any::type_name::<H>())
+            .field("item", &std::any::type_name::<T>())
+            .finish()
+    }
+}
+
+impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
+    type Value = Streamed<H, T>;
+    const STREAMED: bool = true;
+
+    fn split(&self, value: Streamed<H, T>) -> Result<Split> {
+        let (head, input) = value.into_parts();
+        let item = self.item;
+        let encoded = items(input.map(move |value| item.encode(&value?)));
+        Ok(Split {
+            head: self.head.encode(&head)?,
+            input: Some(encoded),
+        })
+    }
+
+    fn join(&self, head: &[u8], input: Option<Items<Vec<u8>>>) -> Result<Streamed<H, T>> {
+        let input = input.ok_or_else(mismatch)?;
+        let item = self.item;
+        // `Streamed::new` fuses the decoded items: nothing follows a bad one.
+        let decoded = items(input.map(move |bytes| item.decode(&bytes?)));
+        Ok(Streamed::new(self.head.decode(head)?, decoded))
+    }
+}
+
+fn mismatch() -> Error {
+    // The layout and the bindings agree on which edges are streamed
+    // (checked when a hop is built), so reaching this is a runtime defect.
+    Error::new(
+        ErrorKind::Placement,
+        "internal: a request and its edge disagree on whether it is streamed",
+    )
+}
+
+/// Only this module's codecs cross a forward edge.
+mod sealed {
+    pub trait Sealed {}
+
+    impl<T> Sealed for super::Codec<T> {}
+    impl<H, T> Sealed for super::StreamCodec<H, T> {}
+}
+
 // Compact (array-form) msgpack: field names are not repeated per item. A
 // change to a message's wire form needs a schema bump anyway, so named
 // fields would buy nothing.
@@ -82,6 +205,16 @@ macro_rules! wire_codec {
         use $crate::__private::{ViaLocal as _, ViaWire as _};
         (&$crate::__private::Probe::<$ty>::new()).__gdl_codec()
     }};
+}
+
+/// The codec of a streamed request with head `H` and items `T`, or `None`
+/// unless both are wire-capable. Like [`wire_codec!`], it must be expanded
+/// where both types are concrete.
+#[macro_export]
+macro_rules! stream_codec {
+    ($head:ty, $item:ty) => {
+        $crate::StreamCodec::pair($crate::wire_codec!($head), $crate::wire_codec!($item))
+    };
 }
 
 /// Support for macro expansions. Not a stable interface.

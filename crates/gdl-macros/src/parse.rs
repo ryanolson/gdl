@@ -9,6 +9,10 @@
 //! backward F: Raw -> Tok;
 //! topology: A => B { C => D => F } => G;
 //! ```
+//!
+//! A request position (a source's, sink's, or operator's request, and both
+//! sides of a forward node) also takes a streamed request: `Head + stream
+//! Item`, or `stream Item` for a head of `()`.
 
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, LitInt, LitStr, Token, Type, braced, parenthesized};
@@ -45,27 +49,35 @@ pub(crate) struct NodeDecl {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Sig {
     Source {
-        req: Type,
+        req: Request,
         item: Type,
     },
     Operator {
-        up_req: Type,
+        up_req: Request,
         up_item: Type,
-        down_req: Type,
+        down_req: Request,
         down_item: Type,
     },
     Forward {
-        input: Type,
-        output: Type,
+        input: Request,
+        output: Request,
     },
     Sink {
-        req: Type,
+        req: Request,
         item: Type,
     },
     Backward {
         input: Type,
         output: Type,
     },
+}
+
+/// A request type: a value, or a head and a stream of items.
+#[derive(Clone)]
+pub(crate) struct Request {
+    pub(crate) head: Type,
+    /// The item type of a streamed request.
+    pub(crate) item: Option<Type>,
 }
 
 /// One element of a topology list: a node, and for an operator, the hop it
@@ -150,20 +162,22 @@ impl Parse for NodeDecl {
                     down_item,
                 }
             }
-            2 | 4 => {
-                let input_ty: Type = input.parse()?;
+            2 => {
+                let input_req = request(input)?;
                 input.parse::<Token![->]>()?;
-                let output: Type = input.parse()?;
-                if sig_kind == 2 {
-                    Sig::Forward {
-                        input: input_ty,
-                        output,
-                    }
-                } else {
-                    Sig::Backward {
-                        input: input_ty,
-                        output,
-                    }
+                let output = request(input)?;
+                Sig::Forward {
+                    input: input_req,
+                    output,
+                }
+            }
+            4 => {
+                let input_ty = item_type(input)?;
+                input.parse::<Token![->]>()?;
+                let output = item_type(input)?;
+                Sig::Backward {
+                    input: input_ty,
+                    output,
                 }
             }
             _ => {
@@ -177,12 +191,55 @@ impl Parse for NodeDecl {
 }
 
 /// `Req -> stream Item`
-fn streaming(input: ParseStream<'_>) -> syn::Result<(Type, Type)> {
-    let req: Type = input.parse()?;
+fn streaming(input: ParseStream<'_>) -> syn::Result<(Request, Type)> {
+    let req = request(input)?;
     input.parse::<Token![->]>()?;
     input.parse::<kw::stream>()?;
     let item: Type = input.parse()?;
     Ok((req, item))
+}
+
+/// A backward node's type: an item, which cannot itself be streamed.
+fn item_type(input: ParseStream<'_>) -> syn::Result<Type> {
+    let ty = Type::without_plus(input)?;
+    if input.peek(Token![+]) {
+        return Err(input
+            .error("only a request can be streamed; a backward node's types are response items"));
+    }
+    Ok(ty)
+}
+
+/// The item type after `stream`.
+fn stream_item(input: ParseStream<'_>) -> syn::Result<Type> {
+    if input.peek(Token![->]) || input.peek(Token![;]) || input.is_empty() {
+        return Err(input.error("`stream` needs the item type after it"));
+    }
+    Type::without_plus(input)
+}
+
+/// `Req`, `Head + stream Item`, or `stream Item`. The head is parsed
+/// without `+`, which would otherwise read `Head + stream` as a trait object.
+fn request(input: ParseStream<'_>) -> syn::Result<Request> {
+    if input.peek(kw::stream) {
+        let stream = input.parse::<kw::stream>()?;
+        let item = stream_item(input)?;
+        let head = syn::parse_quote_spanned!(stream.span => ());
+        return Ok(Request {
+            head,
+            item: Some(item),
+        });
+    }
+    let head = Type::without_plus(input)?;
+    if !input.peek(Token![+]) {
+        return Ok(Request { head, item: None });
+    }
+    input.parse::<Token![+]>()?;
+    input.parse::<kw::stream>()?;
+    let item = stream_item(input)?;
+    Ok(Request {
+        head,
+        item: Some(item),
+    })
 }
 
 /// `X => Y { ... } => Z`

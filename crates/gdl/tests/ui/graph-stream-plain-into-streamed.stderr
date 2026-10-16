@@ -1,0 +1,5 @@
+error: the request on this edge is not streamed: declare it without `stream`
+ --> tests/ui/graph-stream-plain-into-streamed.rs:7:28
+  |
+7 |     sink   D: u32 + stream u32 -> stream u32;
+  |                            ^^^

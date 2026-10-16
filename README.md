@@ -72,6 +72,16 @@ The macro checks the topology at compile time. An implementation with the wrong 
 
 Bump `schema` when the wire form of a message type changes.
 
+### Streamed requests
+
+A request can also be a stream. In a request position, `Head + stream Item` declares a request that has a head value and a stream of items, and `stream Item` declares one with a head of `()`. The node receives a `gdl::Streamed<Head, Item>`. Its items end after their first error. The response streams back while the request still streams in.
+
+```rust
+sink Recognizer: Session + stream Audio -> stream Transcript;
+```
+
+In this version, a streamed request runs in one process, and its response can cross segments. A placement that puts the two ends of a streamed request edge in different segments is refused.
+
 ## Split a graph into segments
 
 A spec file names the contract, the placement, and the implementation of each node. `examples/chat/gdl.toml` is a full spec. This part of it shows the contract, the placement in three segments, and one binding:

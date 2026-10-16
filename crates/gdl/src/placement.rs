@@ -94,6 +94,9 @@ pub struct HopLayout {
     /// opens them: from the run nearest the outer end to the run nearest
     /// the inner end, so each run's reply anchor already exists.
     pub provisioning: Vec<usize>,
+    /// Whether each forward edge carries a streamed request, outer end
+    /// first: one entry per forward edge.
+    pub request_streams: Vec<bool>,
 }
 
 /// A maximal sequence of consecutive stages in one segment.
@@ -120,12 +123,25 @@ impl HopLayout {
     /// first, and at least one whenever the hop is not local (the forward
     /// path left the outer end's segment, so the response returns through an
     /// anchor even if every backward stage is local).
+    ///
+    /// A streamed request adds one anchor at each forward crossing it
+    /// passes: its receiver's input anchor.
     pub fn anchors(&self) -> usize {
         if self.local {
             0
         } else {
-            (self.backward_runs.len() - 1).max(1)
+            (self.backward_runs.len() - 1).max(1) + self.request_anchors()
         }
+    }
+
+    /// Input anchors one request mints on this hop: one per forward
+    /// crossing whose edge carries a streamed request.
+    pub fn request_anchors(&self) -> usize {
+        self.forward_runs
+            .iter()
+            .skip(1)
+            .filter(|run| self.request_streams.get(run.start - 1) == Some(&true))
+            .count()
     }
 }
 
@@ -401,6 +417,11 @@ fn hop_layout(
         forward_runs,
         backward_runs,
         provisioning,
+        request_streams: hop
+            .forward_types
+            .iter()
+            .map(|t| t.stream.is_some())
+            .collect(),
     }
 }
 
@@ -440,13 +461,21 @@ fn require_wire(
     reason: WireReason,
     errors: &mut Vec<PlacementError>,
 ) {
-    if !ty.wire {
+    let mut not_wire = |ty: String| {
         errors.push(PlacementError::NotWire {
             from: from.to_string(),
             to: to.to_string(),
-            ty: ty.name.clone(),
+            ty,
             reason,
         });
+    };
+    // A streamed request crosses whole: its head and its items each need a
+    // codec, and each part without one is reported.
+    if !ty.wire {
+        not_wire(ty.name.clone());
+    }
+    if let Some(item) = ty.stream.as_ref().filter(|item| !item.wire) {
+        not_wire(format!("stream {}", item.name));
     }
 }
 
@@ -515,6 +544,11 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
         if hop.backward_types.len() != hop.backward.len() + 1 {
             bad(format!(
                 "hop {index}: needs one backward type per backward edge"
+            ));
+        }
+        if let Some(ty) = hop.backward_types.iter().find(|t| t.stream.is_some()) {
+            bad(format!(
+                "hop {index}: response type `{ty}` is streamed; only requests can be"
             ));
         }
     }

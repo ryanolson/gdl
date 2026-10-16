@@ -153,6 +153,20 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
                 ),
             ));
         }
+        // The bindings' codecs and the manifest must agree on which forward
+        // edges carry a stream: a streamed request split by a value codec,
+        // or the reverse, would fail on every request that crosses there.
+        let mut streamed = Vec::new();
+        fwd.streamed(&mut streamed);
+        if streamed != hop.request_streams {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                format!(
+                    "hop {index}: the bindings stream requests on edges {streamed:?}, the manifest on {:?}",
+                    hop.request_streams
+                ),
+            ));
+        }
         let plan = HopPlan::new(hop);
         Ok(Self(Arc::new(HopCore {
             rt,
@@ -348,7 +362,10 @@ where
                 let cx = attempt.child();
                 tokio::spawn(async move { hop.run_inner(cx, value, reply, None, egress).await });
             }
-            FwdExit::Leave { at, bytes } => {
+            FwdExit::Leave { at, head, input } => {
+                if input.is_some() {
+                    return Err(internal("a streamed request reached a crossing"));
+                }
                 let envelope = Forward {
                     version: VERSION,
                     identity: rt.identity,
@@ -356,7 +373,7 @@ where
                     pos: at as u16,
                     cx: WireCx::of(attempt),
                     reply,
-                    payload: bytes,
+                    payload: head,
                 };
                 rt.send_forward(&self.plan.fwd_segments[at], envelope)
                     .await?;
@@ -431,7 +448,7 @@ where
             let walked = tokio::select! {
                 biased;
                 reason = cx.done() => Err(reason),
-                walked = hop.fwd.enter(1, pos, end, &cx, &envelope.payload) => walked,
+                walked = hop.fwd.enter(1, pos, end, &cx, &envelope.payload, None) => walked,
             };
             match walked {
                 Ok(FwdExit::Here(value)) => match egress {
@@ -444,7 +461,15 @@ where
                         hop.fail(&cx, &envelope.reply, error).await;
                     }
                 },
-                Ok(FwdExit::Leave { at, bytes }) => {
+                Ok(FwdExit::Leave { input: Some(_), .. }) => {
+                    let error = internal("a streamed request reached a crossing");
+                    hop.fail(&cx, &envelope.reply, error).await;
+                }
+                Ok(FwdExit::Leave {
+                    at,
+                    head,
+                    input: None,
+                }) => {
                     let onward = Forward {
                         version: VERSION,
                         identity: hop.rt.identity,
@@ -452,7 +477,7 @@ where
                         pos: at as u16,
                         cx: WireCx::of(&cx),
                         reply: envelope.reply.clone(),
-                        payload: bytes,
+                        payload: head,
                     };
                     let sent =
                         bounded(&cx, hop.rt.send_forward(&hop.plan.fwd_segments[at], onward)).await;

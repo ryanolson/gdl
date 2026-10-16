@@ -242,11 +242,23 @@ struct Edge<'a> {
     crosses: bool,
 }
 
+/// The type as the graph definition writes it, with each part that has no
+/// codec marked: a streamed request crosses only when both parts have one.
 fn type_label(ty: &TypeInfo) -> String {
-    if ty.wire {
-        ty.name.clone()
-    } else {
-        format!("{} (no codec)", ty.name)
+    let part = |name: &str, wire: bool| {
+        if wire {
+            name.to_string()
+        } else {
+            format!("{name} (no codec)")
+        }
+    };
+    match &ty.stream {
+        None => part(&ty.name, ty.wire),
+        Some(item) => format!(
+            "{} + stream {}",
+            part(&ty.name, ty.wire),
+            part(&item.name, item.wire)
+        ),
     }
 }
 

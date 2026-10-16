@@ -1,4 +1,4 @@
-error[E0308]: mismatched types
+error[E0271]: type mismatch resolving `<Codec<u32> as RequestCodec>::Value == u64`
   --> tests/ui/graph-forward-mismatch.rs:5:1
    |
  5 | / gdl::graph! {
@@ -8,13 +8,19 @@ error[E0308]: mismatched types
  9 | |     sink    D: u64 -> stream u32;
 10 | |     topology: A => C => D;
 11 | | }
-   | |_^ expected `Option<Codec<u64>>`, found `Option<Codec<u32>>`
+   | |_^ expected `u64`, found `u32`
    |
-   = note: expected enum `Option<gdl::Codec<u64>>`
-              found enum `Option<gdl::Codec<u32>>`
-   = note: this error originates in the macro `$crate::wire_codec` which comes from the expansion of the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+note: required by a bound in `FwdStep::<F, R, C>::new`
+  --> src/dist/stages.rs
+   |
+   |     C: RequestCodec<Value = F::In>,
+   |                     ^^^^^^^^^^^^^ required by this bound in `FwdStep::<F, R, C>::new`
+...
+   |     pub fn new(node: Arc<F>, codec: Option<C>, rest: R) -> Self {
+   |            --- required by a bound in this associated function
+   = note: this error originates in the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0271]: type mismatch resolving `<FwdStep<__GdlSlotC, FwdEnd<u64>> as DForward>::In == u32`
+error[E0271]: type mismatch resolving `<FwdStep<__GdlSlotC, FwdEnd<Codec<u64>>, Codec<u32>> as DForward>::In == u32`
   --> tests/ui/graph-forward-mismatch.rs:5:1
    |
  5 | / gdl::graph! {

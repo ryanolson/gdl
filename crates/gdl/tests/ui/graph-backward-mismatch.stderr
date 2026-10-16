@@ -26,7 +26,7 @@ error[E0271]: type mismatch resolving `<BwdStep<__GdlSlotF, BwdEnd<u32>> as DBac
 11 | | }
    | |_^ expected `u32`, found `u64`
    |
-   = note: required for `DHop<FwdEnd<u32>, DSink<__GdlSlotD>, BwdStep<__GdlSlotF, BwdEnd<u32>>>` to implement `Next<u32, u32>`
+   = note: required for `DHop<FwdEnd<gdl::Codec<u32>>, DSink<__GdlSlotD>, BwdStep<__GdlSlotF, BwdEnd<u32>>>` to implement `Next<u32, u32>`
    = note: this error originates in the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0271]: type mismatch resolving `<__GdlSlotF as Backward>::In == u32`

@@ -6,9 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::Span;
+use syn::spanned::Spanned;
 use syn::{Ident, LitInt, LitStr, Type};
 
-use crate::parse::{Element, GraphInput, Sig};
+use crate::parse::{Element, GraphInput, Request, Sig};
 
 pub(crate) struct Graph {
     pub(crate) name: LitStr,
@@ -31,8 +32,9 @@ pub(crate) struct Hop {
     pub(crate) forward: Vec<Ident>,
     pub(crate) inner: Ident,
     pub(crate) backward: Vec<Ident>,
-    /// The type on each forward edge, outer end first: `forward.len() + 1`.
-    pub(crate) forward_types: Vec<Type>,
+    /// The request on each forward edge, outer end first:
+    /// `forward.len() + 1`.
+    pub(crate) forward_types: Vec<Request>,
     /// The type on each backward edge, inner end first: `backward.len() + 1`.
     pub(crate) backward_types: Vec<Type>,
 }
@@ -356,11 +358,18 @@ impl Builder<'_> {
         };
         let mut forward_types = vec![down_req];
         for ident in &forward {
-            if let Sig::Forward { output, .. } = &self.node(ident)?.sig {
+            if let Sig::Forward { input, output } = &self.node(ident)?.sig {
+                agree(forward_types.last(), input)?;
                 forward_types.push(output.clone());
             }
         }
         let inner_node = self.node(&inner.ident)?;
+        match &inner_node.sig {
+            Sig::Sink { req, .. } | Sig::Operator { up_req: req, .. } => {
+                agree(forward_types.last(), req)?;
+            }
+            _ => unreachable!("checked: the inner end is a sink or an operator"),
+        }
         let inner_item = match &inner_node.sig {
             Sig::Sink { item, .. } => item.clone(),
             Sig::Operator { up_item, .. } => up_item.clone(),
@@ -394,5 +403,25 @@ impl Builder<'_> {
             }
             _ => unreachable!("checked: a sink, or an operator with its hop"),
         }
+    }
+}
+
+/// A forward edge carries a stream at both of its ends or at neither. The
+/// types on it are checked by the compiler; this gives the streamed and the
+/// plain form of one type a clear error instead of a type mismatch.
+fn agree(sent: Option<&Request>, declared: &Request) -> syn::Result<()> {
+    let Some(sent) = sent else {
+        return Ok(());
+    };
+    match (&sent.item, &declared.item) {
+        (Some(_), None) => Err(syn::Error::new(
+            declared.head.span(),
+            "the request on this edge is streamed: declare it as `Head + stream Item`",
+        )),
+        (None, Some(item)) => Err(syn::Error::new(
+            item.span(),
+            "the request on this edge is not streamed: declare it without `stream`",
+        )),
+        _ => Ok(()),
     }
 }
