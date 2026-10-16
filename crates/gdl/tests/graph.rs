@@ -290,3 +290,57 @@ async fn a_segment_that_leaves_a_hosted_node_unbound_is_refused() {
         .g(NodeG);
     assert!(contract::assemble(&front, without_d).is_ok());
 }
+
+mod twins {
+    gdl::graph! {
+        name = "twins", schema = 1;
+        source  A: u32 -> stream u32;
+        forward C: u32 -> u32;
+        forward E: u32 -> u32;
+        sink    D: u32 -> stream u32;
+        topology: A => C => E => D;
+    }
+}
+
+struct Echo;
+
+impl gdl::Sink for Echo {
+    type Req = u32;
+    type Item = u32;
+
+    async fn generate(&self, _cx: Cx, req: u32) -> gdl::Result<gdl::Items<u32>> {
+        Ok(gdl::items(futures::stream::iter([Ok(req)])))
+    }
+}
+
+/// The check is by slot, not by the placeholder's name: `C` and `E` have the
+/// same port types, so `E`'s placeholder fits `C`'s slot, and `C` is still
+/// unbound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosted_slot_holding_another_nodes_placeholder_is_refused() {
+    let nodes = [velo_node().await, velo_node().await];
+    let placement = Placement::new()
+        .segment("front", ["A", "C", "D"])
+        .segment("side", ["E"]);
+    let manifest = twins::manifest();
+    let mut roster = Roster::new();
+    for (name, node) in ["front", "side"].iter().zip(&nodes) {
+        roster.add(*name, node.peer_info());
+    }
+    let front = Deployment::new(
+        Arc::clone(&nodes[0]),
+        &manifest,
+        &placement,
+        "front",
+        &roster,
+        RuntimeConfig::default(),
+    )
+    .expect("deployment");
+    let bindings = twins::Bindings::new()
+        .c(gdl::Absent::<twins::nodes::E>::new())
+        .d(Echo);
+    match twins::assemble(&front, bindings) {
+        Ok(_) => panic!("a front with no C was assembled"),
+        Err(error) => assert!(error.to_string().contains("`C`"), "{error}"),
+    }
+}

@@ -19,11 +19,11 @@ pub trait Sink: Send + Sync + 'static {
     /// The response item type.
     type Item: Send + 'static;
 
-    /// The node this slot stands in for, when it is the `Absent`
-    /// placeholder: a segment refuses to assemble with a placeholder in a
-    /// slot it hosts, so the placeholder's methods are never called.
+    /// Whether this is the `Absent` placeholder: a segment refuses to
+    /// assemble with a placeholder in a slot it hosts, so the placeholder's
+    /// methods are never called.
     #[doc(hidden)]
-    const ABSENT: Option<&'static str> = None;
+    const ABSENT: bool = false;
 
     /// Handle one request.
     fn generate(
@@ -41,11 +41,11 @@ pub trait Forward: Send + Sync + 'static {
     /// The request type it passes on.
     type Out: Send + 'static;
 
-    /// The node this slot stands in for, when it is the `Absent`
-    /// placeholder: a segment refuses to assemble with a placeholder in a
-    /// slot it hosts, so the placeholder's methods are never called.
+    /// Whether this is the `Absent` placeholder: a segment refuses to
+    /// assemble with a placeholder in a slot it hosts, so the placeholder's
+    /// methods are never called.
     #[doc(hidden)]
-    const ABSENT: Option<&'static str> = None;
+    const ABSENT: bool = false;
 
     /// Transform one request.
     fn forward(&self, cx: &Cx, req: Self::In) -> impl Future<Output = Result<Self::Out>> + Send;
@@ -59,11 +59,11 @@ pub trait Backward: Send + Sync + 'static {
     /// The item type it passes on.
     type Out: Send + 'static;
 
-    /// The node this slot stands in for, when it is the `Absent`
-    /// placeholder: a segment refuses to assemble with a placeholder in a
-    /// slot it hosts, so the placeholder's methods are never called.
+    /// Whether this is the `Absent` placeholder: a segment refuses to
+    /// assemble with a placeholder in a slot it hosts, so the placeholder's
+    /// methods are never called.
     #[doc(hidden)]
-    const ABSENT: Option<&'static str> = None;
+    const ABSENT: bool = false;
 
     /// Transform one response stream. The returned stream must own what it
     /// uses: it outlives this call.
@@ -94,11 +94,11 @@ pub trait Operator: Send + Sync + 'static {
     /// The item type it receives from downstream.
     type DownItem: Send + 'static;
 
-    /// The node this slot stands in for, when it is the `Absent`
-    /// placeholder: a segment refuses to assemble with a placeholder in a
-    /// slot it hosts, so the placeholder's methods are never called.
+    /// Whether this is the `Absent` placeholder: a segment refuses to
+    /// assemble with a placeholder in a slot it hosts, so the placeholder's
+    /// methods are never called.
     #[doc(hidden)]
-    const ABSENT: Option<&'static str> = None;
+    const ABSENT: bool = false;
 
     /// Handle one upstream request.
     fn generate<N>(

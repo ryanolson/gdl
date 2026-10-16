@@ -119,17 +119,32 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
         })?;
         // A placeholder answers every call with `NotHosted`: in a slot this
         // segment hosts, it would fail each request instead of the start.
-        let mut absent = Vec::new();
-        fwd.absent(&mut absent);
-        inner.absent(&mut absent);
-        bwd.absent(&mut absent);
-        let hosted = |name: &str| {
-            hop.forward_runs
-                .iter()
-                .chain(&hop.backward_runs)
-                .any(|run| run.segment == rt.segment && run.stages.iter().any(|s| s == name))
+        // Slots are checked by position, so the error names the node the
+        // topology puts there, whatever placeholder fills it.
+        let path = |runs: &[crate::placement::Run]| -> Vec<(String, String)> {
+            runs.iter()
+                .flat_map(|run| {
+                    run.stages
+                        .iter()
+                        .map(|stage| (run.segment.clone(), stage.clone()))
+                })
+                .collect()
         };
-        if let Some(name) = absent.into_iter().find(|name| hosted(name)) {
+        let forward = path(&hop.forward_runs);
+        let backward = path(&hop.backward_runs);
+        let mut forward_absent = Vec::new();
+        fwd.absent(1, &mut forward_absent);
+        if inner.absent() {
+            forward_absent.push(forward.len() - 1);
+        }
+        let mut backward_absent = Vec::new();
+        bwd.absent(1, &mut backward_absent);
+        let unbound = forward_absent
+            .iter()
+            .filter_map(|&pos| forward.get(pos))
+            .chain(backward_absent.iter().filter_map(|&pos| backward.get(pos)))
+            .find(|(segment, _)| *segment == rt.segment);
+        if let Some((_, name)) = unbound {
             return Err(Error::new(
                 ErrorKind::Placement,
                 format!(
