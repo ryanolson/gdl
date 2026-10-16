@@ -12,6 +12,7 @@
 mod compose;
 mod cx;
 mod decl;
+mod diagram;
 mod dist;
 mod error;
 mod hash;

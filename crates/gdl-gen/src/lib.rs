@@ -13,6 +13,9 @@
 //! generated, and carries a do-not-edit marker on its first line. [`write`]
 //! replaces generated files and removes marked files it no longer produces;
 //! [`drift`] reports any difference instead of writing.
+//!
+//! [`diagram`] draws the spec's placed graph as Graphviz DOT or a Mermaid
+//! flowchart.
 
 mod dump;
 mod emit;
@@ -53,6 +56,27 @@ pub type Files = BTreeMap<PathBuf, String>;
 pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
     let manifest = dump::manifest(spec, target)?;
     render_manifest(spec, &manifest, out)
+}
+
+/// A diagram format for [`diagram`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// Graphviz DOT.
+    Dot,
+    /// A Mermaid flowchart.
+    Mermaid,
+}
+
+/// The spec's placed graph as a diagram: each segment a cluster, and each
+/// edge that crosses segments marked. The contract's manifest is built in
+/// `target` (a cargo target directory), as for [`render`].
+pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
+    let manifest = dump::manifest(spec, target)?;
+    let layout = gdl::layout(&manifest, &spec.placement).map_err(|e| Error::new(e.to_string()))?;
+    Ok(match format {
+        Format::Dot => manifest.to_dot(Some(&layout)),
+        Format::Mermaid => manifest.to_mermaid(Some(&layout)),
+    })
 }
 
 fn render_manifest(spec: &Spec, manifest: &gdl::Manifest, out: &Path) -> Result<Files, Error> {

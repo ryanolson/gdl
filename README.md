@@ -81,6 +81,21 @@ For each segment, the generator writes a crate with:
 
 The generator owns the directory of each segment crate. Each generated file starts with a do-not-edit marker. `gdl-gen --check` writes nothing. It fails if a generated file is missing, changed, or stale, or if a segment crate holds a file that the generator did not write.
 
+## Draw a graph
+
+`gdl-gen --diagram` writes the placed graph to stdout as Graphviz DOT or as a Mermaid flowchart. It writes no files.
+
+```bash
+cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --diagram mermaid
+cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --diagram dot | dot -Tsvg -o chat.svg
+```
+
+- Request edges are solid. Response edges are dashed.
+- Each edge has the name of its message type. If the type has no codec, the label says `(no codec)`, because a placement cannot cut that edge.
+- Each segment is a cluster. An edge that crosses segments is thick and red.
+
+In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`. Give them `None` to draw the graph without segments, or a `Layout` from `gdl::layout` to draw it placed.
+
 ## Run the example
 
 1. Generate the segment crates:

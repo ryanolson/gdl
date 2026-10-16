@@ -34,6 +34,27 @@ fn cargo() -> Command {
     Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
 }
 
+/// The spec's placement draws as a diagram: one cluster per segment, and
+/// the three crossings (Truncate to Engine, Engine to Detokenize, Format to
+/// Preprocess) marked.
+#[test]
+fn the_placed_graph_draws_as_a_diagram() {
+    let spec = gdl_gen::Spec::load(&example().join("gdl.toml")).expect("spec");
+    let target = target("gdl-gen-tests");
+    let mermaid = gdl_gen::diagram(&spec, &target, gdl_gen::Format::Mermaid).expect("mermaid");
+    for line in [
+        r#"subgraph s0["engine"]"#,
+        r#"subgraph s1["front"]"#,
+        r#"subgraph s2["post"]"#,
+        "linkStyle 4,5,7 stroke:#d62728,stroke-width:3px",
+    ] {
+        assert!(mermaid.contains(line), "{line} in:\n{mermaid}");
+    }
+    let dot = gdl_gen::diagram(&spec, &target, gdl_gen::Format::Dot).expect("dot");
+    assert_eq!(dot.matches("subgraph cluster_").count(), 3, "{dot}");
+    assert_eq!(dot.matches("penwidth=2").count(), 3, "{dot}");
+}
+
 #[test]
 fn the_committed_segments_are_current() {
     let spec = gdl_gen::Spec::load(&example().join("gdl.toml")).expect("spec");
