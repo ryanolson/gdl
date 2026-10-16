@@ -1,0 +1,3 @@
+- **P2 — [crates/gdl-gen/src/lib.rs:225](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/lib.rs:225): Valid raw crate identifiers are rejected.** An implementation library named `async` requires `type = "r#async::Engine"`, but validation compares `"r#async"` against `"async"` and refuses generation. The unescaped spelling passes validation but produces invalid Rust, confirmed with rustfmt. Parse the type path and compare the first identifier without its raw prefix, preserving that prefix during emission. Add a regression fixture with a keyword library name.
+
+ACTIONABLE: 1
