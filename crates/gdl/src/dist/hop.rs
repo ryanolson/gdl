@@ -365,7 +365,7 @@ where
                 return Err(internal("an item arrived before the open signal"));
             }
         }
-        let bytes = inbound_items(inbound, None);
+        let bytes = inbound_items(inbound);
         match self
             .bwd
             .enter(1, self.plan.outer_start, usize::MAX, attempt, bytes)?
@@ -576,7 +576,7 @@ where
             }
         }
         let upstream = inbound.canceller();
-        let bytes = inbound_items(inbound, None);
+        let bytes = inbound_items(inbound);
         match self.bwd.enter(1, pos, end, &cx, bytes) {
             Ok(BwdExit::Leave { bytes, .. }) => pump(bytes, out, &cx, Some(upstream)).await,
             Ok(BwdExit::Here(_)) => {
@@ -861,51 +861,23 @@ async fn finish_failed(out: Outbound, error: Error) {
     }
 }
 
-/// An inbound anchor as a stream of encoded items. With `stop_from`, a stop
-/// requested on that context is passed to the anchor's producer.
-fn inbound_items<S>(inbound: S, stop_from: Option<Cx>) -> Items<Vec<u8>>
+/// An inbound anchor as a stream of encoded items. A stop does not pass
+/// through here: the watcher or the pump that holds the anchor forwards it.
+fn inbound_items<S>(inbound: S) -> Items<Vec<u8>>
 where
-    S: Stream<Item = Frame> + StopSource + Unpin + Send + 'static,
+    S: Stream<Item = Frame> + Unpin + Send + 'static,
 {
-    let stopping: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = stop_from.map(|cx| {
-        Box::pin(async move { cx.stopping().await }) as Pin<Box<dyn Future<Output = ()> + Send>>
-    });
-    items(InboundItems { inbound, stopping })
+    items(InboundItems(inbound))
 }
 
-struct InboundItems<S> {
-    inbound: S,
-    stopping: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-}
+struct InboundItems<S>(S);
 
-/// An inbound stream that can pass a stop to its producer.
-trait StopSource {
-    fn request_stop(&self);
-}
-
-impl StopSource for Inbound {
-    fn request_stop(&self) {
-        Inbound::request_stop(self);
-    }
-}
-
-impl StopSource for super::fabric::SharedInbound {
-    // Its retirer's watcher forwards stop; nothing reads it from here.
-    fn request_stop(&self) {}
-}
-
-impl<S: Stream<Item = Frame> + StopSource + Unpin> Stream for InboundItems<S> {
+impl<S: Stream<Item = Frame> + Unpin> Stream for InboundItems<S> {
     type Item = Result<Vec<u8>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(stopping) = self.stopping.as_mut()
-            && stopping.as_mut().poll(cx).is_ready()
-        {
-            self.stopping = None;
-            self.inbound.request_stop();
-        }
         loop {
-            return match Pin::new(&mut self.inbound).poll_next(cx) {
+            return match Pin::new(&mut self.0).poll_next(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Some(Frame::Open)) => continue,
                 Poll::Ready(Some(Frame::Item(bytes))) => Poll::Ready(Some(Ok(bytes))),
