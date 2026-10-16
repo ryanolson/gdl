@@ -43,3 +43,11 @@ timeout 300 cargo test -p <crate> --test <t>   # one target
 
 - One logical change per commit, after fmt, clippy, and tests pass.
 - Conventional commit titles: `type(scope): summary`.
+
+## Branches and pull requests
+
+This repository is a work in progress. These rules replace the usual draft-PR practice until the repository adopts standard PR review.
+
+- Commit directly to `main`. Push `main` when you are confident in the changes.
+- Open a pull request only when the owner asks for one.
+- Ask the owner for a pull request when a change is large enough to review in separate pieces, or when it has several parts that must merge in order.
