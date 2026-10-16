@@ -63,7 +63,13 @@ pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
     gdl::Manifest::from_toml(&text).map_err(|e| Error::new(format!("reading the manifest: {e}")))
 }
 
+/// Write `text` unless the file already holds it: a rewrite with the same
+/// text still changes the file's modification time, and cargo would rebuild
+/// and relink the program for it.
 fn write(path: &Path, text: &str) -> Result<(), Error> {
+    if std::fs::read_to_string(path).is_ok_and(|old| old == text) {
+        return Ok(());
+    }
     std::fs::write(path, text).map_err(|e| io(path, e))
 }
 
@@ -104,8 +110,13 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let spec = Spec::load(&root.join("examples/chat/gdl.toml")).expect("spec");
         let target = root.join("target/gdl-gen-tests");
-        // Built once first, so the wait below is the lock and not a build.
+        // Built once, so the next dump neither compiles nor links; that one
+        // is timed, and the wait below is many times as long. A dump that
+        // ignored the lock would finish well inside it.
         manifest(&spec, &target).expect("manifest");
+        let started = std::time::Instant::now();
+        manifest(&spec, &target).expect("manifest");
+        let wait = (started.elapsed() * 10).max(Duration::from_secs(2));
 
         let held = lock(&target).expect("lock");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -114,7 +125,7 @@ mod tests {
             let _ = tx.send(manifest(&spec, &waiting).map(|m| m.name));
         });
         assert!(
-            rx.recv_timeout(Duration::from_secs(3)).is_err(),
+            rx.recv_timeout(wait).is_err(),
             "a dump ran while another held the target directory"
         );
         drop(held);
