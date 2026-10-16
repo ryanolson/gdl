@@ -67,7 +67,7 @@ pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
 /// text still changes the file's modification time, and cargo would rebuild
 /// and relink the program for it.
 fn write(path: &Path, text: &str) -> Result<(), Error> {
-    if std::fs::read_to_string(path).is_ok_and(|old| old == text) {
+    if std::fs::read_to_string(path).is_ok_and(|existing| existing == text) {
         return Ok(());
     }
     std::fs::write(path, text).map_err(|e| io(path, e))

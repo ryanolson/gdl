@@ -290,7 +290,7 @@ pub fn write(out: &Path, files: &Files) -> Result<Vec<PathBuf>, Error> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
         }
-        if std::fs::read_to_string(&path).is_ok_and(|old| &old == text) {
+        if std::fs::read_to_string(&path).is_ok_and(|existing| &existing == text) {
             continue;
         }
         std::fs::write(&path, text).map_err(|e| io(&path, e))?;
@@ -310,7 +310,7 @@ pub fn drift(out: &Path, files: &Files) -> Result<Vec<String>, Error> {
     for (path, text) in files {
         match std::fs::read_to_string(out.join(path)) {
             Err(_) => found.push(format!("missing: {}", path.display())),
-            Ok(old) if &old != text => found.push(format!("differs: {}", path.display())),
+            Ok(existing) if &existing != text => found.push(format!("differs: {}", path.display())),
             Ok(_) => {}
         }
     }

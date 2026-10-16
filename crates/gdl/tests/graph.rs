@@ -356,7 +356,7 @@ async fn a_hosted_slot_holding_another_nodes_placeholder_is_refused() {
     }
 }
 
-mod twins_v2 {
+mod twins_schema2 {
     gdl::graph! {
         name = "twins", schema = 2;
         source  A: u32 -> stream u32;
@@ -386,8 +386,8 @@ async fn assembling_another_contracts_graph_is_refused() {
         RuntimeConfig::default(),
     )
     .expect("deployment");
-    let bindings = twins_v2::Bindings::new().c(Same).e(Same).d(Echo);
-    match twins_v2::assemble(&deployment, bindings) {
+    let bindings = twins_schema2::Bindings::new().c(Same).e(Same).d(Echo);
+    match twins_schema2::assemble(&deployment, bindings) {
         Ok(_) => panic!("the schema 2 graph was assembled on a schema 1 deployment"),
         Err(error) => assert!(error.to_string().contains("contract"), "{error}"),
     }
