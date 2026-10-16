@@ -143,7 +143,7 @@ The design and its rulings are in `agent-docs/plan.md`.
 
 ## Cost
 
-A graph that is not cut costs no encoding. A local graph is nested calls, and the nodes of one segment pass values to each other directly. A message is encoded and decoded only where an edge crosses segments: one encode and one decode for each crossing (`crates/gdl/tests/crossings.rs` counts them).
+A graph that is not cut costs no encoding. A local graph is nested calls, and the nodes of one segment pass values to each other directly. A cut costs one encode and one decode for each message on each edge that crosses segments. There is one more case. If the request of a hop leaves the segment of the hop's outer end, the response items return to the outer end through an anchor. Each item is then encoded and decoded one time, also when no response edge crosses segments. `crates/gdl/tests/crossings.rs` counts these encodes.
 
 On one aarch64 workstation, over loopback TCP:
 

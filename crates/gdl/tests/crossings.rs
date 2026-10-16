@@ -1,5 +1,7 @@
-//! A message is encoded and decoded only where an edge crosses segments:
-//! once per crossing, and never inside a segment or in a local graph.
+//! A message is encoded and decoded only when it leaves its segment: once per
+//! crossing, never in a local graph or inside one segment, and once more for
+//! each item of a hop whose request left the outer end's segment and whose
+//! response returns there through the outer end's anchor.
 
 mod common;
 
@@ -172,4 +174,13 @@ async fn messages_are_encoded_only_where_an_edge_crosses_segments() {
         .segment("engine", ["D"]);
     let crossings = 2 + ITEMS as usize;
     assert_eq!(run(three).await, (crossings, crossings), "three segments");
+
+    // Only C apart: the request leaves the source's segment and comes back,
+    // so no response edge crosses, but the items return through the outer
+    // end's anchor, which encodes them (plan section 7.2).
+    let out_and_back = Placement::new()
+        .segment("front", ["A", "D", "F"])
+        .segment("side", ["C"]);
+    let encoded = 2 + ITEMS as usize;
+    assert_eq!(run(out_and_back).await, (encoded, encoded), "out and back");
 }
