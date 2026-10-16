@@ -285,6 +285,11 @@ impl Retirer {
         self.controller.request_stop();
     }
 
+    /// A handle that stops or cancels the producer without retiring.
+    pub(crate) fn canceller(&self) -> Canceller {
+        Canceller(self.controller.clone())
+    }
+
     /// Drop the anchor, cancelling its producer and releasing its buffer;
     /// the consumer's next read is `reason`.
     pub(crate) fn retire(&self, reason: Error) {

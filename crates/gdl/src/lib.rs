@@ -32,7 +32,7 @@ pub use decl::{
 };
 pub use dist::{
     BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment, Entries,
-    FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, bind_node,
+    FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, Served, bind_node,
 };
 #[cfg(feature = "fault-injection")]
 pub use dist::{Faults, Gate};

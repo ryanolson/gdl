@@ -509,7 +509,7 @@ async fn instances_of_one_segment_share_the_load() {
         .segments
         .iter()
         .filter(|(name, _)| name == "engine")
-        .map(|(_, segment)| segment.served().0)
+        .map(|(_, segment)| segment.served().forwards)
         .collect();
     assert_eq!(served, vec![3, 3], "round robin over two engine instances");
     assert!(settles(&cluster).await);

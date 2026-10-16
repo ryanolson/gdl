@@ -7,8 +7,9 @@ use std::task::{Context, Poll};
 
 use futures::{Future, Stream, StreamExt};
 
-use super::envelope::{Forward, Open, VERSION, WireCx, WireItem};
-use super::fabric::{Canceller, Frame, Inbound, Outbound, ReplyTo};
+use super::admission::{EgressPermit, Share};
+use super::envelope::{Accepted, Forward, Open, VERSION, WireCx, WireItem};
+use super::fabric::{Canceller, Frame, Inbound, Outbound, ReplyTo, Retirer};
 use super::runtime::{Entries, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use crate::cx::{Cx, Deadline};
@@ -58,6 +59,9 @@ struct HopPlan {
     outer_start: usize,
     /// Backward position where the inner end's own run stops.
     inner_end: usize,
+    /// Whether each forward edge carries a streamed request, outer end
+    /// first.
+    fwd_streamed: Vec<bool>,
 }
 
 impl HopPlan {
@@ -84,7 +88,20 @@ impl HopPlan {
             // node itself.
             outer_start: if last > 0 { runs[last].start } else { 1 },
             inner_end: if last > 0 { runs[1].start } else { 1 },
+            fwd_streamed: hop.request_streams.clone(),
         }
+    }
+
+    /// Whether the edge entering forward position `pos` carries a streamed
+    /// request: a run that starts there reads its input from an anchor.
+    fn streamed_into(&self, pos: usize) -> bool {
+        self.fwd_streamed[pos - 1]
+    }
+
+    /// Whether a forward run starting at `pos` hands a streamed request on
+    /// to another segment, and so produces the next run's input.
+    fn relays(&self, pos: usize) -> bool {
+        !self.reaches_inner(pos) && self.fwd_streamed[self.fwd_end(pos) - 1]
     }
 
     /// The first forward position after `pos` that is not in `pos`'s segment.
@@ -363,9 +380,21 @@ where
                 tokio::spawn(async move { hop.run_inner(cx, value, reply, None, egress).await });
             }
             FwdExit::Leave { at, head, input } => {
-                if input.is_some() {
-                    return Err(internal("a streamed request reached a crossing"));
-                }
+                // An input pump is a producer. It takes its permit before the
+                // hand-off, so a refused permit never leaves a receiver
+                // waiting for input that will not come.
+                let egress = match input {
+                    Some(_) => Some(
+                        setup(
+                            attempt,
+                            rt.config.setup_timeout,
+                            "egress",
+                            rt.egress.acquire(),
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
                 let envelope = Forward {
                     version: VERSION,
                     identity: rt.identity,
@@ -375,8 +404,27 @@ where
                     reply,
                     payload: head,
                 };
-                rt.send_forward(&self.plan.fwd_segments[at], envelope)
+                let accepted = rt
+                    .send_forward(&self.plan.fwd_segments[at], envelope)
                     .await?;
+                match (input, accepted, egress) {
+                    (None, None, _) => {}
+                    // Started before waiting for the open signal: a sink may
+                    // read its input before it returns its stream, and the
+                    // signal follows that return.
+                    (Some(input), Some(to), Some(egress)) => {
+                        let rt = Arc::clone(rt);
+                        // A child scope: a receiver that drops its input
+                        // cancels the pump's scope, which must not end the
+                        // attempt (the response decides its outcome).
+                        let cx = attempt.child();
+                        tokio::spawn(async move {
+                            send_input(&rt, &cx, to, input, None).await;
+                            drop(egress);
+                        });
+                    }
+                    _ => return Err(disagree()),
+                }
             }
         }
         // As in local composition, no backward node of the outer end runs
@@ -409,8 +457,9 @@ where
 
     /// A forward hand-off arrived. Acknowledge once it is admitted, then run
     /// it; from here until it hands the request on, this stage owns the
-    /// reply and must deliver any failure to it.
-    async fn accept_forward(self: &Arc<Self>, envelope: Forward) -> Result<()> {
+    /// reply and must deliver any failure to it. For a streamed request the
+    /// acknowledgement names the input anchor this stage minted.
+    async fn accept_forward(self: &Arc<Self>, envelope: Forward) -> Result<Accepted> {
         let rt = &self.rt;
         #[cfg(feature = "fault-injection")]
         if let Some(delay) = rt.config.faults.delay_forward_arrival {
@@ -428,13 +477,30 @@ where
             rt.admission.admit(root),
         )
         .await?;
-        // A run that ends at the inner end here will produce a stream; it
-        // takes its egress permit before acknowledging, so a full instance
-        // refuses instead of stalling.
-        let egress = if self.plan.reaches_inner(usize::from(envelope.pos)) {
+        let pos = usize::from(envelope.pos);
+        // A run that will produce a stream (the inner end's output, or a
+        // relay's onward input) takes its egress permit before
+        // acknowledging, so a full instance refuses instead of stalling.
+        let egress = if self.plan.reaches_inner(pos) || self.plan.relays(pos) {
             Some(setup(&cx, rt.config.setup_timeout, "egress", rt.egress.acquire()).await?)
         } else {
             None
+        };
+        // Minted last, after everything that can refuse: a refusal leaves
+        // no anchor behind.
+        let (input, guard, accepted) = if self.plan.streamed_into(pos) {
+            let (inbound, reply) = rt.fabric.mint();
+            let (shared, retirer) = inbound.share();
+            rt.served
+                .inputs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (
+                Some(inbound_items(shared)),
+                Some(InputGuard(retirer)),
+                Some(reply),
+            )
+        } else {
+            (None, None, None)
         };
         rt.served
             .forwards
@@ -443,63 +509,110 @@ where
         tokio::spawn(async move {
             // However this task ends, the request's work here ends with it.
             let _end = cx.cancel_on_drop();
-            let pos = usize::from(envelope.pos);
-            let end = hop.plan.fwd_end(pos);
-            let walked = tokio::select! {
-                biased;
-                reason = cx.done() => Err(reason),
-                walked = hop.fwd.enter(1, pos, end, &cx, &envelope.payload, None) => walked,
+            let upstream = guard.as_ref().map(InputGuard::canceller);
+            let watched = cx.clone();
+            let handed = Handed {
+                pos: usize::from(envelope.pos),
+                payload: envelope.payload,
+                reply: envelope.reply,
             };
-            match walked {
-                Ok(FwdExit::Here(value)) => match egress {
-                    Some(egress) => {
-                        hop.run_inner(cx, value, envelope.reply, Some(share), egress)
-                            .await;
-                    }
-                    None => {
-                        let error = internal("a run reached an inner end it did not expect");
-                        hop.fail(&cx, &envelope.reply, error).await;
-                    }
-                },
-                Ok(FwdExit::Leave { input: Some(_), .. }) => {
-                    let error = internal("a streamed request reached a crossing");
-                    hop.fail(&cx, &envelope.reply, error).await;
+            let run = hop.serve_forward(cx, handed, input, share, egress, upstream);
+            // A stop reaches this run on the response side, or from the
+            // run it relays to, and travels on up the request path to the
+            // stage that sends this run its input (ruling 26). It does not
+            // end the input: the sender decides that.
+            let stop_up = async {
+                if let Some(guard) = &guard {
+                    watched.stopping().await;
+                    guard.request_stop();
                 }
-                Ok(FwdExit::Leave {
-                    at,
-                    head,
-                    input: None,
-                }) => {
-                    let onward = Forward {
-                        version: VERSION,
-                        identity: hop.rt.identity,
-                        hop: hop.index,
-                        pos: at as u16,
-                        cx: WireCx::of(&cx),
-                        reply: envelope.reply.clone(),
-                        payload: head,
-                    };
-                    let sent =
-                        bounded(&cx, hop.rt.send_forward(&hop.plan.fwd_segments[at], onward)).await;
-                    match sent {
-                        // The next stage owns the reply now.
-                        Ok(()) => drop(share),
-                        // This stage still owns it until the failure is
-                        // delivered, and counts against admission until then.
-                        Err(error) => {
-                            hop.fail(&cx, &envelope.reply, error).await;
-                            drop(share);
-                        }
-                    }
-                }
-                Err(error) => hop.fail(&cx, &envelope.reply, error).await,
+                std::future::pending::<()>().await;
+            };
+            tokio::select! {
+                biased;
+                () = run => {}
+                () = stop_up => {}
             }
+            // Dropping the guard retires the input anchor.
+            drop(guard);
         });
         #[cfg(feature = "fault-injection")]
         if let Some(delay) = self.rt.config.faults.delay_forward_ack {
             tokio::time::sleep(delay).await;
         }
-        Ok(())
+        Ok(accepted)
+    }
+
+    /// Run an accepted hand-off: walk this segment's forward stages, then
+    /// run the inner end here or hand the request on. `input` is the
+    /// streamed request's items when the hand-off carried one, and
+    /// `upstream` cancels or stops their sender.
+    async fn serve_forward(
+        self: Arc<Self>,
+        cx: Cx,
+        handed: Handed,
+        input: Option<Items<Vec<u8>>>,
+        share: Share,
+        egress: Option<EgressPermit>,
+        upstream: Option<Canceller>,
+    ) {
+        let Handed {
+            pos,
+            payload,
+            reply,
+        } = handed;
+        let end = self.plan.fwd_end(pos);
+        let walked = tokio::select! {
+            biased;
+            reason = cx.done() => Err(reason),
+            walked = self.fwd.enter(1, pos, end, &cx, &payload, input) => walked,
+        };
+        match walked {
+            Ok(FwdExit::Here(value)) => match egress {
+                Some(egress) => {
+                    self.run_inner(cx, value, reply, Some(share), egress).await;
+                }
+                None => {
+                    let error = internal("a run reached an inner end it did not expect");
+                    self.fail(&cx, &reply, error).await;
+                }
+            },
+            Ok(FwdExit::Leave { at, head, input }) => {
+                let onward = Forward {
+                    version: VERSION,
+                    identity: self.rt.identity,
+                    hop: self.index,
+                    pos: at as u16,
+                    cx: WireCx::of(&cx),
+                    reply: reply.clone(),
+                    payload: head,
+                };
+                let sent = bounded(
+                    &cx,
+                    self.rt.send_forward(&self.plan.fwd_segments[at], onward),
+                )
+                .await;
+                match (sent, input, egress) {
+                    // The next stage owns the reply now.
+                    (Ok(None), None, _) => drop(share),
+                    // A relay. The next stage owns the reply; this one keeps
+                    // its admission share and its permit until it has sent
+                    // the items on (rulings 10 and 15).
+                    (Ok(Some(next)), Some(input), Some(egress)) => {
+                        send_input(&self.rt, &cx, next, input, upstream).await;
+                        drop((share, egress));
+                    }
+                    (Ok(_), _, _) => self.fail(&cx, &reply, disagree()).await,
+                    // This stage still owns the reply until the failure is
+                    // delivered, and counts against admission until then.
+                    (Err(error), _, _) => {
+                        self.fail(&cx, &reply, error).await;
+                        drop(share);
+                    }
+                }
+            }
+            Err(error) => self.fail(&cx, &reply, error).await,
+        }
     }
 
     /// A request to open a backward run arrived.
@@ -533,7 +646,7 @@ where
         cx: Cx,
         pos: usize,
         reply: ReplyTo,
-        share: Option<super::admission::Share>,
+        share: Option<Share>,
     ) -> Result<ReplyTo> {
         let rt = &self.rt;
         let egress = setup(&cx, rt.config.setup_timeout, "egress", rt.egress.acquire()).await?;
@@ -633,8 +746,8 @@ where
         cx: Cx,
         value: I::Req,
         reply: ReplyTo,
-        share: Option<super::admission::Share>,
-        egress: super::admission::EgressPermit,
+        share: Option<Share>,
+        egress: EgressPermit,
     ) {
         // However this task ends, the request's work here ends with it,
         // including anything the inner end started under its context.
@@ -731,6 +844,56 @@ where
         if let Ok(out) = attach.await {
             finish_failed(out, error).await;
         }
+    }
+}
+
+/// Send a streamed request's items into the input anchor its receiver
+/// minted, until they end. A receiver that is already gone ends the pump
+/// without a word, and cancels what feeds it: the response decides the
+/// request's outcome (ruling 24).
+async fn send_input(
+    rt: &Runtime,
+    cx: &Cx,
+    to: ReplyTo,
+    input: Items<Vec<u8>>,
+    upstream: Option<Canceller>,
+) {
+    let attach = setup(cx, rt.config.setup_timeout, "attach", rt.fabric.attach(&to));
+    let Ok(out) = attach.await else {
+        if let Some(upstream) = upstream {
+            upstream.cancel();
+        }
+        return;
+    };
+    pump(input, out, cx, upstream).await;
+}
+
+/// The parts of a forward hand-off its run needs once it is accepted.
+struct Handed {
+    pos: usize,
+    payload: Vec<u8>,
+    reply: ReplyTo,
+}
+
+/// Retires a run's input anchor when the run ends, however it ends. Nothing
+/// else bounds that anchor: a ticket pauses its unattached timeout, a
+/// sender whose acknowledgement was lost never attaches, and a node may hold
+/// its input unread (ruling 23).
+struct InputGuard(Retirer);
+
+impl InputGuard {
+    fn canceller(&self) -> Canceller {
+        self.0.canceller()
+    }
+
+    fn request_stop(&self) {
+        self.0.request_stop();
+    }
+}
+
+impl Drop for InputGuard {
+    fn drop(&mut self) {
+        self.0.retire(Error::cancelled());
     }
 }
 
@@ -935,6 +1098,10 @@ fn items_holding<T: Send + 'static>(inner: Items<T>, held: impl Send + 'static) 
         let _held = &held;
         item
     }))
+}
+
+fn disagree() -> Error {
+    internal("a hand-off and its acknowledgement disagree on whether the request is streamed")
 }
 
 fn internal(why: &str) -> Error {

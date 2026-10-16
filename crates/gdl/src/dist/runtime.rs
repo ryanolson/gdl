@@ -10,7 +10,7 @@ use serde::Deserialize;
 use velo::{InstanceId, PeerInfo};
 
 use super::admission::{Admission, Egress};
-use super::envelope::{Forward, Identity, Open};
+use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 use crate::error::{Error, ErrorKind, Result};
 use crate::placement::Layout;
@@ -274,7 +274,8 @@ impl Picker {
 }
 
 /// A forward hand-off arriving at this instance.
-pub(crate) type ForwardEntry = Arc<dyn Fn(Forward) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+pub(crate) type ForwardEntry =
+    Arc<dyn Fn(Forward) -> BoxFuture<'static, Result<Accepted>> + Send + Sync>;
 
 /// A request to open a backward run on this instance.
 pub(crate) type OpenEntry = Arc<dyn Fn(Open) -> BoxFuture<'static, Result<ReplyTo>> + Send + Sync>;
@@ -395,11 +396,13 @@ impl Runtime {
             .ok_or_else(|| Error::new(ErrorKind::Transport, "the segment has shut down"))
     }
 
-    /// Hand a request to the next segment and wait for it to accept.
+    /// Hand a request to the next segment and wait for it to accept. A
+    /// stage that accepts a streamed request answers with where to send its
+    /// items.
     ///
     /// When the chosen instance is this one, the entry runs by a direct
     /// call: velo is not relied on to deliver a message to its own sender.
-    pub(crate) async fn send_forward(&self, segment: &str, envelope: Forward) -> Result<()> {
+    pub(crate) async fn send_forward(&self, segment: &str, envelope: Forward) -> Result<Accepted> {
         let instance = self.picker.pick(segment)?;
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
@@ -415,7 +418,7 @@ impl Runtime {
                 self.config.setup_timeout,
             )
             .await?;
-        super::envelope::decode::<Result<(), Error>>(&reply)?
+        super::envelope::decode::<Result<Accepted, Error>>(&reply)?
     }
 
     /// Ask an instance of `segment` to open a backward run.
@@ -469,6 +472,7 @@ impl Runtime {
 pub(crate) struct Served {
     pub(crate) forwards: AtomicUsize,
     pub(crate) runs: AtomicUsize,
+    pub(crate) inputs: AtomicUsize,
 }
 
 #[cfg(test)]

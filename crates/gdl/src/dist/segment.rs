@@ -37,18 +37,6 @@ impl Deployment {
     ) -> Result<Self> {
         config.validate()?;
         let layout = layout(manifest, placement)?;
-        // Streamed requests do not cross segments yet: refuse the placement
-        // now rather than fail each request at the crossing.
-        if let Some(index) = layout
-            .hops()
-            .iter()
-            .position(|hop| hop.request_anchors() > 0)
-        {
-            return Err(Error::new(
-                ErrorKind::Placement,
-                format!("hop {index}: a streamed request cannot cross segments yet"),
-            ));
-        }
         if !placement.segments().any(|(name, _)| name == segment) {
             return Err(Error::new(
                 ErrorKind::Placement,
@@ -119,7 +107,7 @@ impl Deployment {
     }
 }
 
-async fn forward(entries: &Weak<Entries>, bytes: &[u8]) -> Result<()> {
+async fn forward(entries: &Weak<Entries>, bytes: &[u8]) -> Result<super::envelope::Accepted> {
     let envelope: Forward = decode(bytes)?;
     let entry = Arc::clone(upgrade(entries)?.forward(envelope.hop, envelope.pos)?);
     entry(envelope).await
@@ -141,6 +129,17 @@ fn encode_reply<T: serde::Serialize>(reply: Result<T>) -> Vec<u8> {
     // The reply type is always encodable; if even the error cannot be
     // encoded, an empty reply makes the caller report a codec error.
     encode(&reply).unwrap_or_default()
+}
+
+/// Work an instance has taken on since it started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Served {
+    /// Forward hand-offs it accepted.
+    pub forwards: usize,
+    /// Backward runs it prepared.
+    pub runs: usize,
+    /// Request streams it received: one input anchor each.
+    pub inputs: usize,
 }
 
 /// A running segment instance.
@@ -171,13 +170,15 @@ impl<H> Segment<H> {
         self.rt.admission.attempting()
     }
 
-    /// Forward hand-offs and backward runs this instance has taken on.
-    pub fn served(&self) -> (usize, usize) {
+    /// Forward hand-offs, backward runs, and request streams this instance
+    /// has taken on.
+    pub fn served(&self) -> Served {
         use std::sync::atomic::Ordering::Relaxed;
-        (
-            self.rt.served.forwards.load(Relaxed),
-            self.rt.served.runs.load(Relaxed),
-        )
+        Served {
+            forwards: self.rt.served.forwards.load(Relaxed),
+            runs: self.rt.served.runs.load(Relaxed),
+            inputs: self.rt.served.inputs.load(Relaxed),
+        }
     }
 
     /// Egress permits this instance holds: one per stream it is producing.

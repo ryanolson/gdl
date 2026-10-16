@@ -67,7 +67,7 @@ async fn every_placement_of_the_reference_graph_matches_the_local_run() {
             }
         });
         let got = cluster.segments.iter().fold((0, 0), |(f, r), (_, s)| {
-            (f + s.served().0, r + s.served().1)
+            (f + s.served().forwards, r + s.served().runs)
         });
         assert_eq!(got, want, "{blocks:?}");
     }

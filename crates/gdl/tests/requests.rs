@@ -1,5 +1,5 @@
 //! Streamed requests in the graph's data: the manifest, its hash, placement
-//! validation, the crossing report, and the deployments milestone 7 runs.
+//! validation, the crossing report, and the checks a deployment makes.
 
 mod common;
 
@@ -138,32 +138,6 @@ fn a_streamed_request_behind_an_alias_is_not_a_streamed_edge() {
             .iter()
             .any(|e| matches!(e, PlacementError::NotWire { .. })),
         "{errors:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_placement_that_crosses_a_streamed_edge_is_refused_for_now() {
-    let node = velo_node().await;
-    let manifest = streamed::contract::manifest();
-    let placement = Placement::new()
-        .segment("front", ["A", "B", "C", "G"])
-        .segment("back", ["D", "F", "E"]);
-    let mut roster = gdl::Roster::new();
-    roster.add("front", node.peer_info());
-    let refused = gdl::Deployment::new(
-        node,
-        &manifest,
-        &placement,
-        "front",
-        &roster,
-        RuntimeConfig::default(),
-    );
-    let Err(error) = refused else {
-        panic!("a streamed crossing was accepted");
-    };
-    assert!(
-        error.to_string().contains("cannot cross segments yet"),
-        "{error}"
     );
 }
 

@@ -80,7 +80,7 @@ A request can also be a stream. In a request position, `Head + stream Item` decl
 sink Recognizer: Session + stream Audio -> stream Transcript;
 ```
 
-In this version, a streamed request runs in one process, and its response can cross segments. A placement that puts the two ends of a streamed request edge in different segments is refused.
+A streamed request can cross segments like any other request. The stage that receives it creates an anchor for its items, and the sender streams the items into that anchor while the response comes back.
 
 ## Split a graph into segments
 
@@ -206,12 +206,13 @@ In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `m
 - **Admission.** Each instance admits a limited number of root requests. A request that enters the same instance more than one time uses one admission.
 - **Egress.** Each instance limits the number of streams that it produces at the same time. A full instance refuses new work.
 - **Failure.** An error item ends a stream. A stream that ends without a finish from its producer ends with an error, not as a success.
+- **Streamed requests.** The items of a streamed request go to an anchor that the receiving stage created. The input ends cleanly only when its sender finishes it. A stage that stops reading its input ends its sender, and the response still decides the result. A stop does not end the input: it reaches every stage, and a stage can end its input when it sees the stop. A stage that relays a streamed request keeps its admission until it has sent all of the items on.
 
 The design and its rulings are in `agent-docs/plan.md`.
 
 ## Cost
 
-A graph that is not cut costs no encoding. A local graph is nested calls, and the nodes of one segment pass values to each other directly. A cut costs one encode and one decode for each message on each edge that crosses segments. There is one more case. If the request of a hop leaves the segment of the hop's outer end, the response items return to the outer end through an anchor. Each item is then encoded and decoded one time, also when no response edge crosses segments. `crates/gdl/tests/crossings.rs` counts these encodes.
+A graph that is not cut costs no encoding. A local graph is nested calls, and the nodes of one segment pass values to each other directly. A cut costs one encode and one decode for each message on each edge that crosses segments. There is one more case. If the request of a hop leaves the segment of the hop's outer end, the response items return to the outer end through an anchor. Each item is then encoded and decoded one time, also when no response edge crosses segments. A streamed request's head and each of its items are encoded once on each crossing that they go through. `crates/gdl/tests/crossings.rs` counts these encodes.
 
 On one aarch64 workstation, over loopback TCP:
 

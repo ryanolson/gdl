@@ -13,7 +13,7 @@ use crate::cx::{Cx, Deadline, RequestId};
 use crate::error::{Error, ErrorKind, Result};
 
 /// The envelope format. A receiver rejects any other version.
-pub(crate) const VERSION: u8 = 1;
+pub(crate) const VERSION: u8 = 2;
 
 /// Which deployment a message belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +78,12 @@ pub(crate) struct Forward {
     #[serde(with = "serde_bytes")]
     pub(crate) payload: Vec<u8>,
 }
+
+/// What a stage that accepted a forward hand-off answers: for a streamed
+/// request, where to send its items. The stage that reads the items mints
+/// their anchor, because a velo anchor is read only in the process that
+/// minted it.
+pub(crate) type Accepted = Option<ReplyTo>;
 
 /// A request to prepare one backward run of a hop.
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,6 +152,17 @@ mod tests {
             .expect("live");
         assert_eq!(arrived.id(), cx.id());
         assert!(arrived.deadline().is_some());
+    }
+
+    #[test]
+    fn an_acknowledgement_carries_its_input_reply() {
+        let accepted: Result<Accepted> = Ok(Some(ReplyTo::test_value(u128::MAX - 9)));
+        let back: Result<Accepted> = decode(&encode(&accepted).expect("encode")).expect("decode");
+        let reply = back.expect("accepted").expect("an input reply");
+        assert_eq!(reply.handle_u128(), u128::MAX - 9);
+        let plain: Result<Accepted> = Ok(None);
+        let back: Result<Accepted> = decode(&encode(&plain).expect("encode")).expect("decode");
+        assert!(back.expect("accepted").is_none());
     }
 
     #[test]

@@ -49,6 +49,18 @@ pub struct Script {
     /// When its input ends, D waits for a stop or the end of its context
     /// before its count.
     pub hold_at_end: bool,
+    /// D returns a stream that never reads its input and never ends.
+    pub stall: bool,
+    /// D sends this many notes before it reads any input.
+    pub emit_first: u32,
+    /// C's words wait for a stop before C reads its input; the stop then
+    /// ends them.
+    pub wait_for_stop: bool,
+    /// After its input ends, C waits for a stop, then adds the word `tail`.
+    pub tail_on_stop: bool,
+    /// D hands its input to a task of its own that reads it to the end, and
+    /// answers with one note at once.
+    pub detach_input: bool,
 }
 
 /// A's request head.
@@ -207,9 +219,26 @@ impl Forward for NodeC {
         self.events.record(format!("C:{}", brief.text));
         brief.text = format!("c({})", brief.text);
         let words = items(input.map(|word| word.map(|w| format!("c({w})"))));
-        let words = if brief.script.stop_ends_input {
+        let script = &brief.script;
+        let words = if script.stop_ends_input {
+            items(words.take_until(stopping(cx)))
+        } else {
+            words
+        };
+        let words = if script.wait_for_stop {
+            // Nothing is read before the stop, and the stop ends the words.
+            let first = futures::stream::once(stopping(cx)).filter_map(|()| async { None });
+            items(first.chain(words.take_until(stopping(cx))))
+        } else {
+            words
+        };
+        let words = if script.tail_on_stop {
             let cx = cx.clone();
-            items(words.take_until(async move { cx.stopping().await }))
+            let tail = futures::stream::once(async move {
+                cx.stopping().await;
+                Ok("tail".to_string())
+            });
+            items(words.chain(tail))
         } else {
             words
         };
@@ -238,6 +267,23 @@ impl Sink for NodeD {
             let note = Note(format!("{}:ignored", brief.text));
             return Ok(items(futures::stream::iter([Ok(note)])));
         }
+        if brief.script.detach_input {
+            let events = Arc::clone(&self.events);
+            let key = key.clone();
+            tokio::spawn(async move {
+                while input.next().await.is_some() {}
+                events.record(format!("D:detached-input-ended:{key}"));
+            });
+            let note = Note(format!("{}:detached", brief.text));
+            return Ok(items(futures::stream::iter([Ok(note)])));
+        }
+        if brief.script.stall {
+            let held = input;
+            return Ok(items(futures::stream::pending().map(move |note| {
+                let _held = &held;
+                note
+            })));
+        }
         let first = if brief.script.read_first {
             let first = input.next().await;
             self.events.record(format!("D:read-first:{key}"));
@@ -249,6 +295,7 @@ impl Sink for NodeD {
             input: Some(input),
             first,
             count: 0,
+            sent_first: 0,
             brief,
             key,
             cx,
@@ -265,6 +312,8 @@ struct Reading {
     /// The first word, when D read it before returning its stream.
     first: Option<Option<Result<Word>>>,
     count: u32,
+    /// Notes sent before any input was read.
+    sent_first: u32,
     brief: Brief,
     key: String,
     cx: Cx,
@@ -274,6 +323,11 @@ struct Reading {
 impl Reading {
     async fn step(mut self) -> Option<(Result<Note>, Self)> {
         let input = self.input.as_mut()?;
+        if self.sent_first < self.brief.script.emit_first {
+            self.sent_first += 1;
+            let note = Note(format!("{}:first:{}", self.brief.text, self.sent_first));
+            return Some((Ok(note), self));
+        }
         if self.brief.script.take == Some(self.count) {
             self.input = None;
             self.events.record(format!("D:took:{}", self.key));
@@ -355,17 +409,30 @@ impl Backward for NodeG {
     }
 }
 
-/// X: the brief's text, split into words.
+/// X: the brief's text, split into words. With `stop_ends_input` the words
+/// go on until a stop.
 pub struct NodeX;
 
 impl Forward for NodeX {
     type In = Brief;
     type Out = Streamed<Brief, Word>;
 
-    async fn forward(&self, _cx: &Cx, brief: Brief) -> Result<Self::Out> {
+    async fn forward(&self, cx: &Cx, brief: Brief) -> Result<Self::Out> {
         let words: Vec<Result<Word>> = brief.text.split(' ').map(|w| Ok(w.to_string())).collect();
-        Ok(Streamed::new(brief, items(futures::stream::iter(words))))
+        let words = futures::stream::iter(words);
+        if brief.script.stop_ends_input {
+            let endless = words.chain(futures::stream::pending());
+            let words = items(endless.take_until(stopping(cx)));
+            return Ok(Streamed::new(brief, words));
+        }
+        Ok(Streamed::new(brief, items(words)))
     }
+}
+
+/// A future that resolves when `cx` is asked to stop, owning what it needs.
+fn stopping(cx: &Cx) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let cx = cx.clone();
+    async move { cx.stopping().await }
 }
 
 /// Y: the words, joined into the brief's text.
@@ -507,7 +574,36 @@ pub fn deploy(
     events: &Arc<Events>,
     config: RuntimeConfig,
 ) -> Cluster<impl Next<Streamed<Ask, Word>, Reply> + Register + use<>> {
-    let manifest = contract::manifest();
+    deploy_configured(instances, placement, events, &|_| config.clone())
+}
+
+/// Deploy the streamed reference graph with each segment's runtime
+/// settings chosen by `config`.
+pub fn deploy_configured(
+    instances: &[(String, Arc<velo::Velo>)],
+    placement: &gdl::Placement,
+    events: &Arc<Events>,
+    config: &dyn Fn(&str) -> RuntimeConfig,
+) -> Cluster<impl Next<Streamed<Ask, Word>, Reply> + Register + use<>> {
+    let events = Arc::clone(events);
+    deploy_graph(
+        instances,
+        &contract::manifest(),
+        placement,
+        config,
+        move |deployment| contract::assemble(deployment, bindings(&events)),
+    )
+}
+
+/// Deploy any graph: `assemble` builds each instance's root from its
+/// deployment.
+pub fn deploy_graph<H: Register>(
+    instances: &[(String, Arc<velo::Velo>)],
+    manifest: &gdl::Manifest,
+    placement: &gdl::Placement,
+    config: &dyn Fn(&str) -> RuntimeConfig,
+    assemble: impl Fn(&Deployment) -> gdl::Result<H>,
+) -> Cluster<H> {
     let mut roster = Roster::new();
     for (name, node) in instances {
         roster.add(name.clone(), node.peer_info());
@@ -517,14 +613,14 @@ pub fn deploy(
         .map(|(name, node)| {
             let deployment = Deployment::new(
                 Arc::clone(node),
-                &manifest,
+                manifest,
                 placement,
                 name,
                 &roster,
-                config.clone(),
+                config(name),
             )
             .expect("deployment");
-            let root = contract::assemble(&deployment, bindings(events)).expect("graph");
+            let root = assemble(&deployment).expect("graph");
             (name.clone(), deployment.start(root).expect("start"))
         })
         .collect();
