@@ -38,6 +38,30 @@ gdl::graph! {
 
 In the topology, each hop lists its forward nodes, then its inner end, then its backward nodes in the order that the response goes through them. An operator owns its hop in braces.
 
+This is the same graph as a diagram, from `manifest().to_mermaid(None)`. Solid edges carry requests, and dashed edges carry responses. Each edge has the name of its message type.
+
+```mermaid
+---
+title: "chat"
+---
+flowchart LR
+    n0(["Frontend<br/>source"])
+    n1[["Preprocess<br/>operator"]]
+    n2["Truncate<br/>forward"]
+    n3[("Engine<br/>sink")]
+    n4("Detokenize<br/>backward")
+    n5("Format<br/>backward")
+    n6("Number<br/>backward")
+    n0 -->|"Prompt"| n1
+    n1 -.->|"Chunk"| n6
+    n6 -.->|"Chunk"| n0
+    n1 -->|"Words"| n2
+    n2 -->|"Words"| n3
+    n3 -.->|"Token"| n4
+    n4 -.->|"Piece"| n5
+    n5 -.->|"Text"| n1
+```
+
 The macro checks the topology at compile time. An implementation with the wrong role or types for its node does not compile. The macro generates:
 
 - `Bindings`: one slot for each node other than the source, filled with `Bindings::new().preprocess(...).engine(...)`.
@@ -50,7 +74,7 @@ Bump `schema` when the wire form of a message type changes.
 
 ## Split a graph into segments
 
-A spec file names the contract, the placement, and the implementation of each node. `examples/chat/gdl.toml` is a full spec:
+A spec file names the contract, the placement, and the implementation of each node. `examples/chat/gdl.toml` is a full spec. This part of it shows the contract, the placement in three segments, and one binding:
 
 ```toml
 [contract]
@@ -64,6 +88,9 @@ nodes = ["Frontend", "Preprocess", "Truncate", "Number"]
 
 [segment.engine]
 nodes = ["Engine"]
+
+[segment.post]
+nodes = ["Detokenize", "Format"]
 
 [bind.Engine]
 crate = "chat-engine-mock"
@@ -93,6 +120,37 @@ cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --diagram dot | dot -Tsvg 
 - Request edges are solid. Response edges are dashed.
 - Each edge has the name of its message type. If the type has no codec, the label says `(no codec)`, because a placement cannot cut that edge.
 - Each segment is a cluster. An edge that crosses segments is thick and red.
+
+For the chat spec, `--diagram mermaid` writes this diagram. Three edges cross segments: `Words` into `engine`, `Token` out of `engine`, and `Text` out of `post`.
+
+```mermaid
+---
+title: "chat"
+---
+flowchart LR
+    subgraph s0["engine"]
+        n3[("Engine<br/>sink")]
+    end
+    subgraph s1["front"]
+        n0(["Frontend<br/>source"])
+        n1[["Preprocess<br/>operator"]]
+        n2["Truncate<br/>forward"]
+        n6("Number<br/>backward")
+    end
+    subgraph s2["post"]
+        n4("Detokenize<br/>backward")
+        n5("Format<br/>backward")
+    end
+    n0 -->|"Prompt"| n1
+    n1 -.->|"Chunk"| n6
+    n6 -.->|"Chunk"| n0
+    n1 -->|"Words"| n2
+    n2 -->|"Words"| n3
+    n3 -.->|"Token"| n4
+    n4 -.->|"Piece"| n5
+    n5 -.->|"Text"| n1
+    linkStyle 4,5,7 stroke:#d62728,stroke-width:3px
+```
 
 In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`. Give them `None` to draw the graph without segments, or a `Layout` from `gdl::layout` to draw it placed. They return an error if the layout was made for another contract.
 
