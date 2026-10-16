@@ -1,6 +1,6 @@
 # dynamo-gdl plan
 
-Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Streaming requests (section 7.9, milestones 7 to 9) planned 2026-10-16. Measurements: `agent-docs/perf/`.
+Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Streaming requests (section 7.9, milestones 7 to 9) planned 2026-10-16 and approved after three review rounds (`agent-docs/reviews/stream-plan-r*.md`). Measurements: `agent-docs/perf/`.
 
 ## 1. Goal
 
