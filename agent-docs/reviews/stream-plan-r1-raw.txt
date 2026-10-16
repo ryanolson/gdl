@@ -1,0 +1,34 @@
+[
+  {
+    "verdict": "APPROVE-WITH-CHANGES",
+    "actionable": 1,
+    "findings": [
+      {
+        "id": 1,
+        "severity": "major",
+        "file": "agent-docs/plan.md",
+        "line": 482,
+        "claim": "Ruling 26 leaves remote forward relays unable to observe Stop, so its prescribed take_until(cx.stopping()) can hang until the deadline instead of completing gracefully.",
+        "evidence": "Consider A -> C -> D with streamed request edges. C wraps a pending input in take_until(cx.stopping()); D drains that input before returning its response stream. Locally, C receives the attempt context (crates/gdl/src/compose.rs:168-173), whose stop propagates from the caller (cx.rs:84-92). In separate segments, C receives a fresh scope (dist/hop.rs:406; cx.rs:173-185), and WireCx carries no stop signal (dist/envelope.rs:27-30). Response-side Stop reaches D through its attached response sender (dist/hop.rs:638-657), but C does not own that sender. Ruling 26 forbids forwarding Stop through the input anchors, leaving no route to C's context. C therefore never produces EOF, D never returns its stream or sends Open, and the call waits until its deadline. This occurs after C's forward transform has returned, beyond section 7.4's stated pre-attachment limitation. Specify how active relay contexts receive Stop without automatically terminating input.",
+        "test_idea": "Run A -> C -> D locally and with placement {A}/{C}/{D}. Supply one input item followed by a permanently pending stream; have C apply take_until using its supplied context and D drain to EOF before returning a summary. After observing D receive the first item, request Stop. Require identical successful completion before the deadline and all anchors, tasks, and permits to settle."
+      }
+    ],
+    "notes": "Read-only review; worktree unchanged. Existing runtime fault suite passed: timeout 300 cargo test --locked -p gdl --features fault-injection --test faults (38 tests). The finding is a design-level protocol trace; streaming requests are not implemented, so its proposed regression test was not executed. Receiver minting, same-worker attach selection, pump-before-Open ordering, and explicit input retirement otherwise fit the inspected runtime and velo 0.19 semantics."
+  },
+  {
+    "verdict": "REJECT",
+    "actionable": 1,
+    "findings": [
+      {
+        "id": 1,
+        "severity": "major",
+        "file": "agent-docs/plan.md",
+        "line": 482,
+        "claim": "Ruling 26 prevents caller stop from reaching a remote streaming relay's context, breaking the promised local/remote parity.",
+        "evidence": "The ruling recommends take_until(cx.stopping()) while forbidding input pumps from reacting to or forwarding stop. Locally, forward C receives the attempt context (crates/gdl/src/compose.rs:168-173), which inherits caller stop (crates/gdl/src/cx.rs:84-105). A remote C instead receives fresh scope tokens (cx.rs:173-185; dist/hop.rs:405-406). In placement {A,B,G} {C} {D,F,E}, the response bypasses C; only the inner end maps response-sender stop into its context (dist/hop.rs:638-656). Velo's sender stop token fires only when its consumer stops or cancels that anchor (velo-0.19.0/src/streaming/sender.rs:307-310). Consequently, C wrapping pending input with take_until(cx.stopping()) supplies EOF locally on stop but never remotely. A D that drains input before returning its result succeeds locally and reaches its deadline remotely. Specify a control path that delivers stop to relay contexts without automatically ending raw input streams before implementing milestone 8.",
+        "test_idea": "Add a milestone-8 parity test with C wrapping pending input in take_until(cx.stopping()) and D draining input before returning a successful response. Compare the local placement with {A,B,G} {C} {D,F,E}. Wait for observable input polling before requesting stop; require graceful success before the deadline and resource counters returning to baseline. Also exercise stop after the response stream has opened."
+      }
+    ],
+    "notes": "Read-only design review against the runtime and velo 0.19.0; no files changed or new tests executed. The finding is a protocol counterexample, not a reproduced failure of the unimplemented feature. No additional material defect established in relay admission retention, ruling 29's explicitly accepted bounded egress contention, or syntax-selected codecs and local-only Streamed aliases. Acceptance tests should additionally name: input half-close with a continuing response; input Err recovered by a sink without cancelling its response, with subsequent input suppressed; terminal input codec failures; remote value-to-stream and stream-to-value conversions; completed relay production with buffered input retained until receiver deadline; egress refusal before ack leaving no input anchor; alias-versus-stream-syntax mismatch despite identical Rust types; independent non-wire head/item rejection and item-only contract-hash changes. The 877-partition happy-path matrix alone does not establish these behaviors."
+  }
+]
