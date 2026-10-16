@@ -1,0 +1,27 @@
+[
+  {
+    "verdict": "REJECT",
+    "actionable": 2,
+    "findings": [
+      {
+        "id": 1,
+        "severity": "major",
+        "file": "agent-docs/plan.md",
+        "line": 482,
+        "claim": "Stop delivery must not depend on input data credit or application polling.",
+        "evidence": "Ruling 26 sends Stop after previously sent input items. A remote forward stage can await cx.stopping() before consuming its input; its fresh context has no response-side stop route. The Stop then remains unread, or is blocked behind exhausted credit. An eager reader with bounded buffering only postpones this failure. Velo serializes every WireItem as ordinary StreamFrame::Item data (streaming/sender.rs:326-344); its credit test demonstrates sends remaining blocked until credit returns (streaming/messenger_mux/peer_batcher/tests/egress.rs:336-365). Local composition supplies the inherited attempt context (crates/gdl/src/compose.rs:42-48), so the same stage wakes on stop. This is a control-delivery deadlock introduced by the runtime, not the application cross-direction deadlock accepted by ruling 28.",
+        "test_idea": "Use a relay whose forward stage signals entry, then awaits cx.stopping() before reading input. In the remote placement, establish input backpressure with an observable blocked-send signal before requesting stop. Require the same successful completion as the local placement before the deadline. Cover both TCP credit exhaustion and same-worker channel saturation."
+      },
+      {
+        "id": 2,
+        "severity": "major",
+        "file": "agent-docs/plan.md",
+        "line": 301,
+        "claim": "Every live relay needs a stop route independent of whether its incoming request stream still exists.",
+        "evidence": "The input-EOF rule finalizes the input anchor while the request may continue, but ruling 26's only stop route is a frame from that input pump. A relay can consume finite input and then await its own context's stop before emitting a final item; after EOF there is no writer left to send that stop. Velo finalize(self) consumes the sender and removes its registry entry (streaming/sender.rs:384-403). The response bypasses the relay, so remote execution reaches the deadline while local execution finishes. Section 7.9:253 also allows a value-to-stream forward node: a remote relay entered with a plain value has no incoming input anchor or pump in the first place. Fixing frame priority alone cannot repair either missing route.",
+        "test_idea": "Have C append a final item after cx.stopping() to a finite incoming stream, with D draining C's output. Signal that C observed input EOF, then stop the caller; require local/remote output equivalence and resource settlement before the deadline. Also test a remote C that receives a plain value and creates a stream ending on C's stop context."
+      }
+    ],
+    "notes": "The round-1 addendum supplies a stop route only while an incoming input transport remains live and makes progress; the finding is therefore only partially resolved. Duplicate Stop is idempotent, stop state persists before attachment, and nested child scopes propagate a received stop correctly. No additional material design defect found. Existing stop fault tests passed: 4 passed, 34 filtered out, using timeout 300 cargo test --locked -p gdl --features fault-injection --test faults stop. The proposed streaming paths are unimplemented; findings are design counterexamples, not newly executed failing regression tests. Repository files were unchanged."
+  }
+]
