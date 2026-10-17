@@ -416,10 +416,14 @@ where
                         let rt = Arc::clone(rt);
                         // A child scope: a receiver that drops its input
                         // cancels the pump's scope, which must not end the
-                        // attempt (the response decides its outcome).
+                        // attempt (the response decides its outcome). A stop
+                        // from the receiver reaches the attempt itself, as
+                        // a stop one stage asks for reaches every stage of a
+                        // local attempt.
+                        let attempt = attempt.clone();
                         let cx = attempt.child();
                         tokio::spawn(async move {
-                            send_input(&rt, &cx, to, input, None).await;
+                            send_input(&rt, &cx, to, input, None, Some(&attempt)).await;
                             drop(egress);
                         });
                     }
@@ -566,7 +570,7 @@ where
                         // its admission share and its permit until it has sent
                         // the items on.
                         (Ok(Some(next)), Some(input), Some(egress)) => {
-                            Box::pin(send_input(&hop.rt, &cx, next, input, upstream)).await;
+                            Box::pin(send_input(&hop.rt, &cx, next, input, upstream, None)).await;
                             drop((share, egress));
                         }
                         (Ok(_), _, _) => hop.fail(&cx, &reply, disagree()).await,
@@ -677,6 +681,7 @@ where
                 let upstream = Upstream {
                     cx: &cx,
                     anchor: Some(inbound.canceller()),
+                    stops: None,
                 };
                 let (stop_open, done_open) = (stop.cancelled(), cx.done());
                 tokio::pin!(stop_open, done_open);
@@ -706,7 +711,7 @@ where
         let upstream = inbound.canceller();
         let bytes = inbound_items(inbound);
         match self.bwd.enter(1, pos, end, &cx, bytes) {
-            Ok(BwdExit::Leave { bytes, .. }) => pump(bytes, out, &cx, Some(upstream)).await,
+            Ok(BwdExit::Leave { bytes, .. }) => pump(bytes, out, &cx, Some(upstream), None).await,
             Ok(BwdExit::Here(_)) => {
                 finish_failed(out, internal("a prepared run reached the outer end")).await;
             }
@@ -780,7 +785,11 @@ where
             Err(error) => return finish_failed(out, error).await,
         };
         // The inner end's stream exists: downstream runs may activate.
-        let upstream = Upstream { cx, anchor: None };
+        let upstream = Upstream {
+            cx,
+            anchor: None,
+            stops: None,
+        };
         let (stop_open, done_open) = (stop.cancelled(), cx.done());
         tokio::pin!(stop_open, done_open);
         let watch = Watch {
@@ -794,7 +803,7 @@ where
             Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
         }
         match self.bwd.walk(1, self.plan.inner_end, cx, items) {
-            BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None).await,
+            BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None, None).await,
             BwdExit::Here(_) => {
                 finish_failed(out, internal("the inner end's run reached the outer end")).await;
             }
@@ -825,12 +834,17 @@ where
 /// minted, until they end. A receiver that is already gone ends the pump
 /// without a word, and cancels what feeds it: the response decides the
 /// request's outcome.
+///
+/// `stops` is a context that a stop from the receiver reaches as well as
+/// `cx`: the outer end's attempt, whose forward stages feed this pump under
+/// the attempt itself, while a cancel must end only the pump.
 async fn send_input(
     rt: &Runtime,
     cx: &Cx,
     to: ReplyTo,
     input: Items<Vec<u8>>,
     upstream: Option<Canceller>,
+    stops: Option<&Cx>,
 ) {
     let attach = setup(cx, rt.config.setup_timeout, "attach", rt.fabric.attach(&to));
     let Ok(out) = attach.await else {
@@ -839,7 +853,7 @@ async fn send_input(
         }
         return;
     };
-    pump(input, out, cx, upstream).await;
+    pump(input, out, cx, upstream, stops).await;
 }
 
 /// Retires a run's input anchor when the run ends, however it ends. Nothing
@@ -864,10 +878,17 @@ impl Drop for InputGuard {
 /// the request's deadline passes. A stop or cancel from the consumer is
 /// passed upstream: to `cx`, which the stages feeding this pump run under,
 /// and to `upstream`, the anchor this run reads from.
-async fn pump(mut bytes: Items<Vec<u8>>, out: Outbound, cx: &Cx, upstream: Option<Canceller>) {
+async fn pump(
+    mut bytes: Items<Vec<u8>>,
+    out: Outbound,
+    cx: &Cx,
+    upstream: Option<Canceller>,
+    stops: Option<&Cx>,
+) {
     let upstream = Upstream {
         cx,
         anchor: upstream,
+        stops,
     };
     let cancel = out.cancel_token();
     let stop_token = out.stop_token();
@@ -938,6 +959,8 @@ async fn pump(mut bytes: Items<Vec<u8>>, out: Outbound, cx: &Cx, upstream: Optio
 struct Upstream<'a> {
     cx: &'a Cx,
     anchor: Option<Canceller>,
+    /// A context that a stop reaches as well, and a cancel does not.
+    stops: Option<&'a Cx>,
 }
 
 impl Upstream<'_> {
@@ -952,6 +975,9 @@ impl Upstream<'_> {
         self.cx.request_stop();
         if let Some(anchor) = &self.anchor {
             anchor.request_stop();
+        }
+        if let Some(stops) = self.stops {
+            stops.request_stop();
         }
     }
 }

@@ -997,6 +997,24 @@ impl gdl::Sink for Drain {
     }
 }
 
+/// Drains its input, then waits for a stop before it answers with the count.
+struct DrainThenAwaitStop;
+
+impl gdl::Sink for DrainThenAwaitStop {
+    type Req = Streamed<(), u32>;
+    type Item = u32;
+
+    async fn generate(&self, cx: Cx, req: Self::Req) -> gdl::Result<gdl::Items<u32>> {
+        let (_, input) = req.into_parts();
+        let counted = async move {
+            let count = input.count().await as u32;
+            cx.stopping().await;
+            Ok(count)
+        };
+        Ok(items(futures::stream::once(counted)))
+    }
+}
+
 async fn stop_from_a_node(placement: Placement) {
     let nodes = nodes(placement.segments().count()).await;
     let cluster = streamed::deploy_graph(
@@ -1039,4 +1057,66 @@ async fn a_stop_a_node_asks_for_reaches_the_stage_before_it_across_segments() {
         .segment("x", ["X"])
         .segment("c", ["C", "D"]);
     stop_from_a_node(placement).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_a_node_asks_for_reaches_a_forward_node_in_the_outer_segment() {
+    let placement = Placement::new()
+        .segment("a", ["A", "X"])
+        .segment("c", ["C", "D"]);
+    stop_from_a_node(placement).await;
+}
+
+async fn stop_from_a_relay(placement: Placement) -> Vec<gdl::Result<u32>> {
+    let nodes = nodes(placement.segments().count()).await;
+    let cluster = streamed::deploy_graph(
+        &streamed::instances(&nodes, &placement),
+        &stopping::manifest(),
+        &placement,
+        &defaults,
+        |deployment| {
+            let bindings = stopping::Bindings::new()
+                .x(UntilStop)
+                .c(StopAfterFirst)
+                .d(DrainThenAwaitStop);
+            stopping::assemble(deployment, bindings)
+        },
+    );
+    // A finite input: the stop C asks for must reach D after the input is
+    // over, with no input sender left upstream to carry it.
+    let input = items(futures::stream::iter([Ok(1)]));
+    let out = cluster
+        .segment("a")
+        .call(Cx::new().with_timeout(ms(3_000)), Streamed::new((), input))
+        .await
+        .expect("call");
+    let got = tokio::time::timeout(WAIT, collect(out))
+        .await
+        .expect("the stream ended");
+    assert!(settles(&cluster).await);
+    got
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_a_relay_asks_for_reaches_the_sink_locally() {
+    let got = stop_from_a_relay(Placement::new().segment("a", ["A", "X", "C", "D"])).await;
+    assert_eq!(got, vec![Ok(1)]);
+}
+
+/// The accepted limit of ruling 26: once a relay's own input has ended, no
+/// stage is left upstream to carry a stop it asks for, and velo gives a
+/// producer no way to signal its consumer outside the data. The stop does
+/// not reach the sink; the deadline ends the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_a_relay_asks_for_after_its_input_ended_waits_for_the_deadline() {
+    let placement = Placement::new()
+        .segment("a", ["A"])
+        .segment("x", ["X", "C"])
+        .segment("d", ["D"]);
+    let got = stop_from_a_relay(placement).await;
+    let kinds: Vec<_> = got
+        .iter()
+        .map(|r| r.as_ref().map_err(Error::kind))
+        .collect();
+    assert_eq!(kinds, vec![Err(ErrorKind::DeadlineExceeded)]);
 }
