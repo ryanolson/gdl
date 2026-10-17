@@ -109,6 +109,10 @@ async fn the_generated_local_graph_matches_the_hand_written_one() {
 }
 
 /// Every placement through the generated `assemble`, every slot bound.
+///
+/// About 15 s: one request through each of the 877 placements, on velo
+/// nodes started once. Each placement splits the hops differently, so none
+/// can stand in for another.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_placement_runs_through_the_generated_assembly() {
     let mut nodes = Vec::new();

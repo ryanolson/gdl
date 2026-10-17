@@ -27,6 +27,9 @@ async fn the_three_segment_placement_matches_the_local_run() {
     events.wait_for("D:done:c(p)#0", WAIT).await;
 }
 
+/// About 15 s: one request through each of the 877 placements, on velo
+/// nodes started once. Each placement splits the hops differently, so none
+/// can stand in for another.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_placement_of_the_reference_graph_matches_the_local_run() {
     let mut nodes = Vec::new();

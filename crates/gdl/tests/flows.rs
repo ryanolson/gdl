@@ -99,6 +99,9 @@ async fn a_relay_streams_the_request_through_the_middle_segment() {
     assert_eq!((served.forwards, served.inputs), (1, 1), "{served:?}");
 }
 
+/// About 15 s: one request through each of the 877 placements, on velo
+/// nodes started once. Each placement splits the hops differently, so none
+/// can stand in for another.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_placement_of_the_streamed_reference_graph_matches_the_local_run() {
     const NODES: [&str; 7] = ["A", "B", "C", "D", "E", "F", "G"];

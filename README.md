@@ -254,7 +254,10 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-timeout 900 cargo test --workspace --all-features
+cargo test --workspace --all-features --no-run
+timeout 300 cargo test --workspace --all-features
 ```
+
+Build the tests first (`--no-run`): the `timeout` then counts only the tests, which take about a minute. It turns a hung test into a failure; set it to two or three times the run you expect.
 
 The tests start velo nodes in one process on ports that the OS assigns. The example tests build the example workspaces in `target/examples`.

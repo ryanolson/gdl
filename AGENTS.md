@@ -20,13 +20,24 @@
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-timeout 900 cargo test --workspace            # full suite
-timeout 300 cargo test -p <crate> --test <t>   # one target
+cargo test --workspace --no-run                   # build first: the limit is for the tests
+timeout <limit> cargo test --workspace            # full suite
+timeout <limit> cargo test -p <crate> --test <t>   # one target
 ```
 
-- Always run tests under `timeout`. On exit 124, rerun the newest test binary with `--test-threads=1 --nocapture` under a short timeout to name the hang.
+- Always run tests under `timeout`, and size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once; a large fixed one hides it. Build first with `--no-run`, so that the limit does not have to cover compilation. Keep the measured times in agent memory, not here: they change as the suite does. Cargo prints each target's time (`finished in`).
+- On exit 124, rerun the newest test binary with `--test-threads=1 --nocapture` under a short timeout to name the hang.
 - Tests that need two or more velo nodes run them in one process over TCP on OS-assigned ports. They must not depend on NATS, etcd, or fixed ports.
 - Prove a precondition with an observable signal; never sleep and hope.
+
+### Keep the suite fast
+
+The suite runs on every change, so its speed is part of its correctness.
+
+- A test waits only for what it observes, and bounds each wait to a few seconds. A defect makes it fail, never hang.
+- Build expensive state once: start velo nodes once per test and reuse them across cases, as the placement matrices do.
+- A test that runs for more than a few seconds says why in a comment.
+- When a target gets slower, find the cause before you raise its limit.
 
 ## Rules
 
