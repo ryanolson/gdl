@@ -790,6 +790,44 @@ pub async fn tight_velo_node() -> Arc<velo::Velo> {
         .expect("velo node")
 }
 
+/// A tight velo node (see [`tight_velo_node`]) that counts how often its
+/// producers waited for credit, read through [`backpressured`].
+pub async fn metered_tight_velo_node() -> (Arc<velo::Velo>, prometheus::Registry) {
+    let registry = prometheus::Registry::new();
+    let metrics = Arc::new(velo::VeloMetrics::register(&registry).expect("metrics"));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let transport = velo::transports::tcp::TcpTransportBuilder::new()
+        .from_listener(listener)
+        .expect("listener")
+        .build()
+        .expect("transport");
+    let mux = velo::streaming::MuxConfig {
+        initial_credit: 4,
+        slot_byte_budget: 1024,
+        ..velo::streaming::MuxConfig::default()
+    };
+    let node = velo::Velo::builder()
+        .add_transport(Arc::new(transport))
+        .stream_bind_addr([127, 0, 0, 1].into())
+        .messenger_mux(mux)
+        .expect("mux config")
+        .metrics(metrics)
+        .build()
+        .await
+        .expect("velo node");
+    (node, registry)
+}
+
+/// How many times the producers of a metered node waited for credit.
+pub fn backpressured(registry: &prometheus::Registry) -> f64 {
+    registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == "velo_streaming_producer_send_backpressure_total")
+        .and_then(|family| family.get_metric().first())
+        .map_or(0.0, |metric| metric.get_counter().value())
+}
+
 /// A velo node on loopback TCP with OS-assigned ports.
 pub async fn velo_node() -> Arc<velo::Velo> {
     gdl::bind_node(([127, 0, 0, 1], 0).into())

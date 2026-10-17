@@ -33,6 +33,7 @@ tokio-util = { workspace = true }
 [dev-dependencies]
 gdl = { path = ".", features = ["fault-injection", "json-lines"] }
 criterion = { workspace = true }
+prometheus = { workspace = true }
 velo = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

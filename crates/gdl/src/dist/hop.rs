@@ -524,10 +524,17 @@ where
                 // beside the run would register a waiter on every item.
                 let watched = cx.clone();
                 tokio::spawn(async move {
+                    // `stopping` resolves on a cancel too, and a cancel is
+                    // the run going away, not asking to stop: passed on as
+                    // a stop, it would stop the outer end's attempt.
                     tokio::select! {
                         biased;
-                        () = watched.stopping() => input.request_stop(),
                         () = watched.cancelled() => {}
+                        () = watched.stopping() => {
+                            if !watched.is_cancelled() {
+                                input.request_stop();
+                            }
+                        }
                     }
                 });
             }

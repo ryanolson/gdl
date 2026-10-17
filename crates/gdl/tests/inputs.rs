@@ -1155,7 +1155,9 @@ impl gdl::Sink for DropBlockedInput {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dropping_an_input_whose_sender_is_blocked_does_not_stop_the_response() {
-    let nodes = tight_nodes(2).await;
+    // `a` hosts the input's sender, and counts when it waits for credit.
+    let (sender, registry) = common::metered_tight_velo_node().await;
+    let nodes = vec![sender, tight_velo_node().await];
     let placement = Placement::new().segment("a", ["A"]).segment("s", ["S"]);
     let events = Events::new();
     let (drop_input, respond) = (
@@ -1186,7 +1188,15 @@ async fn dropping_an_input_whose_sender_is_blocked_does_not_stop_the_response() 
         .call(Cx::new(), Streamed::new((), input))
         .await
         .expect("call");
-    events.wait_for("input:sent:3", WAIT).await;
+    // The pump's send waits for credit: the case where a cancel and a stop
+    // arrive together.
+    tokio::time::timeout(WAIT, async {
+        while common::backpressured(&registry) == 0.0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the input's sender waited for credit");
     assert!(
         !events.has("input:sent:4095"),
         "the input was not held back"
@@ -1209,5 +1219,121 @@ async fn dropping_an_input_whose_sender_is_blocked_does_not_stop_the_response() 
     respond.notify_one();
     assert_eq!(out.next().await, Some(Ok(42)));
     assert_eq!(out.next().await, None);
+    assert!(settles(&cluster).await);
+}
+
+// ----- a relay whose receiver drops its input -----
+
+mod teardown {
+    gdl::graph! {
+        name = "teardown", schema = 1;
+        source  A: stream u32 -> stream u32;
+        forward X: stream u32 -> stream u32;
+        sink    D: stream u32 -> stream u32;
+        topology: A => X => D;
+    }
+}
+
+/// Passes its input on, after registering many waiters on its context's
+/// cancel: they widen the window between a cancel of the relay's context
+/// and the cancel of its input anchor, in which a stop watcher that took
+/// the cancel for a stop would send one upstream.
+struct CrowdedRelay;
+
+impl gdl::Forward for CrowdedRelay {
+    type In = Streamed<(), u32>;
+    type Out = Streamed<(), u32>;
+
+    async fn forward(&self, cx: &Cx, req: Self::In) -> gdl::Result<Self::Out> {
+        let mut registered = Vec::new();
+        for _ in 0..200 {
+            let cx = cx.clone();
+            let (ready, wait) = tokio::sync::oneshot::channel();
+            registered.push(wait);
+            tokio::spawn(async move {
+                let cancelled = cx.cancelled();
+                tokio::pin!(cancelled);
+                assert!(futures::poll!(&mut cancelled).is_pending());
+                let _ = ready.send(());
+                cancelled.await;
+            });
+        }
+        for ready in registered {
+            ready.await.expect("registered");
+        }
+        Ok(req)
+    }
+}
+
+/// Reads one number, drops its input on `drop_input`, and answers 42 on
+/// `respond`, or 0 if it is asked to stop first.
+struct DropRelayedInput {
+    drop_input: Arc<tokio::sync::Notify>,
+    respond: Arc<tokio::sync::Notify>,
+}
+
+impl gdl::Sink for DropRelayedInput {
+    type Req = Streamed<(), u32>;
+    type Item = u32;
+
+    async fn generate(&self, cx: Cx, req: Self::Req) -> gdl::Result<gdl::Items<u32>> {
+        let (_, mut input) = req.into_parts();
+        assert_eq!(input.next().await, Some(Ok(1)));
+        let (drop_input, respond) = (Arc::clone(&self.drop_input), Arc::clone(&self.respond));
+        Ok(items(futures::stream::once(async move {
+            drop_input.notified().await;
+            drop(input);
+            tokio::select! {
+                biased;
+                () = cx.stopping() => Ok(0),
+                () = respond.notified() => Ok(42),
+            }
+        })))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_relay_whose_receiver_drops_its_input_does_not_stop_the_response() {
+    let nodes = nodes(3).await;
+    let placement = Placement::new()
+        .segment("a", ["A"])
+        .segment("x", ["X"])
+        .segment("d", ["D"]);
+    let (drop_input, respond) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let sink = (Arc::clone(&drop_input), Arc::clone(&respond));
+    let cluster = streamed::deploy_graph(
+        &streamed::instances(&nodes, &placement),
+        &teardown::manifest(),
+        &placement,
+        &defaults,
+        move |deployment| {
+            let d = DropRelayedInput {
+                drop_input: Arc::clone(&sink.0),
+                respond: Arc::clone(&sink.1),
+            };
+            teardown::assemble(deployment, teardown::Bindings::new().x(CrowdedRelay).d(d))
+        },
+    );
+    // The race is narrow: many requests give it many chances.
+    for iteration in 0..300 {
+        let input = items(futures::stream::iter([Ok(1)]).chain(futures::stream::pending()));
+        let mut out = cluster
+            .segment("a")
+            .call(Cx::new().with_timeout(WAIT), Streamed::new((), input))
+            .await
+            .expect("call");
+        drop_input.notify_one();
+        let early = tokio::time::timeout(ms(10), out.next()).await;
+        assert!(
+            early.is_err(),
+            "request {iteration}: the input's teardown ended the response: {early:?}"
+        );
+        respond.notify_one();
+        assert_eq!(out.next().await, Some(Ok(42)), "request {iteration}");
+        assert_eq!(out.next().await, None);
+    }
     assert!(settles(&cluster).await);
 }
