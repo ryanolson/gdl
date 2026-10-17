@@ -82,26 +82,50 @@ async fn a_retired_input_releases_what_it_buffered_before_anyone_reads_it() {
     assert!(collect(out).await.iter().all(Result::is_ok));
     assert!(settles(&cluster).await);
 
-    // D keeps its input unread past its run, after all of it was sent.
-    let script = Script {
-        hold_input_unread: true,
-        ..Script::default()
-    };
-    let out = front
-        .call(Cx::new(), ask("hu", script, words(&quiet, &big, false)))
-        .await
-        .expect("call");
-    assert_eq!(collect(out).await, vec![Ok(reply("c(b(hu)):held"))]);
-    assert!(settles(&cluster).await);
-    // Whatever the held input still owns is freed when it is dropped. A
-    // retired anchor let go of its frames when the run ended.
-    let held = LIVE.load(Ordering::Relaxed);
-    events.record("test:drop-held");
-    events.wait_for("D:held-dropped:c(b(hu))#0", WAIT).await;
-    let freed = held - LIVE.load(Ordering::Relaxed);
-    // The three items are 768 KiB.
-    assert!(
-        freed < (ITEM / 4) as isize,
-        "the held input still owned {freed} bytes after its run ended"
-    );
+    // Five times: each run must show the release. The sender's frames can
+    // still be in flight when a run ends; a run that ends first holds fewer
+    // of them, and only repeated runs make a retirement that frees nothing
+    // fail for certain.
+    for round in 0..5 {
+        let text = format!("hu{round}");
+        let key = format!("c(b({text}))#0");
+        // D keeps its input unread past its run.
+        let script = Script {
+            hold_input_unread: true,
+            ..Script::default()
+        };
+        let out = front
+            .call(Cx::new(), ask(&text, script, words(&quiet, &big, false)))
+            .await
+            .expect("call");
+        // Every frame is handed to velo before D's run may end: `front`
+        // holds a permit only for its input pump.
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while front.egress_in_use() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the input pump did not end"
+            );
+            tokio::task::yield_now().await;
+        }
+        events.record(format!("test:release:{key}"));
+        assert_eq!(
+            collect(out).await,
+            vec![Ok(reply(&format!("c(b({text})):held")))]
+        );
+        assert!(settles(&cluster).await);
+        // Whatever the held input still owns is freed when it is dropped. A
+        // retired anchor let go of its frames when the run ended.
+        let held = LIVE.load(Ordering::Relaxed);
+        events.record(format!("test:drop:{key}"));
+        events
+            .wait_for(&format!("D:held-dropped:{key}"), WAIT)
+            .await;
+        let freed = held - LIVE.load(Ordering::Relaxed);
+        // The three items are 768 KiB.
+        assert!(
+            freed < (ITEM / 4) as isize,
+            "round {round}: the held input still owned {freed} bytes after its run ended"
+        );
+    }
 }

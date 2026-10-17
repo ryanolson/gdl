@@ -61,9 +61,9 @@ pub struct Script {
     /// D hands its input to a task of its own that reads it to the end, and
     /// answers with one note at once.
     pub detach_input: bool,
-    /// D reads one word, hands the rest of its input, unread, to a task of
-    /// its own that drops it only once the test logs `test:drop-held`, and
-    /// answers with one note.
+    /// D reads one word and hands the rest of its input, unread, to a task
+    /// of its own that drops it only once the test logs `test:drop:<key>`.
+    /// D answers with one note once the test logs `test:release:<key>`.
     pub hold_input_unread: bool,
 }
 
@@ -275,15 +275,24 @@ impl Sink for NodeD {
             // Reading moves the anchor's frames from velo's transport into
             // the anchor's own buffer, which only retiring the anchor frees.
             let _ = input.next().await;
-            let events = Arc::clone(&self.events);
-            let key = key.clone();
+            let holder = Arc::clone(&self.events);
+            let dropped = key.clone();
             tokio::spawn(async move {
-                events.wait_for("test:drop-held", super::WAIT).await;
+                holder
+                    .wait_for(&format!("test:drop:{dropped}"), super::WAIT)
+                    .await;
                 drop(input);
-                events.record(format!("D:held-dropped:{key}"));
+                holder.record(format!("D:held-dropped:{dropped}"));
             });
+            let events = Arc::clone(&self.events);
             let note = Note(format!("{}:held", brief.text));
-            return Ok(items(futures::stream::iter([Ok(note)])));
+            let answer = async move {
+                events
+                    .wait_for(&format!("test:release:{key}"), super::WAIT)
+                    .await;
+                Ok(note)
+            };
+            return Ok(items(futures::stream::once(answer)));
         }
         if brief.script.detach_input {
             let events = Arc::clone(&self.events);
