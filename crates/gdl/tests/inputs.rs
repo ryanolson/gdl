@@ -1120,3 +1120,94 @@ async fn a_stop_a_relay_asks_for_after_its_input_ended_waits_for_the_deadline() 
         .collect();
     assert_eq!(kinds, vec![Err(ErrorKind::DeadlineExceeded)]);
 }
+
+// ----- a receiver that drops its input while its sender is blocked -----
+
+/// Reads one number, then holds its input unread until `drop_input`, drops
+/// it, and answers 42 on `respond`, or 0 if it is asked to stop first.
+struct DropBlockedInput {
+    drop_input: Arc<tokio::sync::Notify>,
+    respond: Arc<tokio::sync::Notify>,
+    events: Arc<Events>,
+}
+
+impl gdl::Sink for DropBlockedInput {
+    type Req = Streamed<(), odd::Odd>;
+    type Item = u32;
+
+    async fn generate(&self, cx: Cx, req: Self::Req) -> gdl::Result<gdl::Items<u32>> {
+        let (_, mut input) = req.into_parts();
+        assert!(input.next().await.is_some_and(|n| n.is_ok()));
+        let (drop_input, respond) = (Arc::clone(&self.drop_input), Arc::clone(&self.respond));
+        let events = Arc::clone(&self.events);
+        let answer = async move {
+            drop_input.notified().await;
+            drop(input);
+            events.record("S:dropped-input");
+            tokio::select! {
+                () = cx.stopping() => Ok(0),
+                () = respond.notified() => Ok(42),
+            }
+        };
+        Ok(items(futures::stream::once(answer)))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_an_input_whose_sender_is_blocked_does_not_stop_the_response() {
+    let nodes = tight_nodes(2).await;
+    let placement = Placement::new().segment("a", ["A"]).segment("s", ["S"]);
+    let events = Events::new();
+    let (drop_input, respond) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let sink = |events: &Arc<Events>| DropBlockedInput {
+        drop_input: Arc::clone(&drop_input),
+        respond: Arc::clone(&respond),
+        events: Arc::clone(events),
+    };
+    let held = Arc::clone(&events);
+    let cluster = streamed::deploy_graph(
+        &streamed::instances(&nodes, &placement),
+        &odd::manifest(),
+        &placement,
+        &defaults,
+        move |deployment| odd::assemble(deployment, odd::Bindings::new().s(sink(&held))),
+    );
+    // Far more numbers than the input's credit admits while S reads none.
+    let sent = Arc::clone(&events);
+    let input = items(futures::stream::iter(0..4096u32).map(move |n| {
+        sent.record(format!("input:sent:{n}"));
+        Ok(odd::Odd(n + 20))
+    }));
+    let a = cluster.segment("a");
+    let mut out = a
+        .call(Cx::new(), Streamed::new((), input))
+        .await
+        .expect("call");
+    events.wait_for("input:sent:3", WAIT).await;
+    assert!(
+        !events.has("input:sent:4095"),
+        "the input was not held back"
+    );
+    assert_eq!(a.egress_in_use(), 1, "the input pump is running");
+    // The receiver drops its input while the pump waits for credit: velo
+    // cancels the pump, and fires its stop token as part of that cancel.
+    drop_input.notify_one();
+    events.wait_for("S:dropped-input", WAIT).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while a.egress_in_use() > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the pump did not end"
+        );
+        tokio::time::sleep(ms(5)).await;
+    }
+    // A stop taken for the cancel would reach S within this window.
+    tokio::time::sleep(ms(200)).await;
+    respond.notify_one();
+    assert_eq!(out.next().await, Some(Ok(42)));
+    assert_eq!(out.next().await, None);
+    assert!(settles(&cluster).await);
+}

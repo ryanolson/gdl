@@ -1024,6 +1024,13 @@ where
             biased;
             reason = done.as_mut() => return Delivery::Interrupted(reason),
             () = stop.as_mut(), if !*stopped => {
+                // velo fires the stop token when the consumer cancels as
+                // well. A cancel is the consumer leaving, not asking to
+                // stop: passed on as a stop, it would stop what feeds this
+                // send, the outer end's attempt included.
+                if out.cancel_token().is_cancelled() {
+                    return Delivery::Gone;
+                }
                 *stopped = true;
                 upstream.request_stop();
             }
