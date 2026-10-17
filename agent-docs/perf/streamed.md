@@ -62,3 +62,7 @@ Per request, one item of 16 B, five runs each:
 - Boxing the relay's pump alone changed nothing measurable (30,327 and 30,093 bytes).
 - The 1.5 extra allocations per request came from the bench, not from gdl: the footprint bench now also starts the upload workloads' velo nodes, whose background work allocates while it counts. Without them, allocations match the base.
 - What remains is about 280 bytes per unary request, 1% of its total, from larger futures.
+
+### The pump's future (milestone 8 review pass 6)
+
+The test seam added in pass 5 (`pump_watching`) wrapped the pump in a second `async` frame. The pump future grew from 1,600 to 2,192 bytes (release), and a unary request over two segments allocated about 650 bytes more (the reviewer measured 29,652 to 29,809 bytes before, 30,311 to 30,507 after). `pump` is now a plain function that returns `pump_watching` directly, and the seam is a `Consumer` trait whose futures borrow the consumer's tokens, as the pump's own locals did before. The pump future is 1,616 bytes, the extra 16 being the `stops` field the stop route needs. Two footprint runs: 29,884 and 30,082 bytes per unary request.
