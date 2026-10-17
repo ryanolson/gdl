@@ -34,11 +34,13 @@ use setup::*;
 struct Counting;
 
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static ALLOCATED: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicI64 = AtomicI64::new(0);
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED.fetch_add(layout.size() as u64, Ordering::Relaxed);
         LIVE.fetch_add(layout.size() as i64, Ordering::Relaxed);
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.alloc(layout) }
@@ -50,6 +52,7 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED.fetch_add(new_size as u64, Ordering::Relaxed);
         LIVE.fetch_add(new_size as i64 - layout.size() as i64, Ordering::Relaxed);
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -93,16 +96,18 @@ fn per_request<'a>(
     }
     let spawned_before = spawned(rt);
     let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let bytes_before = ALLOCATED.load(Ordering::Relaxed);
     for _ in 0..N {
         rt.block_on(request());
     }
     let allocations = (ALLOCATIONS.load(Ordering::Relaxed) - before) as f64 / N as f64;
+    let bytes = (ALLOCATED.load(Ordering::Relaxed) - bytes_before) as f64 / N as f64;
     let spawned = match (spawned_before, spawned(rt)) {
         (Some(before), Some(after)) => format!("{:.1}", (after - before) as f64 / N as f64),
         _ => "n/a".to_string(),
     };
     println!(
-        "{label:<24} {allocations:>8.1} allocations/request  {spawned:>5} tasks spawned/request"
+        "{label:<24} {allocations:>8.1} allocations/request  {bytes:>8.0} bytes allocated/request  {spawned:>5} tasks spawned/request"
     );
 }
 

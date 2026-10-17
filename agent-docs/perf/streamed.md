@@ -46,3 +46,19 @@ Per request, one item of 16 B, five runs each:
 - Item throughput matches velo's own. As for responses, velo's single-stream rate bounds both.
 - A one-item upload costs about 120 us more than the same exchange on velo alone, where a unary request costs about 30 us more. The difference is not explained yet: it needs a profile, not a guess. The steps gdl adds per upload are the admission and egress checks, two spawned tasks (the receiving run and the input pump), and the `Open` frame, which the sink sends only after its `generate` returns (here, after it has read all of its input).
 - The first run of these benches had a stop watcher in each receiving run, polled on every item. Removing it changed no throughput figure beyond the run-to-run variation (under 2%).
+
+### Allocations per unary request (milestone 8 review pass 1)
+
+`cargo bench -p gdl --bench footprint`, the lean graph over two segments, one item of 16 B, averaged over 2,000 requests after a warm-up. The bench now reports allocated bytes per request as well as allocations.
+
+| Build | Allocations | Bytes allocated |
+|---|---|---|
+| Before milestone 8 (`84ef217`), two runs | 146.6, 147.2 | 29,487, 29,508 |
+| Milestone 8 as first committed, two runs | 148.5, 148.8 | 30,313, 30,303 |
+| After the fix below, two runs | 148.0, 148.9 | 29,772, 29,811 |
+| After the fix, without the upload benches' extra velo nodes | 147.2 | 29,776 |
+
+- The milestone 8 commit added about 810 bytes to every unary request. The receiving run's body had moved into an `async fn`, whose future stores its arguments and its locals both; the receiving task grew from 5,040 to 5,664 bytes (debug build). Moving the body back into the spawned task brought it to 5,168 bytes, the remaining 128 bytes being the streamed request's optional fields.
+- Boxing the relay's pump alone changed nothing measurable (30,327 and 30,093 bytes).
+- The 1.5 extra allocations per request came from the bench, not from gdl: the footprint bench now also starts the upload workloads' velo nodes, whose background work allocates while it counts. Without them, allocations match the base.
+- What remains is about 280 bytes per unary request, 1% of its total, from larger futures.

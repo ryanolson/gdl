@@ -220,7 +220,7 @@ Its placement puts `Resample` in a segment of its own, so the audio crosses two 
 - **Admission.** Each instance admits a limited number of root requests. A request that enters the same instance more than one time uses one admission.
 - **Egress.** Each instance limits the number of streams that it produces at the same time. A full instance refuses new work.
 - **Failure.** An error item ends a stream. A stream that ends without a finish from its producer ends with an error, not as a success.
-- **Streamed requests.** The items of a streamed request go to an anchor that the receiving stage created. The input ends cleanly only when its sender finishes it. A stage that stops reading its input ends its sender, and the response still decides the result. A stop does not end the input: it reaches every stage, and a stage can end its input when it sees the stop. A stage that relays a streamed request keeps its admission until it has sent all of the items on.
+- **Streamed requests.** The items of a streamed request go to an anchor that the receiving stage created. The input ends cleanly only when its sender finishes it. A stage that stops reading its input ends its sender, and the response still decides the result. A stop does not end the input. It reaches every stage that has handed the request on or produces a stream, and a stage can end its input when it sees the stop. In another segment, a forward node that waits for a stop inside `forward`, before it hands the request on, is not reached; its deadline ends it. A stage that relays a streamed request keeps its admission until it has sent all of the items on.
 
 The design and its rulings are in `agent-docs/plan.md`.
 
