@@ -1,0 +1,27 @@
+[
+  {
+    "verdict": "REJECT",
+    "actionable": 2,
+    "findings": [
+      {
+        "id": 1,
+        "severity": "major",
+        "file": "crates/gdl/src/dist/hop.rs",
+        "line": 530,
+        "claim": "A relay that requests a genuine stop and immediately finishes can lose that stop, leaving the downstream response waiting until its deadline.",
+        "evidence": "The detached watcher discards the signal once the run is cancelled; completion retires the input and drops the context guard before the watcher necessarily runs. Reproduced without runtime instrumentation using placement {A,X}/{C}/{D}: the source yields one item then stays pending, C calls request_stop while mapping that item and returns take(1), and D drains its input then waits for stop. Both single-thread and four-thread runs return DeadlineExceeded instead of Ok(1). Local placement passes, as does a remote control that keeps C alive until D observes stop. Unlike ruling 26's accepted limit, C requests stop while its upstream input producer is still live, before input EOF.",
+        "test_idea": "Retain the reproducer and controls in /tmp/gdl-pass6-9y7evirr/crates/gdl/tests/inputs.rs (review_stop_*). Preserve explicitly requested stops across relay retirement while keeping cancel-only teardown from stopping the response; retain the existing cancel regression tests."
+      },
+      {
+        "id": 2,
+        "severity": "minor",
+        "file": "crates/gdl/src/dist/hop.rs",
+        "line": 905,
+        "claim": "The new nested async pump wrapper reintroduces an avoidable allocation-size regression on unary remote requests.",
+        "evidence": "Compared with 2e8402c, the pump future grows from 1,600 to 2,192 bytes on this host; a size-budget assertion passes before the change and fails at HEAD. Three identical lean-unary footprint runs measured 29,809/29,793/29,652 bytes per request before versus 30,507/30,444/30,311 at HEAD: a median increase of 651 bytes (2.2%). In the isolated copy, returning pump_watching directly with owned cancellation futures removes the extra async layer and brings allocation volume back down. This partially reverses pass 1's disposition addressing oversized unary futures.",
+        "test_idea": "Keep the pump interleaving seam and both correctness tests, but avoid retaining a second async frame around it. Compare the existing lean footprint benchmark against 2e8402c; logs are /tmp/gdl-pass6-before-lean.log and /tmp/gdl-pass6-head-lean.log."
+      }
+    ],
+    "notes": "Reviewed HEAD 73557b0 against both requested bases and swept every dist select/stop handler. The pass-5 cancel recheck works, and removing it fails its regression while the genuine-stop control passes. Isolated mutations also confirmed the deliver guard, receiving-run watcher, and retirement tests; disabling retirement retained 527,592 bytes. Workspace rerun passed 255 tests; clippy passed. The initial workspace run failed the task-count test (49 versus 47); its focused rerun and full rerun passed, so no leak finding is asserted. Repository unchanged; all probes and experimental changes stayed under /tmp with a separate target directory. Phone-a-friend was not used."
+  }
+]
