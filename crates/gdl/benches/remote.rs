@@ -14,6 +14,9 @@
 //!   process, for the copy a crossing adds per item.
 //! - **Reference graph:** the test suites' graph (with its event log off)
 //!   local, over two segments, and over three.
+//! - **Upload:** a streamed request (`S => D`, `n` blobs of `size` bytes in,
+//!   one count back) over two segments, against the same exchange on velo
+//!   alone: the server mints the input anchor and answers with its ticket.
 //!
 //! Every request is checked: no errors, exactly the requested items, and on
 //! the direct baseline an explicit `Finalized`. A truncated or failed stream
@@ -148,6 +151,13 @@ fn bench(c: &mut Criterion) {
         b.to_async(&rt)
             .iter(|| setups.direct_attach(black_box(one)))
     });
+    latency.bench_function("upload-2-segments", |b| {
+        b.to_async(&rt).iter(|| setups.upload(black_box(one)))
+    });
+    latency.bench_function("velo-direct-upload", |b| {
+        b.to_async(&rt)
+            .iter(|| setups.direct_upload(black_box(one)))
+    });
     latency.finish();
 
     const ITEMS: u32 = 1_000;
@@ -162,6 +172,13 @@ fn bench(c: &mut Criterion) {
         });
         items.bench_function("velo-direct", |b| {
             b.to_async(&rt).iter(|| setups.direct(black_box(ask)))
+        });
+        items.bench_function("upload-2-segments", |b| {
+            b.to_async(&rt).iter(|| setups.upload(black_box(ask)))
+        });
+        items.bench_function("velo-direct-upload", |b| {
+            b.to_async(&rt)
+                .iter(|| setups.direct_upload(black_box(ask)))
         });
         items.finish();
     }
