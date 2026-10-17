@@ -377,7 +377,9 @@ where
                 // A child scope: the inner end's task cancels its scope when
                 // it ends, which must not end the attempt reading its output.
                 let cx = attempt.child();
-                tokio::spawn(async move { hop.run_inner(cx, value, reply, None, egress).await });
+                tokio::spawn(
+                    async move { hop.run_inner(cx, value, reply, None, egress, None).await },
+                );
             }
             FwdExit::Leave { at, head, input } => {
                 // An input pump is a producer. It takes its permit before the
@@ -510,29 +512,13 @@ where
             // However this task ends, the request's work here ends with it.
             let _end = cx.cancel_on_drop();
             let upstream = guard.as_ref().map(InputGuard::canceller);
-            let watched = cx.clone();
             let handed = Handed {
                 pos: usize::from(envelope.pos),
                 payload: envelope.payload,
                 reply: envelope.reply,
             };
-            let run = hop.serve_forward(cx, handed, input, share, egress, upstream);
-            // A stop reaches this run on the response side, or from the
-            // run it relays to, and travels on up the request path to the
-            // stage that sends this run its input (ruling 26). It does not
-            // end the input: the sender decides that.
-            let stop_up = async {
-                if let Some(guard) = &guard {
-                    watched.stopping().await;
-                    guard.request_stop();
-                }
-                std::future::pending::<()>().await;
-            };
-            tokio::select! {
-                biased;
-                () = run => {}
-                () = stop_up => {}
-            }
+            hop.serve_forward(cx, handed, input, share, egress, upstream)
+                .await;
             // Dropping the guard retires the input anchor.
             drop(guard);
         });
@@ -547,6 +533,13 @@ where
     /// run the inner end here or hand the request on. `input` is the
     /// streamed request's items when the hand-off carried one, and
     /// `upstream` cancels or stops their sender.
+    ///
+    /// This run's context is fresh, so a stop reaches it only from the
+    /// stream it produces: the inner end's response, or a relay's onward
+    /// input. Whichever forwards that stop to this run's context forwards it
+    /// to `upstream` as well, so it travels on up the request path (ruling
+    /// 26) without a watcher polled on every item. It does not end the
+    /// input: the sender decides that.
     async fn serve_forward(
         self: Arc<Self>,
         cx: Cx,
@@ -570,7 +563,8 @@ where
         match walked {
             Ok(FwdExit::Here(value)) => match egress {
                 Some(egress) => {
-                    self.run_inner(cx, value, reply, Some(share), egress).await;
+                    self.run_inner(cx, value, reply, Some(share), egress, upstream)
+                        .await;
                 }
                 None => {
                     let error = internal("a run reached an inner end it did not expect");
@@ -740,7 +734,9 @@ where
     }
 
     /// Run the inner end here and send its output, through this segment's
-    /// part of the backward path, to `reply`.
+    /// part of the backward path, to `reply`. `input` stops or cancels the
+    /// sender of the inner end's streamed request, when it came from
+    /// another segment.
     async fn run_inner(
         &self,
         cx: Cx,
@@ -748,6 +744,7 @@ where
         reply: ReplyTo,
         share: Option<Share>,
         egress: EgressPermit,
+        input: Option<Canceller>,
     ) {
         // However this task ends, the request's work here ends with it,
         // including anything the inner end started under its context.
@@ -769,11 +766,14 @@ where
         let Ok(out) = attach.await else {
             return;
         };
-        self.produce_inner(&cx, value, out).await;
+        self.produce_inner(&cx, value, out, input).await;
         drop(egress);
     }
 
-    async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound) {
+    async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound, input: Option<Canceller>) {
+        // A stop or cancel from the consumer reaches the node through its
+        // context, and the sender of its input through `input`.
+        let upstream = Upstream { cx, anchor: input };
         let cancel = out.cancel_token();
         let stop = out.stop_token();
         let scope = cx.child();
@@ -791,7 +791,7 @@ where
                 // passed on, and the node is left to finish gracefully.
                 () = stop.cancelled(), if !stopped => {
                     stopped = true;
-                    cx.request_stop();
+                    upstream.request_stop();
                 }
                 reason = cx.done() => return finish_failed(out, reason).await,
                 produced = &mut call => break produced,
@@ -805,7 +805,6 @@ where
             Err(error) => return finish_failed(out, error).await,
         };
         // The inner end's stream exists: downstream runs may activate.
-        let upstream = Upstream { cx, anchor: None };
         let (stop_open, done_open) = (stop.cancelled(), cx.done());
         tokio::pin!(stop_open, done_open);
         let watch = Watch {
@@ -819,7 +818,7 @@ where
             Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
         }
         match self.bwd.walk(1, self.plan.inner_end, cx, items) {
-            BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None).await,
+            BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, upstream.anchor).await,
             BwdExit::Here(_) => {
                 finish_failed(out, internal("the inner end's run reached the outer end")).await;
             }
@@ -884,10 +883,6 @@ struct InputGuard(Retirer);
 impl InputGuard {
     fn canceller(&self) -> Canceller {
         self.0.canceller()
-    }
-
-    fn request_stop(&self) {
-        self.0.request_stop();
     }
 }
 
