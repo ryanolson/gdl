@@ -886,25 +886,51 @@ impl Drop for InputGuard {
 /// passed upstream: to `cx`, which the stages feeding this pump run under,
 /// and to `upstream`, the anchor this run reads from.
 async fn pump(
-    mut bytes: Items<Vec<u8>>,
+    bytes: Items<Vec<u8>>,
     out: Outbound,
     cx: &Cx,
     upstream: Option<Canceller>,
     stops: Option<&Cx>,
 ) {
-    let upstream = Upstream {
-        cx,
-        anchor: upstream,
-        stops,
-    };
     let cancel = out.cancel_token();
     let stop_token = out.stop_token();
     // Built once per stream: a fresh future registers again when polled,
     // the deadline with the runtime's shared timer and the tokens in their
     // waiter lists, which would be a lock per item that every stream of the
     // runtime contends on.
-    let cancelled = cancel.cancelled();
-    let stop = stop_token.cancelled();
+    let consumer = Consumer {
+        cancelled: cancel.cancelled(),
+        stop: stop_token.cancelled(),
+    };
+    pump_watching(bytes, out, cx, upstream, stops, consumer).await;
+}
+
+/// The consumer's signals a pump watches: its cancel and its stop.
+struct Consumer<C, S> {
+    cancelled: C,
+    stop: S,
+}
+
+/// [`pump`], given the futures of the consumer's signals, so that a test can
+/// put them in any order.
+async fn pump_watching<C, S>(
+    mut bytes: Items<Vec<u8>>,
+    out: Outbound,
+    cx: &Cx,
+    upstream: Option<Canceller>,
+    stops: Option<&Cx>,
+    consumer: Consumer<C, S>,
+) where
+    C: Future<Output = ()>,
+    S: Future<Output = ()>,
+{
+    let upstream = Upstream {
+        cx,
+        anchor: upstream,
+        stops,
+    };
+    let cancel = out.cancel_token();
+    let Consumer { cancelled, stop } = consumer;
     let done = cx.done();
     tokio::pin!(cancelled, stop, done);
     let mut stopped = false;
@@ -934,6 +960,9 @@ async fn pump(
                     biased;
                     () = &mut cancelled => return upstream.cancel(),
                     () = &mut stop, if !stopped => {
+                        if left(&cancel) {
+                            return upstream.cancel();
+                        }
                         stopped = true;
                         upstream.request_stop();
                         continue;
@@ -960,6 +989,17 @@ async fn pump(
             None => return out.finalize(),
         }
     }
+}
+
+/// Whether a consumer's stop token fired because the consumer cancelled.
+/// velo fires the stop token on a cancel as well, and a cancel can land
+/// between a select's poll of the cancel and its poll of the stop. A cancel
+/// is the consumer leaving, not asking to stop: passed on as a stop, it
+/// would stop what feeds the pump, the outer end's attempt included. The
+/// cancel token is set before its child stop token fires, so a stop that
+/// came with a cancel always finds it.
+fn left(cancel: &tokio_util::sync::CancellationToken) -> bool {
+    cancel.is_cancelled()
 }
 
 /// What a pump stops or cancels when its consumer does.
@@ -1031,11 +1071,7 @@ where
             biased;
             reason = done.as_mut() => return Delivery::Interrupted(reason),
             () = stop.as_mut(), if !*stopped => {
-                // velo fires the stop token when the consumer cancels as
-                // well. A cancel is the consumer leaving, not asking to
-                // stop: passed on as a stop, it would stop what feeds this
-                // send, the outer end's attempt included.
-                if out.cancel_token().is_cancelled() {
+                if left(&out.cancel_token()) {
                     return Delivery::Gone;
                 }
                 *stopped = true;
@@ -1145,4 +1181,69 @@ fn setup_timeout(step: &str) -> Error {
         ErrorKind::Transport,
         format!("{step} did not finish in time"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::dist::fabric::{Fabric, bind_node};
+
+    /// A pump whose consumer cancels between its cancel poll and its stop
+    /// poll: velo fires the stop token with the cancel, so the pump sees a
+    /// stop and a cancel that its first poll missed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pump_takes_a_stop_that_comes_with_a_cancel_for_the_cancel() {
+        let node = bind_node(([127, 0, 0, 1], 0).into()).await.expect("node");
+        let fabric = Fabric::new(node, Duration::from_secs(5), None);
+        let (_inbound, reply) = fabric.mint();
+        let out = fabric.attach(&reply).await.expect("attach");
+        // The consumer has cancelled, which fired the stop token too, but
+        // the pump's cancel future has not seen it yet.
+        let cancel = out.cancel_token();
+        cancel.cancel();
+        let consumer = Consumer {
+            cancelled: std::future::pending::<()>(),
+            stop: std::future::ready(()),
+        };
+        let attempt = Cx::new();
+        let scope = attempt.child();
+        let input = items(futures::stream::pending::<Result<Vec<u8>>>());
+        // Bounded: a pump that took the cancel for a stop goes on waiting
+        // for its input.
+        let pumped = pump_watching(input, out, &scope, None, Some(&attempt), consumer);
+        let ended = tokio::time::timeout(Duration::from_secs(5), pumped).await;
+        assert!(
+            ended.is_ok(),
+            "the pump did not end at the consumer's cancel"
+        );
+        assert!(scope.is_cancelled(), "the pump's scope must end");
+        assert!(
+            !attempt.is_stopping(),
+            "a cancel from the consumer stopped what feeds the pump"
+        );
+    }
+
+    /// The control: a stop alone reaches the attempt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pump_passes_a_stop_alone_to_the_attempt() {
+        let node = bind_node(([127, 0, 0, 1], 0).into()).await.expect("node");
+        let fabric = Fabric::new(node, Duration::from_secs(5), None);
+        let (_inbound, reply) = fabric.mint();
+        let out = fabric.attach(&reply).await.expect("attach");
+        let consumer = Consumer {
+            cancelled: std::future::pending::<()>(),
+            stop: std::future::ready(()),
+        };
+        let attempt = Cx::new();
+        let scope = attempt.child();
+        // A stop does not end the input: the pump goes on waiting for it.
+        let input = items(futures::stream::pending::<Result<Vec<u8>>>());
+        let pumped = pump_watching(input, out, &scope, None, Some(&attempt), consumer);
+        let ended = tokio::time::timeout(Duration::from_millis(200), pumped).await;
+        assert!(ended.is_err(), "a stop ended the pump");
+        assert!(attempt.is_stopping(), "the stop did not reach the attempt");
+        assert!(!attempt.is_cancelled());
+    }
 }
