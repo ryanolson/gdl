@@ -391,6 +391,42 @@ async fn stop_reaches_a_relay_that_waits_for_it_before_reading_under_exhausted_c
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_reaches_a_waiting_relay_when_the_response_returns_to_its_own_worker() {
+    // The forward path leaves at C and comes back to D on `front`, so D's
+    // response anchor is on D's own worker: the stop reaches D through the
+    // same-worker path, then goes up to C through exhausted input credit.
+    let nodes = tight_nodes(2).await;
+    let events = Events::new();
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "D", "F", "E", "G"])
+        .segment("mid", ["C"]);
+    let cluster = deploy(&nodes, &placement, &events, &defaults);
+    let script = Script {
+        wait_for_stop: true,
+        ..Script::default()
+    };
+    let words_sent = many(64);
+    let input = words(&events, &refs(&words_sent), false);
+    let cx = Cx::new();
+    let out = cluster
+        .segment("front")
+        .call(cx.clone(), ask("sw", script, input))
+        .await
+        .expect("call");
+    events.wait_for("input:sent:w3", WAIT).await;
+    assert!(
+        !events.has("input:sent:w63"),
+        "the input was not held back by credit"
+    );
+    cx.request_stop();
+    let rest = tokio::time::timeout(WAIT, collect(out))
+        .await
+        .expect("the stop reached the relay");
+    assert_eq!(rest, vec![Ok(reply("c(b(sw)):end:0"))]);
+    assert!(settles(&cluster).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_reaches_a_relay_whose_input_has_ended() {
     let nodes = nodes(3).await;
     let events = Events::new();
@@ -901,4 +937,106 @@ async fn streamed_requests_leave_no_tasks_behind() {
         );
         tokio::time::sleep(ms(10)).await;
     }
+}
+
+// ----- a stop a node asks for -----
+
+mod stopping {
+    gdl::graph! {
+        name = "stopping", schema = 1;
+        source  A: stream u32 -> stream u32;
+        forward X: stream u32 -> stream u32;
+        forward C: stream u32 -> stream u32;
+        sink    D: stream u32 -> stream u32;
+        topology: A => X => C => D;
+    }
+}
+
+/// Ends the input it passes on when its context is asked to stop.
+struct UntilStop;
+
+impl gdl::Forward for UntilStop {
+    type In = Streamed<(), u32>;
+    type Out = Streamed<(), u32>;
+
+    async fn forward(&self, cx: &Cx, req: Self::In) -> gdl::Result<Self::Out> {
+        let (_, input) = req.into_parts();
+        let cx = cx.clone();
+        let input = input.take_until(async move { cx.stopping().await });
+        Ok(Streamed::new((), items(input)))
+    }
+}
+
+/// Asks its own context to stop as it passes the first item on.
+struct StopAfterFirst;
+
+impl gdl::Forward for StopAfterFirst {
+    type In = Streamed<(), u32>;
+    type Out = Streamed<(), u32>;
+
+    async fn forward(&self, cx: &Cx, req: Self::In) -> gdl::Result<Self::Out> {
+        let (_, input) = req.into_parts();
+        let cx = cx.clone();
+        let input = input.map(move |n| {
+            cx.request_stop();
+            n
+        });
+        Ok(Streamed::new((), items(input)))
+    }
+}
+
+/// Answers with its input.
+struct Drain;
+
+impl gdl::Sink for Drain {
+    type Req = Streamed<(), u32>;
+    type Item = u32;
+
+    async fn generate(&self, _cx: Cx, req: Self::Req) -> gdl::Result<gdl::Items<u32>> {
+        Ok(req.into_parts().1)
+    }
+}
+
+async fn stop_from_a_node(placement: Placement) {
+    let nodes = nodes(placement.segments().count()).await;
+    let cluster = streamed::deploy_graph(
+        &streamed::instances(&nodes, &placement),
+        &stopping::manifest(),
+        &placement,
+        &defaults,
+        |deployment| {
+            let bindings = stopping::Bindings::new()
+                .x(UntilStop)
+                .c(StopAfterFirst)
+                .d(Drain);
+            stopping::assemble(deployment, bindings)
+        },
+    );
+    // One item, then an input that never ends: only the stop C asks for,
+    // reaching X, ends it.
+    let input = items(futures::stream::iter([Ok(1)]).chain(futures::stream::pending()));
+    let out = cluster
+        .segment("a")
+        .call(Cx::new().with_timeout(ms(3_000)), Streamed::new((), input))
+        .await
+        .expect("call");
+    let got = tokio::time::timeout(WAIT, collect(out))
+        .await
+        .expect("the stream ended");
+    assert_eq!(got, vec![Ok(1)], "{placement:?}");
+    assert!(settles(&cluster).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_a_node_asks_for_reaches_the_stage_before_it_locally() {
+    stop_from_a_node(Placement::new().segment("a", ["A", "X", "C", "D"])).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_a_node_asks_for_reaches_the_stage_before_it_across_segments() {
+    let placement = Placement::new()
+        .segment("a", ["A"])
+        .segment("x", ["X"])
+        .segment("c", ["C", "D"]);
+    stop_from_a_node(placement).await;
 }

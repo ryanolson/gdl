@@ -377,9 +377,7 @@ where
                 // A child scope: the inner end's task cancels its scope when
                 // it ends, which must not end the attempt reading its output.
                 let cx = attempt.child();
-                tokio::spawn(
-                    async move { hop.run_inner(cx, value, reply, None, egress, None).await },
-                );
+                tokio::spawn(async move { hop.run_inner(cx, value, reply, None, egress).await });
             }
             FwdExit::Leave { at, head, input } => {
                 // An input pump is a producer. It takes its permit before the
@@ -507,18 +505,81 @@ where
         rt.served
             .forwards
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Forward { payload, reply, .. } = envelope;
         let hop = Arc::clone(self);
         tokio::spawn(async move {
             // However this task ends, the request's work here ends with it.
             let _end = cx.cancel_on_drop();
             let upstream = guard.as_ref().map(InputGuard::canceller);
-            let handed = Handed {
-                pos: usize::from(envelope.pos),
-                payload: envelope.payload,
-                reply: envelope.reply,
+            if let Some(input) = upstream.clone() {
+                // A stop reaches this run's context from the stream it
+                // produces, or from a node that asks for one, and travels on
+                // up the request path to the stage that sends this run its
+                // input. It does not end the input: the sender decides that.
+                // A task of its own, and only for a streamed run: a branch
+                // beside the run would register a waiter on every item.
+                let watched = cx.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        biased;
+                        () = watched.stopping() => input.request_stop(),
+                        () = watched.cancelled() => {}
+                    }
+                });
+            }
+            // The walk of this segment's forward stages, then the inner end
+            // here or a hand-off onward. Inline rather than an `async fn`,
+            // whose future would store its arguments and its locals both,
+            // in every receiving task.
+            let end = hop.plan.fwd_end(pos);
+            let walked = tokio::select! {
+                biased;
+                reason = cx.done() => Err(reason),
+                walked = hop.fwd.enter(1, pos, end, &cx, &payload, input) => walked,
             };
-            hop.serve_forward(cx, handed, input, share, egress, upstream)
-                .await;
+            match walked {
+                Ok(FwdExit::Here(value)) => match egress {
+                    Some(egress) => {
+                        hop.run_inner(cx, value, reply, Some(share), egress).await;
+                    }
+                    None => {
+                        let error = internal("a run reached an inner end it did not expect");
+                        hop.fail(&cx, &reply, error).await;
+                    }
+                },
+                Ok(FwdExit::Leave { at, head, input }) => {
+                    let onward = Forward {
+                        version: VERSION,
+                        identity: hop.rt.identity,
+                        hop: hop.index,
+                        pos: at as u16,
+                        cx: WireCx::of(&cx),
+                        reply: reply.clone(),
+                        payload: head,
+                    };
+                    let sent =
+                        bounded(&cx, hop.rt.send_forward(&hop.plan.fwd_segments[at], onward)).await;
+                    match (sent, input, egress) {
+                        // The next stage owns the reply now.
+                        (Ok(None), None, _) => drop(share),
+                        // A relay. The next stage owns the reply; this one keeps
+                        // its admission share and its permit until it has sent
+                        // the items on.
+                        (Ok(Some(next)), Some(input), Some(egress)) => {
+                            Box::pin(send_input(&hop.rt, &cx, next, input, upstream)).await;
+                            drop((share, egress));
+                        }
+                        (Ok(_), _, _) => hop.fail(&cx, &reply, disagree()).await,
+                        // This stage still owns the reply until the failure is
+                        // delivered, and counts against admission until then.
+                        (Err(error), _, _) => {
+                            hop.fail(&cx, &reply, error).await;
+                            drop(share);
+                        }
+                    }
+                }
+                Err(error) => hop.fail(&cx, &reply, error).await,
+            }
             // Dropping the guard retires the input anchor.
             drop(guard);
         });
@@ -527,86 +588,6 @@ where
             tokio::time::sleep(delay).await;
         }
         Ok(accepted)
-    }
-
-    /// Run an accepted hand-off: walk this segment's forward stages, then
-    /// run the inner end here or hand the request on. `input` is the
-    /// streamed request's items when the hand-off carried one, and
-    /// `upstream` cancels or stops their sender.
-    ///
-    /// This run's context is fresh, so a stop reaches it only from the
-    /// stream it produces: the inner end's response, or a relay's onward
-    /// input. Whichever forwards that stop to this run's context forwards it
-    /// to `upstream` as well, so it travels on up the request path
-    /// without a watcher polled on every item. It does not end the
-    /// input: the sender decides that.
-    async fn serve_forward(
-        self: Arc<Self>,
-        cx: Cx,
-        handed: Handed,
-        input: Option<Items<Vec<u8>>>,
-        share: Share,
-        egress: Option<EgressPermit>,
-        upstream: Option<Canceller>,
-    ) {
-        let Handed {
-            pos,
-            payload,
-            reply,
-        } = handed;
-        let end = self.plan.fwd_end(pos);
-        let walked = tokio::select! {
-            biased;
-            reason = cx.done() => Err(reason),
-            walked = self.fwd.enter(1, pos, end, &cx, &payload, input) => walked,
-        };
-        match walked {
-            Ok(FwdExit::Here(value)) => match egress {
-                Some(egress) => {
-                    self.run_inner(cx, value, reply, Some(share), egress, upstream)
-                        .await;
-                }
-                None => {
-                    let error = internal("a run reached an inner end it did not expect");
-                    self.fail(&cx, &reply, error).await;
-                }
-            },
-            Ok(FwdExit::Leave { at, head, input }) => {
-                let onward = Forward {
-                    version: VERSION,
-                    identity: self.rt.identity,
-                    hop: self.index,
-                    pos: at as u16,
-                    cx: WireCx::of(&cx),
-                    reply: reply.clone(),
-                    payload: head,
-                };
-                let sent = bounded(
-                    &cx,
-                    self.rt.send_forward(&self.plan.fwd_segments[at], onward),
-                )
-                .await;
-                match (sent, input, egress) {
-                    // The next stage owns the reply now.
-                    (Ok(None), None, _) => drop(share),
-                    // A relay. The next stage owns the reply; this one keeps
-                    // its admission share and its permit until it has sent
-                    // the items on.
-                    (Ok(Some(next)), Some(input), Some(egress)) => {
-                        send_input(&self.rt, &cx, next, input, upstream).await;
-                        drop((share, egress));
-                    }
-                    (Ok(_), _, _) => self.fail(&cx, &reply, disagree()).await,
-                    // This stage still owns the reply until the failure is
-                    // delivered, and counts against admission until then.
-                    (Err(error), _, _) => {
-                        self.fail(&cx, &reply, error).await;
-                        drop(share);
-                    }
-                }
-            }
-            Err(error) => self.fail(&cx, &reply, error).await,
-        }
     }
 
     /// A request to open a backward run arrived.
@@ -734,9 +715,7 @@ where
     }
 
     /// Run the inner end here and send its output, through this segment's
-    /// part of the backward path, to `reply`. `input` stops or cancels the
-    /// sender of the inner end's streamed request, when it came from
-    /// another segment.
+    /// part of the backward path, to `reply`.
     async fn run_inner(
         &self,
         cx: Cx,
@@ -744,7 +723,6 @@ where
         reply: ReplyTo,
         share: Option<Share>,
         egress: EgressPermit,
-        input: Option<Canceller>,
     ) {
         // However this task ends, the request's work here ends with it,
         // including anything the inner end started under its context.
@@ -766,14 +744,11 @@ where
         let Ok(out) = attach.await else {
             return;
         };
-        self.produce_inner(&cx, value, out, input).await;
+        self.produce_inner(&cx, value, out).await;
         drop(egress);
     }
 
-    async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound, input: Option<Canceller>) {
-        // A stop or cancel from the consumer reaches the node through its
-        // context, and the sender of its input through `input`.
-        let upstream = Upstream { cx, anchor: input };
+    async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound) {
         let cancel = out.cancel_token();
         let stop = out.stop_token();
         let scope = cx.child();
@@ -791,7 +766,7 @@ where
                 // passed on, and the node is left to finish gracefully.
                 () = stop.cancelled(), if !stopped => {
                     stopped = true;
-                    upstream.request_stop();
+                    cx.request_stop();
                 }
                 reason = cx.done() => return finish_failed(out, reason).await,
                 produced = &mut call => break produced,
@@ -805,6 +780,7 @@ where
             Err(error) => return finish_failed(out, error).await,
         };
         // The inner end's stream exists: downstream runs may activate.
+        let upstream = Upstream { cx, anchor: None };
         let (stop_open, done_open) = (stop.cancelled(), cx.done());
         tokio::pin!(stop_open, done_open);
         let watch = Watch {
@@ -818,7 +794,7 @@ where
             Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
         }
         match self.bwd.walk(1, self.plan.inner_end, cx, items) {
-            BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, upstream.anchor).await,
+            BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None).await,
             BwdExit::Here(_) => {
                 finish_failed(out, internal("the inner end's run reached the outer end")).await;
             }
@@ -864,13 +840,6 @@ async fn send_input(
         return;
     };
     pump(input, out, cx, upstream).await;
-}
-
-/// The parts of a forward hand-off its run needs once it is accepted.
-struct Handed {
-    pos: usize,
-    payload: Vec<u8>,
-    reply: ReplyTo,
 }
 
 /// Retires a run's input anchor when the run ends, however it ends. Nothing
