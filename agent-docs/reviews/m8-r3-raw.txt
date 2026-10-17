@@ -1,0 +1,18 @@
+[
+  {
+    "verdict": "REJECT",
+    "actionable": 1,
+    "findings": [
+      {
+        "id": 1,
+        "severity": "major",
+        "file": "crates/gdl/src/dist/hop.rs",
+        "line": 979,
+        "claim": "Cancelling a backpressured input pump can prematurely end the response, violating ruling 24.",
+        "evidence": "Velo fires both stop and cancel tokens when an input receiver disappears. While a send is blocked, deliver's biased select (lines 1023\u20131031) handles stop before polling the send's cancellation error. Upstream::request_stop now forwards that cancellation-derived stop into the outer attempt, whose response watcher propagates it to the sink. An isolated end-to-end test waited for velo's producer-backpressure metric, dropped the sink's input while its response remained pending, and observed Ok(None) instead of the intended response item. A deterministic pump-level test also failed: the child was cancelled, but the parent attempt incorrectly became stopping. Giving cancellation precedence in deliver made the end-to-end test pass; all 11 existing stop-related tests still passed.",
+        "test_idea": "Add the backpressured-input-drop regression with a sink that retains its input and returns a separately gated, stop-aware response. Establish the blocked send through an observable signal, drop only the input, and require the response to remain live and subsequently deliver its item. Retain controls for genuine stop propagation and cancellation while waiting for input. Distinguish cancellation before promoting the stop token to the attempt."
+      }
+    ],
+    "notes": "Reviewed 84ef217..a0d1c3c, emphasizing 04bbd15..HEAD. Original worktree remains unchanged; added tests and mutations used isolated /tmp copies with separate target directories. Existing workspace suite passed: 251 tests, including all 877 streamed placements and ASR coverage. Workspace all-target/all-feature clippy passed with warnings denied. Earlier dispositions were checked; the retirement mutation correctly failed with 525,720 bytes retained. Recorded allocation measurements were inspected, not rerun. README, AGENTS.md, and plan were checked; no additional material documentation finding. The owner-accepted relay-stop limit was respected. Phone-a-friend was not used."
+  }
+]
