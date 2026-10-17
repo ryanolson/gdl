@@ -63,7 +63,8 @@ pub struct HopInfo {
 pub struct TypeInfo {
     /// The type as written in the graph definition.
     pub name: String,
-    /// Whether the type has a codec, so an edge carrying it may be cut.
+    /// Whether the type has a codec, so an edge carrying it may be cut. For
+    /// a streamed request the item type must have one as well.
     pub wire: bool,
     /// The item type of a streamed request. `None` for any other type.
     #[serde(default, skip_serializing_if = "Option::is_none")]

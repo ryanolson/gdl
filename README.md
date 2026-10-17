@@ -114,7 +114,7 @@ For each segment, the generator writes a crate with:
 
 - A library. `start(node, roster, config, nodes)` deploys the segment inside a program.
 - A binary. It builds each hosted node through `gdl::Build`, meets the other segments in a shared roster directory, and waits until every instance that it can send to is serving. Then it serves until Ctrl-C.
-- On the segment that hosts the source, the binary instead reads one JSON request per line on stdin, writes the items as JSON lines (`gdl::serve_json_lines`), and stops at the end of the input. It does this only if the source's request type and item type both implement `Serialize` and `Deserialize`. For other source types, the binary serves until Ctrl-C, and your own program calls the graph through the generated library.
+- On the segment that hosts the source, the binary instead reads one JSON request per line on stdin, writes the items as JSON lines (`gdl::serve_json_lines`), and stops at the end of the input. It does this only if the source's request type and item type both implement `Serialize` and `Deserialize`, and the request is not streamed. For other source types, the binary serves until Ctrl-C, and your own program calls the graph through the generated library.
 
 The generator owns the directory of each segment crate. Each generated file starts with a do-not-edit marker. `gdl-gen --check` writes nothing. It fails if a generated file is missing, changed, or stale, or if a segment crate holds a file that the generator did not write.
 
@@ -230,11 +230,13 @@ A graph that is not cut costs no encoding. A local graph is nested calls, and th
 
 On one aarch64 workstation, over loopback TCP:
 
-- **Per request.** The seven-node reference graph takes about 26 us in one process and about 223 us over two segments. A request with one hop over two segments takes about the same time as the same request written directly on velo (about 200 us to 250 us; the run-to-run variance is larger than the difference). gdl adds two tasks and 48 allocations to each request.
+- **Per request.** The seven-node reference graph takes about 26 us in one process and about 223 us over two segments. A request with one hop over two segments, whose request is one value, takes about the same time as the same request written directly on velo (about 200 us to 250 us; the run-to-run variance is larger than the difference). gdl adds two tasks and 48 allocations to each request.
 - **Per item, at each crossing.** Encoding and decoding cost 123 ns (16 B), 223 ns (1 KiB), and 811 ns (16 KiB). Of that, 80 ns to 400 ns is more than velo direct, which also encodes.
 - **Throughput.** Item throughput is 0% to 11% lower than direct velo, about the size of the run-to-run variance. velo's rate for a single stream, about 11 K items/s here, limits both.
 
-The measurements and the method are in `agent-docs/perf/m3-remote.md`.
+- **Streamed requests.** Items of a streamed request cross at velo's rate, the same as on velo directly. A one-item upload over two segments takes about 524 us, against 403 us for the same exchange written directly on velo.
+
+The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent-docs/perf/streamed.md`.
 
 ## Repository layout
 

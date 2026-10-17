@@ -45,8 +45,9 @@ pub(crate) fn peer(node: &Velo) -> PeerInfo {
     node.peer_info()
 }
 
-/// Where a run delivers its output: an anchor handle, plus the ticket that
-/// lets a remote producer open the stream without an attach round trip.
+/// Where a producer delivers a stream (a run's output, or a streamed
+/// request's items): an anchor handle, plus the ticket that lets a remote
+/// producer open the stream without an attach round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ReplyTo {
     handle: u128,

@@ -9,7 +9,7 @@ A general Rust tool to express request/response streaming pipelines as graphs, t
 1. **Define** a graph once: its nodes, its topology, and the message types on every edge. No node implementations.
 2. **Configure** a placement: which nodes live in which segment.
 3. **Generate** one crate per segment. A segment crate links only the implementations of the nodes placed in it, so a segment that hosts CPU-only nodes never links the GPU node's dependencies.
-4. **Run** segments as separate processes over [velo](https://github.com/ai-dynamo/velo) 0.19. Inside a segment, a hop is a plain function call. Between segments, requests travel as velo active messages and responses travel as velo streams.
+4. **Run** segments as separate processes over [velo](https://github.com/ai-dynamo/velo) 0.19. Inside a segment, a hop is a plain function call. Between segments, requests travel as velo active messages and responses travel as velo streams. A streamed request's items travel as a velo stream too, into an anchor its receiver mints (7.9).
 
 Non-goals for the first release: streaming requests (bidirectional), fan-out ports, instance-selection policies beyond round robin, service discovery, and non-Rust segments. Section 12 lists these as later work; the design must not block them.
 
@@ -27,7 +27,7 @@ Non-goals for the first release: streaming requests (bidirectional), fan-out por
 | Run | A maximal sequence of consecutive stages of one hop direction that sit in one segment |
 | Crossing | An edge whose two ends are in different segments |
 | Anchor | A velo SPSC stream endpoint owned by a consumer; its handle is a serializable u128 |
-| Reply-to | The anchor handle, plus an optional open ticket, that a run must deliver its output to |
+| Reply-to | The anchor handle, plus an optional open ticket, that a run must deliver its output to, or a sender a streamed request's items to (7.9) |
 | Attempt | One call of `next.generate`, with its own cancellation scope |
 
 ## 3. Model
@@ -92,7 +92,7 @@ Attempt rules:
 
 ## 5. Node implementation API
 
-Implementations implement one role trait. Traits return `impl Future + Send`; nothing on the local path is boxed except the node's output stream.
+Implementations implement one role trait. Traits return `impl Future + Send`; nothing on the local path is boxed except the node's output stream and a streamed request's items (7.9).
 
 ```rust
 pub type Items<T> = Pin<Box<dyn Stream<Item = Result<T, Error>> + Send>>;
@@ -133,7 +133,7 @@ The graph is a typed structure; the placement is runtime data.
 
 - Each node has a marker type (`nodes::D`) that fixes its role and port types through a declaration trait (`SinkDecl`, `BackwardDecl`, ...).
 - `Bindings` is a typestate struct with one slot per non-source node. A slot holds an implementation or `Absent<N>`, where `N` is the node's marker. A blanket impl (`impl<N: SinkDecl> Sink for Absent<N>`, and one per role) gives each absent slot exactly its node's port types and returns `Error::NotHosted`; validation guarantees it is never called. A segment that binds only `B`, `C`, `G` names no other implementation type, so it links nothing else.
-- Each edge has an `Option<Codec<T>>`: a pair of monomorphized function pointers (`encode: fn(&T) -> Result<Bytes>`, `decode: fn(&[u8]) -> Result<T>`), created where `T` is concrete (section 9.1). A codec exists only for wire-capable types.
+- Each edge has an `Option<Codec<T>>`: a pair of monomorphized function pointers (`encode: fn(&T) -> Result<Vec<u8>>`, `decode: fn(&[u8]) -> Result<T>`), created where `T` is concrete (section 9.1). A codec exists only for wire-capable types. Addendum 2026-10-16: a forward edge holds a request codec instead, `Codec<T>` or, for a streamed request, `StreamCodec<H, T>`, which pairs a head codec and an item codec (7.9, ruling 30).
 - **Crossings are byte-based.** A runtime generic over `T` cannot call velo's `attach_anchor::<T>` without `T: Serialize`, and a runtime check cannot supply that bound. So every gdl anchor and envelope carries one concrete type, `WireItem = Open | Item(bytes) | Fail(gdl::Error)`, and the edge's codec turns `T` into bytes and back. The cost is one extra copy per item at a crossing; milestone 3 measures it.
 - The runtime is generic over the graph and the bindings, so dispatch inside a run is static. At each stage boundary it checks the placement: same segment, call the next stage; different segment, send through the edge's codec. That is one branch per boundary, and it lets one compiled build run any placement. Tests rely on this to execute every placement of the reference graph; production builds bind only their own nodes.
 
@@ -163,10 +163,12 @@ The outer end O of a hop owns the attempt. If any stage of the hop is outside O'
      Either way the run is prepared, not active: its pump waits for an Open frame on
        anchor_j before it calls its first backward node.
 3. O runs its local forward stages, then sends gdl.fwd to the first crossing's segment:
-     envelope = { contract and placement hash, root request token, hop, stage,
-                  cx (wire part), reply = (h_1 or h_k, ticket?), payload }.
+     envelope = { version, contract and placement hash, hop, pos (the first stage to run),
+                  cx (wire part, whose id is the root), reply = (h_1 or h_k, ticket?), payload }.
 4. A forward run executes its local stages and either sends gdl.fwd onward or, when it reaches
    the inner end, attaches or opens to its reply, starts the inner end, and pumps.
+   For a streamed request (7.9): the payload is the head, the ack names the input anchor
+   the receiver minted, and a forward run that hands a stream on is a relay.
 5. O's next.generate returns anchor_k's stream, wrapped in O's local backward nodes.
 ```
 
@@ -212,8 +214,8 @@ A remote forward node cannot observe cancel in the middle of its transform: no a
 ### 7.5 Admission and memory
 
 - **Limit.** Each segment instance has an admission limit: the number of root requests it may serve at once. An entry handler (`gdl.fwd`, `gdl.open`) reserves admission before it acknowledges; if none is free within a short wait it rejects with `Overloaded`, and the sender may try another instance. The bounded wait means admission can reject but never deadlock.
-- **Reentrant per root request.** The source mints a root request token, and every envelope carries it. An instance that already admitted that token admits further entries for it without a new permit. Without this, one request can block itself: with placement `{A,B,D,G} {C,F,E}` and a limit of one, the provisioned F/E run would hold the second segment's only permit while C waits for it. The ledger is sharded and touched only at entry and retirement.
-- **Release.** A forward run that hands the request on releases its share at the acknowledged handoff. The inner end's share and a backward run's share last until its stream retires: its final terminal is sent, or the stream is cancelled.
+- **Reentrant per root request.** The root is the request id, which every envelope carries in its context. An instance that already admitted that token admits further entries for it without a new permit. Without this, one request can block itself: with placement `{A,B,D,G} {C,F,E}` and a limit of one, the provisioned F/E run would hold the second segment's only permit while C waits for it. The ledger is sharded and touched only at entry and retirement.
+- **Release.** A forward run that hands the request on releases its share at the acknowledged handoff. A relay (7.9) keeps its share until it has sent all of its input on (ruling 10). The inner end's share and a backward run's share last until its stream retires: its final terminal is sent, or the stream is cancelled.
 - **Attempts per root.** Concurrent attempts each mint anchors and share the root's admission, so admission alone does not bound streams. Each root has a limit on outstanding remote attempts (configurable); `next.generate` beyond it returns `Err(Overloaded)`.
 - **Egress.** Each instance has an egress quota: the streams it may be producing at once. A producing stream takes its permit before it attaches (before acknowledging, so a full instance refuses) and releases it when it ends. Output velo keeps after a producer finishes (its slot's withheld queue, up to the slot byte budget, plus its credit window) is drained or dropped by the consumer, and every gdl consumer holds the request's deadline and cancels its anchor when it passes, whether or not its stream is being read (ruling 17). velo 0.19 has no signal for when that output is gone; with one, the permit would be held until then (ruling 15; `agent-docs/velo-issues.md`). Every pump selects on its cancel token.
 - **No correlation map.** gdl never maps a response to its consumer. velo's own registries (anchors, senders) and the admission ledger are the only per-request tables.
@@ -341,7 +343,7 @@ gdl::graph! {
 
 The macro emits node markers, the `Bindings` typestate, the typed graph structure (section 6), `manifest() -> gdl::Manifest`, and `CONTRACT_HASH`.
 
-- **Wire capability.** For each edge type the expansion calls an autoref probe on the concrete type (`(&&Probe::<Raw>::new()).codec()`), which yields `Some(Codec)` when the type implements `Serialize + DeserializeOwned` and `None` otherwise. A probe inside a generic helper would always pick the fallback, so the macro emits it only at concrete types. Tests cover type aliases, concrete generics, serialize-only types, and non-wire types. A type that deserializes only by borrowing from its input cannot be classified: its higher-ranked `Deserialize` bound fails after method selection, so the probe is a compile error rather than `None` (found in milestone 1, `crates/gdl/tests/ui/borrowed-message.rs`). Message types must own their data.
+- **Wire capability.** For each edge type the expansion calls an autoref probe on the concrete type (`(&&Probe::<Raw>::new()).codec()`), which yields `Some(Codec)` when the type implements `Serialize + DeserializeOwned` and `None` otherwise. A probe inside a generic helper would always pick the fallback, so the macro emits it only at concrete types. Tests cover type aliases, concrete generics, serialize-only types, and non-wire types. A type that deserializes only by borrowing from its input cannot be classified: its higher-ranked `Deserialize` bound fails after method selection, so the probe is a compile error rather than `None` (found in milestone 1, `crates/gdl/tests/ui/borrowed-message.rs`). Message types must own their data. A streamed forward edge probes its head and its item, and pairs them only when both are wire types (`stream_codec!`, ruling 30).
 - **Schema version.** Rust type names cannot fingerprint a serde representation. `CONTRACT_HASH` covers node names, roles, topology, type names, and the `schema` number, and a change to any message type's wire form requires a `schema` bump. Contract evolution rules are later work.
 
 **Addendum (2026-10-16, as built).**
@@ -405,6 +407,7 @@ Runtime config, separate from placement: the roster, admission limits, timeouts,
 | Every crossing edge and every anchor-carried edge has a codec | generation, and segment start (`NotWire`) |
 | Every placed non-source node is bound in the binary that hosts it | segment start |
 | Envelope hashes match the receiving instance | every request |
+| The bindings and the manifest agree on which forward edges are streamed | segment start |
 
 ### 9.5 Why crates and not Cargo features
 
@@ -480,7 +483,7 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 23 | Input retirement | the receiver retires its input anchor when its run ends, for any reason. This bounds a never-attached anchor (a prebind pauses velo's unattached timeout) and releases input held unread | 2026-10-16 |
 | 24 | Late input attach | a failed attach, open, or send on an input anchor ends the pump silently and cancels what feeds it; the response decides the request's outcome | 2026-10-16 |
 | 25 | No request-side `Open` | nothing on the request side is provisioned ahead: the receiver exists before its producer, and the ack is the readiness signal | 2026-10-16 |
-| 26 | Stop and input | a stop does not end the input, as in local composition. An application that wants stop to end its input ends it from its own context, for example with `take_until(cx.stopping())`. Addendum 2026-10-16 (plan review round 1): as first written, pumps neither reacted to stop nor forwarded it, so a remote relay never saw a stop. Its context is fresh on arrival, and the response path does not pass through it, so a relay that ends its input on stop kept a draining sink waiting until the deadline, where the local run finished. Stop now travels forward in band: an input pump whose context is stopping sends `WireItem::Stop` once, after the items already sent, and the receiving run calls `request_stop` on its context; the frame does not end the input. Receivers still never stop an input anchor through velo, which would ask the producer to finish. Addendum 2026-10-16 (plan review round 2): the in-band frame is superseded. A `Stop` item is data: it waits behind exhausted credit, a reader that waits for stop before it reads never sees it, and after the input ends, or for a relay that turns a value into a stream, no input pump is left to send it. Stop now uses velo's control path in the other direction. It reaches the inner end on the response side, as before. A receiving run whose context is stopping calls `request_stop` on its input anchor, a control message that no data credit holds back. The sender's pump already turns its consumer's stop into a stop of its own context and of the anchor it reads (`Upstream::request_stop`), so a relay's forward stages see the stop and pass it further up. The pump keeps sending: velo does not end a stream on stop, and the producer decides whether to finish. The route exists while a relay produces output. A forward node that waits for stop inside `forward`, before the hand-off, is not reached, as a cancel is not (7.4); the deadline bounds it | 2026-10-16, amended plan review rounds 1 and 2 |
+| 26 | Stop and input | a stop does not end the input, as in local composition. An application that wants stop to end its input ends it from its own context, for example with `take_until(cx.stopping())`. Addendum 2026-10-16 (plan review round 1): as first written, pumps neither reacted to stop nor forwarded it, so a remote relay never saw a stop. Its context is fresh on arrival, and the response path does not pass through it, so a relay that ends its input on stop kept a draining sink waiting until the deadline, where the local run finished. Stop now travels forward in band: an input pump whose context is stopping sends `WireItem::Stop` once, after the items already sent, and the receiving run calls `request_stop` on its context; the frame does not end the input. Receivers still never stop an input anchor through velo, which would ask the producer to finish. Addendum 2026-10-16 (plan review round 2): the in-band frame is superseded. A `Stop` item is data: it waits behind exhausted credit, a reader that waits for stop before it reads never sees it, and after the input ends, or for a relay that turns a value into a stream, no input pump is left to send it. Stop now uses velo's control path in the other direction. It reaches the inner end on the response side, as before. A receiving run whose context is stopping calls `request_stop` on its input anchor, a control message that no data credit holds back. Addendum 2026-10-16 (milestone 8, as built): no watcher waits on the context. A receiving run's context gets a stop only where its own consumer's stop arrives (the inner end's response, or a relay's onward input), and that same place forwards the stop to the input anchor (`Upstream::request_stop`). A watcher polled with the run would have registered a cancellation future on every item. The sender's pump already turns its consumer's stop into a stop of its own context and of the anchor it reads (`Upstream::request_stop`), so a relay's forward stages see the stop and pass it further up. The pump keeps sending: velo does not end a stream on stop, and the producer decides whether to finish. The route exists while a relay produces output. A forward node that waits for stop inside `forward`, before the hand-off, is not reached, as a cancel is not (7.4); the deadline bounds it | 2026-10-16, amended plan review rounds 1 and 2 |
 | 27 | Replay | `Streamed` is not `Clone`. Retry, hedging, and migration of a streamed request are the operator's job, from its own buffer | 2026-10-16 |
 | 28 | Cross-direction deadlock | not detected. Input pumps run on their own tasks, never driven by response reads; a deadlock the application builds is bounded by the deadline | 2026-10-16 |
 | 29 | Egress hold and wait | accepted as in the unary design. An outer end that holds an input pump's permit while its local inner end waits for another can be refused with `Overloaded` at the limit; the bounded wait means it is refused, never hung. Provisioned local runs and a local inner end already share one quota the same way | 2026-10-16 |

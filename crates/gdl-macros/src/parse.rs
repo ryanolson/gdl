@@ -7,7 +7,9 @@
 //! forward  C: Pre -> Pre;
 //! sink     D: Pre -> stream Raw;
 //! backward F: Raw -> Tok;
-//! topology: A => B { C => D => F } => G;
+//! backward E: Tok -> Out;
+//! backward G: Chunk -> Chunk;
+//! topology: A => B { C => D => F => E } => G;
 //! ```
 //!
 //! A request position (a source's, sink's, or operator's request, and both

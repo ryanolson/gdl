@@ -329,7 +329,8 @@ pub(crate) struct Runtime {
     pub(crate) identity: Identity,
     picker: Picker,
     names: Names,
-    /// Forward hand-offs and backward runs this instance has taken on.
+    /// Forward hand-offs, backward runs, and request streams this instance
+    /// has taken on.
     pub(crate) served: Served,
     /// Filled once at start; read by local short-circuits.
     entries: std::sync::OnceLock<std::sync::Weak<Entries>>,

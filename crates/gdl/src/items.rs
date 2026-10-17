@@ -10,8 +10,9 @@ use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOw
 use crate::cx::Cx;
 use crate::error::{Error, Result};
 
-/// A response stream. Every response in gdl is a stream; a unary response is
-/// a stream of one item. An `Err` item is terminal.
+/// A stream of items: a response, or a streamed request's items. Every
+/// response in gdl is a stream; a unary response is a stream of one item. An
+/// `Err` item is terminal.
 pub type Items<T> = Pin<Box<dyn Stream<Item = Result<T>> + Send>>;
 
 /// Box a stream as [`Items`].

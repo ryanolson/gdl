@@ -537,8 +537,8 @@ where
     /// This run's context is fresh, so a stop reaches it only from the
     /// stream it produces: the inner end's response, or a relay's onward
     /// input. Whichever forwards that stop to this run's context forwards it
-    /// to `upstream` as well, so it travels on up the request path (ruling
-    /// 26) without a watcher polled on every item. It does not end the
+    /// to `upstream` as well, so it travels on up the request path
+    /// without a watcher polled on every item. It does not end the
     /// input: the sender decides that.
     async fn serve_forward(
         self: Arc<Self>,
@@ -591,7 +591,7 @@ where
                     (Ok(None), None, _) => drop(share),
                     // A relay. The next stage owns the reply; this one keeps
                     // its admission share and its permit until it has sent
-                    // the items on (rulings 10 and 15).
+                    // the items on.
                     (Ok(Some(next)), Some(input), Some(egress)) => {
                         send_input(&self.rt, &cx, next, input, upstream).await;
                         drop((share, egress));
@@ -825,7 +825,6 @@ where
         }
     }
 
-    /// Deliver a failure to a reply this stage owns.
     /// Deliver `error` to `reply`, unless the request is over: then its
     /// consumer has the reason already.
     async fn fail(&self, cx: &Cx, reply: &ReplyTo, error: Error) {
@@ -849,7 +848,7 @@ where
 /// Send a streamed request's items into the input anchor its receiver
 /// minted, until they end. A receiver that is already gone ends the pump
 /// without a word, and cancels what feeds it: the response decides the
-/// request's outcome (ruling 24).
+/// request's outcome.
 async fn send_input(
     rt: &Runtime,
     cx: &Cx,
@@ -877,7 +876,7 @@ struct Handed {
 /// Retires a run's input anchor when the run ends, however it ends. Nothing
 /// else bounds that anchor: a ticket pauses its unattached timeout, a
 /// sender whose acknowledgement was lost never attaches, and a node may hold
-/// its input unread (ruling 23).
+/// its input unread.
 struct InputGuard(Retirer);
 
 impl InputGuard {
