@@ -13,6 +13,7 @@
 | `agent-docs/perf/` | Measurements, with the command that produced them |
 | `crates/` | `gdl` (runtime), `gdl-macros` (`graph!`), `gdl-gen` (segment crate generator) |
 | `examples/chat` | A separate workspace: a contract, its implementations, and generated segments. Regenerate with `cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --out examples/chat/segments`; never edit `segments/` by hand |
+| `examples/asr` | A separate workspace with a streamed request, generated segments, and a demo that runs them. Regenerate with `cargo run -p gdl-gen -- --spec examples/asr/gdl.toml --out examples/asr/segments` |
 
 ## Build, lint, test
 

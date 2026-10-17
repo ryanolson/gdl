@@ -1,0 +1,10 @@
+[package]
+name = "asr-contract"
+description = "The ASR example's messages and graph"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gdl = { workspace = true }
+serde = { workspace = true }

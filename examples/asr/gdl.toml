@@ -1,0 +1,40 @@
+# The ASR example's placement. The audio crosses twice: from the client's
+# segment to the resampler, and from the resampler to the recognizer.
+# Generate the segment crates with:
+#
+#     cargo run -p gdl-gen -- --spec examples/asr/gdl.toml --out examples/asr/segments
+
+[contract]
+path = "contract"
+
+[gdl]
+path = "../../crates/gdl"
+
+[segment.front]
+nodes = ["Client", "Gateway"]
+
+[segment.dsp]
+nodes = ["Resample"]
+
+[segment.engine]
+nodes = ["Recognizer", "Punctuate"]
+
+[bind.Gateway]
+crate = "asr-front-nodes"
+path = "front-nodes"
+type = "asr_front_nodes::Gateway"
+
+[bind.Resample]
+crate = "asr-dsp-nodes"
+path = "dsp-nodes"
+type = "asr_dsp_nodes::Resample"
+
+[bind.Recognizer]
+crate = "asr-engine-mock"
+path = "engine-mock"
+type = "asr_engine_mock::Recognizer"
+
+[bind.Punctuate]
+crate = "asr-engine-mock"
+path = "engine-mock"
+type = "asr_engine_mock::Punctuate"

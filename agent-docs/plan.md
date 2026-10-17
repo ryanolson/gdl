@@ -1,6 +1,6 @@
 # dynamo-gdl plan
 
-Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Streaming requests (section 7.9, milestones 7 to 9) planned 2026-10-16 and approved after three review rounds (`agent-docs/reviews/stream-plan-r*.md`). Measurements: `agent-docs/perf/`.
+Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Streaming requests (section 7.9, milestones 7 to 9) planned 2026-10-16 and approved after three review rounds (`agent-docs/reviews/stream-plan-r*.md`); milestone 7 done, its review clean (`m7-r1.md`); milestones 8 and 9 implemented, reviews in progress. Measurements: `agent-docs/perf/`.
 
 ## 1. Goal
 
@@ -393,7 +393,7 @@ Runtime config, separate from placement: the roster, admission limits, timeouts,
 - Validation adds: segment names are letters, digits, `-`, and `_`; no two segments may become one package name; a package bound from two paths is refused; every problem is reported at once.
 - Generated Rust is formatted by rustfmt with a config of the generator's own, so output does not depend on where it runs. The generator owns each segment crate's directory: `--check` reports missing, changed, stale (marked, no longer produced), and unexpected (unmarked, inside a crate) files, and generation refuses to run over an unexpected one. Cargo build directories are recognized by `CACHEDIR.TAG`.
 - The binary's config has `listen`, `roster` (a directory fresh for each deployment), `rendezvous_ms`, `[runtime]` (`RuntimeConfig`, durations in milliseconds, validated at parse), and `[node.<Node>]` (each node's `Build::Config`). It meets the other segments with `Roster::rendezvous`, starts, then waits with `Roster::ready` until every instance it can route to is serving. Generated code makes no velo call.
-- On the segment that hosts the source, when the source's types are serde types, the binary serves JSON lines through `gdl::serve_json_lines` (gdl feature `json-lines`), tested once in gdl rather than generated into each crate.
+- On the segment that hosts the source, when the source's types are serde types, the binary serves JSON lines through `gdl::serve_json_lines` (gdl feature `json-lines`), tested once in gdl rather than generated into each crate. Addendum 2026-10-16 (milestone 9): a source that takes a streamed request is not served this way, because one line cannot carry it; its binary only serves, and callers use the segment library (`examples/asr/demo`).
 
 ### 9.4 Validation
 
@@ -420,6 +420,7 @@ crates/
   gdl-gen/      generator binary
 examples/
   chat/         contract crate, implementation crates, placement configs, generated segments
+  asr/          a streamed request: contract, implementations, generated segments, in-process demo
 ```
 
 ## 11. Milestones
@@ -463,7 +464,7 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 7 | Toolchain | stay on 1.93.1, velo's pin. Probed 2026-10-15: return-type notation, `impl Trait` in associated types, type-alias `impl Trait`, and dyn-compatible `async fn` are all still unstable on 1.99.0, so a newer stable toolchain would not change the design. Revisit when one of them stabilizes: associated `impl Trait` would let node output streams drop the `Items<T>` box | owner allowed a bump; not needed |
 | 8 | Crossing representation | byte-based: one concrete `WireItem` through velo, typed by monomorphized codec function pointers | round 2 |
 | 9 | Deadline | absolute wall-clock deadline with a configured skew; expired requests are rejected on arrival | round 2 |
-| 10 | Admission | reentrant per root request; released at handoff for forward runs and at stream retirement otherwise. Its claim that source admission bounds buffered bytes is superseded by ruling 14  Addendum 2026-10-16 (streaming requests): a relay (7.9) does not release at the handoff; it holds its share until its relay ends, because it is still reading its input anchor | round 2, amended round 3 and 2026-10-16 |
+| 10 | Admission | reentrant per root request; released at handoff for forward runs and at stream retirement otherwise. Its claim that source admission bounds buffered bytes is superseded by ruling 14. Addendum 2026-10-16 (streaming requests): a relay (7.9) does not release at the handoff; it holds its share until its relay ends, because it is still reading its input anchor | round 2, amended round 3 and 2026-10-16 |
 | 11 | Provisioned backward runs | prepared before dispatch, activated by their first input frame; runs that revisit O's segment are opened on O's instance by direct call | round 2 |
 | 12 | Backward-run activation | on a gdl `Open` frame sent when the upstream stream is established, never on application data | round 3 |
 | 13 | Deadline conversion | `mono_now + max(0, deadline_wall - wall_now - skew)`; stop up to `2 x skew` early, never late | round 3 |

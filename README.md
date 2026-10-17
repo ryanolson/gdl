@@ -198,6 +198,20 @@ In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `m
 
 `crates/gdl-gen/tests/chat.rs` does these steps as a test.
 
+### A graph with a streamed request
+
+`examples/asr` is a speech recognition pipeline with a mock recognizer. Its request is a session's settings and a stream of audio chunks:
+
+```rust
+source   Client: Session + stream Audio -> stream Transcript;
+operator Gateway: (Session + stream Audio -> stream Transcript) over (Session + stream Audio -> stream Partial);
+forward  Resample: Session + stream Audio -> Session + stream Pcm;
+sink     Recognizer: Session + stream Pcm -> stream Partial;
+backward Punctuate: Partial -> Partial;
+```
+
+Its placement puts `Resample` in a segment of its own, so the audio crosses two times. The generated binary of the source's segment has no JSON-lines server, because one line cannot carry a streamed request. Call the source through the segment library. `examples/asr/demo` starts the three generated segments in one process, sends audio, and receives transcripts while the audio streams in. `crates/gdl-gen/tests/asr.rs` runs it as a test.
+
 ## Across segments
 
 - **Responses.** Each response stream goes to an anchor that its consumer created. The runtime never matches a response to a request by a request id.
@@ -230,6 +244,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md`.
 | `crates/gdl-macros` | The `graph!` macro |
 | `crates/gdl-gen` | The generator |
 | `examples/chat` | A contract, its node implementations, and the generated segment crates. It is a separate Cargo workspace. |
+| `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |
 | `agent-docs/` | The plan, review records, and measurements |
 
 ## Build and test
@@ -240,4 +255,4 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 timeout 900 cargo test --workspace --all-features
 ```
 
-The tests start velo nodes in one process on ports that the OS assigns. The example test builds the example workspace in `target/examples`.
+The tests start velo nodes in one process on ports that the OS assigns. The example tests build the example workspaces in `target/examples`.
