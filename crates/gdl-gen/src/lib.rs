@@ -821,6 +821,19 @@ mod tests {
     }
 
     #[test]
+    fn a_streaming_source_is_not_served_as_json_lines() {
+        let out = std::path::Path::new("/work/segments");
+        let spec = spec(split(), &[("D", "tiny_nodes::D")]);
+        let mut manifest = manifest();
+        manifest.hops[0].forward_types = vec![TypeInfo::streamed("Req", true, "Chunk", true)];
+        let files = render_manifest(&spec, &manifest, out).expect("render");
+        let front = &files[&PathBuf::from("front/src/main.rs")];
+        assert!(!front.contains("serve_json_lines"), "{front}");
+        assert!(front.contains("streamed request"), "{front}");
+        assert!(!files[&PathBuf::from("front/Cargo.toml")].contains("json-lines"));
+    }
+
+    #[test]
     fn only_the_source_segment_serves_json_lines() {
         let out = std::path::Path::new("/work/segments");
         let spec = spec(split(), &[("D", "tiny_nodes::D")]);

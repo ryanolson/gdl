@@ -203,14 +203,27 @@ impl Unit<'_> {
     }
 
     /// Whether the binary can serve the source over JSON lines: both of the
-    /// source's types must be serde types.
+    /// source's types must be serde types, and its request one value. One
+    /// line cannot carry a streamed request.
     fn serves(&self) -> bool {
         let Some(hop) = self.manifest.hops.first() else {
             return false;
         };
-        let req = hop.forward_types.first().is_some_and(|t| t.wire);
+        let req = hop
+            .forward_types
+            .first()
+            .is_some_and(|t| t.wire && t.stream.is_none());
         let item = hop.backward_types.last().is_some_and(|t| t.wire);
         self.hosts_source() && req && item
+    }
+
+    /// Whether the source takes a streamed request.
+    fn streamed_source(&self) -> bool {
+        self.manifest
+            .hops
+            .first()
+            .and_then(|hop| hop.forward_types.first())
+            .is_some_and(|t| t.stream.is_some())
     }
 
     fn path_to(&self, target: &Path) -> String {
@@ -444,6 +457,16 @@ impl Unit<'_> {
             let _ = writeln!(
                 text,
                 "//! item, `{{\"item\": ...}}`, then `{{\"done\": null}}` or `{{\"error\": \"...\"}}`."
+            );
+        } else if self.hosts_source() && self.streamed_source() {
+            let _ = writeln!(text, "//!");
+            let _ = writeln!(
+                text,
+                "//! This segment hosts the source, which takes a streamed request. One JSON"
+            );
+            let _ = writeln!(
+                text,
+                "//! line cannot carry it, so the binary only serves; call it through the library."
             );
         } else if self.hosts_source() {
             let _ = writeln!(text, "//!");
