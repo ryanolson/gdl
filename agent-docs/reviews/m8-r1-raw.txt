@@ -1,0 +1,61 @@
+[
+  {
+    "verdict": "APPROVE-WITH-CHANGES",
+    "actionable": 4,
+    "findings": [
+      {
+        "id": 1,
+        "severity": "minor",
+        "file": "crates/gdl/src/dist/hop.rs",
+        "line": 520,
+        "claim": "Isolate streamed-request state from the common forwarding task: unary requests now allocate larger futures.",
+        "evidence": "Isolated aarch64 release comparisons of 84ef217 and HEAD, with fault injection disabled, measured 29,279\u201329,400 versus 29,966\u201330,089 allocated bytes per one-item unary request; allocation counts remained approximately 144/request. In the standard benchmark configuration, caller, entry, and receiving-task futures grew by 48, 96, and 640 bytes respectively. Thus the unary path pays for the rewrite even with no input stream. hop.rs also grows from 978 to 1,140 lines; decomposing stream pumping/retirement and reducing the shared future's captured state would address both problems.",
+        "test_idea": "Repeat the isolated unary allocation-byte benchmark against the base, including a build without fault injection. Reduce common future storage or isolate streaming-specific state without adding unary allocations, then rerun the workspace suite."
+      },
+      {
+        "id": 2,
+        "severity": "minor",
+        "file": "crates/gdl/tests/inputs.rs",
+        "line": 155,
+        "claim": "Add a retirement test that retains buffered input outside the receiving run without polling it.",
+        "evidence": "an_input_held_past_its_run_is_retired_when_the_run_ends uses detach_input, whose task actively drains input at common/streamed.rs:273\u2013275. Replacing InputGuard's retirement with controller cancellation left all 25 input tests green. A stronger isolated probe read one of three 256-KiB items, retained the remaining input, waited for the relay to finish, and ended the receiving run. Under that mutation, settles still passed but 525,934 bytes remained until the application dropped its input; unmodified HEAD retained only 281 bytes. The existing assertions do not enforce the buffered-input release required by milestone 8.",
+        "test_idea": "Keep a detached input handle unread after its relay finishes. End the receiver through cancellation/deadline and verify buffered memory is released before that handle is polled or dropped; anchor/admission counters alone are insufficient."
+      },
+      {
+        "id": 3,
+        "severity": "minor",
+        "file": "crates/gdl/tests/inputs.rs",
+        "line": 362,
+        "claim": "Cover the required same-worker stop route while a remote relay waits under exhausted input credit.",
+        "evidence": "The stop tests use distinct front/mid/back workers. The out-and-back placement test at line 762 exercises a same-worker response attach but never requests stop. Suppressing stop tokens only for same-worker attachments left all 25 input tests green. An isolated variant placing A/B/D/F/E/G on front and C on mid passed on HEAD and timed out under that mutation. This supplies the reachable same-worker response-control case required alongside TCP in milestone 8.",
+        "test_idea": "Run the exhausted-credit, wait-for-stop scenario with both the current three-worker placement and the out-and-back placement. Establish the blocked-input precondition, request stop, assert the normal terminal count, and require settles."
+      },
+      {
+        "id": 4,
+        "severity": "minor",
+        "file": "README.md",
+        "line": 209,
+        "claim": "Qualify the promise that stop reaches every stage.",
+        "evidence": "Ruling 26 explicitly excludes a remote forward node waiting inside forward before handing the request on. A disposable probe confirmed the distinction: a forward awaiting cx.stopping() completed after stop locally, but the same graph split across segments returned DeadlineExceeded at 500 ms. The implementation follows the accepted ruling; the newly added README sentence promises broader behavior.",
+        "test_idea": "Describe propagation through established response/input producers and state the pre-handoff limitation. Retain a local/remote boundary test so this accepted limitation remains explicit."
+      }
+    ],
+    "notes": "Reviewed 84ef217..df0d506 with the thermo-nuclear skill and independent Claude verification. timeout 900 cargo test --workspace and clippy --workspace --all-targets -- -D warnings passed, including all 877 streamed placements. Five additional isolated probes passed on unmodified runtime code. The two test findings describe coverage gaps, not current runtime failures. All mutations and instrumentation were confined to separate /tmp copies with their own target directories; the repository remains clean. Probe sources/logs: /tmp/gdl-review-36d4f5r5; baseline measurements: /tmp/gdl-base-3vddyfvb. Allocation measurements do not establish a latency regression."
+  },
+  {
+    "verdict": "REJECT",
+    "actionable": 1,
+    "findings": [
+      {
+        "id": 1,
+        "severity": "major",
+        "file": "crates/gdl/src/dist/hop.rs",
+        "line": 520,
+        "claim": "Restore forwarding of a receiving run's context stop to its input anchor; removing stop_up makes node-initiated stops hang until the deadline.",
+        "evidence": "Forward nodes receive this run's Cx and can call request_stop() while producing input. After the watcher removal, upstream stop propagation occurs only when an output anchor's stop token fires (produce_inner:791\u2013795 and pump:940\u2013942); stopping Cx itself triggers neither path. In an isolated test of A => X => C => D, X ends its pending input on cx.stopping(), C requests stop after its first item, and D drains. With placement {A}/{X}/{C,D}, HEAD returns [Ok(1), Err(DeadlineExceeded)] after approximately 3 seconds instead of [Ok(1)]. The all-local control passes, and the distributed test passes with hop.rs from 4028ca5, before watcher removal. This violates ruling 26's requirement to propagate a receiving run's stop upstream.",
+        "test_idea": "Keep the A => X => C => D regression with one input item followed by pending input. Have C request stop from its returned stream, without stopping the source context. Assert that X observes stop, the response ends successfully before its deadline, and anchors/admission/egress settle. The reproduction is /tmp/gdl-review-5fne0_je/crates/gdl/tests/stopprobe.rs."
+      }
+    ],
+    "notes": "Repository unchanged. All 68 existing targeted tests passed: inputs, flows (including all 877 placements), crossings, and faults. An additional same-worker response-path stop probe passed. All added probes and the watcher comparison used an isolated /tmp copy with its own CARGO_TARGET_DIR. The phone-a-friend independent read-only review produced no result after more than seven minutes and was interrupted; no independent verdict is claimed."
+  }
+]
