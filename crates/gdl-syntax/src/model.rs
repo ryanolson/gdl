@@ -151,6 +151,7 @@ impl Graph {
             by_name: &by_name,
             used: BTreeSet::new(),
             hops: Vec::new(),
+            streaming: None,
         };
         let mut list = input.topology.into_iter();
         let first = list
@@ -172,6 +173,9 @@ impl Graph {
                     "node is declared but not in the topology",
                 ));
             }
+        }
+        if let Some(error) = builder.streaming {
+            return Err(error);
         }
         let hops = builder.hops;
         Ok(Self {
@@ -388,10 +392,14 @@ struct Builder<'a> {
     by_name: &'a BTreeMap<String, usize>,
     used: BTreeSet<String>,
     hops: Vec<Hop>,
+    /// Every edge whose ends disagree on streaming. One such edge leaves
+    /// the rest of the graph well formed, so all are collected and
+    /// reported together once the topology is checked.
+    streaming: Option<syn::Error>,
 }
 
-impl Builder<'_> {
-    fn node(&self, ident: &Ident) -> syn::Result<&Node> {
+impl<'a> Builder<'a> {
+    fn node(&self, ident: &Ident) -> syn::Result<&'a Node> {
         self.by_name
             .get(&ident.to_string())
             .map(|&index| &self.nodes[index])
@@ -474,14 +482,14 @@ impl Builder<'_> {
         let mut forward_types = vec![down_req];
         for ident in &forward {
             if let Sig::Forward { input, output } = &self.node(ident)?.sig {
-                agree(forward_types.last(), input)?;
+                self.agree(forward_types.last(), input);
                 forward_types.push(output.clone());
             }
         }
         let inner_node = self.node(&inner.ident)?;
         match &inner_node.sig {
             Sig::Sink { req, .. } | Sig::Operator { up_req: req, .. } => {
-                agree(forward_types.last(), req)?;
+                self.agree(forward_types.last(), req);
             }
             _ => unreachable!("checked: the inner end is a sink or an operator"),
         }
@@ -521,22 +529,29 @@ impl Builder<'_> {
     }
 }
 
-/// A forward edge carries a stream at both of its ends or at neither. The
-/// types on it are checked by the compiler; this gives the streamed and the
-/// plain form of one type a clear error instead of a type mismatch.
-fn agree(sent: Option<&Request>, declared: &Request) -> syn::Result<()> {
-    let Some(sent) = sent else {
-        return Ok(());
-    };
-    match (&sent.item, &declared.item) {
-        (Some(_), None) => Err(syn::Error::new(
-            declared.head.span(),
-            "the request on this edge is streamed: declare it as `Head + stream Item`",
-        )),
-        (None, Some(item)) => Err(syn::Error::new(
-            item.span(),
-            "the request on this edge is not streamed: declare it without `stream`",
-        )),
-        _ => Ok(()),
+impl Builder<'_> {
+    /// A forward edge carries a stream at both of its ends or at neither.
+    /// The types on it are checked by the compiler; this gives the streamed
+    /// and the plain form of one type a clear error instead of a type
+    /// mismatch.
+    fn agree(&mut self, sent: Option<&Request>, declared: &Request) {
+        let Some(sent) = sent else {
+            return;
+        };
+        let error = match (&sent.item, &declared.item) {
+            (Some(_), None) => syn::Error::new(
+                declared.head.span(),
+                "the request on this edge is streamed: declare it as `Head + stream Item`",
+            ),
+            (None, Some(item)) => syn::Error::new(
+                item.span(),
+                "the request on this edge is not streamed: declare it without `stream`",
+            ),
+            _ => return,
+        };
+        match &mut self.streaming {
+            Some(first) => first.combine(error),
+            None => self.streaming = Some(error),
+        }
     }
 }

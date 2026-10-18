@@ -226,6 +226,24 @@ topology: Client => Resample => Recognizer;
         );
     }
 
+    /// Whether an edge is streamed is structure, checked before names, as
+    /// in `graph!`; every edge whose ends disagree on it is reported.
+    #[test]
+    fn every_edge_that_disagrees_on_streaming_is_reported() {
+        let text = r#"name = "g", schema = 1;
+source   A: Head + stream Item -> stream Reply;
+forward  B: Head -> Head + stream Item;
+sink     C: Head -> stream Reply;
+topology: A => B => C;
+"#;
+        let error = parse(text).expect_err("not streamed");
+        assert_eq!(
+            error,
+            "chat.gdl:3:13: the request on this edge is streamed: declare it as `Head + stream Item`\n\
+             chat.gdl:4:13: the request on this edge is streamed: declare it as `Head + stream Item`"
+        );
+    }
+
     #[test]
     fn a_rust_type_is_not_a_message_name() {
         let text = CHAT
