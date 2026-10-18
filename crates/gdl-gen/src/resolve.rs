@@ -43,8 +43,31 @@ pub(crate) fn resolve(
     let mut resolved = BTreeMap::new();
     for (name, users) in uses {
         let users = users.join(", ");
+        // Two entries of one path from one listed directory are one type
+        // that Cargo built twice: neither can be chosen.
+        let twice = |found: &[&MessageInfo]| {
+            found
+                .iter()
+                .enumerate()
+                .find(|(i, m)| found[..*i].iter().any(|n| n.path == m.path))
+                .map(|(_, m)| {
+                    format!(
+                        "message `{name}` ({users}): `{}` is registered twice from one directory, because Cargo built the package there twice, from a path and from another source; depend on it from one source",
+                        m.path
+                    )
+                })
+        };
         if let Some(path) = pins.get(name) {
-            match offered.iter().find(|m| m.path == *path) {
+            let found: Vec<&MessageInfo> = offered
+                .iter()
+                .filter(|m| m.path == *path)
+                .copied()
+                .collect();
+            if let Some(problem) = twice(&found) {
+                problems.push(problem);
+                continue;
+            }
+            match found.first() {
                 Some(message) => {
                     resolved.insert(name.clone(), (*message).clone());
                 }
@@ -62,6 +85,10 @@ pub(crate) fn resolve(
             .filter(|m| m.name == *name)
             .copied()
             .collect();
+        if let Some(problem) = twice(&found) {
+            problems.push(problem);
+            continue;
+        }
         match found.as_slice() {
             [message] => {
                 resolved.insert(name.clone(), (*message).clone());
@@ -390,6 +417,34 @@ mod tests {
                 "[messages] crate `empty` offers no messages: derive `gdl::Message` on its message types"
             ]
         );
+    }
+
+    /// Cargo can build one directory as two packages, from a path and from
+    /// another source. Their entries share a directory and a path and
+    /// cannot be told apart, so the name is refused, with or without a pin.
+    #[test]
+    fn a_directory_built_twice_is_refused() {
+        let mut catalogue = catalogue(&[("a", "a::Chunk"), ("a", "a::Chunk")]);
+        catalogue.messages[1].wire = false;
+        let expected = "message `Chunk` (A): `a::Chunk` is registered twice from one directory, \
+             because Cargo built the package there twice, from a path and from another source; \
+             depend on it from one source";
+        let problems = resolve(
+            &uses(&[("Chunk", &["A"])]),
+            &catalogue,
+            &listed(&["a"]),
+            &BTreeMap::new(),
+        )
+        .expect_err("twice");
+        assert_eq!(problems, [expected]);
+        let problems = resolve(
+            &uses(&[("Chunk", &["A"])]),
+            &catalogue,
+            &listed(&["a"]),
+            &pins(&[("Chunk", "a::Chunk")]),
+        )
+        .expect_err("twice, pinned");
+        assert_eq!(problems, [expected]);
     }
 
     #[test]

@@ -1,0 +1,18 @@
+[package]
+name = "dual-macro"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+proc-macro = true
+
+# Both gdls, in the compiler: the macro panics there, never in the program
+# that reads the catalogue.
+[dependencies]
+gdl = { path = "../../../../../gdl" }
+stray = { package = "gdl", path = "../stray-gdl" }
+
+# Not a member of the repository workspace: it is built only by the
+# catalogue programs that the tests generate.
+[workspace]

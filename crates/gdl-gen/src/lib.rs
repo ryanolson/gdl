@@ -194,6 +194,10 @@ fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, E
     // compare like with like.
     let package = emit::package_name(&name, "contract");
     let lib = package.replace('-', "_");
+    let clashes = library_clashes(&lib, &source.crates);
+    if !clashes.is_empty() {
+        return Err(Error::new(clashes.join("\n")));
+    }
     let lib_rs = contract::lib_rs(&file.graph, &resolution, &source.path);
     let crates = |path: &dyn Fn(&Path) -> String| {
         contract::cargo_toml(&package, &spec.gdl, &source.crates, path)
@@ -273,6 +277,27 @@ fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, E
         manifest,
         files,
     })
+}
+
+/// The message crates whose library takes a name that the generated
+/// contract uses for another crate: `gdl`, or the contract's own.
+fn library_clashes(contract: &str, crates: &[spec::MessageCrate]) -> Vec<String> {
+    crates
+        .iter()
+        .filter_map(|c| {
+            let whose = if c.lib == "gdl" {
+                "the gdl runtime's name in the generated contract"
+            } else if c.lib == contract {
+                "the generated contract's name"
+            } else {
+                return None;
+            };
+            Some(format!(
+                "[messages] crate `{}`: its library `{}` is {whose}",
+                c.package, c.lib
+            ))
+        })
+        .collect()
 }
 
 fn render_manifest(
@@ -739,6 +764,29 @@ mod tests {
         assert_eq!(chunk(&one), ":: chat_protocols :: Chunk");
         assert_eq!(chunk(&other), ":: other_protocols :: Chunk");
         assert_ne!(one.contract_hash(), other.contract_hash());
+    }
+
+    /// The generated contract depends on gdl and on each message crate by
+    /// library name, so a message library may take neither `gdl` nor the
+    /// contract's own name.
+    #[test]
+    fn a_message_library_may_not_take_a_name_the_contract_uses() {
+        let crate_ = |lib: &str| spec::MessageCrate {
+            package: format!("{lib}-package"),
+            lib: lib.to_string(),
+            path: PathBuf::from("/m"),
+        };
+        assert_eq!(
+            library_clashes("chat_contract", &[crate_("chat_protocols")]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            library_clashes("chat_contract", &[crate_("gdl"), crate_("chat_contract")]),
+            [
+                "[messages] crate `gdl-package`: its library `gdl` is the gdl runtime's name in the generated contract",
+                "[messages] crate `chat_contract-package`: its library `chat_contract` is the generated contract's name",
+            ]
+        );
     }
 
     #[test]

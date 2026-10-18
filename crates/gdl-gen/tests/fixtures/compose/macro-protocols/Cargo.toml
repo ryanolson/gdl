@@ -1,0 +1,13 @@
+[package]
+name = "macro-protocols"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+dual-macro = { path = "../dual-macro" }
+gdl = { path = "../../../../../gdl" }
+
+# Not a member of the repository workspace: it is built only by the
+# catalogue programs that the tests generate.
+[workspace]

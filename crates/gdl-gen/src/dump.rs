@@ -80,10 +80,13 @@ pub fn catalogue(
     let name = format!("gdl-catalogue-{:016x}", hash(&dependencies));
     let text = match run(target, &name, "the message catalogue", &dependencies, &main) {
         Ok(text) => text,
-        Err(error) if error.0.contains(DUPLICATE) => {
+        // Only the program itself, once built and running, can have
+        // linked two catalogues: a duplicate inside a proc macro fails the
+        // build, and is reported as the compiler reports it.
+        Err(Failure::Run(text)) if text.contains(DUPLICATE) => {
             return Err(two_catalogues(&target.join("gdl-gen").join(&name), target));
         }
-        Err(error) => return Err(error),
+        Err(failure) => return Err(failure.into()),
     };
     gdl::Catalogue::from_toml(&text)
         .map_err(|e| Error::new(format!("reading the message catalogue: {e}")))
@@ -192,31 +195,66 @@ fn run(
     what: &str,
     dependencies: &str,
     main: &str,
-) -> Result<String, Error> {
+) -> Result<String, Failure> {
     // Every run of `name` in `target` builds the same program at the same
     // path. Holding the directory's lock from writing the program until it
     // has run keeps another run from replacing it in between, which would
     // make this one print the other's output.
-    let _lock = lock(target)?;
+    let _lock = lock(target).map_err(|e| Failure::Build(e.0))?;
     let work = target.join("gdl-gen").join(name);
-    std::fs::create_dir_all(work.join("src")).map_err(|e| io(&work, e))?;
-    let manifest = format!(
-        "[package]\n\
-         name = \"{name}\"\n\
-         version = \"0.0.0\"\n\
-         edition = \"2024\"\n\
-         publish = false\n\
-         \n\
-         # Its own workspace, wherever the target directory is.\n\
-         [workspace]\n\
-         \n\
-         [dependencies]\n\
-         {dependencies}"
-    );
-    write(&work.join("Cargo.toml"), &manifest)?;
-    write(&work.join("src/main.rs"), main)?;
-    cargo(&work, target, &["run", "--quiet"])
-        .map_err(|e| Error::new(format!("building {what} failed:\n{e}")))
+    let setup = || {
+        std::fs::create_dir_all(work.join("src")).map_err(|e| io(&work, e))?;
+        let manifest = format!(
+            "[package]\n\
+             name = \"{name}\"\n\
+             version = \"0.0.0\"\n\
+             edition = \"2024\"\n\
+             publish = false\n\
+             \n\
+             # Its own workspace, wherever the target directory is.\n\
+             [workspace]\n\
+             \n\
+             [dependencies]\n\
+             {dependencies}"
+        );
+        write(&work.join("Cargo.toml"), &manifest)?;
+        write(&work.join("src/main.rs"), main)
+    };
+    setup().map_err(|e| Failure::Build(e.0))?;
+    // Built, then run apart from cargo, so that a failure says which of the
+    // two it was.
+    cargo(&work, target, &["build", "--quiet"])
+        .map_err(|e| Failure::Build(format!("building {what} failed:\n{e}")))?;
+    let program = target
+        .join("debug")
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let output = Command::new(&program)
+        .output()
+        .map_err(|e| Failure::Run(format!("running {}: {e}", program.display())))?;
+    if !output.status.success() {
+        return Err(Failure::Run(format!(
+            "reading {what} failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|e| Failure::Run(format!("the output of {what} is not UTF-8: {e}")))
+}
+
+/// Why a program of [`run`] produced no output.
+enum Failure {
+    /// It did not build.
+    Build(String),
+    /// It built, and failed as it ran.
+    Run(String),
+}
+
+impl From<Failure> for Error {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::Build(text) | Failure::Run(text) => Error::new(text),
+        }
+    }
 }
 
 /// Run `cargo <args>` on the program in `work`, and return its output.

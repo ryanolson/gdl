@@ -101,6 +101,16 @@ fn a_gdl_that_is_not_linked_is_no_conflict() {
     );
 }
 
+/// A build that fails is reported as the compiler reports it, even when
+/// the failure is a duplicate catalogue inside a proc macro: only the
+/// catalogue program itself, once it runs, can link two catalogues.
+#[test]
+fn a_build_failure_is_not_taken_for_two_catalogues() {
+    let error = resolve("macro-panic.toml").expect_err("the build fails");
+    assert!(error.contains("proc macro panicked"), "{error}");
+    assert!(!error.contains("links two message catalogues"), "{error}");
+}
+
 /// A program holds one message catalogue. A message crate that links
 /// another gdl's catalogue into it is refused, and the error names that gdl
 /// and the crates that use it.
