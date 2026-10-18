@@ -286,3 +286,48 @@ fn an_inconsistent_manifest_is_refused() {
         }
     }
 }
+
+/// A message named by its full path, as a contract generated from a graph
+/// file names it, is labeled by its own name: the path is in the manifest
+/// for the contract hash, not for the reader. Other types keep their form.
+#[test]
+fn a_type_named_by_its_path_is_labeled_by_its_name() {
+    let manifest = Manifest {
+        name: "paths".to_string(),
+        schema: 1,
+        nodes: vec![
+            NodeInfo {
+                name: "A".to_string(),
+                role: Role::Source,
+                binding: None,
+            },
+            NodeInfo {
+                name: "B".to_string(),
+                role: Role::Sink,
+                binding: Some("b".to_string()),
+            },
+        ],
+        hops: vec![HopInfo {
+            outer: "A".to_string(),
+            forward: vec![],
+            inner: "B".to_string(),
+            backward: vec![],
+            forward_types: vec![TypeInfo::streamed(
+                ":: chat_protocols :: Session",
+                true,
+                ":: r#gen :: audio :: Frame",
+                false,
+            )],
+            backward_types: vec![TypeInfo::new("Vec < :: p :: Chunk >", true)],
+        }],
+    };
+    let mermaid = manifest.to_mermaid(None).expect("draw");
+    assert!(
+        mermaid.contains(r#"n0 -->|"Session + stream Frame (no codec)"| n1"#),
+        "{mermaid}"
+    );
+    assert!(
+        mermaid.contains(r#"n1 -.->|"Vec #lt; :: p :: Chunk #gt;"| n0"#),
+        "{mermaid}"
+    );
+}

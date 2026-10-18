@@ -244,8 +244,12 @@ struct Edge<'a> {
 
 /// The type as the graph definition writes it, with each part that has no
 /// codec marked: a streamed request crosses only when both parts have one.
+/// A type named by a plain path is labeled by its last segment: a contract
+/// generated from a graph file writes each message's full path, which the
+/// contract hash needs and the reader does not.
 fn type_label(ty: &TypeInfo) -> String {
     let part = |name: &str, wire: bool| {
+        let name = short(name);
         if wire {
             name.to_string()
         } else {
@@ -259,6 +263,28 @@ fn type_label(ty: &TypeInfo) -> String {
             part(&ty.name, ty.wire),
             part(&item.name, item.wire)
         ),
+    }
+}
+
+/// The last segment of a plain path (`:: a :: b :: C` is `C`); any other
+/// type as it is.
+fn short(name: &str) -> &str {
+    let segments: Vec<&str> = name
+        .trim()
+        .trim_start_matches("::")
+        .split("::")
+        .map(str::trim)
+        .collect();
+    let plain = segments.iter().all(|s| {
+        let s = s.strip_prefix("r#").unwrap_or(s);
+        s.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+    });
+    match segments.last() {
+        Some(last) if plain && segments.len() > 1 => last.strip_prefix("r#").unwrap_or(last),
+        _ => name,
     }
 }
 
