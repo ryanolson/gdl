@@ -481,6 +481,27 @@ composer (browser) <-- portable model: syntax, manifest, placement, layout (wasm
 
 **Composer (milestone 16) and Docker builder (milestone 17).** The composer reads cached catalogues, keeps the graph as a graph file and a spec, and asks the server for an export. The Docker builder builds one image per segment, each from its own multi-stage build, and publishes it.
 
+**Addendum 2026-10-18 (owner): graph bits without a build.** This addendum supersedes the node catalogue paragraph and the catalogue service paragraph above. A node crate cannot be expected to build in the catalogue service. A CUDA engine needs its toolkit, and validating a graph needs none of it. So the service reads a node crate's nodes without compiling the crate, and it compiles only light protocols crates.
+
+- **A nodes file.** A node crate ships its declarations as a file in graph syntax, found through its manifest. The file also lists the protocols crates that its message names resolve against, with pins as in 9.6:
+
+  ```toml
+  # engine-cuda/Cargo.toml
+  [package.metadata.gdl]
+  nodes = "gdl/nodes.gdl"
+  messages = ["chat-protocols"]
+  ```
+
+  ```
+  // engine-cuda/gdl/nodes.gdl
+  sink Engine: Words -> stream Token;
+  ```
+
+  The service reads both files from the published `.crate` archive. It runs no code of the node crate. `gdl-syntax` parses the node lines, as it parses a graph file.
+- **The file cannot drift from the code.** `#[gdl::node(Engine)]` on the implementing type reads the same file when the node crate compiles. It asserts that the role trait impl matches the declaration: the role, and each port's message identity, which the `gdl::Message` trait gives as constants. A mismatch is a compile error in the node crate's own build, in its CI and in every segment build that links it. The expansion includes the file with `include_str!`, so an edit to the file rebuilds the crate.
+- **Light protocols crates.** `derive(gdl::Message)`, the `gdl::Message` trait, and the catalogue move from `gdl` into a small crate that depends only on `linkme` and `serde`. `gdl` re-exports them. The service still compiles protocols crates, because wire capability and message identity need the compiler (ruling 32), but those builds stay small. The service builds them in a sandbox, without network access after the fetch.
+- **What the service keeps.** For each `name@version`, the service keeps the node crate's declarations, with each message name resolved to an identity, and each protocols crate's message catalogue. Both are kept forever.
+
 **Open questions.**
 
 - Whether two ports connect across semver-compatible versions of a message's package, or only at one version.
@@ -520,10 +541,10 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 9 | Streaming example and generator: no JSON-lines server for a streaming source; an ASR-like example with a relay; docs | generated example crates build and pass `--check`; a test streams audio through the generated segments; docs match code |
 | 10 | Composition, messages (9.6): `gdl-syntax` shared by `graph!` and `gdl-gen`; `#[derive(gdl::Message)]` and `gdl::Catalogue`; `[graph]` and `[messages]` in the spec; `gdl-gen --resolve` | `graph!` behaves as before (trybuild cases unchanged); the derive registers a message with its path and wire capability, and refuses a generic type; a graph file whose edges disagree reports every disagreement with its position; a non-name message position is refused; resolution through one protocols crate and through several; a missing name, an ambiguous name, a pin that breaks a tie, a pin to nothing, a listed crate that offers nothing; a nested module and a re-export resolve to the definition |
 | 11 | Composition, contract: generate the contract crate from a graph file and its resolution, so `--out`, `--check`, and `--diagram` work from a `[graph]` spec; settle the open questions of 9.6 | the chat example builds from a graph file and a protocols crate, and its segments match the committed ones in behavior; the contract hash changes when a name resolves to another crate |
-| 12 | Node catalogue (9.7): node implementations register their role and port message types; a `gdl::Message` trait exposes a message's identity; graph node instances bind to catalogue nodes without `[bind.*]` | to be planned |
+| 12 | Node declarations (9.7 and its addendum): the message derive, trait, and catalogue in a light crate; a nodes file per node crate, found through `[package.metadata.gdl]`; `#[gdl::node]` checks an impl against its declaration at compile time; graph node instances bind to declared nodes without `[bind.*]` | to be planned |
 | 13 | Portable model (9.7): syntax, manifest, placement, and layout in a crate without the runtime, built for wasm; `gdl` uses it | to be planned |
 | 14 | Export (9.7): `gdl-gen --export` writes a tarball with the contract, one crate per segment, and `build-all.sh` | to be planned |
-| 15 | Catalogue service (9.7): fetch, sandboxed build, and a cache of catalogues by `name@version` | to be planned |
+| 15 | Catalogue service (9.7 and its addendum): read nodes files from published archives without a build; build protocols crates in a sandbox; keep both by `name@version` | to be planned |
 | 16 | Composer (9.7): the web UI | to be planned |
 | 17 | Docker builder (9.7): one multi-stage build per segment, and publication | to be planned |
 
@@ -578,4 +599,6 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 34 | What a gdl-compatible crate offers | discoverable nodes, each with its role and the message types at its ports | owner, 2026-10-18 |
 | 35 | Export layout | one crate per segment, each with its own `Cargo.toml`, built one at a time by `build-all.sh`; no shared workspace, so link dependencies stay isolated (9.5) | owner, 2026-10-18 |
 | 36 | Where the composer's rules live | in a crate without the runtime that compiles to wasm, used by both the composer and `gdl` | 2026-10-18 |
-| 37 | Reading a published crate's catalogue | a server builds it in a sandbox, without network access after the fetch, and keeps the result by `name@version` forever | 2026-10-18 |
+| 37 | Reading a published crate's catalogue | a server builds it in a sandbox, without network access after the fetch, and keeps the result by `name@version` forever. Addendum 2026-10-18 (owner): a node crate is never built. Ruling 38 gives its nodes, and only light protocols crates are built | 2026-10-18, amended by the owner the same day |
+| 38 | How a node crate offers its nodes | a nodes file in graph syntax, named in `[package.metadata.gdl]` with the protocols crates its messages come from, read without a build. `#[gdl::node]` checks each impl against the file at compile time. Rejected: a source scan for attributes (it must find modules, `cfg`, and macro-made items) and a separate interface crate for each node crate (two published crates per node crate) | owner, 2026-10-18 |
+| 39 | Where `derive(Message)` lives | in a small crate that depends only on `linkme` and `serde`, re-exported by `gdl`, so a protocols crate builds without the runtime | 2026-10-18 |
