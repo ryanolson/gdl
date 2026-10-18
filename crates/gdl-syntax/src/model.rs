@@ -1,7 +1,8 @@
 //! A checked graph: every node declared once, the topology well formed, and
 //! every hop's stages and edge types worked out. Type agreement along an
-//! edge is left to the compiler: the expansion states each edge's type once,
-//! so a mismatch is a type error at the node's binding.
+//! edge is left to the reader: in `graph!` the expansion states each edge's
+//! type once, so a mismatch is a type error at the node's binding; for a
+//! graph file, `gdl-gen` compares the names on each of [`Graph::edges`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,36 +12,49 @@ use syn::{Ident, LitInt, LitStr, Type};
 
 use crate::parse::{Element, GraphInput, Request, Sig};
 
-pub(crate) struct Graph {
-    pub(crate) name: LitStr,
-    pub(crate) schema: LitInt,
-    pub(crate) nodes: Vec<Node>,
+/// A graph whose structure is checked: the result of [`Graph::parse`].
+pub struct Graph {
+    /// The graph's name.
+    pub name: LitStr,
+    /// The schema version.
+    pub schema: LitInt,
+    /// Every node, in declaration order.
+    pub nodes: Vec<Node>,
     /// Outermost first.
-    pub(crate) hops: Vec<Hop>,
+    pub hops: Vec<Hop>,
 }
 
-pub(crate) struct Node {
-    pub(crate) ident: Ident,
-    pub(crate) sig: Sig,
+/// One declared node.
+pub struct Node {
+    /// The node's name.
+    pub ident: Ident,
+    /// Its role and port types.
+    pub sig: Sig,
     /// The node's setter on `Bindings` and its field there: the node's name
     /// in snake case, raw when it is a keyword. The source has none.
-    pub(crate) binding: Option<Ident>,
+    pub binding: Option<Ident>,
 }
 
-pub(crate) struct Hop {
-    pub(crate) outer: Ident,
-    pub(crate) forward: Vec<Ident>,
-    pub(crate) inner: Ident,
-    pub(crate) backward: Vec<Ident>,
+/// One hop: outer end, forward chain, inner end, backward chain.
+pub struct Hop {
+    /// The source or operator that owns the hop.
+    pub outer: Ident,
+    /// Forward nodes in request order.
+    pub forward: Vec<Ident>,
+    /// The sink or operator at the inner end.
+    pub inner: Ident,
+    /// Backward nodes in response order.
+    pub backward: Vec<Ident>,
     /// The request on each forward edge, outer end first:
     /// `forward.len() + 1`.
-    pub(crate) forward_types: Vec<Request>,
+    pub forward_types: Vec<Request>,
     /// The type on each backward edge, inner end first: `backward.len() + 1`.
-    pub(crate) backward_types: Vec<Type>,
+    pub backward_types: Vec<Type>,
 }
 
 impl Node {
-    pub(crate) fn role(&self) -> Role {
+    /// The node's role, from its signature.
+    pub fn role(&self) -> Role {
         match self.sig {
             Sig::Source { .. } => Role::Source,
             Sig::Operator { .. } => Role::Operator,
@@ -51,17 +65,29 @@ impl Node {
     }
 }
 
+/// A node's role.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Role {
+pub enum Role {
+    /// The graph's entry point.
     Source,
+    /// Owns a nested hop and sees both directions.
     Operator,
+    /// Transforms the request.
     Forward,
+    /// Ends a hop and produces its response.
     Sink,
+    /// Transforms the response.
     Backward,
 }
 
 impl Graph {
-    pub(crate) fn check(input: GraphInput) -> syn::Result<Self> {
+    /// Parse a graph body and check its structure: the macro's input, or a
+    /// graph file's text as tokens.
+    pub fn parse(tokens: proc_macro2::TokenStream) -> syn::Result<Self> {
+        Self::check(syn::parse2::<GraphInput>(tokens)?)
+    }
+
+    fn check(input: GraphInput) -> syn::Result<Self> {
         let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
         for (index, node) in input.nodes.iter().enumerate() {
             if by_name.insert(node.ident.to_string(), index).is_some() {
@@ -143,14 +169,16 @@ impl Graph {
         })
     }
 
-    pub(crate) fn node(&self, ident: &Ident) -> &Node {
+    /// The declared node named `ident`, which must be in the graph.
+    pub fn node(&self, ident: &Ident) -> &Node {
         self.nodes
             .iter()
             .find(|n| n.ident == *ident)
             .expect("checked: every topology node is declared")
     }
 
-    pub(crate) fn source(&self) -> &Node {
+    /// The graph's one source.
+    pub fn source(&self) -> &Node {
         self.nodes
             .iter()
             .find(|n| n.role() == Role::Source)

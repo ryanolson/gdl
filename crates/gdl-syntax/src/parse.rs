@@ -48,38 +48,57 @@ pub(crate) struct NodeDecl {
 // Built once per declared node while the macro expands; its size costs
 // nothing at run time, and boxing the operator variant would only add
 // indirection to the expansion code.
+/// A node's role and the message types at its ports.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum Sig {
+pub enum Sig {
+    /// `source A: Req -> stream Item;`
     Source {
+        /// The request the caller sends.
         req: Request,
+        /// The item of the response the caller receives.
         item: Type,
     },
+    /// `operator B: (UpReq -> stream UpItem) over (DownReq -> stream DownItem);`
     Operator {
+        /// The request it takes from its outer hop.
         up_req: Request,
+        /// The item of the response it returns to its outer hop.
         up_item: Type,
+        /// The request it sends into the hop it owns.
         down_req: Request,
+        /// The item of the response it reads from the hop it owns.
         down_item: Type,
     },
+    /// `forward C: In -> Out;`
     Forward {
+        /// The request it takes.
         input: Request,
+        /// The request it passes on.
         output: Request,
     },
+    /// `sink D: Req -> stream Item;`
     Sink {
+        /// The request it takes.
         req: Request,
+        /// The item of the response it returns.
         item: Type,
     },
+    /// `backward F: In -> Out;`
     Backward {
+        /// The response item it takes.
         input: Type,
+        /// The response item it passes on.
         output: Type,
     },
 }
 
 /// A request type: a value, or a head and a stream of items.
 #[derive(Clone)]
-pub(crate) struct Request {
-    pub(crate) head: Type,
+pub struct Request {
+    /// The value, or the head of a streamed request: `()` for `stream Item`.
+    pub head: Type,
     /// The item type of a streamed request.
-    pub(crate) item: Option<Type>,
+    pub item: Option<Type>,
 }
 
 /// One element of a topology list: a node, and for an operator, the hop it

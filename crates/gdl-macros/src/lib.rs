@@ -6,8 +6,6 @@ use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as Tokens, TokenTree};
 
 mod expand;
-mod model;
-mod parse;
 
 /// The expansion behind `gdl::graph!`, which calls it as
 /// `graph! { $crate; <graph> }`. The leading path is how the expansion names
@@ -24,11 +22,7 @@ pub fn graph(input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     };
-    let parsed = match syn::parse2::<parse::GraphInput>(body) {
-        Ok(parsed) => parsed,
-        Err(error) => return error.to_compile_error().into(),
-    };
-    match model::Graph::check(parsed) {
+    match gdl_syntax::Graph::parse(body) {
         Ok(graph) => expand::expand(&graph, &krate).into(),
         Err(error) => error.to_compile_error().into(),
     }

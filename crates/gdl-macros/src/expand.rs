@@ -31,8 +31,7 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{Ident, Type};
 
-use crate::model::{Graph, Hop, Node, Role};
-use crate::parse::{Request, Sig};
+use gdl_syntax::{Graph, Hop, Node, Request, Role, Sig};
 
 pub(crate) fn expand(graph: &Graph, krate: &TokenStream) -> TokenStream {
     let nodes = expand_nodes(graph, krate);
@@ -586,7 +585,7 @@ mod tests {
             backward E: u32 -> u32;
             topology: A => B { C => D => E };
         };
-        let graph = Graph::check(syn::parse2(input).expect("parse")).expect("check");
+        let graph = Graph::parse(input).expect("graph");
         let expansion = expand(&graph, &quote!(::pipeline));
         let mut idents = Vec::new();
         collect_idents(expansion, &mut idents);

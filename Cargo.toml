@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gdl", "crates/gdl-gen", "crates/gdl-macros"]
+members = ["crates/gdl", "crates/gdl-gen", "crates/gdl-macros", "crates/gdl-syntax"]
 # The example is its own workspace, as a deployment would be: its segment
 # crates must build with only the implementations they host.
 exclude = ["examples"]

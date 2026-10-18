@@ -243,6 +243,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | Path | Contents |
 |---|---|
 | `crates/gdl` | Request context, node roles, local composition, manifest, placement, and the velo runtime |
+| `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share |
 | `crates/gdl-macros` | The `graph!` macro |
 | `crates/gdl-gen` | The generator |
 | `examples/chat` | A contract, its node implementations, and the generated segment crates. It is a separate Cargo workspace. |
