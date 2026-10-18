@@ -13,3 +13,6 @@ syn = { version = "2", features = ["full"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+quote = "1"

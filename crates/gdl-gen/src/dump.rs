@@ -1,31 +1,94 @@
-//! Reading a contract's manifest: build and run a throwaway program that
-//! depends on the contract crate and prints `manifest()`.
+//! Reading what only compiled code knows: a contract's manifest, and the
+//! message catalogue of the crates a graph file draws on. Each is read by
+//! building and running a throwaway program that depends on those crates
+//! and prints it.
 //!
-//! The manifest is produced by the `graph!` expansion, so the only faithful
-//! way to read it is to compile the contract. The program depends on the
-//! contract alone, so this compiles the contract and gdl, never an
-//! implementation crate.
+//! The manifest is produced by the `graph!` expansion, and the catalogue by
+//! `derive(Message)`, so the only faithful way to read either is to compile
+//! the crates. Each program depends on the crates it reads alone, so this
+//! never compiles an implementation crate.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::Error;
-use crate::spec::Spec;
+use crate::spec::{Contract, GdlDep, MessageCrate};
 
-/// The manifest of `spec`'s contract. `target` is the cargo target directory
-/// to build in; reusing one across runs keeps the build incremental.
-pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
-    // Every dump in `target` builds the same program at the same path.
-    // Holding the directory's lock from writing the program until it has
-    // run keeps another dump from replacing it in between, which would make
-    // this one print the other contract's manifest.
+/// The manifest of `contract`. `target` is the cargo target directory to
+/// build in; reusing one across runs keeps the build incremental.
+pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl::Manifest, Error> {
+    let path = absolute(&contract.path)?;
+    let dependencies = format!(
+        "{package} = {{ path = {path} }}\n",
+        package = contract.package,
+        path = toml_string(&path.to_string_lossy()),
+    );
+    let main = format!(
+        "fn main() {{\n    print!(\"{{}}\", {module}::manifest().to_toml());\n}}\n",
+        module = contract.module,
+    );
+    let text = run(target, "gdl-manifest-dump", &dependencies, &main)
+        .map_err(|e| Error::new(format!("building the contract's manifest failed:\n{e}")))?;
+    gdl::Manifest::from_toml(&text).map_err(|e| Error::new(format!("reading the manifest: {e}")))
+}
+
+/// The catalogue of every message type linked from `crates`, read with the
+/// gdl that `gdl` names: a crate that registers with another gdl registers
+/// in another catalogue, and is reported as offering nothing.
+pub fn catalogue(
+    crates: &[MessageCrate],
+    gdl: &GdlDep,
+    target: &Path,
+) -> Result<gdl::Catalogue, Error> {
+    let mut dependencies = match gdl {
+        GdlDep::Path(path) => format!(
+            "gdl = {{ path = {} }}\n",
+            toml_string(&absolute(path)?.to_string_lossy())
+        ),
+        GdlDep::Version(version) => format!("gdl = {{ version = {} }}\n", toml_string(version)),
+    };
+    let mut main = String::new();
+    for krate in crates {
+        dependencies.push_str(&format!(
+            "{} = {{ path = {} }}\n",
+            krate.package,
+            toml_string(&absolute(&krate.path)?.to_string_lossy())
+        ));
+        // A crate the program never names is never linked, and neither
+        // are its catalogue entries.
+        main.push_str(&format!(
+            "use {} as _;\n",
+            crate::spec::default_module(&krate.lib)
+        ));
+    }
+    main.push_str("\nfn main() {\n    print!(\"{}\", gdl::Catalogue::linked().to_toml());\n}\n");
+    // One program per set of dependencies: a spec that links other crates
+    // builds its own, and switching between specs relinks neither.
+    let name = format!("gdl-catalogue-{:016x}", {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        dependencies.hash(&mut hasher);
+        hasher.finish()
+    });
+    let text = run(target, &name, &dependencies, &main)
+        .map_err(|e| Error::new(format!("building the message catalogue failed:\n{e}")))?;
+    gdl::Catalogue::from_toml(&text)
+        .map_err(|e| Error::new(format!("reading the message catalogue: {e}")))
+}
+
+/// Build and run the program `name` with these `[dependencies]` lines and
+/// this `main.rs`, and return what it prints.
+fn run(target: &Path, name: &str, dependencies: &str, main: &str) -> Result<String, Error> {
+    // Every run of `name` in `target` builds the same program at the same
+    // path. Holding the directory's lock from writing the program until it
+    // has run keeps another run from replacing it in between, which would
+    // make this one print the other's output.
     let _lock = lock(target)?;
-    let work = target.join("gdl-gen").join("dump");
+    let work = target.join("gdl-gen").join(name);
     std::fs::create_dir_all(work.join("src")).map_err(|e| io(&work, e))?;
-    let contract = absolute(&spec.contract.path)?;
     let manifest = format!(
         "[package]\n\
-         name = \"gdl-manifest-dump\"\n\
+         name = \"{name}\"\n\
          version = \"0.0.0\"\n\
          edition = \"2024\"\n\
          publish = false\n\
@@ -34,16 +97,10 @@ pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
          [workspace]\n\
          \n\
          [dependencies]\n\
-         {package} = {{ path = {path} }}\n",
-        package = spec.contract.package,
-        path = toml_string(&contract.to_string_lossy()),
-    );
-    let main = format!(
-        "fn main() {{\n    print!(\"{{}}\", {module}::manifest().to_toml());\n}}\n",
-        module = spec.contract.module,
+         {dependencies}"
     );
     write(&work.join("Cargo.toml"), &manifest)?;
-    write(&work.join("src/main.rs"), &main)?;
+    write(&work.join("src/main.rs"), main)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
@@ -53,14 +110,10 @@ pub fn manifest(spec: &Spec, target: &Path) -> Result<gdl::Manifest, Error> {
         .output()
         .map_err(|e| Error::new(format!("running cargo: {e}")))?;
     if !output.status.success() {
-        return Err(Error::new(format!(
-            "building the contract's manifest failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+        return Err(Error::new(String::from_utf8_lossy(&output.stderr)));
     }
-    let text = String::from_utf8(output.stdout)
-        .map_err(|e| Error::new(format!("the manifest is not UTF-8: {e}")))?;
-    gdl::Manifest::from_toml(&text).map_err(|e| Error::new(format!("reading the manifest: {e}")))
+    String::from_utf8(output.stdout)
+        .map_err(|e| Error::new(format!("the program's output is not UTF-8: {e}")))
 }
 
 /// Write `text` unless the file already holds it: a rewrite with the same
@@ -108,21 +161,22 @@ mod tests {
     #[test]
     fn a_dump_waits_while_another_holds_the_target_directory() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let spec = Spec::load(&root.join("examples/chat/gdl.toml")).expect("spec");
+        let spec = crate::Spec::load(&root.join("examples/chat/gdl.toml")).expect("spec");
+        let contract = spec.contract().expect("a contract spec").clone();
         let target = root.join("target/gdl-gen-tests");
         // Built once, so the next dump neither compiles nor links; that one
         // is timed, and the wait below is many times as long. A dump that
         // ignored the lock would finish well inside it.
-        manifest(&spec, &target).expect("manifest");
+        manifest(&contract, &target).expect("manifest");
         let started = std::time::Instant::now();
-        manifest(&spec, &target).expect("manifest");
+        manifest(&contract, &target).expect("manifest");
         let wait = (started.elapsed() * 10).max(Duration::from_secs(2));
 
         let held = lock(&target).expect("lock");
         let (tx, rx) = std::sync::mpsc::channel();
         let waiting = target.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(manifest(&spec, &waiting).map(|m| m.name));
+            let _ = tx.send(manifest(&contract, &waiting).map(|m| m.name));
         });
         assert!(
             rx.recv_timeout(wait).is_err(),

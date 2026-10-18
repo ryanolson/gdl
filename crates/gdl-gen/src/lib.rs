@@ -16,10 +16,18 @@
 //!
 //! [`diagram`] draws the spec's placed graph as Graphviz DOT or a Mermaid
 //! flowchart.
+//!
+//! A spec may name a graph file instead of a contract crate: the body of a
+//! `graph!` invocation, with message names where `graph!` has Rust types,
+//! and the crates that define those messages with `derive(gdl::Message)`.
+//! [`resolve`] checks that the names agree along every edge and resolves
+//! each to exactly one type.
 
 mod dump;
 mod emit;
+mod names;
 mod paths;
+mod resolve;
 mod spec;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,7 +62,7 @@ pub type Files = BTreeMap<PathBuf, String>;
 /// validate `spec` against it, and render every file for output directory
 /// `out`.
 pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
-    let manifest = dump::manifest(spec, target)?;
+    let manifest = dump::manifest(spec.contract()?, target)?;
     render_manifest(spec, &manifest, out)
 }
 
@@ -71,7 +79,7 @@ pub enum Format {
 /// edge that crosses segments marked. The contract's manifest is built in
 /// `target` (a cargo target directory), as for [`render`].
 pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
-    let manifest = dump::manifest(spec, target)?;
+    let manifest = dump::manifest(spec.contract()?, target)?;
     let layout = gdl::layout(&manifest, &spec.placement).map_err(|e| Error::new(e.to_string()))?;
     match format {
         Format::Dot => manifest.to_dot(Some(&layout)),
@@ -80,15 +88,64 @@ pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Err
     .map_err(|e| Error::new(e.to_string()))
 }
 
+/// A graph file's message names, each resolved to one type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    /// Message name to the type it resolved to.
+    pub messages: BTreeMap<String, gdl::MessageInfo>,
+}
+
+impl fmt::Display for Resolution {
+    /// One line per name: the name, the type's path, and `wire` or `local`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names = self.messages.keys().map(String::len).max().unwrap_or(0);
+        let paths = self
+            .messages
+            .values()
+            .map(|m| m.path.len())
+            .max()
+            .unwrap_or(0);
+        for (name, message) in &self.messages {
+            let wire = if message.wire { "wire" } else { "local" };
+            writeln!(f, "{name:names$}  {:paths$}  {wire}", message.path)?;
+        }
+        Ok(())
+    }
+}
+
+/// Check the spec's graph file and resolve its message names against the
+/// catalogue of the crates `[messages]` lists, which is built in `target`
+/// (a cargo target directory), as for [`render`]. The names are checked
+/// before anything is compiled.
+pub fn resolve(spec: &Spec, target: &Path) -> Result<Resolution, Error> {
+    let spec::Source::Graph(source) = &spec.source else {
+        return Err(Error::new(format!(
+            "{}: resolving messages needs a [graph] spec; a contract crate names its own types",
+            spec.file.display()
+        )));
+    };
+    let file = names::GraphFile::read(&source.path)?;
+    let catalogue = dump::catalogue(&source.crates, &spec.gdl, target)?;
+    let listed: Vec<String> = source.crates.iter().map(|c| c.package.clone()).collect();
+    resolve::resolve(&file.uses, &catalogue, &listed, &source.pins)
+        .map(|messages| Resolution { messages })
+        .map_err(|problems| Error::new(problems.join("\n")))
+}
+
 fn render_manifest(spec: &Spec, manifest: &gdl::Manifest, out: &Path) -> Result<Files, Error> {
-    let layout = validate(spec, manifest)?;
+    let contract = spec.contract()?;
+    let layout = validate(spec, contract, manifest)?;
     let out = dump::absolute(out)?;
-    emit::files(spec, manifest, &layout, &out)
+    emit::files(spec, contract, manifest, &layout, &out)
 }
 
 /// Check the placement and the bindings against the manifest, reporting
 /// every problem found.
-fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error> {
+fn validate(
+    spec: &Spec,
+    contract: &spec::Contract,
+    manifest: &gdl::Manifest,
+) -> Result<gdl::Layout, Error> {
     let mut problems = spec.problems.clone();
     let layout = match gdl::layout(manifest, &spec.placement) {
         Ok(layout) => Some(layout),
@@ -126,7 +183,7 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
         let package = emit::package(manifest, segment);
         // A generated crate depends on the contract and on implementations
         // by package name; Cargo cannot hold two path packages of one name.
-        if package == spec.contract.package {
+        if package == contract.package {
             problems.push(format!(
                 "segment `{segment}` becomes package `{package}`, the contract's name"
             ));
@@ -157,7 +214,7 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
             "the segment's library".into(),
             &mut problems,
         );
-        see(&spec.contract.lib, "the contract".into(), &mut problems);
+        see(&contract.lib, "the contract".into(), &mut problems);
         for fixed in ["gdl", "serde", "tokio", "toml"] {
             see(fixed, format!("the `{fixed}` dependency"), &mut problems);
         }
@@ -191,7 +248,7 @@ fn validate(spec: &Spec, manifest: &gdl::Manifest) -> Result<gdl::Layout, Error>
         for fixed in ["gdl", "serde", "tokio", "toml"] {
             key(fixed, format!("the `{fixed}` dependency"), &mut problems);
         }
-        key(&spec.contract.package, "the contract".into(), &mut problems);
+        key(&contract.package, "the contract".into(), &mut problems);
         for (node, bind) in &spec.bind {
             if hosted.contains(node.as_str()) {
                 let first = spec
@@ -435,7 +492,7 @@ fn type_crate(ty: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{Bind, Contract, GdlDep};
+    use crate::spec::{Bind, Contract, GdlDep, Source};
     use gdl::{HopInfo, Manifest, NodeInfo, Role, TypeInfo};
 
     /// `S => D`: a source and one sink.
@@ -467,12 +524,12 @@ mod tests {
         Spec {
             file: "gdl.toml".into(),
             dir: "/work".into(),
-            contract: Contract {
+            source: Source::Contract(Contract {
                 package: "tiny-contract".into(),
                 lib: "tiny_contract".into(),
                 path: "/work/contract".into(),
                 module: "tiny_contract".into(),
-            },
+            }),
             gdl: GdlDep::Version("0.1".into()),
             placement,
             bind: bind
@@ -491,6 +548,10 @@ mod tests {
         }
     }
 
+    fn check(spec: &Spec, manifest: &Manifest) -> Result<gdl::Layout, Error> {
+        validate(spec, spec.contract().expect("a contract spec"), manifest)
+    }
+
     fn split() -> gdl::Placement {
         gdl::Placement::new()
             .segment("front", ["S"])
@@ -500,7 +561,7 @@ mod tests {
     #[test]
     fn a_complete_spec_validates() {
         let spec = spec(split(), &[("D", "tiny_nodes::D")]);
-        assert!(validate(&spec, &manifest()).is_ok());
+        assert!(check(&spec, &manifest()).is_ok());
     }
 
     #[test]
@@ -509,9 +570,7 @@ mod tests {
             .segment("front.end", ["S"])
             .segment("engine", ["D"]);
         let spec = spec(placement, &[("S", "tiny_nodes::S"), ("Q", "tiny_nodes::Q")]);
-        let error = validate(&spec, &manifest())
-            .expect_err("invalid")
-            .to_string();
+        let error = check(&spec, &manifest()).expect_err("invalid").to_string();
         for expected in [
             "segment `front.end`",
             "[bind.S]: `S` is the source",
@@ -532,7 +591,7 @@ mod tests {
             .segment("worker-a", ["D"])
             .segment("worker_a", Vec::<String>::new());
         let spec = spec(placement, &[("D", "tiny_nodes::D")]);
-        let error = validate(&spec, &manifest())
+        let error = check(&spec, &manifest())
             .expect_err("collision")
             .to_string();
         assert!(
@@ -550,7 +609,7 @@ mod tests {
             .segment("contract", ["S"])
             .segment("nodes", ["D"]);
         let spec = spec(placement, &[("D", "tiny_nodes::D")]);
-        let error = validate(&spec, &manifest())
+        let error = check(&spec, &manifest())
             .expect_err("collision")
             .to_string();
         assert!(
@@ -576,7 +635,7 @@ mod tests {
         let bind = spec.bind.get_mut("D").expect("D");
         bind.package = "tiny_engine".into();
         bind.lib = "tiny_engine".into();
-        let error = validate(&spec, &manifest())
+        let error = check(&spec, &manifest())
             .expect_err("collision")
             .to_string();
         assert!(
@@ -587,9 +646,9 @@ mod tests {
         let bind = spec.bind.get_mut("D").expect("D");
         bind.package = "tiny-nodes".into();
         bind.lib = "tiny_engine".into();
-        assert!(validate(&spec, &manifest()).is_err());
+        assert!(check(&spec, &manifest()).is_err());
         spec.bind.get_mut("D").expect("D").lib = "tiny_nodes".into();
-        assert!(validate(&spec, &manifest()).is_ok());
+        assert!(check(&spec, &manifest()).is_ok());
     }
 
     /// A library named like a keyword is valid in cargo; Rust names it with
@@ -598,10 +657,10 @@ mod tests {
     fn a_keyword_library_takes_a_raw_type_path() {
         let mut spec = spec(split(), &[("D", "r#async::D")]);
         spec.bind.get_mut("D").expect("D").lib = "async".into();
-        assert!(validate(&spec, &manifest()).is_ok());
+        assert!(check(&spec, &manifest()).is_ok());
 
         spec.bind.get_mut("D").expect("D").ty = "async::D".into();
-        let error = validate(&spec, &manifest())
+        let error = check(&spec, &manifest())
             .expect_err("not a path")
             .to_string();
         assert!(
@@ -613,7 +672,7 @@ mod tests {
     #[test]
     fn a_type_must_come_from_its_bound_crate() {
         let spec = spec(split(), &[("D", "contract::D")]);
-        let error = validate(&spec, &manifest())
+        let error = check(&spec, &manifest())
             .expect_err("foreign type")
             .to_string();
         assert!(
@@ -630,7 +689,7 @@ mod tests {
         let bind = spec.bind.get_mut("D").expect("D");
         bind.package = "tokio".into();
         bind.lib = "engine_impl".into();
-        let error = validate(&spec, &manifest())
+        let error = check(&spec, &manifest())
             .expect_err("duplicate key")
             .to_string();
         assert!(
@@ -674,7 +733,10 @@ mod tests {
         .expect("spaced");
         assert_eq!(plain, spaced);
         let mut module = spec(split(), &[("D", "tiny_nodes::D")]);
-        module.contract.module = "  ::tiny_contract ".into();
+        let Source::Contract(contract) = &mut module.source else {
+            unreachable!("a contract spec")
+        };
+        contract.module = "  ::tiny_contract ".into();
         let module = render_manifest(&module, &manifest(), out).expect("module");
         assert_eq!(plain, module);
     }
@@ -685,9 +747,7 @@ mod tests {
             let ty = format!("{name}::D");
             let mut spec = spec(split(), &[("D", &ty)]);
             spec.bind.get_mut("D").expect("D").lib = name.into();
-            let error = validate(&spec, &manifest())
-                .expect_err("shadows")
-                .to_string();
+            let error = check(&spec, &manifest()).expect_err("shadows").to_string();
             assert!(
                 error.contains(&format!("crate name `{name}` is both the standard library")),
                 "{error}"
@@ -712,23 +772,21 @@ mod tests {
             .segment("engine", ["D"]);
         let mut spec = spec(placement, &[("D", "tiny_nodes::D"), ("F", "tiny_nodes::F")]);
         spec.bind.get_mut("F").expect("F").path = "/elsewhere/nodes".into();
-        let error = validate(&spec, &manifest)
-            .expect_err("two paths")
-            .to_string();
+        let error = check(&spec, &manifest).expect_err("two paths").to_string();
         assert!(
             error.contains("[bind.D] and [bind.F] give package `tiny-nodes` two paths"),
             "{error}"
         );
         spec.bind.get_mut("F").expect("F").path = "/work/./nodes".into();
         assert!(
-            validate(&spec, &manifest).is_ok(),
+            check(&spec, &manifest).is_ok(),
             "the same path, spelled two ways"
         );
         // Relative: two different directories, however many steps up.
         spec.bind.get_mut("D").expect("D").path = "../../nodes".into();
         spec.bind.get_mut("F").expect("F").path = "nodes".into();
         assert!(
-            validate(&spec, &manifest).is_err(),
+            check(&spec, &manifest).is_err(),
             "`../../nodes` is not `nodes`"
         );
     }
@@ -737,7 +795,7 @@ mod tests {
     fn a_placement_error_is_reported() {
         let placement = gdl::Placement::new().segment("front", ["S"]);
         let spec = spec(placement, &[("D", "tiny_nodes::D")]);
-        assert!(validate(&spec, &manifest()).is_err());
+        assert!(check(&spec, &manifest()).is_err());
     }
 
     #[test]

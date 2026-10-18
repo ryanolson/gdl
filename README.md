@@ -82,6 +82,45 @@ sink Recognizer: Session + stream Audio -> stream Transcript;
 
 A streamed request can cross segments like any other request. The stage that receives it creates an anchor for its items, and the sender streams the items into that anchor while the response comes back.
 
+### Compose a graph from message names
+
+A graph file holds the body of a `graph!` invocation. Where `graph!` has Rust types, the file has message names. In a message position, the file accepts a bare name such as `Prompt`, or `()`.
+
+The message types are in one or more protocols crates. A crate offers a type to graph files with `derive(gdl::Message)`:
+
+```rust
+#[derive(serde::Serialize, serde::Deserialize, gdl::Message)]
+pub struct Prompt {
+    pub text: String,
+}
+```
+
+A spec names the graph file instead of a contract crate, and lists the crates that define its messages:
+
+```toml
+[graph]
+path = "chat.gdl"
+
+[messages]
+crates = ["protocols"]
+pin = { Chunk = "chat_protocols::Chunk" }   # optional
+
+[gdl]
+path = "../../crates/gdl"
+```
+
+`gdl-gen --spec gdl.toml --resolve` prints the type that each message name resolves to, and whether it is a wire type:
+
+```text
+Chunk   chat_protocols::Chunk          wire
+Piece   chat_protocols::Piece          local
+Prompt  chat_protocols::Prompt         wire
+```
+
+Before it compiles a crate, the generator makes sure that the names agree on each edge. Each error gives the line and column in the graph file. Then it compiles a program that links the listed crates and reads their messages. Each name must resolve to exactly one type. If two listed crates define a name, the generator reports an error. Add a `pin` entry to choose one type. The generator reports all errors at once.
+
+A `[graph]` spec only resolves messages. To generate segments or draw a diagram, a spec needs a `[contract]`.
+
 ## Split a graph into segments
 
 A spec file names the contract, the placement, and the implementation of each node. `examples/chat/gdl.toml` is a full spec. This part of it shows the contract, the placement in three segments, and one binding:

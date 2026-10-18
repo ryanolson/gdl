@@ -1,10 +1,13 @@
 //! `gdl-gen --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]`
 //! `gdl-gen --spec <gdl.toml> --diagram dot|mermaid [--target-dir <dir>]`
+//! `gdl-gen --spec <gdl.toml> --resolve [--target-dir <dir>]`
 //!
 //! Generates one crate per segment into `--out`. With `--check`, writes
 //! nothing and fails if the files there differ from what would be
 //! generated. With `--diagram`, writes nothing and prints the placed graph
-//! as Graphviz DOT or a Mermaid flowchart. The contract is compiled in
+//! as Graphviz DOT or a Mermaid flowchart. With `--resolve`, writes
+//! nothing and prints the type each message name of the spec's graph file
+//! resolves to. The contract is compiled in
 //! `--target-dir`, else `$CARGO_TARGET_DIR`, else `target` beside the spec.
 
 use std::path::PathBuf;
@@ -15,6 +18,7 @@ use gdl_gen::Format;
 enum Mode {
     Generate { out: PathBuf, check: bool },
     Diagram(Format),
+    Resolve,
 }
 
 struct Args {
@@ -23,13 +27,14 @@ struct Args {
     target: Option<PathBuf>,
 }
 
-const USAGE: &str = "usage: gdl-gen --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]\n       gdl-gen --spec <gdl.toml> --diagram dot|mermaid [--target-dir <dir>]";
+const USAGE: &str = "usage: gdl-gen --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]\n       gdl-gen --spec <gdl.toml> --diagram dot|mermaid [--target-dir <dir>]\n       gdl-gen --spec <gdl.toml> --resolve [--target-dir <dir>]";
 
 fn args() -> Result<Args, String> {
     let mut spec = None;
     let mut out = None;
     let mut check = false;
     let mut diagram = None;
+    let mut resolve = false;
     let mut target = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -38,6 +43,7 @@ fn args() -> Result<Args, String> {
             Some("--out") => out = args.next().map(PathBuf::from),
             Some("--target-dir") => target = args.next().map(PathBuf::from),
             Some("--check") => check = true,
+            Some("--resolve") => resolve = true,
             Some("--diagram") => {
                 diagram = match args.next().as_ref().and_then(|f| f.to_str()) {
                     Some("dot") => Some(Format::Dot),
@@ -52,9 +58,10 @@ fn args() -> Result<Args, String> {
             _ => return Err(format!("unexpected argument {arg:?}\n{USAGE}")),
         }
     }
-    let mode = match (diagram, out) {
-        (Some(format), None) if !check => Mode::Diagram(format),
-        (None, Some(out)) => Mode::Generate { out, check },
+    let mode = match (diagram, out, resolve) {
+        (Some(format), None, false) if !check => Mode::Diagram(format),
+        (None, None, true) if !check => Mode::Resolve,
+        (None, Some(out), false) => Mode::Generate { out, check },
         _ => return Err(USAGE.to_string()),
     };
     Ok(Args {
@@ -84,6 +91,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let (out, check) = match args.mode {
         Mode::Diagram(format) => {
             print!("{}", gdl_gen::diagram(&spec, &target, format)?);
+            return Ok(ExitCode::SUCCESS);
+        }
+        Mode::Resolve => {
+            print!("{}", gdl_gen::resolve(&spec, &target)?);
             return Ok(ExitCode::SUCCESS);
         }
         Mode::Generate { out, check } => (out, check),

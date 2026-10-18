@@ -52,6 +52,19 @@ pub struct Hop {
     pub backward_types: Vec<Type>,
 }
 
+/// One edge: the type its sending end declares, and the type its receiving
+/// end declares. In a well-typed graph the two are the same type.
+pub struct Edge<'a, T> {
+    /// The sending node.
+    pub from: &'a Ident,
+    /// The receiving node.
+    pub to: &'a Ident,
+    /// What `from` declares it sends.
+    pub sent: &'a T,
+    /// What `to` declares it takes.
+    pub taken: &'a T,
+}
+
 impl Node {
     /// The node's role, from its signature.
     pub fn role(&self) -> Role {
@@ -167,6 +180,80 @@ impl Graph {
             nodes,
             hops,
         })
+    }
+
+    /// Every request edge, outermost hop first, each in request order.
+    pub fn forward_edges(&self) -> Vec<Edge<'_, Request>> {
+        let mut edges = Vec::new();
+        for hop in &self.hops {
+            let path: Vec<&Ident> = std::iter::once(&hop.outer)
+                .chain(&hop.forward)
+                .chain(std::iter::once(&hop.inner))
+                .collect();
+            for pair in path.windows(2) {
+                let (from, to) = (pair[0], pair[1]);
+                let sent = match &self.node(from).sig {
+                    Sig::Source { req, .. } => req,
+                    Sig::Operator { down_req, .. } => down_req,
+                    Sig::Forward { output, .. } => output,
+                    Sig::Sink { .. } | Sig::Backward { .. } => {
+                        unreachable!("checked: a request leaves a source, operator, or forward")
+                    }
+                };
+                let taken = match &self.node(to).sig {
+                    Sig::Forward { input, .. } => input,
+                    Sig::Sink { req, .. } => req,
+                    Sig::Operator { up_req, .. } => up_req,
+                    Sig::Source { .. } | Sig::Backward { .. } => {
+                        unreachable!("checked: a request reaches a forward, sink, or operator")
+                    }
+                };
+                edges.push(Edge {
+                    from,
+                    to,
+                    sent,
+                    taken,
+                });
+            }
+        }
+        edges
+    }
+
+    /// Every response edge, outermost hop first, each in response order.
+    pub fn backward_edges(&self) -> Vec<Edge<'_, Type>> {
+        let mut edges = Vec::new();
+        for hop in &self.hops {
+            let path: Vec<&Ident> = std::iter::once(&hop.inner)
+                .chain(&hop.backward)
+                .chain(std::iter::once(&hop.outer))
+                .collect();
+            for pair in path.windows(2) {
+                let (from, to) = (pair[0], pair[1]);
+                let sent = match &self.node(from).sig {
+                    Sig::Sink { item, .. } => item,
+                    Sig::Operator { up_item, .. } => up_item,
+                    Sig::Backward { output, .. } => output,
+                    Sig::Source { .. } | Sig::Forward { .. } => {
+                        unreachable!("checked: a response leaves a sink, operator, or backward")
+                    }
+                };
+                let taken = match &self.node(to).sig {
+                    Sig::Backward { input, .. } => input,
+                    Sig::Source { item, .. } => item,
+                    Sig::Operator { down_item, .. } => down_item,
+                    Sig::Sink { .. } | Sig::Forward { .. } => {
+                        unreachable!("checked: a response reaches a backward, source, or operator")
+                    }
+                };
+                edges.push(Edge {
+                    from,
+                    to,
+                    sent,
+                    taken,
+                });
+            }
+        }
+        edges
     }
 
     /// The declared node named `ident`, which must be in the graph.

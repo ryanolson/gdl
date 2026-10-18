@@ -1,0 +1,11 @@
+// The chat graph, by message name. Its messages are in `chat-protocols`.
+name = "chat", schema = 1;
+source   Frontend: Prompt -> stream Chunk;
+operator Preprocess: (Prompt -> stream Chunk) over (Words -> stream Txet);
+forward  Truncate: Words -> Words;
+sink     Engine: Words -> stream Token;
+backward Detokenize: Token -> Piece;
+backward Format: Piece -> Txet;
+backward Pad: Txet -> Txet;
+backward Number: Chunk -> Chunk;
+topology: Frontend => Preprocess { Truncate => Engine => Detokenize => Format => Pad } => Number;
