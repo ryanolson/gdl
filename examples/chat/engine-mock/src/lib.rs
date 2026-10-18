@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use chat_contract::{Token, Words};
+use chat_protocols::{Token, Words};
 use futures::StreamExt;
 use gdl::{Build, Cx, Error, Items, Result, Sink, items};
 use serde::Deserialize;

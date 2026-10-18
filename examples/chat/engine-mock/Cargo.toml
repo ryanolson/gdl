@@ -6,7 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-chat-contract = { path = "../contract" }
+chat-protocols = { path = "../protocols" }
 chat-sentinel = { path = "../sentinel" }
 futures = { workspace = true }
 gdl = { workspace = true }

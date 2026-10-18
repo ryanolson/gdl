@@ -380,7 +380,7 @@ fn every_problem_in_a_spec_is_reported_at_once() {
     let path = |p: &str| toml::Value::String(example.join(p).display().to_string());
     let gdl = toml::Value::String(root().join("crates/gdl").display().to_string());
     let text = format!(
-        "[contract]\npath = {contract}\n[gdl]\npath = {gdl}\n\
+        "[graph]\npath = {graph}\n[messages]\ncrates = [{protocols}]\n[gdl]\npath = {gdl}\n\
          [segment.front]\nnodes = [\"Frontend\", \"Preprocess\", \"Truncate\", \"Number\"]\n\
          [segment.engine]\nnodes = [\"Engine\"]\n\
          [bind.Preprocess]\ncrate = \"chat-front-nodes\"\npath = {front}\ntype = \"chat_front_nodes::Preprocess\"\n\
@@ -389,7 +389,8 @@ fn every_problem_in_a_spec_is_reported_at_once() {
          [bind.Engine]\ncrate = \"chat-front-nodes\"\npath = {engine}\ntype = \"chat_engine_mock::Engine\"\n\
          [bind.Detokenize]\ncrate = \"chat-post-nodes\"\npath = {missing}\ntype = \"chat_post_nodes::Detokenize\"\n\
          [bind.Format]\ncrate = \"chat-post-nodes\"\npath = {missing}\ntype = \"chat_post_nodes::Format\"\n",
-        contract = path("contract"),
+        graph = path("chat.gdl"),
+        protocols = path("protocols"),
         front = path("front-nodes"),
         engine = path("engine-mock"),
         missing = path("no-such-crate"),

@@ -1,0 +1,11 @@
+// The chat graph. Its messages are in the `chat-protocols` crate
+// (`protocols/`); gdl-gen generates the contract crate from this file.
+name = "chat", schema = 1;
+source   Frontend: Prompt -> stream Chunk;
+operator Preprocess: (Prompt -> stream Chunk) over (Words -> stream Text);
+forward  Truncate: Words -> Words;
+sink     Engine: Words -> stream Token;
+backward Detokenize: Token -> Piece;
+backward Format: Piece -> Text;
+backward Number: Chunk -> Chunk;
+topology: Frontend => Preprocess { Truncate => Engine => Detokenize => Format } => Number;

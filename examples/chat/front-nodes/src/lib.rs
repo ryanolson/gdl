@@ -1,6 +1,6 @@
 //! The front-end nodes: preprocessing, truncation, and numbering.
 
-use chat_contract::{Chunk, Prompt, Text, Words};
+use chat_protocols::{Chunk, Prompt, Text, Words};
 use futures::StreamExt;
 use gdl::{Backward, Build, Cx, Forward, Items, Next, Operator, Result, items};
 use serde::Deserialize;

@@ -79,8 +79,8 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 name = "chat-contract"
 version = "0.0.0"
 dependencies = [
+ "chat-protocols",
  "gdl",
- "serde",
 ]
 
 [[package]]
@@ -99,7 +99,7 @@ dependencies = [
 name = "chat-engine-mock"
 version = "0.0.0"
 dependencies = [
- "chat-contract",
+ "chat-protocols",
  "chat-sentinel",
  "futures",
  "gdl",
@@ -123,7 +123,7 @@ dependencies = [
 name = "chat-front-nodes"
 version = "0.0.0"
 dependencies = [
- "chat-contract",
+ "chat-protocols",
  "futures",
  "gdl",
  "serde",
@@ -145,8 +145,16 @@ dependencies = [
 name = "chat-post-nodes"
 version = "0.0.0"
 dependencies = [
- "chat-contract",
+ "chat-protocols",
  "futures",
+ "gdl",
+ "serde",
+]
+
+[[package]]
+name = "chat-protocols"
+version = "0.0.0"
+dependencies = [
  "gdl",
  "serde",
 ]

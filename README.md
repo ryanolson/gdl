@@ -86,7 +86,7 @@ A streamed request can cross segments like any other request. The stage that rec
 
 A graph file holds the body of a `graph!` invocation. Where `graph!` has Rust types, the file has message names. In a message position, the file accepts a bare name such as `Prompt`, or `()`.
 
-The message types are in one or more protocols crates. A crate offers a type to graph files with `derive(gdl::Message)`:
+The message types are in one or more protocols crates. A crate offers a type to graph files with `derive(gdl::Message)`. The type must be `Send + 'static`, and it must not be generic:
 
 ```rust
 #[derive(serde::Serialize, serde::Deserialize, gdl::Message)]
@@ -119,15 +119,18 @@ Prompt  chat_protocols::Prompt         wire
 
 Before it compiles a crate, the generator makes sure that the names agree on each edge. Each error gives the line and column in the graph file. Then it compiles a program that links the listed crates and reads their messages. Each name must resolve to exactly one type. If two listed crates define a name, the generator reports an error. Add a `pin` entry to choose one type. The generator reports all errors at once.
 
-A `[graph]` spec only resolves messages. To generate segments or draw a diagram, a spec needs a `[contract]`.
+From a `[graph]` spec, the generator also generates the contract crate, in `contract/` under the output directory. Its `graph!` invocation names each message by the full path of its type, so the contract hash changes when a name resolves to another crate. A message must be public at the path where it is defined. The chat example uses a graph file. The ASR example uses a contract crate that holds its own `graph!` invocation.
 
 ## Split a graph into segments
 
-A spec file names the contract, the placement, and the implementation of each node. `examples/chat/gdl.toml` is a full spec. This part of it shows the contract, the placement in three segments, and one binding:
+A spec file names the graph, the placement, and the implementation of each node. `examples/chat/gdl.toml` is a full spec. This part of it shows the graph file and its messages, the placement in three segments, and one binding:
 
 ```toml
-[contract]
-path = "contract"
+[graph]
+path = "chat.gdl"
+
+[messages]
+crates = ["protocols"]
 
 [gdl]
 path = "../../crates/gdl"
@@ -147,7 +150,7 @@ path = "engine-mock"
 type = "chat_engine_mock::Engine"
 ```
 
-The generator compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`.
+The generator compiles only the contract crate to read its manifest. For a graph file, it first compiles the message crates to read their catalogue. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`.
 
 For each segment, the generator writes a crate with:
 
@@ -285,7 +288,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share |
 | `crates/gdl-macros` | The `graph!` macro and `derive(Message)` |
 | `crates/gdl-gen` | The generator |
-| `examples/chat` | A contract, its node implementations, and the generated segment crates. It is a separate Cargo workspace. |
+| `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |
 | `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |
 | `agent-docs/` | The plan, review records, and measurements |
 

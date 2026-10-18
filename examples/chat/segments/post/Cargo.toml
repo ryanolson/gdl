@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 gdl = { path = "../../../../crates/gdl" }
-chat-contract = { path = "../../contract" }
+chat-contract = { path = "../contract" }
 chat-post-nodes = { path = "../../post-nodes" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal"] }

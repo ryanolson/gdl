@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn a_dump_waits_while_another_holds_the_target_directory() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let spec = crate::Spec::load(&root.join("examples/chat/gdl.toml")).expect("spec");
+        let spec = crate::Spec::load(&root.join("examples/asr/gdl.toml")).expect("spec");
         let contract = spec.contract().expect("a contract spec").clone();
         let target = root.join("target/gdl-gen-tests");
         // Built once, so the next dump neither compiles nor links; that one
@@ -353,6 +353,6 @@ mod tests {
             .recv_timeout(Duration::from_secs(120))
             .expect("the dump finished")
             .expect("manifest");
-        assert_eq!(name, "chat");
+        assert_eq!(name, "asr");
     }
 }

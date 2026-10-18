@@ -1,6 +1,6 @@
 //! The post-processing nodes: turn the engine's tokens into text.
 
-use chat_contract::{Piece, Text, Token};
+use chat_protocols::{Piece, Text, Token};
 use futures::StreamExt;
 use gdl::{Backward, Build, Cx, Items, Result, items};
 use serde::Deserialize;

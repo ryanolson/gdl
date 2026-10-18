@@ -769,6 +769,9 @@ mod tests {
     fn a_segment_package_may_not_take_a_dependency_name() {
         // `tiny-contract` and `tiny-nodes` are the contract and the
         // implementation; Cargo cannot build two path packages of one name.
+        // A contract generated from a graph file is `<graph>-contract` in
+        // `contract/`, so this check also keeps a segment out of its
+        // directory.
         let placement = gdl::Placement::new()
             .segment("contract", ["S"])
             .segment("nodes", ["D"]);

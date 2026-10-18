@@ -1,12 +1,13 @@
-# The chat example: a contract, the crates implementing its nodes, and the
-# segment crates gdl-gen generates from `gdl.toml`. Its own workspace, as a
+# The chat example: its messages, the crates implementing its nodes, and the
+# contract and segment crates gdl-gen generates from `gdl.toml`. Its own workspace, as a
 # deployment's would be.
 [workspace]
 members = [
-    "contract",
     "engine-mock",
     "front-nodes",
     "post-nodes",
+    "protocols",
+    "segments/contract",
     "segments/engine",
     "segments/front",
     "segments/post",

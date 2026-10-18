@@ -1,6 +1,6 @@
 [package]
-name = "chat-contract"
-description = "The chat example's messages and graph"
+name = "chat-protocols"
+description = "The chat example's messages"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
