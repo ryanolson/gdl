@@ -19,10 +19,11 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     // `const _` block keeps the static's name out of the caller's module.
     Ok(quote! {
         const _: () = {
-            #[::gdl::__private::linkme::distributed_slice(::gdl::__private::MESSAGES)]
+            #[::gdl::__private::linkme::distributed_slice(::gdl::__private::GDL_MESSAGE_CATALOGUE)]
             #[linkme(crate = ::gdl::__private::linkme)]
             static __GDL_MESSAGE: ::gdl::__private::MessageEntry = ::gdl::__private::MessageEntry {
                 package: ::core::env!("CARGO_PKG_NAME"),
+                version: ::core::env!("CARGO_PKG_VERSION"),
                 name: #name,
                 module: ::core::module_path!(),
                 wire: || ::gdl::wire_codec!(#ident).is_some(),

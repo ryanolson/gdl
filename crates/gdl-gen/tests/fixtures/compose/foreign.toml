@@ -1,0 +1,9 @@
+# `foreign-protocols` depends on another package named `gdl`.
+[graph]
+path = "chat.gdl"
+
+[messages]
+crates = ["chat-protocols", "foreign-protocols"]
+
+[gdl]
+path = "../../../../gdl"

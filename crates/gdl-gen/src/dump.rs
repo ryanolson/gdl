@@ -27,19 +27,31 @@ pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl::Manifest, Err
         "fn main() {{\n    print!(\"{{}}\", {module}::manifest().to_toml());\n}}\n",
         module = contract.module,
     );
-    let text = run(target, "gdl-manifest-dump", &dependencies, &main)
-        .map_err(|e| Error::new(format!("building the contract's manifest failed:\n{e}")))?;
+    let ((), text) = run(
+        target,
+        "gdl-manifest-dump",
+        "the contract's manifest",
+        &dependencies,
+        &main,
+        |_| Ok(()),
+    )?;
     gdl::Manifest::from_toml(&text).map_err(|e| Error::new(format!("reading the manifest: {e}")))
 }
 
 /// The catalogue of every message type linked from `crates`, read with the
-/// gdl that `gdl` names: a crate that registers with another gdl registers
-/// in another catalogue, and is reported as offering nothing.
+/// gdl that `gdl` names, and each listed crate's package identity, in the
+/// order of `crates`.
+///
+/// Before it builds anything, this refuses a program that links a second
+/// package named `gdl`: both register into a linker section of one name,
+/// and the catalogue panics on first use. It also refuses a listed crate
+/// that another package in the program shares a name and a version with,
+/// because catalogue entries tell packages apart by those two alone.
 pub fn catalogue(
     crates: &[MessageCrate],
     gdl: &GdlDep,
     target: &Path,
-) -> Result<gdl::Catalogue, Error> {
+) -> Result<(gdl::Catalogue, Vec<Identity>), Error> {
     let mut dependencies = match gdl {
         GdlDep::Path(path) => format!(
             "gdl = {{ path = {} }}\n",
@@ -48,18 +60,18 @@ pub fn catalogue(
         GdlDep::Version(version) => format!("gdl = {{ version = {} }}\n", toml_string(version)),
     };
     let mut main = String::new();
-    for krate in crates {
+    for (index, krate) in crates.iter().enumerate() {
+        // Each crate under a name of the program's own: its library's name
+        // may be a keyword (`gen`), or `gdl`.
         dependencies.push_str(&format!(
-            "{} = {{ path = {} }}\n",
-            krate.package,
+            "{} = {{ package = {}, path = {} }}\n",
+            alias(index),
+            toml_string(&krate.package),
             toml_string(&absolute(&krate.path)?.to_string_lossy())
         ));
         // A crate the program never names is never linked, and neither
         // are its catalogue entries.
-        main.push_str(&format!(
-            "use {} as _;\n",
-            crate::spec::default_module(&krate.lib)
-        ));
+        main.push_str(&format!("use {} as _;\n", alias(index)));
     }
     main.push_str("\nfn main() {\n    print!(\"{}\", gdl::Catalogue::linked().to_toml());\n}\n");
     // One program per set of dependencies: a spec that links other crates
@@ -70,15 +82,161 @@ pub fn catalogue(
         dependencies.hash(&mut hasher);
         hasher.finish()
     });
-    let text = run(target, &name, &dependencies, &main)
-        .map_err(|e| Error::new(format!("building the message catalogue failed:\n{e}")))?;
-    gdl::Catalogue::from_toml(&text)
-        .map_err(|e| Error::new(format!("reading the message catalogue: {e}")))
+    let check = |work: &Path| {
+        let metadata =
+            cargo(work, target, &["metadata", "--format-version", "1"]).map_err(|e| {
+                Error::new(format!(
+                    "resolving the message crates' dependencies failed:\n{e}"
+                ))
+            })?;
+        identities(&metadata, crates)
+    };
+    let (identities, text) = run(
+        target,
+        &name,
+        "the message catalogue",
+        &dependencies,
+        &main,
+        check,
+    )?;
+    let catalogue = gdl::Catalogue::from_toml(&text)
+        .map_err(|e| Error::new(format!("reading the message catalogue: {e}")))?;
+    Ok((catalogue, identities))
 }
 
-/// Build and run the program `name` with these `[dependencies]` lines and
-/// this `main.rs`, and return what it prints.
-fn run(target: &Path, name: &str, dependencies: &str, main: &str) -> Result<String, Error> {
+/// A package as catalogue entries name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    /// The package name.
+    pub package: String,
+    /// Its version.
+    pub version: String,
+}
+
+fn alias(index: usize) -> String {
+    format!("gdl_messages_{index}")
+}
+
+/// The listed crates' identities, from the catalogue program's `cargo
+/// metadata`, after checking that the program links one gdl and that each
+/// listed crate's identity is its own.
+fn identities(metadata: &str, crates: &[MessageCrate]) -> Result<Vec<Identity>, Error> {
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        packages: Vec<Package>,
+        resolve: Resolve,
+    }
+    #[derive(serde::Deserialize)]
+    struct Package {
+        id: String,
+        name: String,
+        version: String,
+        manifest_path: PathBuf,
+    }
+    #[derive(serde::Deserialize)]
+    struct Resolve {
+        root: String,
+        nodes: Vec<Node>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Node {
+        id: String,
+        deps: Vec<Dep>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Dep {
+        name: String,
+        pkg: String,
+    }
+
+    let metadata: Metadata = serde_json::from_str(metadata)
+        .map_err(|e| Error::new(format!("reading cargo metadata: {e}")))?;
+    let package = |id: &str| metadata.packages.iter().find(|p| p.id == id);
+    let named = |id: &str| {
+        package(id).map_or_else(|| id.to_string(), |p| format!("`{} {}`", p.name, p.version))
+    };
+    let root = metadata
+        .resolve
+        .nodes
+        .iter()
+        .find(|n| n.id == metadata.resolve.root)
+        .ok_or_else(|| Error::new("cargo metadata has no root package"))?;
+    let dependency = |name: &str| {
+        root.deps
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.pkg.as_str())
+    };
+
+    let mut problems = Vec::new();
+    let gdl = dependency("gdl").ok_or_else(|| Error::new("the catalogue program has no gdl"))?;
+    for stray in metadata
+        .packages
+        .iter()
+        .filter(|p| p.name == "gdl" && p.id != gdl)
+    {
+        let users: Vec<String> = metadata
+            .resolve
+            .nodes
+            .iter()
+            .filter(|n| n.deps.iter().any(|d| d.pkg == stray.id))
+            .map(|n| {
+                format!(
+                    "`{}`",
+                    package(&n.id).map_or(n.id.as_str(), |p| p.name.as_str())
+                )
+            })
+            .collect();
+        problems.push(format!(
+            "the message crates link more than one package named `gdl`, and a program holds one message catalogue: `gdl {}` ({}) is used by {}; make every message crate depend on the gdl that [gdl] names, {}",
+            stray.version,
+            stray.manifest_path.display(),
+            users.join(", "),
+            named(gdl),
+        ));
+    }
+    let mut identities = Vec::with_capacity(crates.len());
+    for index in 0..crates.len() {
+        let id = dependency(&alias(index))
+            .ok_or_else(|| Error::new(format!("cargo metadata lacks {}", alias(index))))?;
+        let listed = package(id).ok_or_else(|| Error::new(format!("cargo metadata lacks {id}")))?;
+        for twin in metadata
+            .packages
+            .iter()
+            .filter(|p| p.id != listed.id && p.name == listed.name && p.version == listed.version)
+        {
+            problems.push(format!(
+                "[messages] crate `{} {}` ({}) has the name and version of another package in the program ({}), and a message records only those two; give one of them another version",
+                listed.name,
+                listed.version,
+                listed.manifest_path.display(),
+                twin.manifest_path.display()
+            ));
+        }
+        identities.push(Identity {
+            package: listed.name.clone(),
+            version: listed.version.clone(),
+        });
+    }
+    if problems.is_empty() {
+        Ok(identities)
+    } else {
+        Err(Error::new(problems.join("\n")))
+    }
+}
+
+/// Write the program `name` with these `[dependencies]` lines and this
+/// `main.rs`, pass its directory to `check`, then build and run it, and
+/// return what `check` returned and what the program printed. `what` the
+/// program prints names it in a build failure.
+fn run<T>(
+    target: &Path,
+    name: &str,
+    what: &str,
+    dependencies: &str,
+    main: &str,
+    check: impl FnOnce(&Path) -> Result<T, Error>,
+) -> Result<(T, String), Error> {
     // Every run of `name` in `target` builds the same program at the same
     // path. Holding the directory's lock from writing the program until it
     // has run keeps another run from replacing it in between, which would
@@ -101,10 +259,18 @@ fn run(target: &Path, name: &str, dependencies: &str, main: &str) -> Result<Stri
     );
     write(&work.join("Cargo.toml"), &manifest)?;
     write(&work.join("src/main.rs"), main)?;
+    let checked = check(&work)?;
+    let printed = cargo(&work, target, &["run", "--quiet"])
+        .map_err(|e| Error::new(format!("building {what} failed:\n{e}")))?;
+    Ok((checked, printed))
+}
 
+/// Run `cargo <args>` on the program in `work`, and return its output.
+fn cargo(work: &Path, target: &Path, args: &[&str]) -> Result<String, Error> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
-        .args(["run", "--quiet", "--manifest-path"])
+        .args(args)
+        .arg("--manifest-path")
         .arg(work.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", target)
         .output()
@@ -113,7 +279,7 @@ fn run(target: &Path, name: &str, dependencies: &str, main: &str) -> Result<Stri
         return Err(Error::new(String::from_utf8_lossy(&output.stderr)));
     }
     String::from_utf8(output.stdout)
-        .map_err(|e| Error::new(format!("the program's output is not UTF-8: {e}")))
+        .map_err(|e| Error::new(format!("cargo's output is not UTF-8: {e}")))
 }
 
 /// Write `text` unless the file already holds it: a rewrite with the same

@@ -1,0 +1,10 @@
+# A pin to `vproto::Chunk` takes the listed version's type.
+[graph]
+path = "chunk.gdl"
+
+[messages]
+crates = ["vproto-2", "vbridge"]
+pin = { Chunk = "vproto::Chunk" }
+
+[gdl]
+path = "../../../../gdl"

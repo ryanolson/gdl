@@ -1,0 +1,5 @@
+// `Chunk` is in both versions of `vproto`; `Hidden` only in the unlisted one.
+name = "versions", schema = 1;
+source A: Chunk -> stream Hidden;
+sink   B: Chunk -> stream Hidden;
+topology: A => B;

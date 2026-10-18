@@ -17,6 +17,9 @@ pub struct Catalogue {
 pub struct MessageInfo {
     /// The package that defines it.
     pub package: String,
+    /// That package's version: one program can link two versions of one
+    /// package, and only a listed one offers messages.
+    pub version: String,
     /// The type's name: what a graph file calls it.
     pub name: String,
     /// Where it is defined: its module path and its name. A re-export is
@@ -30,7 +33,7 @@ impl Catalogue {
     /// Every message type linked into this program, sorted, so the result
     /// does not depend on link order.
     pub fn linked() -> Self {
-        let mut messages: Vec<MessageInfo> = registry::MESSAGES
+        let mut messages: Vec<MessageInfo> = registry::GDL_MESSAGE_CATALOGUE
             .iter()
             .map(registry::Entry::info)
             .collect();
@@ -59,11 +62,18 @@ pub mod registry {
     /// One entry per type that derives `Message`, collected at link time:
     /// a derive cannot add to a list any other way, and an explicit list in
     /// each protocols crate is one more place to forget a type.
+    ///
+    /// linkme names the linker section after this static alone, not its
+    /// path, and two slices of one name in a program panic on first use.
+    /// The name is gdl's own, so another crate's registry cannot take it.
+    /// Two gdl versions in one program still share it; the generator
+    /// refuses such a program before it builds it.
     #[linkme::distributed_slice]
-    pub static MESSAGES: [Entry];
+    pub static GDL_MESSAGE_CATALOGUE: [Entry];
 
     pub struct Entry {
         pub package: &'static str,
+        pub version: &'static str,
         pub name: &'static str,
         pub module: &'static str,
         /// Expanded where the type is concrete, as the wire probe must be.
@@ -74,6 +84,7 @@ pub mod registry {
         pub(super) fn info(&self) -> MessageInfo {
             MessageInfo {
                 package: self.package.to_string(),
+                version: self.version.to_string(),
                 name: self.name.to_string(),
                 path: format!("{}::{}", self.module, self.name),
                 wire: (self.wire)(),

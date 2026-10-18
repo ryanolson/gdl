@@ -34,6 +34,18 @@ use inner::Words as Reexported;
 #[derive(Serialize, Deserialize)]
 struct Unregistered;
 
+/// Another registry in the same program, with the name a registry would
+/// naturally take. linkme names a slice's linker section by the static's
+/// name alone, so the catalogue's must not be a common one.
+// linkme places the slice in a linker section; nothing here is unsafe.
+#[allow(unsafe_code)]
+#[linkme::distributed_slice]
+static MESSAGES: [&'static str];
+
+#[allow(unsafe_code)]
+#[linkme::distributed_slice(MESSAGES)]
+static GREETING: &str = "hello";
+
 fn find<'a>(catalogue: &'a Catalogue, name: &str) -> Vec<&'a MessageInfo> {
     catalogue
         .messages
@@ -50,6 +62,7 @@ fn a_derived_message_is_registered_with_its_definition_path() {
         prompt,
         [&MessageInfo {
             package: "gdl".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
             name: "Prompt".into(),
             path: "catalogue::Prompt".into(),
             wire: true,
@@ -60,6 +73,12 @@ fn a_derived_message_is_registered_with_its_definition_path() {
     assert_eq!(words[0].path, "catalogue::inner::Words");
     assert!(find(&catalogue, "Reexported").is_empty());
     assert!(find(&catalogue, "Unregistered").is_empty());
+}
+
+#[test]
+fn another_registry_named_like_the_catalogue_is_independent() {
+    assert_eq!(MESSAGES[..], ["hello"]);
+    assert_eq!(find(&Catalogue::linked(), "Prompt").len(), 1);
 }
 
 #[test]

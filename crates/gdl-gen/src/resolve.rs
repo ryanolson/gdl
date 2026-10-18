@@ -5,26 +5,31 @@ use std::collections::BTreeMap;
 
 use gdl::{Catalogue, MessageInfo};
 
+use crate::dump::Identity;
+
 /// Resolve each name in `uses` (a message name and the nodes that declare
-/// it) to one entry of `catalogue` from a package in `listed`. A pin maps a
+/// it) to one entry of `catalogue` from a package in `listed`: its name and
+/// its version, as another version of a listed package can be in the
+/// program too. A pin maps a
 /// name to the path of the entry it takes, and is how a name in two crates
 /// is resolved. Every problem is reported.
 pub(crate) fn resolve(
     uses: &BTreeMap<String, Vec<String>>,
     catalogue: &Catalogue,
-    listed: &[String],
+    listed: &[Identity],
     pins: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, MessageInfo>, Vec<String>> {
     let offered: Vec<&MessageInfo> = catalogue
         .messages
         .iter()
-        .filter(|m| listed.contains(&m.package))
+        .filter(|m| is_listed(m, listed))
         .collect();
     let mut problems = Vec::new();
-    for package in listed {
-        if !offered.iter().any(|m| &m.package == package) {
+    for identity in listed {
+        if !offered.iter().any(|m| m.package == identity.package) {
             problems.push(format!(
-                "[messages] crate `{package}` offers no messages: derive `gdl::Message` on its message types, with the gdl that [gdl] names"
+                "[messages] crate `{}` offers no messages: derive `gdl::Message` on its message types",
+                identity.package
             ));
         }
     }
@@ -83,6 +88,12 @@ pub(crate) fn resolve(
     }
 }
 
+fn is_listed(message: &MessageInfo, listed: &[Identity]) -> bool {
+    listed
+        .iter()
+        .any(|l| l.package == message.package && l.version == message.version)
+}
+
 /// `` `a::X` `` or `` `a::X`, `b::X` ``, or `None` for no candidates.
 fn candidates<'a>(found: impl Iterator<Item = &'a &'a MessageInfo>) -> Option<String> {
     let paths: Vec<String> = found.map(|m| format!("`{}`", m.path)).collect();
@@ -95,13 +106,13 @@ fn missing_hint(
     name: &str,
     offered: &[&MessageInfo],
     catalogue: &Catalogue,
-    listed: &[String],
+    listed: &[Identity],
 ) -> String {
-    let mut unlisted: Vec<&str> = catalogue
+    let mut unlisted: Vec<String> = catalogue
         .messages
         .iter()
-        .filter(|m| m.name == name && !listed.contains(&m.package))
-        .map(|m| m.package.as_str())
+        .filter(|m| m.name == name && !is_listed(m, listed))
+        .map(|m| format!("{} {}", m.package, m.version))
         .collect();
     unlisted.dedup();
     if !unlisted.is_empty() {
@@ -179,6 +190,7 @@ mod tests {
     fn message(package: &str, path: &str) -> MessageInfo {
         MessageInfo {
             package: package.into(),
+            version: "0.1.0".into(),
             name: path.rsplit("::").next().expect("name").into(),
             path: path.into(),
             wire: true,
@@ -204,8 +216,14 @@ mod tests {
             .collect()
     }
 
-    fn listed(packages: &[&str]) -> Vec<String> {
-        packages.iter().map(|p| (*p).to_string()).collect()
+    fn listed(packages: &[&str]) -> Vec<Identity> {
+        packages
+            .iter()
+            .map(|p| Identity {
+                package: (*p).to_string(),
+                version: "0.1.0".into(),
+            })
+            .collect()
     }
 
     fn pins(pins: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -340,7 +358,7 @@ mod tests {
             problems,
             [
                 "message `Audoi` (Client) is in no listed crate; did you mean `Audio`?",
-                "message `Pcm` (Resample, Recognizer) is in no listed crate; `dsp` defines it, but is not in [messages] crates",
+                "message `Pcm` (Resample, Recognizer) is in no listed crate; `dsp 0.1.0` defines it, but is not in [messages] crates",
                 "message `Transcript` (Client) is in no listed crate; the listed crates offer `Audio`, `Session`",
             ]
         );
@@ -361,7 +379,7 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "[messages] crate `empty` offers no messages: derive `gdl::Message` on its message types, with the gdl that [gdl] names"
+                "[messages] crate `empty` offers no messages: derive `gdl::Message` on its message types"
             ]
         );
     }

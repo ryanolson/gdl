@@ -1,0 +1,4 @@
+name = "chunk", schema = 1;
+source A: Chunk -> stream Chunk;
+sink   B: Chunk -> stream Chunk;
+topology: A => B;

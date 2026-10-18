@@ -1,0 +1,9 @@
+[package]
+name = "gdl"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Not a member of the repository workspace: it is built only by the
+# catalogue programs that the tests generate.
+[workspace]

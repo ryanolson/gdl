@@ -125,7 +125,7 @@ pub use gdl_macros::Message;
 /// Support for macro expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::catalogue::registry::{Entry as MessageEntry, MESSAGES};
+    pub use crate::catalogue::registry::{Entry as MessageEntry, GDL_MESSAGE_CATALOGUE};
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
     pub use gdl_macros::graph;
     pub use linkme;

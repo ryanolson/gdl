@@ -125,8 +125,7 @@ pub fn resolve(spec: &Spec, target: &Path) -> Result<Resolution, Error> {
         )));
     };
     let file = names::GraphFile::read(&source.path)?;
-    let catalogue = dump::catalogue(&source.crates, &spec.gdl, target)?;
-    let listed: Vec<String> = source.crates.iter().map(|c| c.package.clone()).collect();
+    let (catalogue, listed) = dump::catalogue(&source.crates, &spec.gdl, target)?;
     resolve::resolve(&file.uses, &catalogue, &listed, &source.pins)
         .map(|messages| Resolution { messages })
         .map_err(|problems| Error::new(problems.join("\n")))

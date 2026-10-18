@@ -13,6 +13,7 @@ gdl-syntax = { path = "../gdl-syntax" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 serde = { workspace = true }
+serde_json = { workspace = true }
 syn = "2"
 toml = { workspace = true }
 

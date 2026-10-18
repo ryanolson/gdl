@@ -81,8 +81,6 @@ pub(crate) struct GraphSource {
 pub(crate) struct MessageCrate {
     /// The package name.
     pub(crate) package: String,
-    /// Its library's crate name, as Rust code names it.
-    pub(crate) lib: String,
     /// Its directory, resolved.
     pub(crate) path: PathBuf,
 }
@@ -304,15 +302,17 @@ fn graph_source(dir: &Path, graph: RawGraph, messages: RawMessages) -> Result<Gr
     let mut crates: Vec<MessageCrate> = Vec::with_capacity(messages.crates.len());
     for path in messages.crates {
         let path = dir.join(path);
-        let CrateNames { package, lib } = crate_names(&path)?;
-        if let Some(first) = crates.iter().find(|c| c.lib == lib) {
+        let CrateNames { package, .. } = crate_names(&path)?;
+        // Catalogue entries name a package, not a path: two listed packages
+        // of one name could not be told apart by a pin.
+        if let Some(first) = crates.iter().find(|c| c.package == package) {
             return Err(Error::new(format!(
-                "[messages] crates: {} and {} are both crate `{lib}`",
+                "[messages] crates: {} and {} are both package `{package}`",
                 first.path.display(),
                 path.display()
             )));
         }
-        crates.push(MessageCrate { package, lib, path });
+        crates.push(MessageCrate { package, path });
     }
     Ok(GraphSource {
         path: dir.join(graph.path),
@@ -351,7 +351,7 @@ fn crate_names(dir: &Path) -> Result<CrateNames, Error> {
 /// The Rust path of a contract library's root: its name, or `r#name` when
 /// the name is a keyword (cargo accepts a library named `async`, and Rust
 /// reaches it only as `r#async`).
-pub(crate) fn default_module(lib: &str) -> String {
+fn default_module(lib: &str) -> String {
     if syn::parse_str::<syn::Ident>(lib).is_ok() {
         lib.to_string()
     } else {
@@ -430,7 +430,6 @@ mod tests {
         assert_eq!(graph.path, dir.join("chat.gdl"));
         assert_eq!(graph.crates.len(), 1);
         assert_eq!(graph.crates[0].package, "chat-protocols");
-        assert_eq!(graph.crates[0].lib, "chat_protocols");
         assert_eq!(graph.crates[0].path, dir.join("protocols"));
         assert_eq!(graph.pins["Chunk"], "chat_protocols::Chunk");
         let error = spec.contract().expect_err("no contract").to_string();
@@ -459,7 +458,7 @@ mod tests {
             ),
             (
                 format!("{graph}[messages]\ncrates = [\"contract\", \"./contract\"]\n{gdl}"),
-                "are both crate `chat_contract`",
+                "are both package `chat-contract`",
             ),
         ] {
             let error = Spec::parse(&text, &dir.join("gdl.toml"), &dir)

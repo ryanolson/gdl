@@ -59,15 +59,50 @@ fn a_name_two_crates_define_resolves_only_when_pinned() {
     );
 }
 
+/// The empty crate's library is named `gen`, a Rust 2024 keyword: the
+/// catalogue program must still link it.
 #[test]
 fn every_resolution_problem_is_reported_at_once() {
     let error = resolve("bad.toml").expect_err("problems");
     assert_eq!(
         error,
         "[messages] crate `empty-protocols` offers no messages: derive `gdl::Message` on its \
-         message types, with the gdl that [gdl] names\n\
+         message types\n\
          message `Txet` (Preprocess, Format, Pad) is in no listed crate; did you mean `Text`?"
     );
+}
+
+/// A listed crate is one package: its name and its version. Another version
+/// of it in the program, here linked through `vbridge`, offers nothing: its
+/// `Hidden` does not resolve, and its `Chunk` neither makes the name
+/// ambiguous nor answers a pin.
+#[test]
+fn only_the_listed_version_of_a_package_offers_messages() {
+    let error = resolve("versions.toml").expect_err("Hidden is unlisted");
+    assert_eq!(
+        error,
+        "message `Hidden` (A, B) is in no listed crate; `vproto 0.1.0` defines it, but is not \
+         in [messages] crates"
+    );
+    let resolution = resolve("versions-pinned.toml").expect("pinned");
+    let chunk = &resolution.messages["Chunk"];
+    assert_eq!((chunk.version.as_str(), chunk.wire), ("0.2.0", true));
+}
+
+/// A program holds one message catalogue per gdl. A message crate built
+/// against another package named `gdl` is refused by name, before anything
+/// is compiled.
+#[test]
+fn a_message_crate_on_another_gdl_is_refused() {
+    let error = resolve("foreign.toml").expect_err("two runtimes");
+    for part in [
+        "more than one package named `gdl`",
+        "`gdl 0.0.1`",
+        "used by `foreign-protocols`",
+        "depend on the gdl that [gdl] names",
+    ] {
+        assert!(error.contains(part), "{part} in:\n{error}");
+    }
 }
 
 /// Names are checked before anything is compiled: a graph whose edges

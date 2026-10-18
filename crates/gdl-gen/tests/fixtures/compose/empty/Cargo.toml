@@ -4,6 +4,11 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
+# A library named like a Rust 2024 keyword: a program can reach it only
+# as `r#gen`, or under another name.
+[lib]
+name = "gen"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 
