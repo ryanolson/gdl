@@ -197,12 +197,10 @@ fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, E
         )
     };
     let scratch_toml = crates(&absolute);
-    let scratch = target.join("gdl-gen").join(format!("contract-{:016x}", {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (&scratch_toml, &lib_rs).hash(&mut hasher);
-        hasher.finish()
-    }));
+    let scratch = target.join("gdl-gen").join(format!(
+        "contract-{:016x}",
+        dump::hash(&(&scratch_toml, &lib_rs))
+    ));
     let src = scratch.join("src");
     std::fs::create_dir_all(&src).map_err(|e| io(&src, e))?;
     dump::write(&scratch.join("Cargo.toml"), &scratch_toml)?;

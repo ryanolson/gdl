@@ -27,9 +27,12 @@ pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl::Manifest, Err
         "fn main() {{\n    print!(\"{{}}\", {module}::manifest().to_toml());\n}}\n",
         module = contract.module,
     );
+    // One program per contract, as for catalogues: a run that reads another
+    // contract does not relink this one.
+    let name = format!("gdl-manifest-{:016x}", hash(&(&dependencies, &main)));
     let ((), text) = run(
         target,
-        "gdl-manifest-dump",
+        &name,
         "the contract's manifest",
         &dependencies,
         &main,
@@ -76,12 +79,7 @@ pub fn catalogue(
     main.push_str("\nfn main() {\n    print!(\"{}\", gdl::Catalogue::linked().to_toml());\n}\n");
     // One program per set of dependencies: a spec that links other crates
     // builds its own, and switching between specs relinks neither.
-    let name = format!("gdl-catalogue-{:016x}", {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        dependencies.hash(&mut hasher);
-        hasher.finish()
-    });
+    let name = format!("gdl-catalogue-{:016x}", hash(&dependencies));
     let check = |work: &Path| {
         let metadata =
             cargo(work, target, &["metadata", "--format-version", "1"]).map_err(|e| {
@@ -102,6 +100,15 @@ pub fn catalogue(
     let catalogue = gdl::Catalogue::from_toml(&text)
         .map_err(|e| Error::new(format!("reading the message catalogue: {e}")))?;
     Ok((catalogue, identities))
+}
+
+/// A name for generated content: the same content, the same name, within
+/// one build of the generator.
+pub(crate) fn hash(value: &impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A package as catalogue entries name it.
@@ -284,12 +291,16 @@ fn cargo(work: &Path, target: &Path, args: &[&str]) -> Result<String, Error> {
 
 /// Write `text` unless the file already holds it: a rewrite with the same
 /// text still changes the file's modification time, and cargo would rebuild
-/// and relink the program for it.
+/// and relink the program for it. The text goes to a file of this process
+/// and is renamed into place, so a reader never sees a file half written,
+/// even when another process writes the same path.
 pub(crate) fn write(path: &Path, text: &str) -> Result<(), Error> {
     if std::fs::read_to_string(path).is_ok_and(|existing| existing == text) {
         return Ok(());
     }
-    std::fs::write(path, text).map_err(|e| io(path, e))
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, text).map_err(|e| io(&temporary, e))?;
+    std::fs::rename(&temporary, path).map_err(|e| io(path, e))
 }
 
 pub(crate) fn absolute(path: &Path) -> Result<PathBuf, Error> {
@@ -320,10 +331,10 @@ mod tests {
 
     use super::*;
 
-    /// Every dump in one target directory builds and runs the same program
-    /// path, so a dump must hold the directory's lock from its build until
-    /// its program has run: otherwise another dump can replace the program
-    /// in between, and this one reads the other contract's manifest.
+    /// Every dump of one contract in a target directory builds and runs
+    /// the same program path, so a dump must hold the directory's lock from
+    /// its build until its program has run: otherwise another dump can
+    /// rewrite the program in between.
     #[test]
     fn a_dump_waits_while_another_holds_the_target_directory() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

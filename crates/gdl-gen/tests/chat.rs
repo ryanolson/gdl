@@ -473,3 +473,18 @@ fn the_spec_path_may_be_given_any_way() {
         );
     }
 }
+
+/// Rendering a graph spec, as `--check` does, and drawing it build the
+/// generated contract under the target directory, never in the output.
+#[test]
+fn rendering_a_graph_spec_writes_nothing_in_the_output() {
+    let out = scratch("render-only");
+    let spec = gdl_gen::Spec::load(&example().join("gdl.toml")).expect("spec");
+    let target = target("gdl-gen-tests");
+    let files = gdl_gen::render(&spec, &out, &target).expect("render");
+    assert!(files.contains_key(Path::new("contract/src/lib.rs")));
+    gdl_gen::diagram(&spec, &target, gdl_gen::Format::Dot).expect("diagram");
+    let written: Vec<_> = std::fs::read_dir(&out).expect("out").collect();
+    assert!(written.is_empty(), "{written:?}");
+    let _ = std::fs::remove_dir_all(&out);
+}
