@@ -8,3 +8,7 @@ publish = false
 chat-protocols = { path = "../chat-protocols" }
 gdl = { path = "../../../../../gdl" }
 serde = { version = "1", features = ["derive"] }
+
+# Not a member of the repository workspace: it is built only by the
+# catalogue programs that the tests generate.
+[workspace]

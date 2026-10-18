@@ -6,3 +6,7 @@ publish = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+
+# Not a member of the repository workspace: it is built only by the
+# catalogue programs that the tests generate.
+[workspace]
