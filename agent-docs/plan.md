@@ -1,6 +1,6 @@
 # dynamo-gdl plan
 
-Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Streaming requests (section 7.9, milestones 7 to 9) planned 2026-10-16 and approved after three review rounds (`agent-docs/reviews/stream-plan-r*.md`); milestones 7 to 9 done, their reviews clean (`m7-r1.md`, `m8-r1.md` to `m8-r8.md`), 2026-10-17. Measurements: `agent-docs/perf/`. Composition (section 9.6, milestones 10 to 12) planned 2026-10-18 at the owner's request; milestone 10 done 2026-10-18; review pass 1 found 5 findings, all fixed (`m10-r1.md`).
+Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Streaming requests (section 7.9, milestones 7 to 9) planned 2026-10-16 and approved after three review rounds (`agent-docs/reviews/stream-plan-r*.md`); milestones 7 to 9 done, their reviews clean (`m7-r1.md`, `m8-r1.md` to `m8-r8.md`), 2026-10-17. Measurements: `agent-docs/perf/`. Composition (section 9.6, milestones 10 to 12) planned 2026-10-18 at the owner's request, and the composer (section 9.7, milestones 12 to 17) on the same day; milestone 10 done 2026-10-18; review pass 1 found 5 findings, all fixed (`m10-r1.md`).
 
 ## 1. Goal
 
@@ -451,6 +451,43 @@ Entries are per definition, not per path. A type that one crate re-exports from 
 - The schema rule (9.1) assumes that the graph's author owns the message types. With an external protocols crate, someone else can change a wire form.
 - The derive makes a protocols crate depend on `gdl`, which brings in velo and tokio. If that matters to a crate that is shared outside gdl, the catalogue and the derive can move into a small crate.
 
+### 9.7 The composer
+
+**Owner vision 2026-10-18.** A web UI, the composer, builds graphs from published crates:
+
+1. Point the composer at crates on crates.io. A gdl-compatible crate offers discoverable nodes. Each node presents its role and its message types. The message types come from the crates that the node crate depends on.
+2. Build a graph visually: a request path and a response path. The composer connects two ports only if they carry the same message type.
+3. Define segments by cutting edges between nodes.
+4. Download the result as a tarball. Expand it and run `build-all.sh`, which builds each segment with its own `cargo build`. Each segment has its own `Cargo.toml`, so the link dependencies of one segment never reach another (9.5).
+5. Optionally, a Docker builder builds each segment in its own multi-stage Docker build and publishes the image.
+
+```
+crates.io name@version --> sandboxed build --> catalogue: nodes and their messages --> cache, kept forever
+                                                                                           |
+composer (browser) <-- portable model: syntax, manifest, placement, layout (wasm) <--------+
+  |  request and response paths; compatible ports only; cut edges become segments
+  +--> graph file + spec --> gdl-gen (server) --> tarball  |  Docker: one build per segment --> registry
+```
+
+**Node catalogue (milestone 12).** A node implementation registers in the catalogue, as a message does (9.6). Its entry holds the package and version, the type path, the role, and the message type at each port: both requests and both items for an operator, the head and the item of a streamed request. The role and port types come from the node's role trait impl, so the entry cannot disagree with the code. Each port names a message by its catalogue identity, so a message type must derive `gdl::Message`. That derive will also implement a `gdl::Message` trait that exposes the identity, so a node's registration can read it from its port types. In a graph, a node name is an instance. Each instance binds to one catalogue node. Several instances can bind to one implementation. The binding replaces a hand-written `[bind.*]` table.
+
+**Compatibility.** Two ports connect when they carry the same message identity: package, version, and path. Cargo unifies semver-compatible versions of one package into one crate, so two node crates that depend on `protocols 1.2` and `protocols 1.4` see one type. The composer checks optimistically, and the Cargo resolve of the exported workspace decides. The exact rule (semver-compatible or exact version) is an open question for milestone 12.
+
+**Portable model (milestone 13).** The composer applies the generator's rules while the user draws: the hop grammar, each operator and source placed whole, a cut only on a wire edge, and the anchor rule (7.2, `AnchorCarried`). These rules are in `gdl-syntax` and in the manifest, placement, and layout modules of `gdl`, and `gdl` depends on velo and tokio. A crate without the runtime holds them, compiles to wasm, and both `gdl` and the composer use it. One copy of each rule serves both.
+
+**Export (milestone 14).** `gdl-gen --export <file.tar.gz>` writes the generated contract crate, one directory per segment with its own `Cargo.toml` and `main`, and `build-all.sh`, which runs `cargo build --release --manifest-path <segment>/Cargo.toml` for each segment in turn. The segments are not members of one workspace, so each build resolves only its own dependencies. They can share one target directory for the build cache. This is the layout `gdl-gen` emits now, with a contract crate and a build script added.
+
+**Catalogue service (milestone 15).** Reading a crate's catalogue means compiling it, and compilation runs the crate's build scripts and proc macros. The service fetches `name@version` and its dependencies first, then builds without network access, inside a sandbox, under limits on time, memory, and disk. A published crate version never changes, so the service keeps each catalogue forever, keyed by `name@version`. Browsing runs no code.
+
+**Composer (milestone 16) and Docker builder (milestone 17).** The composer reads cached catalogues, keeps the graph as a graph file and a spec, and asks the server for an export. The Docker builder builds one image per segment, each from its own multi-stage build, and publishes it.
+
+**Open questions.**
+
+- Whether two ports connect across semver-compatible versions of a message's package, or only at one version.
+- How a node presents its `Build::Config`, so the composer can show and fill each node's configuration.
+- Where images are published, and with whose credentials.
+- Whether a gdl-compatible crate also offers whole graphs, as templates that the composer opens and edits.
+
 ## 10. Crate map
 
 ```
@@ -483,7 +520,12 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 9 | Streaming example and generator: no JSON-lines server for a streaming source; an ASR-like example with a relay; docs | generated example crates build and pass `--check`; a test streams audio through the generated segments; docs match code |
 | 10 | Composition, messages (9.6): `gdl-syntax` shared by `graph!` and `gdl-gen`; `#[derive(gdl::Message)]` and `gdl::Catalogue`; `[graph]` and `[messages]` in the spec; `gdl-gen --resolve` | `graph!` behaves as before (trybuild cases unchanged); the derive registers a message with its path and wire capability, and refuses a generic type; a graph file whose edges disagree reports every disagreement with its position; a non-name message position is refused; resolution through one protocols crate and through several; a missing name, an ambiguous name, a pin that breaks a tie, a pin to nothing, a listed crate that offers nothing; a nested module and a re-export resolve to the definition |
 | 11 | Composition, contract: generate the contract crate from a graph file and its resolution, so `--out`, `--check`, and `--diagram` work from a `[graph]` spec; settle the open questions of 9.6 | the chat example builds from a graph file and a protocols crate, and its segments match the committed ones in behavior; the contract hash changes when a name resolves to another crate |
-| 12 | Composition, nodes: implementation crates offer their nodes the way protocols crates offer messages, and a node name binds to an implementation without a `[bind.*]` table | to be planned |
+| 12 | Node catalogue (9.7): node implementations register their role and port message types; a `gdl::Message` trait exposes a message's identity; graph node instances bind to catalogue nodes without `[bind.*]` | to be planned |
+| 13 | Portable model (9.7): syntax, manifest, placement, and layout in a crate without the runtime, built for wasm; `gdl` uses it | to be planned |
+| 14 | Export (9.7): `gdl-gen --export` writes a tarball with the contract, one crate per segment, and `build-all.sh` | to be planned |
+| 15 | Catalogue service (9.7): fetch, sandboxed build, and a cache of catalogues by `name@version` | to be planned |
+| 16 | Composer (9.7): the web UI | to be planned |
+| 17 | Docker builder (9.7): one multi-stage build per segment, and publication | to be planned |
 
 ## 12. Later work
 
@@ -533,3 +575,7 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 31 | Where a composed graph lives | a standalone graph file in `graph!` syntax, with message names instead of Rust types; one parser (`gdl-syntax`) for both | owner, 2026-10-18 |
 | 32 | How a crate offers its messages | `#[derive(gdl::Message)]` into a link-time catalogue (`linkme`), read by compiling and running a program that links the listed crates. Not a source scan (it misses re-exports and macro-made types, and cannot tell wire capability), not rustdoc JSON (nightly; ruling 7), and not a probe of `crate::Name` paths (crate roots only, with rustc diagnostics as the errors) | owner, 2026-10-18 |
 | 33 | A name in two crates | an error that lists the candidates; `[messages] pin` breaks the tie. Search order never decides, because a type added to an earlier crate would silently rebind the graph | owner, 2026-10-18 |
+| 34 | What a gdl-compatible crate offers | discoverable nodes, each with its role and the message types at its ports | owner, 2026-10-18 |
+| 35 | Export layout | one crate per segment, each with its own `Cargo.toml`, built one at a time by `build-all.sh`; no shared workspace, so link dependencies stay isolated (9.5) | owner, 2026-10-18 |
+| 36 | Where the composer's rules live | in a crate without the runtime that compiles to wasm, used by both the composer and `gdl` | 2026-10-18 |
+| 37 | Reading a published crate's catalogue | a server builds it in a sandbox, without network access after the fetch, and keeps the result by `name@version` forever | 2026-10-18 |
