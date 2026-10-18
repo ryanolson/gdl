@@ -329,6 +329,16 @@ fn snake_case(name: &str) -> String {
     out
 }
 
+/// `word` as Rust code must spell it: raw (`r#gen`) when it is a keyword of
+/// any edition, as is.
+pub fn identifier(word: &str) -> String {
+    if is_keyword(word) {
+        format!("r#{word}")
+    } else {
+        word.to_string()
+    }
+}
+
 /// Every keyword a raw identifier can spell: the strict and reserved
 /// keywords of every edition (`crate`, `self`, `super`, and `Self` cannot be
 /// raw, and are rejected above). Escaping a word that is a keyword only in a

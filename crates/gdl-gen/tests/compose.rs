@@ -140,3 +140,19 @@ fn a_graph_whose_names_disagree_fails_before_any_build() {
 fn toml_string(path: &Path) -> String {
     format!("{:?}", path.to_string_lossy())
 }
+
+/// A generated contract names each message where it is defined, so a
+/// message in a private module cannot be named, and the error says why.
+#[test]
+fn a_message_must_be_public_where_it_is_defined() {
+    let spec = gdl_gen::Spec::load(&fixtures().join("private.toml")).expect("spec");
+    let error = gdl_gen::diagram(&spec, &target(), gdl_gen::Format::Mermaid)
+        .expect_err("private")
+        .to_string();
+    assert!(
+        error.contains(
+            "a message must be public at the path where it is defined: `private_protocols::inner::Prompt`"
+        ),
+        "{error}"
+    );
+}

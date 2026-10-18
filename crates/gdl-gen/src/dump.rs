@@ -285,7 +285,7 @@ fn cargo(work: &Path, target: &Path, args: &[&str]) -> Result<String, Error> {
 /// Write `text` unless the file already holds it: a rewrite with the same
 /// text still changes the file's modification time, and cargo would rebuild
 /// and relink the program for it.
-fn write(path: &Path, text: &str) -> Result<(), Error> {
+pub(crate) fn write(path: &Path, text: &str) -> Result<(), Error> {
     if std::fs::read_to_string(path).is_ok_and(|existing| existing == text) {
         return Ok(());
     }

@@ -81,6 +81,8 @@ pub(crate) struct GraphSource {
 pub(crate) struct MessageCrate {
     /// The package name.
     pub(crate) package: String,
+    /// Its library's crate name, as Rust code names it.
+    pub(crate) lib: String,
     /// Its directory, resolved.
     pub(crate) path: PathBuf,
 }
@@ -178,16 +180,12 @@ impl Spec {
         &self.dir
     }
 
-    /// The contract crate, which generation and diagrams need. A spec with
-    /// a graph file has none yet: its messages resolve (`--resolve`), but
-    /// no contract crate is generated from it.
-    pub(crate) fn contract(&self) -> Result<&Contract, Error> {
+    /// The contract crate a `[contract]` spec names.
+    #[cfg(test)]
+    pub(crate) fn contract(&self) -> Option<&Contract> {
         match &self.source {
-            Source::Contract(contract) => Ok(contract),
-            Source::Graph(_) => Err(Error::new(format!(
-                "{}: generating segments or a diagram needs a [contract]; a [graph] spec only resolves its messages (--resolve)",
-                self.file.display()
-            ))),
+            Source::Contract(contract) => Some(contract),
+            Source::Graph(_) => None,
         }
     }
 
@@ -302,7 +300,7 @@ fn graph_source(dir: &Path, graph: RawGraph, messages: RawMessages) -> Result<Gr
     let mut crates: Vec<MessageCrate> = Vec::with_capacity(messages.crates.len());
     for path in messages.crates {
         let path = dir.join(path);
-        let CrateNames { package, .. } = crate_names(&path)?;
+        let CrateNames { package, lib } = crate_names(&path)?;
         // Catalogue entries name a package, not a path: two listed packages
         // of one name could not be told apart by a pin.
         if let Some(first) = crates.iter().find(|c| c.package == package) {
@@ -312,7 +310,15 @@ fn graph_source(dir: &Path, graph: RawGraph, messages: RawMessages) -> Result<Gr
                 path.display()
             )));
         }
-        crates.push(MessageCrate { package, path });
+        // The generated contract names each message by its library's path.
+        if let Some(first) = crates.iter().find(|c| c.lib == lib) {
+            return Err(Error::new(format!(
+                "[messages] crates: {} and {} are both library `{lib}`",
+                first.path.display(),
+                path.display()
+            )));
+        }
+        crates.push(MessageCrate { package, lib, path });
     }
     Ok(GraphSource {
         path: dir.join(graph.path),
@@ -348,15 +354,11 @@ fn crate_names(dir: &Path) -> Result<CrateNames, Error> {
     Ok(CrateNames { package, lib })
 }
 
-/// The Rust path of a contract library's root: its name, or `r#name` when
-/// the name is a keyword (cargo accepts a library named `async`, and Rust
-/// reaches it only as `r#async`).
-fn default_module(lib: &str) -> String {
-    if syn::parse_str::<syn::Ident>(lib).is_ok() {
-        lib.to_string()
-    } else {
-        format!("r#{lib}")
-    }
+/// The Rust path of a library's root: its name, or `r#name` when the name
+/// is a keyword (cargo accepts a library named `async` or `gen`, and Rust
+/// reaches it only as `r#async` or `r#gen`).
+pub(crate) fn default_module(lib: &str) -> String {
+    gdl_syntax::identifier(lib)
 }
 
 #[cfg(test)]
@@ -432,14 +434,19 @@ mod tests {
         assert_eq!(graph.crates[0].package, "chat-protocols");
         assert_eq!(graph.crates[0].path, dir.join("protocols"));
         assert_eq!(graph.pins["Chunk"], "chat_protocols::Chunk");
-        let error = spec.contract().expect_err("no contract").to_string();
-        assert!(error.contains("only resolves its messages"), "{error}");
+        assert!(spec.contract().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_spec_has_a_contract_or_a_graph_with_its_messages() {
         let dir = contract_dir("sources");
+        std::fs::create_dir_all(dir.join("twin")).expect("dir");
+        std::fs::write(
+            dir.join("twin/Cargo.toml"),
+            "[package]\nname = \"twin\"\n[lib]\nname = \"chat_contract\"\n",
+        )
+        .expect("write");
         let gdl = "[gdl]\nversion = \"0.1\"\n";
         let contract = "[contract]\npath = \"contract\"\n";
         let graph = "[graph]\npath = \"g.gdl\"\n";
@@ -459,6 +466,12 @@ mod tests {
             (
                 format!("{graph}[messages]\ncrates = [\"contract\", \"./contract\"]\n{gdl}"),
                 "are both package `chat-contract`",
+            ),
+            // The generated contract names each message crate by its
+            // library: two of one library name cannot both be named.
+            (
+                format!("{graph}[messages]\ncrates = [\"contract\", \"twin\"]\n{gdl}"),
+                "are both library `chat_contract`",
             ),
         ] {
             let error = Spec::parse(&text, &dir.join("gdl.toml"), &dir)
@@ -530,5 +543,7 @@ mod tests {
     fn the_default_module_escapes_a_keyword_library() {
         assert_eq!(default_module("chat_contract"), "chat_contract");
         assert_eq!(default_module("async"), "r#async");
+        // A keyword only from edition 2024 on; syn takes it for a name.
+        assert_eq!(default_module("gen"), "r#gen");
     }
 }

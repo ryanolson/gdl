@@ -7,5 +7,5 @@
 mod model;
 mod parse;
 
-pub use model::{Edge, Graph, Hop, Node, Role};
+pub use model::{Edge, Graph, Hop, Node, Role, identifier};
 pub use parse::{Request, Sig};

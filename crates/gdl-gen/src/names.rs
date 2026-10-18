@@ -17,8 +17,9 @@ use syn::spanned::Spanned as _;
 use crate::Error;
 
 /// A graph file whose structure is checked and whose edges agree.
-#[derive(Debug)]
 pub(crate) struct GraphFile {
+    /// The checked graph, whose message positions all hold names.
+    pub(crate) graph: Graph,
     /// Each message name, with the nodes that declare it, in declaration
     /// order.
     pub(crate) uses: BTreeMap<String, Vec<String>>,
@@ -118,10 +119,19 @@ impl GraphFile {
             differ(edge.from, edge.to, edge.sent, edge.taken);
         }
         if problems.is_empty() {
-            Ok(Self { uses })
+            Ok(Self { graph, uses })
         } else {
             Err(Error::new(problems.join("\n")))
         }
+    }
+}
+
+/// The message name at a position of a checked graph file, or `None` for
+/// `()`.
+pub(crate) fn message(ty: &Type) -> Option<String> {
+    match name(ty) {
+        Ok(Name::Message(name)) => Some(name),
+        Ok(Name::Unit) | Err(()) => None,
     }
 }
 
@@ -162,14 +172,16 @@ fn port_types(sig: &Sig) -> Vec<&Type> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn parse(text: &str) -> Result<GraphFile, String> {
-        GraphFile::parse(text, Path::new("chat.gdl")).map_err(|e| e.to_string())
+    fn parse(text: &str) -> Result<BTreeMap<String, Vec<String>>, String> {
+        GraphFile::parse(text, Path::new("chat.gdl"))
+            .map(|file| file.uses)
+            .map_err(|e| e.to_string())
     }
 
-    const CHAT: &str = r#"name = "chat", schema = 1;
+    pub(crate) const CHAT: &str = r#"name = "chat", schema = 1;
 source   Frontend: Prompt -> stream Chunk;
 operator Preprocess: (Prompt -> stream Chunk) over (Words -> stream Text);
 forward  Truncate: Words -> Words;
@@ -182,13 +194,13 @@ topology: Frontend => Preprocess { Truncate => Engine => Detokenize => Format } 
 
     #[test]
     fn a_graph_file_lists_each_message_with_the_nodes_that_declare_it() {
-        let file = parse(CHAT).expect("graph");
-        let names: Vec<&str> = file.uses.keys().map(String::as_str).collect();
+        let uses = parse(CHAT).expect("graph");
+        let names: Vec<&str> = uses.keys().map(String::as_str).collect();
         assert_eq!(
             names,
             ["Chunk", "Piece", "Prompt", "Text", "Token", "Words"]
         );
-        assert_eq!(file.uses["Words"], ["Preprocess", "Truncate", "Engine"]);
+        assert_eq!(uses["Words"], ["Preprocess", "Truncate", "Engine"]);
     }
 
     /// Every disagreement is reported, each at the receiving end's type.

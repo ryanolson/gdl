@@ -1,0 +1,12 @@
+# The only message is defined in a private module.
+[graph]
+path = "private.gdl"
+
+[messages]
+crates = ["private-protocols"]
+
+[gdl]
+path = "../../../../gdl"
+
+[segment.all]
+nodes = ["A", "B"]
