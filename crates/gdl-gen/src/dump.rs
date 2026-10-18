@@ -87,7 +87,8 @@ pub fn catalogue(
                     "resolving the message crates' dependencies failed:\n{e}"
                 ))
             })?;
-        identities(&metadata, crates)
+        let platform = Platform::host()?;
+        identities(&metadata, crates, &platform)
     };
     let (identities, text) = run(
         target,
@@ -120,6 +121,88 @@ pub struct Identity {
     pub version: String,
 }
 
+/// The platform the catalogue program is built for: the host's target
+/// triple and its `cfg` settings.
+struct Platform {
+    triple: String,
+    /// Each setting: a name, with its value for `key = "value"` settings.
+    settings: Vec<(String, Option<String>)>,
+}
+
+impl Platform {
+    fn host() -> Result<Self, Error> {
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let run = |args: &[&str]| {
+            let output = Command::new(&rustc)
+                .args(args)
+                .output()
+                .map_err(|e| Error::new(format!("running rustc: {e}")))?;
+            Ok::<_, Error>(String::from_utf8_lossy(&output.stdout).into_owned())
+        };
+        let triple = run(&["-vV"])?
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .map(str::to_string)
+            .ok_or_else(|| Error::new("rustc -vV names no host"))?;
+        let settings = Self::settings(&run(&["--print", "cfg"])?);
+        Ok(Self { triple, settings })
+    }
+
+    /// `rustc --print cfg` lines: `unix`, `target_os="linux"`.
+    fn settings(text: &str) -> Vec<(String, Option<String>)> {
+        text.lines()
+            .map(|line| match line.split_once('=') {
+                Some((key, value)) => (key.to_string(), Some(value.trim_matches('"').to_string())),
+                None => (line.to_string(), None),
+            })
+            .collect()
+    }
+
+    /// Whether a dependency's platform, a target triple or a `cfg(..)`,
+    /// applies here. A form this does not read applies, so that a check
+    /// built on it errs toward reporting a conflict, never hiding one.
+    fn applies(&self, target: &str) -> bool {
+        let Some(predicate) = target
+            .strip_prefix("cfg(")
+            .and_then(|t| t.strip_suffix(')'))
+        else {
+            return target == self.triple;
+        };
+        syn::parse_str::<syn::Meta>(predicate).map_or(true, |meta| self.holds(&meta))
+    }
+
+    fn holds(&self, meta: &syn::Meta) -> bool {
+        use syn::punctuated::Punctuated;
+        let name = |path: &syn::Path| path.get_ident().map(ToString::to_string);
+        match meta {
+            syn::Meta::Path(path) => name(path).is_some_and(|n| self.settings.contains(&(n, None))),
+            syn::Meta::NameValue(pair) => match (&pair.value, name(&pair.path)) {
+                (
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(value),
+                        ..
+                    }),
+                    Some(key),
+                ) => self.settings.contains(&(key, Some(value.value()))),
+                _ => true,
+            },
+            syn::Meta::List(list) => {
+                let Ok(args) =
+                    list.parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+                else {
+                    return true;
+                };
+                match name(&list.path).as_deref() {
+                    Some("all") => args.iter().all(|m| self.holds(m)),
+                    Some("any") => args.iter().any(|m| self.holds(m)),
+                    Some("not") => args.len() != 1 || !self.holds(&args[0]),
+                    _ => true,
+                }
+            }
+        }
+    }
+}
+
 fn alias(index: usize) -> String {
     format!("gdl_messages_{index}")
 }
@@ -127,7 +210,11 @@ fn alias(index: usize) -> String {
 /// The listed crates' identities, from the catalogue program's `cargo
 /// metadata`, after checking that the program links one gdl and that each
 /// listed crate's identity is its own.
-fn identities(metadata: &str, crates: &[MessageCrate]) -> Result<Vec<Identity>, Error> {
+fn identities(
+    metadata: &str,
+    crates: &[MessageCrate],
+    platform: &Platform,
+) -> Result<Vec<Identity>, Error> {
     #[derive(serde::Deserialize)]
     struct Metadata {
         packages: Vec<Package>,
@@ -154,6 +241,14 @@ fn identities(metadata: &str, crates: &[MessageCrate]) -> Result<Vec<Identity>, 
     struct Dep {
         name: String,
         pkg: String,
+        dep_kinds: Vec<DepKind>,
+    }
+    #[derive(serde::Deserialize)]
+    struct DepKind {
+        /// `None` for a normal dependency, else `dev` or `build`.
+        kind: Option<String>,
+        /// The platforms it applies to: a `cfg(..)` or a target triple.
+        target: Option<String>,
     }
 
     let metadata: Metadata = serde_json::from_str(metadata)
@@ -175,18 +270,43 @@ fn identities(metadata: &str, crates: &[MessageCrate]) -> Result<Vec<Identity>, 
             .map(|d| d.pkg.as_str())
     };
 
+    // The packages linked into the program: reached from it through normal
+    // dependencies. A build script's dependencies run at build time and
+    // never share the program's linker sections.
+    let node = |id: &str| metadata.resolve.nodes.iter().find(|n| n.id == id);
+    // Cargo lists a dependency for another platform too, marked with the
+    // platform it applies to.
+    let normal = |d: &Dep| {
+        d.dep_kinds
+            .iter()
+            .any(|k| k.kind.is_none() && k.target.as_deref().is_none_or(|t| platform.applies(t)))
+    };
+    let mut linked: Vec<&str> = vec![root.id.as_str()];
+    let mut next = 0;
+    while let Some(id) = linked.get(next).copied() {
+        next += 1;
+        for dep in node(id).into_iter().flat_map(|n| &n.deps) {
+            if normal(dep) && !linked.contains(&dep.pkg.as_str()) {
+                linked.push(&dep.pkg);
+            }
+        }
+    }
+    let linked_packages = || {
+        metadata
+            .packages
+            .iter()
+            .filter(|p| linked.contains(&p.id.as_str()))
+    };
+
     let mut problems = Vec::new();
     let gdl = dependency("gdl").ok_or_else(|| Error::new("the catalogue program has no gdl"))?;
-    for stray in metadata
-        .packages
-        .iter()
-        .filter(|p| p.name == "gdl" && p.id != gdl)
-    {
+    for stray in linked_packages().filter(|p| p.name == "gdl" && p.id != gdl) {
         let users: Vec<String> = metadata
             .resolve
             .nodes
             .iter()
-            .filter(|n| n.deps.iter().any(|d| d.pkg == stray.id))
+            .filter(|n| linked.contains(&n.id.as_str()))
+            .filter(|n| n.deps.iter().any(|d| d.pkg == stray.id && normal(d)))
             .map(|n| {
                 format!(
                     "`{}`",
@@ -293,12 +413,15 @@ fn cargo(work: &Path, target: &Path, args: &[&str]) -> Result<String, Error> {
 /// text still changes the file's modification time, and cargo would rebuild
 /// and relink the program for it. The text goes to a file of this process
 /// and is renamed into place, so a reader never sees a file half written,
-/// even when another process writes the same path.
+/// even when another thread or process writes the same path.
 pub(crate) fn write(path: &Path, text: &str) -> Result<(), Error> {
     if std::fs::read_to_string(path).is_ok_and(|existing| existing == text) {
         return Ok(());
     }
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    // Unique to this write: threads of one process write one path too.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = path.with_extension(format!("tmp-{}-{write}", std::process::id()));
     std::fs::write(&temporary, text).map_err(|e| io(&temporary, e))?;
     std::fs::rename(&temporary, path).map_err(|e| io(path, e))
 }
@@ -336,6 +459,57 @@ mod tests {
     /// its build until its program has run: otherwise another dump can
     /// rewrite the program in between.
     #[test]
+    fn a_dependency_platform_applies_by_its_cfg_or_triple() {
+        let linux = Platform {
+            triple: "x86_64-unknown-linux-gnu".into(),
+            settings: Platform::settings(
+                "unix\ntarget_os=\"linux\"\ntarget_pointer_width=\"64\"\n",
+            ),
+        };
+        for (target, applies) in [
+            ("cfg(unix)", true),
+            ("cfg(windows)", false),
+            ("cfg(not(any(unix, windows)))", false),
+            ("cfg(all(unix, target_os = \"linux\"))", true),
+            ("cfg(target_os = \"macos\")", false),
+            ("cfg(not(target_os = \"macos\"))", true),
+            ("x86_64-unknown-linux-gnu", true),
+            ("x86_64-pc-windows-msvc", false),
+        ] {
+            assert_eq!(linux.applies(target), applies, "{target}");
+        }
+    }
+
+    /// Threads of one process that write the same file at once each
+    /// succeed, and the file holds the text.
+    #[test]
+    fn concurrent_writers_of_one_file_all_succeed() {
+        let dir = std::env::temp_dir().join(format!("gdl-gen-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("lib.rs");
+        let text = "x".repeat(1024);
+        let barrier = std::sync::Barrier::new(16);
+        let results: Vec<Result<(), Error>> = std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        write(&path, &text)
+                    })
+                })
+                .collect();
+            writers
+                .into_iter()
+                .map(|w| w.join().expect("writer"))
+                .collect()
+        });
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_dump_waits_while_another_holds_the_target_directory() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let spec = crate::Spec::load(&root.join("examples/asr/gdl.toml")).expect("spec");
@@ -347,7 +521,11 @@ mod tests {
         manifest(&contract, &target).expect("manifest");
         let started = std::time::Instant::now();
         manifest(&contract, &target).expect("manifest");
-        let wait = (started.elapsed() * 10).max(Duration::from_secs(2));
+        // Bounded above too: other tests share this target directory, and a
+        // timed run that waited for their builds would hold the lock below
+        // for tens of seconds. A dump that ignored the lock still finishes
+        // in well under five seconds once built.
+        let wait = (started.elapsed() * 10).clamp(Duration::from_secs(2), Duration::from_secs(5));
 
         let held = lock(&target).expect("lock");
         let (tx, rx) = std::sync::mpsc::channel();

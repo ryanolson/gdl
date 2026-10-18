@@ -180,7 +180,9 @@ fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, E
             "graph `{name}`: its name starts every package name, so it is a letter, then letters, digits, `-`, and `_`"
         )));
     }
-    let package = format!("{name}-contract");
+    // Named as segment packages are, so the package checks of `validate`
+    // compare like with like.
+    let package = emit::package_name(&name, "contract");
     let lib = package.replace('-', "_");
     let lib_rs = contract::lib_rs(&file.graph, &resolution, &source.path);
     let crates = |path: &dyn Fn(&Path) -> String| {
@@ -312,6 +314,15 @@ fn validate(
         if !valid {
             problems.push(format!(
                 "segment `{segment}`: a segment name is letters, digits, `-`, and `_`"
+            ));
+            continue;
+        }
+        // The generated contract is written to `contract/`, whatever its
+        // package is called; case is folded for file systems that fold it.
+        if matches!(spec.source, spec::Source::Graph(_)) && segment.eq_ignore_ascii_case("contract")
+        {
+            problems.push(format!(
+                "segment `{segment}`: the generated contract crate is `contract/`; rename the segment"
             ));
             continue;
         }

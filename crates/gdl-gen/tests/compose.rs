@@ -89,6 +89,18 @@ fn only_the_listed_version_of_a_package_offers_messages() {
     assert_eq!((chunk.version.as_str(), chunk.wire), ("0.2.0", true));
 }
 
+/// Only a `gdl` linked into the catalogue program conflicts: one that a
+/// message crate takes for another platform, or for its build script, does
+/// not.
+#[test]
+fn a_gdl_that_is_not_linked_is_no_conflict() {
+    let resolution = resolve("platform.toml").expect("resolved");
+    assert_eq!(
+        resolution.messages["Chunk"].path,
+        "platform_protocols::Chunk"
+    );
+}
+
 /// A program holds one message catalogue per gdl. A message crate built
 /// against another package named `gdl` is refused by name, before anything
 /// is compiled.

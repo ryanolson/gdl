@@ -125,7 +125,13 @@ fn rustfmt_config() -> Result<PathBuf, Error> {
 
 /// The package name of a segment's crate.
 pub(crate) fn package(manifest: &Manifest, segment: &str) -> String {
-    format!("{}-{}", slug(&manifest.name), slug(segment))
+    package_name(&manifest.name, segment)
+}
+
+/// The package that graph `graph` generates for `part`: a segment, or the
+/// contract.
+pub(crate) fn package_name(graph: &str, part: &str) -> String {
+    format!("{}-{}", slug(graph), slug(part))
 }
 
 fn slug(name: &str) -> String {

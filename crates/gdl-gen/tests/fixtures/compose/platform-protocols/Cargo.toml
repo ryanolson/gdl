@@ -1,0 +1,20 @@
+[package]
+name = "platform-protocols"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gdl = { path = "../../../../../gdl" }
+
+# Another package named `gdl`, which never reaches the catalogue program
+# on this platform: only on another target, and only for a build script.
+[target.'cfg(not(any(unix, windows)))'.dependencies]
+other-gdl = { package = "gdl", path = "../stray-gdl" }
+
+[build-dependencies]
+other-gdl = { package = "gdl", path = "../stray-gdl" }
+
+# Not a member of the repository workspace: it is built only by the
+# catalogue programs that the tests generate.
+[workspace]

@@ -12,6 +12,7 @@ use gdl_syntax::{Graph, Request, Sig};
 use proc_macro2::{Span, TokenStream};
 use quote::ToTokens;
 use syn::Type;
+use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 
 use crate::Error;
@@ -140,7 +141,8 @@ fn name(ty: &Type) -> Result<Name, ()> {
     match ty {
         Type::Tuple(tuple) if tuple.elems.is_empty() => Ok(Name::Unit),
         Type::Path(path) if path.qself.is_none() => match path.path.get_ident() {
-            Some(ident) => Ok(Name::Message(ident.to_string())),
+            // `r#Prompt` is `Prompt`, as the catalogue records it.
+            Some(ident) => Ok(Name::Message(ident.unraw().to_string())),
             None => Err(()),
         },
         _ => Err(()),
@@ -254,6 +256,19 @@ topology: A => B => C;
             "chat.gdl:3:13: the request on this edge is streamed: declare it as `Head + stream Item`\n\
              chat.gdl:4:13: the request on this edge is streamed: declare it as `Head + stream Item`"
         );
+    }
+
+    /// `r#Prompt` is how Rust may spell `Prompt`: one name, on both ends of
+    /// an edge and in the list of names.
+    #[test]
+    fn a_raw_identifier_names_the_same_message() {
+        let text = r#"name = "g", schema = 1;
+source A: r#Prompt -> stream Prompt;
+sink   B: Prompt -> stream r#Prompt;
+topology: A => B;
+"#;
+        let uses = parse(text).expect("one name");
+        assert_eq!(uses.keys().collect::<Vec<_>>(), ["Prompt"]);
     }
 
     #[test]

@@ -29,6 +29,10 @@ mod inner {
 #[allow(unused_imports)]
 use inner::Words as Reexported;
 
+/// Spelled raw, named plainly: a graph names it `Raw`.
+#[derive(gdl::Message)]
+struct r#Raw;
+
 /// Not derived: not in the catalogue.
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
@@ -72,6 +76,9 @@ fn a_derived_message_is_registered_with_its_definition_path() {
     assert_eq!(words.len(), 1, "a re-export registers nothing: {words:?}");
     assert_eq!(words[0].path, "catalogue::inner::Words");
     assert!(find(&catalogue, "Reexported").is_empty());
+    let raw = find(&catalogue, "Raw");
+    assert_eq!(raw.len(), 1, "{:?}", catalogue.messages);
+    assert_eq!(raw[0].path, "catalogue::Raw");
     assert!(find(&catalogue, "Unregistered").is_empty());
 }
 

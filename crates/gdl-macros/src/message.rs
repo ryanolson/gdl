@@ -4,6 +4,7 @@
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned};
 use syn::DeriveInput;
+use syn::ext::IdentExt as _;
 use syn::spanned::Spanned;
 
 pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
@@ -14,7 +15,8 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         ));
     }
     let ident = &input.ident;
-    let name = ident.to_string();
+    // `r#Prompt` is `Prompt`: graphs name the type, not its spelling.
+    let name = ident.unraw().to_string();
     // Every port type crosses tasks. Checked here, at the definition, so a
     // protocols crate cannot publish a message that no graph can carry.
     let bounds = quote_spanned! {ident.span()=>

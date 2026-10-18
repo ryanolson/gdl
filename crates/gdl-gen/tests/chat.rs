@@ -488,3 +488,53 @@ fn rendering_a_graph_spec_writes_nothing_in_the_output() {
     assert!(written.is_empty(), "{written:?}");
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// A segment named `contract` would share the generated contract's
+/// directory. Refused whatever the graph's name: package names fold case,
+/// and a graph named `Chat` once slipped past the package check and mixed
+/// the two crates' files.
+#[test]
+fn a_segment_cannot_take_the_contract_directory() {
+    let dir = scratch("contract-segment");
+    let example = example();
+    let graph = std::fs::read_to_string(example.join("chat.gdl"))
+        .expect("graph")
+        .replace("name = \"chat\"", "name = \"Chat\"");
+    std::fs::write(dir.join("chat.gdl"), graph).expect("graph");
+    let spec = std::fs::read_to_string(example.join("gdl.toml"))
+        .expect("spec")
+        .replace("[segment.front]", "[segment.contract]")
+        .replace(
+            "crates = [\"protocols\"]",
+            &format!("crates = [{:?}]", example.join("protocols")),
+        )
+        .replace(
+            "path = \"../../crates/gdl\"",
+            &format!("path = {:?}", root().join("crates/gdl")),
+        );
+    let spec = spec
+        .lines()
+        .map(|line| {
+            match line
+                .strip_prefix("path = \"")
+                .and_then(|p| p.strip_suffix('"'))
+            {
+                Some(relative) if !relative.ends_with(".gdl") && !relative.starts_with('/') => {
+                    format!("path = {:?}", example.join(relative))
+                }
+                _ => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(dir.join("gdl.toml"), spec).expect("spec");
+    let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
+    let error = gdl_gen::render(&spec, &dir.join("segments"), &target("gdl-gen-tests"))
+        .expect_err("a segment in contract/")
+        .to_string();
+    assert!(
+        error.contains("segment `contract`: the generated contract crate is `contract/`"),
+        "{error}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
