@@ -1,6 +1,6 @@
 # dynamo-gdl plan
 
-Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Streaming requests (section 7.9, milestones 7 to 9) planned 2026-10-16 and approved after three review rounds (`agent-docs/reviews/stream-plan-r*.md`); milestones 7 to 9 done, their reviews clean (`m7-r1.md`, `m8-r1.md` to `m8-r8.md`), 2026-10-17. Measurements: `agent-docs/perf/`.
+Status: approved with changes (draft 4), after review rounds 1 to 3 (`agent-docs/reviews/`). Rulings are in section 13. Progress: milestones 0 to 2 done, and their mega review is clean (ten passes, `agent-docs/reviews/m1-r*.md`); milestone 3 implemented, mega review in progress (2026-10-15). Streaming requests (section 7.9, milestones 7 to 9) planned 2026-10-16 and approved after three review rounds (`agent-docs/reviews/stream-plan-r*.md`); milestones 7 to 9 done, their reviews clean (`m7-r1.md`, `m8-r1.md` to `m8-r8.md`), 2026-10-17. Measurements: `agent-docs/perf/`. Composition (section 9.6, milestones 10 to 12) planned 2026-10-18 at the owner's request; milestone 10 in progress.
 
 ## 1. Goal
 
@@ -413,13 +413,48 @@ Runtime config, separate from placement: the roster, admission limits, timeouts,
 
 Native link requirements apply whenever a crate is a dependency, and Cargo unifies features across packages built together. Separate implementation crates are the only reliable isolation. Milestone 5 proves it with a sentinel crate.
 
+### 9.6 Composition
+
+**Owner request 2026-10-18.** Composing a graph should be easy. A graph names its messages, and later its nodes, and a tool finds the crates that define them. When all the messages are in one protocols crate, that crate is enough to check the graph. Otherwise the spec lists every crate that holds messages.
+
+`graph!` already takes messages from other crates through `use`, but the compiler is then the only resolver, and its errors are type errors in expanded code. A graph file names messages abstractly, and `gdl-gen` resolves each name to one type before it compiles anything for the graph.
+
+**Graph file.** The graph file has the same syntax as the body of `graph!`, and both are read by one parser, `gdl-syntax`. Because `gdl-macros` is a proc-macro crate, `gdl-gen` cannot import from it, so the parser lives in a separate crate. In a graph file, a message position takes a bare name (`Prompt`), or `()` as the head of a stream. Paths, generics, and references are refused, because they are Rust types and not message names.
+
+```toml
+[graph]
+path = "chat.gdl"                   # instead of [contract]
+
+[messages]
+crates = ["protocols"]              # crate directories, relative to the spec
+pin = { Chunk = "chat_protocols::Chunk" }   # only to break a tie
+```
+
+**Catalogue.** A crate offers its messages with `#[derive(gdl::Message)]`. The derive puts one entry in a link-time list: the package, the name, the definition path (`module_path!()` and the type name), and whether the type is a wire type. The wire probe is expanded at the concrete type, as in 9.1. The list is a `linkme` distributed slice. A prototype on 2026-10-18 showed that the entries of a crate are kept when the program refers to it only with `use krate as _`, in debug and release builds, under `deny(unsafe_code)`. `gdl-gen` reads the catalogue as it reads the manifest (9.3). It builds one program that links every listed crate and prints `gdl::Catalogue::linked()` as TOML. That program shares the dump's target directory and lock. A generic type cannot derive `Message`, because it has no concrete type to register.
+
+**Checks, each reporting every problem it finds.**
+
+1. Names agree on every edge: what one end sends is what the next end takes, including whether it is a stream. No crate is compiled. Each problem has the file, line, and column.
+2. Every name resolves to exactly one catalogue entry among the listed crates. A missing name lists the names the crates offer, suggests near names, and names any unlisted linked crate that defines it. An ambiguous name lists its candidates. A pin must name an entry, and only for a name the graph uses. A listed crate that offers nothing is a problem: it derives nothing, or it uses a different gdl from the spec's.
+3. Wire capability comes from the catalogue. A missing wire capability is not an error at this stage: a placement decides which edges cross (9.4).
+
+Entries are per definition, not per path. A type that one crate re-exports from another is one entry, so a re-export is never ambiguous.
+
+**Open questions, for milestone 11.**
+
+- The contract hash covers type names as written (9.1). A generated contract must write the resolved path, not the bare name, so that two deployments that resolve `Prompt` to different crates get different hashes.
+- A type's definition path can go through a private module. The generated contract must name a public path, so the catalogue may need to record one.
+- The schema rule (9.1) assumes that the graph's author owns the message types. With an external protocols crate, someone else can change a wire form.
+- The derive makes a protocols crate depend on `gdl`, which brings in velo and tokio. If that matters to a crate that is shared outside gdl, the catalogue and the derive can move into a small crate.
+
 ## 10. Crate map
 
 ```
 crates/
   gdl/          Cx, Error, role traits, Build, typed graph structure, local composition,
                 Manifest and placement model, validator, runtime (one internal velo module)
-  gdl-macros/   graph! proc macro
+  gdl-syntax/   the graph syntax: parser and checked model, shared by graph! and gdl-gen
+  gdl-macros/   graph! proc macro, derive(Message)
   gdl-gen/      generator binary
 examples/
   chat/         contract crate, implementation crates, placement configs, generated segments
@@ -442,6 +477,9 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 7 | Streaming requests, local: `Streamed`, the request codec, `graph!` syntax, manifest stream marker and hash, `NotWire` for both parts, request anchors in the crossing report; a placement that crosses a streamed edge is refused until milestone 8 | a streamed reference graph runs locally (on both hops, so an operator forwards its own input); input errors are fused at every node; a sink that ends early releases its input; an operator retries from its own buffer; forward nodes that expand and collapse a stream; trybuild cases for the syntax; the stream marker changes the contract hash, and so does a change to the item type alone; `NotWire` names the head and the item separately; a `Streamed` named through an alias is not a streamed edge and cannot cross |
 | 8 | Streaming requests across segments: the ack carries the input anchor, input pumps, relays, input retirement, admission and egress amendments | all 877 partitions of the streamed reference graph match the local run; fault tests mirror milestone 3's for input (lost ack, dead input producer, receiver that drops its input, early completion, cancel during setup and streaming, held input released at the deadline, a stalled input that does not block another request, relay admission at a limit of one, egress at its limit, a sink that reads input before returning its stream, a cross-direction credit deadlock ended by the deadline; stop reaches a remote relay whose forward node ends its input on stop, and the result matches the local run, also when the relay's stream waits for stop before it reads its input under exhausted credit (TCP and same-worker), when the relay's input has already ended and it adds a last item on stop, and when the relay turned a value into a stream; input half-close with a continuing response; a sink that recovers from an input `Err` keeps its response and sees no later input; a terminal input codec failure; value-to-stream and stream-to-value forward nodes across segments; a finished relay whose output the receiver has not read is released at the receiver's end; a refused egress permit before the ack leaves no input anchor); `settles` and the task baseline hold; **measured:** setup latency and per-item input cost, and unary latency unchanged |
 | 9 | Streaming example and generator: no JSON-lines server for a streaming source; an ASR-like example with a relay; docs | generated example crates build and pass `--check`; a test streams audio through the generated segments; docs match code |
+| 10 | Composition, messages (9.6): `gdl-syntax` shared by `graph!` and `gdl-gen`; `#[derive(gdl::Message)]` and `gdl::Catalogue`; `[graph]` and `[messages]` in the spec; `gdl-gen --resolve` | `graph!` behaves as before (trybuild cases unchanged); the derive registers a message with its path and wire capability, and refuses a generic type; a graph file whose edges disagree reports every disagreement with its position; a non-name message position is refused; resolution through one protocols crate and through several; a missing name, an ambiguous name, a pin that breaks a tie, a pin to nothing, a listed crate that offers nothing; a nested module and a re-export resolve to the definition |
+| 11 | Composition, contract: generate the contract crate from a graph file and its resolution, so `--out`, `--check`, and `--diagram` work from a `[graph]` spec; settle the open questions of 9.6 | the chat example builds from a graph file and a protocols crate, and its segments match the committed ones in behavior; the contract hash changes when a name resolves to another crate |
+| 12 | Composition, nodes: implementation crates offer their nodes the way protocols crates offer messages, and a node name binds to an implementation without a `[bind.*]` table | to be planned |
 
 ## 12. Later work
 
@@ -488,3 +526,6 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 28 | Cross-direction deadlock | not detected. Input pumps run on their own tasks, never driven by response reads; a deadlock the application builds is bounded by the deadline | 2026-10-16 |
 | 29 | Egress hold and wait | accepted as in the unary design. An outer end that holds an input pump's permit while its local inner end waits for another can be refused with `Overloaded` at the limit; the bounded wait means it is refused, never hung. Provisioned local runs and a local inner end already share one quota the same way | 2026-10-16 |
 | 30 | Codec selection for streamed edges | by the graph syntax, not by a third autoref level of the wire probe | 2026-10-16 |
+| 31 | Where a composed graph lives | a standalone graph file in `graph!` syntax, with message names instead of Rust types; one parser (`gdl-syntax`) for both | owner, 2026-10-18 |
+| 32 | How a crate offers its messages | `#[derive(gdl::Message)]` into a link-time catalogue (`linkme`), read by compiling and running a program that links the listed crates. Not a source scan (it misses re-exports and macro-made types, and cannot tell wire capability), not rustdoc JSON (nightly; ruling 7), and not a probe of `crate::Name` paths (crate roots only, with rustc diagnostics as the errors) | owner, 2026-10-18 |
+| 33 | A name in two crates | an error that lists the candidates; `[messages] pin` breaks the tie. Search order never decides, because a type added to an earlier crate would silently rebind the graph | owner, 2026-10-18 |
