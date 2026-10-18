@@ -9,6 +9,7 @@
 //!
 //! The design and its rulings are in `agent-docs/plan.md`.
 
+mod catalogue;
 mod compose;
 mod cx;
 mod decl;
@@ -25,6 +26,7 @@ mod role;
 mod streamed;
 mod wire;
 
+pub use catalogue::{Catalogue, MessageInfo};
 pub use compose::{BackwardChain, ForwardChain, Hop, Inner, OperatorStage, SinkStage, Source};
 pub use cx::{Cx, Deadline, RequestId};
 pub use decl::{
@@ -104,9 +106,27 @@ macro_rules! graph {
     };
 }
 
+/// Offer a type to graph files by its name: derive it in a protocols crate,
+/// and a graph file that lists the crate can name the type.
+///
+/// ```ignore
+/// #[derive(serde::Serialize, serde::Deserialize, gdl::Message)]
+/// pub struct Prompt {
+///     pub text: String,
+/// }
+/// ```
+///
+/// The type joins the [`Catalogue`] of every program that links its crate,
+/// with its package, name, definition path, and whether it is a wire type.
+/// A generic type cannot be a message: a graph names it by name alone. The
+/// expansion names gdl as `::gdl`.
+pub use gdl_macros::Message;
+
 /// Support for macro expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::catalogue::registry::{Entry as MessageEntry, MESSAGES};
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
     pub use gdl_macros::graph;
+    pub use linkme;
 }

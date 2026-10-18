@@ -16,6 +16,7 @@ publish = false
 criterion = { version = "0.7", default-features = false, features = ["async_tokio"] }
 dashmap = "6"
 futures = "0.3"
+linkme = "0.3"
 pin-project-lite = "0.2"
 prometheus = "0.14"
 rmp-serde = "1"

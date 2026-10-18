@@ -1,11 +1,13 @@
 //! The `graph!` macro: one declaration of a graph's nodes, message types,
 //! and topology, expanded into everything the runtime and the generator need
 //! from it. Reached through `gdl::graph!`; see that macro for the syntax.
+//! Also `#[derive(Message)]`, reached as `gdl::Message`.
 
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as Tokens, TokenTree};
 
 mod expand;
+mod message;
 
 /// The expansion behind `gdl::graph!`, which calls it as
 /// `graph! { $crate; <graph> }`. The leading path is how the expansion names
@@ -24,6 +26,16 @@ pub fn graph(input: TokenStream) -> TokenStream {
     };
     match gdl_syntax::Graph::parse(body) {
         Ok(graph) => expand::expand(&graph, &krate).into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// The expansion behind `gdl::Message`: one catalogue entry for the type.
+#[proc_macro_derive(Message)]
+pub fn message(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    match message::expand(&input) {
+        Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
 }

@@ -1,0 +1,11 @@
+error: a message cannot be generic: a graph names it by its name alone, so it must be one concrete type
+ --> tests/ui/message-generic.rs:5:15
+  |
+5 | struct Wrapper<T> {
+  |               ^
+
+error: a message cannot be generic: a graph names it by its name alone, so it must be one concrete type
+  --> tests/ui/message-generic.rs:10:16
+   |
+10 | struct Borrowed<'a> {
+   |                ^
