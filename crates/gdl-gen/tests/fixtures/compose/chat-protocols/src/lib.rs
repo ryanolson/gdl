@@ -42,7 +42,7 @@ pub use engine::{Token, Words};
 #[derive(gdl::Message)]
 pub struct Piece {
     /// The text.
-    pub text: std::rc::Rc<str>,
+    pub text: std::sync::Arc<str>,
 }
 
 /// Text ready for the user.

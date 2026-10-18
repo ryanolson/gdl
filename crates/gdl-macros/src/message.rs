@@ -2,7 +2,7 @@
 //! program that links its crate.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::DeriveInput;
 use syn::spanned::Spanned;
 
@@ -15,10 +15,17 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     }
     let ident = &input.ident;
     let name = ident.to_string();
+    // Every port type crosses tasks. Checked here, at the definition, so a
+    // protocols crate cannot publish a message that no graph can carry.
+    let bounds = quote_spanned! {ident.span()=>
+        fn __gdl_message<T: ::core::marker::Send + 'static>() {}
+        let _ = __gdl_message::<#ident>;
+    };
     // A derive has no `$crate`, so the expansion names gdl as `::gdl`. The
     // `const _` block keeps the static's name out of the caller's module.
     Ok(quote! {
         const _: () = {
+            #bounds
             #[::gdl::__private::linkme::distributed_slice(::gdl::__private::GDL_MESSAGE_CATALOGUE)]
             #[linkme(crate = ::gdl::__private::linkme)]
             static __GDL_MESSAGE: ::gdl::__private::MessageEntry = ::gdl::__private::MessageEntry {
