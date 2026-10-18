@@ -30,31 +30,29 @@ pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl::Manifest, Err
     // One program per contract, as for catalogues: a run that reads another
     // contract does not relink this one.
     let name = format!("gdl-manifest-{:016x}", hash(&(&dependencies, &main)));
-    let ((), text) = run(
+    let text = run(
         target,
         &name,
         "the contract's manifest",
         &dependencies,
         &main,
-        |_| Ok(()),
     )?;
     gdl::Manifest::from_toml(&text).map_err(|e| Error::new(format!("reading the manifest: {e}")))
 }
 
 /// The catalogue of every message type linked from `crates`, read with the
-/// gdl that `gdl` names, and each listed crate's package identity, in the
-/// order of `crates`.
+/// gdl that `gdl` names.
 ///
-/// Before it builds anything, this refuses a program that links a second
-/// package named `gdl`: both register into a linker section of one name,
-/// and the catalogue panics on first use. It also refuses a listed crate
-/// that another package in the program shares a name and a version with,
-/// because catalogue entries tell packages apart by those two alone.
+/// What the program links decides what it reads: no prediction from the
+/// dependency graph stands in for the linker. A program that links a
+/// second gdl's catalogue panics when it reads its own, because linkme
+/// gives both one section name. That panic is reported as the conflict it
+/// is, with every package named `gdl` and the crates that use it.
 pub fn catalogue(
     crates: &[MessageCrate],
     gdl: &GdlDep,
     target: &Path,
-) -> Result<(gdl::Catalogue, Vec<Identity>), Error> {
+) -> Result<gdl::Catalogue, Error> {
     let mut dependencies = match gdl {
         GdlDep::Path(path) => format!(
             "gdl = {{ path = {} }}\n",
@@ -80,141 +78,25 @@ pub fn catalogue(
     // One program per set of dependencies: a spec that links other crates
     // builds its own, and switching between specs relinks neither.
     let name = format!("gdl-catalogue-{:016x}", hash(&dependencies));
-    let check = |work: &Path| {
-        let metadata =
-            cargo(work, target, &["metadata", "--format-version", "1"]).map_err(|e| {
-                Error::new(format!(
-                    "resolving the message crates' dependencies failed:\n{e}"
-                ))
-            })?;
-        let platform = Platform::host()?;
-        identities(&metadata, crates, &platform)
-    };
-    let (identities, text) = run(
-        target,
-        &name,
-        "the message catalogue",
-        &dependencies,
-        &main,
-        check,
-    )?;
-    let catalogue = gdl::Catalogue::from_toml(&text)
-        .map_err(|e| Error::new(format!("reading the message catalogue: {e}")))?;
-    Ok((catalogue, identities))
-}
-
-/// A name for generated content: the same content, the same name, within
-/// one build of the generator.
-pub(crate) fn hash(value: &impl std::hash::Hash) -> u64 {
-    use std::hash::Hasher;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// A package as catalogue entries name it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Identity {
-    /// The package name.
-    pub package: String,
-    /// Its version.
-    pub version: String,
-}
-
-/// The platform the catalogue program is built for: the host's target
-/// triple and its `cfg` settings.
-struct Platform {
-    triple: String,
-    /// Each setting: a name, with its value for `key = "value"` settings.
-    settings: Vec<(String, Option<String>)>,
-}
-
-impl Platform {
-    fn host() -> Result<Self, Error> {
-        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-        let run = |args: &[&str]| {
-            let output = Command::new(&rustc)
-                .args(args)
-                .output()
-                .map_err(|e| Error::new(format!("running rustc: {e}")))?;
-            Ok::<_, Error>(String::from_utf8_lossy(&output.stdout).into_owned())
-        };
-        let triple = run(&["-vV"])?
-            .lines()
-            .find_map(|line| line.strip_prefix("host: "))
-            .map(str::to_string)
-            .ok_or_else(|| Error::new("rustc -vV names no host"))?;
-        let settings = Self::settings(&run(&["--print", "cfg"])?);
-        Ok(Self { triple, settings })
-    }
-
-    /// `rustc --print cfg` lines: `unix`, `target_os="linux"`.
-    fn settings(text: &str) -> Vec<(String, Option<String>)> {
-        text.lines()
-            .map(|line| match line.split_once('=') {
-                Some((key, value)) => (key.to_string(), Some(value.trim_matches('"').to_string())),
-                None => (line.to_string(), None),
-            })
-            .collect()
-    }
-
-    /// Whether a dependency's platform, a target triple or a `cfg(..)`,
-    /// applies here. A form this does not read applies, so that a check
-    /// built on it errs toward reporting a conflict, never hiding one.
-    fn applies(&self, target: &str) -> bool {
-        let Some(predicate) = target
-            .strip_prefix("cfg(")
-            .and_then(|t| t.strip_suffix(')'))
-        else {
-            return target == self.triple;
-        };
-        syn::parse_str::<syn::Meta>(predicate).map_or(true, |meta| self.holds(&meta))
-    }
-
-    fn holds(&self, meta: &syn::Meta) -> bool {
-        use syn::punctuated::Punctuated;
-        let name = |path: &syn::Path| path.get_ident().map(ToString::to_string);
-        match meta {
-            syn::Meta::Path(path) => name(path).is_some_and(|n| self.settings.contains(&(n, None))),
-            syn::Meta::NameValue(pair) => match (&pair.value, name(&pair.path)) {
-                (
-                    syn::Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(value),
-                        ..
-                    }),
-                    Some(key),
-                ) => self.settings.contains(&(key, Some(value.value()))),
-                _ => true,
-            },
-            syn::Meta::List(list) => {
-                let Ok(args) =
-                    list.parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
-                else {
-                    return true;
-                };
-                match name(&list.path).as_deref() {
-                    Some("all") => args.iter().all(|m| self.holds(m)),
-                    Some("any") => args.iter().any(|m| self.holds(m)),
-                    Some("not") => args.len() != 1 || !self.holds(&args[0]),
-                    _ => true,
-                }
-            }
+    let text = match run(target, &name, "the message catalogue", &dependencies, &main) {
+        Ok(text) => text,
+        Err(error) if error.0.contains(DUPLICATE) => {
+            return Err(two_catalogues(&target.join("gdl-gen").join(&name), target));
         }
-    }
+        Err(error) => return Err(error),
+    };
+    gdl::Catalogue::from_toml(&text)
+        .map_err(|e| Error::new(format!("reading the message catalogue: {e}")))
 }
 
-fn alias(index: usize) -> String {
-    format!("gdl_messages_{index}")
-}
+/// What linkme prints when a program links two catalogues.
+const DUPLICATE: &str = "duplicate #[distributed_slice] with name \"GDL_MESSAGE_CATALOGUE\"";
 
-/// The listed crates' identities, from the catalogue program's `cargo
-/// metadata`, after checking that the program links one gdl and that each
-/// listed crate's identity is its own.
-fn identities(
-    metadata: &str,
-    crates: &[MessageCrate],
-    platform: &Platform,
-) -> Result<Vec<Identity>, Error> {
+/// The error for a catalogue program that linked two catalogues: each
+/// package named `gdl` other than the one `[gdl]` names, with the packages
+/// that depend on it. Only a program that did link two reaches here, so
+/// listing a package that is not linked can only add detail.
+fn two_catalogues(work: &Path, target: &Path) -> Error {
     #[derive(serde::Deserialize)]
     struct Metadata {
         packages: Vec<Package>,
@@ -241,129 +123,76 @@ fn identities(
     struct Dep {
         name: String,
         pkg: String,
-        dep_kinds: Vec<DepKind>,
-    }
-    #[derive(serde::Deserialize)]
-    struct DepKind {
-        /// `None` for a normal dependency, else `dev` or `build`.
-        kind: Option<String>,
-        /// The platforms it applies to: a `cfg(..)` or a target triple.
-        target: Option<String>,
     }
 
-    let metadata: Metadata = serde_json::from_str(metadata)
-        .map_err(|e| Error::new(format!("reading cargo metadata: {e}")))?;
-    let package = |id: &str| metadata.packages.iter().find(|p| p.id == id);
-    let named = |id: &str| {
-        package(id).map_or_else(|| id.to_string(), |p| format!("`{} {}`", p.name, p.version))
+    let head = "the catalogue program links two message catalogues, and a program holds one";
+    let tail = "make every message crate depend on the gdl that [gdl] names";
+    let metadata = cargo(work, target, &["metadata", "--format-version", "1"])
+        .ok()
+        .and_then(|text| serde_json::from_str::<Metadata>(&text).ok());
+    let Some(metadata) = metadata else {
+        return Error::new(format!("{head}; {tail}"));
     };
-    let root = metadata
+    let name = |id: &str| {
+        metadata
+            .packages
+            .iter()
+            .find(|p| p.id == id)
+            .map_or_else(|| id.to_string(), |p| p.name.clone())
+    };
+    let ours = metadata
         .resolve
         .nodes
         .iter()
         .find(|n| n.id == metadata.resolve.root)
-        .ok_or_else(|| Error::new("cargo metadata has no root package"))?;
-    let dependency = |name: &str| {
-        root.deps
-            .iter()
-            .find(|d| d.name == name)
-            .map(|d| d.pkg.as_str())
-    };
+        .and_then(|root| root.deps.iter().find(|d| d.name == "gdl"))
+        .map(|d| d.pkg.as_str());
+    let others: Vec<String> = metadata
+        .packages
+        .iter()
+        .filter(|p| p.name == "gdl" && Some(p.id.as_str()) != ours)
+        .map(|p| {
+            let users: Vec<String> = metadata
+                .resolve
+                .nodes
+                .iter()
+                .filter(|n| n.deps.iter().any(|d| d.pkg == p.id))
+                .map(|n| format!("`{}`", name(&n.id)))
+                .collect();
+            format!(
+                "`gdl {}` ({}) is used by {}",
+                p.version,
+                p.manifest_path.display(),
+                users.join(", ")
+            )
+        })
+        .collect();
+    Error::new(format!("{head}: {}; {tail}", others.join("; ")))
+}
 
-    // The packages linked into the program: reached from it through normal
-    // dependencies. A build script's dependencies run at build time and
-    // never share the program's linker sections.
-    let node = |id: &str| metadata.resolve.nodes.iter().find(|n| n.id == id);
-    // Cargo lists a dependency for another platform too, marked with the
-    // platform it applies to.
-    let normal = |d: &Dep| {
-        d.dep_kinds
-            .iter()
-            .any(|k| k.kind.is_none() && k.target.as_deref().is_none_or(|t| platform.applies(t)))
-    };
-    let mut linked: Vec<&str> = vec![root.id.as_str()];
-    let mut next = 0;
-    while let Some(id) = linked.get(next).copied() {
-        next += 1;
-        for dep in node(id).into_iter().flat_map(|n| &n.deps) {
-            if normal(dep) && !linked.contains(&dep.pkg.as_str()) {
-                linked.push(&dep.pkg);
-            }
-        }
-    }
-    let linked_packages = || {
-        metadata
-            .packages
-            .iter()
-            .filter(|p| linked.contains(&p.id.as_str()))
-    };
+/// A name for generated content: the same content, the same name, within
+/// one build of the generator.
+pub(crate) fn hash(value: &impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
 
-    let mut problems = Vec::new();
-    let gdl = dependency("gdl").ok_or_else(|| Error::new("the catalogue program has no gdl"))?;
-    for stray in linked_packages().filter(|p| p.name == "gdl" && p.id != gdl) {
-        let users: Vec<String> = metadata
-            .resolve
-            .nodes
-            .iter()
-            .filter(|n| linked.contains(&n.id.as_str()))
-            .filter(|n| n.deps.iter().any(|d| d.pkg == stray.id && normal(d)))
-            .map(|n| {
-                format!(
-                    "`{}`",
-                    package(&n.id).map_or(n.id.as_str(), |p| p.name.as_str())
-                )
-            })
-            .collect();
-        problems.push(format!(
-            "the message crates link more than one package named `gdl`, and a program holds one message catalogue: `gdl {}` ({}) is used by {}; make every message crate depend on the gdl that [gdl] names, {}",
-            stray.version,
-            stray.manifest_path.display(),
-            users.join(", "),
-            named(gdl),
-        ));
-    }
-    let mut identities = Vec::with_capacity(crates.len());
-    for index in 0..crates.len() {
-        let id = dependency(&alias(index))
-            .ok_or_else(|| Error::new(format!("cargo metadata lacks {}", alias(index))))?;
-        let listed = package(id).ok_or_else(|| Error::new(format!("cargo metadata lacks {id}")))?;
-        for twin in metadata
-            .packages
-            .iter()
-            .filter(|p| p.id != listed.id && p.name == listed.name && p.version == listed.version)
-        {
-            problems.push(format!(
-                "[messages] crate `{} {}` ({}) has the name and version of another package in the program ({}), and a message records only those two; give one of them another version",
-                listed.name,
-                listed.version,
-                listed.manifest_path.display(),
-                twin.manifest_path.display()
-            ));
-        }
-        identities.push(Identity {
-            package: listed.name.clone(),
-            version: listed.version.clone(),
-        });
-    }
-    if problems.is_empty() {
-        Ok(identities)
-    } else {
-        Err(Error::new(problems.join("\n")))
-    }
+fn alias(index: usize) -> String {
+    format!("gdl_messages_{index}")
 }
 
 /// Write the program `name` with these `[dependencies]` lines and this
-/// `main.rs`, pass its directory to `check`, then build and run it, and
-/// return what `check` returned and what the program printed. `what` the
-/// program prints names it in a build failure.
-fn run<T>(
+/// `main.rs`, then build and run it, and return what it printed. `what` the
+/// program prints names it in a failure.
+fn run(
     target: &Path,
     name: &str,
     what: &str,
     dependencies: &str,
     main: &str,
-    check: impl FnOnce(&Path) -> Result<T, Error>,
-) -> Result<(T, String), Error> {
+) -> Result<String, Error> {
     // Every run of `name` in `target` builds the same program at the same
     // path. Holding the directory's lock from writing the program until it
     // has run keeps another run from replacing it in between, which would
@@ -386,10 +215,8 @@ fn run<T>(
     );
     write(&work.join("Cargo.toml"), &manifest)?;
     write(&work.join("src/main.rs"), main)?;
-    let checked = check(&work)?;
-    let printed = cargo(&work, target, &["run", "--quiet"])
-        .map_err(|e| Error::new(format!("building {what} failed:\n{e}")))?;
-    Ok((checked, printed))
+    cargo(&work, target, &["run", "--quiet"])
+        .map_err(|e| Error::new(format!("building {what} failed:\n{e}")))
 }
 
 /// Run `cargo <args>` on the program in `work`, and return its output.
@@ -458,28 +285,6 @@ mod tests {
     /// the same program path, so a dump must hold the directory's lock from
     /// its build until its program has run: otherwise another dump can
     /// rewrite the program in between.
-    #[test]
-    fn a_dependency_platform_applies_by_its_cfg_or_triple() {
-        let linux = Platform {
-            triple: "x86_64-unknown-linux-gnu".into(),
-            settings: Platform::settings(
-                "unix\ntarget_os=\"linux\"\ntarget_pointer_width=\"64\"\n",
-            ),
-        };
-        for (target, applies) in [
-            ("cfg(unix)", true),
-            ("cfg(windows)", false),
-            ("cfg(not(any(unix, windows)))", false),
-            ("cfg(all(unix, target_os = \"linux\"))", true),
-            ("cfg(target_os = \"macos\")", false),
-            ("cfg(not(target_os = \"macos\"))", true),
-            ("x86_64-unknown-linux-gnu", true),
-            ("x86_64-pc-windows-msvc", false),
-        ] {
-            assert_eq!(linux.applies(target), applies, "{target}");
-        }
-    }
-
     /// Threads of one process that write the same file at once each
     /// succeed, and the file holds the text.
     #[test]

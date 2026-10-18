@@ -2,21 +2,20 @@
 //! crates the spec lists.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use gdl::{Catalogue, MessageInfo};
 
-use crate::dump::Identity;
-
 /// Resolve each name in `uses` (a message name and the nodes that declare
-/// it) to one entry of `catalogue` from a package in `listed`: its name and
-/// its version, as another version of a listed package can be in the
-/// program too. A pin maps a
+/// it) to one entry of `catalogue` from a crate in `listed`, told apart by
+/// its directory: another package of a listed one's name, and even of its
+/// version, can be in the program too. A pin maps a
 /// name to the path of the entry it takes, and is how a name in two crates
 /// is resolved. Every problem is reported.
 pub(crate) fn resolve(
     uses: &BTreeMap<String, Vec<String>>,
     catalogue: &Catalogue,
-    listed: &[Identity],
+    listed: &[Listed],
     pins: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, MessageInfo>, Vec<String>> {
     let offered: Vec<&MessageInfo> = catalogue
@@ -88,10 +87,18 @@ pub(crate) fn resolve(
     }
 }
 
-fn is_listed(message: &MessageInfo, listed: &[Identity]) -> bool {
-    listed
-        .iter()
-        .any(|l| l.package == message.package && l.version == message.version)
+/// A crate the spec lists.
+pub(crate) struct Listed {
+    /// Its package name.
+    pub(crate) package: String,
+    /// Its directory, as `paths::resolve` gives it.
+    pub(crate) dir: PathBuf,
+}
+
+fn is_listed(message: &MessageInfo, listed: &[Listed]) -> bool {
+    let dir = PathBuf::from(&message.dir);
+    let dir = crate::paths::resolve(&dir).unwrap_or(dir);
+    listed.iter().any(|l| l.dir == dir)
 }
 
 /// `` `a::X` `` or `` `a::X`, `b::X` ``, or `None` for no candidates.
@@ -106,7 +113,7 @@ fn missing_hint(
     name: &str,
     offered: &[&MessageInfo],
     catalogue: &Catalogue,
-    listed: &[Identity],
+    listed: &[Listed],
 ) -> String {
     let mut unlisted: Vec<String> = catalogue
         .messages
@@ -191,6 +198,7 @@ mod tests {
         MessageInfo {
             package: package.into(),
             version: "0.1.0".into(),
+            dir: format!("/crates/{package}"),
             name: path.rsplit("::").next().expect("name").into(),
             path: path.into(),
             wire: true,
@@ -216,12 +224,12 @@ mod tests {
             .collect()
     }
 
-    fn listed(packages: &[&str]) -> Vec<Identity> {
+    fn listed(packages: &[&str]) -> Vec<Listed> {
         packages
             .iter()
-            .map(|p| Identity {
+            .map(|p| Listed {
                 package: (*p).to_string(),
-                version: "0.1.0".into(),
+                dir: PathBuf::from(format!("/crates/{p}")),
             })
             .collect()
     }

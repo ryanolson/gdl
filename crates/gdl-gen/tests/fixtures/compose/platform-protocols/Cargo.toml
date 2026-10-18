@@ -6,9 +6,10 @@ publish = false
 
 [dependencies]
 gdl = { path = "../../../../../gdl" }
+stray-macro = { path = "../stray-macro" }
 
-# Another package named `gdl`, which never reaches the catalogue program
-# on this platform: only on another target, and only for a build script.
+# Another package named `gdl`, which never reaches the catalogue program:
+# through a proc macro, on another target, and for a build script.
 [target.'cfg(not(any(unix, windows)))'.dependencies]
 other-gdl = { package = "gdl", path = "../stray-gdl" }
 

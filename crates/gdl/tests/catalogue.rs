@@ -67,6 +67,7 @@ fn a_derived_message_is_registered_with_its_definition_path() {
         [&MessageInfo {
             package: "gdl".into(),
             version: env!("CARGO_PKG_VERSION").into(),
+            dir: env!("CARGO_MANIFEST_DIR").into(),
             name: "Prompt".into(),
             path: "catalogue::Prompt".into(),
             wire: true,

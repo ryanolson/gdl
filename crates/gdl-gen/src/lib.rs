@@ -138,7 +138,17 @@ fn resolved(
     target: &Path,
 ) -> Result<(names::GraphFile, Resolution), Error> {
     let file = names::GraphFile::read(&source.path)?;
-    let (catalogue, listed) = dump::catalogue(&source.crates, &spec.gdl, target)?;
+    let catalogue = dump::catalogue(&source.crates, &spec.gdl, target)?;
+    let listed = source
+        .crates
+        .iter()
+        .map(|c| {
+            Ok(resolve::Listed {
+                package: c.package.clone(),
+                dir: dump::absolute(&c.path)?,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
     let messages = resolve::resolve(&file.uses, &catalogue, &listed, &source.pins)
         .map_err(|problems| Error::new(problems.join("\n")))?;
     Ok((file, Resolution { messages }))

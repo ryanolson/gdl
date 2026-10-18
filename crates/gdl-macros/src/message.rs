@@ -33,6 +33,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             static __GDL_MESSAGE: ::gdl::__private::MessageEntry = ::gdl::__private::MessageEntry {
                 package: ::core::env!("CARGO_PKG_NAME"),
                 version: ::core::env!("CARGO_PKG_VERSION"),
+                dir: ::core::env!("CARGO_MANIFEST_DIR"),
                 name: #name,
                 module: ::core::module_path!(),
                 wire: || ::gdl::wire_codec!(#ident).is_some(),

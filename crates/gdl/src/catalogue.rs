@@ -17,9 +17,12 @@ pub struct Catalogue {
 pub struct MessageInfo {
     /// The package that defines it.
     pub package: String,
-    /// That package's version: one program can link two versions of one
-    /// package, and only a listed one offers messages.
+    /// That package's version.
     pub version: String,
+    /// That package's directory when it was built. One program can link two
+    /// packages of one name, even of one version from two sources; only a
+    /// listed one offers messages, and its directory tells it apart.
+    pub dir: String,
     /// The type's name: what a graph file calls it.
     pub name: String,
     /// Where it is defined: its module path and its name. A re-export is
@@ -66,14 +69,15 @@ pub mod registry {
     /// linkme names the linker section after this static alone, not its
     /// path, and two slices of one name in a program panic on first use.
     /// The name is gdl's own, so another crate's registry cannot take it.
-    /// Two gdl versions in one program still share it; the generator
-    /// refuses such a program before it builds it.
+    /// Two gdl versions in one program still share it: reading the slice
+    /// then panics, and the generator reports that as the conflict.
     #[linkme::distributed_slice]
     pub static GDL_MESSAGE_CATALOGUE: [Entry];
 
     pub struct Entry {
         pub package: &'static str,
         pub version: &'static str,
+        pub dir: &'static str,
         pub name: &'static str,
         pub module: &'static str,
         /// Expanded where the type is concrete, as the wire probe must be.
@@ -85,6 +89,7 @@ pub mod registry {
             MessageInfo {
                 package: self.package.to_string(),
                 version: self.version.to_string(),
+                dir: self.dir.to_string(),
                 name: self.name.to_string(),
                 path: format!("{}::{}", self.module, self.name),
                 wire: (self.wire)(),

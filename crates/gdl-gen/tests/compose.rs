@@ -90,8 +90,8 @@ fn only_the_listed_version_of_a_package_offers_messages() {
 }
 
 /// Only a `gdl` linked into the catalogue program conflicts: one that a
-/// message crate takes for another platform, or for its build script, does
-/// not.
+/// message crate reaches through a proc macro, takes for another platform,
+/// or takes for its build script does not.
 #[test]
 fn a_gdl_that_is_not_linked_is_no_conflict() {
     let resolution = resolve("platform.toml").expect("resolved");
@@ -101,14 +101,14 @@ fn a_gdl_that_is_not_linked_is_no_conflict() {
     );
 }
 
-/// A program holds one message catalogue per gdl. A message crate built
-/// against another package named `gdl` is refused by name, before anything
-/// is compiled.
+/// A program holds one message catalogue. A message crate that links
+/// another gdl's catalogue into it is refused, and the error names that gdl
+/// and the crates that use it.
 #[test]
 fn a_message_crate_on_another_gdl_is_refused() {
     let error = resolve("foreign.toml").expect_err("two runtimes");
     for part in [
-        "more than one package named `gdl`",
+        "the catalogue program links two message catalogues",
         "`gdl 0.0.1`",
         "used by `foreign-protocols`",
         "depend on the gdl that [gdl] names",

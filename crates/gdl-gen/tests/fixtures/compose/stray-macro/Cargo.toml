@@ -1,0 +1,17 @@
+[package]
+name = "stray-macro"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+proc-macro = true
+
+# A proc macro runs in the compiler: its dependencies are never linked
+# into the program that uses it.
+[dependencies]
+gdl = { path = "../stray-gdl" }
+
+# Not a member of the repository workspace: it is built only by the
+# catalogue programs that the tests generate.
+[workspace]
