@@ -700,6 +700,17 @@ gdl-web: Catalog behind a lock; every gdl-gen call on a blocking thread; a draft
   `build-images.sh` runs one `docker build` per segment, tagged with the segment's package name after `GDL_IMAGE_PREFIX`, and passes its arguments on.
 - **Not tested end to end.** No image was built: the machine has no Rust image cached, a build fetches crates.io inside the container, and gdl has no public git URL yet. The test checks the generated text (`an_archive_of_fetchable_crates_builds_images`). The runtime image may need more than the binary, for example CA certificates for TLS, which a first real build will show.
 
+**Addendum 2026-10-19 (owner): the composer for a demo.** The owner asked for a demo that imports the examples' crates from local directories, and for a vertical page.
+
+- **Adding by directory.** `POST /api/catalog` takes a directory on the server's machine as well as `name@version`, as `cargo gdl extract` does. The composer serves the machine it runs on, so it should not face a network one does not trust.
+- **Lanes.** Each hop is drawn as two lanes:
+  - the request lane flows down from the outer end through the forward nodes to the inner end;
+  - the response lane beside it flows back up through the backward nodes to the outer end;
+  - an operator's own hop is drawn below it, indented.
+  
+  This matches the operators' `Up` and `Down` ports: up is toward the root. Each edge is an arrow named for its message, and a click cuts it.
+- **The demo** is scripted in `agent-docs/demo-script.md`. `the_chat_example_composes_from_its_directories` runs it against the server, without the page.
+
 **Open questions.**
 
 - Settled 2026-10-18 by the owner, so no longer open: a central catalogue (there is nowhere to publish to; the working catalogue is ours), and when `cargo gdl generate` extracts (it reads source every time).
