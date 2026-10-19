@@ -108,9 +108,53 @@ macro_rules! graph {
 /// crate alone and derives `gdl_message::Message`.
 pub use gdl_message::{Catalogue, Message, MessageInfo, Shape};
 
+/// Mark the type that implements a node a crate declares in its nodes
+/// file.
+///
+/// ```ignore
+/// // Cargo.toml: [package.metadata.gdl] nodes = "gdl/nodes.gdl"
+/// // gdl/nodes.gdl: sink Engine: Words -> stream Token;
+/// #[gdl::node]
+/// pub struct Engine { .. }
+/// impl gdl::Sink for Engine { type Req = Words; type Item = Token; .. }
+/// ```
+///
+/// When the crate compiles, the type must be declared in the nodes file
+/// under its own name, be reachable at the crate root under that name, and
+/// implement the declared role with the declared message at each port. The
+/// generator reads the nodes file without compiling the crate; this check
+/// keeps the file true.
+pub use gdl_macros::node;
+
 /// Support for macro expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
+    /// Whether port type `T` carries the message names `head` and `item`:
+    /// what `#[gdl::node]` asserts for each port, at compile time.
+    pub const fn shape_is<T: gdl_message::Shape>(head: &str, item: Option<&str>) -> bool {
+        same(T::HEAD, head)
+            && match (T::ITEM, item) {
+                (None, None) => true,
+                (Some(a), Some(b)) => same(a, b),
+                _ => false,
+            }
+    }
+
+    const fn same(a: &str, b: &str) -> bool {
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
     pub use gdl_macros::graph;
 }

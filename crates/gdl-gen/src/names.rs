@@ -12,7 +12,6 @@ use gdl_syntax::{Graph, Request, Sig};
 use proc_macro2::{Span, TokenStream};
 use quote::ToTokens;
 use syn::Type;
-use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 
 use crate::Error;
@@ -136,17 +135,10 @@ pub(crate) fn message(ty: &Type) -> Option<String> {
     }
 }
 
-/// The message name a position holds: a bare identifier, or `()`.
+/// The message name a position holds, by the rule `gdl_syntax` keeps for
+/// graph files and nodes files alike.
 fn name(ty: &Type) -> Result<Name, ()> {
-    match ty {
-        Type::Tuple(tuple) if tuple.elems.is_empty() => Ok(Name::Unit),
-        Type::Path(path) if path.qself.is_none() => match path.path.get_ident() {
-            // `r#Prompt` is `Prompt`, as the catalogue records it.
-            Some(ident) => Ok(Name::Message(ident.unraw().to_string())),
-            None => Err(()),
-        },
-        _ => Err(()),
-    }
+    gdl_syntax::message_name(ty).map(|name| name.map_or(Name::Unit, Name::Message))
 }
 
 /// Every message position of a node, in declaration order.

@@ -10,7 +10,7 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::{Ident, LitInt, LitStr, Type};
 
-use crate::parse::{Element, GraphInput, Request, Sig};
+use crate::parse::{Declarations, Element, GraphInput, Request, Sig};
 
 /// A graph whose structure is checked: the result of [`Graph::parse`].
 pub struct Graph {
@@ -327,6 +327,49 @@ fn snake_case(name: &str) -> String {
         }
     }
     out
+}
+
+/// The nodes a nodes file declares, in order: each with its role and port
+/// types. A source cannot be declared, since it takes no implementation,
+/// and no name twice.
+pub fn declarations(tokens: proc_macro2::TokenStream) -> syn::Result<Vec<Node>> {
+    let Declarations(decls) = syn::parse2(tokens)?;
+    let mut nodes: Vec<Node> = Vec::with_capacity(decls.len());
+    for decl in decls {
+        if matches!(decl.sig, Sig::Source { .. }) {
+            return Err(syn::Error::new(
+                decl.ident.span(),
+                "a source takes no implementation, so a nodes file cannot declare one",
+            ));
+        }
+        if nodes.iter().any(|n| n.ident == decl.ident) {
+            return Err(syn::Error::new(decl.ident.span(), "node declared twice"));
+        }
+        nodes.push(Node {
+            ident: decl.ident,
+            sig: decl.sig,
+            binding: None,
+        });
+    }
+    Ok(nodes)
+}
+
+/// The message name at a message position of a graph file or a nodes
+/// file: `Some` for a bare name, with any `r#` dropped (`r#Prompt` is
+/// `Prompt`); `None` for `()`; `Err` for anything else, which is a Rust
+/// type, not a message name.
+#[allow(clippy::result_unit_err)]
+pub fn message_name(ty: &Type) -> Result<Option<String>, ()> {
+    use syn::ext::IdentExt as _;
+    match ty {
+        Type::Tuple(tuple) if tuple.elems.is_empty() => Ok(None),
+        Type::Path(path) if path.qself.is_none() => path
+            .path
+            .get_ident()
+            .map(|ident| Some(ident.unraw().to_string()))
+            .ok_or(()),
+        _ => Err(()),
+    }
 }
 
 /// `word` as Rust code must spell it: raw (`r#gen`) when it is a keyword of

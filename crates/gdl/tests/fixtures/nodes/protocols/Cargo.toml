@@ -1,0 +1,9 @@
+[package]
+name = "node-protocols"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gdl-message = { workspace = true }
+serde = { workspace = true }

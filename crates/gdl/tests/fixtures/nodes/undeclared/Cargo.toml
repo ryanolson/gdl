@@ -1,0 +1,13 @@
+[package]
+name = "node-undeclared"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[package.metadata.gdl]
+nodes = "gdl/nodes.gdl"
+
+[dependencies]
+futures = { workspace = true }
+gdl = { workspace = true }
+node-protocols = { workspace = true }
