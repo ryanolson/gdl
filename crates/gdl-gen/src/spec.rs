@@ -12,7 +12,7 @@
 //! path = "chat.gdl"              # relative to this file
 //!
 //! [messages]
-//! crates = ["protocols"]         # crate directories, relative to this file
+//! crates = ["protocols"]         # directories, relative to this file, or name@version
 //! pin = { Chunk = "chat_protocols::Chunk" }   # optional: a name's type
 //!
 //! [nodes]                        # with [graph], instead of [bind.*]

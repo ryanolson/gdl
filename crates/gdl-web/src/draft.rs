@@ -277,11 +277,12 @@ impl Draft {
     }
 }
 
-/// How each carried message is named in the graph file, the crates that
-/// define them, and the pins their names need.
+/// How each carried message is named in the graph file, the crates the
+/// spec lists for them, and the pins their names need.
 struct Names {
     names: BTreeMap<Origin, String>,
-    /// Entry keys of the defining crates.
+    /// Entry keys of the crates that offer each message at a public path:
+    /// its own definition, its own export, or another crate's export.
     crates: BTreeSet<String>,
     /// Graph name to public path, where a name alone would not resolve to
     /// the message.

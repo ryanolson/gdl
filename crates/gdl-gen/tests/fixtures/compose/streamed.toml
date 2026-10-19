@@ -1,0 +1,9 @@
+# A graph whose requests are streamed.
+[graph]
+path = "streamed.gdl"
+
+[messages]
+crates = ["chat-protocols"]
+
+[gdl]
+path = "../../../../gdl"

@@ -1,9 +1,17 @@
-# Whole-repository mega review, pass 6
+# Milestones 10 to 18, mega review pass 6
 
-Reviewer: fresh Codex (`gpt-6-astra`) session, read-only, `thermo-nuclear-code-quality-review` over the whole repository at `f5e3d7b`, which includes the new diagram renderer. Raw text: `mega-r6-raw.txt`. ACTIONABLE: 3.
+Reviewer: a fresh Fable subagent, read-only, running the thermo-nuclear code-quality review over `main..b393826`, on a frozen checkout so that the demo work could proceed beside it. It checked the fixes of `mega-r5.md` first, by probe (a draft whose every message is offered only through a facade; `prune` in five scenarios), then read the whole diff fresh. In a scratch copy it ran the workspace suite (42 targets, all green), clippy, and fmt, and probed the manifest equality with a streamed graph. Verdict: REJECT, 2 actionable, both minor.
 
-| # | Severity | Finding | Ruling | Evidence and fix |
+Pass 5's fixes held, with no regression. The reviewer traced these again and found them sound:
+- the reader's memoisation, module files, and `cfg`;
+- `given_offer`, binding, `survey`, the export's paths, and the catalogue under concurrent adds;
+- `Spec::from_text`, and the page's drafts and segments.
+
+| # | Finding | Ruling | Test | Fix |
 |---|---|---|---|---|
-| 1 | P2 | The hosted-slot check of pass 3 trusts the placeholder's name: `Absent<nodes::E>` in `C`'s slot (same port types) passes when `C` is hosted | valid | `a_hosted_slot_holding_another_nodes_placeholder_is_refused` (graph suite, contract `A => C => E => D`): the front assembled. Fix: `ABSENT` is a flag; the stages report the positions of absent slots, and `Deployment::hop` maps each position to the node the layout puts there and checks that node's segment |
-| 2 | P2 | The Mermaid title is YAML front matter but was escaped as a label: `chat: demo` is invalid YAML, and `odd #quot;graph#quot;` reads as `odd` | valid | `the_mermaid_title_is_a_yaml_string`, `names_and_types_are_escaped`. Fix: the title is a YAML double-quoted string. A YAML parser reads `"odd \"graph\""` as `odd "graph"`, and Mermaid 11.4.1 still parses the documents |
-| 3 | P3 | The README says encoding happens only where an edge crosses, but a hop whose request leaves the outer end's segment and returns encodes each response item through the outer end's anchor | valid | `crates/gdl/tests/crossings.rs`, placement `{A, D, F} {C}`: 2 + 3 encodes, as plan section 7.2 says. Fix: the README, the perf notes, and the test's documentation state this case |
+| R6-1 | pass 5's fix made `Names`' comments wrong: the listed crate is the one offering a message at a public path, not always the defining one; `spec.rs`'s module doc still said `[messages]` holds only directories | valid | none | both reworded |
+| R6-2 | the test that proves a graph spec need not compile its contract had no streamed request, so the `()` head and the streamed wire flags were built without a compiled comparison | valid (no defect today: the reviewer's probe passed) | `a_graph_files_manifest_is_built_as_its_contract_prints_it` now includes `streamed.toml`: a request with a head, and one without | none needed |
+
+The reviewer also noted that `gdl-gen/src/lib.rs` was 990 lines, 600 of them tests. They now live in `src/tests.rs`, and `lib.rs` is 375 lines.
+
+The workspace suite, clippy, and fmt pass after the fixes.
