@@ -20,6 +20,7 @@
 //! not see items that macros make, code that build scripts generate, or
 //! `cfg` that depends on compiler flags.
 
+mod catalog;
 mod cfg;
 mod markers;
 mod metadata;
@@ -30,6 +31,8 @@ use std::fmt;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+pub use catalog::{Catalog, Entry, NodeRef, rfc3339};
 
 /// The packages of a Cargo workspace and of all their dependencies, as
 /// `cargo metadata` gives them, ready to read.
@@ -102,6 +105,7 @@ impl Workspace {
             version: package.version.clone(),
             dir: package.dir.clone(),
             path: package.source.starts_with("path+"),
+            checksum: package.checksum.clone(),
         }
     }
 }
@@ -117,6 +121,9 @@ pub struct Located {
     pub dir: std::path::PathBuf,
     /// Whether it is a path package.
     pub path: bool,
+    /// The registry's checksum of its `.crate`; none for a path or git
+    /// package.
+    pub checksum: Option<String>,
 }
 
 /// What a crate offers, and what the reader could not read.

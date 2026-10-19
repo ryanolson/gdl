@@ -210,8 +210,9 @@ fn the_manifest_program_runs_as_cargo_built_it() {
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("digraph"));
 }
 
-/// `cargo gdl extract` writes a crate's offer, read from source, as a
-/// working-catalogue entry, `<name>/<version>.toml`.
+/// `cargo gdl extract --catalog` adds a crate's offer, read from source, to
+/// the working catalogue as `<name>/<version>.toml`, and `cargo gdl catalog`
+/// prints the catalogue's index.
 #[test]
 fn extract_writes_a_working_catalogue_entry() {
     let catalogue = std::env::temp_dir().join(format!("gdl-catalogue-{}", std::process::id()));
@@ -233,13 +234,38 @@ fn extract_writes_a_working_catalogue_entry() {
         String::from_utf8_lossy(&output.stdout).trim(),
         entry.display().to_string()
     );
-    let offer = gdl_extract_offer(&entry);
-    assert_eq!(offer.messages.len(), 6);
+    let entry =
+        gdl_gen::Entry::from_toml(&std::fs::read_to_string(&entry).expect("entry")).expect("entry");
+    assert_eq!(entry.offer.messages.len(), 6);
+    // A path package: when it was added, and no registry checksum.
+    assert_eq!(
+        entry.added.len(),
+        "2026-10-18T21:04:05Z".len(),
+        "{}",
+        entry.added
+    );
+    assert_eq!(entry.checksum, None);
+    // `cargo gdl catalog` prints the index of what was added.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .args(["gdl", "catalog"])
+        .arg(&catalogue)
+        .output()
+        .expect("cargo gdl");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.starts_with("entries:\n  chat-protocols@0.0.0  path+file://"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  Words: chat_protocols::engine::Words (chat-protocols 0.0.0)\n"),
+        "{text}"
+    );
     let _ = std::fs::remove_dir_all(&catalogue);
-}
-
-fn gdl_extract_offer(entry: &Path) -> gdl_gen::Offer {
-    gdl_gen::Offer::from_toml(&std::fs::read_to_string(entry).expect("entry")).expect("offer")
 }
 
 /// `--verify` builds the crate and compares what its markers register with

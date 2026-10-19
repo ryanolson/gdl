@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use gdl_extract::{Located, Offer, Workspace};
+use gdl_extract::{Catalog, Entry, Located, Offer, Workspace};
 
 use crate::Error;
 
@@ -88,15 +88,22 @@ pub fn extract(krate: &Crate, target: &Path) -> Result<Extracted, Error> {
     })
 }
 
-/// Write `offer` into the working catalogue at `catalogue`, as
-/// `<name>/<version>.toml`, and return the file's path. A crate version
-/// never changes, so an entry is written once; writing it again writes the
-/// same text.
-pub fn write_entry(catalogue: &Path, offer: &Offer) -> Result<PathBuf, Error> {
-    let dir = catalogue.join(&offer.package);
-    std::fs::create_dir_all(&dir).map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
-    let file = dir.join(format!("{}.toml", offer.version));
-    crate::dump::write(&file, &offer.to_toml())?;
+/// Add the extracted crate to the working catalogue in `catalogue`, as
+/// `<name>/<version>.toml`, with its checksum and the time `added`, and
+/// return the entry's file. A crate version never changes, so an entry
+/// already there is kept as it is.
+pub fn add_to_catalog(
+    catalogue: &Path,
+    extracted: &Extracted,
+    added: std::time::SystemTime,
+) -> Result<PathBuf, Error> {
+    let mut catalog = Catalog::load(catalogue).map_err(|e| Error::new(e.to_string()))?;
+    let entry = Entry {
+        added: gdl_extract::rfc3339(added),
+        checksum: extracted.located.checksum.clone(),
+        offer: extracted.offer.clone(),
+    };
+    let (_, file) = catalog.add(entry).map_err(|e| Error::new(e.to_string()))?;
     Ok(file)
 }
 

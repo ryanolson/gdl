@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--target-dir <dir>]
+//! cargo gdl catalog <dir>
 //! cargo gdl resolve --spec <gdl.toml>
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
@@ -10,7 +11,9 @@
 //!
 //! `extract` reads what a crate offers (messages, exports, nodes) from its
 //! source, building nothing, and prints it as a working-catalogue entry, or
-//! writes it under `--catalog` as `<name>/<version>.toml`. `--verify`
+//! adds it to the working catalogue in `--catalog`, as
+//! `<name>/<version>.toml` with its checksum and the time it was added.
+//! `catalog` prints a working catalogue's index. `--verify`
 //! builds the crate as well and fails if what its markers register differs
 //! from what was read. `resolve` prints the message each name of a spec's
 //! graph file resolves to. `generate` writes one crate per segment, and the
@@ -26,6 +29,7 @@ use std::process::ExitCode;
 use gdl_gen::Format;
 
 const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--target-dir <dir>]
+       cargo gdl catalog <dir>
        cargo gdl resolve --spec <gdl.toml>
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
@@ -37,6 +41,7 @@ enum Command {
         catalog: Option<PathBuf>,
         verify: bool,
     },
+    Catalog(PathBuf),
     Resolve,
     Generate {
         out: PathBuf,
@@ -93,6 +98,7 @@ fn args() -> Result<Args, String> {
             catalog,
             verify,
         },
+        "catalog" => Command::Catalog(PathBuf::from(krate.ok_or_else(|| USAGE.to_string())?)),
         "resolve" => Command::Resolve,
         "generate" => Command::Generate {
             out: out.ok_or_else(|| USAGE.to_string())?,
@@ -112,7 +118,7 @@ fn args() -> Result<Args, String> {
         },
         _ => return Err(USAGE.to_string()),
     };
-    let needs_spec = !matches!(command, Command::Extract { .. });
+    let needs_spec = !matches!(command, Command::Extract { .. } | Command::Catalog(_));
     if needs_spec && spec.is_none() {
         return Err(USAGE.to_string());
     }
@@ -162,12 +168,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
             match catalog {
                 Some(catalog) => {
-                    let file = gdl_gen::write_entry(catalog, &extracted.offer)?;
+                    let now = std::time::SystemTime::now();
+                    let file = gdl_gen::add_to_catalog(catalog, &extracted, now)?;
                     println!("{}", file.display());
                 }
                 None => print!("{}", extracted.offer.to_toml()),
             }
         }
+        Command::Catalog(dir) => print!("{}", gdl_gen::Catalog::load(dir)?),
         Command::Resolve => print!("{}", gdl_gen::resolve(&spec()?)?),
         Command::Diagram(format) => {
             let spec = spec()?;

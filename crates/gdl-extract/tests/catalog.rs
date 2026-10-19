@@ -1,0 +1,132 @@
+//! The working catalogue: entries from the source reader's fixtures, added
+//! once with their provenance, and the index a load builds from them.
+
+use std::path::{Path, PathBuf};
+
+use gdl_extract::{Catalog, Entry, Workspace};
+
+fn workspace() -> Workspace {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/read/Cargo.toml");
+    Workspace::load(&manifest).expect("cargo metadata")
+}
+
+fn entry(workspace: &Workspace, package: &str, added: &str) -> Entry {
+    let extraction = workspace.extract(package).expect("package");
+    Entry {
+        added: added.to_string(),
+        checksum: workspace.locate(package).expect("package").checksum,
+        offer: extraction.offer,
+    }
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("gdl-catalog-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// An entry is written once, as `<name>/<version>.toml`, with when it was
+/// added; adding it again keeps the file as it was.
+#[test]
+fn an_entry_is_written_once() {
+    let dir = scratch("once");
+    let workspace = workspace();
+    let mut catalog = Catalog::load(&dir).expect("an empty catalogue");
+    let (_, file) = catalog
+        .add(entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z"))
+        .expect("added");
+    assert_eq!(file, dir.join("read-protocols/0.0.0.toml"));
+    let text = std::fs::read_to_string(&file).expect("written");
+    assert!(
+        text.starts_with("added = \"2026-10-18T21:04:05Z\"\n"),
+        "{text}"
+    );
+    // A path package has no registry checksum.
+    assert!(!text.contains("checksum"), "{text}");
+    let (kept, _) = catalog
+        .add(entry(&workspace, "read-protocols", "2027-01-01T00:00:00Z"))
+        .expect("kept");
+    assert_eq!(kept.added, "2026-10-18T21:04:05Z");
+    assert_eq!(std::fs::read_to_string(&file).expect("kept"), text);
+    // A second load reads the same entry back.
+    let loaded = Catalog::load(&dir).expect("loaded");
+    let entries: Vec<String> = loaded.entries().map(Entry::key).collect();
+    assert_eq!(entries, ["read-protocols@0.0.0"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Loading builds the index: message names to their messages, node names
+/// to their nodes, and each message to the ports that carry it.
+#[test]
+fn a_load_indexes_messages_nodes_and_ports() {
+    let dir = scratch("index");
+    let workspace = workspace();
+    let mut catalog = Catalog::load(&dir).expect("an empty catalogue");
+    for package in ["read-protocols", "read-facade", "read-quirks"] {
+        catalog
+            .add(entry(&workspace, package, "2026-10-18T21:04:05Z"))
+            .expect("added");
+    }
+    let catalog = Catalog::load(&dir).expect("loaded");
+    let paths =
+        |name: &str| -> Vec<String> { catalog.messages(name).map(|o| o.path.clone()).collect() };
+    // Defined in one crate and exported by another: one message.
+    assert_eq!(paths("Token"), ["read_protocols::engine::Token"]);
+    // Exported under another name.
+    assert_eq!(paths("Prompt"), ["read_protocols::Words"]);
+    // Two messages of one name.
+    assert_eq!(
+        paths("Payload"),
+        [
+            "read_quirks::hidden::Payload",
+            "read_quirks::visible::Payload"
+        ]
+    );
+    let renamed: Vec<(String, String)> = catalog
+        .nodes("Renamed")
+        .map(|(entry, node)| (entry.key(), node.role.clone()))
+        .collect();
+    assert_eq!(
+        renamed,
+        [("read-quirks@0.0.0".to_string(), "forward".to_string())]
+    );
+    let actual = catalog.messages("Actual").next().expect("Actual").clone();
+    let ports: Vec<(String, String)> = catalog
+        .ports(&actual)
+        .map(|(_, node, port)| (node.name.clone(), port.to_string()))
+        .collect();
+    assert_eq!(
+        ports,
+        [
+            ("Renamed".to_string(), "In".to_string()),
+            ("Renamed".to_string(), "Out".to_string()),
+            ("Selected".to_string(), "In".to_string()),
+            ("Selected".to_string(), "Out".to_string()),
+        ]
+    );
+    let text = catalog.to_string();
+    assert!(
+        text.contains("  Renamed: forward read_quirks::Renamed (read-quirks@0.0.0)\n    In: read_quirks::Actual (read-quirks 0.0.0) + stream read_quirks::Actual (read-quirks 0.0.0)\n"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file in the wrong place is refused: the directory is the index of
+/// the entries' names.
+#[test]
+fn an_entry_in_the_wrong_file_is_refused() {
+    let dir = scratch("misplaced");
+    let mut catalog = Catalog::load(&dir).expect("an empty catalogue");
+    let (_, file) = catalog
+        .add(entry(
+            &workspace(),
+            "read-protocols",
+            "2026-10-18T21:04:05Z",
+        ))
+        .expect("added");
+    std::fs::rename(&file, dir.join("read-protocols/9.9.9.toml")).expect("moved");
+    let error = Catalog::load(&dir).expect_err("misplaced").to_string();
+    assert!(error.contains("holds read-protocols@0.0.0"), "{error}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

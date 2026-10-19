@@ -27,6 +27,9 @@ pub(crate) struct Package {
     pub(crate) deps: Vec<(String, usize)>,
     /// Its enabled features.
     pub(crate) features: Vec<String>,
+    /// The registry's checksum of its `.crate`, from the lockfile; none for
+    /// a path or git package.
+    pub(crate) checksum: Option<String>,
 }
 
 impl Graph {
@@ -53,6 +56,7 @@ impl Graph {
             packages: Vec<RawPackage>,
             workspace_members: Vec<String>,
             resolve: Resolve,
+            workspace_root: PathBuf,
         }
         #[derive(serde::Deserialize)]
         struct RawPackage {
@@ -121,8 +125,21 @@ impl Graph {
                     .map(|t| (t.name.replace('-', "_"), t.src_path.clone())),
                 deps: Vec::new(),
                 features: Vec::new(),
+                checksum: None,
             })
             .collect();
+        // `cargo metadata` resolves into the workspace's lockfile, which
+        // holds each registry package's checksum.
+        let checksums = checksums(&metadata.workspace_root.join("Cargo.lock"));
+        for package in &mut packages {
+            package.checksum = checksums
+                .get(&(
+                    package.name.clone(),
+                    package.version.clone(),
+                    package.source.clone(),
+                ))
+                .cloned();
+        }
         for node in &metadata.resolve.nodes {
             let Some(&at) = index.get(node.id.as_str()) else {
                 continue;
@@ -180,4 +197,32 @@ impl Graph {
         (0..self.packages.len())
             .find(|&i| std::fs::canonicalize(&self.packages[i].dir).is_ok_and(|d| d == dir))
     }
+}
+
+/// Each locked package's checksum, by name, version, and source. A
+/// lockfile that cannot be read gives none: the checksum is provenance,
+/// not something reading source needs.
+fn checksums(lockfile: &Path) -> HashMap<(String, String, String), String> {
+    #[derive(serde::Deserialize)]
+    struct Lock {
+        #[serde(default)]
+        package: Vec<Locked>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Locked {
+        name: String,
+        version: String,
+        source: Option<String>,
+        checksum: Option<String>,
+    }
+    let Ok(text) = std::fs::read_to_string(lockfile) else {
+        return HashMap::new();
+    };
+    let Ok(lock) = toml::from_str::<Lock>(&text) else {
+        return HashMap::new();
+    };
+    lock.package
+        .into_iter()
+        .filter_map(|p| Some(((p.name, p.version, p.source?), p.checksum?)))
+        .collect()
 }

@@ -43,9 +43,10 @@ use std::path::{Path, PathBuf};
 
 use emit::MARKER;
 pub use export::export;
-pub use extract::{Crate, Extracted, extract, verify, write_entry};
-/// A working-catalogue entry: what a crate offers, read from its source.
-pub use gdl_extract::Offer;
+pub use extract::{Crate, Extracted, add_to_catalog, extract, verify};
+/// The working catalogue, its entries, and what a crate offers, read from
+/// its source.
+pub use gdl_extract::{Catalog, Entry, Offer};
 pub use resolve::Resolved;
 pub use spec::Spec;
 
