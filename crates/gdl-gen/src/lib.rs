@@ -319,6 +319,14 @@ fn offers(
     }
 }
 
+/// crates.io, as a lockfile names it over git and over the sparse
+/// protocol: what a crate listed by version, and a manifest that depends
+/// on one by version, mean.
+pub const CRATES_IO: [&str; 2] = [
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+];
+
 /// The offer of the listed crate `package` from `source` among `given`,
 /// held to the rule a read holds it to: its library is `lib`.
 fn given_offer(
@@ -335,8 +343,7 @@ fn given_offer(
                 // A version names the crates.io package, which a lockfile
                 // gives a registry source; a git package is another.
                 {
-                    o.version == *v
-                        && (o.source.starts_with("registry+") || o.source.starts_with("sparse+"))
+                    o.version == *v && CRATES_IO.contains(&o.source.as_str())
                 }
                 spec::CrateSource::Path(dir) => o
                     .source
@@ -1270,6 +1277,12 @@ mod tests {
         let registry = offer("registry+https://github.com/rust-lang/crates.io-index");
         let version = spec::CrateSource::Version("0.1.0".into());
         assert!(given_offer(std::slice::from_ref(&git), "proto", "proto", &version).is_err());
+        // Another registry's package of that name and version is another
+        // crate: the generated manifests name crates.io.
+        let elsewhere = offer("sparse+https://registry.example.com/index/");
+        assert!(given_offer(std::slice::from_ref(&elsewhere), "proto", "proto", &version).is_err());
+        let sparse = offer("sparse+https://index.crates.io/");
+        assert!(given_offer(std::slice::from_ref(&sparse), "proto", "proto", &version).is_ok());
         for given in [
             [git.clone(), registry.clone()],
             [registry.clone(), git.clone()],

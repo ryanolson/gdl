@@ -507,7 +507,7 @@ fn an_archive_of_fetchable_crates_builds_images() {
         "FROM rust:${RUST_VERSION}-slim-bookworm AS build\n",
         "COPY [\"contract\", \"contract\"]\n",
         "COPY [\"engine\", \"engine\"]\n",
-        "RUN [\"cargo\", \"build\", \"--release\", \"--manifest-path\", \"engine/Cargo.toml\"]\n",
+        "RUN [\"cargo\", \"build\", \"--release\", \"--manifest-path\", \"./engine/Cargo.toml\"]\n",
         "COPY --from=build [\"/src/engine/target/release/imaged-engine\", \"/usr/local/bin/imaged-engine\"]\n",
     ] {
         assert!(dockerfile.contains(line), "{line} in:\n{dockerfile}");

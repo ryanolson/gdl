@@ -46,6 +46,10 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
         0o755,
     ));
     if portable(spec) {
+        let problems = image_problems(&graph, &segments);
+        if !problems.is_empty() {
+            return Err(Error::new(problems.join("\n")));
+        }
         for segment in &segments {
             let package = emit::package_name(&graph, segment);
             entries.push((
@@ -124,9 +128,28 @@ fn dockerfile(graph: &str, segment: &str, package: &str) -> String {
         marker = emit::MARKER,
         rust = env!("CARGO_PKG_RUST_VERSION"),
         segment_json = json(segment),
-        manifest = json(&format!("{segment}/Cargo.toml")),
+        // `./`: a segment named `-front` is a path to cargo, not an option.
+        manifest = json(&format!("./{segment}/Cargo.toml")),
         binary = json(&format!("/src/{segment}/target/release/{package}")),
     )
+}
+
+/// Why a segment's image name would be refused: Docker takes a name of
+/// lowercase letters, digits, and separators that starts and ends with a
+/// letter or digit, and a package name may end with `-`.
+fn image_problems(graph: &str, segments: &[&str]) -> Vec<String> {
+    segments
+        .iter()
+        .filter_map(|segment| {
+            let name = emit::package_name(graph, segment);
+            let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+            (!edge(name.chars().next()) || !edge(name.chars().last())).then(|| {
+                format!(
+                    "segment `{segment}`: its image would be named `{name}`, which Docker refuses; name the segment with a letter or digit last"
+                )
+            })
+        })
+        .collect()
 }
 
 /// Builds one image per segment, each from its own `Dockerfile`.
@@ -218,6 +241,33 @@ mod tests {
         assert!(
             script.contains(" --manifest-path './it'\\''s/Cargo.toml' \"$@\"\n"),
             "{script}"
+        );
+    }
+
+    /// The Dockerfile's cargo reads a segment's manifest path as a path,
+    /// never an option, however the segment is named.
+    #[test]
+    fn the_dockerfile_names_the_manifest_as_a_path() {
+        let dockerfile = dockerfile("g", "-front", "g--front");
+        assert!(
+            dockerfile.contains("\"--manifest-path\", \"./-front/Cargo.toml\"]"),
+            "{dockerfile}"
+        );
+    }
+
+    /// An image is named for its segment's package, which Docker must accept:
+    /// a name that would end in a separator is refused by segment.
+    #[test]
+    fn image_names_are_names_docker_accepts() {
+        assert_eq!(
+            image_problems("imaged", &["engine", "front"]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            image_problems("imaged", &["engine_"]),
+            [
+                "segment `engine_`: its image would be named `imaged-engine-`, which Docker refuses; name the segment with a letter or digit last"
+            ]
         );
     }
 }

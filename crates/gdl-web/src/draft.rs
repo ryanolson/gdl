@@ -406,7 +406,7 @@ fn crate_list(entries: &[&Entry], problems: &mut Vec<String>) -> Vec<toml::Value
         .iter()
         .filter_map(|entry| {
             let offer = &entry.offer;
-            if offer.source.starts_with("registry+") || offer.source.starts_with("sparse+") {
+            if gdl_gen::CRATES_IO.contains(&offer.source.as_str()) {
                 Some(format!("{}@{}", offer.package, offer.version).into())
             } else if let Some(dir) = offer.source.strip_prefix("path+file://") {
                 Some(dir.to_string().into())
@@ -538,5 +538,31 @@ mod tests {
             "name = \"keyword\", schema = 1;\nsource A: r#match -> stream Token;\nsink Engine: r#match -> stream Token;\ntopology: A => Engine;\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A spec lists a registry crate by version, which means crates.io: a
+    /// crate from another registry cannot be listed.
+    #[test]
+    fn a_crate_from_another_registry_is_refused() {
+        let elsewhere = Entry {
+            added: "2026-10-19T00:00:00Z".into(),
+            checksum: None,
+            offer: Offer {
+                package: "proto".into(),
+                version: "0.1.0".into(),
+                source: "sparse+https://registry.example.com/index/".into(),
+                messages: Vec::new(),
+                exports: Vec::new(),
+                nodes: Vec::new(),
+            },
+        };
+        let mut problems = Vec::new();
+        assert!(crate_list(&[&elsewhere], &mut problems).is_empty());
+        assert_eq!(
+            problems,
+            [
+                "proto@0.1.0: a crate from sparse+https://registry.example.com/index/ cannot be listed yet: only crates.io and directories"
+            ]
+        );
     }
 }
