@@ -1,7 +1,0 @@
-// Every role a node crate can declare, streamed requests with a head and
-// without one, and a name spelled raw.
-sink     Engine: Words -> stream Token;
-forward  Resample: Session + stream Pcm -> stream Pcm;
-backward Detokenize: Token -> Piece;
-operator Gate: (Words -> stream Piece) over (Words -> stream Token);
-backward r#Relabel: Piece -> Piece;

@@ -1,2 +1,0 @@
-sink Engine: Words + stream Token -> stream Token;
-sink Other: Words + stream Token -> stream Token;

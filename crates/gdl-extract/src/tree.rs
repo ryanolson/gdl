@@ -33,6 +33,7 @@ pub(crate) struct Module {
 pub(crate) struct TypeDef {
     pub(crate) name: String,
     pub(crate) attrs: Vec<Meta>,
+    pub(crate) at: Location,
 }
 
 /// One name a `use` (or an `extern crate`) brings in, or one glob.
@@ -52,8 +53,6 @@ pub(crate) struct Impl {
     pub(crate) self_ty: syn::Type,
     /// Its associated types: name, type, and where.
     pub(crate) types: Vec<(String, syn::Type, Location)>,
-    pub(crate) attrs: Vec<Meta>,
-    pub(crate) at: Location,
 }
 
 /// A place in a source file.
@@ -169,14 +168,17 @@ impl Reader<'_> {
                 Item::Struct(s) => krate.modules[module].types.push(TypeDef {
                     name: s.ident.unraw().to_string(),
                     attrs,
+                    at: at(s.ident.span()),
                 }),
                 Item::Enum(e) => krate.modules[module].types.push(TypeDef {
                     name: e.ident.unraw().to_string(),
                     attrs,
+                    at: at(e.ident.span()),
                 }),
                 Item::Union(u) => krate.modules[module].types.push(TypeDef {
                     name: u.ident.unraw().to_string(),
                     attrs,
+                    at: at(u.ident.span()),
                 }),
                 Item::Use(u) => {
                     let mut uses = Vec::new();
@@ -221,8 +223,6 @@ impl Reader<'_> {
                         trait_path: i.trait_.as_ref().map(|(_, path, _)| path.clone()),
                         self_ty: (*i.self_ty).clone(),
                         types,
-                        attrs,
-                        at: at(i.self_ty.span()),
                     });
                 }
                 Item::Mod(m) => {

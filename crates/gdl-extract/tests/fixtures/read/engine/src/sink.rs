@@ -1,12 +1,5 @@
-use gdl::{Sink, node};
+use gdl::Node;
 
-use super::{Token, Words};
-
-/// The engine.
+/// The engine: its role impl is in another module.
+#[derive(Node)]
 pub struct Engine;
-
-#[node]
-impl Sink for Engine {
-    type Req = Words;
-    type Item = Token;
-}

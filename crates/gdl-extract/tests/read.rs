@@ -102,9 +102,10 @@ fn an_export_names_its_origin() {
     assert!(extraction.offer.messages.is_empty());
 }
 
-/// Nodes in module files, reached through a root re-export and a glob;
-/// ports through imports, a module alias, `super`, streamed requests with
-/// and without a head, and a message offered only through an export.
+/// Nodes in module files, reached through a root re-export and a glob,
+/// with their role impl in their own module or another; ports through
+/// imports, a module alias, `super`, `crate`, streamed requests with and
+/// without a head, and a message offered only through an export.
 #[test]
 fn a_node_crate_offers_its_nodes_by_message_origin() {
     let extraction = workspace().extract("read-engine").expect("package");
@@ -139,24 +140,20 @@ fn a_node_crate_offers_its_nodes_by_message_origin() {
             "forward Resample read_engine::Resample: In=read_protocols::Words + stream read_protocols::engine::Token, Out=() + stream read_protocols::engine::Token",
         ]
     );
-    assert_eq!(extraction.problems.len(), 2, "{:#?}", extraction.problems);
-    assert!(
-        extraction.problems[0]
-            .contains("node `Bad`: port `Req`: `String` names no type that derives `Message`"),
-        "{}",
-        extraction.problems[0]
-    );
-    assert!(
-        extraction.problems[1]
-            .contains("node `Buried`: the crate root does not reach it as `read_engine::Buried`"),
-        "{}",
-        extraction.problems[1]
-    );
-    assert!(
-        extraction.problems[0].contains("engine/src/lib.rs:"),
-        "{}",
-        extraction.problems[0]
-    );
+    let problems = extraction.problems.join("\n");
+    for expected in [
+        "node `Bad`: port `Req`: `String` names no type that derives `Message`",
+        "node `Buried`: the crate root does not reach it as `read_engine::Buried`",
+        "node `Twice` implements more than one role trait: sink, backward",
+        "node `Idle`: the crate implements no role trait for it",
+    ] {
+        assert!(
+            problems.contains(expected),
+            "{expected:?} missing from:\n{problems}"
+        );
+    }
+    assert_eq!(extraction.problems.len(), 4, "{problems}");
+    assert!(problems.contains("engine/src/lib.rs:"), "{problems}");
 }
 
 #[test]

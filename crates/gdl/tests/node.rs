@@ -1,221 +1,215 @@
-//! `#[gdl::node]`: a node type checked against its crate's nodes file when
-//! the crate compiles. Each case is a crate of the fixture workspace in
-//! `tests/fixtures/nodes`, built with cargo: the attribute reads the
-//! manifest of the crate being compiled, which only a real crate has.
-//!
-//! The first build of the fixture workspace compiles gdl and takes a
-//! while; the target directory is the one the generator's tests share, so
-//! it is usually warm.
+//! `#[derive(gdl::Node)]`: a node type registers each role trait it
+//! implements, with the messages at its ports, read through the role
+//! trait's associated types; and `gdl::Message` works in a crate that names
+//! only gdl.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use gdl::{
+    Backward, Catalogue, Cx, Error, Forward, Items, Next, Operator, Result, Sink, Streamed, items,
+};
 
-fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nodes")
-}
+/// Words.
+#[derive(gdl::Message)]
+pub struct Words;
 
-fn target() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
-        .join("gdl-gen-tests")
-}
+/// A token.
+#[derive(gdl::Message)]
+pub struct Token;
 
-/// Build package `package` of the fixture workspace: its success, and what
-/// the compiler said.
-fn build(package: &str) -> (bool, String) {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
-        .args(["build", "--quiet", "-p", package, "--manifest-path"])
-        .arg(fixtures().join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", target())
-        .output()
-        .expect("cargo");
-    (
-        output.status.success(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
-}
+/// A piece of text.
+#[derive(gdl::Message)]
+pub struct Piece;
 
-fn fails_with(package: &str, expected: &[&str]) {
-    let (ok, stderr) = build(package);
-    assert!(!ok, "{package} built");
-    for part in expected {
-        assert!(stderr.contains(part), "{part:?} missing from:\n{stderr}");
-    }
-}
+mod engine {
+    use super::*;
 
-/// Every role, streamed requests with and without a head, a type in a
-/// module that the crate root re-exports, and a declaration spelled raw.
-#[test]
-fn nodes_that_match_their_declarations_compile() {
-    let (ok, stderr) = build("node-good");
-    assert!(ok, "{stderr}");
-}
+    /// A sink, in a module, re-exported at the root.
+    #[derive(gdl::Node)]
+    pub struct Engine;
 
-#[test]
-fn a_port_with_another_message_fails_to_compile() {
-    fails_with(
-        "node-wrong-message",
-        &["node `Engine`: its `Sink::Item` is not `Piece`, as gdl/nodes.gdl declares"],
-    );
-}
+    impl Sink for Engine {
+        type Req = Words;
+        type Item = Token;
 
-#[test]
-fn an_undeclared_node_fails_to_compile() {
-    fails_with(
-        "node-undeclared",
-        &["`Other` is not declared in gdl/nodes.gdl, which declares `Engine`"],
-    );
-}
-
-#[test]
-fn a_node_the_crate_root_does_not_reach_fails_to_compile() {
-    fails_with(
-        "node-not-at-root",
-        &["cannot find type `Engine` in the crate root"],
-    );
-}
-
-#[test]
-fn a_node_of_another_role_fails_to_compile() {
-    fails_with(
-        "node-wrong-role",
-        &["the trait bound `Engine: gdl::Forward` is not satisfied"],
-    );
-}
-
-/// A streamed request nested in a head or an item matches no declaration:
-/// graph syntax has no form for it.
-#[test]
-fn a_nested_stream_fails_to_compile() {
-    fails_with(
-        "node-nested-stream",
-        &[
-            "node `Engine`: its `Sink::Req` is not `Words + stream Token`",
-            "node `Other`: its `Sink::Req` is not `Words + stream Token`",
-        ],
-    );
-}
-
-/// The generated segment names the type from another crate.
-#[test]
-fn a_private_node_type_fails_to_compile() {
-    fails_with(
-        "node-private-root",
-        &["node `Engine`: a node type must be `pub`, for the generated segment crates to name it"],
-    );
-}
-
-#[test]
-fn a_crate_without_a_nodes_file_fails_to_compile() {
-    fails_with(
-        "node-no-metadata",
-        &["`#[gdl::node]` needs `[package.metadata.gdl] nodes = \"<file>\"` in Cargo.toml"],
-    );
-}
-
-/// The nodes file is part of the crate's build: an edit that makes it
-/// disagree with the code fails the next build, though no Rust file
-/// changed. Built from a copy, so the other tests' crate is not touched.
-#[test]
-fn an_edit_to_the_nodes_file_rebuilds_the_crate() {
-    let dir = good_copy("edit");
-    let build = || build_copy(&dir);
-    let (ok, stderr) = build();
-    assert!(ok, "{stderr}");
-    let file = dir.join("good/gdl/nodes.gdl");
-    let text = std::fs::read_to_string(&file).expect("nodes file");
-    std::fs::write(
-        &file,
-        text.replace("Words -> stream Token;", "Words -> stream Piece;"),
-    )
-    .expect("edit");
-    let (ok, stderr) = build();
-    assert!(!ok, "the edit did not rebuild the crate");
-    assert!(
-        stderr.contains("node `Engine`: its `Sink::Item` is not `Piece`"),
-        "{stderr}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The manifest names the nodes file, so pointing it at another file
-/// rebuilds the crate as well.
-#[test]
-fn a_change_of_nodes_file_in_the_manifest_rebuilds_the_crate() {
-    let dir = good_copy("manifest");
-    let build = || build_copy(&dir);
-    let text = std::fs::read_to_string(dir.join("good/gdl/nodes.gdl")).expect("nodes file");
-    std::fs::write(
-        dir.join("good/gdl/other.gdl"),
-        text.replace("Words -> stream Token;", "Words -> stream Piece;"),
-    )
-    .expect("other file");
-    let (ok, stderr) = build();
-    assert!(ok, "{stderr}");
-    let manifest = dir.join("good/Cargo.toml");
-    let text = std::fs::read_to_string(&manifest).expect("manifest");
-    std::fs::write(&manifest, text.replace("gdl/nodes.gdl", "gdl/other.gdl")).expect("edit");
-    let (ok, stderr) = build();
-    assert!(!ok, "the manifest change did not rebuild the crate");
-    assert!(
-        stderr
-            .contains("node `Engine`: its `Sink::Item` is not `Piece`, as gdl/other.gdl declares"),
-        "{stderr}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A copy of the `good` fixture crate in a workspace of its own, so that a
-/// test may edit it without touching the crate the other tests build.
-fn good_copy(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gdl-node-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    for krate in ["good", "protocols"] {
-        copy(&fixtures().join(krate), &dir.join(krate));
-    }
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    std::fs::write(
-        dir.join("Cargo.toml"),
-        format!(
-            "[workspace]\nmembers = [\"good\", \"protocols\"]\nresolver = \"3\"\n\
-             [workspace.package]\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\
-             [workspace.dependencies]\nfutures = \"0.3\"\ngdl = {{ path = {:?} }}\n\
-             gdl-message = {{ path = {:?} }}\nnode-protocols = {{ path = \"protocols\" }}\n\
-             serde = {{ version = \"1\", features = [\"derive\"] }}\n",
-            crates.join("gdl"),
-            crates.join("gdl-message"),
-        ),
-    )
-    .expect("workspace");
-    dir
-}
-
-/// Build the copy's node crate: its success, and what the compiler said.
-fn build_copy(dir: &Path) -> (bool, String) {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
-        .args(["build", "--quiet", "-p", "node-good", "--manifest-path"])
-        .arg(dir.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", target())
-        .output()
-        .expect("cargo");
-    (
-        output.status.success(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
-}
-
-fn copy(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).expect("dir");
-    for entry in std::fs::read_dir(from).expect("read") {
-        let entry = entry.expect("entry");
-        let target = to.join(entry.file_name());
-        if entry.file_type().expect("type").is_dir() {
-            copy(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).expect("copy");
+        async fn generate(&self, _cx: Cx, _req: Words) -> Result<Items<Token>> {
+            Err(Error::node("a fixture"))
         }
     }
+}
+
+pub use engine::Engine;
+
+/// A forward node with streamed requests, with a head and without one.
+#[derive(gdl::Node)]
+pub struct Resample;
+
+impl Forward for Resample {
+    type In = Streamed<Words, Token>;
+    type Out = Streamed<(), Token>;
+
+    async fn forward(&self, _cx: &Cx, _req: Self::In) -> Result<Self::Out> {
+        Err(Error::node("a fixture"))
+    }
+}
+
+/// A backward node.
+#[derive(gdl::Node)]
+pub struct Detokenize;
+
+impl Backward for Detokenize {
+    type In = Token;
+    type Out = Piece;
+
+    fn backward(&self, _cx: &Cx, _input: Items<Token>) -> Items<Piece> {
+        items(futures::stream::empty())
+    }
+}
+
+/// An operator.
+#[derive(gdl::Node)]
+pub struct Gate;
+
+impl Operator for Gate {
+    type UpReq = Words;
+    type UpItem = Piece;
+    type DownReq = Words;
+    type DownItem = Token;
+
+    async fn generate<N>(&self, _cx: Cx, _req: Words, _next: N) -> Result<Items<Piece>>
+    where
+        N: Next<Words, Token>,
+    {
+        Err(Error::node("a fixture"))
+    }
+}
+
+/// A type that implements two roles: registered with both, for the reader
+/// and `--verify` to refuse.
+#[derive(gdl::Node)]
+pub struct Both;
+
+impl Sink for Both {
+    type Req = Words;
+    type Item = Token;
+
+    async fn generate(&self, _cx: Cx, _req: Words) -> Result<Items<Token>> {
+        Err(Error::node("a fixture"))
+    }
+}
+
+impl Backward for Both {
+    type In = Token;
+    type Out = Token;
+
+    fn backward(&self, _cx: &Cx, input: Items<Token>) -> Items<Token> {
+        input
+    }
+}
+
+/// A sink whose request is not a message: no role is found.
+#[derive(gdl::Node)]
+pub struct Plain;
+
+impl Sink for Plain {
+    type Req = String;
+    type Item = Token;
+
+    async fn generate(&self, _cx: Cx, _req: String) -> Result<Items<Token>> {
+        Err(Error::node("a fixture"))
+    }
+}
+
+/// A stream nested in a streamed request's head.
+#[derive(gdl::Node)]
+pub struct Nested;
+
+impl Sink for Nested {
+    type Req = Streamed<Streamed<Words, Token>, Token>;
+    type Item = Token;
+
+    async fn generate(&self, _cx: Cx, _req: Self::Req) -> Result<Items<Token>> {
+        Err(Error::node("a fixture"))
+    }
+}
+
+fn summary(catalogue: &Catalogue) -> Vec<String> {
+    // The type's last path segment, `()` for none.
+    let short = |path: Option<&str>| {
+        path.map_or("()".to_string(), |p| {
+            p.rsplit("::").next().unwrap_or("").to_string()
+        })
+    };
+    catalogue
+        .nodes
+        .iter()
+        .map(|n| {
+            let roles: Vec<String> = n
+                .roles
+                .iter()
+                .map(|r| {
+                    let ports: Vec<String> = r
+                        .ports
+                        .iter()
+                        .map(|p| {
+                            let nested = if p.nested { " nested" } else { "" };
+                            if p.streamed {
+                                format!(
+                                    "{}={} + stream {}{nested}",
+                                    p.port,
+                                    short(p.head.as_ref().map(|o| o.path.as_str())),
+                                    short(p.item.as_ref().map(|o| o.path.as_str()))
+                                )
+                            } else {
+                                format!(
+                                    "{}={}",
+                                    p.port,
+                                    short(p.head.as_ref().map(|o| o.path.as_str()))
+                                )
+                            }
+                        })
+                        .collect();
+                    format!("{}({})", r.role, ports.join(", "))
+                })
+                .collect();
+            format!("{} {}: {}", n.name, n.path, roles.join(" "))
+        })
+        .collect()
+}
+
+#[test]
+fn a_node_registers_its_roles_and_ports() {
+    let catalogue = Catalogue::linked();
+    assert_eq!(
+        summary(&catalogue),
+        [
+            "Both node::Both: backward(In=Token, Out=Token) sink(Req=Words, Item=Token)",
+            "Detokenize node::Detokenize: backward(In=Token, Out=Piece)",
+            "Engine node::Engine: sink(Req=Words, Item=Token)",
+            "Gate node::Gate: operator(UpReq=Words, UpItem=Piece, DownReq=Words, DownItem=Token)",
+            "Nested node::Nested: sink(Req=Words + stream Token nested, Item=Token)",
+            "Plain node::Plain: ",
+            "Resample node::Resample: forward(In=Words + stream Token, Out=() + stream Token)",
+        ]
+    );
+    let engine = catalogue
+        .nodes
+        .iter()
+        .find(|n| n.name == "Engine")
+        .expect("Engine");
+    let words = engine.roles[0].ports[0].head.as_ref().expect("Words");
+    assert_eq!(
+        (words.package.as_str(), words.path.as_str()),
+        ("gdl", "node::Words")
+    );
+}
+
+/// `gdl::Message` registers through gdl: this crate names no other.
+#[test]
+fn a_message_derived_through_gdl_is_registered() {
+    let catalogue = Catalogue::linked();
+    let words = catalogue
+        .messages
+        .iter()
+        .find(|m| m.path == "node::Words")
+        .expect("Words");
+    assert_eq!(words.package, "gdl");
 }

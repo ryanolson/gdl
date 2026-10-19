@@ -161,7 +161,7 @@ nodes = "gdl/nodes.gdl"
 sink Engine: Words -> stream Token;
 ```
 
-Each graph node binds to the node of its name that a listed crate declares. Its implementation is the type of that name at the crate's root, here `chat_engine_mock::Engine`. If two crates declare one name, add `pin = { Engine = "chat_engine_mock::Engine" }` to `[nodes]` to choose one. The graph's signature for each node must be the one that its crate declares. The generator reads nodes files without compiling the node crates, so a crate that needs CUDA, for example, does not have to build there. The implementing type carries `#[gdl::node]`. When the crate compiles, the attribute makes sure that the type is declared, sits at the crate root, and has the declared role and messages.
+Each graph node binds to the node of its name that a listed crate declares. Its implementation is the type of that name at the crate's root, here `chat_engine_mock::Engine`. If two crates declare one name, add `pin = { Engine = "chat_engine_mock::Engine" }` to `[nodes]` to choose one. The graph's signature for each node must be the one that its crate declares. The generator reads nodes files without compiling the node crates, so a crate that needs CUDA, for example, does not have to build there. The implementing type carries `#[derive(gdl::Node)]`. When the crate compiles, the derive makes sure that the type is `pub` and sits at the crate root, and it registers the role and messages it finds. The nodes files are temporary: `gdl-extract` reads the same information from the source, and the generator will use it instead.
 
 A spec with a contract crate binds each node with a table instead:
 

@@ -1,5 +1,5 @@
-//! `#[derive(Message)]`: register a type in the message catalogue of every
-//! program that links its crate.
+//! `#[derive(Message)]`: implement `Message` and `Shape`, and register the
+//! type in the catalogue of every program that links its crate.
 
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned};
@@ -7,7 +7,10 @@ use syn::DeriveInput;
 use syn::ext::IdentExt as _;
 use syn::spanned::Spanned;
 
-pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
+/// The expansion, naming the support items through `root`: the
+/// `__private` module of `gdl_message` or of `gdl`, whichever crate the
+/// derive was reached through. A derive has no `$crate`.
+pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<TokenStream> {
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new(
             input.generics.span(),
@@ -22,33 +25,43 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     // definition, and a protocols crate cannot publish a message that no
     // graph can carry.
     let message = quote_spanned! {ident.span()=>
-        impl ::gdl_message::Message for #ident {
+        impl #root::MessageTrait for #ident {
             const NAME: &'static str = #name;
-            const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
-            const PATH: &'static str = ::core::concat!(::core::module_path!(), "::", #name);
+            const IDENTITY: #root::Identity = #root::Identity {
+                package: ::core::env!("CARGO_PKG_NAME"),
+                version: ::core::env!("CARGO_PKG_VERSION"),
+                dir: ::core::env!("CARGO_MANIFEST_DIR"),
+                path: ::core::concat!(::core::module_path!(), "::", #name),
+            };
         }
     };
-    // A derive has no `$crate`, so the expansion names `::gdl_message`,
-    // which a crate deriving `Message` depends on. The `const _` block keeps
-    // the static's name out of the caller's module.
+    // The `const _` block keeps the static's name out of the caller's
+    // module.
     Ok(quote! {
         #message
 
-        impl ::gdl_message::Shape for #ident {
-            const HEAD: &'static str = #name;
-            const ITEM: ::core::option::Option<&'static str> = ::core::option::Option::None;
+        impl #root::Shape for #ident {
+            const STREAMED: bool = false;
+            const NESTED: bool = false;
+            const HEAD: ::core::option::Option<#root::Identity> =
+                ::core::option::Option::Some(<#ident as #root::MessageTrait>::IDENTITY);
+            const ITEM: ::core::option::Option<#root::Identity> = ::core::option::Option::None;
         }
 
         const _: () = {
-            #[::gdl_message::__private::linkme::distributed_slice(::gdl_message::__private::GDL_MESSAGE_CATALOGUE)]
-            #[linkme(crate = ::gdl_message::__private::linkme)]
-            static __GDL_MESSAGE: ::gdl_message::__private::Entry = ::gdl_message::__private::Entry {
+            #[#root::linkme::distributed_slice(#root::GDL_MESSAGE_CATALOGUE)]
+            #[linkme(crate = #root::linkme)]
+            static __GDL_MESSAGE: #root::Entry = #root::Entry {
                 package: ::core::env!("CARGO_PKG_NAME"),
                 version: ::core::env!("CARGO_PKG_VERSION"),
                 dir: ::core::env!("CARGO_MANIFEST_DIR"),
                 name: #name,
                 module: ::core::module_path!(),
-                wire: || ::gdl_message::__gdl_wire!(#ident),
+                wire: || {
+                    #[allow(unused_imports)]
+                    use #root::{WireNo as _, WireYes as _};
+                    (&#root::WireProbe::<#ident>::new()).__gdl_wire()
+                },
             };
         };
     })

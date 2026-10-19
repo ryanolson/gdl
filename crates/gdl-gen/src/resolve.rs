@@ -236,7 +236,10 @@ mod tests {
         let mut messages: Vec<MessageInfo> =
             messages.iter().map(|(p, path)| message(p, path)).collect();
         messages.sort();
-        Catalogue { messages }
+        Catalogue {
+            messages,
+            ..Catalogue::default()
+        }
     }
 
     fn uses(names: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {

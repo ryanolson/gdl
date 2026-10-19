@@ -1,13 +1,15 @@
 //! The `graph!` macro: one declaration of a graph's nodes, message types,
 //! and topology, expanded into everything the runtime and the generator need
 //! from it. Reached through `gdl::graph!`; see that macro for the syntax.
-//! Also `#[derive(Message)]`, reached as `gdl_message::Message`, and
-//! `#[node]`, reached as `gdl::node`.
+//! Also the markers that offer a crate's messages and nodes to graphs:
+//! `derive(Message)` and `#[export]`, each reached through `gdl_message` or
+//! through `gdl`, and `derive(Node)`, reached through `gdl`.
 
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as Tokens, TokenTree};
 
 mod expand;
+mod export;
 mod message;
 mod node;
 
@@ -33,21 +35,51 @@ pub fn graph(input: TokenStream) -> TokenStream {
 }
 
 /// The expansion behind `gdl_message::Message`: the `Message` and `Shape`
-/// impls, and one catalogue entry for the type.
+/// impls, and one catalogue entry for the type, named through
+/// `::gdl_message`.
 #[proc_macro_derive(Message)]
 pub fn message(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
-    match message::expand(&input) {
-        Ok(tokens) => tokens.into(),
-        Err(error) => error.to_compile_error().into(),
-    }
+    result(message::expand(&input, &through_message()))
 }
 
-/// The expansion behind `gdl::node`: the item, and the checks that tie it
-/// to its crate's nodes file.
+/// The same derive, reached as `gdl::Message`: named through `::gdl`, so a
+/// crate that depends on gdl alone can use it.
+#[proc_macro_derive(GdlMessage)]
+pub fn gdl_message(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    result(message::expand(&input, &through_gdl()))
+}
+
+/// The expansion behind `gdl_message::export`.
 #[proc_macro_attribute]
-pub fn node(attr: TokenStream, item: TokenStream) -> TokenStream {
-    match node::expand(attr.into(), item.into()) {
+pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
+    result(export::expand(attr.into(), item.into(), &through_message()))
+}
+
+/// The same attribute, reached as `gdl::export`.
+#[proc_macro_attribute]
+pub fn gdl_export(attr: TokenStream, item: TokenStream) -> TokenStream {
+    result(export::expand(attr.into(), item.into(), &through_gdl()))
+}
+
+/// The expansion behind `gdl::Node`.
+#[proc_macro_derive(Node)]
+pub fn node(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    result(node::expand(&input, &through_gdl()))
+}
+
+fn through_message() -> Tokens {
+    quote::quote!(::gdl_message::__private)
+}
+
+fn through_gdl() -> Tokens {
+    quote::quote!(::gdl::__private)
+}
+
+fn result(expansion: syn::Result<Tokens>) -> TokenStream {
+    match expansion {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
@@ -64,4 +96,48 @@ fn split_crate(input: Tokens) -> Option<(Tokens, Tokens)> {
         krate.extend([token]);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn idents(tokens: Tokens, out: &mut Vec<String>) {
+        for token in tokens {
+            match token {
+                TokenTree::Ident(ident) => out.push(ident.to_string()),
+                TokenTree::Group(group) => idents(group.stream(), out),
+                _ => {}
+            }
+        }
+    }
+
+    /// A crate that depends on gdl alone can use the markers that gdl
+    /// re-exports: their expansions name gdl, never `gdl_message`.
+    #[test]
+    fn markers_through_gdl_name_only_gdl() {
+        let input: syn::DeriveInput = syn::parse_quote!(
+            pub struct Words;
+        );
+        let use_item = quote::quote!(
+            pub use inner::Words;
+        );
+        let expansions = [
+            message::expand(&input, &through_gdl()).expect("message"),
+            export::expand(Tokens::new(), use_item, &through_gdl()).expect("export"),
+            node::expand(&input, &through_gdl()).expect("node"),
+        ];
+        for expansion in expansions {
+            let mut names = Vec::new();
+            idents(expansion, &mut names);
+            assert!(names.iter().any(|n| n == "gdl"), "{names:?}");
+            assert!(!names.iter().any(|n| n == "gdl_message"), "{names:?}");
+        }
+        let mut names = Vec::new();
+        idents(
+            message::expand(&input, &through_message()).expect("message"),
+            &mut names,
+        );
+        assert!(names.iter().any(|n| n == "gdl_message"), "{names:?}");
+    }
 }

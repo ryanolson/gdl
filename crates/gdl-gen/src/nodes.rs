@@ -1,8 +1,8 @@
 //! Binding a graph file's nodes to the nodes that node crates declare.
 //!
 //! A node crate declares its nodes in a nodes file, which the generator
-//! reads without compiling the crate; `#[gdl::node]` keeps the file true
-//! when the crate compiles. Each graph node other than the source binds to
+//! reads without compiling the crate. Nothing checks the file against the
+//! code: the source reader, `gdl-extract`, replaces it. Each graph node other than the source binds to
 //! the one declared node of its name, or to the one a pin names, and the
 //! graph's signature for it must be the declaration's.
 

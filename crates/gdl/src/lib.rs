@@ -104,58 +104,121 @@ macro_rules! graph {
     };
 }
 
-/// Message types, from `gdl-message`: a protocols crate depends on that
-/// crate alone and derives `gdl_message::Message`.
-pub use gdl_message::{Catalogue, Message, MessageInfo, Shape};
+/// Message types, from `gdl-message`. A protocols crate depends on that
+/// crate alone; a node crate can reach the same items here.
+pub use gdl_message::{Catalogue, Identity, MessageInfo, Shape};
 
-/// Mark the type that implements a node a crate declares in its nodes
-/// file.
+/// The `Message` trait, and the derive of the same name: offer a type to
+/// graphs by its name. This derive names gdl in its expansion, so a crate
+/// that depends on gdl needs nothing else; `gdl_message::Message` is the
+/// same derive for a crate that depends on `gdl-message` alone.
+pub use gdl_macros::GdlMessage as Message;
+#[doc(inline)]
+pub use gdl_message::__private::MessageTrait as Message;
+
+/// Offer messages under this crate's own paths: on a `pub use` of message
+/// types, it keeps the `use` and registers each name with the identity of
+/// the message it names. The same attribute as `gdl_message::export`,
+/// named through gdl.
+pub use gdl_macros::gdl_export as export;
+
+/// Mark the type that implements a node.
 ///
 /// ```ignore
-/// // Cargo.toml: [package.metadata.gdl] nodes = "gdl/nodes.gdl"
-/// // gdl/nodes.gdl: sink Engine: Words -> stream Token;
-/// #[gdl::node]
+/// #[derive(gdl::Node)]
 /// pub struct Engine { .. }
 /// impl gdl::Sink for Engine { type Req = Words; type Item = Token; .. }
 /// ```
 ///
-/// When the crate compiles, the type must be declared in the nodes file
-/// under its own name, be reachable at the crate root under that name, and
-/// implement the declared role with the declared message at each port. The
-/// generator reads the nodes file without compiling the crate; this check
-/// keeps the file true. The expansion names gdl as `::gdl`, so a node crate
-/// depends on gdl under that name.
-pub use gdl_macros::node;
+/// The node's name is the type's name. The type must be `pub`, not generic,
+/// and reachable at the crate root under its name, because generated
+/// segments name it there. The derive registers the type with each role
+/// trait it implements and the messages at its ports, for
+/// `cargo gdl extract --verify`; the source reader finds the same impl in
+/// the crate's source. A node implements exactly one role trait.
+pub use gdl_macros::Node;
 
 /// Support for macro expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
-    /// Whether port type `T` carries the message names `head` and `item`:
-    /// what `#[gdl::node]` asserts for each port, at compile time.
-    pub const fn shape_is<T: gdl_message::Shape>(head: &str, item: Option<&str>) -> bool {
-        same(T::HEAD, head)
-            && match (T::ITEM, item) {
-                (None, None) => true,
-                (Some(a), Some(b)) => same(a, b),
-                _ => false,
-            }
-    }
-
-    const fn same(a: &str, b: &str) -> bool {
-        let (a, b) = (a.as_bytes(), b.as_bytes());
-        if a.len() != b.len() {
-            return false;
-        }
-        let mut i = 0;
-        while i < a.len() {
-            if a[i] != b[i] {
-                return false;
-            }
-            i += 1;
-        }
-        true
-    }
-
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
     pub use gdl_macros::graph;
+    pub use gdl_message::__private::*;
+
+    use crate::{Backward, Forward, Operator, Sink};
+
+    /// The type whose role traits `derive(Node)` probes. For each role, the
+    /// bounded impl is on `RoleProbe<T>` and the fallback on
+    /// `&RoleProbe<T>`, so method lookup on `&RoleProbe<T>` finds the
+    /// bounded impl when the type implements the role with a message at
+    /// every port.
+    pub struct RoleProbe<T>(core::marker::PhantomData<fn() -> T>);
+
+    impl<T> RoleProbe<T> {
+        pub const fn new() -> Self {
+            Self(core::marker::PhantomData)
+        }
+    }
+
+    impl<T> Default for RoleProbe<T> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    macro_rules! probe {
+        ($yes:ident, $no:ident, $method:ident, $role:ident, $name:literal, [$($port:ident),+]) => {
+            pub trait $yes {
+                fn $method(&self) -> Option<Role>;
+            }
+
+            impl<T: $role> $yes for RoleProbe<T>
+            where
+                $(T::$port: Shape,)+
+            {
+                fn $method(&self) -> Option<Role> {
+                    Some(Role {
+                        role: $name,
+                        ports: vec![$((stringify!($port), port::<T::$port>())),+],
+                    })
+                }
+            }
+
+            pub trait $no {
+                fn $method(&self) -> Option<Role>;
+            }
+
+            impl<T> $no for &RoleProbe<T> {
+                fn $method(&self) -> Option<Role> {
+                    None
+                }
+            }
+        };
+    }
+
+    probe!(SinkYes, SinkNo, __gdl_sink, Sink, "sink", [Req, Item]);
+    probe!(
+        ForwardYes,
+        ForwardNo,
+        __gdl_forward,
+        Forward,
+        "forward",
+        [In, Out]
+    );
+    probe!(
+        BackwardYes,
+        BackwardNo,
+        __gdl_backward,
+        Backward,
+        "backward",
+        [In, Out]
+    );
+    probe!(
+        OperatorYes,
+        OperatorNo,
+        __gdl_operator,
+        Operator,
+        "operator",
+        [UpReq, UpItem, DownReq, DownItem]
+    );
 }

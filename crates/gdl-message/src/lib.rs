@@ -8,8 +8,8 @@
 mod catalogue;
 mod shape;
 
-pub use catalogue::{Catalogue, MessageInfo};
-pub use shape::{Message, Shape};
+pub use catalogue::{Catalogue, ExportInfo, MessageInfo, NodeInfo, Origin, PortInfo, RoleInfo};
+pub use shape::{Identity, Message, Shape};
 
 /// Offer a type to graph files by its name.
 ///
@@ -25,59 +25,69 @@ pub use shape::{Message, Shape};
 /// package, name, definition path, and whether it is a wire type. The type
 /// must be `Send + 'static` and not generic: a graph names it by name
 /// alone. The expansion names this crate as `::gdl_message`, so a crate
-/// that derives `Message` depends on it directly.
+/// that derives `Message` this way depends on it directly; `gdl::Message`
+/// is the same derive for a crate that depends on gdl instead.
 pub use gdl_macros::Message;
 
-/// Support for the derive's expansion. Not a stable interface.
+/// Offer messages under this crate's own paths: on a `pub use` of message
+/// types, it keeps the `use` and registers each name, with the identity of
+/// the message it names.
+///
+/// ```ignore
+/// mod defs { #[derive(gdl_message::Message)] pub struct Prompt; }
+/// #[gdl_message::export]
+/// pub use defs::Prompt;
+/// ```
+///
+/// A crate that lists this one offers `Prompt` at this path, though its
+/// definition is in a private module. Each name must be a message, and a
+/// glob names none.
+pub use gdl_macros::export;
+
+/// Support for the markers' expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::catalogue::registry::{Entry, GDL_MESSAGE_CATALOGUE};
+    pub use crate::catalogue::registry::{
+        Entry, Export, GDL_EXPORT_CATALOGUE, GDL_MESSAGE_CATALOGUE, GDL_NODE_CATALOGUE, Node, Port,
+        Role, port,
+    };
+    pub use crate::shape::{Identity, Message as MessageTrait, Shape};
     pub use linkme;
 
-    /// Whether `T` is a wire type: `Serialize` and `DeserializeOwned`.
+    /// Whether a type is a wire type: `Serialize` and `DeserializeOwned`.
     ///
-    /// The derive expands it where `T` is concrete, by autoref: the bounded
-    /// impl is on `Probe<T>` and the fallback on `&Probe<T>`, so method
-    /// lookup on `&Probe<T>` tries the bounded impl first.
-    #[macro_export]
-    #[doc(hidden)]
-    macro_rules! __gdl_wire {
-        ($ty:ty) => {{
-            #[allow(unused_imports)]
-            use ::gdl_message::__private::{ViaLocal as _, ViaWire as _};
-            (&::gdl_message::__private::Probe::<$ty>::new()).__gdl_wire()
-        }};
-    }
+    /// The derive calls it where the type is concrete, by autoref: the
+    /// bounded impl is on `WireProbe<T>` and the fallback on `&WireProbe<T>`,
+    /// so method lookup on `&WireProbe<T>` tries the bounded impl first.
+    pub struct WireProbe<T>(core::marker::PhantomData<fn() -> T>);
 
-    pub struct Probe<T>(core::marker::PhantomData<fn() -> T>);
-
-    impl<T> Probe<T> {
+    impl<T> WireProbe<T> {
         pub const fn new() -> Self {
             Self(core::marker::PhantomData)
         }
     }
 
-    impl<T> Default for Probe<T> {
+    impl<T> Default for WireProbe<T> {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    pub trait ViaWire {
+    pub trait WireYes {
         fn __gdl_wire(&self) -> bool;
     }
 
-    impl<T: serde::Serialize + serde::de::DeserializeOwned> ViaWire for Probe<T> {
+    impl<T: serde::Serialize + serde::de::DeserializeOwned> WireYes for WireProbe<T> {
         fn __gdl_wire(&self) -> bool {
             true
         }
     }
 
-    pub trait ViaLocal {
+    pub trait WireNo {
         fn __gdl_wire(&self) -> bool;
     }
 
-    impl<T> ViaLocal for &Probe<T> {
+    impl<T> WireNo for &WireProbe<T> {
         fn __gdl_wire(&self) -> bool {
             false
         }

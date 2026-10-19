@@ -83,15 +83,14 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                 )),
             }
         }
-        // Nodes: role trait impls marked `#[gdl::node]`.
-        let impls: Vec<usize> = resolver.crates[krate].modules[module]
-            .impls
-            .iter()
-            .enumerate()
-            .filter(|(_, i)| marked(&i.attrs, "node", &["gdl"], &resolver, krate, module))
-            .map(|(index, _)| index)
-            .collect();
-        for index in impls {
+    }
+    // Nodes: types that derive `Node`, each with its role impl, wherever
+    // in the crate that is.
+    for module in 0..resolver.crates[krate].modules.len() {
+        for index in 0..resolver.crates[krate].modules[module].types.len() {
+            if !derives(&resolver.crates[krate].modules[module].types[index], "Node") {
+                continue;
+            }
             match node(&mut resolver, krate, module, index) {
                 Ok(entry) => offer.nodes.push(entry),
                 Err(problem) => problems.push(problem),
@@ -219,62 +218,69 @@ fn marked(
     })
 }
 
-/// The node entry of impl `index` of a module.
+/// The node entry of type `index` of a module, which derives `Node`.
 fn node(
     resolver: &mut Resolver<'_>,
     krate: usize,
     module: usize,
     index: usize,
 ) -> Result<NodeEntry, String> {
-    let item = &resolver.crates[krate].modules[module].impls[index];
-    let at = item.at.clone();
-    let role_name = item
-        .trait_path
-        .as_ref()
-        .and_then(|p| p.segments.last())
-        .map(|s| s.ident.to_string())
-        .unwrap_or_default();
-    let (role, ports): (&str, &[&str]) = match role_name.as_str() {
-        "Sink" => ("sink", &["Req", "Item"]),
-        "Forward" => ("forward", &["In", "Out"]),
-        "Backward" => ("backward", &["In", "Out"]),
-        "Operator" => ("operator", &["UpReq", "UpItem", "DownReq", "DownItem"]),
-        _ => {
-            return Err(format!(
-                "{at}: `#[gdl::node]` goes on an impl of `Sink`, `Forward`, `Backward`, or `Operator`"
-            ));
-        }
-    };
-    let syn::Type::Path(self_ty) = &item.self_ty else {
-        return Err(format!("{at}: a node's type is a named type"));
-    };
-    let (self_path, absolute) = segments(&self_ty.path);
-    let types = item.types.clone();
-    let Some(Def::Type(c, m, i)) = resolver.resolve(krate, module, &self_path, absolute) else {
-        return Err(format!(
-            "{at}: the node type `{}` is not a struct, enum, or union this crate defines",
-            self_path.join("::")
-        ));
-    };
-    if c != krate {
-        return Err(format!(
-            "{at}: the node type `{}` is defined in another crate",
-            self_path.join("::")
-        ));
-    }
-    let name = resolver.crates[c].modules[m].types[i].name.clone();
+    let def = Def::Type(krate, module, index);
+    let ty_def = &resolver.crates[krate].modules[module].types[index];
+    let (name, at) = (ty_def.name.clone(), ty_def.at.clone());
     let ty = format!("{}::{name}", resolver.crates[krate].name);
     // The generated segments name the type at the crate root.
-    if resolver.member(krate, 0, &name, 0) != Some(Def::Type(c, m, i)) {
+    if resolver.member(krate, 0, &name, 0) != Some(def) {
         return Err(format!(
             "{at}: node `{name}`: the crate root does not reach it as `{ty}`"
         ));
     }
+
+    // Its role trait impls: the one that makes it a node.
+    let mut found = Vec::new();
+    for m in 0..resolver.crates[krate].modules.len() {
+        let impls: Vec<RoleImpl> = resolver.crates[krate].modules[m]
+            .impls
+            .iter()
+            .filter_map(|i| {
+                let role = i.trait_path.as_ref()?.segments.last()?.ident.to_string();
+                Some((role, i.self_ty.clone(), i.types.clone()))
+            })
+            .collect();
+        for (role, self_ty, types) in impls {
+            let Some(role) = role_of(&role) else {
+                continue;
+            };
+            let syn::Type::Path(path) = &self_ty else {
+                continue;
+            };
+            let (path, absolute) = segments(&path.path);
+            if resolver.resolve(krate, m, &path, absolute) == Some(def) {
+                found.push((m, role, types));
+            }
+        }
+    }
+    let (impl_module, (role, ports), types) = match found.as_slice() {
+        [] => {
+            return Err(format!(
+                "{at}: node `{name}`: the crate implements no role trait for it"
+            ));
+        }
+        [(m, role, types)] => (*m, *role, types.clone()),
+        several => {
+            let roles: Vec<&str> = several.iter().map(|(_, (role, _), _)| *role).collect();
+            return Err(format!(
+                "{at}: node `{name}` implements more than one role trait: {}",
+                roles.join(", ")
+            ));
+        }
+    };
+
     let mut entries = Vec::with_capacity(ports.len());
     for &port in ports {
         let Some((_, port_ty, port_at)) = types.iter().find(|(n, _, _)| n == port) else {
             return Err(format!(
-                "{at}: node `{name}`: the impl has no `type {port}`"
+                "{at}: node `{name}`: its impl has no `type {port}`"
             ));
         };
         let (head, item) = match streamed(port_ty) {
@@ -289,12 +295,14 @@ fn node(
         };
         let head = match head {
             syn::Type::Tuple(t) if t.elems.is_empty() => None,
-            ty => Some(message_type(resolver, krate, module, ty).ok_or_else(|| unresolved(ty))?),
+            ty => {
+                Some(message_type(resolver, krate, impl_module, ty).ok_or_else(|| unresolved(ty))?)
+            }
         };
         let item = match item {
             None => None,
             Some(ty) => {
-                Some(message_type(resolver, krate, module, ty).ok_or_else(|| unresolved(ty))?)
+                Some(message_type(resolver, krate, impl_module, ty).ok_or_else(|| unresolved(ty))?)
             }
         };
         entries.push(PortEntry {
@@ -309,6 +317,20 @@ fn node(
         ty,
         ports: entries,
     })
+}
+
+/// A trait impl's trait name, self type, and associated types.
+type RoleImpl = (String, syn::Type, Vec<(String, syn::Type, Location)>);
+
+/// A role trait's role and its ports, by the trait's name.
+fn role_of(name: &str) -> Option<(&'static str, &'static [&'static str])> {
+    match name {
+        "Sink" => Some(("sink", &["Req", "Item"])),
+        "Forward" => Some(("forward", &["In", "Out"])),
+        "Backward" => Some(("backward", &["In", "Out"])),
+        "Operator" => Some(("operator", &["UpReq", "UpItem", "DownReq", "DownItem"])),
+        _ => None,
+    }
 }
 
 /// A streamed request's head and item: `Streamed<H, T>`.

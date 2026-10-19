@@ -10,7 +10,8 @@
 //!
 //! - `#[derive(Message)]` on a type: a message, at its definition.
 //! - `#[gdl_message::export]` on a `pub use`: another path to a message.
-//! - `#[gdl::node]` on a role trait impl: a node, with its port types.
+//! - `#[derive(Node)]` on a type: a node, with the port types of the one
+//!   role trait impl the crate has for it.
 //!
 //! It resolves only the paths those markers need, through `use`
 //! declarations, globs, re-exports, `crate`, `self`, `super`, and

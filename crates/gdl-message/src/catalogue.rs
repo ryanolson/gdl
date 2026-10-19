@@ -1,15 +1,23 @@
 use serde::{Deserialize, Serialize};
 
-/// Every message type linked into this program: each type that derives
-/// [`Message`](crate::Message), in whatever crate.
+/// Everything the markers register in this program, in whatever crate:
+/// each type that derives [`Message`](crate::Message), each export, and
+/// each node type.
 ///
-/// The generator reads the catalogue of a protocols crate by building a
-/// program that links it and prints [`Catalogue::linked`] as TOML; a graph
-/// file's message names resolve against it.
+/// `cargo gdl extract --verify` builds a program that links a crate, prints
+/// [`Catalogue::linked`] as TOML, and compares it with what the source
+/// reader found.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Catalogue {
     /// The messages, sorted.
+    #[serde(default)]
     pub messages: Vec<MessageInfo>,
+    /// The exports, sorted.
+    #[serde(default)]
+    pub exports: Vec<ExportInfo>,
+    /// The node types, sorted.
+    #[serde(default)]
+    pub nodes: Vec<NodeInfo>,
 }
 
 /// One message type.
@@ -32,8 +40,95 @@ pub struct MessageInfo {
     pub wire: bool,
 }
 
+/// A message's identity, as a catalogue holds it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Origin {
+    /// The defining package.
+    pub package: String,
+    /// Its version.
+    pub version: String,
+    /// Its directory when it was built.
+    pub dir: String,
+    /// The definition path.
+    pub path: String,
+}
+
+impl From<crate::Identity> for Origin {
+    fn from(id: crate::Identity) -> Self {
+        Self {
+            package: id.package.to_string(),
+            version: id.version.to_string(),
+            dir: id.dir.to_string(),
+            path: id.path.to_string(),
+        }
+    }
+}
+
+/// A message offered under another public path.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ExportInfo {
+    /// The package that exports it.
+    pub package: String,
+    /// That package's version.
+    pub version: String,
+    /// That package's directory when it was built.
+    pub dir: String,
+    /// The name it is offered under.
+    pub name: String,
+    /// The public path.
+    pub path: String,
+    /// The message it is.
+    pub origin: Origin,
+}
+
+/// A type that derives `Node`, with each role trait it implements.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NodeInfo {
+    /// The package that defines it.
+    pub package: String,
+    /// That package's version.
+    pub version: String,
+    /// That package's directory when it was built.
+    pub dir: String,
+    /// The node's name: the type's name.
+    pub name: String,
+    /// The type's path at its crate's root.
+    pub path: String,
+    /// Each role trait it implements, with the messages at its ports. A
+    /// node has exactly one; the reader and `--verify` report any other
+    /// count.
+    pub roles: Vec<RoleInfo>,
+}
+
+/// One role a node type implements.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RoleInfo {
+    /// `sink`, `forward`, `backward`, or `operator`.
+    pub role: String,
+    /// Its ports, in the order the role trait declares them.
+    pub ports: Vec<PortInfo>,
+}
+
+/// One port: a role trait's associated type.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PortInfo {
+    /// The associated type's name: `Req`, `Item`, `In`, `Out`, and so on.
+    pub port: String,
+    /// Whether it is a streamed request.
+    pub streamed: bool,
+    /// Whether a streamed head or item is itself streamed.
+    #[serde(default)]
+    pub nested: bool,
+    /// The message, or the head; `None` for `()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<Origin>,
+    /// A streamed request's item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<Origin>,
+}
+
 impl Catalogue {
-    /// Every message type linked into this program, sorted, so the result
+    /// Every registration linked into this program, sorted, so the result
     /// does not depend on link order.
     pub fn linked() -> Self {
         let mut messages: Vec<MessageInfo> = registry::GDL_MESSAGE_CATALOGUE
@@ -41,7 +136,21 @@ impl Catalogue {
             .map(registry::Entry::info)
             .collect();
         messages.sort();
-        Self { messages }
+        let mut exports: Vec<ExportInfo> = registry::GDL_EXPORT_CATALOGUE
+            .iter()
+            .map(registry::Export::info)
+            .collect();
+        exports.sort();
+        let mut nodes: Vec<NodeInfo> = registry::GDL_NODE_CATALOGUE
+            .iter()
+            .map(registry::Node::info)
+            .collect();
+        nodes.sort();
+        Self {
+            messages,
+            exports,
+            nodes,
+        }
     }
 
     /// The catalogue as TOML, the form the generator reads it in.
@@ -56,10 +165,11 @@ impl Catalogue {
     }
 }
 
-/// What `#[derive(Message)]` registers. Not a stable interface.
+/// What the markers register. Not a stable interface.
 #[doc(hidden)]
 pub mod registry {
-    use super::MessageInfo;
+    use super::{ExportInfo, MessageInfo, NodeInfo, PortInfo, RoleInfo};
+    use crate::{Identity, Shape};
 
     /// One entry per type that derives `Message`, collected at link time:
     /// a derive cannot add to a list any other way, and an explicit list in
@@ -92,6 +202,102 @@ pub mod registry {
                 name: self.name.to_string(),
                 path: format!("{}::{}", self.module, self.name),
                 wire: (self.wire)(),
+            }
+        }
+    }
+
+    /// One entry per `pub use` name marked `#[export]`.
+    #[linkme::distributed_slice]
+    pub static GDL_EXPORT_CATALOGUE: [Export];
+
+    pub struct Export {
+        pub package: &'static str,
+        pub version: &'static str,
+        pub dir: &'static str,
+        pub name: &'static str,
+        pub module: &'static str,
+        pub origin: Identity,
+    }
+
+    impl Export {
+        pub(super) fn info(&self) -> ExportInfo {
+            ExportInfo {
+                package: self.package.to_string(),
+                version: self.version.to_string(),
+                dir: self.dir.to_string(),
+                name: self.name.to_string(),
+                path: format!("{}::{}", self.module, self.name),
+                origin: self.origin.into(),
+            }
+        }
+    }
+
+    /// One entry per type that derives `Node`.
+    #[linkme::distributed_slice]
+    pub static GDL_NODE_CATALOGUE: [Node];
+
+    pub struct Node {
+        pub package: &'static str,
+        pub version: &'static str,
+        pub dir: &'static str,
+        pub name: &'static str,
+        pub krate: &'static str,
+        /// Each role trait the type implements: probed where the type is
+        /// concrete, as the wire probe is.
+        pub roles: fn() -> Vec<Role>,
+    }
+
+    /// A role and its ports, as the derive's probe finds them.
+    pub struct Role {
+        pub role: &'static str,
+        pub ports: Vec<(&'static str, Port)>,
+    }
+
+    /// A port's shape, read from its type's `Shape`.
+    pub struct Port {
+        pub streamed: bool,
+        pub nested: bool,
+        pub head: Option<Identity>,
+        pub item: Option<Identity>,
+    }
+
+    /// The shape of port type `T`.
+    pub fn port<T: Shape>() -> Port {
+        Port {
+            streamed: T::STREAMED,
+            nested: T::NESTED,
+            head: T::HEAD,
+            item: T::ITEM,
+        }
+    }
+
+    impl Node {
+        pub(super) fn info(&self) -> NodeInfo {
+            let mut roles: Vec<RoleInfo> = (self.roles)()
+                .into_iter()
+                .map(|role| RoleInfo {
+                    role: role.role.to_string(),
+                    ports: role
+                        .ports
+                        .into_iter()
+                        .map(|(port, shape)| PortInfo {
+                            port: port.to_string(),
+                            streamed: shape.streamed,
+                            nested: shape.nested,
+                            head: shape.head.map(Into::into),
+                            item: shape.item.map(Into::into),
+                        })
+                        .collect(),
+                })
+                .collect();
+            roles.sort();
+            NodeInfo {
+                package: self.package.to_string(),
+                version: self.version.to_string(),
+                dir: self.dir.to_string(),
+                name: self.name.to_string(),
+                path: format!("{}::{}", self.krate, self.name),
+                roles,
             }
         }
     }

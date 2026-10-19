@@ -15,7 +15,6 @@ gdl-syntax = { path = "../gdl-syntax" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
-toml = { workspace = true }
 
 [lints]
 workspace = true

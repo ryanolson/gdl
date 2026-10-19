@@ -1,8 +1,9 @@
 //! The message catalogue: `#[derive(gdl_message::Message)]` registers a type with
-//! its package, name, definition path, and wire capability, and
-//! `Catalogue::linked` lists every registered type in the program.
+//! its package, name, definition path, and wire capability;
+//! `#[gdl_message::export]` registers another public path to a message; and
+//! `Catalogue::linked` lists every registration in the program.
 
-use gdl_message::{Catalogue, Message, MessageInfo, Shape};
+use gdl_message::{Catalogue, Identity, Message, MessageInfo, Shape};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, gdl_message::Message)]
@@ -18,12 +19,28 @@ struct Local;
 mod inner {
     use serde::{Deserialize, Serialize};
 
+    /// Words, in a module, exported at the root under another name.
     #[derive(Serialize, Deserialize, gdl_message::Message)]
     pub enum Words {
+        /// One word.
         #[allow(dead_code)]
         One(String),
     }
 }
+
+mod hidden {
+    /// Defined in a private module, offered by an export.
+    #[derive(gdl_message::Message)]
+    pub struct Piece;
+}
+
+/// An export: the root path is public, though the definition is not.
+#[gdl_message::export]
+pub use hidden::Piece;
+
+/// An export under another name.
+#[gdl_message::export]
+pub use inner::Words as Prompted;
 
 /// A re-export is the same type, not another message.
 #[allow(unused_imports)]
@@ -93,15 +110,62 @@ fn another_registry_named_like_the_catalogue_is_independent() {
 /// its `Shape` is one plain message.
 #[test]
 fn a_message_states_its_identity_and_shape() {
+    let prompt = Identity {
+        package: "gdl-message",
+        version: env!("CARGO_PKG_VERSION"),
+        dir: env!("CARGO_MANIFEST_DIR"),
+        path: "catalogue::Prompt",
+    };
     assert_eq!(<Prompt as Message>::NAME, "Prompt");
-    assert_eq!(<Prompt as Message>::PACKAGE, "gdl-message");
-    assert_eq!(<inner::Words as Message>::PATH, "catalogue::inner::Words");
+    assert_eq!(<Prompt as Message>::IDENTITY, prompt);
+    assert_eq!(
+        <inner::Words as Message>::IDENTITY.path,
+        "catalogue::inner::Words"
+    );
     assert_eq!(<Raw as Message>::NAME, "Raw");
+    const { assert!(!<Prompt as Shape>::STREAMED) };
     assert_eq!(
         (<Prompt as Shape>::HEAD, <Prompt as Shape>::ITEM),
-        ("Prompt", None)
+        (Some(prompt), None)
     );
-    assert_eq!((<() as Shape>::HEAD, <() as Shape>::ITEM), ("()", None));
+    assert_eq!((<() as Shape>::HEAD, <() as Shape>::ITEM), (None, None));
+}
+
+/// An export is registered under its public path, with the identity of the
+/// message it offers, whatever name it is offered under.
+#[test]
+fn an_export_registers_its_public_path_and_origin() {
+    let catalogue = Catalogue::linked();
+    let exports: Vec<(&str, &str, &str, &str)> = catalogue
+        .exports
+        .iter()
+        .map(|e| {
+            (
+                e.name.as_str(),
+                e.path.as_str(),
+                e.package.as_str(),
+                e.origin.path.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        exports,
+        [
+            (
+                "Piece",
+                "catalogue::Piece",
+                "gdl-message",
+                "catalogue::hidden::Piece"
+            ),
+            (
+                "Prompted",
+                "catalogue::Prompted",
+                "gdl-message",
+                "catalogue::inner::Words"
+            ),
+        ]
+    );
+    assert_eq!(catalogue.exports[0].origin.package, "gdl-message");
 }
 
 #[test]

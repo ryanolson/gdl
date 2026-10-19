@@ -6,7 +6,7 @@ use gdl::{Backward, Build, Cx, Items, Result, items};
 use serde::Deserialize;
 
 /// Turns each token into a piece of text.
-#[gdl::node]
+#[derive(gdl::Node)]
 pub struct Detokenize;
 
 impl Backward for Detokenize {
@@ -19,7 +19,7 @@ impl Backward for Detokenize {
 }
 
 /// Brackets each piece of text with the configured marks.
-#[gdl::node]
+#[derive(gdl::Node)]
 pub struct Format {
     open: String,
     close: String,

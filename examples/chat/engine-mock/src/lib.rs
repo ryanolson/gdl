@@ -12,7 +12,7 @@ use gdl::{Build, Cx, Error, Items, Result, Sink, items};
 use serde::Deserialize;
 
 /// The engine.
-#[gdl::node]
+#[derive(gdl::Node)]
 pub struct Engine {
     model: &'static str,
     uppercase: bool,

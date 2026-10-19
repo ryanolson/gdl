@@ -51,17 +51,15 @@ impl<H: fmt::Debug, T> fmt::Debug for Streamed<H, T> {
     }
 }
 
-/// A streamed request's message names: its head's, and its item's. A port
+/// A streamed request's messages: its head's, and its item's. A port
 /// written `stream Item` has a head of `()`. A head or an item that is
-/// itself streamed has no form in graph syntax, so it takes a name that no
-/// declaration can write, and never matches one.
+/// itself streamed has no form in graph syntax; it is marked nested.
 impl<H: gdl_message::Shape, T: gdl_message::Shape> gdl_message::Shape for Streamed<H, T> {
-    const HEAD: &'static str = if H::ITEM.is_some() { NESTED } else { H::HEAD };
-    const ITEM: Option<&'static str> = Some(if T::ITEM.is_some() { NESTED } else { T::HEAD });
+    const STREAMED: bool = true;
+    const NESTED: bool = H::STREAMED || T::STREAMED || H::NESTED || T::NESTED;
+    const HEAD: Option<gdl_message::Identity> = H::HEAD;
+    const ITEM: Option<gdl_message::Identity> = T::HEAD;
 }
-
-/// The name of a streamed head or item nested in another stream.
-const NESTED: &str = "<a nested stream>";
 
 #[cfg(test)]
 mod tests {
