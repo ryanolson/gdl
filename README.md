@@ -104,9 +104,9 @@ pub use chat_protocols::Prompt;
 
 A crate that depends on gdl can write `gdl::Message` and `gdl::export` instead.
 
-`cargo gdl extract <crate dir | name@version>` prints what a crate offers (its messages, exports, and nodes), read from its source without building it. With `--catalog <dir>`, it writes the entry to `<dir>/<name>/<version>.toml` instead. With `--verify`, it also builds the crate and fails if what the markers register differs from what it read, for example a message that a macro makes. The generator is the `cargo-gdl` binary of `crates/gdl-gen`: install it with `cargo install --path crates/gdl-gen`, or run it with `cargo run -p gdl-gen --`.
+`cargo gdl extract <crate dir | name@version>` prints what a crate offers (its messages, exports, and nodes), read from its source without building it. A `name@version` is fetched from crates.io with `cargo metadata`, which builds nothing. With `--catalog <dir>`, it adds the crate to a working catalogue instead: `<dir>/<name>/<version>.toml`, with the time it was added and the registry's checksum of the crate. An entry already there is kept, because a published version never changes. `cargo gdl catalog <dir>` prints the catalogue's index: each entry, each message name with the messages of that name, and each node with the messages at its ports. With `--verify`, it also builds the crate and fails if what the markers register differs from what it read, for example a message that a macro makes. The generator is the `cargo-gdl` binary of `crates/gdl-gen`: install it with `cargo install --path crates/gdl-gen`, or run it with `cargo run -p gdl-gen --`.
 
-A spec names the graph file instead of a contract crate, and lists the crates that offer its messages:
+A spec names the graph file instead of a contract crate, and lists the crates that offer its messages. A listed crate is a directory, or `name@version` for a crate on crates.io, which the generator fetches and reads. Generated crates depend on such a crate at exactly that version:
 
 ```toml
 [graph]
@@ -334,9 +334,9 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-model` | The model without the runtime: manifest, placement, layout, and diagrams. It builds for wasm, so the composer can run the same rules in a browser |
 | `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract |
 | `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |
-| `crates/gdl-extract` | The source reader: what a crate offers to graphs (messages, exports, and nodes), read from its source without building it |
+| `crates/gdl-extract` | The source reader: what a crate offers to graphs (messages, exports, and nodes), read from its source without building it; and the working catalogue of such offers |
 | `crates/gdl-macros` | The `graph!` macro, `derive(Message)`, `derive(Node)`, and `#[export]` |
-| `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `resolve`, `generate`, `diagram`, and `export` |
+| `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `catalog`, `resolve`, `generate`, `diagram`, and `export` |
 | `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |
 | `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |
 | `agent-docs/` | The plan, review records, and measurements |
