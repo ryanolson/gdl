@@ -41,7 +41,7 @@ fn the_committed_asr_segments_are_current() {
     let drift = gdl_gen::drift(&out, &files).expect("drift");
     assert!(
         drift.is_empty(),
-        "regenerate with `cargo run -p gdl-gen -- --spec examples/asr/gdl.toml --out examples/asr/segments`:\n{}",
+        "regenerate with `cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments`:\n{}",
         drift.join("\n")
     );
     let front = &files[&PathBuf::from("front/src/main.rs")];

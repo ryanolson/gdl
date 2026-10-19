@@ -1,0 +1,12 @@
+[package]
+name = "macro-made"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gdl-message = { path = "../../../../../gdl-message" }
+
+# Not a member of the repository workspace: it is read by the tests, and
+# built only for the programs they generate.
+[workspace]

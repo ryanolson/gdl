@@ -468,6 +468,7 @@ version = "0.1.0"
 dependencies = [
  "gdl",
  "gdl-extract",
+ "gdl-message",
  "gdl-syntax",
  "proc-macro2",
  "quote",

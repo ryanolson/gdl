@@ -104,6 +104,8 @@ pub use chat_protocols::Prompt;
 
 A crate that depends on gdl can write `gdl::Message` and `gdl::export` instead.
 
+`cargo gdl extract <crate dir | name@version>` prints what a crate offers (its messages, exports, and nodes), read from its source without building it. With `--catalog <dir>`, it writes the entry to `<dir>/<name>/<version>.toml` instead. With `--verify`, it also builds the crate and fails if what the markers register differs from what it read, for example a message that a macro makes. The generator is the `cargo-gdl` binary of `crates/gdl-gen`: install it with `cargo install --path crates/gdl-gen`, or run it with `cargo run -p gdl-gen --`.
+
 A spec names the graph file instead of a contract crate, and lists the crates that offer its messages:
 
 ```toml
@@ -118,7 +120,7 @@ pin = { Chunk = "chat_protocols::Chunk" }   # optional
 path = "../../crates/gdl"
 ```
 
-`gdl-gen --spec gdl.toml --resolve` prints the type that each message name resolves to, and whether it is a wire type:
+`cargo gdl resolve --spec gdl.toml` prints the type that each message name resolves to, and whether it is a wire type:
 
 ```text
 Chunk   chat_protocols::Chunk          wire
@@ -189,22 +191,22 @@ For each segment, the generator writes a crate with:
 - A binary. It builds each hosted node through `gdl::Build`, meets the other segments in a shared roster directory, and waits until every instance that it can send to is serving. Then it serves until Ctrl-C.
 - On the segment that hosts the source, the binary instead reads one JSON request per line on stdin, writes the items as JSON lines (`gdl::serve_json_lines`), and stops at the end of the input. It does this only if the source's request type and item type both implement `Serialize` and `Deserialize`, and the request is not streamed. For other source types, the binary serves until Ctrl-C, and your own program calls the graph through the generated library.
 
-The generator owns the directory of each segment crate. Each generated file starts with a do-not-edit marker. `gdl-gen --check` writes nothing. It fails if a generated file is missing, changed, or stale, or if a segment crate holds a file that the generator did not write.
+The generator owns the directory of each segment crate. Each generated file starts with a do-not-edit marker. `cargo gdl generate --check` writes nothing. It fails if a generated file is missing, changed, or stale, or if a segment crate holds a file that the generator did not write.
 
 ## Draw a graph
 
-`gdl-gen --diagram` writes the placed graph to stdout as Graphviz DOT or as a Mermaid flowchart. It writes no files.
+`cargo gdl diagram` writes the placed graph to stdout as Graphviz DOT or as a Mermaid flowchart. It writes no files.
 
 ```bash
-cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --diagram mermaid
-cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --diagram dot | dot -Tsvg -o chat.svg
+cargo run -p gdl-gen -- diagram --spec examples/chat/gdl.toml --format mermaid
+cargo run -p gdl-gen -- diagram --spec examples/chat/gdl.toml --format dot | dot -Tsvg -o chat.svg
 ```
 
 - Request edges are solid. Response edges are dashed.
 - Each edge has the name of its message type. If the type has no codec, the label says `(no codec)`, because a placement cannot cut that edge.
 - Each segment is a cluster. An edge that crosses segments is thick and red.
 
-For the chat spec, `--diagram mermaid` writes this diagram. Three edges cross segments: `Words` into `engine`, `Token` out of `engine`, and `Text` out of `post`.
+For the chat spec, `--format mermaid` writes this diagram. Three edges cross segments: `Words` into `engine`, `Token` out of `engine`, and `Text` out of `post`.
 
 ```mermaid
 ---
@@ -242,7 +244,7 @@ In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `m
 1. Generate the segment crates:
 
    ```bash
-   cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --out examples/chat/segments
+   cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments
    ```
 
 2. Build the three segment binaries:
@@ -320,7 +322,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |
 | `crates/gdl-extract` | The source reader: what a crate offers to graphs (messages, exports, and nodes), read from its source without building it |
 | `crates/gdl-macros` | The `graph!` macro and `derive(Message)` |
-| `crates/gdl-gen` | The generator |
+| `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `resolve`, `generate`, and `diagram` |
 | `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |
 | `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |
 | `agent-docs/` | The plan, review records, and measurements |

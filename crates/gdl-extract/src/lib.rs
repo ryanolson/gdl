@@ -74,6 +74,19 @@ impl Workspace {
         Ok(markers::extract(&self.graph, &self.settings, package))
     }
 
+    /// Where package `spec` (a name, or `name@version`) is: its version,
+    /// its manifest's directory, and whether that is a path package, which
+    /// a dependency names by that directory rather than by version.
+    pub fn locate(&self, spec: &str) -> Result<Located, Error> {
+        let package = &self.graph.packages[self.graph.package(spec).map_err(Error)?];
+        Ok(Located {
+            name: package.name.clone(),
+            version: package.version.clone(),
+            dir: package.dir.clone(),
+            path: package.source.starts_with("path+"),
+        })
+    }
+
     /// The name of the package whose manifest is in `dir`, if this
     /// workspace resolved it.
     pub fn package_in(&self, dir: &Path) -> Option<String> {
@@ -81,6 +94,19 @@ impl Workspace {
             .package_in(dir)
             .map(|i| self.graph.packages[i].name.clone())
     }
+}
+
+/// Where a resolved package is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    /// Its name.
+    pub name: String,
+    /// Its version.
+    pub version: String,
+    /// Its manifest's directory.
+    pub dir: std::path::PathBuf,
+    /// Whether it is a path package.
+    pub path: bool,
 }
 
 /// What a crate offers, and what the reader could not read.

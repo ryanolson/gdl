@@ -29,6 +29,7 @@
 mod contract;
 mod dump;
 mod emit;
+mod extract;
 mod names;
 mod nodes;
 mod paths;
@@ -40,6 +41,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use emit::MARKER;
+pub use extract::{Crate, Extracted, extract, verify, write_entry};
+/// A working-catalogue entry: what a crate offers, read from its source.
+pub use gdl_extract::Offer;
 pub use resolve::Resolved;
 pub use spec::Spec;
 

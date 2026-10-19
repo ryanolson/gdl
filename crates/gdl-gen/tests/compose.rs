@@ -180,10 +180,10 @@ fn the_manifest_program_runs_as_cargo_built_it() {
     .lines()
     .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
     .expect("host");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gdl-gen"))
-        .arg("--spec")
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .args(["diagram", "--spec"])
         .arg(fixtures().join("exported.toml"))
-        .args(["--diagram", "dot"])
+        .args(["--format", "dot"])
         .arg("--target-dir")
         .arg(target().with_file_name("gdl-gen-tests-target"))
         .env("CARGO_BUILD_TARGET", host)
@@ -196,4 +196,56 @@ fn the_manifest_program_runs_as_cargo_built_it() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("digraph"));
+}
+
+/// `cargo gdl extract` writes a crate's offer, read from source, as a
+/// working-catalogue entry, `<name>/<version>.toml`.
+#[test]
+fn extract_writes_a_working_catalogue_entry() {
+    let catalogue = std::env::temp_dir().join(format!("gdl-catalogue-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&catalogue);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .args(["gdl", "extract"])
+        .arg(fixtures().join("chat-protocols"))
+        .arg("--catalog")
+        .arg(&catalogue)
+        .output()
+        .expect("cargo gdl");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let entry = catalogue.join("chat-protocols/0.0.0.toml");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        entry.display().to_string()
+    );
+    let offer = gdl_extract_offer(&entry);
+    assert_eq!(offer.messages.len(), 6);
+    let _ = std::fs::remove_dir_all(&catalogue);
+}
+
+fn gdl_extract_offer(entry: &Path) -> gdl_gen::Offer {
+    gdl_gen::Offer::from_toml(&std::fs::read_to_string(entry).expect("entry")).expect("offer")
+}
+
+/// `--verify` builds the crate and compares what its markers register with
+/// what was read: an export agrees; a message a macro makes is registered
+/// and not read, which it reports.
+#[test]
+fn verify_compares_the_build_with_the_source() {
+    let read = |name: &str| {
+        let krate = gdl_gen::Crate::Path(fixtures().join(name));
+        let extracted = gdl_gen::extract(&krate, &target()).expect("extracted");
+        gdl_gen::verify(&extracted, &target())
+    };
+    read("exported-protocols").expect("an export agrees");
+    let error = read("macro-made")
+        .expect_err("a macro made a message")
+        .to_string();
+    assert_eq!(
+        error,
+        "registered by the build, not read from source: message `Hidden` at `macro_made::Hidden`, local"
+    );
 }

@@ -2,7 +2,7 @@
 # segment to the resampler, and from the resampler to the recognizer.
 # Generate the segment crates with:
 #
-#     cargo run -p gdl-gen -- --spec examples/asr/gdl.toml --out examples/asr/segments
+#     cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments
 
 [contract]
 path = "contract"

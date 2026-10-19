@@ -50,7 +50,7 @@ pub(crate) fn hash(value: &impl std::hash::Hash) -> u64 {
 /// Write the program `name` with these `[dependencies]` lines and this
 /// `main.rs`, then build and run it, and return what it printed. `what` the
 /// program prints names it in a failure.
-fn run(
+pub(crate) fn run(
     target: &Path,
     name: &str,
     what: &str,

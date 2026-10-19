@@ -63,7 +63,7 @@ fn the_committed_segments_are_current() {
     let drift = gdl_gen::drift(&out, &files).expect("drift");
     assert!(
         drift.is_empty(),
-        "regenerate with `cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --out examples/chat/segments`:\n{}",
+        "regenerate with `cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments`:\n{}",
         drift.join("\n")
     );
 }
@@ -215,9 +215,11 @@ fn three_segment_binaries_answer_requests() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `cargo gdl generate`, run as cargo runs it.
 fn gdl_gen(dir: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_gdl-gen"))
+    Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
         .current_dir(dir)
+        .args(["gdl", "generate"])
         .args(args)
         .arg("--target-dir")
         .arg(target("gdl-gen-tests"))

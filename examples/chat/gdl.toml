@@ -2,7 +2,7 @@
 # messages, the crates that implement its nodes, and which segment hosts
 # which node. Generate the contract and segment crates with:
 #
-#     cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --out examples/chat/segments
+#     cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments
 
 [graph]
 path = "chat.gdl"

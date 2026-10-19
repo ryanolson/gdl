@@ -152,7 +152,7 @@ fn regenerate_command(spec: &Spec, spec_dir: &Path, crate_dir: &Path, out: &Path
     let file = spec.file.file_name().unwrap_or_default();
     let spec_file = display(&relative(crate_dir, &spec_dir.join(file)));
     let out = display(&relative(crate_dir, out));
-    format!("gdl-gen --spec {spec_file} --out {out}")
+    format!("cargo gdl generate --spec {spec_file} --out {out}")
 }
 
 struct Unit<'a> {

@@ -1,72 +1,115 @@
-//! `gdl-gen --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]`
-//! `gdl-gen --spec <gdl.toml> --diagram dot|mermaid [--target-dir <dir>]`
-//! `gdl-gen --spec <gdl.toml> --resolve [--target-dir <dir>]`
+//! `cargo gdl`: compose gdl graphs from crates.
 //!
-//! Generates one crate per segment into `--out`. With `--check`, writes
-//! nothing and fails if the files there differ from what would be
-//! generated. With `--diagram`, writes nothing and prints the placed graph
-//! as Graphviz DOT or a Mermaid flowchart. With `--resolve`, writes
-//! nothing and prints the type each message name of the spec's graph file
-//! resolves to. The contract is compiled in
-//! `--target-dir`, else `$CARGO_TARGET_DIR`, else `target` beside the spec.
+//! ```text
+//! cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--target-dir <dir>]
+//! cargo gdl resolve --spec <gdl.toml>
+//! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
+//! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
+//! ```
+//!
+//! `extract` reads what a crate offers (messages, exports, nodes) from its
+//! source, building nothing, and prints it as a working-catalogue entry, or
+//! writes it under `--catalog` as `<name>/<version>.toml`. `--verify`
+//! builds the crate as well and fails if what its markers register differs
+//! from what was read. `resolve` prints the message each name of a spec's
+//! graph file resolves to. `generate` writes one crate per segment, and the
+//! contract crate of a graph file, into `--out`; with `--check` it writes
+//! nothing and fails if the files there differ. `diagram` prints the placed
+//! graph. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
+//! else `target` beside the spec or the crate.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use gdl_gen::Format;
 
-enum Mode {
-    Generate { out: PathBuf, check: bool },
-    Diagram(Format),
+const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--target-dir <dir>]
+       cargo gdl resolve --spec <gdl.toml>
+       cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
+       cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]";
+
+enum Command {
+    Extract {
+        krate: gdl_gen::Crate,
+        catalog: Option<PathBuf>,
+        verify: bool,
+    },
     Resolve,
+    Generate {
+        out: PathBuf,
+        check: bool,
+    },
+    Diagram(Format),
 }
 
 struct Args {
-    spec: PathBuf,
-    mode: Mode,
+    command: Command,
+    spec: Option<PathBuf>,
     target: Option<PathBuf>,
 }
 
-const USAGE: &str = "usage: gdl-gen --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]\n       gdl-gen --spec <gdl.toml> --diagram dot|mermaid [--target-dir <dir>]\n       gdl-gen --spec <gdl.toml> --resolve [--target-dir <dir>]";
-
 fn args() -> Result<Args, String> {
-    let mut spec = None;
-    let mut out = None;
-    let mut check = false;
-    let mut diagram = None;
-    let mut resolve = false;
-    let mut target = None;
-    let mut args = std::env::args_os().skip(1);
+    let mut args = std::env::args_os().skip(1).peekable();
+    // Cargo runs `cargo-gdl gdl <command> ..` for `cargo gdl <command> ..`.
+    if args.peek().and_then(|a| a.to_str()) == Some("gdl") {
+        args.next();
+    }
+    let command = args
+        .next()
+        .and_then(|a| a.into_string().ok())
+        .ok_or_else(|| USAGE.to_string())?;
+    let (mut spec, mut out, mut catalog, mut target, mut format, mut krate) =
+        (None, None, None, None, None, None);
+    let (mut check, mut verify) = (false, false);
     while let Some(arg) = args.next() {
+        let mut value = || {
+            args.next()
+                .map(PathBuf::from)
+                .ok_or_else(|| USAGE.to_string())
+        };
         match arg.to_str() {
-            Some("--spec") => spec = args.next().map(PathBuf::from),
-            Some("--out") => out = args.next().map(PathBuf::from),
-            Some("--target-dir") => target = args.next().map(PathBuf::from),
+            Some("--spec") => spec = Some(value()?),
+            Some("--out") => out = Some(value()?),
+            Some("--catalog") => catalog = Some(value()?),
+            Some("--target-dir") => target = Some(value()?),
+            Some("--format") => format = Some(value()?),
             Some("--check") => check = true,
-            Some("--resolve") => resolve = true,
-            Some("--diagram") => {
-                diagram = match args.next().as_ref().and_then(|f| f.to_str()) {
-                    Some("dot") => Some(Format::Dot),
-                    Some("mermaid") => Some(Format::Mermaid),
-                    other => {
-                        return Err(format!(
-                            "--diagram takes dot or mermaid, not {other:?}\n{USAGE}"
-                        ));
-                    }
-                }
+            Some("--verify") => verify = true,
+            Some(other) if !other.starts_with("--") && krate.is_none() => {
+                krate = Some(other.to_string());
             }
             _ => return Err(format!("unexpected argument {arg:?}\n{USAGE}")),
         }
     }
-    let mode = match (diagram, out, resolve) {
-        (Some(format), None, false) if !check => Mode::Diagram(format),
-        (None, None, true) if !check => Mode::Resolve,
-        (None, Some(out), false) => Mode::Generate { out, check },
+    let command = match command.as_str() {
+        "extract" => Command::Extract {
+            krate: gdl_gen::Crate::parse(&krate.ok_or_else(|| USAGE.to_string())?),
+            catalog,
+            verify,
+        },
+        "resolve" => Command::Resolve,
+        "generate" => Command::Generate {
+            out: out.ok_or_else(|| USAGE.to_string())?,
+            check,
+        },
+        "diagram" => match format.as_ref().and_then(|f| f.to_str()) {
+            Some("dot") => Command::Diagram(Format::Dot),
+            Some("mermaid") => Command::Diagram(Format::Mermaid),
+            other => {
+                return Err(format!(
+                    "--format takes dot or mermaid, not {other:?}\n{USAGE}"
+                ));
+            }
+        },
         _ => return Err(USAGE.to_string()),
     };
+    let needs_spec = !matches!(command, Command::Extract { .. });
+    if needs_spec && spec.is_none() {
+        return Err(USAGE.to_string());
+    }
     Ok(Args {
-        spec: spec.ok_or(USAGE)?,
-        mode,
+        command,
+        spec,
         target,
     })
 }
@@ -75,7 +118,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("gdl-gen: {error}");
+            eprintln!("cargo gdl: {error}");
             ExitCode::FAILURE
         }
     }
@@ -83,36 +126,64 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let args = args()?;
-    let spec = gdl_gen::Spec::load(&args.spec)?;
-    let target = args
-        .target
-        .or_else(|| std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| spec.dir().join("target"));
-    let (out, check) = match args.mode {
-        Mode::Diagram(format) => {
-            print!("{}", gdl_gen::diagram(&spec, &target, format)?);
-            return Ok(ExitCode::SUCCESS);
-        }
-        Mode::Resolve => {
-            print!("{}", gdl_gen::resolve(&spec)?);
-            return Ok(ExitCode::SUCCESS);
-        }
-        Mode::Generate { out, check } => (out, check),
+    let target = |beside: &std::path::Path| {
+        args.target
+            .clone()
+            .or_else(|| std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from))
+            .unwrap_or_else(|| beside.join("target"))
     };
-    let files = gdl_gen::render(&spec, &out, &target)?;
-    if check {
-        let drift = gdl_gen::drift(&out, &files)?;
-        if drift.is_empty() {
-            return Ok(ExitCode::SUCCESS);
+    let spec = || -> Result<gdl_gen::Spec, Box<dyn std::error::Error>> {
+        let file = args.spec.as_ref().ok_or(USAGE)?;
+        Ok(gdl_gen::Spec::load(file)?)
+    };
+    match &args.command {
+        Command::Extract {
+            krate,
+            catalog,
+            verify,
+        } => {
+            let beside = match krate {
+                gdl_gen::Crate::Path(dir) => dir.clone(),
+                gdl_gen::Crate::Registry { .. } => PathBuf::from("."),
+            };
+            let target = target(&beside);
+            let extracted = gdl_gen::extract(krate, &target)?;
+            if *verify {
+                gdl_gen::verify(&extracted, &target)?;
+            }
+            match catalog {
+                Some(catalog) => {
+                    let file = gdl_gen::write_entry(catalog, &extracted.offer)?;
+                    println!("{}", file.display());
+                }
+                None => print!("{}", extracted.offer.to_toml()),
+            }
         }
-        for line in drift {
-            eprintln!("{line}");
+        Command::Resolve => print!("{}", gdl_gen::resolve(&spec()?)?),
+        Command::Diagram(format) => {
+            let spec = spec()?;
+            let target = target(spec.dir());
+            print!("{}", gdl_gen::diagram(&spec, &target, *format)?);
         }
-        eprintln!("gdl-gen: the generated crates are out of date; regenerate them");
-        return Ok(ExitCode::FAILURE);
-    }
-    for removed in gdl_gen::write(&out, &files)? {
-        eprintln!("removed stale {}", removed.display());
+        Command::Generate { out, check } => {
+            let spec = spec()?;
+            let target = target(spec.dir());
+            let files = gdl_gen::render(&spec, out, &target)?;
+            if *check {
+                let drift = gdl_gen::drift(out, &files)?;
+                if drift.is_empty() {
+                    return Ok(ExitCode::SUCCESS);
+                }
+                for line in drift {
+                    eprintln!("{line}");
+                }
+                eprintln!("cargo gdl: the generated crates are out of date; regenerate them");
+                return Ok(ExitCode::FAILURE);
+            }
+            for removed in gdl_gen::write(out, &files)? {
+                eprintln!("removed stale {}", removed.display());
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
