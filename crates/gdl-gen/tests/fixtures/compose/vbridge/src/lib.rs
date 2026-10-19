@@ -4,5 +4,5 @@
 pub use vproto::Hidden;
 
 /// This crate's own message.
-#[derive(gdl::Message)]
+#[derive(gdl_message::Message)]
 pub struct Bridge;

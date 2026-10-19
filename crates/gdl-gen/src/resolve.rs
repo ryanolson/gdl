@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use gdl::{Catalogue, MessageInfo};
+use gdl_message::{Catalogue, MessageInfo};
 
 /// Resolve each name in `uses` (a message name and the nodes that declare
 /// it) to one entry of `catalogue` from a crate in `listed`, told apart by
@@ -27,7 +27,7 @@ pub(crate) fn resolve(
     for identity in listed {
         if !offered.iter().any(|m| m.package == identity.package) {
             problems.push(format!(
-                "[messages] crate `{}` offers no messages: derive `gdl::Message` on its message types",
+                "[messages] crate `{}` offers no messages: derive `gdl_message::Message` on its message types",
                 identity.package
             ));
         }
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "[messages] crate `empty` offers no messages: derive `gdl::Message` on its message types"
+                "[messages] crate `empty` offers no messages: derive `gdl_message::Message` on its message types"
             ]
         );
     }

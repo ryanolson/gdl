@@ -23,5 +23,6 @@ publish = false
 [workspace.dependencies]
 futures = "0.3"
 gdl = { path = "../../crates/gdl" }
+gdl-message = { path = "../../crates/gdl-message" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["time"] }

@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 gdl = { path = "../gdl" }
+gdl-message = { path = "../gdl-message" }
 gdl-syntax = { path = "../gdl-syntax" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"

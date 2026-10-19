@@ -3,7 +3,7 @@
 
 mod inner {
     /// A prompt.
-    #[derive(serde::Serialize, serde::Deserialize, gdl::Message)]
+    #[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
     pub struct Prompt;
 }
 

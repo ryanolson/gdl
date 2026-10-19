@@ -10,7 +10,7 @@ proc-macro = true
 # A proc macro runs in the compiler: its dependencies are never linked
 # into the program that uses it.
 [dependencies]
-gdl = { path = "../stray-gdl" }
+gdl-message = { path = "../stray-message" }
 
 # Not a member of the repository workspace: it is built only by the
 # catalogue programs that the tests generate.

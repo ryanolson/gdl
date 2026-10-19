@@ -1,7 +1,7 @@
 //! The `graph!` macro: one declaration of a graph's nodes, message types,
 //! and topology, expanded into everything the runtime and the generator need
 //! from it. Reached through `gdl::graph!`; see that macro for the syntax.
-//! Also `#[derive(Message)]`, reached as `gdl::Message`.
+//! Also `#[derive(Message)]`, reached as `gdl_message::Message`.
 
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as Tokens, TokenTree};
@@ -30,7 +30,8 @@ pub fn graph(input: TokenStream) -> TokenStream {
     }
 }
 
-/// The expansion behind `gdl::Message`: one catalogue entry for the type.
+/// The expansion behind `gdl_message::Message`: the `Message` and `Shape`
+/// impls, and one catalogue entry for the type.
 #[proc_macro_derive(Message)]
 pub fn message(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);

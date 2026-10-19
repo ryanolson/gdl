@@ -18,8 +18,8 @@ json-lines = ["dep:serde_json", "tokio/io-util"]
 [dependencies]
 dashmap = { workspace = true }
 gdl-macros = { path = "../gdl-macros" }
+gdl-message = { path = "../gdl-message" }
 futures = { workspace = true }
-linkme = { workspace = true }
 pin-project-lite = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
@@ -34,7 +34,6 @@ tokio-util = { workspace = true }
 [dev-dependencies]
 gdl = { path = ".", features = ["fault-injection", "json-lines"] }
 criterion = { workspace = true }
-linkme = { workspace = true }
 prometheus = { workspace = true }
 velo = { workspace = true }
 serde = { workspace = true }

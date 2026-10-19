@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 dual-macro = { path = "../dual-macro" }
-gdl = { path = "../../../../../gdl" }
+gdl-message = { path = "../../../../../gdl-message" }
 
 # Not a member of the repository workspace: it is built only by the
 # catalogue programs that the tests generate.

@@ -435,7 +435,7 @@ dependencies = [
  "futures",
  "gdl",
  "gdl-macros",
- "linkme",
+ "gdl-message",
  "pin-project-lite",
  "prometheus",
  "rmp-serde",
@@ -455,6 +455,7 @@ name = "gdl-gen"
 version = "0.1.0"
 dependencies = [
  "gdl",
+ "gdl-message",
  "gdl-syntax",
  "proc-macro2",
  "quote",
@@ -472,6 +473,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "gdl-message"
+version = "0.1.0"
+dependencies = [
+ "gdl-macros",
+ "linkme",
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
+ "trybuild",
 ]
 
 [[package]]

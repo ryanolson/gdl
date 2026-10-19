@@ -3,5 +3,5 @@
 stray_macro::nothing!();
 
 /// A chunk.
-#[derive(gdl::Message)]
+#[derive(gdl_message::Message)]
 pub struct Chunk;

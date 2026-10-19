@@ -6,6 +6,6 @@ use proc_macro::TokenStream;
 #[proc_macro]
 pub fn boom(_: TokenStream) -> TokenStream {
     let _ = stray::GDL_MESSAGE_CATALOGUE.len();
-    let _ = gdl::Catalogue::linked();
+    let _ = gdl_message::Catalogue::linked();
     TokenStream::new()
 }

@@ -155,7 +155,7 @@ dependencies = [
 name = "chat-protocols"
 version = "0.0.0"
 dependencies = [
- "gdl",
+ "gdl-message",
  "serde",
 ]
 
@@ -398,7 +398,7 @@ dependencies = [
  "dashmap",
  "futures",
  "gdl-macros",
- "linkme",
+ "gdl-message",
  "pin-project-lite",
  "rmp-serde",
  "serde",
@@ -419,6 +419,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "gdl-message"
+version = "0.1.0"
+dependencies = [
+ "gdl-macros",
+ "linkme",
+ "serde",
+ "toml",
 ]
 
 [[package]]

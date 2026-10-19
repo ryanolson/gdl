@@ -19,7 +19,7 @@
 //!
 //! A spec may name a graph file instead of a contract crate: the body of a
 //! `graph!` invocation, with message names where `graph!` has Rust types,
-//! and the crates that define those messages with `derive(gdl::Message)`.
+//! and the crates that define those messages with `derive(gdl_message::Message)`.
 //! [`resolve`] checks that the names agree along every edge and resolves
 //! each to exactly one type.
 
@@ -96,7 +96,7 @@ pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Err
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
     /// Message name to the type it resolved to.
-    pub messages: BTreeMap<String, gdl::MessageInfo>,
+    pub messages: BTreeMap<String, gdl_message::MessageInfo>,
 }
 
 impl fmt::Display for Resolution {

@@ -1,12 +1,12 @@
 //! The chat example's messages. The graph is in `chat.gdl`, which names
 //! these types; the generator resolves the names here and generates the
 //! contract crate. Implementation crates depend on this crate for their
-//! port types.
+//! port types. It depends on `gdl-message`, not on the gdl runtime.
 
 use serde::{Deserialize, Serialize};
 
 /// What a user asks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl::Message)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl_message::Message)]
 pub struct Prompt {
     /// The prompt text.
     pub text: String,
@@ -15,7 +15,7 @@ pub struct Prompt {
 }
 
 /// One piece of the answer, as the user receives it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl::Message)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl_message::Message)]
 pub struct Chunk {
     /// The chunk's position in the answer.
     pub index: u32,
@@ -24,7 +24,7 @@ pub struct Chunk {
 }
 
 /// The prompt as the engine takes it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl::Message)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl_message::Message)]
 pub struct Words {
     /// The prompt's words.
     pub words: Vec<String>,
@@ -33,21 +33,21 @@ pub struct Words {
 }
 
 /// One word the engine produced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl::Message)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl_message::Message)]
 pub struct Token {
     /// The word.
     pub word: String,
 }
 
 /// A token turned back into text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl::Message)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl_message::Message)]
 pub struct Piece {
     /// The text.
     pub text: String,
 }
 
 /// A piece of text ready for the user.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl::Message)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, gdl_message::Message)]
 pub struct Text {
     /// The text.
     pub text: String,

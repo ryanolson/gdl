@@ -109,6 +109,34 @@ pub(crate) enum GdlDep {
     Version(String),
 }
 
+impl GdlDep {
+    /// The `gdl-message` that this gdl uses: for a path, the one its own
+    /// manifest names; for a version, the same version, as the two are
+    /// released together.
+    pub(crate) fn message(&self) -> Result<GdlDep, Error> {
+        let GdlDep::Path(gdl) = self else {
+            return Ok(self.clone());
+        };
+        let manifest = gdl.join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest)
+            .map_err(|e| Error::new(format!("reading {}: {e}", manifest.display())))?;
+        let table: toml::Table = toml::from_str(&text)
+            .map_err(|e| Error::new(format!("{}: {e}", manifest.display())))?;
+        table
+            .get("dependencies")
+            .and_then(|d| d.get("gdl-message"))
+            .and_then(|d| d.get("path"))
+            .and_then(toml::Value::as_str)
+            .map(|path| GdlDep::Path(gdl.join(path)))
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "{} has no path dependency on gdl-message",
+                    manifest.display()
+                ))
+            })
+    }
+}
+
 /// One node's implementation.
 #[derive(Debug, Clone)]
 pub(crate) struct Bind {

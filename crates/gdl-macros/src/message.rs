@@ -17,26 +17,38 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let ident = &input.ident;
     // `r#Prompt` is `Prompt`: graphs name the type, not its spelling.
     let name = ident.unraw().to_string();
-    // Every port type crosses tasks. Checked here, at the definition, so a
-    // protocols crate cannot publish a message that no graph can carry.
-    let bounds = quote_spanned! {ident.span()=>
-        fn __gdl_message<T: ::core::marker::Send + 'static>() {}
-        let _ = __gdl_message::<#ident>;
+    // `Message: Send + 'static`: every port type crosses tasks. The impl is
+    // spanned at the type, so a type that is not `Send` is reported at its
+    // definition, and a protocols crate cannot publish a message that no
+    // graph can carry.
+    let message = quote_spanned! {ident.span()=>
+        impl ::gdl_message::Message for #ident {
+            const NAME: &'static str = #name;
+            const PACKAGE: &'static str = ::core::env!("CARGO_PKG_NAME");
+            const PATH: &'static str = ::core::concat!(::core::module_path!(), "::", #name);
+        }
     };
-    // A derive has no `$crate`, so the expansion names gdl as `::gdl`. The
-    // `const _` block keeps the static's name out of the caller's module.
+    // A derive has no `$crate`, so the expansion names `::gdl_message`,
+    // which a crate deriving `Message` depends on. The `const _` block keeps
+    // the static's name out of the caller's module.
     Ok(quote! {
+        #message
+
+        impl ::gdl_message::Shape for #ident {
+            const HEAD: &'static str = #name;
+            const ITEM: ::core::option::Option<&'static str> = ::core::option::Option::None;
+        }
+
         const _: () = {
-            #bounds
-            #[::gdl::__private::linkme::distributed_slice(::gdl::__private::GDL_MESSAGE_CATALOGUE)]
-            #[linkme(crate = ::gdl::__private::linkme)]
-            static __GDL_MESSAGE: ::gdl::__private::MessageEntry = ::gdl::__private::MessageEntry {
+            #[::gdl_message::__private::linkme::distributed_slice(::gdl_message::__private::GDL_MESSAGE_CATALOGUE)]
+            #[linkme(crate = ::gdl_message::__private::linkme)]
+            static __GDL_MESSAGE: ::gdl_message::__private::Entry = ::gdl_message::__private::Entry {
                 package: ::core::env!("CARGO_PKG_NAME"),
                 version: ::core::env!("CARGO_PKG_VERSION"),
                 dir: ::core::env!("CARGO_MANIFEST_DIR"),
                 name: #name,
                 module: ::core::module_path!(),
-                wire: || ::gdl::wire_codec!(#ident).is_some(),
+                wire: || ::gdl_message::__gdl_wire!(#ident),
             };
         };
     })

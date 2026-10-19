@@ -1,5 +1,5 @@
-//! Another package named `gdl`: a second runtime, which declares a
-//! message catalogue of the same name as the real one.
+//! Another package named `gdl-message`, which declares a message
+//! catalogue of the same name as the real one.
 
 pub use linkme;
 

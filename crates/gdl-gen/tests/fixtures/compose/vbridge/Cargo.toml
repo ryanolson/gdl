@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gdl = { path = "../../../../../gdl" }
+gdl-message = { path = "../../../../../gdl-message" }
 vproto = { path = "../vproto-1" }
 
 # Not a member of the repository workspace: it is built only by the

@@ -51,9 +51,8 @@ impl Catalogue {
     }
 
     /// Read a catalogue written by [`Catalogue::to_toml`].
-    pub fn from_toml(text: &str) -> Result<Self, crate::Error> {
+    pub fn from_toml(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)
-            .map_err(|e| crate::Error::new(crate::ErrorKind::Placement, e.to_string()))
     }
 }
 

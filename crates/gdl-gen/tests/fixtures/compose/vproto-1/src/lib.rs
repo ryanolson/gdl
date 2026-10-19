@@ -2,9 +2,9 @@
 //! type, and its `Hidden` is gone from the second version.
 
 /// A chunk that never crosses a process.
-#[derive(gdl::Message)]
+#[derive(gdl_message::Message)]
 pub struct Chunk;
 
 /// A type only this version defines.
-#[derive(serde::Serialize, serde::Deserialize, gdl::Message)]
+#[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
 pub struct Hidden;

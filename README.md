@@ -86,10 +86,10 @@ A streamed request can cross segments like any other request. The stage that rec
 
 A graph file holds the body of a `graph!` invocation. Where `graph!` has Rust types, the file has message names. In a message position, the file accepts a bare name such as `Prompt`, or `()`.
 
-The message types are in one or more protocols crates. A crate offers a type to graph files with `derive(gdl::Message)`. The type must be `Send + 'static`, and it must not be generic:
+The message types are in one or more protocols crates. A protocols crate depends on `gdl-message`, a small crate without the gdl runtime, and offers a type to graph files with `derive(gdl_message::Message)`. The type must be `Send + 'static`, and it must not be generic:
 
 ```rust
-#[derive(serde::Serialize, serde::Deserialize, gdl::Message)]
+#[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
 pub struct Prompt {
     pub text: String,
 }
@@ -286,6 +286,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 |---|---|
 | `crates/gdl` | Request context, node roles, local composition, manifest, placement, and the velo runtime |
 | `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share |
+| `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |
 | `crates/gdl-macros` | The `graph!` macro and `derive(Message)` |
 | `crates/gdl-gen` | The generator |
 | `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |

@@ -1,10 +1,10 @@
-//! A proc macro that depends on another `gdl`.
+//! A proc macro that depends on another `gdl-message`.
 
 use proc_macro::TokenStream;
 
 /// Expands to nothing.
 #[proc_macro]
 pub fn nothing(_: TokenStream) -> TokenStream {
-    let _ = gdl::GDL_MESSAGE_CATALOGUE.len();
+    let _ = gdl_message::GDL_MESSAGE_CATALOGUE.len();
     TokenStream::new()
 }

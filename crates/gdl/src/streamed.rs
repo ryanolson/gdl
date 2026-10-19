@@ -51,6 +51,13 @@ impl<H: fmt::Debug, T> fmt::Debug for Streamed<H, T> {
     }
 }
 
+/// A streamed request's message names: its head's, and its item's. A port
+/// written `stream Item` has a head of `()`.
+impl<H: gdl_message::Shape, T: gdl_message::Shape> gdl_message::Shape for Streamed<H, T> {
+    const HEAD: &'static str = H::HEAD;
+    const ITEM: Option<&'static str> = Some(T::HEAD);
+}
+
 #[cfg(test)]
 mod tests {
     use futures::StreamExt;

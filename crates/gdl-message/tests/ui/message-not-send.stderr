@@ -10,8 +10,8 @@ note: required because it appears within the type `Shared`
   |
 5 | struct Shared {
   |        ^^^^^^
-note: required by a bound in `__gdl_message`
- --> tests/ui/message-not-send.rs:5:8
+note: required by a bound in `Message`
+ --> src/shape.rs
   |
-5 | struct Shared {
-  |        ^^^^^^ required by this bound in `__gdl_message`
+  | pub trait Message: Send + 'static {
+  |                    ^^^^ required by this bound in `Message`

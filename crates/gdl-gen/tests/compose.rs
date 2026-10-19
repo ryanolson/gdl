@@ -1,5 +1,5 @@
 //! Composition end to end: a graph file's message names resolve against the
-//! catalogue that real protocols crates register with `derive(gdl::Message)`,
+//! catalogue that real protocols crates register with `derive(gdl_message::Message)`,
 //! read by compiling and running a program that links them.
 
 use std::path::{Path, PathBuf};
@@ -66,7 +66,7 @@ fn every_resolution_problem_is_reported_at_once() {
     let error = resolve("bad.toml").expect_err("problems");
     assert_eq!(
         error,
-        "[messages] crate `empty-protocols` offers no messages: derive `gdl::Message` on its \
+        "[messages] crate `empty-protocols` offers no messages: derive `gdl_message::Message` on its \
          message types\n\
          message `Txet` (Preprocess, Format, Pad) is in no listed crate; did you mean `Text`?"
     );
@@ -89,7 +89,7 @@ fn only_the_listed_version_of_a_package_offers_messages() {
     assert_eq!((chunk.version.as_str(), chunk.wire), ("0.2.0", true));
 }
 
-/// Only a `gdl` linked into the catalogue program conflicts: one that a
+/// Only a `gdl-message` linked into the catalogue program conflicts: one that a
 /// message crate reaches through a proc macro, takes for another platform,
 /// or takes for its build script does not.
 #[test]
@@ -112,16 +112,16 @@ fn a_build_failure_is_not_taken_for_two_catalogues() {
 }
 
 /// A program holds one message catalogue. A message crate that links
-/// another gdl's catalogue into it is refused, and the error names that gdl
+/// another gdl-message's catalogue into it is refused, and the error names it
 /// and the crates that use it.
 #[test]
 fn a_message_crate_on_another_gdl_is_refused() {
     let error = resolve("foreign.toml").expect_err("two runtimes");
     for part in [
         "the catalogue program links two message catalogues",
-        "`gdl 0.0.1`",
+        "`gdl-message 0.0.1`",
         "used by `foreign-protocols`",
-        "depend on the gdl that [gdl] names",
+        "depend on the gdl-message of the gdl that [gdl] names",
     ] {
         assert!(error.contains(part), "{part} in:\n{error}");
     }

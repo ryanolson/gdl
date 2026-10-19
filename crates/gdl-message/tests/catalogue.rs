@@ -1,24 +1,24 @@
-//! The message catalogue: `#[derive(gdl::Message)]` registers a type with
+//! The message catalogue: `#[derive(gdl_message::Message)]` registers a type with
 //! its package, name, definition path, and wire capability, and
 //! `Catalogue::linked` lists every registered type in the program.
 
-use gdl::{Catalogue, MessageInfo};
+use gdl_message::{Catalogue, Message, MessageInfo, Shape};
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, gdl::Message)]
+#[derive(Serialize, Deserialize, gdl_message::Message)]
 struct Prompt {
     #[allow(dead_code)]
     text: String,
 }
 
 /// Not a wire type: it has no serde impls.
-#[derive(gdl::Message)]
+#[derive(gdl_message::Message)]
 struct Local;
 
 mod inner {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Serialize, Deserialize, gdl::Message)]
+    #[derive(Serialize, Deserialize, gdl_message::Message)]
     pub enum Words {
         #[allow(dead_code)]
         One(String),
@@ -30,7 +30,7 @@ mod inner {
 use inner::Words as Reexported;
 
 /// Spelled raw, named plainly: a graph names it `Raw`.
-#[derive(gdl::Message)]
+#[derive(gdl_message::Message)]
 struct r#Raw;
 
 /// Not derived: not in the catalogue.
@@ -65,7 +65,7 @@ fn a_derived_message_is_registered_with_its_definition_path() {
     assert_eq!(
         prompt,
         [&MessageInfo {
-            package: "gdl".into(),
+            package: "gdl-message".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             dir: env!("CARGO_MANIFEST_DIR").into(),
             name: "Prompt".into(),
@@ -87,6 +87,21 @@ fn a_derived_message_is_registered_with_its_definition_path() {
 fn another_registry_named_like_the_catalogue_is_independent() {
     assert_eq!(MESSAGES[..], ["hello"]);
     assert_eq!(find(&Catalogue::linked(), "Prompt").len(), 1);
+}
+
+/// The derive's `Message` constants are the catalogue entry's identity, and
+/// its `Shape` is one plain message.
+#[test]
+fn a_message_states_its_identity_and_shape() {
+    assert_eq!(<Prompt as Message>::NAME, "Prompt");
+    assert_eq!(<Prompt as Message>::PACKAGE, "gdl-message");
+    assert_eq!(<inner::Words as Message>::PATH, "catalogue::inner::Words");
+    assert_eq!(<Raw as Message>::NAME, "Raw");
+    assert_eq!(
+        (<Prompt as Shape>::HEAD, <Prompt as Shape>::ITEM),
+        ("Prompt", None)
+    );
+    assert_eq!((<() as Shape>::HEAD, <() as Shape>::ITEM), ("()", None));
 }
 
 #[test]

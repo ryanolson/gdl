@@ -41,24 +41,28 @@ pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl::Manifest, Err
 }
 
 /// The catalogue of every message type linked from `crates`, read with the
-/// gdl that `gdl` names.
+/// `gdl-message` of the gdl that `gdl` names.
 ///
 /// What the program links decides what it reads: no prediction from the
 /// dependency graph stands in for the linker. A program that links a
 /// second gdl's catalogue panics when it reads its own, because linkme
 /// gives both one section name. That panic is reported as the conflict it
-/// is, with every package named `gdl` and the crates that use it.
+/// is, with every package named `gdl-message` and the crates that use it.
 pub fn catalogue(
     crates: &[MessageCrate],
     gdl: &GdlDep,
     target: &Path,
-) -> Result<gdl::Catalogue, Error> {
-    let mut dependencies = match gdl {
+) -> Result<gdl_message::Catalogue, Error> {
+    // The program depends on `gdl-message`, not on the runtime, so it
+    // builds only what the message crates need.
+    let mut dependencies = match gdl.message()? {
         GdlDep::Path(path) => format!(
-            "gdl = {{ path = {} }}\n",
-            toml_string(&absolute(path)?.to_string_lossy())
+            "gdl-message = {{ path = {} }}\n",
+            toml_string(&absolute(&path)?.to_string_lossy())
         ),
-        GdlDep::Version(version) => format!("gdl = {{ version = {} }}\n", toml_string(version)),
+        GdlDep::Version(version) => {
+            format!("gdl-message = {{ version = {} }}\n", toml_string(&version))
+        }
     };
     let mut main = String::new();
     for (index, krate) in crates.iter().enumerate() {
@@ -74,7 +78,9 @@ pub fn catalogue(
         // are its catalogue entries.
         main.push_str(&format!("use {} as _;\n", alias(index)));
     }
-    main.push_str("\nfn main() {\n    print!(\"{}\", gdl::Catalogue::linked().to_toml());\n}\n");
+    main.push_str(
+        "\nfn main() {\n    print!(\"{}\", gdl_message::Catalogue::linked().to_toml());\n}\n",
+    );
     // One program per set of dependencies: a spec that links other crates
     // builds its own, and switching between specs relinks neither.
     let name = format!("gdl-catalogue-{:016x}", hash(&dependencies));
@@ -88,7 +94,7 @@ pub fn catalogue(
         }
         Err(failure) => return Err(failure.into()),
     };
-    gdl::Catalogue::from_toml(&text)
+    gdl_message::Catalogue::from_toml(&text)
         .map_err(|e| Error::new(format!("reading the message catalogue: {e}")))
 }
 
@@ -96,7 +102,7 @@ pub fn catalogue(
 const DUPLICATE: &str = "duplicate #[distributed_slice] with name \"GDL_MESSAGE_CATALOGUE\"";
 
 /// The error for a catalogue program that linked two catalogues: each
-/// package named `gdl` other than the one `[gdl]` names, with the packages
+/// package named `gdl-message` other than the program's own, with the packages
 /// that depend on it. Only a program that did link two reaches here, so
 /// listing a package that is not linked can only add detail.
 fn two_catalogues(work: &Path, target: &Path) -> Error {
@@ -129,7 +135,7 @@ fn two_catalogues(work: &Path, target: &Path) -> Error {
     }
 
     let head = "the catalogue program links two message catalogues, and a program holds one";
-    let tail = "make every message crate depend on the gdl that [gdl] names";
+    let tail = "make every message crate depend on the gdl-message of the gdl that [gdl] names";
     let metadata = cargo(work, target, &["metadata", "--format-version", "1"])
         .ok()
         .and_then(|text| serde_json::from_str::<Metadata>(&text).ok());
@@ -148,12 +154,12 @@ fn two_catalogues(work: &Path, target: &Path) -> Error {
         .nodes
         .iter()
         .find(|n| n.id == metadata.resolve.root)
-        .and_then(|root| root.deps.iter().find(|d| d.name == "gdl"))
+        .and_then(|root| root.deps.iter().find(|d| d.name == "gdl_message"))
         .map(|d| d.pkg.as_str());
     let others: Vec<String> = metadata
         .packages
         .iter()
-        .filter(|p| p.name == "gdl" && Some(p.id.as_str()) != ours)
+        .filter(|p| p.name == "gdl-message" && Some(p.id.as_str()) != ours)
         .map(|p| {
             let users: Vec<String> = metadata
                 .resolve
@@ -163,7 +169,7 @@ fn two_catalogues(work: &Path, target: &Path) -> Error {
                 .map(|n| format!("`{}`", name(&n.id)))
                 .collect();
             format!(
-                "`gdl {}` ({}) is used by {}",
+                "`gdl-message {}` ({}) is used by {}",
                 p.version,
                 p.manifest_path.display(),
                 users.join(", ")

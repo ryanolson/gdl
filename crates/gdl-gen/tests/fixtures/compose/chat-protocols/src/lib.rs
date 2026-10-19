@@ -4,14 +4,14 @@
 use serde::{Deserialize, Serialize};
 
 /// What a user asks.
-#[derive(Serialize, Deserialize, gdl::Message)]
+#[derive(Serialize, Deserialize, gdl_message::Message)]
 pub struct Prompt {
     /// The prompt text.
     pub text: String,
 }
 
 /// One piece of the answer.
-#[derive(Serialize, Deserialize, gdl::Message)]
+#[derive(Serialize, Deserialize, gdl_message::Message)]
 pub struct Chunk {
     /// The chunk's text.
     pub text: String,
@@ -22,14 +22,14 @@ pub mod engine {
     use serde::{Deserialize, Serialize};
 
     /// The prompt as the engine takes it.
-    #[derive(Serialize, Deserialize, gdl::Message)]
+    #[derive(Serialize, Deserialize, gdl_message::Message)]
     pub struct Words {
         /// The words.
         pub words: Vec<String>,
     }
 
     /// One word the engine produced.
-    #[derive(Serialize, Deserialize, gdl::Message)]
+    #[derive(Serialize, Deserialize, gdl_message::Message)]
     pub struct Token {
         /// The word.
         pub word: String,
@@ -39,14 +39,14 @@ pub mod engine {
 pub use engine::{Token, Words};
 
 /// A token as text: never crosses a process, so it needs no serde.
-#[derive(gdl::Message)]
+#[derive(gdl_message::Message)]
 pub struct Piece {
     /// The text.
     pub text: std::sync::Arc<str>,
 }
 
 /// Text ready for the user.
-#[derive(Serialize, Deserialize, gdl::Message)]
+#[derive(Serialize, Deserialize, gdl_message::Message)]
 pub struct Text {
     /// The text.
     pub text: String,
