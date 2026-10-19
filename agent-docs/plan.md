@@ -844,7 +844,7 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 70 | Lockfiles in an archive | none: the first build writes one per segment; pinning is milestone 18's question | Fable, 2026-10-18 |
 | 71 | `export` beside `generate` | its own subcommand, rendering in memory with no temporary directory: one path policy per command | Fable, 2026-10-18 |
 | 72 | The catalogue service in 16 | `Catalog` in `gdl-extract`, with `cargo gdl extract --catalog` and `cargo gdl catalog`; the HTTP server is 17's: a server without its client is guesswork | Fable, 2026-10-18 |
-| 73 | A catalogue entry | the offer, its checksum, and when it was added; adding a version already there keeps it: written once means never rewritten | Fable, 2026-10-18 |
+| 73 | A catalogue entry | the offer, its checksum, and when it was added; adding a version already there keeps it: written once means never rewritten. Addendum 2026-10-19 (review `mega-r2`): only from the same source; a version from another source is an error that names both | Fable, 2026-10-18 |
 | 74 | Where a checksum comes from | the checksum Cargo locked when it fetched the crate; none for a path or git package: Cargo already verified it, and we invent nothing | Fable, 2026-10-18 |
 | 75 | When an entry was added | RFC 3339 UTC to the second, passed in by the caller: tests stay deterministic without a time crate | Fable, 2026-10-18 |
 | 76 | The catalogue's index | built at load: message name to origins, node name to nodes, origin to (node, port); which ports may pair is the grammar's | Fable, 2026-10-18 |

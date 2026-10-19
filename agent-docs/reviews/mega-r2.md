@@ -1,11 +1,20 @@
-# Whole-repository mega review, pass 2
+# Milestones 10 to 18, mega review pass 2
 
-Reviewer: fresh Codex (`gpt-6-astra`) session, read-only, `thermo-nuclear-code-quality-review` over the whole repository at `3ba9b88`. Raw text: `mega-r2-raw.txt`. ACTIONABLE: 5.
+Reviewer: a fresh Fable subagent, read-only, running the thermo-nuclear code-quality review over `main..HEAD`. It checked the fixes of `mega-r1.md` first, then read the whole diff (230 files) fresh. It ran the workspace suite in a scratch copy (42 targets, all green), two scenario probes, and four mutation probes. Verdict: REJECT, 4 actionable (1 major, 3 minor).
 
-| # | Severity | Finding | Ruling | Evidence and fix |
+Pass 1's fixes held, as did the following, on a fresh read:
+- the reader's module tree, `#[path]`, and `cfg` rules;
+- resolution by origin, and binding by identity;
+- the manifest equality, `survey`, and the export's determinism;
+- the server's locking.
+
+The runtime's diff is a move of types to `gdl-model`, so no hot path changed.
+
+| # | Finding | Ruling | Test | Fix |
 |---|---|---|---|---|
-| 1 | P2 | When the last local forward node cancels the attempt, the outer end still hands the request on, and the remote work runs under a context that does not carry the cancel | valid | The reviewer could not build a test. `a_request_cancelled_by_its_last_local_forward_node_is_not_handed_on` (C cancels its context and returns the request; D is remote): D started and finished after the call returned `Cancelled`. Fix: the outer end checks the attempt after the forward walk, before either the local inner end or a hand-off |
-| 2 | P2 | Introduced names still collide: a node `Bound` takes the setter generic's name, and nodes `Hop_1` and `Local_1` take hop locals' names | valid | `tests/pass/graph-local-names.rs` (E0403, E0308). Fix: one prefix per kind of introduced name: `__GdlSlot<Node>` for slots, `__GdlImpl` for a setter, `__gdl_node_<binding>` for node locals, `__gdl_hop_<n>` and `__gdl_local_<n>` for hops. The parameters of the generated functions are prefixed too: a caller's constant named `deployment` turned the parameter into a constant pattern (same test file, `graph-shadowed-prelude.rs`) |
-| 3 | P2 | The keyword table misses reserved keywords, so a node `Abstract` gets an unescaped `abstract` binding | valid | `tests/pass/graph-local-names.rs` ("expected identifier, found reserved keyword `abstract`"). Fix: the table holds every strict and reserved keyword of every edition |
-| 4 | P2 | `NAME: &'static str` resolves a caller's `str` | valid | `tests/pass/graph-shadowed-prelude.rs` (E0326). Fix: `::core::primitive::str` |
-| 5 | P2 | The local benchmark counts failed or short runs as throughput (`unwrap_or(0)`, no count check) | valid | By inspection: an error item adds 0 and an early end is not checked. Fix: both paths fold into a `Checked` that panics on an error item or a short count, as the remote benchmark does. `cargo bench --bench hop -- --test` passes |
+| 1 | two adds of one crate at once raced on the fetch's scratch manifest: `cargo metadata` read one truncated by the other (3 of 31 runs) | valid | `adds_of_one_crate_at_once_all_succeed` (six rounds of eight adds; failed two runs of three before the fix, passed five of five after) | `Workspace::fetch` writes each scratch file beside and renames it into place, and leaves a file that already holds the text |
+| 2 | adding a version from another source than the one the catalogue holds succeeded and kept the other crate | valid; ruling 73 meant one source | `a_version_from_another_source_is_refused` | `Catalog::add` errs, naming both sources; the same source is kept as before |
+| 3 | two comments still described the drafts directory that pass 1 removed | valid | none | reworded in `gdl-web/src/main.rs` and `api.rs` |
+| 4 | two rules survived mutation: the case-folded `contract` segment name, and the tie-break toward the graph's name among one crate's exports | valid | `a_graph_spec_refuses_a_segment_named_contract_in_any_case`, `an_export_of_the_graphs_name_is_chosen_among_a_crates_exports`; each fails under its mutation | none needed |
+
+The workspace suite, clippy, and fmt pass after the fixes.
