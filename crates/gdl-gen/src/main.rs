@@ -189,7 +189,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Export { out } => {
             let spec = spec()?;
             let target = target(spec.dir());
-            let bytes = gdl_gen::export(&spec, &target)?;
+            let bytes = gdl_gen::export(&spec, &target, gdl_gen::Offers::Read)?;
             std::fs::write(out, bytes).map_err(|e| format!("{}: {e}", out.display()))?;
         }
         Command::Generate { out, check } => {

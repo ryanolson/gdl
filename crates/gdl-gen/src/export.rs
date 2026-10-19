@@ -13,15 +13,15 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{Error, Spec, emit};
+use crate::{Error, Offers, Spec, emit};
 
 /// The spec's crates as a `.tar.gz`, under a directory named for the graph.
 /// The contract's manifest is built in `target`, as for [`crate::render`].
-pub fn export(spec: &Spec, target: &Path) -> Result<Vec<u8>, Error> {
+pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, Error> {
     // The output's place only decides which paths are inside it; nothing
     // is written there.
     let out = crate::dump::absolute(&spec.dir)?.join(".gdl-export");
-    let (files, graph) = crate::render_with(spec, &out, target, emit::Deps::Exported)?;
+    let (files, graph) = crate::render_with(spec, &out, target, emit::Deps::Exported, from)?;
     let segments: Vec<&str> = spec.placement.segments().map(|(name, _)| name).collect();
 
     let mut entries: Vec<(PathBuf, Vec<u8>, u32)> = files

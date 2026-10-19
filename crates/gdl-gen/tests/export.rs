@@ -20,7 +20,7 @@ fn target(purpose: &str) -> PathBuf {
 
 fn export() -> Vec<u8> {
     let spec = gdl_gen::Spec::load(&root().join("examples/chat/gdl.toml")).expect("spec");
-    gdl_gen::export(&spec, &target("gdl-gen-tests")).expect("exported")
+    gdl_gen::export(&spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read).expect("exported")
 }
 
 /// Each entry: its path, mode, modification time, and text.

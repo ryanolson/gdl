@@ -418,3 +418,52 @@ fn a_registry_crate_enters_the_catalogue_with_its_checksum() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What each listed crate of the chat example offers, as a catalogue would
+/// hold it: read once, from source.
+fn chat_offers() -> Vec<gdl_gen::Offer> {
+    let chat = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/chat");
+    let workspace = gdl_extract::Workspace::load(&chat.join("Cargo.toml")).expect("metadata");
+    ["protocols", "front-nodes", "engine-mock", "post-nodes"]
+        .iter()
+        .map(|dir| {
+            let extraction = workspace.extract_in(&chat.join(dir)).expect("a package");
+            assert!(extraction.problems.is_empty(), "{:?}", extraction.problems);
+            extraction.offer
+        })
+        .collect()
+}
+
+/// `check` validates a spec as generation does and writes nothing: from
+/// source, or from offers a catalogue holds, to the same manifest and the
+/// committed crossing report. A crate the catalogue lacks is named.
+#[test]
+fn a_check_agrees_with_generation() {
+    let chat = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/chat");
+    let spec = gdl_gen::Spec::load(&chat.join("gdl.toml")).expect("spec");
+    let read = gdl_gen::check(&spec, &target(), gdl_gen::Offers::Read).expect("read");
+    let committed =
+        std::fs::read_to_string(chat.join("segments/crossings.txt")).expect("crossings");
+    assert!(
+        committed.contains(&read.crossings),
+        "{}\nvs\n{committed}",
+        read.crossings
+    );
+    assert!(read.mermaid.contains("\nflowchart LR\n"), "{}", read.mermaid);
+    let offers = chat_offers();
+    let given = gdl_gen::check(&spec, &target(), gdl_gen::Offers::Given(&offers)).expect("given");
+    assert_eq!(given.manifest, read.manifest);
+    assert_eq!(given.crossings, read.crossings);
+    let without_engine: Vec<_> = offers
+        .into_iter()
+        .filter(|o| o.package != "chat-engine-mock")
+        .collect();
+    let error = gdl_gen::check(&spec, &target(), gdl_gen::Offers::Given(&without_engine))
+        .expect_err("no engine")
+        .to_string();
+    assert!(
+        error.starts_with("`chat-engine-mock` (")
+            && error.ends_with(") is not in the catalogue: add it first"),
+        "{error}"
+    );
+}

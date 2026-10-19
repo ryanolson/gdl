@@ -76,52 +76,99 @@ pub type Files = BTreeMap<PathBuf, String>;
 /// `out`. For a graph file, the files include the contract crate, in
 /// `contract/` under `out`.
 pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
-    Ok(render_with(spec, out, target, emit::Deps::Relative)?.0)
+    Ok(render_with(spec, out, target, emit::Deps::Relative, Offers::Read)?.0)
 }
 
-/// [`render`], with dependencies named as `deps` says, and the graph's
-/// name.
+/// Where the offers of a spec's listed crates come from.
+#[derive(Debug, Clone, Copy)]
+pub enum Offers<'a> {
+    /// Read from each crate's source, a crate listed by version fetched
+    /// into the target directory first.
+    Read,
+    /// Given: the entries of a loaded catalogue, read when each was added.
+    /// A listed crate the catalogue does not hold is an error.
+    Given(&'a [Offer]),
+}
+
+/// [`render`], with dependencies named as `deps` says and offers from
+/// `from`, and the graph's name.
 fn render_with(
     spec: &Spec,
     out: &Path,
     target: &Path,
     deps: emit::Deps,
+    from: Offers<'_>,
 ) -> Result<(Files, String), Error> {
-    let prepared = prepare(spec, Some(out), target, deps)?;
-    // A graph spec binds its nodes to the nodes its node crates offer, read
-    // from their source, in place of the `[bind.*]` tables of a contract
-    // spec.
-    let bound;
-    let spec = match &spec.source {
-        spec::Source::Contract(_) => spec,
-        spec::Source::Graph(source) => {
-            let (graph, resolution) = prepared
-                .graph
-                .as_ref()
-                .expect("a graph spec's preparation reads its graph");
-            let listed: Vec<_> = source
-                .nodes
-                .iter()
-                .map(|c| (c.package.as_str(), c.lib.as_str(), &c.source))
-                .collect();
-            let offers = offers(&listed, target)?;
-            let (bind, problems) = nodes::bind(
-                graph,
-                &source.nodes,
-                &offers,
-                &resolution.messages,
-                &source.node_pins,
-            );
-            let mut with_binds = spec.clone();
-            with_binds.bind = bind;
-            with_binds.problems.extend(problems);
-            bound = with_binds;
-            &bound
-        }
-    };
-    let mut files = render_manifest(spec, &prepared.contract, &prepared.manifest, out, deps)?;
+    let prepared = prepare(spec, Some(out), target, deps, from)?;
+    let spec = bound(spec, &prepared, target, from)?;
+    let mut files = render_manifest(&spec, &prepared.contract, &prepared.manifest, out, deps)?;
     files.extend(prepared.files);
     Ok((files, prepared.manifest.name))
+}
+
+/// `spec` with its graph's nodes bound to the nodes its node crates offer,
+/// in place of the `[bind.*]` tables of a contract spec, which is returned
+/// as it is.
+fn bound<'s>(
+    spec: &'s Spec,
+    prepared: &Prepared,
+    target: &Path,
+    from: Offers<'_>,
+) -> Result<std::borrow::Cow<'s, Spec>, Error> {
+    let spec::Source::Graph(source) = &spec.source else {
+        return Ok(std::borrow::Cow::Borrowed(spec));
+    };
+    let (graph, resolution) = prepared
+        .graph
+        .as_ref()
+        .expect("a graph spec's preparation reads its graph");
+    let listed: Vec<_> = source
+        .nodes
+        .iter()
+        .map(|c| (c.package.as_str(), c.lib.as_str(), &c.source))
+        .collect();
+    let offers = offers(&listed, target, from)?;
+    let (bind, problems) = nodes::bind(
+        graph,
+        &source.nodes,
+        &offers,
+        &resolution.messages,
+        &source.node_pins,
+    );
+    let mut with_binds = spec.clone();
+    with_binds.bind = bind;
+    with_binds.problems.extend(problems);
+    Ok(std::borrow::Cow::Owned(with_binds))
+}
+
+/// A spec checked as generating it would check it, with nothing written:
+/// its manifest, what one request costs under its placement, and its
+/// placed graph as a Mermaid flowchart.
+#[derive(Debug, Clone)]
+pub struct Check {
+    /// The contract's manifest.
+    pub manifest: gdl_model::Manifest,
+    /// The crossing report, as `crossings.txt` holds it.
+    pub crossings: String,
+    /// The placed graph.
+    pub mermaid: String,
+}
+
+/// Check `spec` as [`render`] and [`export`] check it, with offers from
+/// `from`, and write nothing. A spec that passes generates.
+pub fn check(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Check, Error> {
+    let prepared = prepare(spec, None, target, emit::Deps::Relative, from)?;
+    let spec = bound(spec, &prepared, target, from)?;
+    let layout = validate(&spec, &prepared.contract, &prepared.manifest)?;
+    let mermaid = prepared
+        .manifest
+        .to_mermaid(Some(&layout))
+        .map_err(|e| Error::new(e.to_string()))?;
+    Ok(Check {
+        crossings: layout.report().to_string(),
+        mermaid,
+        manifest: prepared.manifest,
+    })
 }
 
 /// A diagram format for [`diagram`].
@@ -137,7 +184,7 @@ pub enum Format {
 /// edge that crosses segments marked. The contract's manifest is built in
 /// `target` (a cargo target directory), as for [`render`].
 pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
-    let manifest = prepare(spec, None, target, emit::Deps::Relative)?.manifest;
+    let manifest = prepare(spec, None, target, emit::Deps::Relative, Offers::Read)?.manifest;
     let layout =
         gdl_model::layout(&manifest, &spec.placement).map_err(|e| Error::new(e.to_string()))?;
     match format {
@@ -182,13 +229,14 @@ pub fn resolve(spec: &Spec, target: &Path) -> Result<Resolution, Error> {
             spec.file.display()
         )));
     };
-    Ok(resolved(source, target)?.1)
+    Ok(resolved(source, target, Offers::Read)?.1)
 }
 
 /// The graph file of `source`, checked, and its names resolved.
 fn resolved(
     source: &spec::GraphSource,
     target: &Path,
+    from: Offers<'_>,
 ) -> Result<(names::GraphFile, Resolution), Error> {
     let file = names::GraphFile::read(&source.path)?;
     let listed: Vec<_> = source
@@ -196,7 +244,7 @@ fn resolved(
         .iter()
         .map(|c| (c.package.as_str(), c.lib.as_str(), &c.source))
         .collect();
-    let offers = offers(&listed, target)?;
+    let offers = offers(&listed, target, from)?;
     let messages = resolve::resolve(&file.uses, &offers, &source.pins)
         .map_err(|problems| Error::new(problems.join("\n")))?;
     Ok((file, Resolution { messages }))
@@ -209,7 +257,15 @@ fn resolved(
 fn offers(
     listed: &[(&str, &str, &spec::CrateSource)],
     target: &Path,
+    from: Offers<'_>,
 ) -> Result<Vec<gdl_extract::Offer>, Error> {
+    if let Offers::Given(given) = from {
+        return listed
+            .iter()
+            .map(|&(package, lib, source)| given_offer(given, package, lib, source))
+            .collect::<Result<Vec<_>, Vec<String>>>()
+            .map_err(|problems| Error::new(problems.join("\n")));
+    }
     let mut workspaces: Vec<gdl_extract::Workspace> = Vec::new();
     let mut offers = Vec::with_capacity(listed.len());
     let mut problems = Vec::new();
@@ -263,6 +319,47 @@ fn offers(
     }
 }
 
+/// The offer of the listed crate `package` from `source` among `given`,
+/// held to the rule a read holds it to: its library is `lib`.
+fn given_offer(
+    given: &[Offer],
+    package: &str,
+    lib: &str,
+    source: &spec::CrateSource,
+) -> Result<Offer, Vec<String>> {
+    let canonical = |dir: &Path| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let found = given.iter().find(|o| {
+        o.package == package
+            && match source {
+                spec::CrateSource::Version(v) => o.version == *v && !o.source.starts_with("path+"),
+                spec::CrateSource::Path(dir) => o
+                    .source
+                    .strip_prefix("path+file://")
+                    .is_some_and(|d| canonical(Path::new(d)) == canonical(dir)),
+            }
+    });
+    let Some(offer) = found else {
+        return Err(vec![format!(
+            "`{package}` ({source}) is not in the catalogue: add it first"
+        )]);
+    };
+    // The library's name, as the reader wrote every path of the crate.
+    let library = offer
+        .messages
+        .iter()
+        .map(|m| m.path.as_str())
+        .chain(offer.exports.iter().map(|e| e.path.as_str()))
+        .chain(offer.nodes.iter().map(|n| n.ty.as_str()))
+        .find_map(|path| path.split("::").next());
+    if let Some(library) = library.filter(|l| *l != lib) {
+        return Err(vec![format!(
+            "{package}@{}: its library is `{library}`, not `{lib}`; a crate listed by version must name its library for its package",
+            offer.version
+        )]);
+    }
+    Ok(offer.clone())
+}
+
 /// The contract that a spec's segments build on, its manifest, and the
 /// files of the contract crate when the generator writes it.
 struct Prepared {
@@ -286,6 +383,7 @@ fn prepare(
     out: Option<&Path>,
     target: &Path,
     deps: emit::Deps,
+    from: Offers<'_>,
 ) -> Result<Prepared, Error> {
     let source = match &spec.source {
         spec::Source::Contract(contract) => {
@@ -298,7 +396,7 @@ fn prepare(
         }
         spec::Source::Graph(source) => source,
     };
-    let (file, resolution) = resolved(source, target)?;
+    let (file, resolution) = resolved(source, target, from)?;
     let name = file.graph.name.value();
     let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && name
@@ -872,7 +970,7 @@ mod tests {
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gdl-gen-tests");
         let manifest = |file: &str| {
             let spec = Spec::load(&fixtures.join(file)).expect("spec");
-            prepare(&spec, None, &target, emit::Deps::Relative)
+            prepare(&spec, None, &target, emit::Deps::Relative, Offers::Read)
                 .expect("prepared")
                 .manifest
         };
@@ -896,7 +994,7 @@ mod tests {
             root.join("tests/fixtures/compose/versions-pinned.toml"),
         ] {
             let spec = Spec::load(&spec).expect("spec");
-            let built = prepare(&spec, None, &target, emit::Deps::Relative)
+            let built = prepare(&spec, None, &target, emit::Deps::Relative, Offers::Read)
                 .expect("prepared")
                 .manifest;
             let compiled = compiled_manifest(&spec, &target);
@@ -912,7 +1010,7 @@ mod tests {
         let Source::Graph(source) = &spec.source else {
             panic!("a graph spec");
         };
-        let (file, resolution) = resolved(source, target).expect("resolved");
+        let (file, resolution) = resolved(source, target, Offers::Read).expect("resolved");
         let package = emit::package_name(&file.graph.name.value(), "contract");
         let lib = package.replace('-', "_");
         let lib_rs = contract::lib_rs(&file.graph, &resolution, &source.path);
