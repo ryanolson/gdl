@@ -322,63 +322,25 @@ fn prepare(
         contract::cargo_toml(&package, &spec.gdl, &source.crates, path)
     };
 
-    // Read the manifest from a copy whose paths are absolute, in a
-    // directory named by its content: runs of other specs never share it.
-    let absolute = |p: &Path| {
-        dump::toml_string(
-            &dump::absolute(p)
-                .unwrap_or_else(|_| p.to_path_buf())
-                .to_string_lossy(),
-        )
-    };
-    let scratch_toml = crates(&absolute);
-    let scratch = target.join("gdl-gen").join(format!(
-        "contract-{:016x}",
-        dump::hash(&(&scratch_toml, &lib_rs))
-    ));
-    let src = scratch.join("src");
-    std::fs::create_dir_all(&src).map_err(|e| io(&src, e))?;
-    dump::write(&scratch.join("Cargo.toml"), &scratch_toml)?;
-    dump::write(&src.join("lib.rs"), &lib_rs)?;
+    // The manifest is built from the graph and its resolution, as the
+    // contract's `graph!` would emit it. Nothing is compiled, so a spec
+    // whose crates do not build here (an engine that needs CUDA) still
+    // generates. A wrong reading of a wire type is caught by the segment's
+    // build or by its deployment, which checks the layout against the
+    // compiled contract's own manifest.
+    let manifest = file
+        .graph
+        .manifest(&|name| {
+            let resolved = resolution.messages.get(name)?;
+            Some((resolved.path.clone(), resolved.wire))
+        })
+        .map_err(Error::new)?;
     let mut contract = spec::Contract {
         package: package.clone(),
         lib: lib.clone(),
-        path: scratch,
+        path: target.join("gdl-gen").join(&package),
         module: gdl_syntax::identifier(&lib),
     };
-    let manifest = dump::manifest(&contract, target).map_err(|e| {
-        let text = e.to_string();
-        // rustc's E0603 names the private module. The contract names each
-        // message where it is defined, and a re-export elsewhere does not
-        // make that path public.
-        let modules: Vec<&str> = text
-            .split("module `")
-            .skip(1)
-            .filter_map(|rest| rest.split_once("` is private").map(|(m, _)| m))
-            .filter(|m| !m.contains('`'))
-            .collect();
-        let private: Vec<&str> = resolution
-            .messages
-            .values()
-            .map(|m| m.path.as_str())
-            .filter(|path| {
-                let mut segments = path.split("::");
-                let _crate = segments.next();
-                segments.any(|s| modules.contains(&s))
-            })
-            .collect();
-        if private.is_empty() {
-            return e;
-        }
-        Error::new(format!(
-            "{text}\na message must be public at the path where it is defined: {}",
-            private
-                .iter()
-                .map(|p| format!("`{p}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
-    })?;
 
     let mut files = Files::new();
     if let Some(out) = out {
@@ -934,17 +896,42 @@ mod tests {
             root.join("tests/fixtures/compose/versions-pinned.toml"),
         ] {
             let spec = Spec::load(&spec).expect("spec");
-            let prepared = prepare(&spec, None, &target, emit::Deps::Relative).expect("prepared");
-            let (graph, resolution) = prepared.graph.as_ref().expect("a graph file");
-            let built = graph
-                .manifest(&|name| {
-                    let resolved = resolution.messages.get(name)?;
-                    Some((resolved.path.clone(), resolved.wire))
-                })
-                .expect("built");
-            assert_eq!(built, prepared.manifest);
-            assert_eq!(built.contract_hash(), prepared.manifest.contract_hash());
+            let built = prepare(&spec, None, &target, emit::Deps::Relative)
+                .expect("prepared")
+                .manifest;
+            let compiled = compiled_manifest(&spec, &target);
+            assert_eq!(built, compiled);
+            assert_eq!(built.contract_hash(), compiled.contract_hash());
         }
+    }
+
+    /// What a graph spec's contract prints when it is compiled and run:
+    /// the generator no longer compiles it, and this is the proof that it
+    /// need not.
+    fn compiled_manifest(spec: &Spec, target: &Path) -> Manifest {
+        let Source::Graph(source) = &spec.source else {
+            panic!("a graph spec");
+        };
+        let (file, resolution) = resolved(source, target).expect("resolved");
+        let package = emit::package_name(&file.graph.name.value(), "contract");
+        let lib = package.replace('-', "_");
+        let lib_rs = contract::lib_rs(&file.graph, &resolution, &source.path);
+        let absolute =
+            |p: &Path| dump::toml_string(&dump::absolute(p).expect("absolute").to_string_lossy());
+        let toml = contract::cargo_toml(&package, &spec.gdl, &source.crates, &absolute);
+        let dir = target
+            .join("gdl-gen")
+            .join(format!("contract-{:016x}", dump::hash(&(&toml, &lib_rs))));
+        std::fs::create_dir_all(dir.join("src")).expect("dir");
+        dump::write(&dir.join("Cargo.toml"), &toml).expect("manifest");
+        dump::write(&dir.join("src/lib.rs"), &lib_rs).expect("lib");
+        let contract = Contract {
+            package,
+            module: gdl_syntax::identifier(&lib),
+            lib,
+            path: dir,
+        };
+        dump::manifest(&contract, target).expect("compiled")
     }
 
     /// The generated contract depends on gdl and on each message crate by

@@ -183,6 +183,10 @@ pub struct MessageEntry {
     /// Whether it implements `Serialize` and `Deserialize`, by derive or by
     /// an impl the reader found.
     pub wire: bool,
+    /// Whether its definition path is public: the type and every module
+    /// above it are `pub`. Code outside the crate can name it there only
+    /// if so; an export gives it another path.
+    pub public: bool,
 }
 
 /// A message a crate offers under a public path of its own.
@@ -196,6 +200,9 @@ pub struct ExportEntry {
     pub origin: Origin,
     /// Whether the message is a wire type, as its definition shows.
     pub wire: bool,
+    /// Whether the public path is public: every module above the `pub use`
+    /// is `pub`.
+    pub public: bool,
 }
 
 /// A message's identity: where it is defined, wherever it is offered.

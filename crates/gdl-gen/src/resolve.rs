@@ -32,6 +32,8 @@ struct Candidate {
     /// Whether it is an export, and whether its own package exports it:
     /// what decides the path the contract names it by.
     export: Option<bool>,
+    /// Whether code outside its crate can name `path`.
+    public: bool,
 }
 
 /// Resolve each name in `uses` (a message name and the nodes that declare
@@ -65,6 +67,7 @@ pub(crate) fn resolve(
                 path: m.path.clone(),
                 wire: m.wire,
                 export: None,
+                public: m.public,
             });
         }
         for e in &offer.exports {
@@ -74,6 +77,7 @@ pub(crate) fn resolve(
                 path: e.path.clone(),
                 wire: e.wire,
                 export: Some(e.origin.package == offer.package),
+                public: e.public,
             });
         }
     }
@@ -105,6 +109,12 @@ pub(crate) fn resolve(
                 ));
                 continue;
             };
+            if !pinned.public {
+                problems.push(format!(
+                    "[messages] pin `{name}`: `{path}` is not public: a module above it is private"
+                ));
+                continue;
+            }
             // The pinned message, through the path the pin gives.
             resolved.insert(
                 name.clone(),
@@ -130,9 +140,9 @@ pub(crate) fn resolve(
                 // definition's may not be; the defining package's own
                 // export before another's. Any offer of the message
                 // counts, under whatever name it is exported.
-                let best = candidates
+                let Some(best) = candidates
                     .iter()
-                    .filter(|c| c.origin == **origin)
+                    .filter(|c| c.origin == **origin && c.public)
                     .min_by_key(|c| {
                         let rank = match c.export {
                             Some(true) => 0,
@@ -141,7 +151,13 @@ pub(crate) fn resolve(
                         };
                         (rank, c.name != *name)
                     })
-                    .expect("one candidate at least");
+                else {
+                    problems.push(format!(
+                        "message `{name}` ({users}): a message must be public at the path where it is defined, or exported with `#[export]`: `{}` is not",
+                        origin.path
+                    ));
+                    continue;
+                };
                 resolved.insert(
                     name.clone(),
                     Resolved {
@@ -253,6 +269,7 @@ pub(crate) mod tests {
                     name: path.rsplit("::").next().expect("name").to_string(),
                     path: (*path).to_string(),
                     wire: true,
+                    public: true,
                 })
                 .collect(),
             exports: exported
@@ -267,6 +284,7 @@ pub(crate) mod tests {
                         path: (*origin).to_string(),
                     },
                     wire: true,
+                    public: true,
                 })
                 .collect(),
             nodes: Vec::new(),

@@ -130,7 +130,7 @@ Prompt  chat_protocols::Prompt         wire
 
 First, the generator makes sure that the names agree on each edge. Each error gives the line and column in the graph file. Then it reads the source of the listed crates with `gdl-extract`. It builds nothing, so a crate whose build needs a toolkit that is not installed can still be read. A listed crate offers the messages that it defines and the messages that it exports. Each name must resolve to exactly one message. A message that two listed crates offer, one by its definition and one by an export, is one message. If a name resolves to two different messages, the generator reports an error. Add a `pin` entry to choose one. The generator reports all errors at once.
 
-From a `[graph]` spec, the generator also generates the contract crate, in `contract/` under the output directory. Its `graph!` invocation names each message by a public path through a listed crate: an export's path if there is one, else the definition's. The contract hash covers that path, so it changes when a name resolves to another message. A message that is defined in a private module must be exported. The chat example uses a graph file. The ASR example uses a contract crate that holds its own `graph!` invocation.
+From a `[graph]` spec, the generator also generates the contract crate, in `contract/` under the output directory. Its `graph!` invocation names each message by a public path through a listed crate: an export's path if there is one, else the definition's. The contract hash covers that path, so it changes when a name resolves to another message. A message that is defined in a private module must be exported: resolution reports it, read from source. The chat example uses a graph file. The ASR example uses a contract crate that holds its own `graph!` invocation.
 
 ## Split a graph into segments
 
@@ -183,7 +183,7 @@ path = "engine-mock"
 type = "chat_engine_mock::Engine"
 ```
 
-The generator compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`.
+For a graph spec, the generator compiles nothing: it builds the contract's manifest from the graph file and what the source reader found, including which messages are wire types. For a contract spec, it compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`. If the reader takes a type for a wire type that is not one, the segment's build or its deployment, which checks the placement against the compiled contract, fails. If it misses a wire type's serde impls (for example, impls that a macro writes), the generator refuses a cut that would work. `cargo gdl extract --verify` finds both.
 
 For each segment, the generator writes a crate with:
 

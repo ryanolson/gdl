@@ -396,6 +396,7 @@ mod tests {
                 path: "facade::Words".into(),
                 origin: read_origin("protocols::Words"),
                 wire: true,
+                public: true,
             }],
             nodes: vec![NodeEntry {
                 name: "Stage".into(),

@@ -345,3 +345,30 @@ fn rust_is_read_as_the_compiler_reads_it() {
         ]
     );
 }
+
+/// A definition path is public when the type and every module above it
+/// are `pub`; an export's, when every module above the `pub use` is.
+#[test]
+fn the_reader_knows_which_paths_are_public() {
+    let offer = workspace()
+        .extract("read-protocols")
+        .expect("package")
+        .offer;
+    let public: Vec<(&str, bool)> = offer
+        .messages
+        .iter()
+        .map(|m| (m.path.as_str(), m.public))
+        .chain(offer.exports.iter().map(|e| (e.path.as_str(), e.public)))
+        .collect();
+    assert_eq!(
+        public,
+        [
+            ("read_protocols::hidden::Piece", false),
+            ("read_protocols::hidden::Session", false),
+            ("read_protocols::engine::Token", true),
+            ("read_protocols::Words", true),
+            ("read_protocols::Piece", true),
+            ("read_protocols::Session", true),
+        ]
+    );
+}

@@ -151,19 +151,18 @@ fn toml_string(path: &Path) -> String {
 }
 
 /// A generated contract names a message by a public path. A message
-/// defined in a private module and not exported has none, and the error
-/// says why; exported, it is named by the export's path and compiles.
+/// defined in a private module and not exported has none: resolution says
+/// so, read from source, before anything is generated. Exported, it is
+/// named by the export's path, and its contract compiles.
 #[test]
 fn a_message_in_a_private_module_needs_an_export() {
     let spec = gdl_gen::Spec::load(&fixtures().join("private.toml")).expect("spec");
-    let error = gdl_gen::diagram(&spec, &target(), gdl_gen::Format::Mermaid)
+    let error = gdl_gen::resolve(&spec, &target())
         .expect_err("private")
         .to_string();
-    assert!(
-        error.contains(
-            "a message must be public at the path where it is defined: `private_protocols::inner::Prompt`"
-        ),
-        "{error}"
+    assert_eq!(
+        error,
+        "message `Prompt` (A, B): a message must be public at the path where it is defined, or exported with `#[export]`: `private_protocols::inner::Prompt` is not"
     );
     let spec = gdl_gen::Spec::load(&fixtures().join("exported.toml")).expect("spec");
     let resolution = gdl_gen::resolve(&spec, &target()).expect("resolved");
@@ -194,7 +193,9 @@ fn the_manifest_program_runs_as_cargo_built_it() {
     .expect("host");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
         .args(["diagram", "--spec"])
-        .arg(fixtures().join("exported.toml"))
+        // A contract spec: a graph spec's manifest is built without a
+        // program.
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/asr/gdl.toml"))
         .args(["--format", "dot"])
         .arg("--target-dir")
         .arg(target().with_file_name("gdl-gen-tests-target"))

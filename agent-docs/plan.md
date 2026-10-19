@@ -650,6 +650,17 @@ spec [messages] / [nodes] crates = ["name@version", "dir"]
 - **Cargo runs where its manifest is**, so a `.cargo/config.toml` above a fetch's scratch directory applies. The tests use a vendored `directory` source with `net.offline` (`crates/gdl-gen/tests/fixtures/registry`), which keeps crates.io's source id and the fixture's checksums. Its crates are read, never built.
 - **Not built.** A contract or segment that depends on a crate by version is not built by the tests: the vendored registry holds no gdl-message, so its crates do not compile. Rendering such a dependency is tested on the generated text.
 
+**Addendum 2026-10-19 (milestone 17, stage 1; design from Fable, ruling 88): a graph spec compiles nothing.** This settles ruling 61. The composer's server cannot build a crate that needs CUDA, so it cannot build any contract that names such a crate's messages. The generator now builds a graph spec's manifest with `Graph::manifest`, from the graph file and the resolution. It compiles no contract to read the manifest; a contract spec still compiles its contract. Two checks move from the compiler to the reader:
+
+- **Public paths.** The reader records whether each message's definition path and each export's path is public: the item, and every module above it, is `pub` (`pub(crate)` and `pub(super)` are not). Resolution takes only public paths. A message with none is an error that names the remedy, `#[export]`, before anything is generated. Before, rustc's E0603 reported this when the contract compiled.
+- **Wire capability.** The manifest's wire bits are now the reader's, not the probe's. What checked before:
+  - `contract_hash` does not cover wire bits, and the segments embed the manifest's wire bits in one place only: whether the source's segment serves JSON lines.
+  - At start, a deployment checks its layout against the compiled contract's own manifest, which the probe builds.
+- **What a wrong wire bit does now.**
+  - If the reader takes a type for a wire type that is not one, the segment's build or its deployment fails, as before.
+  - If the reader misses a wire type's serde impls (impls a macro writes, one of ruling 54's limits), the generator now refuses a cut that would work. The probe used to allow it. The only remedy is to see it with `cargo gdl extract --verify` and write the impls where the reader can see them. This is a regression for such crates, accepted so that nothing is built.
+- **The proof.** `a_graph_files_manifest_is_built_as_its_contract_prints_it` still compiles each contract, for the chat example and two fixtures, and compares.
+
 **Open questions.**
 
 - Settled 2026-10-18 by the owner, so no longer open: a central catalogue (there is nowhere to publish to; the working catalogue is ours), and when `cargo gdl generate` extracts (it reads source every time).
@@ -800,3 +811,4 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 79 | How a listed crate is named in generated manifests | one `CrateSource` (a directory or a version) for every listed crate and binding; a version renders `=x.y.z`; its library must be named for its package | Fable, 2026-10-18 |
 | 80 | Where cargo runs | in its manifest's directory, so a configuration above a scratch directory applies; tests use a vendored directory source, offline, the one offline registry that keeps crates.io's source id and checksums | Fable, 2026-10-18 |
 | 81 | Whether the browser loads catalogues | no: the server answers from a loaded `Catalog`, so nothing moves to `gdl-model` | Fable, 2026-10-18 |
+| 88 | Whether a graph spec compiles its contract | no: its manifest is built from the graph and the resolution, and the reader checks public paths; settles ruling 61. A server that cannot build a CUDA crate cannot build any contract naming its messages | Fable, 2026-10-19 |

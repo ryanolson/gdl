@@ -7,7 +7,7 @@ use syn::{Meta, Token};
 use crate::cfg::Settings;
 use crate::metadata::Graph;
 use crate::resolve::{Def, Resolver, segments};
-use crate::tree::{Location, TypeDef};
+use crate::tree::{Location, TypeDef, Vis};
 use crate::{ExportEntry, Extraction, MessageEntry, NodeEntry, Offer, Origin, PortEntry};
 
 /// What package `package` offers.
@@ -35,18 +35,18 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
         for index in 0..resolver.crates[krate].modules[module].types.len() {
             if let Some(origin) = message(&mut resolver, Def::Type(krate, module, index)) {
                 let wire = wire(&mut resolver, krate, module, index);
+                let ty = &resolver.crates[krate].modules[module].types[index];
                 offer.messages.push(MessageEntry {
-                    name: resolver.crates[krate].modules[module].types[index]
-                        .name
-                        .clone(),
+                    name: ty.name.clone(),
                     path: origin.path,
                     wire,
+                    public: ty.vis == Vis::Public && public(&resolver, krate, module),
                 });
             }
         }
         // Exports: `pub use` items marked `#[gdl_message::export]`.
-        let uses: Vec<(Option<String>, Vec<String>, bool, Location)> = resolver.crates[krate]
-            .modules[module]
+        let reachable = public(&resolver, krate, module);
+        let uses: Vec<ExportUse> = resolver.crates[krate].modules[module]
             .uses
             .iter()
             .filter(|u| {
@@ -59,9 +59,18 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                     module,
                 )
             })
-            .map(|u| (u.name.clone(), u.path.clone(), u.absolute, u.at.clone()))
+            .map(|u| {
+                let public = u.vis == Vis::Public && reachable;
+                (
+                    u.name.clone(),
+                    u.path.clone(),
+                    u.absolute,
+                    u.at.clone(),
+                    public,
+                )
+            })
             .collect();
-        for (name, path, absolute, at) in uses {
+        for (name, path, absolute, at, public) in uses {
             let Some(name) = name else {
                 problems.push(format!(
                     "{at}: an export names its messages: a glob exports nothing"
@@ -77,6 +86,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                     name,
                     origin,
                     wire: wire(&mut resolver, c, m, i),
+                    public,
                 }),
                 Some(_) => unreachable!("a message is a type"),
                 None => problems.push(format!(
@@ -127,6 +137,24 @@ fn message(resolver: &mut Resolver<'_>, def: Def) -> Option<Origin> {
         source: package.source.clone(),
         path: public_path(resolver, krate, module, &ty.name),
     })
+}
+
+/// A `use` an export marks: the name it binds, its path, whether that is
+/// absolute, where it is, and whether the name is public.
+type ExportUse = (Option<String>, Vec<String>, bool, Location, bool);
+
+/// Whether code outside the crate can name module `module`: it and every
+/// module above it are `pub`.
+fn public(resolver: &Resolver<'_>, krate: usize, module: usize) -> bool {
+    let modules = &resolver.crates[krate].modules;
+    let mut at = Some(module);
+    while let Some(m) = at {
+        if m != 0 && modules[m].vis != Vis::Public {
+            return false;
+        }
+        at = modules[m].parent;
+    }
+    true
 }
 
 /// `<crate>::<module path>::<name>`.
