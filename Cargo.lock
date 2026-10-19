@@ -617,6 +617,7 @@ dependencies = [
  "flate2",
  "gdl-extract",
  "gdl-gen",
+ "gdl-syntax",
  "http-body-util",
  "serde",
  "serde_json",
