@@ -193,6 +193,19 @@ For each segment, the generator writes a crate with:
 
 The generator owns the directory of each segment crate. Each generated file starts with a do-not-edit marker. `cargo gdl generate --check` writes nothing. It fails if a generated file is missing, changed, or stale, or if a segment crate holds a file that the generator did not write.
 
+`[gdl]` names the gdl crate by `path`, by `version`, or by `git` with `rev`.
+
+### Export the segments
+
+`cargo gdl export --spec gdl.toml --out chat.tar.gz` writes the same crates as one archive, with a `README.md` and a `build-all.sh`:
+
+```bash
+tar xzf chat.tar.gz
+sh chat/build-all.sh          # one `cargo build` per segment, into chat/target
+```
+
+Each crate in the archive is its own Cargo workspace, so each segment's build resolves only the dependencies of the nodes that it hosts. The builds share one target directory. `GDL_PROFILE` picks the profile (`release` by default), and the script passes its arguments on to `cargo build`. A crate outside the archive is named by its absolute path on the machine that wrote the archive, so the archive builds on that machine. A crate named by a version or a git revision builds anywhere. Two exports of one spec are the same bytes.
+
 ## Draw a graph
 
 `cargo gdl diagram` writes the placed graph to stdout as Graphviz DOT or as a Mermaid flowchart. It writes no files.
@@ -323,7 +336,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |
 | `crates/gdl-extract` | The source reader: what a crate offers to graphs (messages, exports, and nodes), read from its source without building it |
 | `crates/gdl-macros` | The `graph!` macro, `derive(Message)`, `derive(Node)`, and `#[export]` |
-| `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `resolve`, `generate`, and `diagram` |
+| `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `resolve`, `generate`, `diagram`, and `export` |
 | `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |
 | `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |
 | `agent-docs/` | The plan, review records, and measurements |
