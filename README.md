@@ -206,6 +206,8 @@ sh chat/build-all.sh          # one `cargo build` per segment, into chat/target
 
 Each crate in the archive is its own Cargo workspace, so each segment's build resolves only the dependencies of the nodes that it hosts. The builds share one target directory. `GDL_PROFILE` picks the profile (`release` by default), and the script passes its arguments on to `cargo build`. A crate outside the archive is named by its absolute path on the machine that wrote the archive, so the archive builds on that machine. A crate named by a version or a git revision builds anywhere. Two exports of one spec are the same bytes.
 
+When every crate comes from crates.io or git (a graph spec whose crates are listed by `name@version`, with `[gdl] git`), the archive also builds images: a `Dockerfile` per segment, a multi-stage build from the archive alone, and `sh build-images.sh`, which builds one image per segment, named for its package after `GDL_IMAGE_PREFIX`. The archive does not push images anywhere.
+
 ## Compose in a browser
 
 `gdl-web` serves the composer: a page that builds a graph from the nodes and messages of a working catalogue.
