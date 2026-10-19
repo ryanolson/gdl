@@ -373,7 +373,7 @@ fn a_standalone_build_of_a_generated_crate_is_not_drift() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// A node that no listed crate declares, a pin to no declared node, and a
+/// A node that no listed crate offers, a pin to no offered node, and a
 /// placement that leaves nodes out: all reported together.
 #[test]
 fn every_problem_in_a_spec_is_reported_at_once() {
@@ -400,10 +400,10 @@ fn every_problem_in_a_spec_is_reported_at_once() {
     let error = error.to_string();
     for expected in [
         // A pin to a type no node crate declares.
-        "[nodes] pin `Engine`: no [nodes] crate declares `chat_engine_mock::Engin`",
+        "[nodes] pin `Engine`: no [nodes] crate offers `chat_engine_mock::Engin`",
         // Nodes whose crate is not listed.
-        "node `Detokenize`: no [nodes] crate declares it",
-        "node `Format`: no [nodes] crate declares it",
+        "node `Detokenize`: no [nodes] crate offers it",
+        "node `Format`: no [nodes] crate offers it",
         // A placement that leaves nodes out.
         "node `Detokenize` is in no segment",
     ] {

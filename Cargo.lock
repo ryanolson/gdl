@@ -467,12 +467,11 @@ name = "gdl-gen"
 version = "0.1.0"
 dependencies = [
  "gdl",
- "gdl-message",
+ "gdl-extract",
  "gdl-syntax",
  "proc-macro2",
  "quote",
  "serde",
- "serde_json",
  "syn 2.0.119",
  "toml 0.9.12+spec-1.1.0",
 ]

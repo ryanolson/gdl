@@ -16,7 +16,7 @@
 //! pin = { Chunk = "chat_protocols::Chunk" }   # optional: a name's type
 //!
 //! [nodes]                        # with [graph], instead of [bind.*]
-//! crates = ["engine-mock"]       # node crates, each with a nodes file
+//! crates = ["engine-mock"]       # node crates, read from their source
 //! pin = { Engine = "chat_engine_mock::Engine" }   # optional
 //!
 //! [gdl]
@@ -86,7 +86,7 @@ pub(crate) struct GraphSource {
     pub(crate) node_pins: BTreeMap<String, String>,
 }
 
-/// A crate that declares nodes in a nodes file.
+/// A crate that offers nodes: types that derive `Node`.
 #[derive(Debug, Clone)]
 pub(crate) struct NodeCrate {
     /// The package name.
@@ -95,8 +95,6 @@ pub(crate) struct NodeCrate {
     pub(crate) lib: String,
     /// Its directory, resolved.
     pub(crate) path: PathBuf,
-    /// Its nodes file, from `[package.metadata.gdl] nodes`.
-    pub(crate) file: PathBuf,
 }
 
 /// A crate that defines messages.
@@ -130,34 +128,6 @@ pub(crate) enum GdlDep {
     Path(PathBuf),
     /// A registry version requirement.
     Version(String),
-}
-
-impl GdlDep {
-    /// The `gdl-message` that this gdl uses: for a path, the one its own
-    /// manifest names; for a version, the same version, as the two are
-    /// released together.
-    pub(crate) fn message(&self) -> Result<GdlDep, Error> {
-        let GdlDep::Path(gdl) = self else {
-            return Ok(self.clone());
-        };
-        let manifest = gdl.join("Cargo.toml");
-        let text = std::fs::read_to_string(&manifest)
-            .map_err(|e| Error::new(format!("reading {}: {e}", manifest.display())))?;
-        let table: toml::Table = toml::from_str(&text)
-            .map_err(|e| Error::new(format!("{}: {e}", manifest.display())))?;
-        table
-            .get("dependencies")
-            .and_then(|d| d.get("gdl-message"))
-            .and_then(|d| d.get("path"))
-            .and_then(toml::Value::as_str)
-            .map(|path| GdlDep::Path(gdl.join(path)))
-            .ok_or_else(|| {
-                Error::new(format!(
-                    "{} has no path dependency on gdl-message",
-                    manifest.display()
-                ))
-            })
-    }
 }
 
 /// One node's implementation.
@@ -414,13 +384,7 @@ fn graph_source(
                 path.display()
             )));
         }
-        let file = nodes_file(&path)?;
-        nodes.push(NodeCrate {
-            package,
-            lib,
-            path,
-            file,
-        });
+        nodes.push(NodeCrate { package, lib, path });
     }
     Ok(GraphSource {
         path: dir.join(graph.path),
@@ -429,29 +393,6 @@ fn graph_source(
         nodes,
         node_pins,
     })
-}
-
-/// A node crate's nodes file: `[package.metadata.gdl] nodes`, relative to
-/// the crate.
-fn nodes_file(dir: &Path) -> Result<PathBuf, Error> {
-    let manifest = dir.join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| Error::new(format!("reading {}: {e}", manifest.display())))?;
-    let table: toml::Table =
-        toml::from_str(&text).map_err(|e| Error::new(format!("{}: {e}", manifest.display())))?;
-    table
-        .get("package")
-        .and_then(|p| p.get("metadata"))
-        .and_then(|m| m.get("gdl"))
-        .and_then(|g| g.get("nodes"))
-        .and_then(toml::Value::as_str)
-        .map(|file| dir.join(file))
-        .ok_or_else(|| {
-            Error::new(format!(
-                "[nodes] crates: {} names no nodes file: add [package.metadata.gdl] nodes = \"<file>\" to it",
-                manifest.display()
-            ))
-        })
 }
 
 /// What a crate is called: by Cargo, and by Rust code.
@@ -565,23 +506,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A graph spec lists its node crates, each read for its names and its
-    /// nodes file; pins choose a declared node by its type's path.
+    /// A graph spec lists its node crates, each read for its names; pins
+    /// choose an offered node by its type's path.
     #[test]
     fn a_graph_spec_reads_its_node_crates() {
         let dir = contract_dir("nodes");
-        for (name, metadata) in [
-            ("protocols", ""),
-            (
-                "engine",
-                "[package.metadata.gdl]\nnodes = \"gdl/nodes.gdl\"\n",
-            ),
-            ("bare", ""),
-        ] {
+        for name in ["protocols", "engine"] {
             std::fs::create_dir_all(dir.join(name)).expect("dir");
             std::fs::write(
                 dir.join(name).join("Cargo.toml"),
-                format!("[package]\nname = \"chat-{name}\"\n{metadata}"),
+                format!("[package]\nname = \"chat-{name}\"\n"),
             )
             .expect("write");
         }
@@ -596,17 +530,8 @@ mod tests {
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].package, "chat-engine");
         assert_eq!(graph.nodes[0].lib, "chat_engine");
-        assert_eq!(graph.nodes[0].file, dir.join("engine/gdl/nodes.gdl"));
         assert_eq!(graph.node_pins["Engine"], "chat_engine::Engine");
 
-        let error = Spec::parse(
-            &format!("{head}[nodes]\ncrates = [\"bare\"]\n"),
-            &dir.join("gdl.toml"),
-            &dir,
-        )
-        .expect_err("no nodes file")
-        .to_string();
-        assert!(error.contains("names no nodes file"), "{error}");
         let error = Spec::parse(
             &format!("{head}[bind.Engine]\ncrate = \"chat-engine\"\npath = \"engine\"\ntype = \"chat_engine::Engine\"\n"),
             &dir.join("gdl.toml"),

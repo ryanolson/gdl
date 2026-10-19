@@ -108,20 +108,6 @@ pub(crate) struct Element {
     pub(crate) nested: Option<Vec<Element>>,
 }
 
-/// The node declarations of a nodes file: node lines only, no header and no
-/// topology.
-pub(crate) struct Declarations(pub(crate) Vec<NodeDecl>);
-
-impl Parse for Declarations {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let mut nodes = Vec::new();
-        while !input.is_empty() {
-            nodes.push(input.parse()?);
-        }
-        Ok(Self(nodes))
-    }
-}
-
 impl Parse for GraphInput {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         input.parse::<kw::name>()?;

@@ -1,9 +1,0 @@
-# The catalogue program fails to build: a proc macro panics in the compiler.
-[graph]
-path = "chunk.gdl"
-
-[messages]
-crates = ["macro-protocols"]
-
-[gdl]
-path = "../../../../gdl"

@@ -8,6 +8,6 @@ publish = false
 gdl-message = { path = "../../../../../gdl-message" }
 vproto = { path = "../vproto-1" }
 
-# Not a member of the repository workspace: it is built only by the
-# catalogue programs that the tests generate.
+# Not a member of the repository workspace: it is read by the tests, and
+# built only for the contracts they generate.
 [workspace]

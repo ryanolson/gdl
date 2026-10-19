@@ -94,7 +94,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             return Ok(ExitCode::SUCCESS);
         }
         Mode::Resolve => {
-            print!("{}", gdl_gen::resolve(&spec, &target)?);
+            print!("{}", gdl_gen::resolve(&spec)?);
             return Ok(ExitCode::SUCCESS);
         }
         Mode::Generate { out, check } => (out, check),

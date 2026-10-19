@@ -10,8 +10,8 @@ path = "chat.gdl"
 [messages]
 crates = ["protocols"]
 
-# The node crates: each declares its nodes in its nodes file, and each
-# graph node binds to the declared node of its name.
+# The node crates: each graph node binds to the node of its name that
+# they offer, read from their source.
 [nodes]
 crates = ["front-nodes", "engine-mock", "post-nodes"]
 

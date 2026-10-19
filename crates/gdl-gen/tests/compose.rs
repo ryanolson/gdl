@@ -1,6 +1,6 @@
-//! Composition end to end: a graph file's message names resolve against the
-//! catalogue that real protocols crates register with `derive(gdl_message::Message)`,
-//! read by compiling and running a program that links them.
+//! Composition end to end: a graph file's message names resolve against
+//! what real crates offer, read from their source by `gdl-extract`, and a
+//! contract generated from the resolution compiles.
 
 use std::path::{Path, PathBuf};
 
@@ -19,12 +19,12 @@ fn target() -> PathBuf {
 
 fn resolve(spec: &str) -> Result<gdl_gen::Resolution, String> {
     let spec = gdl_gen::Spec::load(&fixtures().join(spec)).map_err(|e| e.to_string())?;
-    gdl_gen::resolve(&spec, &target()).map_err(|e| e.to_string())
+    gdl_gen::resolve(&spec).map_err(|e| e.to_string())
 }
 
 /// One protocols crate holds every message. A type in a module resolves to
-/// its definition, though the crate also re-exports it at the root; a type
-/// without serde resolves too, as a local type.
+/// its definition, though the crate also re-exports it at the root without
+/// `export`; a type without serde resolves too, as a local type.
 #[test]
 fn one_protocols_crate_resolves_the_whole_graph() {
     let resolution = resolve("one.toml").expect("resolved");
@@ -42,14 +42,16 @@ Words   chat_protocols::engine::Words  wire
 }
 
 /// Two listed crates define `Chunk`: ambiguous until a pin chooses. The
-/// second crate re-exports the first's `Token`, which stays one message.
+/// second crate re-exports the first's `Token` without `export`, so it
+/// offers only its own `Chunk`.
 #[test]
 fn a_name_two_crates_define_resolves_only_when_pinned() {
     let error = resolve("two.toml").expect_err("ambiguous");
     assert_eq!(
         error,
-        "message `Chunk` (Frontend, Preprocess, Number) is in more than one listed crate: \
-         `chat_protocols::Chunk`, `other_protocols::Chunk`; choose one under [messages] pin"
+        "message `Chunk` (Frontend, Preprocess, Number) is more than one message in the \
+         listed crates: `chat_protocols::Chunk` (chat-protocols 0.0.0), \
+         `other_protocols::Chunk` (other-protocols 0.0.0); choose one under [messages] pin"
     );
     let resolution = resolve("pinned.toml").expect("pinned");
     assert_eq!(resolution.messages["Chunk"].path, "chat_protocols::Chunk");
@@ -59,93 +61,67 @@ fn a_name_two_crates_define_resolves_only_when_pinned() {
     );
 }
 
-/// The empty crate's library is named `gen`, a Rust 2024 keyword: the
-/// catalogue program must still link it.
+/// The empty crate's library is named `gen`, a Rust 2024 keyword, which the
+/// reader reads like any other.
 #[test]
 fn every_resolution_problem_is_reported_at_once() {
     let error = resolve("bad.toml").expect_err("problems");
     assert_eq!(
         error,
-        "[messages] crate `empty-protocols` offers no messages: derive `gdl_message::Message` on its \
-         message types\n\
+        "[messages] crate `empty-protocols` offers no messages: derive `Message` on its \
+         message types, or export them\n\
          message `Txet` (Preprocess, Format, Pad) is in no listed crate; did you mean `Text`?"
     );
 }
 
-/// A listed crate is one package: its name and its version. Another version
-/// of it in the program, here linked through `vbridge`, offers nothing: its
-/// `Hidden` does not resolve, and its `Chunk` neither makes the name
-/// ambiguous nor answers a pin.
+/// A listed crate offers what it defines and what it exports, nothing
+/// else: `vbridge` re-exports `Hidden` from `vproto` 0.1.0 without
+/// `export`, so it is not offered; and `vproto` 0.2.0's `Chunk` is the one
+/// a pin to `vproto::Chunk` takes.
 #[test]
-fn only_the_listed_version_of_a_package_offers_messages() {
-    let error = resolve("versions.toml").expect_err("Hidden is unlisted");
+fn a_listed_crate_offers_only_what_it_defines_and_exports() {
+    let error = resolve("versions.toml").expect_err("Hidden is not offered");
     assert_eq!(
         error,
-        "message `Hidden` (A, B) is in no listed crate; `vproto 0.1.0` defines it, but is not \
-         in [messages] crates"
+        "message `Hidden` (A, B) is in no listed crate; the listed crates offer `Bridge`, `Chunk`"
     );
     let resolution = resolve("versions-pinned.toml").expect("pinned");
     let chunk = &resolution.messages["Chunk"];
-    assert_eq!((chunk.version.as_str(), chunk.wire), ("0.2.0", true));
+    assert_eq!((chunk.origin.version.as_str(), chunk.wire), ("0.2.0", true));
 }
 
-/// Only a `gdl-message` linked into the catalogue program conflicts: one that a
-/// message crate reaches through a proc macro, takes for another platform,
-/// or takes for its build script does not.
+/// A crate that only exports a message offers it under its own path, and
+/// the name resolves to the message where it is defined; listed with the
+/// defining crate, it is one message, not two.
 #[test]
-fn a_gdl_that_is_not_linked_is_no_conflict() {
-    let resolution = resolve("platform.toml").expect("resolved");
-    assert_eq!(
-        resolution.messages["Chunk"].path,
-        "platform_protocols::Chunk"
-    );
-}
-
-/// A build that fails is reported as the compiler reports it, even when
-/// the failure is a duplicate catalogue inside a proc macro: only the
-/// catalogue program itself, once it runs, can link two catalogues.
-#[test]
-fn a_build_failure_is_not_taken_for_two_catalogues() {
-    let error = resolve("macro-panic.toml").expect_err("the build fails");
-    assert!(error.contains("proc macro panicked"), "{error}");
-    assert!(!error.contains("links two message catalogues"), "{error}");
-}
-
-/// A program holds one message catalogue. A message crate that links
-/// another gdl-message's catalogue into it is refused, and the error names it
-/// and the crates that use it.
-#[test]
-fn a_message_crate_on_another_gdl_is_refused() {
-    let error = resolve("foreign.toml").expect_err("two runtimes");
-    for part in [
-        "the catalogue program links two message catalogues",
-        "`gdl-message 0.0.1`",
-        "used by `foreign-protocols`",
-        "depend on the gdl-message of the gdl that [gdl] names",
-    ] {
-        assert!(error.contains(part), "{part} in:\n{error}");
+fn an_export_resolves_to_its_origin() {
+    for spec in ["facade.toml", "facade-both.toml"] {
+        let resolution = resolve(spec).expect("resolved");
+        let chunk = &resolution.messages["Chunk"];
+        assert_eq!(chunk.path, "facade_protocols::Chunk", "{spec}");
+        assert_eq!(chunk.origin.path, "other_protocols::Chunk", "{spec}");
+        assert_eq!(chunk.origin.package, "other-protocols", "{spec}");
     }
 }
 
-/// Names are checked before anything is compiled: a graph whose edges
-/// disagree fails with the file's positions, and builds no catalogue.
+/// Names are checked before any crate is read: a graph whose edges
+/// disagree fails with the file's positions.
 #[test]
-fn a_graph_whose_names_disagree_fails_before_any_build() {
+fn a_graph_whose_names_disagree_fails_before_any_crate_is_read() {
     let dir = std::env::temp_dir().join(format!("gdl-gen-compose-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("dir");
     let graph = std::fs::read_to_string(fixtures().join("chat.gdl"))
         .expect("graph")
         .replace("sink     Engine: Words", "sink     Engine: Tokens");
     std::fs::write(dir.join("chat.gdl"), graph).expect("graph");
+    // A crate that does not exist: reading it would fail another way.
     let spec = format!(
         "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [{}]\n[gdl]\nversion = \"0.1\"\n",
         toml_string(&fixtures().join("chat-protocols"))
     );
     std::fs::write(dir.join("gdl.toml"), spec).expect("spec");
     let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
-    // An empty target directory: a build there would take far longer than
-    // this test allows, and there is nothing in it to reuse.
-    let error = gdl_gen::resolve(&spec, &dir.join("target"))
+    let error = gdl_gen::resolve(&spec)
         .expect_err("names differ")
         .to_string();
     assert_eq!(
@@ -155,7 +131,6 @@ fn a_graph_whose_names_disagree_fails_before_any_build() {
             dir.join("chat.gdl").display()
         )
     );
-    assert!(!dir.join("target").exists(), "a catalogue was built");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -163,10 +138,11 @@ fn toml_string(path: &Path) -> String {
     format!("{:?}", path.to_string_lossy())
 }
 
-/// A generated contract names each message where it is defined, so a
-/// message in a private module cannot be named, and the error says why.
+/// A generated contract names a message by a public path. A message
+/// defined in a private module and not exported has none, and the error
+/// says why; exported, it is named by the export's path and compiles.
 #[test]
-fn a_message_must_be_public_where_it_is_defined() {
+fn a_message_in_a_private_module_needs_an_export() {
     let spec = gdl_gen::Spec::load(&fixtures().join("private.toml")).expect("spec");
     let error = gdl_gen::diagram(&spec, &target(), gdl_gen::Format::Mermaid)
         .expect_err("private")
@@ -177,15 +153,22 @@ fn a_message_must_be_public_where_it_is_defined() {
         ),
         "{error}"
     );
+    let spec = gdl_gen::Spec::load(&fixtures().join("exported.toml")).expect("spec");
+    let resolution = gdl_gen::resolve(&spec).expect("resolved");
+    assert_eq!(
+        resolution.messages["Prompt"].path,
+        "exported_protocols::Prompt"
+    );
+    gdl_gen::diagram(&spec, &target(), gdl_gen::Format::Mermaid).expect("diagram");
 }
 
-/// The catalogue program is run by cargo, as it was built: a target named
+/// The manifest program is run by cargo, as it was built: a target named
 /// explicitly puts it in another directory, and `prefer-dynamic` makes it
 /// load the standard library at run time. Both settings at once, in a
-/// target directory of their own, so neither reaches the other tests' build.
-/// Slow on its first run: it builds the message crates for that target.
+/// target directory of their own, so neither reaches the other tests'
+/// build. Slow on its first run: it builds gdl for that target.
 #[test]
-fn the_catalogue_program_runs_as_cargo_built_it() {
+fn the_manifest_program_runs_as_cargo_built_it() {
     let host = String::from_utf8(
         std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
             .arg("-vV")
@@ -199,8 +182,8 @@ fn the_catalogue_program_runs_as_cargo_built_it() {
     .expect("host");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_gdl-gen"))
         .arg("--spec")
-        .arg(fixtures().join("one.toml"))
-        .arg("--resolve")
+        .arg(fixtures().join("exported.toml"))
+        .args(["--diagram", "dot"])
         .arg("--target-dir")
         .arg(target().with_file_name("gdl-gen-tests-target"))
         .env("CARGO_BUILD_TARGET", host)
@@ -212,5 +195,5 @@ fn the_catalogue_program_runs_as_cargo_built_it() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("chat_protocols::Prompt"));
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("digraph"));
 }

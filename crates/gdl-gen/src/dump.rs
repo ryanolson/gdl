@@ -1,18 +1,16 @@
-//! Reading what only compiled code knows: a contract's manifest, and the
-//! message catalogue of the crates a graph file draws on. Each is read by
-//! building and running a throwaway program that depends on those crates
+//! Reading what only compiled code knows: a contract's manifest, read by
+//! building and running a throwaway program that depends on the contract
 //! and prints it.
 //!
-//! The manifest is produced by the `graph!` expansion, and the catalogue by
-//! `derive(Message)`, so the only faithful way to read either is to compile
-//! the crates. Each program depends on the crates it reads alone, so this
-//! never compiles an implementation crate.
+//! The manifest is produced by the `graph!` expansion, so the only faithful
+//! way to read it is to compile the contract. The program depends on the
+//! contract alone, so this never compiles an implementation crate.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::Error;
-use crate::spec::{Contract, GdlDep, MessageCrate};
+use crate::spec::Contract;
 
 /// The manifest of `contract`. `target` is the cargo target directory to
 /// build in; reusing one across runs keeps the build incremental.
@@ -40,145 +38,6 @@ pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl::Manifest, Err
     gdl::Manifest::from_toml(&text).map_err(|e| Error::new(format!("reading the manifest: {e}")))
 }
 
-/// The catalogue of every message type linked from `crates`, read with the
-/// `gdl-message` of the gdl that `gdl` names.
-///
-/// What the program links decides what it reads: no prediction from the
-/// dependency graph stands in for the linker. A program that links a
-/// second gdl's catalogue panics when it reads its own, because linkme
-/// gives both one section name. That panic is reported as the conflict it
-/// is, with every package named `gdl-message` and the crates that use it.
-pub fn catalogue(
-    crates: &[MessageCrate],
-    gdl: &GdlDep,
-    target: &Path,
-) -> Result<gdl_message::Catalogue, Error> {
-    // The program depends on `gdl-message`, not on the runtime, so it
-    // builds only what the message crates need.
-    let mut dependencies = match gdl.message()? {
-        GdlDep::Path(path) => format!(
-            "gdl-message = {{ path = {} }}\n",
-            toml_string(&absolute(&path)?.to_string_lossy())
-        ),
-        GdlDep::Version(version) => {
-            format!("gdl-message = {{ version = {} }}\n", toml_string(&version))
-        }
-    };
-    let mut main = String::new();
-    for (index, krate) in crates.iter().enumerate() {
-        // Each crate under a name of the program's own: its library's name
-        // may be a keyword (`gen`), or `gdl`.
-        dependencies.push_str(&format!(
-            "{} = {{ package = {}, path = {} }}\n",
-            alias(index),
-            toml_string(&krate.package),
-            toml_string(&absolute(&krate.path)?.to_string_lossy())
-        ));
-        // A crate the program never names is never linked, and neither
-        // are its catalogue entries.
-        main.push_str(&format!("use {} as _;\n", alias(index)));
-    }
-    main.push_str(
-        "\nfn main() {\n    print!(\"{}\", gdl_message::Catalogue::linked().to_toml());\n}\n",
-    );
-    // One program per set of dependencies: a spec that links other crates
-    // builds its own, and switching between specs relinks neither.
-    let name = format!("gdl-catalogue-{:016x}", hash(&dependencies));
-    let text = match run(target, &name, "the message catalogue", &dependencies, &main) {
-        Ok(text) => text,
-        // Only the program itself, once built and running, can have
-        // linked two catalogues: a duplicate inside a proc macro fails the
-        // build, and is reported as the compiler reports it.
-        Err(Failure::Run(text)) if text.contains(DUPLICATE) => {
-            return Err(two_catalogues(&target.join("gdl-gen").join(&name), target));
-        }
-        Err(failure) => return Err(failure.into()),
-    };
-    gdl_message::Catalogue::from_toml(&text)
-        .map_err(|e| Error::new(format!("reading the message catalogue: {e}")))
-}
-
-/// What linkme prints when a program links two catalogues.
-const DUPLICATE: &str = "duplicate #[distributed_slice] with name \"GDL_MESSAGE_CATALOGUE\"";
-
-/// The error for a catalogue program that linked two catalogues: each
-/// package named `gdl-message` other than the program's own, with the packages
-/// that depend on it. Only a program that did link two reaches here, so
-/// listing a package that is not linked can only add detail.
-fn two_catalogues(work: &Path, target: &Path) -> Error {
-    #[derive(serde::Deserialize)]
-    struct Metadata {
-        packages: Vec<Package>,
-        resolve: Resolve,
-    }
-    #[derive(serde::Deserialize)]
-    struct Package {
-        id: String,
-        name: String,
-        version: String,
-        manifest_path: PathBuf,
-    }
-    #[derive(serde::Deserialize)]
-    struct Resolve {
-        root: String,
-        nodes: Vec<Node>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Node {
-        id: String,
-        deps: Vec<Dep>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Dep {
-        name: String,
-        pkg: String,
-    }
-
-    let head = "the catalogue program links two message catalogues, and a program holds one";
-    let tail = "make every message crate depend on the gdl-message of the gdl that [gdl] names";
-    let metadata = cargo(work, target, &["metadata", "--format-version", "1"])
-        .ok()
-        .and_then(|text| serde_json::from_str::<Metadata>(&text).ok());
-    let Some(metadata) = metadata else {
-        return Error::new(format!("{head}; {tail}"));
-    };
-    let name = |id: &str| {
-        metadata
-            .packages
-            .iter()
-            .find(|p| p.id == id)
-            .map_or_else(|| id.to_string(), |p| p.name.clone())
-    };
-    let ours = metadata
-        .resolve
-        .nodes
-        .iter()
-        .find(|n| n.id == metadata.resolve.root)
-        .and_then(|root| root.deps.iter().find(|d| d.name == "gdl_message"))
-        .map(|d| d.pkg.as_str());
-    let others: Vec<String> = metadata
-        .packages
-        .iter()
-        .filter(|p| p.name == "gdl-message" && Some(p.id.as_str()) != ours)
-        .map(|p| {
-            let users: Vec<String> = metadata
-                .resolve
-                .nodes
-                .iter()
-                .filter(|n| n.deps.iter().any(|d| d.pkg == p.id))
-                .map(|n| format!("`{}`", name(&n.id)))
-                .collect();
-            format!(
-                "`gdl-message {}` ({}) is used by {}",
-                p.version,
-                p.manifest_path.display(),
-                users.join(", ")
-            )
-        })
-        .collect();
-    Error::new(format!("{head}: {}; {tail}", others.join("; ")))
-}
-
 /// A name for generated content: the same content, the same name, within
 /// one build of the generator.
 pub(crate) fn hash(value: &impl std::hash::Hash) -> u64 {
@@ -186,10 +45,6 @@ pub(crate) fn hash(value: &impl std::hash::Hash) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
-}
-
-fn alias(index: usize) -> String {
-    format!("gdl_messages_{index}")
 }
 
 /// Write the program `name` with these `[dependencies]` lines and this
@@ -201,12 +56,12 @@ fn run(
     what: &str,
     dependencies: &str,
     main: &str,
-) -> Result<String, Failure> {
+) -> Result<String, Error> {
     // Every run of `name` in `target` builds the same program at the same
     // path. Holding the directory's lock from writing the program until it
     // has run keeps another run from replacing it in between, which would
     // make this one print the other's output.
-    let _lock = lock(target).map_err(|e| Failure::Build(e.0))?;
+    let _lock = lock(target)?;
     let work = target.join("gdl-gen").join(name);
     let setup = || {
         std::fs::create_dir_all(work.join("src")).map_err(|e| io(&work, e))?;
@@ -226,31 +81,15 @@ fn run(
         write(&work.join("Cargo.toml"), &manifest)?;
         write(&work.join("src/main.rs"), main)
     };
-    setup().map_err(|e| Failure::Build(e.0))?;
+    setup()?;
     // Built, then run, so that a failure says which of the two it was.
     // Cargo runs it: it knows where the target and the profile put the
     // program, and what it needs at run time (a dynamically linked standard
     // library, for one).
     cargo(&work, target, &["build", "--quiet"])
-        .map_err(|e| Failure::Build(format!("building {what} failed:\n{e}")))?;
+        .map_err(|e| Error::new(format!("building {what} failed:\n{e}")))?;
     cargo(&work, target, &["run", "--quiet"])
-        .map_err(|e| Failure::Run(format!("reading {what} failed:\n{e}")))
-}
-
-/// Why a program of [`run`] produced no output.
-enum Failure {
-    /// It did not build.
-    Build(String),
-    /// It built, and failed as it ran.
-    Run(String),
-}
-
-impl From<Failure> for Error {
-    fn from(failure: Failure) -> Self {
-        match failure {
-            Failure::Build(text) | Failure::Run(text) => Error::new(text),
-        }
-    }
+        .map_err(|e| Error::new(format!("reading {what} failed:\n{e}")))
 }
 
 /// Run `cargo <args>` on the program in `work`, and return its output.

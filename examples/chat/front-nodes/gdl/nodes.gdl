@@ -1,6 +1,0 @@
-// The front-end nodes: what this crate offers to graphs. gdl-gen reads this file
-// without compiling the crate. Nothing checks it against the code: the
-// source reader replaces it.
-operator Preprocess: (Prompt -> stream Chunk) over (Words -> stream Text);
-forward  Truncate: Words -> Words;
-backward Number: Chunk -> Chunk;

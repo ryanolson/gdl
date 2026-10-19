@@ -19,10 +19,11 @@
 //!
 //! A spec may name a graph file instead of a contract crate: the body of a
 //! `graph!` invocation, with message names where `graph!` has Rust types,
-//! and the crates that define those messages with `derive(gdl_message::Message)`.
-//! [`resolve`] checks that the names agree along every edge and resolves
-//! each to exactly one type. Such a spec binds its nodes through `[nodes]`:
-//! node crates whose nodes files declare them, read without compiling
+//! and the crates that offer those messages: types that derive `Message`,
+//! and `pub use` items marked `#[export]`. [`resolve`] checks that the
+//! names agree along every edge and resolves each to exactly one message,
+//! read from the crates' source by `gdl-extract`. Such a spec binds its nodes through `[nodes]`:
+//! node crates that offer them, read from their source without compiling
 //! those crates.
 
 mod contract;
@@ -39,6 +40,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use emit::MARKER;
+pub use resolve::Resolved;
 pub use spec::Spec;
 
 /// A generation failure, with everything wrong at once where possible.
@@ -68,18 +70,26 @@ pub type Files = BTreeMap<PathBuf, String>;
 /// `contract/` under `out`.
 pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
     let prepared = prepare(spec, Some(out), target)?;
-    // A graph spec binds its nodes to the nodes its node crates declare,
-    // in place of the `[bind.*]` tables of a contract spec.
+    // A graph spec binds its nodes to the nodes its node crates offer, read
+    // from their source, in place of the `[bind.*]` tables of a contract
+    // spec.
     let bound;
     let spec = match &spec.source {
         spec::Source::Contract(_) => spec,
         spec::Source::Graph(source) => {
-            let graph = prepared
+            let (graph, resolution) = prepared
                 .graph
                 .as_ref()
                 .expect("a graph spec's preparation reads its graph");
-            let declared = nodes::read(&source.nodes)?;
-            let (bind, problems) = nodes::bind(graph, &source.nodes, &declared, &source.node_pins);
+            let dirs: Vec<&Path> = source.nodes.iter().map(|c| c.path.as_path()).collect();
+            let offers = offers(&dirs)?;
+            let (bind, problems) = nodes::bind(
+                graph,
+                &source.nodes,
+                &offers,
+                &resolution.messages,
+                &source.node_pins,
+            );
             let mut with_binds = spec.clone();
             with_binds.bind = bind;
             with_binds.problems.extend(problems);
@@ -114,11 +124,11 @@ pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Err
     .map_err(|e| Error::new(e.to_string()))
 }
 
-/// A graph file's message names, each resolved to one type.
+/// A graph file's message names, each resolved to one message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
-    /// Message name to the type it resolved to.
-    pub messages: BTreeMap<String, gdl_message::MessageInfo>,
+    /// Message name to the message it resolved to.
+    pub messages: BTreeMap<String, Resolved>,
 }
 
 impl fmt::Display for Resolution {
@@ -139,41 +149,67 @@ impl fmt::Display for Resolution {
     }
 }
 
-/// Check the spec's graph file and resolve its message names against the
-/// catalogue of the crates `[messages]` lists, which is built in `target`
-/// (a cargo target directory), as for [`render`]. The names are checked
-/// before anything is compiled.
-pub fn resolve(spec: &Spec, target: &Path) -> Result<Resolution, Error> {
+/// Check the spec's graph file and resolve its message names against what
+/// the crates `[messages]` lists offer, read from their source. The names
+/// are checked before any crate is read, and nothing is built.
+pub fn resolve(spec: &Spec) -> Result<Resolution, Error> {
     let spec::Source::Graph(source) = &spec.source else {
         return Err(Error::new(format!(
             "{}: resolving messages needs a [graph] spec; a contract crate names its own types",
             spec.file.display()
         )));
     };
-    Ok(resolved(spec, source, target)?.1)
+    Ok(resolved(source)?.1)
 }
 
 /// The graph file of `source`, checked, and its names resolved.
-fn resolved(
-    spec: &Spec,
-    source: &spec::GraphSource,
-    target: &Path,
-) -> Result<(names::GraphFile, Resolution), Error> {
+fn resolved(source: &spec::GraphSource) -> Result<(names::GraphFile, Resolution), Error> {
     let file = names::GraphFile::read(&source.path)?;
-    let catalogue = dump::catalogue(&source.crates, &spec.gdl, target)?;
-    let listed = source
-        .crates
-        .iter()
-        .map(|c| {
-            Ok(resolve::Listed {
-                package: c.package.clone(),
-                dir: dump::absolute(&c.path)?,
-            })
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    let messages = resolve::resolve(&file.uses, &catalogue, &listed, &source.pins)
+    let dirs: Vec<&Path> = source.crates.iter().map(|c| c.path.as_path()).collect();
+    let offers = offers(&dirs)?;
+    let messages = resolve::resolve(&file.uses, &offers, &source.pins)
         .map_err(|problems| Error::new(problems.join("\n")))?;
     Ok((file, Resolution { messages }))
+}
+
+/// What the crates in `dirs` offer, read from their source. Crates of one
+/// workspace share one `cargo metadata`. Every problem the reader meets is
+/// reported.
+fn offers(dirs: &[&Path]) -> Result<Vec<gdl_extract::Offer>, Error> {
+    let mut workspaces: Vec<gdl_extract::Workspace> = Vec::new();
+    let mut offers = Vec::with_capacity(dirs.len());
+    let mut problems = Vec::new();
+    for dir in dirs {
+        let known = workspaces
+            .iter()
+            .find_map(|w| w.package_in(dir).map(|name| (w, name)));
+        let (workspace, name) = match known {
+            Some(found) => found,
+            None => {
+                let workspace = gdl_extract::Workspace::load(&dir.join("Cargo.toml"))
+                    .map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
+                workspaces.push(workspace);
+                let workspace = workspaces.last().expect("just pushed");
+                let name = workspace.package_in(dir).ok_or_else(|| {
+                    Error::new(format!(
+                        "{}: cargo metadata resolves no package there",
+                        dir.display()
+                    ))
+                })?;
+                (workspace, name)
+            }
+        };
+        let extraction = workspace
+            .extract(&name)
+            .map_err(|e| Error::new(e.to_string()))?;
+        problems.extend(extraction.problems);
+        offers.push(extraction.offer);
+    }
+    if problems.is_empty() {
+        Ok(offers)
+    } else {
+        Err(Error::new(problems.join("\n")))
+    }
 }
 
 /// The contract that a spec's segments build on, its manifest, and the
@@ -184,9 +220,10 @@ struct Prepared {
     manifest: gdl::Manifest,
     /// Empty for a contract crate the spec names.
     files: Files,
-    /// A graph file's graph: read once, so that everything generated from
-    /// it, the contract and the bindings, comes from one version of it.
-    graph: Option<gdl_syntax::Graph>,
+    /// A graph file's graph and its resolution: read once, so that
+    /// everything generated from it, the contract and the bindings, comes
+    /// from one version of it.
+    graph: Option<(gdl_syntax::Graph, Resolution)>,
 }
 
 /// The spec's contract and its manifest. A graph file's contract is
@@ -205,7 +242,7 @@ fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, E
         }
         spec::Source::Graph(source) => source,
     };
-    let (file, resolution) = resolved(spec, source, target)?;
+    let (file, resolution) = resolved(source)?;
     let name = file.graph.name.value();
     let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && name
@@ -302,7 +339,7 @@ fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, E
         contract,
         manifest,
         files,
-        graph: Some(file.graph),
+        graph: Some((file.graph, resolution)),
     })
 }
 

@@ -1,4 +1,0 @@
-// The engine: what this crate offers to graphs. gdl-gen reads this file
-// without compiling the crate. Nothing checks it against the code: the
-// source reader replaces it.
-sink Engine: Words -> stream Token;

@@ -145,7 +145,7 @@ pub(crate) fn message(ty: &Type) -> Option<String> {
 }
 
 /// The message name a position holds, by the rule `gdl_syntax` keeps for
-/// graph files and nodes files alike.
+/// graph files.
 fn name(ty: &Type) -> Result<Name, ()> {
     gdl_syntax::message_name(ty).map(|name| name.map_or(Name::Unit, Name::Message))
 }

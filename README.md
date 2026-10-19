@@ -95,7 +95,16 @@ pub struct Prompt {
 }
 ```
 
-A spec names the graph file instead of a contract crate, and lists the crates that define its messages:
+A crate can also offer a message that is defined in another module or another crate, under a path of its own. Mark the `pub use` with `#[gdl_message::export]`:
+
+```rust
+#[gdl_message::export]
+pub use chat_protocols::Prompt;
+```
+
+A crate that depends on gdl can write `gdl::Message` and `gdl::export` instead.
+
+A spec names the graph file instead of a contract crate, and lists the crates that offer its messages:
 
 ```toml
 [graph]
@@ -117,9 +126,9 @@ Piece   chat_protocols::Piece          local
 Prompt  chat_protocols::Prompt         wire
 ```
 
-Before it compiles a crate, the generator makes sure that the names agree on each edge. Each error gives the line and column in the graph file. Then it compiles a program that links the listed crates and reads their messages. Each name must resolve to exactly one type. If two listed crates define a name, the generator reports an error. Add a `pin` entry to choose one type. The generator reports all errors at once.
+First, the generator makes sure that the names agree on each edge. Each error gives the line and column in the graph file. Then it reads the source of the listed crates with `gdl-extract`. It builds nothing, so a crate whose build needs a toolkit that is not installed can still be read. A listed crate offers the messages that it defines and the messages that it exports. Each name must resolve to exactly one message. A message that two listed crates offer, one by its definition and one by an export, is one message. If a name resolves to two different messages, the generator reports an error. Add a `pin` entry to choose one. The generator reports all errors at once.
 
-From a `[graph]` spec, the generator also generates the contract crate, in `contract/` under the output directory. Its `graph!` invocation names each message by the full path of its type, so the contract hash changes when a name resolves to another crate. A message must be public at the path where it is defined. The chat example uses a graph file. The ASR example uses a contract crate that holds its own `graph!` invocation.
+From a `[graph]` spec, the generator also generates the contract crate, in `contract/` under the output directory. Its `graph!` invocation names each message by a public path through a listed crate: an export's path if there is one, else the definition's. The contract hash covers that path, so it changes when a name resolves to another message. A message that is defined in a private module must be exported. The chat example uses a graph file. The ASR example uses a contract crate that holds its own `graph!` invocation.
 
 ## Split a graph into segments
 
@@ -148,20 +157,20 @@ nodes = ["Engine"]
 nodes = ["Detokenize", "Format"]
 ```
 
-A node crate declares the nodes it implements in a nodes file, in graph syntax, and names the file in its manifest:
+A node crate marks each node type with `#[derive(gdl::Node)]`. The node's name is the type's name, and its role and messages come from the role trait that the type implements:
 
-```toml
-# engine-mock/Cargo.toml
-[package.metadata.gdl]
-nodes = "gdl/nodes.gdl"
+```rust
+#[derive(gdl::Node)]
+pub struct Engine { /* .. */ }
+
+impl gdl::Sink for Engine {
+    type Req = Words;
+    type Item = Token;
+    // ..
+}
 ```
 
-```text
-// engine-mock/gdl/nodes.gdl
-sink Engine: Words -> stream Token;
-```
-
-Each graph node binds to the node of its name that a listed crate declares. Its implementation is the type of that name at the crate's root, here `chat_engine_mock::Engine`. If two crates declare one name, add `pin = { Engine = "chat_engine_mock::Engine" }` to `[nodes]` to choose one. The graph's signature for each node must be the one that its crate declares. The generator reads nodes files without compiling the node crates, so a crate that needs CUDA, for example, does not have to build there. The implementing type carries `#[derive(gdl::Node)]`. When the crate compiles, the derive makes sure that the type is `pub` and sits at the crate root, and it registers the role and messages it finds. The nodes files are temporary: `gdl-extract` reads the same information from the source, and the generator will use it instead.
+Each graph node binds to the node of its name that a listed crate offers. Its implementation is the type of that name at the crate's root, here `chat_engine_mock::Engine`. If two crates offer one name, add `pin = { Engine = "chat_engine_mock::Engine" }` to `[nodes]` to choose one. The node must have the role that the graph gives it, and at each port the message that the graph's name for the port resolves to. The generator reads the node crates' source and does not compile them, so a crate that needs CUDA, for example, does not have to build there. When the node crate compiles, the derive makes sure that the type is `pub` and sits at the crate root.
 
 A spec with a contract crate binds each node with a table instead:
 
@@ -172,7 +181,7 @@ path = "engine-mock"
 type = "chat_engine_mock::Engine"
 ```
 
-The generator compiles only the contract crate to read its manifest. For a graph file, it first compiles the message crates to read their catalogue. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`.
+The generator compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`.
 
 For each segment, the generator writes a crate with:
 

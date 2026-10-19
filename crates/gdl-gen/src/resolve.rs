@@ -1,35 +1,80 @@
-//! Resolving a graph file's message names against the catalogue of the
-//! crates the spec lists.
+//! Resolving a graph file's message names against what the listed crates
+//! offer, as the source reader found it.
+//!
+//! A listed crate offers the messages it defines and the messages it
+//! exports. A name resolves to a message's origin, so one message offered
+//! by two listed crates (its own and one that exports it) is one candidate,
+//! not two.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
-use gdl_message::{Catalogue, MessageInfo};
+use gdl_extract::{Offer, Origin};
+
+/// A name resolved: the message it is, and the public path the contract
+/// names it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// The message's identity: where it is defined.
+    pub origin: Origin,
+    /// A public path through a listed crate: an export's, when the crates
+    /// offer one, else the definition's.
+    pub path: String,
+    /// Whether it is a wire type.
+    pub wire: bool,
+}
+
+/// One way a listed crate offers a message.
+struct Candidate {
+    name: String,
+    origin: Origin,
+    path: String,
+    wire: bool,
+    /// Whether it is an export, and whether its own package exports it:
+    /// what decides the path the contract names it by.
+    export: Option<bool>,
+}
 
 /// Resolve each name in `uses` (a message name and the nodes that declare
-/// it) to one entry of `catalogue` from a crate in `listed`, told apart by
-/// its directory: another package of a listed one's name, and even of its
-/// version, can be in the program too. A pin maps a
-/// name to the path of the entry it takes, and is how a name in two crates
-/// is resolved. Every problem is reported.
+/// it) to one message that `offers` hold. A pin maps a name to a public
+/// path that the offers hold, and is how a name with two messages is
+/// resolved, or a name given to a message of another name. Every problem
+/// is reported.
 pub(crate) fn resolve(
     uses: &BTreeMap<String, Vec<String>>,
-    catalogue: &Catalogue,
-    listed: &[Listed],
+    offers: &[Offer],
     pins: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, MessageInfo>, Vec<String>> {
-    let offered: Vec<&MessageInfo> = catalogue
-        .messages
-        .iter()
-        .filter(|m| is_listed(m, listed))
-        .collect();
+) -> Result<BTreeMap<String, Resolved>, Vec<String>> {
     let mut problems = Vec::new();
-    for identity in listed {
-        if !offered.iter().any(|m| m.package == identity.package) {
+    let mut candidates = Vec::new();
+    for offer in offers {
+        if offer.messages.is_empty() && offer.exports.is_empty() {
             problems.push(format!(
-                "[messages] crate `{}` offers no messages: derive `gdl_message::Message` on its message types",
-                identity.package
+                "[messages] crate `{}` offers no messages: derive `Message` on its message types, or export them",
+                offer.package
             ));
+        }
+        for m in &offer.messages {
+            candidates.push(Candidate {
+                name: m.name.clone(),
+                origin: Origin {
+                    package: offer.package.clone(),
+                    version: offer.version.clone(),
+                    source: offer.source.clone(),
+                    path: m.path.clone(),
+                },
+                path: m.path.clone(),
+                wire: m.wire,
+                export: None,
+            });
+        }
+        for e in &offer.exports {
+            candidates.push(Candidate {
+                name: e.name.clone(),
+                origin: e.origin.clone(),
+                path: e.path.clone(),
+                wire: e.wire,
+                export: Some(e.origin.package == offer.package),
+            });
         }
     }
     for name in pins.keys() {
@@ -43,65 +88,69 @@ pub(crate) fn resolve(
     let mut resolved = BTreeMap::new();
     for (name, users) in uses {
         let users = users.join(", ");
-        // Two entries of one path from one listed directory are one type
-        // that Cargo built twice: neither can be chosen.
-        let twice = |found: &[&MessageInfo]| {
-            found
-                .iter()
-                .enumerate()
-                .find(|(i, m)| found[..*i].iter().any(|n| n.path == m.path))
-                .map(|(_, m)| {
-                    format!(
-                        "message `{name}` ({users}): `{}` is registered twice from one directory, because Cargo built the package there twice, from a path and from another source; depend on it from one source",
-                        m.path
-                    )
-                })
-        };
         if let Some(path) = pins.get(name) {
-            let found: Vec<&MessageInfo> = offered
-                .iter()
-                .filter(|m| m.path == *path)
-                .copied()
-                .collect();
-            if let Some(problem) = twice(&found) {
-                problems.push(problem);
+            let Some(pinned) = candidates.iter().find(|c| c.path == *path) else {
+                let named: Vec<String> = candidates
+                    .iter()
+                    .filter(|c| c.name == *name)
+                    .map(|c| format!("`{}`", c.path))
+                    .collect();
+                problems.push(format!(
+                    "[messages] pin `{name}`: no listed crate offers `{path}`{}",
+                    if named.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; `{name}` is {}", named.join(", "))
+                    }
+                ));
                 continue;
-            }
-            match found.first() {
-                Some(message) => {
-                    resolved.insert(name.clone(), (*message).clone());
-                }
-                None => problems.push(format!(
-                    "[messages] pin `{name}`: no listed crate defines `{path}`{}",
-                    candidates(offered.iter().filter(|m| m.name == *name))
-                        .map(|c| format!("; `{name}` is {c}"))
-                        .unwrap_or_default()
-                )),
-            }
+            };
+            // The pinned message, through the path the pin gives.
+            resolved.insert(
+                name.clone(),
+                Resolved {
+                    origin: pinned.origin.clone(),
+                    path: pinned.path.clone(),
+                    wire: pinned.wire,
+                },
+            );
             continue;
         }
-        let found: Vec<&MessageInfo> = offered
-            .iter()
-            .filter(|m| m.name == *name)
-            .copied()
-            .collect();
-        if let Some(problem) = twice(&found) {
-            problems.push(problem);
-            continue;
-        }
-        match found.as_slice() {
-            [message] => {
-                resolved.insert(name.clone(), (*message).clone());
-            }
+        let found: Vec<&Candidate> = candidates.iter().filter(|c| c.name == *name).collect();
+        let mut origins: Vec<&Origin> = found.iter().map(|c| &c.origin).collect();
+        origins.sort();
+        origins.dedup();
+        match origins.as_slice() {
             [] => problems.push(format!(
                 "message `{name}` ({users}) is in no listed crate{}",
-                missing_hint(name, &offered, catalogue, listed)
+                missing_hint(name, &candidates)
             )),
+            [_] => {
+                // An export first: its path is public, though the
+                // definition's may not be; the defining package's own
+                // export before another's.
+                let best = found
+                    .iter()
+                    .min_by_key(|c| match c.export {
+                        Some(true) => 0,
+                        Some(false) => 1,
+                        None => 2,
+                    })
+                    .expect("one candidate at least");
+                resolved.insert(
+                    name.clone(),
+                    Resolved {
+                        origin: best.origin.clone(),
+                        path: best.path.clone(),
+                        wire: best.wire,
+                    },
+                );
+            }
             several => problems.push(format!(
-                "message `{name}` ({users}) is in more than one listed crate: {}; choose one under [messages] pin",
+                "message `{name}` ({users}) is more than one message in the listed crates: {}; choose one under [messages] pin",
                 several
                     .iter()
-                    .map(|m| format!("`{}`", m.path))
+                    .map(|o| format!("`{}` ({} {})", o.path, o.package, o.version))
                     .collect::<Vec<_>>()
                     .join(", ")
             )),
@@ -114,52 +163,10 @@ pub(crate) fn resolve(
     }
 }
 
-/// A crate the spec lists.
-pub(crate) struct Listed {
-    /// Its package name.
-    pub(crate) package: String,
-    /// Its directory, as `paths::resolve` gives it.
-    pub(crate) dir: PathBuf,
-}
-
-fn is_listed(message: &MessageInfo, listed: &[Listed]) -> bool {
-    let dir = PathBuf::from(&message.dir);
-    let dir = crate::paths::resolve(&dir).unwrap_or(dir);
-    listed.iter().any(|l| l.dir == dir)
-}
-
-/// `` `a::X` `` or `` `a::X`, `b::X` ``, or `None` for no candidates.
-fn candidates<'a>(found: impl Iterator<Item = &'a &'a MessageInfo>) -> Option<String> {
-    let paths: Vec<String> = found.map(|m| format!("`{}`", m.path)).collect();
-    (!paths.is_empty()).then(|| paths.join(", "))
-}
-
-/// What may help with a name that no listed crate defines: a crate that
-/// defines it but is not listed, near names, or else everything offered.
-fn missing_hint(
-    name: &str,
-    offered: &[&MessageInfo],
-    catalogue: &Catalogue,
-    listed: &[Listed],
-) -> String {
-    let mut unlisted: Vec<String> = catalogue
-        .messages
-        .iter()
-        .filter(|m| m.name == name && !is_listed(m, listed))
-        .map(|m| format!("{} {}", m.package, m.version))
-        .collect();
-    unlisted.dedup();
-    if !unlisted.is_empty() {
-        return format!(
-            "; {} defines it, but is not in [messages] crates",
-            unlisted
-                .iter()
-                .map(|p| format!("`{p}`"))
-                .collect::<Vec<_>>()
-                .join(" and ")
-        );
-    }
-    let mut names: Vec<&str> = offered.iter().map(|m| m.name.as_str()).collect();
+/// What may help with a name that no listed crate offers: near names, or
+/// else every name offered.
+fn missing_hint(name: &str, candidates: &[Candidate]) -> String {
+    let mut names: Vec<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
     names.sort_unstable();
     names.dedup();
     let near: Vec<&str> = names
@@ -218,27 +225,46 @@ fn edits(a: &str, b: &str) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use gdl_extract::{ExportEntry, MessageEntry};
+
     use super::*;
 
-    fn message(package: &str, path: &str) -> MessageInfo {
-        MessageInfo {
-            package: package.into(),
+    /// An offer of package `package` 0.1.0 from a path, defining the
+    /// messages at `defined` and exporting `exported` (name, public path,
+    /// origin package, origin path).
+    pub(crate) fn offer(
+        package: &str,
+        defined: &[&str],
+        exported: &[(&str, &str, &str, &str)],
+    ) -> Offer {
+        Offer {
+            package: package.to_string(),
             version: "0.1.0".into(),
-            dir: format!("/crates/{package}"),
-            name: path.rsplit("::").next().expect("name").into(),
-            path: path.into(),
-            wire: true,
-        }
-    }
-
-    fn catalogue(messages: &[(&str, &str)]) -> Catalogue {
-        let mut messages: Vec<MessageInfo> =
-            messages.iter().map(|(p, path)| message(p, path)).collect();
-        messages.sort();
-        Catalogue {
-            messages,
-            ..Catalogue::default()
+            source: format!("path+file:///crates/{package}"),
+            messages: defined
+                .iter()
+                .map(|path| MessageEntry {
+                    name: path.rsplit("::").next().expect("name").to_string(),
+                    path: (*path).to_string(),
+                    wire: true,
+                })
+                .collect(),
+            exports: exported
+                .iter()
+                .map(|(name, path, from, origin)| ExportEntry {
+                    name: (*name).to_string(),
+                    path: (*path).to_string(),
+                    origin: Origin {
+                        package: (*from).to_string(),
+                        version: "0.1.0".into(),
+                        source: format!("path+file:///crates/{from}"),
+                        path: (*origin).to_string(),
+                    },
+                    wire: true,
+                })
+                .collect(),
+            nodes: Vec::new(),
         }
     }
 
@@ -254,26 +280,16 @@ mod tests {
             .collect()
     }
 
-    fn listed(packages: &[&str]) -> Vec<Listed> {
-        packages
-            .iter()
-            .map(|p| Listed {
-                package: (*p).to_string(),
-                dir: PathBuf::from(format!("/crates/{p}")),
-            })
-            .collect()
-    }
-
     fn pins(pins: &[(&str, &str)]) -> BTreeMap<String, String> {
         pins.iter()
             .map(|(n, p)| ((*n).to_string(), (*p).to_string()))
             .collect()
     }
 
-    fn paths(resolved: &BTreeMap<String, MessageInfo>) -> Vec<(&str, &str)> {
+    fn paths(resolved: &BTreeMap<String, Resolved>) -> Vec<(&str, &str, &str)> {
         resolved
             .iter()
-            .map(|(n, m)| (n.as_str(), m.path.as_str()))
+            .map(|(n, r)| (n.as_str(), r.path.as_str(), r.origin.path.as_str()))
             .collect()
     }
 
@@ -281,114 +297,137 @@ mod tests {
     /// in a nested module resolves by its name.
     #[test]
     fn one_protocols_crate_resolves_every_name() {
-        let catalogue = catalogue(&[
-            ("chat-protocols", "chat_protocols::Prompt"),
-            ("chat-protocols", "chat_protocols::engine::Words"),
-            ("chat-protocols", "chat_protocols::Unused"),
-        ]);
+        let offers = [offer(
+            "chat",
+            &["chat::Prompt", "chat::engine::Words", "chat::Unused"],
+            &[],
+        )];
         let resolved = resolve(
             &uses(&[("Prompt", &["A"]), ("Words", &["B", "C"])]),
-            &catalogue,
-            &listed(&["chat-protocols"]),
+            &offers,
             &BTreeMap::new(),
         )
         .expect("resolved");
         assert_eq!(
             paths(&resolved),
             [
-                ("Prompt", "chat_protocols::Prompt"),
-                ("Words", "chat_protocols::engine::Words")
+                ("Prompt", "chat::Prompt", "chat::Prompt"),
+                ("Words", "chat::engine::Words", "chat::engine::Words")
             ]
         );
     }
 
+    /// An export is the message it names: a facade crate alone resolves to
+    /// the origin, through its own public path, and a facade listed with
+    /// the defining crate is no ambiguity.
     #[test]
-    fn names_resolve_across_several_crates() {
-        let catalogue = catalogue(&[("front", "front::Prompt"), ("engine", "engine::Words")]);
-        let resolved = resolve(
-            &uses(&[("Prompt", &["A"]), ("Words", &["B"])]),
-            &catalogue,
-            &listed(&["front", "engine"]),
+    fn an_export_resolves_to_its_origin_through_a_public_path() {
+        let facade = offer(
+            "facade",
+            &[],
+            &[("Words", "facade::Words", "chat", "chat::engine::Words")],
+        );
+        let alone = resolve(
+            &uses(&[("Words", &["A"])]),
+            std::slice::from_ref(&facade),
             &BTreeMap::new(),
         )
-        .expect("resolved");
+        .expect("alone");
         assert_eq!(
-            paths(&resolved),
-            [("Prompt", "front::Prompt"), ("Words", "engine::Words")]
+            paths(&alone),
+            [("Words", "facade::Words", "chat::engine::Words")]
+        );
+        assert_eq!(alone["Words"].origin.package, "chat");
+        let both = resolve(
+            &uses(&[("Words", &["A"])]),
+            &[offer("chat", &["chat::engine::Words"], &[]), facade],
+            &BTreeMap::new(),
+        )
+        .expect("both");
+        assert_eq!(
+            paths(&both),
+            [("Words", "facade::Words", "chat::engine::Words")]
         );
     }
 
+    /// A crate's own export comes before its private definition path, and
+    /// before another crate's export.
     #[test]
-    fn a_name_in_two_crates_is_ambiguous_until_pinned() {
-        let catalogue = catalogue(&[("a", "a::Chunk"), ("b", "b::inner::Chunk")]);
+    fn the_defining_crates_export_names_a_message() {
+        let offers = [
+            offer(
+                "chat",
+                &["chat::hidden::Piece"],
+                &[("Piece", "chat::Piece", "chat", "chat::hidden::Piece")],
+            ),
+            offer(
+                "facade",
+                &[],
+                &[("Piece", "facade::Piece", "chat", "chat::hidden::Piece")],
+            ),
+        ];
+        let resolved =
+            resolve(&uses(&[("Piece", &["A"])]), &offers, &BTreeMap::new()).expect("resolved");
+        assert_eq!(resolved["Piece"].path, "chat::Piece");
+    }
+
+    #[test]
+    fn a_name_of_two_messages_is_ambiguous_until_pinned() {
+        let offers = [
+            offer("a", &["a::Chunk"], &[]),
+            offer("b", &["b::inner::Chunk"], &[]),
+        ];
         let uses = uses(&[("Chunk", &["Frontend", "Number"])]);
-        let both = listed(&["a", "b"]);
-        let problems = resolve(&uses, &catalogue, &both, &BTreeMap::new()).expect_err("ambiguous");
+        let problems = resolve(&uses, &offers, &BTreeMap::new()).expect_err("ambiguous");
         assert_eq!(
             problems,
             [
-                "message `Chunk` (Frontend, Number) is in more than one listed crate: `a::Chunk`, `b::inner::Chunk`; choose one under [messages] pin"
+                "message `Chunk` (Frontend, Number) is more than one message in the listed crates: `a::Chunk` (a 0.1.0), `b::inner::Chunk` (b 0.1.0); choose one under [messages] pin"
             ]
         );
-        let resolved = resolve(
-            &uses,
-            &catalogue,
-            &both,
-            &pins(&[("Chunk", "b::inner::Chunk")]),
-        )
-        .expect("pinned");
-        assert_eq!(paths(&resolved), [("Chunk", "b::inner::Chunk")]);
+        let resolved =
+            resolve(&uses, &offers, &pins(&[("Chunk", "b::inner::Chunk")])).expect("pinned");
+        assert_eq!(resolved["Chunk"].origin.package, "b");
     }
 
-    /// A pin binds a name to any listed type, so a graph's name need not be
-    /// the type's.
+    /// A pin binds a name to any offered message, so a graph's name need
+    /// not be the type's.
     #[test]
-    fn a_pin_may_bind_a_name_to_a_type_of_another_name() {
-        let catalogue = catalogue(&[("a", "a::Piece")]);
+    fn a_pin_may_bind_a_name_to_a_message_of_another_name() {
+        let offers = [offer("a", &["a::Piece"], &[])];
         let resolved = resolve(
             &uses(&[("Text", &["F"])]),
-            &catalogue,
-            &listed(&["a"]),
+            &offers,
             &pins(&[("Text", "a::Piece")]),
         )
         .expect("pinned");
-        assert_eq!(paths(&resolved), [("Text", "a::Piece")]);
+        assert_eq!(resolved["Text"].path, "a::Piece");
     }
 
     #[test]
-    fn a_pin_must_name_a_listed_type_and_a_used_name() {
-        let catalogue = catalogue(&[("a", "a::Chunk"), ("unlisted", "unlisted::Other")]);
+    fn a_pin_must_name_an_offered_path_and_a_used_name() {
+        let offers = [offer("a", &["a::Chunk"], &[])];
         let problems = resolve(
             &uses(&[("Chunk", &["A"])]),
-            &catalogue,
-            &listed(&["a"]),
-            &pins(&[("Chunk", "a::Chunck"), ("Other", "unlisted::Other")]),
+            &offers,
+            &pins(&[("Chunk", "a::Chunck"), ("Other", "a::Chunk")]),
         )
         .expect_err("bad pins");
         assert_eq!(
             problems,
             [
                 "[messages] pin `Other`: the graph has no message `Other`",
-                "[messages] pin `Chunk`: no listed crate defines `a::Chunck`; `Chunk` is `a::Chunk`",
+                "[messages] pin `Chunk`: no listed crate offers `a::Chunck`; `Chunk` is `a::Chunk`",
             ]
         );
     }
 
     #[test]
     fn a_missing_name_says_what_might_be_meant() {
-        let catalogue = catalogue(&[
-            ("asr", "asr::Audio"),
-            ("asr", "asr::Session"),
-            ("dsp", "dsp::Pcm"),
-        ]);
+        let offers = [offer("asr", &["asr::Audio", "asr::Session"], &[])];
         let problems = resolve(
-            &uses(&[
-                ("Audoi", &["Client"]),
-                ("Pcm", &["Resample", "Recognizer"]),
-                ("Transcript", &["Client"]),
-            ]),
-            &catalogue,
-            &listed(&["asr"]),
+            &uses(&[("Audoi", &["Client"]), ("Transcript", &["Client"])]),
+            &offers,
             &BTreeMap::new(),
         )
         .expect_err("missing");
@@ -396,58 +435,22 @@ mod tests {
             problems,
             [
                 "message `Audoi` (Client) is in no listed crate; did you mean `Audio`?",
-                "message `Pcm` (Resample, Recognizer) is in no listed crate; `dsp 0.1.0` defines it, but is not in [messages] crates",
                 "message `Transcript` (Client) is in no listed crate; the listed crates offer `Audio`, `Session`",
             ]
         );
     }
 
-    /// A listed crate that registers nothing derives nothing, or registers
-    /// in another gdl's catalogue: either way the spec is wrong.
     #[test]
     fn a_listed_crate_that_offers_nothing_is_reported() {
-        let catalogue = catalogue(&[("a", "a::Chunk")]);
-        let problems = resolve(
-            &uses(&[("Chunk", &["A"])]),
-            &catalogue,
-            &listed(&["a", "empty"]),
-            &BTreeMap::new(),
-        )
-        .expect_err("empty crate");
+        let offers = [offer("a", &["a::Chunk"], &[]), offer("empty", &[], &[])];
+        let problems = resolve(&uses(&[("Chunk", &["A"])]), &offers, &BTreeMap::new())
+            .expect_err("empty crate");
         assert_eq!(
             problems,
             [
-                "[messages] crate `empty` offers no messages: derive `gdl_message::Message` on its message types"
+                "[messages] crate `empty` offers no messages: derive `Message` on its message types, or export them"
             ]
         );
-    }
-
-    /// Cargo can build one directory as two packages, from a path and from
-    /// another source. Their entries share a directory and a path and
-    /// cannot be told apart, so the name is refused, with or without a pin.
-    #[test]
-    fn a_directory_built_twice_is_refused() {
-        let mut catalogue = catalogue(&[("a", "a::Chunk"), ("a", "a::Chunk")]);
-        catalogue.messages[1].wire = false;
-        let expected = "message `Chunk` (A): `a::Chunk` is registered twice from one directory, \
-             because Cargo built the package there twice, from a path and from another source; \
-             depend on it from one source";
-        let problems = resolve(
-            &uses(&[("Chunk", &["A"])]),
-            &catalogue,
-            &listed(&["a"]),
-            &BTreeMap::new(),
-        )
-        .expect_err("twice");
-        assert_eq!(problems, [expected]);
-        let problems = resolve(
-            &uses(&[("Chunk", &["A"])]),
-            &catalogue,
-            &listed(&["a"]),
-            &pins(&[("Chunk", "a::Chunk")]),
-        )
-        .expect_err("twice, pinned");
-        assert_eq!(problems, [expected]);
     }
 
     #[test]
