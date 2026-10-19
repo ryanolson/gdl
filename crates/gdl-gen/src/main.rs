@@ -176,7 +176,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Catalog(dir) => print!("{}", gdl_gen::Catalog::load(dir)?),
-        Command::Resolve => print!("{}", gdl_gen::resolve(&spec()?)?),
+        Command::Resolve => {
+            let spec = spec()?;
+            let target = target(spec.dir());
+            print!("{}", gdl_gen::resolve(&spec, &target)?);
+        }
         Command::Diagram(format) => {
             let spec = spec()?;
             let target = target(spec.dir());

@@ -12,6 +12,8 @@ use gdl_extract::{NodeEntry, Offer, Origin};
 use gdl_syntax::{Graph, Request, Role, Sig};
 
 use crate::resolve::Resolved;
+#[cfg(test)]
+use crate::spec::CrateSource;
 use crate::spec::{Bind, NodeCrate};
 
 /// The binding of each graph node other than the source that binds, keyed
@@ -118,7 +120,7 @@ pub(crate) fn bind(
             Bind {
                 package: krate.package.clone(),
                 lib: krate.lib.clone(),
-                path: krate.path.clone(),
+                source: krate.source.clone(),
                 ty: bound,
             },
         );
@@ -284,7 +286,7 @@ mod tests {
         NodeCrate {
             package: lib.replace('_', "-"),
             lib: lib.to_string(),
-            path: PathBuf::from(format!("/nodes/{lib}")),
+            source: CrateSource::Path(PathBuf::from(format!("/nodes/{lib}"))),
         }
     }
 
@@ -403,7 +405,10 @@ mod tests {
                 ("Truncate", "front::Truncate"),
             ]
         );
-        assert_eq!(binds["Engine"].path, Path::new("/nodes/engine"));
+        assert_eq!(
+            binds["Engine"].source,
+            CrateSource::Path(PathBuf::from("/nodes/engine"))
+        );
     }
 
     /// A node of another role, or with another message at a port, is

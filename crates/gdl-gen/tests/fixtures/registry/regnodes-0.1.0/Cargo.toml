@@ -1,0 +1,9 @@
+# A node crate as a registry holds it, depending on a protocols crate from
+# the same registry. It is read, never built.
+[package]
+name = "regnodes"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+regproto = "0.1.0"

@@ -106,6 +106,7 @@ impl Workspace {
             dir: package.dir.clone(),
             path: package.source.starts_with("path+"),
             checksum: package.checksum.clone(),
+            lib: package.lib.as_ref().map(|(name, _)| name.clone()),
         }
     }
 }
@@ -124,6 +125,9 @@ pub struct Located {
     /// The registry's checksum of its `.crate`; none for a path or git
     /// package.
     pub checksum: Option<String>,
+    /// Its library's crate name, as Rust code names it; none for a package
+    /// without a library.
+    pub lib: Option<String>,
 }
 
 /// What a crate offers, and what the reader could not read.

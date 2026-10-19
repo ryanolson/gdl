@@ -93,8 +93,8 @@ pub(crate) struct NodeCrate {
     pub(crate) package: String,
     /// Its library's crate name, as Rust code names it.
     pub(crate) lib: String,
-    /// Its directory, resolved.
-    pub(crate) path: PathBuf,
+    /// Where it comes from.
+    pub(crate) source: CrateSource,
 }
 
 /// A crate that defines messages.
@@ -104,8 +104,62 @@ pub(crate) struct MessageCrate {
     pub(crate) package: String,
     /// Its library's crate name, as Rust code names it.
     pub(crate) lib: String,
+    /// Where it comes from.
+    pub(crate) source: CrateSource,
+}
+
+/// Where a crate a spec names comes from: a directory, or a version on
+/// crates.io, which the generator fetches to read and generated crates
+/// depend on exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CrateSource {
     /// Its directory, resolved.
-    pub(crate) path: PathBuf,
+    Path(PathBuf),
+    /// An exact version on crates.io.
+    Version(String),
+}
+
+impl CrateSource {
+    /// A `[messages]` or `[nodes]` entry, relative to the spec's directory
+    /// `dir`: `name@version` that is not a directory names a version.
+    fn parse(dir: &Path, entry: &str) -> Result<(CrateNames, Self), Error> {
+        let path = dir.join(entry);
+        match entry.split_once('@') {
+            Some((name, version)) if !path.exists() => {
+                if name.is_empty() || version.is_empty() {
+                    return Err(Error::new(format!(
+                        "`{entry}` is neither a directory nor `name@version`"
+                    )));
+                }
+                // The library is named for the package; `offers` checks
+                // this when it reads the crate.
+                let names = CrateNames {
+                    package: name.to_string(),
+                    lib: name.replace('-', "_"),
+                };
+                Ok((names, Self::Version(version.to_string())))
+            }
+            _ => Ok((crate_names(&path)?, Self::Path(path))),
+        }
+    }
+
+    /// The source, as the inside of an inline table, with a path written
+    /// as `path` writes it.
+    pub(crate) fn source(&self, path: &dyn Fn(&Path) -> String) -> String {
+        match self {
+            Self::Path(p) => format!("path = {}", path(p)),
+            Self::Version(v) => format!("version = {}", crate::dump::toml_string(&format!("={v}"))),
+        }
+    }
+}
+
+impl std::fmt::Display for CrateSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path(p) => write!(f, "{}", p.display()),
+            Self::Version(v) => write!(f, "version {v}"),
+        }
+    }
 }
 
 /// The contract crate.
@@ -161,8 +215,9 @@ pub(crate) struct Bind {
     /// Its library's crate name, as Rust code names it: `[lib] name` in its
     /// manifest, or the package name with `-` as `_`.
     pub(crate) lib: String,
-    /// Its directory, resolved.
-    pub(crate) path: PathBuf,
+    /// Where it comes from: a `[bind.*]` table's directory, or a `[nodes]`
+    /// crate's source.
+    pub(crate) source: CrateSource,
     /// The implementing type's Rust path.
     pub(crate) ty: String,
 }
@@ -197,7 +252,7 @@ struct RawGraph {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMessages {
-    crates: Vec<PathBuf>,
+    crates: Vec<String>,
     #[serde(default)]
     pin: BTreeMap<String, String>,
 }
@@ -205,7 +260,7 @@ struct RawMessages {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawNodes {
-    crates: Vec<PathBuf>,
+    crates: Vec<String>,
     #[serde(default)]
     pin: BTreeMap<String, String>,
 }
@@ -259,11 +314,14 @@ impl Spec {
         let mut spec = Self::parse(&text, file, &dir)?;
         let mut problems = Vec::new();
         for (node, bind) in &mut spec.bind {
-            match crate_names(&bind.path) {
+            let CrateSource::Path(path) = &bind.source else {
+                continue;
+            };
+            match crate_names(path) {
                 Err(error) => problems.push(format!("[bind.{node}]: {error}")),
                 Ok(names) if names.package != bind.package => problems.push(format!(
                     "[bind.{node}]: {} holds package `{}`, not `{}`",
-                    bind.path.display(),
+                    path.display(),
                     names.package,
                     bind.package
                 )),
@@ -342,7 +400,7 @@ impl Spec {
                     // Read from the crate's manifest when the spec is loaded.
                     lib: b.package.replace('-', "_"),
                     package: b.package,
-                    path: dir.join(b.path),
+                    source: CrateSource::Path(dir.join(b.path)),
                     ty: b.ty,
                 };
                 (node, bind)
@@ -370,27 +428,29 @@ fn graph_source(
         return Err(Error::new("[messages] crates lists no crate"));
     }
     let mut crates: Vec<MessageCrate> = Vec::with_capacity(messages.crates.len());
-    for path in messages.crates {
-        let path = dir.join(path);
-        let CrateNames { package, lib } = crate_names(&path)?;
+    for entry in messages.crates {
+        let (CrateNames { package, lib }, source) = CrateSource::parse(dir, &entry)
+            .map_err(|e| Error::new(format!("[messages] crates: {e}")))?;
         // Catalogue entries name a package, not a path: two listed packages
         // of one name could not be told apart by a pin.
         if let Some(first) = crates.iter().find(|c| c.package == package) {
             return Err(Error::new(format!(
-                "[messages] crates: {} and {} are both package `{package}`",
-                first.path.display(),
-                path.display()
+                "[messages] crates: {} and {source} are both package `{package}`",
+                first.source
             )));
         }
         // The generated contract names each message by its library's path.
         if let Some(first) = crates.iter().find(|c| c.lib == lib) {
             return Err(Error::new(format!(
-                "[messages] crates: {} and {} are both library `{lib}`",
-                first.path.display(),
-                path.display()
+                "[messages] crates: {} and {source} are both library `{lib}`",
+                first.source
             )));
         }
-        crates.push(MessageCrate { package, lib, path });
+        crates.push(MessageCrate {
+            package,
+            lib,
+            source,
+        });
     }
     let RawNodes {
         crates: node_dirs,
@@ -400,17 +460,20 @@ fn graph_source(
         pin: BTreeMap::new(),
     });
     let mut nodes: Vec<NodeCrate> = Vec::with_capacity(node_dirs.len());
-    for path in node_dirs {
-        let path = dir.join(path);
-        let CrateNames { package, lib } = crate_names(&path)?;
+    for entry in node_dirs {
+        let (CrateNames { package, lib }, source) = CrateSource::parse(dir, &entry)
+            .map_err(|e| Error::new(format!("[nodes] crates: {e}")))?;
         if let Some(first) = nodes.iter().find(|c| c.package == package) {
             return Err(Error::new(format!(
-                "[nodes] crates: {} and {} are both package `{package}`",
-                first.path.display(),
-                path.display()
+                "[nodes] crates: {} and {source} are both package `{package}`",
+                first.source
             )));
         }
-        nodes.push(NodeCrate { package, lib, path });
+        nodes.push(NodeCrate {
+            package,
+            lib,
+            source,
+        });
     }
     Ok(GraphSource {
         path: dir.join(graph.path),
@@ -422,6 +485,7 @@ fn graph_source(
 }
 
 /// What a crate is called: by Cargo, and by Rust code.
+#[derive(Debug)]
 struct CrateNames {
     package: String,
     lib: String,
@@ -491,7 +555,7 @@ mod tests {
         assert_eq!(contract.module, "chat_contract");
         assert_eq!(contract.path, dir.join("contract"));
         assert_eq!(spec.gdl, GdlDep::Path(dir.join("../gdl")));
-        assert_eq!(spec.bind["B"].path, dir.join("front"));
+        assert_eq!(spec.bind["B"].source, CrateSource::Path(dir.join("front")));
         assert_eq!(
             spec.placement,
             gdl_model::Placement::new().segment("front", ["A", "B"])
@@ -529,6 +593,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A listed crate is a directory, or `name@version` that is not one.
+    #[test]
+    fn a_listed_crate_is_a_directory_or_a_version() {
+        let dir = contract_dir("listed");
+        let (names, source) = CrateSource::parse(&dir, "contract").expect("a directory");
+        assert_eq!(names.package, "chat-contract");
+        assert_eq!(source, CrateSource::Path(dir.join("contract")));
+        let (names, source) = CrateSource::parse(&dir, "chat-protocols@1.2.3").expect("a version");
+        assert_eq!(
+            (names.package.as_str(), names.lib.as_str()),
+            ("chat-protocols", "chat_protocols")
+        );
+        assert_eq!(source, CrateSource::Version("1.2.3".into()));
+        let error = CrateSource::parse(&dir, "@1.2.3")
+            .expect_err("no name")
+            .to_string();
+        assert_eq!(error, "`@1.2.3` is neither a directory nor `name@version`");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A graph spec names its graph file and the crates that define its
     /// messages, each read for its package and library names.
     #[test]
@@ -556,7 +640,10 @@ mod tests {
         assert_eq!(graph.path, dir.join("chat.gdl"));
         assert_eq!(graph.crates.len(), 1);
         assert_eq!(graph.crates[0].package, "chat-protocols");
-        assert_eq!(graph.crates[0].path, dir.join("protocols"));
+        assert_eq!(
+            graph.crates[0].source,
+            CrateSource::Path(dir.join("protocols"))
+        );
         assert_eq!(graph.pins["Chunk"], "chat_protocols::Chunk");
         assert!(spec.contract().is_none());
         let _ = std::fs::remove_dir_all(&dir);

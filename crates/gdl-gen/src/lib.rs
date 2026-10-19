@@ -99,8 +99,12 @@ fn render_with(
                 .graph
                 .as_ref()
                 .expect("a graph spec's preparation reads its graph");
-            let dirs: Vec<&Path> = source.nodes.iter().map(|c| c.path.as_path()).collect();
-            let offers = offers(&dirs)?;
+            let listed: Vec<_> = source
+                .nodes
+                .iter()
+                .map(|c| (c.package.as_str(), c.lib.as_str(), &c.source))
+                .collect();
+            let offers = offers(&listed, target)?;
             let (bind, problems) = nodes::bind(
                 graph,
                 &source.nodes,
@@ -171,49 +175,82 @@ impl fmt::Display for Resolution {
 /// Check the spec's graph file and resolve its message names against what
 /// the crates `[messages]` lists offer, read from their source. The names
 /// are checked before any crate is read, and nothing is built.
-pub fn resolve(spec: &Spec) -> Result<Resolution, Error> {
+pub fn resolve(spec: &Spec, target: &Path) -> Result<Resolution, Error> {
     let spec::Source::Graph(source) = &spec.source else {
         return Err(Error::new(format!(
             "{}: resolving messages needs a [graph] spec; a contract crate names its own types",
             spec.file.display()
         )));
     };
-    Ok(resolved(source)?.1)
+    Ok(resolved(source, target)?.1)
 }
 
 /// The graph file of `source`, checked, and its names resolved.
-fn resolved(source: &spec::GraphSource) -> Result<(names::GraphFile, Resolution), Error> {
+fn resolved(
+    source: &spec::GraphSource,
+    target: &Path,
+) -> Result<(names::GraphFile, Resolution), Error> {
     let file = names::GraphFile::read(&source.path)?;
-    let dirs: Vec<&Path> = source.crates.iter().map(|c| c.path.as_path()).collect();
-    let offers = offers(&dirs)?;
+    let listed: Vec<_> = source
+        .crates
+        .iter()
+        .map(|c| (c.package.as_str(), c.lib.as_str(), &c.source))
+        .collect();
+    let offers = offers(&listed, target)?;
     let messages = resolve::resolve(&file.uses, &offers, &source.pins)
         .map_err(|problems| Error::new(problems.join("\n")))?;
     Ok((file, Resolution { messages }))
 }
 
-/// What the crates in `dirs` offer, read from their source. Crates of one
-/// workspace share one `cargo metadata`. Every problem the reader meets is
-/// reported.
-fn offers(dirs: &[&Path]) -> Result<Vec<gdl_extract::Offer>, Error> {
+/// What the listed crates offer, read from their source: a directory as
+/// it is, and a version fetched from crates.io into `target`, which builds
+/// nothing. Crates of one workspace share one `cargo metadata`. Every
+/// problem the reader meets is reported.
+fn offers(
+    listed: &[(&str, &str, &spec::CrateSource)],
+    target: &Path,
+) -> Result<Vec<gdl_extract::Offer>, Error> {
     let mut workspaces: Vec<gdl_extract::Workspace> = Vec::new();
-    let mut offers = Vec::with_capacity(dirs.len());
+    let mut offers = Vec::with_capacity(listed.len());
     let mut problems = Vec::new();
-    for dir in dirs {
-        // Crates of one workspace share its `cargo metadata`.
-        let known = workspaces.iter().find_map(|w| w.extract_in(dir));
-        let extraction = match known {
-            Some(extraction) => extraction,
-            None => {
-                let workspace = gdl_extract::Workspace::load(&dir.join("Cargo.toml"))
-                    .map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
-                let extraction = workspace.extract_in(dir).ok_or_else(|| {
-                    Error::new(format!(
-                        "{}: cargo metadata resolves no package there",
-                        dir.display()
-                    ))
-                })?;
-                workspaces.push(workspace);
-                extraction
+    for &(package, lib, source) in listed {
+        let extraction = match source {
+            spec::CrateSource::Path(dir) => {
+                // Crates of one workspace share its `cargo metadata`.
+                match workspaces.iter().find_map(|w| w.extract_in(dir)) {
+                    Some(extraction) => extraction,
+                    None => {
+                        let workspace = gdl_extract::Workspace::load(&dir.join("Cargo.toml"))
+                            .map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
+                        let extraction = workspace.extract_in(dir).ok_or_else(|| {
+                            Error::new(format!(
+                                "{}: cargo metadata resolves no package there",
+                                dir.display()
+                            ))
+                        })?;
+                        workspaces.push(workspace);
+                        extraction
+                    }
+                }
+            }
+            spec::CrateSource::Version(version) => {
+                let scratch = target
+                    .join("gdl-gen")
+                    .join(format!("fetch-{package}-{version}"));
+                let spec = format!("{package}@{version}");
+                let fail = |e: gdl_extract::Error| Error::new(format!("{spec}: {e}"));
+                let workspace =
+                    gdl_extract::Workspace::fetch(package, version, &scratch).map_err(fail)?;
+                let located = workspace.locate(&spec).map_err(fail)?;
+                // The spec named the library for the package; generated
+                // code names the crate by its library.
+                if located.lib.as_deref().is_some_and(|l| l != lib) {
+                    return Err(Error::new(format!(
+                        "{spec}: its library is `{}`, not `{lib}`; a crate listed by version must name its library for its package",
+                        located.lib.unwrap_or_default()
+                    )));
+                }
+                workspace.extract(&spec).map_err(fail)?
             }
         };
         problems.extend(extraction.problems);
@@ -261,7 +298,7 @@ fn prepare(
         }
         spec::Source::Graph(source) => source,
     };
-    let (file, resolution) = resolved(source)?;
+    let (file, resolution) = resolved(source, target)?;
     let name = file.graph.name.value();
     let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && name
@@ -546,7 +583,7 @@ fn validate(
             ));
         }
     }
-    let mut sources: BTreeMap<&str, (PathBuf, &str)> = BTreeMap::new();
+    let mut sources: BTreeMap<&str, (spec::CrateSource, &str)> = BTreeMap::new();
     for (node, bind) in &spec.bind {
         match manifest.node(node) {
             None => problems.push(format!(
@@ -580,10 +617,15 @@ fn validate(
                 Some(_) => {}
             }
         }
-        let path = dump::absolute(&bind.path).unwrap_or_else(|_| paths::normalize(&bind.path));
+        let path = match &bind.source {
+            spec::CrateSource::Path(path) => spec::CrateSource::Path(
+                dump::absolute(path).unwrap_or_else(|_| paths::normalize(path)),
+            ),
+            version => version.clone(),
+        };
         match sources.get(bind.package.as_str()) {
             Some((first, other)) if *first != path => problems.push(format!(
-                "{} and {} give package `{}` two paths",
+                "{} and {} give package `{}` two sources",
                 bound_by(other),
                 bound_by(node),
                 bind.package
@@ -829,7 +871,7 @@ mod tests {
                     let bind = Bind {
                         package: "tiny-nodes".into(),
                         lib: "tiny_nodes".into(),
-                        path: "/work/nodes".into(),
+                        source: spec::CrateSource::Path("/work/nodes".into()),
                         ty: (*ty).into(),
                     };
                     ((*node).to_string(), bind)
@@ -913,7 +955,7 @@ mod tests {
         let crate_ = |lib: &str| spec::MessageCrate {
             package: format!("{lib}-package"),
             lib: lib.to_string(),
-            path: PathBuf::from("/m"),
+            source: spec::CrateSource::Path(PathBuf::from("/m")),
         };
         assert_eq!(
             library_clashes("chat_contract", &[crate_("chat_protocols")]),
@@ -1120,6 +1162,25 @@ mod tests {
         assert!(main.contains("build::<::tiny_nodes::D>"), "{main}");
     }
 
+    /// A node crate listed by version is a dependency on exactly that
+    /// version, in a generated crate and in an exported one alike.
+    #[test]
+    fn a_crate_listed_by_version_is_depended_on_exactly() {
+        let mut spec = spec(split(), &[("D", "tiny_nodes::D")]);
+        spec.bind.get_mut("D").expect("D").source = spec::CrateSource::Version("0.3.1".into());
+        let out = Path::new("/work/segments");
+        let manifest = manifest();
+        let contract = spec.contract().expect("a contract spec");
+        for deps in [emit::Deps::Relative, emit::Deps::Exported] {
+            let files = render_manifest(&spec, contract, &manifest, out, deps).expect("render");
+            let cargo = &files[&PathBuf::from("engine/Cargo.toml")];
+            assert!(
+                cargo.contains("tiny-nodes = { version = \"=0.3.1\" }\n"),
+                "{cargo}"
+            );
+        }
+    }
+
     #[test]
     fn a_type_from_the_crate_root_is_the_same_binding() {
         let out = Path::new("/work/segments");
@@ -1178,20 +1239,21 @@ mod tests {
             .segment("front", ["S", "F"])
             .segment("engine", ["D"]);
         let mut spec = spec(placement, &[("D", "tiny_nodes::D"), ("F", "tiny_nodes::F")]);
-        spec.bind.get_mut("F").expect("F").path = "/elsewhere/nodes".into();
+        spec.bind.get_mut("F").expect("F").source =
+            spec::CrateSource::Path("/elsewhere/nodes".into());
         let error = check(&spec, &manifest).expect_err("two paths").to_string();
         assert!(
-            error.contains("[bind.D] and [bind.F] give package `tiny-nodes` two paths"),
+            error.contains("[bind.D] and [bind.F] give package `tiny-nodes` two sources"),
             "{error}"
         );
-        spec.bind.get_mut("F").expect("F").path = "/work/./nodes".into();
+        spec.bind.get_mut("F").expect("F").source = spec::CrateSource::Path("/work/./nodes".into());
         assert!(
             check(&spec, &manifest).is_ok(),
             "the same path, spelled two ways"
         );
         // Relative: two different directories, however many steps up.
-        spec.bind.get_mut("D").expect("D").path = "../../nodes".into();
-        spec.bind.get_mut("F").expect("F").path = "nodes".into();
+        spec.bind.get_mut("D").expect("D").source = spec::CrateSource::Path("../../nodes".into());
+        spec.bind.get_mut("F").expect("F").source = spec::CrateSource::Path("nodes".into());
         assert!(
             check(&spec, &manifest).is_err(),
             "`../../nodes` is not `nodes`"

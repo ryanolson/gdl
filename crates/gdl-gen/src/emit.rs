@@ -15,7 +15,7 @@ use gdl_model::{Layout, Manifest, Role};
 
 use crate::Error;
 use crate::paths::{display, relative};
-use crate::spec::{Contract, Spec};
+use crate::spec::{Contract, CrateSource, Spec};
 
 /// Marks every generated file. `--check` and stale-file cleanup find
 /// generated files by it.
@@ -347,12 +347,13 @@ impl Unit<'_> {
             self.contract_path()
         );
         // Each implementation crate once, however many nodes it implements.
-        let mut implementations: BTreeMap<&str, &Path> = BTreeMap::new();
+        let mut implementations: BTreeMap<&str, &CrateSource> = BTreeMap::new();
         for node in self.hosted() {
-            implementations.insert(node.package, &self.spec.bind[node.name].path);
+            implementations.insert(node.package, &self.spec.bind[node.name].source);
         }
-        for (package, path) in implementations {
-            let _ = writeln!(text, "{package} = {{ path = {} }}", self.path_to(path));
+        for (package, source) in implementations {
+            let source = source.source(&|path| self.path_to(path));
+            let _ = writeln!(text, "{package} = {{ {source} }}");
         }
         let _ = writeln!(
             text,

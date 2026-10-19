@@ -35,7 +35,16 @@ pub(crate) struct Package {
 impl Graph {
     pub(crate) fn load(manifest: &Path) -> Result<Self, Error> {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let output = Command::new(cargo)
+        // Cargo reads its configuration from where it runs: run it where
+        // the manifest is, so a `.cargo/config.toml` above a fetch's
+        // scratch directory (a mirror, `net.offline`) applies to it.
+        let manifest = std::path::absolute(manifest)
+            .map_err(|e| Error(format!("{}: {e}", manifest.display())))?;
+        let mut command = Command::new(cargo);
+        if let Some(dir) = manifest.parent() {
+            command.current_dir(dir);
+        }
+        let output = command
             .args(["metadata", "--format-version", "1", "--manifest-path"])
             .arg(manifest)
             .output()

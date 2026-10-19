@@ -61,9 +61,9 @@ pub(crate) fn cargo_toml(
     );
     for krate in crates {
         text.push_str(&format!(
-            "{} = {{ path = {} }}\n",
+            "{} = {{ {} }}\n",
             krate.package,
-            path(&krate.path)
+            krate.source.source(path)
         ));
     }
     text

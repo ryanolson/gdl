@@ -1,0 +1,6 @@
+# A protocols crate as a registry holds it, for the tests that list crates
+# by name and version. It is read, never built: its markers are text.
+[package]
+name = "regproto"
+version = "0.1.0"
+edition = "2024"

@@ -19,7 +19,7 @@ fn target() -> PathBuf {
 
 fn resolve(spec: &str) -> Result<gdl_gen::Resolution, String> {
     let spec = gdl_gen::Spec::load(&fixtures().join(spec)).map_err(|e| e.to_string())?;
-    gdl_gen::resolve(&spec).map_err(|e| e.to_string())
+    gdl_gen::resolve(&spec, &target()).map_err(|e| e.to_string())
 }
 
 /// One protocols crate holds every message. A type in a module resolves to
@@ -133,7 +133,7 @@ fn a_graph_whose_names_disagree_fails_before_any_crate_is_read() {
     );
     std::fs::write(dir.join("gdl.toml"), spec).expect("spec");
     let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
-    let error = gdl_gen::resolve(&spec)
+    let error = gdl_gen::resolve(&spec, &target())
         .expect_err("names differ")
         .to_string();
     assert_eq!(
@@ -166,7 +166,7 @@ fn a_message_in_a_private_module_needs_an_export() {
         "{error}"
     );
     let spec = gdl_gen::Spec::load(&fixtures().join("exported.toml")).expect("spec");
-    let resolution = gdl_gen::resolve(&spec).expect("resolved");
+    let resolution = gdl_gen::resolve(&spec, &target()).expect("resolved");
     assert_eq!(
         resolution.messages["Prompt"].path,
         "exported_protocols::Prompt"
@@ -293,4 +293,127 @@ fn verify_compares_the_build_with_the_source() {
         error,
         "registered by the build, not read from source: message `Hidden` at `macro_made::Hidden`, local"
     );
+}
+
+/// A directory whose `.cargo/config.toml` takes crates.io from
+/// `tests/fixtures/registry`, offline: a vendored registry of crates that
+/// are read, never built. Fetches under it see that registry, with its
+/// source id and checksums, as they would see crates.io.
+fn offline_registry(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("gdl-registry-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".cargo")).expect("dir");
+    let registry = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/registry");
+    std::fs::write(
+        dir.join(".cargo/config.toml"),
+        format!(
+            "[net]\noffline = true\n\n[source.crates-io]\nreplace-with = \"fixture\"\n\n[source.fixture]\ndirectory = {}\n",
+            toml_string(&registry)
+        ),
+    )
+    .expect("config");
+    dir
+}
+
+/// A spec lists crates by name and version: the generator fetches them,
+/// reads their source, and resolves names to messages from the registry.
+#[test]
+fn a_spec_lists_crates_by_version() {
+    let dir = offline_registry("spec");
+    std::fs::write(
+        dir.join("graph.gdl"),
+        "name = \"versioned\", schema = 1;\nsource A: Words -> stream Token;\nsink   Engine: Words -> stream Token;\ntopology: A => Engine;\n",
+    )
+    .expect("graph");
+    std::fs::write(
+        dir.join("gdl.toml"),
+        format!(
+            "[graph]\npath = \"graph.gdl\"\n[messages]\ncrates = [\"regproto@0.1.0\"]\n[nodes]\ncrates = [\"regnodes@0.1.0\"]\n[gdl]\npath = {}\n[segment.all]\nnodes = [\"A\", \"Engine\"]\n",
+            toml_string(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl"))
+        ),
+    )
+    .expect("spec");
+    let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
+    let resolution = gdl_gen::resolve(&spec, &dir.join("target")).expect("resolved");
+    let words = &resolution.messages["Words"];
+    assert_eq!(words.path, "regproto::Words");
+    assert_eq!(
+        (
+            words.origin.package.as_str(),
+            words.origin.version.as_str(),
+            words.origin.source.as_str()
+        ),
+        (
+            "regproto",
+            "0.1.0",
+            "registry+https://github.com/rust-lang/crates.io-index"
+        )
+    );
+    assert!(words.wire);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Generated code names a crate by its library, and a spec that lists a
+/// crate by version names the library for the package: a crate whose
+/// library is named otherwise is refused, by name.
+#[test]
+fn a_crate_listed_by_version_names_its_library_for_its_package() {
+    let dir = offline_registry("renamed");
+    std::fs::write(
+        dir.join("graph.gdl"),
+        "name = \"renamed\", schema = 1;\nsource A: Words -> stream Words;\nsink   B: Words -> stream Words;\ntopology: A => B;\n",
+    )
+    .expect("graph");
+    std::fs::write(
+        dir.join("gdl.toml"),
+        "[graph]\npath = \"graph.gdl\"\n[messages]\ncrates = [\"regrenamed@0.1.0\"]\n[gdl]\nversion = \"0.1\"\n",
+    )
+    .expect("spec");
+    let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
+    let error = gdl_gen::resolve(&spec, &dir.join("target"))
+        .expect_err("renamed")
+        .to_string();
+    assert_eq!(
+        error,
+        "regrenamed@0.1.0: its library is `renamed`, not `regrenamed`; a crate listed by version must name its library for its package"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `cargo gdl extract name@version --catalog` fetches the crate, reads it,
+/// and adds it to the catalogue with the registry's checksum.
+#[test]
+fn a_registry_crate_enters_the_catalogue_with_its_checksum() {
+    let dir = offline_registry("catalogue");
+    let catalogue = dir.join("catalogue");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .args(["gdl", "extract", "regnodes@0.1.0", "--catalog"])
+        .arg(&catalogue)
+        .arg("--target-dir")
+        .arg(dir.join("target"))
+        .output()
+        .expect("cargo gdl");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = std::fs::read_to_string(catalogue.join("regnodes/0.1.0.toml")).expect("entry");
+    let entry = gdl_gen::Entry::from_toml(&text).expect("entry");
+    // The fixture's `.cargo-checksum.json`, as Cargo locked it.
+    assert_eq!(
+        entry.checksum.as_deref(),
+        Some("677ebc6731d74ce2567ec1e7a5928b902f6f5d8a3ad7b57a332fdb6475142189")
+    );
+    let engine = &entry.offer.nodes[0];
+    assert_eq!(
+        (engine.name.as_str(), engine.role.as_str()),
+        ("Engine", "sink")
+    );
+    let req = engine.ports[0].head.as_ref().expect("Req");
+    assert_eq!(
+        (req.package.as_str(), req.path.as_str()),
+        ("regproto", "regproto::Words")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
