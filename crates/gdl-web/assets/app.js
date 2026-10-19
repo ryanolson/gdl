@@ -10,7 +10,8 @@ const state = {
   entries: [],
   hop: newHop(),
   cuts: new Set(),
-  segmentNames: {},
+  // Keyed by names the user chooses: no prototype, so `constructor` is a name.
+  segmentNames: Object.create(null),
 };
 
 function newHop() {
@@ -280,7 +281,7 @@ function segments(names) {
     if (!groups.has(root)) groups.set(root, []);
     groups.get(root).push(m);
   }
-  const result = {};
+  const result = Object.create(null);
   [...groups.values()].forEach((group, i) => {
     // Two groups never share a name: one would replace the other.
     let name = state.segmentNames[group[0]] || `s${i + 1}`;

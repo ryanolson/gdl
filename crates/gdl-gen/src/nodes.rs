@@ -14,7 +14,7 @@ use gdl_syntax::{Graph, Request, Role, Sig};
 use crate::resolve::Resolved;
 #[cfg(test)]
 use crate::spec::CrateSource;
-use crate::spec::{Bind, NodeCrate};
+use crate::spec::{Bind, ListedCrate};
 
 /// The binding of each graph node other than the source that binds, keyed
 /// by node name, and every problem with the others: reported with the
@@ -22,7 +22,7 @@ use crate::spec::{Bind, NodeCrate};
 /// order of `crates`; `messages` is the graph's resolution.
 pub(crate) fn bind(
     graph: &Graph,
-    crates: &[NodeCrate],
+    crates: &[ListedCrate],
     offers: &[Offer],
     messages: &BTreeMap<String, Resolved>,
     pins: &BTreeMap<String, String>,
@@ -282,8 +282,8 @@ mod tests {
             .collect()
     }
 
-    fn krate(lib: &str) -> NodeCrate {
-        NodeCrate {
+    fn krate(lib: &str) -> ListedCrate {
+        ListedCrate {
             package: lib.replace('_', "-"),
             lib: lib.to_string(),
             source: CrateSource::Path(PathBuf::from(format!("/nodes/{lib}"))),
@@ -368,7 +368,7 @@ mod tests {
         ]
     }
 
-    fn chat() -> (Vec<NodeCrate>, Vec<Offer>) {
+    fn chat() -> (Vec<ListedCrate>, Vec<Offer>) {
         (
             vec![krate("front"), krate("engine"), krate("post")],
             vec![offer(front()), offer(engine()), offer(post())],
@@ -376,7 +376,7 @@ mod tests {
     }
 
     fn bound(
-        crates: &[NodeCrate],
+        crates: &[ListedCrate],
         offers: &[Offer],
         pins: &BTreeMap<String, String>,
     ) -> Result<BTreeMap<String, Bind>, Vec<String>> {

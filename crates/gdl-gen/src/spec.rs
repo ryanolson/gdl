@@ -80,32 +80,22 @@ pub(crate) struct GraphSource {
     /// file to read: a composer's draft is never written to disk.
     pub(crate) text: Option<String>,
     /// The crates whose messages the graph's names resolve against.
-    pub(crate) crates: Vec<MessageCrate>,
+    pub(crate) crates: Vec<ListedCrate>,
     /// Message name to the path of the type it takes, for a name that
     /// would otherwise be ambiguous or that differs from its type's.
     pub(crate) pins: BTreeMap<String, String>,
     /// The crates whose declared nodes the graph's nodes bind to.
-    pub(crate) nodes: Vec<NodeCrate>,
+    pub(crate) nodes: Vec<ListedCrate>,
     /// Graph node name to the type of the declared node it binds to, for
     /// a name that would otherwise be ambiguous or that differs from the
     /// declared node's.
     pub(crate) node_pins: BTreeMap<String, String>,
 }
 
-/// A crate that offers nodes: types that derive `Node`.
+/// A crate a spec lists: under `[messages]`, for the messages it offers,
+/// or under `[nodes]`, for its nodes.
 #[derive(Debug, Clone)]
-pub(crate) struct NodeCrate {
-    /// The package name.
-    pub(crate) package: String,
-    /// Its library's crate name, as Rust code names it.
-    pub(crate) lib: String,
-    /// Where it comes from.
-    pub(crate) source: CrateSource,
-}
-
-/// A crate that defines messages.
-#[derive(Debug, Clone)]
-pub(crate) struct MessageCrate {
+pub(crate) struct ListedCrate {
     /// The package name.
     pub(crate) package: String,
     /// Its library's crate name, as Rust code names it.
@@ -446,7 +436,7 @@ fn graph_source(
     if messages.crates.is_empty() {
         return Err(Error::new("[messages] crates lists no crate"));
     }
-    let mut crates: Vec<MessageCrate> = Vec::with_capacity(messages.crates.len());
+    let mut crates: Vec<ListedCrate> = Vec::with_capacity(messages.crates.len());
     for entry in messages.crates {
         let (CrateNames { package, lib }, source) = CrateSource::parse(dir, &entry)
             .map_err(|e| Error::new(format!("[messages] crates: {e}")))?;
@@ -465,7 +455,7 @@ fn graph_source(
                 first.source
             )));
         }
-        crates.push(MessageCrate {
+        crates.push(ListedCrate {
             package,
             lib,
             source,
@@ -478,7 +468,7 @@ fn graph_source(
         crates: Vec::new(),
         pin: BTreeMap::new(),
     });
-    let mut nodes: Vec<NodeCrate> = Vec::with_capacity(node_dirs.len());
+    let mut nodes: Vec<ListedCrate> = Vec::with_capacity(node_dirs.len());
     for entry in node_dirs {
         let (CrateNames { package, lib }, source) = CrateSource::parse(dir, &entry)
             .map_err(|e| Error::new(format!("[nodes] crates: {e}")))?;
@@ -488,7 +478,7 @@ fn graph_source(
                 first.source
             )));
         }
-        nodes.push(NodeCrate {
+        nodes.push(ListedCrate {
             package,
             lib,
             source,

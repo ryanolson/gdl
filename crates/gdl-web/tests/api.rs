@@ -639,10 +639,28 @@ async fn an_edited_directory_crate_is_read_again() {
     let (_, body) = json_call(&router, "GET", "/api/catalog", None).await;
     assert_eq!(names(&body), ["One"]);
     write(&["One", "Two"]);
-    let (status, body) = json_call(&router, "POST", "/api/catalog", Some(add)).await;
+    let (status, body) = json_call(&router, "POST", "/api/catalog", Some(add.clone())).await;
     assert_eq!(status, StatusCode::OK, "{body:#}");
     let (_, body) = json_call(&router, "GET", "/api/catalog", None).await;
     assert_eq!(names(&body), ["One", "Two"]);
+    // A new version of the directory is still the one package: its entry
+    // replaces the old version's, so the catalogue never offers both.
+    std::fs::write(
+        krate.join("Cargo.toml"),
+        "[package]\nname = \"edited\"\nversion = \"0.2.0\"\nedition = \"2024\"\n\n[workspace]\n",
+    )
+    .expect("manifest");
+    write(&["Uno"]);
+    let (status, body) = json_call(&router, "POST", "/api/catalog", Some(add)).await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    let (_, body) = json_call(&router, "GET", "/api/catalog", None).await;
+    assert_eq!(
+        body["entries"].as_array().expect("entries").len(),
+        1,
+        "{body:#}"
+    );
+    assert_eq!(body["entries"][0]["version"], "0.2.0");
+    assert_eq!(names(&body), ["Uno"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

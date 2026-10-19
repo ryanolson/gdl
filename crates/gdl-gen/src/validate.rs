@@ -7,7 +7,7 @@ use crate::{Error, Spec, dump, emit, paths, spec};
 
 /// The message crates whose library takes a name that the generated
 /// contract uses for another crate: `gdl`, or the contract's own.
-pub(crate) fn library_clashes(contract: &str, crates: &[spec::MessageCrate]) -> Vec<String> {
+pub(crate) fn library_clashes(contract: &str, crates: &[spec::ListedCrate]) -> Vec<String> {
     crates
         .iter()
         .filter_map(|c| {

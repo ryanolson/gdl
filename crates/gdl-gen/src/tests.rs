@@ -153,7 +153,7 @@ fn compiled_manifest(spec: &Spec, target: &Path) -> Manifest {
 /// contract's own name.
 #[test]
 fn a_message_library_may_not_take_a_name_the_contract_uses() {
-    let crate_ = |lib: &str| spec::MessageCrate {
+    let crate_ = |lib: &str| spec::ListedCrate {
         package: format!("{lib}-package"),
         lib: lib.to_string(),
         source: spec::CrateSource::Path(PathBuf::from("/m")),

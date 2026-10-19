@@ -104,8 +104,9 @@ pub fn extract(krate: &Crate, target: &Path) -> Result<Extracted, Error> {
 
 /// Add the extracted crate to the working catalogue in `catalogue`, as
 /// `<name>/<version>.toml`, with its checksum and the time `added`, and
-/// return the entry's file. A crate version never changes, so an entry
-/// already there is kept as it is.
+/// return the entry's file. A published version already there is kept as
+/// it is; a crate from a directory replaces its entry, whatever version it
+/// had.
 pub fn add_to_catalog(
     catalogue: &Path,
     extracted: &Extracted,

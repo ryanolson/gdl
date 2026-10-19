@@ -24,21 +24,22 @@ pub enum Offers<'a> {
 /// nothing. Crates of one workspace share one `cargo metadata`. Every
 /// problem the reader meets is reported.
 pub(crate) fn offers(
-    listed: &[(&str, &str, &spec::CrateSource)],
+    listed: &[spec::ListedCrate],
     target: &Path,
     from: Offers<'_>,
 ) -> Result<Vec<gdl_extract::Offer>, Error> {
     if let Offers::Given(given) = from {
         return listed
             .iter()
-            .map(|&(package, lib, source)| given_offer(given, package, lib, source))
+            .map(|c| given_offer(given, &c.package, &c.lib, &c.source))
             .collect::<Result<Vec<_>, Vec<String>>>()
             .map_err(|problems| Error::new(problems.join("\n")));
     }
     let mut workspaces: Vec<gdl_extract::Workspace> = Vec::new();
     let mut offers = Vec::with_capacity(listed.len());
     let mut problems = Vec::new();
-    for &(package, lib, source) in listed {
+    for listed in listed {
+        let (package, lib, source) = (listed.package.as_str(), listed.lib.as_str(), &listed.source);
         let extraction = match source {
             spec::CrateSource::Path(dir) => {
                 // Crates of one workspace share its `cargo metadata`.

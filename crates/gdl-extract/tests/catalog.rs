@@ -245,3 +245,29 @@ fn a_directory_crate_added_again_is_replaced() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A directory is one package, whatever version it says: adding it at a
+/// new version replaces the entry of its old one, file and all, so a
+/// catalogue never offers two readings of one directory.
+#[test]
+fn a_directory_crate_at_a_new_version_replaces_its_old_entry() {
+    let dir = scratch("bumped");
+    let workspace = workspace();
+    let mut catalog = Catalog::load(&dir).expect("catalogue");
+    catalog
+        .add(entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z"))
+        .expect("added");
+    let mut bumped = entry(&workspace, "read-protocols", "2026-10-18T21:05:00Z");
+    bumped.offer.version = "0.2.0".into();
+    catalog.add(bumped).expect("bumped");
+    let keys: Vec<String> = catalog.entries().map(Entry::key).collect();
+    assert_eq!(keys, ["read-protocols@0.2.0"]);
+    assert!(!dir.join("read-protocols/0.0.0.toml").exists());
+    let loaded: Vec<String> = Catalog::load(&dir)
+        .expect("loaded")
+        .entries()
+        .map(Entry::key)
+        .collect();
+    assert_eq!(loaded, ["read-protocols@0.2.0"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

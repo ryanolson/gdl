@@ -13,7 +13,7 @@ use syn::Type;
 
 use crate::Resolution;
 use crate::emit::MARKER;
-use crate::spec::{GdlDep, MessageCrate};
+use crate::spec::{GdlDep, ListedCrate};
 
 /// The contract crate's `src/lib.rs`: the graph of `file`, each message at
 /// the path it resolved to.
@@ -43,7 +43,7 @@ pub(crate) fn lib_rs(graph: &Graph, resolution: &Resolution, file: &Path) -> Str
 pub(crate) fn cargo_toml(
     package: &str,
     gdl: &GdlDep,
-    crates: &[MessageCrate],
+    crates: &[ListedCrate],
     path: &dyn Fn(&Path) -> String,
 ) -> String {
     let gdl = format!("{{ {} }}", gdl.source(path));
@@ -162,12 +162,12 @@ mod tests {
     fn the_contract_depends_on_each_message_crate_as_listed() {
         use crate::spec::CrateSource;
         let crates = [
-            MessageCrate {
+            ListedCrate {
                 package: "chat-protocols".into(),
                 lib: "chat_protocols".into(),
                 source: CrateSource::Version("0.3.1".into()),
             },
-            MessageCrate {
+            ListedCrate {
                 package: "local-protocols".into(),
                 lib: "local_protocols".into(),
                 source: CrateSource::Path("/work/local".into()),

@@ -1,11 +1,13 @@
-//! The working catalogue: one file per crate version, written once, and
-//! loaded into memory whole.
+//! The working catalogue: one file per crate version, loaded into memory
+//! whole.
 //!
 //! ```text
 //! <catalogue>/<name>/<version>.toml    an Entry: the Offer, and where it came from
 //! ```
 //!
-//! A crate version never changes, so an entry is never rewritten. No
+//! A published crate version never changes, so its entry is written once.
+//! A crate from a directory is one package that changes as it is edited,
+//! its version with it, so it has one entry, which each add replaces. No
 //! unified file is stored: the directory is the catalogue.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -95,6 +97,23 @@ impl Catalog {
                     catalog.file(&entry).display()
                 )));
             }
+            // One entry per directory: a catalogue written before a crate's
+            // version changed may hold its older readings too; the latest
+            // added stands.
+            if entry.offer.source.starts_with("path+") {
+                let same = catalog
+                    .entries
+                    .iter()
+                    .find(|(_, held)| held.offer.source == entry.offer.source)
+                    .map(|(k, held)| (k.clone(), held.added.clone()));
+                match same {
+                    Some((_, added)) if added >= entry.added => continue,
+                    Some((k, _)) => {
+                        catalog.entries.remove(&k);
+                    }
+                    None => {}
+                }
+            }
             catalog.index(entry);
         }
         Ok(catalog)
@@ -108,18 +127,22 @@ impl Catalog {
     pub fn add(&mut self, entry: Entry) -> Result<(&Entry, PathBuf), Error> {
         let key = entry.key();
         let file = self.file(&entry);
-        // A directory's crate changes as it is edited, and has no checksum
-        // to tell versions apart: it replaces its entry, when the entry is
-        // from the same directory.
-        let edited = entry.offer.source.starts_with("path+")
-            && self
-                .entries
-                .get(&key)
-                .is_some_and(|held| held.offer.source == entry.offer.source);
-        if edited {
+        // A directory is one package: it changes as it is edited, its
+        // version with it, and it has no checksum to tell readings apart.
+        // Its entry replaces every entry from the same directory.
+        if let Some(held) = self.entries.get(&key)
+            && held.offer.source != entry.offer.source
+        {
+            return Err(Error(format!(
+                "{key} is already in the catalogue from {}, not from {}",
+                held.offer.source, entry.offer.source
+            )));
+        }
+        if entry.offer.source.starts_with("path+") {
             let dir = file
                 .parent()
                 .expect("an entry's file is in its package's directory");
+            std::fs::create_dir_all(dir).map_err(|e| Error(format!("{}: {e}", dir.display())))?;
             static REPLACES: AtomicU64 = AtomicU64::new(0);
             let partial = dir.join(format!(
                 ".{}.{}.r{}",
@@ -131,6 +154,25 @@ impl Catalog {
             std::fs::write(&partial, entry.to_toml())
                 .and_then(|()| std::fs::rename(&partial, &file))
                 .map_err(|e| Error(format!("{}: {e}", file.display())))?;
+            let stale: Vec<String> = self
+                .entries
+                .iter()
+                .filter(|(k, held)| **k != key && held.offer.source == entry.offer.source)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in stale {
+                let old = self.file(&self.entries[&k]);
+                std::fs::remove_file(&old)
+                    .or_else(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
+                    })
+                    .map_err(|e| Error(format!("{}: {e}", old.display())))?;
+                self.entries.remove(&k);
+            }
             self.index(entry);
             return Ok((&self.entries[&key], file));
         }

@@ -123,12 +123,7 @@ fn bound<'s>(
         .graph
         .as_ref()
         .expect("a graph spec's preparation reads its graph");
-    let listed: Vec<_> = source
-        .nodes
-        .iter()
-        .map(|c| (c.package.as_str(), c.lib.as_str(), &c.source))
-        .collect();
-    let offers = offers(&listed, target, from)?;
+    let offers = offers(&source.nodes, target, from)?;
     let (bind, problems) = nodes::bind(
         graph,
         &source.nodes,
@@ -248,12 +243,7 @@ fn resolved(
         Some(text) => names::GraphFile::parse(text, &source.path)?,
         None => names::GraphFile::read(&source.path)?,
     };
-    let listed: Vec<_> = source
-        .crates
-        .iter()
-        .map(|c| (c.package.as_str(), c.lib.as_str(), &c.source))
-        .collect();
-    let offers = offers(&listed, target, from)?;
+    let offers = offers(&source.crates, target, from)?;
     let messages = resolve::resolve(&file.uses, &offers, &source.pins)
         .map_err(|problems| Error::new(problems.join("\n")))?;
     Ok((file, Resolution { messages }))
