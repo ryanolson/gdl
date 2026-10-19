@@ -8,11 +8,18 @@
 //! each segment with its own `cargo build`, so one segment's dependencies
 //! never reach another's, into one shared target directory.
 //!
+//! When every crate the archive depends on can be fetched anywhere (a
+//! version, or a git revision), the archive also holds a `Dockerfile` per
+//! segment and `build-images.sh`: one multi-stage image build per segment,
+//! from the archive alone. A directory on this machine is not in an image's
+//! build context, so an archive that names one holds no image builds.
+//!
 //! The bytes depend only on the files: entries in a fixed order, with zero
 //! times and owners, so two exports of one spec are equal.
 
 use std::path::{Path, PathBuf};
 
+use crate::spec::{CrateSource, GdlDep, Source};
 use crate::{Error, Offers, Spec, emit};
 
 /// The spec's crates as a `.tar.gz`, under a directory named for the graph.
@@ -30,7 +37,7 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
         .collect();
     entries.push((
         "README.md".into(),
-        readme(&graph, &segments).into_bytes(),
+        readme(&graph, &segments, portable(spec)).into_bytes(),
         0o644,
     ));
     entries.push((
@@ -38,6 +45,21 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
         build_all(&segments).into_bytes(),
         0o755,
     ));
+    if portable(spec) {
+        for segment in &segments {
+            let package = emit::package_name(&graph, segment);
+            entries.push((
+                Path::new(segment).join("Dockerfile"),
+                dockerfile(&graph, segment, &package).into_bytes(),
+                0o644,
+            ));
+        }
+        entries.push((
+            "build-images.sh".into(),
+            build_images(&graph, &segments).into_bytes(),
+            0o755,
+        ));
+    }
 
     let gzip = flate2::GzBuilder::new()
         .mtime(0)
@@ -60,6 +82,74 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
         .map_err(|e| Error::new(format!("archiving: {e}")))?;
     gzip.finish()
         .map_err(|e| Error::new(format!("compressing: {e}")))
+}
+
+/// Whether every crate the archive depends on can be fetched anywhere: gdl
+/// and each listed crate by a version or a git revision. A contract spec's
+/// contract is a directory, so it never is.
+fn portable(spec: &Spec) -> bool {
+    let Source::Graph(source) = &spec.source else {
+        return false;
+    };
+    !matches!(spec.gdl, GdlDep::Path(_))
+        && source
+            .crates
+            .iter()
+            .map(|c| &c.source)
+            .chain(source.nodes.iter().map(|c| &c.source))
+            .all(|s| matches!(s, CrateSource::Version(_)))
+}
+
+/// A segment's image: built in the Rust image, from the archive's root
+/// (the contract and the segment), and run in a slim one with only its
+/// binary. The Rust version is the one gdl needs.
+fn dockerfile(graph: &str, segment: &str, package: &str) -> String {
+    let json = |s: &str| format!("{s:?}");
+    format!(
+        "# {marker}.\n\
+         # Segment `{segment}` of graph `{graph}` as an image, built from the\n\
+         # archive's root, which holds the contract it depends on:\n\
+         #\n\
+         #   docker build -f {segment}/Dockerfile -t {package} .\n\
+         ARG RUST_VERSION={rust}\n\
+         FROM rust:${{RUST_VERSION}}-slim-bookworm AS build\n\
+         WORKDIR /src\n\
+         COPY [\"contract\", \"contract\"]\n\
+         COPY [{segment_json}, {segment_json}]\n\
+         RUN [\"cargo\", \"build\", \"--release\", \"--manifest-path\", {manifest}]\n\
+         \n\
+         FROM debian:bookworm-slim\n\
+         COPY --from=build [{binary}, \"/usr/local/bin/{package}\"]\n\
+         ENTRYPOINT [\"/usr/local/bin/{package}\"]\n",
+        marker = emit::MARKER,
+        rust = env!("CARGO_PKG_RUST_VERSION"),
+        segment_json = json(segment),
+        manifest = json(&format!("{segment}/Cargo.toml")),
+        binary = json(&format!("/src/{segment}/target/release/{package}")),
+    )
+}
+
+/// Builds one image per segment, each from its own `Dockerfile`.
+fn build_images(graph: &str, segments: &[&str]) -> String {
+    let mut text = String::from(
+        "#!/bin/sh\n\
+         # Builds one image per segment, each from its own Dockerfile, so an\n\
+         # image holds only its segment's dependencies. Each is tagged with its\n\
+         # package's name, after GDL_IMAGE_PREFIX (a registry and path, empty by\n\
+         # default). Publishing them is left to you.\n\
+         #\n\
+         #   sh build-images.sh [docker build arguments]\n\
+         set -eu\n\
+         cd \"$(dirname \"$0\")\"\n",
+    );
+    for segment in segments {
+        let dockerfile = quoted(&format!("./{segment}/Dockerfile"));
+        let package = quoted(&emit::package_name(graph, segment));
+        text.push_str(&format!(
+            "docker build -f {dockerfile} -t \"${{GDL_IMAGE_PREFIX:-}}\"{package} \"$@\" .\n"
+        ));
+    }
+    text
 }
 
 /// Builds every segment, each on its own, into one target directory.
@@ -93,8 +183,13 @@ fn quoted(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
-fn readme(graph: &str, segments: &[&str]) -> String {
+fn readme(graph: &str, segments: &[&str], images: bool) -> String {
     let list: String = segments.iter().map(|s| format!("- `{s}/`\n")).collect();
+    let images = if images {
+        "\n`sh build-images.sh` builds one image per segment, each from its own `Dockerfile`, from this directory alone: every crate comes from crates.io or git. `GDL_IMAGE_PREFIX` goes before each image's name, for the registry you push to.\n"
+    } else {
+        ""
+    };
     format!(
         "# {graph}\n\
          \n\
@@ -103,7 +198,7 @@ fn readme(graph: &str, segments: &[&str]) -> String {
          {list}\n\
          `sh build-all.sh` builds them all. Each segment's binary is then in `target/release/`, named for its package; run it with the segment's configuration file. `GDL_PROFILE=dev sh build-all.sh` builds without optimizations.\n\
          \n\
-         A dependency outside this directory is named by its absolute path on the machine that made the archive, so the archive builds there. Crates named by a version or a git revision build anywhere.\n"
+         A dependency outside this directory is named by its absolute path on the machine that made the archive, so the archive builds there. Crates named by a version or a git revision build anywhere.\n{images}"
     )
 }
 

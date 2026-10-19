@@ -471,3 +471,56 @@ fn a_check_agrees_with_generation() {
         "{error}"
     );
 }
+
+/// An archive whose crates all come from a registry or git builds images
+/// too: a `Dockerfile` per segment, from the archive alone, and a script
+/// that builds each. An archive naming a directory has neither (`export.rs`
+/// lists the chat example's entries exactly).
+#[test]
+fn an_archive_of_fetchable_crates_builds_images() {
+    use std::io::Read as _;
+    let dir = offline_registry("images");
+    std::fs::write(
+        dir.join("graph.gdl"),
+        "name = \"imaged\", schema = 1;\nsource A: Words -> stream Token;\nsink   Engine: Words -> stream Token;\ntopology: A => Engine;\n",
+    )
+    .expect("graph");
+    std::fs::write(
+        dir.join("gdl.toml"),
+        "[graph]\npath = \"graph.gdl\"\n[messages]\ncrates = [\"regproto@0.1.0\"]\n[nodes]\ncrates = [\"regnodes@0.1.0\"]\n[gdl]\ngit = \"https://example.com/gdl\"\nrev = \"abc123\"\n[segment.front]\nnodes = [\"A\"]\n[segment.engine]\nnodes = [\"Engine\"]\n",
+    )
+    .expect("spec");
+    let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
+    let bytes =
+        gdl_gen::export(&spec, &dir.join("target"), gdl_gen::Offers::Read).expect("exported");
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+    let mut files = std::collections::BTreeMap::new();
+    for entry in archive.entries().expect("entries") {
+        let mut entry = entry.expect("entry");
+        let name = entry.path().expect("path").display().to_string();
+        let mut text = String::new();
+        entry.read_to_string(&mut text).expect("text");
+        files.insert(name, text);
+    }
+    let dockerfile = &files["imaged/engine/Dockerfile"];
+    for line in [
+        "FROM rust:${RUST_VERSION}-slim-bookworm AS build\n",
+        "COPY [\"contract\", \"contract\"]\n",
+        "COPY [\"engine\", \"engine\"]\n",
+        "RUN [\"cargo\", \"build\", \"--release\", \"--manifest-path\", \"engine/Cargo.toml\"]\n",
+        "COPY --from=build [\"/src/engine/target/release/imaged-engine\", \"/usr/local/bin/imaged-engine\"]\n",
+    ] {
+        assert!(dockerfile.contains(line), "{line} in:\n{dockerfile}");
+    }
+    assert!(files.contains_key("imaged/front/Dockerfile"));
+    let script = &files["imaged/build-images.sh"];
+    assert!(
+        script.contains("docker build -f './engine/Dockerfile' -t \"${GDL_IMAGE_PREFIX:-}\"'imaged-engine' \"$@\" .\n"),
+        "{script}"
+    );
+    assert!(
+        files["imaged/engine/Cargo.toml"]
+            .contains("gdl = { git = \"https://example.com/gdl\", rev = \"abc123\" }")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
