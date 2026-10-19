@@ -66,3 +66,16 @@ impl Operator for Gate {
         Err(Error::node("a fixture"))
     }
 }
+
+/// The relabeller: declared as `r#Relabel`, the same name.
+#[gdl::node]
+pub struct Relabel;
+
+impl Backward for Relabel {
+    type In = Piece;
+    type Out = Piece;
+
+    fn backward(&self, _cx: &Cx, input: Items<Piece>) -> Items<Piece> {
+        input
+    }
+}

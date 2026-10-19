@@ -227,24 +227,14 @@ fn run(
         write(&work.join("src/main.rs"), main)
     };
     setup().map_err(|e| Failure::Build(e.0))?;
-    // Built, then run apart from cargo, so that a failure says which of the
-    // two it was.
+    // Built, then run, so that a failure says which of the two it was.
+    // Cargo runs it: it knows where the target and the profile put the
+    // program, and what it needs at run time (a dynamically linked standard
+    // library, for one).
     cargo(&work, target, &["build", "--quiet"])
         .map_err(|e| Failure::Build(format!("building {what} failed:\n{e}")))?;
-    let program = target
-        .join("debug")
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    let output = Command::new(&program)
-        .output()
-        .map_err(|e| Failure::Run(format!("running {}: {e}", program.display())))?;
-    if !output.status.success() {
-        return Err(Failure::Run(format!(
-            "reading {what} failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|e| Failure::Run(format!("the output of {what} is not UTF-8: {e}")))
+    cargo(&work, target, &["run", "--quiet"])
+        .map_err(|e| Failure::Run(format!("reading {what} failed:\n{e}")))
 }
 
 /// Why a program of [`run`] produced no output.

@@ -74,9 +74,12 @@ pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
     let spec = match &spec.source {
         spec::Source::Contract(_) => spec,
         spec::Source::Graph(source) => {
-            let graph = names::GraphFile::read(&source.path)?.graph;
+            let graph = prepared
+                .graph
+                .as_ref()
+                .expect("a graph spec's preparation reads its graph");
             let declared = nodes::read(&source.nodes)?;
-            let (bind, problems) = nodes::bind(&graph, &source.nodes, &declared, &source.node_pins);
+            let (bind, problems) = nodes::bind(graph, &source.nodes, &declared, &source.node_pins);
             let mut with_binds = spec.clone();
             with_binds.bind = bind;
             with_binds.problems.extend(problems);
@@ -181,6 +184,9 @@ struct Prepared {
     manifest: gdl::Manifest,
     /// Empty for a contract crate the spec names.
     files: Files,
+    /// A graph file's graph: read once, so that everything generated from
+    /// it, the contract and the bindings, comes from one version of it.
+    graph: Option<gdl_syntax::Graph>,
 }
 
 /// The spec's contract and its manifest. A graph file's contract is
@@ -194,6 +200,7 @@ fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, E
                 contract: contract.clone(),
                 manifest: dump::manifest(contract, target)?,
                 files: Files::new(),
+                graph: None,
             });
         }
         spec::Source::Graph(source) => source,
@@ -295,6 +302,7 @@ fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, E
         contract,
         manifest,
         files,
+        graph: Some(file.graph),
     })
 }
 
@@ -338,6 +346,12 @@ fn validate(
     manifest: &gdl::Manifest,
 ) -> Result<gdl::Layout, Error> {
     let mut problems = spec.problems.clone();
+    // Where a node's crate comes from, as the spec writes it: a contract
+    // spec binds each node in a table, a graph spec through `[nodes]`.
+    let bound_by = |node: &str| match spec.source {
+        spec::Source::Contract(_) => format!("[bind.{node}]"),
+        spec::Source::Graph(_) => format!("node `{node}`'s [nodes] entry"),
+    };
     let layout = match gdl::layout(manifest, &spec.placement) {
         Ok(layout) => Some(layout),
         Err(errors) => {
@@ -390,9 +404,14 @@ fn validate(
         }
         for (node, bind) in &spec.bind {
             if package == bind.package {
-                problems.push(format!(
-                    "segment `{segment}` becomes package `{package}`, the name of [bind.{node}]'s crate"
-                ));
+                problems.push(match spec.source {
+                    spec::Source::Contract(_) => format!(
+                        "segment `{segment}` becomes package `{package}`, the name of [bind.{node}]'s crate"
+                    ),
+                    spec::Source::Graph(_) => format!(
+                        "segment `{segment}` becomes package `{package}`, the name of node `{node}`'s [nodes] crate"
+                    ),
+                });
             }
         }
         // Rust code names crates by library name; each crate the segment's
@@ -458,7 +477,7 @@ fn validate(
                     .map_or(node.as_str(), |(n, _)| n.as_str());
                 key(
                     &bind.package,
-                    format!("[bind.{first}]'s package"),
+                    format!("{}'s package", bound_by(first)),
                     &mut problems,
                 );
             }
@@ -472,26 +491,33 @@ fn validate(
     let mut sources: BTreeMap<&str, (PathBuf, &str)> = BTreeMap::new();
     for (node, bind) in &spec.bind {
         match manifest.node(node) {
-            None => problems.push(format!("[bind.{node}]: the graph has no node `{node}`")),
+            None => problems.push(format!(
+                "{}: the graph has no node `{node}`",
+                bound_by(node)
+            )),
             Some(info) if info.role == gdl::Role::Source => problems.push(format!(
-                "[bind.{node}]: `{node}` is the source, which takes no implementation"
+                "{}: `{node}` is the source, which takes no implementation",
+                bound_by(node)
             )),
             Some(_) => {}
         }
         if bind.ty.trim().is_empty() {
-            problems.push(format!("[bind.{node}]: `type` is empty"));
+            problems.push(format!("{}: `type` is empty", bound_by(node)));
         } else {
             match type_crate(&bind.ty) {
                 None => problems.push(format!(
-                    "[bind.{node}]: type `{}` is not a Rust type path",
+                    "{}: type `{}` is not a Rust type path",
+                    bound_by(node),
                     bind.ty
                 )),
                 // The bound crate is the only one of the node's that the
                 // segment depends on; a type from anywhere else cannot
                 // resolve.
                 Some(krate) if krate != bind.lib => problems.push(format!(
-                    "[bind.{node}]: type `{}` is not in crate `{}`",
-                    bind.ty, bind.lib
+                    "{}: type `{}` is not in crate `{}`",
+                    bound_by(node),
+                    bind.ty,
+                    bind.lib
                 )),
                 Some(_) => {}
             }
@@ -499,7 +525,9 @@ fn validate(
         let path = dump::absolute(&bind.path).unwrap_or_else(|_| paths::normalize(&bind.path));
         match sources.get(bind.package.as_str()) {
             Some((first, other)) if *first != path => problems.push(format!(
-                "[bind.{other}] and [bind.{node}] give package `{}` two paths",
+                "{} and {} give package `{}` two paths",
+                bound_by(other),
+                bound_by(node),
                 bind.package
             )),
             Some(_) => {}
@@ -851,6 +879,41 @@ mod tests {
                 .contains("segments `worker-a` and `worker_a` both become package `tiny-worker-a`"),
             "{error}"
         );
+    }
+
+    /// A graph spec has no `[bind.*]` tables, so its errors name the node
+    /// and its `[nodes]` crate instead.
+    #[test]
+    fn a_graph_spec_names_a_node_crate_without_bind_tables() {
+        let mut spec = spec(
+            gdl::Placement::new()
+                .segment("contract", ["S"])
+                .segment("nodes", ["D"]),
+            &[("D", "tiny_nodes::D")],
+        );
+        spec.source = Source::Graph(spec::GraphSource {
+            path: "/work/tiny.gdl".into(),
+            crates: Vec::new(),
+            pins: Default::default(),
+            nodes: Vec::new(),
+            node_pins: Default::default(),
+        });
+        let contract = Contract {
+            package: "tiny-contract".into(),
+            lib: "tiny_contract".into(),
+            path: "/work/out/contract".into(),
+            module: "tiny_contract".into(),
+        };
+        let error = validate(&spec, &contract, &manifest())
+            .expect_err("collision")
+            .to_string();
+        assert!(
+            error.contains(
+                "segment `nodes` becomes package `tiny-nodes`, the name of node `D`'s [nodes] crate"
+            ),
+            "{error}"
+        );
+        assert!(!error.contains("[bind."), "{error}");
     }
 
     #[test]

@@ -178,3 +178,39 @@ fn a_message_must_be_public_where_it_is_defined() {
         "{error}"
     );
 }
+
+/// The catalogue program is run by cargo, as it was built: a target named
+/// explicitly puts it in another directory, and `prefer-dynamic` makes it
+/// load the standard library at run time. Both settings at once, in a
+/// target directory of their own, so neither reaches the other tests' build.
+/// Slow on its first run: it builds the message crates for that target.
+#[test]
+fn the_catalogue_program_runs_as_cargo_built_it() {
+    let host = String::from_utf8(
+        std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .arg("-vV")
+            .output()
+            .expect("rustc")
+            .stdout,
+    )
+    .expect("utf-8")
+    .lines()
+    .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
+    .expect("host");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gdl-gen"))
+        .arg("--spec")
+        .arg(fixtures().join("one.toml"))
+        .arg("--resolve")
+        .arg("--target-dir")
+        .arg(target().with_file_name("gdl-gen-tests-target"))
+        .env("CARGO_BUILD_TARGET", host)
+        .env("RUSTFLAGS", "-C prefer-dynamic")
+        .output()
+        .expect("gdl-gen");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("chat_protocols::Prompt"));
+}

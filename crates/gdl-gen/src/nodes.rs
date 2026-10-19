@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use gdl_syntax::{Graph, Node, Role};
+use syn::ext::IdentExt as _;
 
 use crate::Error;
 use crate::spec::{Bind, NodeCrate};
@@ -25,10 +26,29 @@ pub(crate) fn read(crates: &[NodeCrate]) -> Result<Vec<(usize, Node)>, Error> {
             .and_then(|tokens| {
                 gdl_syntax::declarations(tokens).map_err(|e| crate::names::located(e, &krate.file))
             });
-        match parsed {
-            Ok(nodes) => declared.extend(nodes.into_iter().map(|node| (index, node))),
-            Err(error) => problems.push(error.to_string()),
+        let nodes = match parsed {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                problems.push(error.to_string());
+                continue;
+            }
+        };
+        // A nodes file names messages, as a graph file does.
+        for node in &nodes {
+            for ty in crate::names::port_types(&node.sig) {
+                if gdl_syntax::message_name(ty).is_err() {
+                    problems.push(crate::names::at(
+                        &krate.file,
+                        syn::spanned::Spanned::span(ty),
+                        &format!(
+                            "a nodes file names messages, and `{}` is not a message name",
+                            quote::ToTokens::to_token_stream(ty)
+                        ),
+                    ));
+                }
+            }
         }
+        declared.extend(nodes.into_iter().map(|node| (index, node)));
     }
     if problems.is_empty() {
         Ok(declared)
@@ -48,11 +68,13 @@ pub(crate) fn bind(
 ) -> (BTreeMap<String, Bind>, Vec<String>) {
     // The type a declared node names: `<lib>::<Name>`, by ruling 43, with a
     // library named like a keyword (`gen`) written raw, as Rust reaches it.
+    // `r#Engine` declares `Engine`.
+    let name_of = |node: &Node| node.ident.unraw().to_string();
     let ty = |&(index, ref node): &(usize, Node)| {
         format!(
             "{}::{}",
             gdl_syntax::identifier(&crates[index].lib),
-            node.ident
+            gdl_syntax::identifier(&name_of(node))
         )
     };
     let mut problems = Vec::new();
@@ -73,7 +95,10 @@ pub(crate) fn bind(
         let name = node.ident.to_string();
         let found: Vec<&(usize, Node)> = match pins.get(&name) {
             Some(path) => declared.iter().filter(|d| ty(d) == *path).collect(),
-            None => declared.iter().filter(|(_, d)| d.ident == name).collect(),
+            None => declared
+                .iter()
+                .filter(|(_, d)| name_of(d) == name)
+                .collect(),
         };
         let choice = match (found.as_slice(), pins.get(&name)) {
             ([one], _) => *one,
@@ -129,7 +154,7 @@ pub(crate) fn bind(
         let crate_says = format!(
             "{} {}: {}",
             crate::contract::role(declaration.role()),
-            declaration.ident,
+            name_of(declaration),
             crate::contract::signature(&declaration.sig, &names)
         );
         let same = node.role() == declaration.role()
@@ -282,6 +307,46 @@ mod tests {
         let pins = BTreeMap::from([("Engine".to_string(), "engine::Mock".to_string())]);
         let binds = bound(&graph(), &crates, &declared, &pins).expect("pinned");
         assert_eq!(binds["Engine"].ty, "engine::Mock");
+    }
+
+    /// A declaration spelled raw names the same node: `r#Engine` is
+    /// `Engine`.
+    #[test]
+    fn a_raw_declaration_names_the_same_node() {
+        let (crates, mut declared) = chat();
+        declared.retain(|(_, d)| d.ident != "Engine");
+        declared.extend(declare(1, "sink r#Engine: Words -> stream Token;"));
+        let binds = bound(&graph(), &crates, &declared, &BTreeMap::new()).expect("bound");
+        assert_eq!(binds["Engine"].ty, "engine::Engine");
+    }
+
+    /// A nodes file names messages, as a graph file does: every position
+    /// that holds a Rust type instead is reported, with its place.
+    #[test]
+    fn a_nodes_file_names_messages() {
+        let dir = std::env::temp_dir().join(format!("gdl-gen-nodes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("nodes.gdl");
+        std::fs::write(
+            &file,
+            "sink Engine: Vec<Words> -> stream Token;\nforward Truncate: () -> a::Words;\n",
+        )
+        .expect("nodes file");
+        let mut krate = krate("engine");
+        krate.file = file.clone();
+        let Err(error) = read(&[krate]) else {
+            panic!("a nodes file of Rust types was read");
+        };
+        let error = error.to_string();
+        assert_eq!(
+            error,
+            format!(
+                "{0}:1:14: a nodes file names messages, and `Vec < Words >` is not a message name\n\
+                 {0}:2:25: a nodes file names messages, and `a :: Words` is not a message name",
+                file.display()
+            )
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A library named like a keyword is reached as `r#gen`, in the type

@@ -45,8 +45,8 @@ fn fails_with(package: &str, expected: &[&str]) {
     }
 }
 
-/// Every role, streamed requests with and without a head, and a type in a
-/// module that the crate root re-exports.
+/// Every role, streamed requests with and without a head, a type in a
+/// module that the crate root re-exports, and a declaration spelled raw.
 #[test]
 fn nodes_that_match_their_declarations_compile() {
     let (ok, stderr) = build("node-good");
@@ -85,6 +85,28 @@ fn a_node_of_another_role_fails_to_compile() {
     );
 }
 
+/// A streamed request nested in a head or an item matches no declaration:
+/// graph syntax has no form for it.
+#[test]
+fn a_nested_stream_fails_to_compile() {
+    fails_with(
+        "node-nested-stream",
+        &[
+            "node `Engine`: its `Sink::Req` is not `Words + stream Token`",
+            "node `Other`: its `Sink::Req` is not `Words + stream Token`",
+        ],
+    );
+}
+
+/// The generated segment names the type from another crate.
+#[test]
+fn a_private_node_type_fails_to_compile() {
+    fails_with(
+        "node-private-root",
+        &["node `Engine`: a node type must be `pub`, for the generated segment crates to name it"],
+    );
+}
+
 #[test]
 fn a_crate_without_a_nodes_file_fails_to_compile() {
     fails_with(
@@ -98,7 +120,57 @@ fn a_crate_without_a_nodes_file_fails_to_compile() {
 /// changed. Built from a copy, so the other tests' crate is not touched.
 #[test]
 fn an_edit_to_the_nodes_file_rebuilds_the_crate() {
-    let dir = std::env::temp_dir().join(format!("gdl-node-edit-{}", std::process::id()));
+    let dir = good_copy("edit");
+    let build = || build_copy(&dir);
+    let (ok, stderr) = build();
+    assert!(ok, "{stderr}");
+    let file = dir.join("good/gdl/nodes.gdl");
+    let text = std::fs::read_to_string(&file).expect("nodes file");
+    std::fs::write(
+        &file,
+        text.replace("Words -> stream Token;", "Words -> stream Piece;"),
+    )
+    .expect("edit");
+    let (ok, stderr) = build();
+    assert!(!ok, "the edit did not rebuild the crate");
+    assert!(
+        stderr.contains("node `Engine`: its `Sink::Item` is not `Piece`"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The manifest names the nodes file, so pointing it at another file
+/// rebuilds the crate as well.
+#[test]
+fn a_change_of_nodes_file_in_the_manifest_rebuilds_the_crate() {
+    let dir = good_copy("manifest");
+    let build = || build_copy(&dir);
+    let text = std::fs::read_to_string(dir.join("good/gdl/nodes.gdl")).expect("nodes file");
+    std::fs::write(
+        dir.join("good/gdl/other.gdl"),
+        text.replace("Words -> stream Token;", "Words -> stream Piece;"),
+    )
+    .expect("other file");
+    let (ok, stderr) = build();
+    assert!(ok, "{stderr}");
+    let manifest = dir.join("good/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).expect("manifest");
+    std::fs::write(&manifest, text.replace("gdl/nodes.gdl", "gdl/other.gdl")).expect("edit");
+    let (ok, stderr) = build();
+    assert!(!ok, "the manifest change did not rebuild the crate");
+    assert!(
+        stderr
+            .contains("node `Engine`: its `Sink::Item` is not `Piece`, as gdl/other.gdl declares"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A copy of the `good` fixture crate in a workspace of its own, so that a
+/// test may edit it without touching the crate the other tests build.
+fn good_copy(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("gdl-node-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for krate in ["good", "protocols"] {
         copy(&fixtures().join(krate), &dir.join(krate));
@@ -117,35 +189,22 @@ fn an_edit_to_the_nodes_file_rebuilds_the_crate() {
         ),
     )
     .expect("workspace");
-    let build = || {
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let output = Command::new(cargo)
-            .args(["build", "--quiet", "-p", "node-good", "--manifest-path"])
-            .arg(dir.join("Cargo.toml"))
-            .env("CARGO_TARGET_DIR", target())
-            .output()
-            .expect("cargo");
-        (
-            output.status.success(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        )
-    };
-    let (ok, stderr) = build();
-    assert!(ok, "{stderr}");
-    let file = dir.join("good/gdl/nodes.gdl");
-    let text = std::fs::read_to_string(&file).expect("nodes file");
-    std::fs::write(
-        &file,
-        text.replace("Words -> stream Token;", "Words -> stream Piece;"),
+    dir
+}
+
+/// Build the copy's node crate: its success, and what the compiler said.
+fn build_copy(dir: &Path) -> (bool, String) {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .args(["build", "--quiet", "-p", "node-good", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", target())
+        .output()
+        .expect("cargo");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
     )
-    .expect("edit");
-    let (ok, stderr) = build();
-    assert!(!ok, "the edit did not rebuild the crate");
-    assert!(
-        stderr.contains("node `Engine`: its `Sink::Item` is not `Piece`"),
-        "{stderr}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn copy(from: &Path, to: &Path) {

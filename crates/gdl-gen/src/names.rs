@@ -151,7 +151,7 @@ fn name(ty: &Type) -> Result<Name, ()> {
 }
 
 /// Every message position of a node, in declaration order.
-fn port_types(sig: &Sig) -> Vec<&Type> {
+pub(crate) fn port_types(sig: &Sig) -> Vec<&Type> {
     fn request(req: &Request) -> impl Iterator<Item = &Type> {
         std::iter::once(&req.head).chain(&req.item)
     }

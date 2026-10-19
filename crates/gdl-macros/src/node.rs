@@ -31,7 +31,15 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         ));
     }
     let name = ident.unraw().to_string();
-    let (file, shown) = nodes_file(ident.span())?;
+    if !matches!(input.vis, syn::Visibility::Public(_)) {
+        return Err(syn::Error::new(
+            ident.span(),
+            format!(
+                "node `{name}`: a node type must be `pub`, for the generated segment crates to name it"
+            ),
+        ));
+    }
+    let (manifest, file, shown) = nodes_file(ident.span())?;
     let text = std::fs::read_to_string(&file)
         .map_err(|e| syn::Error::new(ident.span(), format!("reading {}: {e}", file.display())))?;
     let declared = text
@@ -41,8 +49,12 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             gdl_syntax::declarations(tokens)
                 .map_err(|e| syn::Error::new(ident.span(), format!("{shown}: {e}")))
         })?;
-    let Some(node) = declared.iter().find(|n| n.ident == name) else {
-        let names: Vec<String> = declared.iter().map(|n| format!("`{}`", n.ident)).collect();
+    // `r#Engine` and `Engine` are one name, on either side.
+    let Some(node) = declared.iter().find(|n| n.ident.unraw() == name) else {
+        let names: Vec<String> = declared
+            .iter()
+            .map(|n| format!("`{}`", n.ident.unraw()))
+            .collect();
         return Err(syn::Error::new(
             ident.span(),
             format!(
@@ -89,6 +101,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         });
     }
     let file = LitStr::new(&file.to_string_lossy(), Span::call_site());
+    let manifest = LitStr::new(&manifest.to_string_lossy(), Span::call_site());
     let root = quote_spanned! {ident.span()=>
         // The generator names the type `<crate>::<Node>`: the same type must
         // be there.
@@ -102,17 +115,19 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         #item
 
         const _: () = {
-            // An edit to the nodes file rebuilds the crate.
+            // An edit to the nodes file, or to the manifest that names it,
+            // rebuilds the crate.
             const _: &str = ::core::include_str!(#file);
+            const _: &str = ::core::include_str!(#manifest);
             #root
             #(#checks)*
         };
     })
 }
 
-/// The nodes file of the crate being compiled, and its path as the
-/// manifest writes it.
-fn nodes_file(span: Span) -> syn::Result<(PathBuf, String)> {
+/// The manifest of the crate being compiled, its nodes file, and the
+/// file's path as the manifest writes it.
+fn nodes_file(span: Span) -> syn::Result<(PathBuf, PathBuf, String)> {
     let missing = || {
         syn::Error::new(
             span,
@@ -121,8 +136,9 @@ fn nodes_file(span: Span) -> syn::Result<(PathBuf, String)> {
     };
     let dir = std::env::var_os("CARGO_MANIFEST_DIR").ok_or_else(missing)?;
     let dir = Path::new(&dir);
-    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).map_err(|_| missing())?;
-    let table: toml::Table = toml::from_str(&manifest).map_err(|_| missing())?;
+    let manifest = dir.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).map_err(|_| missing())?;
+    let table: toml::Table = toml::from_str(&text).map_err(|_| missing())?;
     let file = table
         .get("package")
         .and_then(|p| p.get("metadata"))
@@ -130,7 +146,7 @@ fn nodes_file(span: Span) -> syn::Result<(PathBuf, String)> {
         .and_then(|g| g.get("nodes"))
         .and_then(toml::Value::as_str)
         .ok_or_else(missing)?;
-    Ok((dir.join(file), file.to_string()))
+    Ok((manifest, dir.join(file), file.to_string()))
 }
 
 /// The expected message names, or the position that holds no message name,

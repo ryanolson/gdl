@@ -4,8 +4,10 @@
 [workspace]
 members = [
     "good",
+    "nested-stream",
     "no-metadata",
     "not-at-root",
+    "private-root",
     "protocols",
     "undeclared",
     "wrong-message",
