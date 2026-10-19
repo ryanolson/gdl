@@ -98,13 +98,21 @@ pub fn add_to_catalog(
     added: std::time::SystemTime,
 ) -> Result<PathBuf, Error> {
     let mut catalog = Catalog::load(catalogue).map_err(|e| Error::new(e.to_string()))?;
-    let entry = Entry {
-        added: gdl_extract::rfc3339(added),
-        checksum: extracted.located.checksum.clone(),
-        offer: extracted.offer.clone(),
-    };
-    let (_, file) = catalog.add(entry).map_err(|e| Error::new(e.to_string()))?;
+    let (_, file) = catalog
+        .add(extracted.entry(added))
+        .map_err(|e| Error::new(e.to_string()))?;
     Ok(file)
+}
+
+impl Extracted {
+    /// The crate as a catalogue entry, added at `added`.
+    pub fn entry(&self, added: std::time::SystemTime) -> Entry {
+        Entry {
+            added: gdl_extract::rfc3339(added),
+            checksum: self.located.checksum.clone(),
+            offer: self.offer.clone(),
+        }
+    }
 }
 
 /// Build a program that links the extracted crate, in `target`, and

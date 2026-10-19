@@ -565,4 +565,79 @@ mod tests {
             ]
         );
     }
+
+    /// Two messages of one name: the second carried is numbered, and each
+    /// name is pinned to its message, since the name alone resolves to two.
+    #[test]
+    fn two_messages_of_one_name_are_named_apart_and_pinned() {
+        let dir = std::env::temp_dir().join(format!("gdl-web-twins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut catalog = Catalog::load(&dir).expect("catalogue");
+        for package in ["other", "proto"] {
+            let offer = Offer {
+                package: package.into(),
+                version: "0.1.0".into(),
+                source: REGISTRY.into(),
+                messages: vec![MessageEntry {
+                    name: "Token".into(),
+                    path: format!("{package}::Token"),
+                    wire: true,
+                    public: true,
+                }],
+                exports: Vec::new(),
+                nodes: Vec::new(),
+            };
+            catalog
+                .add(Entry {
+                    added: "2026-10-19T00:00:00Z".into(),
+                    checksum: None,
+                    offer,
+                })
+                .expect("added");
+        }
+        let other = Origin {
+            package: "other".into(),
+            ..origin("other::Token")
+        };
+        let draft = Draft {
+            name: "twins".into(),
+            source: Source {
+                name: "A".into(),
+                request: Port {
+                    head: Some(other),
+                    item: None,
+                },
+                response: origin("proto::Token"),
+            },
+            nodes: Vec::new(),
+            hop: Hop {
+                forward: Vec::new(),
+                inner: "B".into(),
+                nested: None,
+                backward: Vec::new(),
+            },
+            segments: BTreeMap::new(),
+        };
+        let rendered = draft
+            .render(&catalog, &Gdl::Path("/gdl".into()))
+            .expect("rendered");
+        assert!(
+            rendered
+                .graph
+                .contains("source A: Token -> stream Token2;\n"),
+            "{}",
+            rendered.graph
+        );
+        assert!(
+            rendered.spec.contains("Token = \"other::Token\""),
+            "{}",
+            rendered.spec
+        );
+        assert!(
+            rendered.spec.contains("Token2 = \"proto::Token\""),
+            "{}",
+            rendered.spec
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -670,7 +670,7 @@ page (index.html + app.js, embedded; no build step)
      | POST /api/catalog {crate}    fetch + read + add (the only call that fetches; failure adds nothing)
      | POST /api/check {draft}      render graph file + spec --> gdl_gen::check(Offers::Given(catalogue))
      | POST /api/export {draft}     render --> gdl_gen::export(Offers::Given(catalogue)) --> .tar.gz
-gdl-web: Catalog behind a lock; every gdl-gen call on a blocking thread; drafts written under target/gdl-web/drafts/<hash>/
+gdl-web: Catalog behind a lock; every gdl-gen call on a blocking thread; a draft's spec is read from its text (Spec::from_text), and nothing is written
 ```
 
 - **`gdl_gen::check` and `Offers`.** `check` validates a spec as `render` does and writes nothing. It returns the manifest, the crossing report, and the placed graph. `Offers::Given` takes a loaded catalogue's offers instead of reading source, and holds them to the same library-name rule. `export` takes the same choice, so a draft that checks exports from the same offers.

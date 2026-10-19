@@ -73,6 +73,9 @@ pub(crate) enum Source {
 pub(crate) struct GraphSource {
     /// The graph file, resolved.
     pub(crate) path: PathBuf,
+    /// The graph file's text, when the spec was given it rather than a
+    /// file to read: a composer's draft is never written to disk.
+    pub(crate) text: Option<String>,
     /// The crates whose messages the graph's names resolve against.
     pub(crate) crates: Vec<MessageCrate>,
     /// Message name to the path of the type it takes, for a name that
@@ -332,6 +335,22 @@ impl Spec {
         Ok(spec)
     }
 
+    /// A graph spec given as text, with its graph file's text: the spec as
+    /// if it were `gdl.toml` in `dir`, which paths in it are relative to.
+    /// Nothing is read from disk but the listed crates.
+    pub fn from_text(spec: &str, graph: &str, dir: &Path) -> Result<Self, Error> {
+        let mut spec = Self::parse(spec, &dir.join("gdl.toml"), dir)?;
+        match &mut spec.source {
+            Source::Graph(source) => source.text = Some(graph.to_string()),
+            Source::Contract(_) => {
+                return Err(Error::new(
+                    "a spec given as text names a [graph], not a [contract]",
+                ));
+            }
+        }
+        Ok(spec)
+    }
+
     fn parse(text: &str, file: &Path, dir: &Path) -> Result<Self, Error> {
         let raw: Raw =
             toml::from_str(text).map_err(|e| Error::new(format!("{}: {e}", file.display())))?;
@@ -477,6 +496,7 @@ fn graph_source(
     }
     Ok(GraphSource {
         path: dir.join(graph.path),
+        text: None,
         crates,
         pins: messages.pin,
         nodes,

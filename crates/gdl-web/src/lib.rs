@@ -14,7 +14,7 @@
 
 mod draft;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use axum::Router;
@@ -32,7 +32,7 @@ pub use draft::{Draft, Gdl, Rendered};
 pub struct Config {
     /// The working catalogue's directory.
     pub catalog: PathBuf,
-    /// Where crates are fetched, and drafts written.
+    /// Where crates are fetched.
     pub target: PathBuf,
     /// Where generated crates take gdl from.
     pub gdl: Gdl,
@@ -46,6 +46,8 @@ struct Composer {
 /// The server's routes, over the catalogue `config` names, loaded now.
 pub fn router(config: Config) -> Result<Router, String> {
     let catalog = Catalog::load(&config.catalog).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&config.target)
+        .map_err(|e| format!("{}: {e}", config.target.display()))?;
     let composer = Arc::new(Composer {
         config,
         catalog: RwLock::new(catalog),
@@ -99,26 +101,21 @@ async fn add(State(composer): Shared, Json(add): Json<Add>) -> Response {
         name: name.to_string(),
         version: version.to_string(),
     };
-    let blocking = Arc::clone(&composer);
     // Fetching runs cargo, and adding writes a file: off the async threads.
+    // The add is made to the served catalogue, under its lock, so two adds
+    // at once both stay served; `Catalog::add` keeps whichever entry was
+    // written first.
     let added = tokio::task::spawn_blocking(move || {
         let extracted =
-            gdl_gen::extract(&krate, &blocking.config.target).map_err(|e| e.to_string())?;
-        gdl_gen::add_to_catalog(
-            &blocking.config.catalog,
-            &extracted,
-            std::time::SystemTime::now(),
-        )
-        .map_err(|e| e.to_string())?;
-        Catalog::load(&blocking.config.catalog).map_err(|e| e.to_string())
+            gdl_gen::extract(&krate, &composer.config.target).map_err(|e| e.to_string())?;
+        let entry = extracted.entry(std::time::SystemTime::now());
+        let mut catalog = composer.catalog.write().expect("the catalogue lock");
+        catalog.add(entry).map(|_| ()).map_err(|e| e.to_string())
     })
     .await
     .expect("the add's thread");
     match added {
-        Ok(catalog) => {
-            *composer.catalog.write().expect("the catalogue lock") = catalog;
-            Json(json!({ "added": add.krate })).into_response()
-        }
+        Ok(()) => Json(json!({ "added": add.krate })).into_response(),
         Err(error) => problems(
             StatusCode::UNPROCESSABLE_ENTITY,
             error.lines().map(str::to_string).collect(),
@@ -206,8 +203,9 @@ async fn export(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
     }
 }
 
-/// The draft rendered, and written where its spec can be loaded: a
-/// directory named for its content, so one draft is always one path.
+/// The draft rendered, and its spec read from the text: nothing is
+/// written, so drafts leave nothing behind. The target directory stands for
+/// the spec's own; paths in the spec are absolute or versions.
 fn prepare(
     composer: &Composer,
     draft: &Draft,
@@ -218,38 +216,10 @@ fn prepare(
             .render(&catalog, &composer.config.gdl)
             .map_err(|p| (None, p))?
     };
-    let dir = drafts(&composer.config.target).join(format!("{:016x}", hash(&rendered)));
-    // Identical drafts share the directory: each file is written beside and
-    // renamed into place, so a check never reads another's half-written one.
-    let write = |path: &Path, text: &str| {
-        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let partial = path.with_extension(format!("{}.{n}", std::process::id()));
-        std::fs::write(&partial, text)
-            .and_then(|()| std::fs::rename(&partial, path))
-            .map_err(|e| format!("{}: {e}", path.display()))
-    };
-    let written = std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))
-        .and_then(|()| write(&dir.join("graph.gdl"), &rendered.graph))
-        .and_then(|()| write(&dir.join("gdl.toml"), &rendered.spec))
-        .and_then(|()| gdl_gen::Spec::load(&dir.join("gdl.toml")).map_err(|e| e.to_string()));
-    match written {
+    match gdl_gen::Spec::from_text(&rendered.spec, &rendered.graph, &composer.config.target) {
         Ok(spec) => Ok((rendered, spec)),
-        Err(error) => Err((Some(rendered), vec![error])),
+        Err(error) => Err((Some(rendered), vec![error.to_string()])),
     }
-}
-
-fn drafts(target: &Path) -> PathBuf {
-    target.join("gdl-web").join("drafts")
-}
-
-fn hash(rendered: &Rendered) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    rendered.graph.hash(&mut hasher);
-    rendered.spec.hash(&mut hasher);
-    hasher.finish()
 }
 
 fn problems(status: StatusCode, problems: Vec<String>) -> Response {

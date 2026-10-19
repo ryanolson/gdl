@@ -238,7 +238,10 @@ fn resolved(
     target: &Path,
     from: Offers<'_>,
 ) -> Result<(names::GraphFile, Resolution), Error> {
-    let file = names::GraphFile::read(&source.path)?;
+    let file = match &source.text {
+        Some(text) => names::GraphFile::parse(text, &source.path)?,
+        None => names::GraphFile::read(&source.path)?,
+    };
     let listed: Vec<_> = source
         .crates
         .iter()
@@ -1123,6 +1126,7 @@ mod tests {
         );
         spec.source = Source::Graph(spec::GraphSource {
             path: "/work/tiny.gdl".into(),
+            text: None,
             crates: Vec::new(),
             pins: Default::default(),
             nodes: Vec::new(),
@@ -1258,6 +1262,38 @@ mod tests {
             "{lib}"
         );
         assert!(main.contains("build::<::tiny_nodes::D>"), "{main}");
+    }
+
+    /// Generated code names a crate by its library: a given offer whose
+    /// paths begin with another library than the listed one is refused,
+    /// as a read is.
+    #[test]
+    fn a_given_offer_names_its_library_for_its_package() {
+        let offer = Offer {
+            package: "proto".into(),
+            version: "0.1.0".into(),
+            source: CRATES_IO[0].into(),
+            messages: vec![gdl_extract::MessageEntry {
+                name: "Words".into(),
+                path: "renamed::Words".into(),
+                wire: true,
+                public: true,
+            }],
+            exports: Vec::new(),
+            nodes: Vec::new(),
+        };
+        let version = spec::CrateSource::Version("0.1.0".into());
+        let error = given_offer(std::slice::from_ref(&offer), "proto", "proto", &version)
+            .expect_err("renamed");
+        assert_eq!(
+            error,
+            [
+                "proto@0.1.0: its library is `renamed`, not `proto`; a crate listed by version must name its library for its package"
+            ]
+        );
+        let mut named = offer.clone();
+        named.messages[0].path = "proto::Words".into();
+        assert!(given_offer(&[named], "proto", "proto", &version).is_ok());
     }
 
     /// A crate listed by version is the registry's: a git package of the

@@ -143,6 +143,8 @@ async fn a_draft_checks_as_its_spec_would_generate() {
         body["graph"],
         "name = \"composed\", schema = 1;\nsource A: Words -> stream Token;\nsink Engine: Words -> stream Token;\ntopology: A => Engine;\n"
     );
+    // A check writes nothing.
+    assert!(!dir.join("target/gdl-web").exists());
     let spec = body["spec"].as_str().expect("spec");
     assert!(spec.contains("crates = [\"regproto@0.1.0\"]"), "{spec}");
     assert!(spec.contains("crates = [\"regnodes@0.1.0\"]"), "{spec}");
