@@ -28,7 +28,7 @@ pub(crate) fn expand(
         ));
     }
     let mut names = Vec::new();
-    bindings(&item.tree, &mut names)?;
+    bindings(&item.tree, None, &mut names)?;
     let statics = names.iter().enumerate().map(|(index, ident)| {
         let name = ident.unraw().to_string();
         let static_ident = format_ident!("__GDL_EXPORT_{index}");
@@ -54,11 +54,19 @@ pub(crate) fn expand(
     })
 }
 
-/// Each name a use tree binds. A glob binds names no one wrote, so it
-/// cannot be an export.
-fn bindings(tree: &UseTree, out: &mut Vec<Ident>) -> syn::Result<()> {
+/// Each name a use tree binds; `parent` is the segment before `tree`,
+/// which `{self}` binds. A glob binds names no one wrote, so it cannot be
+/// an export.
+fn bindings(tree: &UseTree, parent: Option<&Ident>, out: &mut Vec<Ident>) -> syn::Result<()> {
     match tree {
-        UseTree::Path(p) => bindings(&p.tree, out),
+        UseTree::Path(p) => bindings(&p.tree, Some(&p.ident), out),
+        UseTree::Name(n) if n.ident == "self" => match parent {
+            Some(parent) => {
+                out.push(parent.clone());
+                Ok(())
+            }
+            None => Err(syn::Error::new(n.ident.span(), "`self` names no message")),
+        },
         UseTree::Name(n) => {
             out.push(n.ident.clone());
             Ok(())
@@ -77,6 +85,6 @@ fn bindings(tree: &UseTree, out: &mut Vec<Ident>) -> syn::Result<()> {
             g.star_token.span,
             "an export names each message it offers: a glob names none",
         )),
-        UseTree::Group(g) => g.items.iter().try_for_each(|t| bindings(t, out)),
+        UseTree::Group(g) => g.items.iter().try_for_each(|t| bindings(t, parent, out)),
     }
 }

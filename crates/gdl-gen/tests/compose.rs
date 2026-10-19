@@ -90,6 +90,18 @@ fn a_listed_crate_offers_only_what_it_defines_and_exports() {
     assert_eq!((chunk.origin.version.as_str(), chunk.wire), ("0.2.0", true));
 }
 
+/// A listed directory is one package, whichever workspace read it first:
+/// the bridge's workspace holds both versions of `vproto`, and listing it
+/// first still takes the listed directory's version.
+#[test]
+fn a_listed_directory_names_one_package_in_any_order() {
+    for spec in ["versions-pinned.toml", "versions-bridge-first.toml"] {
+        let resolution = resolve(spec).expect(spec);
+        let chunk = &resolution.messages["Chunk"];
+        assert_eq!(chunk.origin.version, "0.2.0", "{spec}");
+    }
+}
+
 /// A crate that only exports a message offers it under its own path, and
 /// the name resolves to the message where it is defined; listed with the
 /// defining crate, it is one message, not two.
@@ -241,6 +253,13 @@ fn verify_compares_the_build_with_the_source() {
         gdl_gen::verify(&extracted, &target())
     };
     read("exported-protocols").expect("an export agrees");
+    // The source reader's own fixture of Rust read as the compiler reads
+    // it: the build agrees with every case.
+    let quirks = gdl_gen::Crate::Path(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-extract/tests/fixtures/read/quirks"),
+    );
+    let extracted = gdl_gen::extract(&quirks, &target()).expect("extracted");
+    gdl_gen::verify(&extracted, &target()).expect("the build agrees with the reader");
     let error = read("macro-made")
         .expect_err("a macro made a message")
         .to_string();

@@ -616,6 +616,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "read-quirks"
+version = "0.0.0"
+dependencies = [
+ "gdl",
+ "read-protocols",
+ "serde",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

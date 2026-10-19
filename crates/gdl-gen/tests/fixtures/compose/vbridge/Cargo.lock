@@ -201,12 +201,21 @@ name = "vbridge"
 version = "0.0.0"
 dependencies = [
  "gdl-message",
- "vproto",
+ "vproto 0.1.0",
+ "vproto 0.2.0",
 ]
 
 [[package]]
 name = "vproto"
 version = "0.1.0"
+dependencies = [
+ "gdl-message",
+ "serde",
+]
+
+[[package]]
+name = "vproto"
+version = "0.2.0"
 dependencies = [
  "gdl-message",
  "serde",

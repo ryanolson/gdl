@@ -186,7 +186,7 @@ fn offers(dirs: &[&Path]) -> Result<Vec<gdl_extract::Offer>, Error> {
     for dir in dirs {
         let known = workspaces
             .iter()
-            .find_map(|w| w.package_in(dir).map(|name| (w, name)));
+            .find_map(|w| w.package_in(dir).map(|spec| (w, spec)));
         let (workspace, name) = match known {
             Some(found) => found,
             None => {

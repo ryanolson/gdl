@@ -151,6 +151,33 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
     // Only this crate's registrations: a dependency registers its own.
     let dir = std::fs::canonicalize(&located.dir).unwrap_or_else(|_| located.dir.clone());
     let mine = |d: &str| std::fs::canonicalize(d).is_ok_and(|d| d == dir);
+    let problems = differences(&registered, &mine, &extracted.offer);
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::new(problems.join("\n")))
+    }
+}
+
+/// Each difference between what a build registered for the crate whose
+/// registrations `mine` picks, and what the reader found in it, `offer`.
+/// Entries are compared as lines that hold everything an entry claims: a
+/// message's wire capability, an export's origin and that message's wire
+/// capability, and each port's messages and shape.
+fn differences(
+    registered: &gdl_message::Catalogue,
+    mine: &dyn Fn(&str) -> bool,
+    offer: &Offer,
+) -> Vec<String> {
+    // An export's capability is its message's, registered by the crate
+    // that defines it, which the program links too.
+    let capability = |origin: &gdl_message::Origin| {
+        registered
+            .messages
+            .iter()
+            .find(|m| m.dir == origin.dir && m.path == origin.path)
+            .map_or("unregistered", |m| wire(m.wire))
+    };
     let built: BTreeSet<String> = registered
         .messages
         .iter()
@@ -158,8 +185,13 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
         .map(|m| format!("message `{}` at `{}`, {}", m.name, m.path, wire(m.wire)))
         .chain(registered.exports.iter().filter(|e| mine(&e.dir)).map(|e| {
             format!(
-                "export `{}` at `{}`, of `{}` ({} {})",
-                e.name, e.path, e.origin.path, e.origin.package, e.origin.version
+                "export `{}` at `{}`, of `{}` ({} {}), {}",
+                e.name,
+                e.path,
+                e.origin.path,
+                e.origin.package,
+                e.origin.version,
+                capability(&e.origin)
             )
         }))
         .chain(registered.nodes.iter().filter(|n| mine(&n.dir)).map(|n| {
@@ -174,7 +206,10 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
                             port(
                                 &p.port,
                                 p.head.as_ref().map(|o| (&o.package, &o.version, &o.path)),
-                                p.item.as_ref().map(|o| (&o.package, &o.version, &o.path)),
+                                p.streamed.then(|| {
+                                    p.item.as_ref().map(|o| (&o.package, &o.version, &o.path))
+                                }),
+                                p.nested,
                             )
                         })
                         .collect();
@@ -184,15 +219,19 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
             format!("node `{}` at `{}`: {}", n.name, n.path, roles.join(" "))
         }))
         .collect();
-    let offer = &extracted.offer;
     let read: BTreeSet<String> = offer
         .messages
         .iter()
         .map(|m| format!("message `{}` at `{}`, {}", m.name, m.path, wire(m.wire)))
         .chain(offer.exports.iter().map(|e| {
             format!(
-                "export `{}` at `{}`, of `{}` ({} {})",
-                e.name, e.path, e.origin.path, e.origin.package, e.origin.version
+                "export `{}` at `{}`, of `{}` ({} {}), {}",
+                e.name,
+                e.path,
+                e.origin.path,
+                e.origin.package,
+                e.origin.version,
+                wire(e.wire)
             )
         }))
         .chain(offer.nodes.iter().map(|n| {
@@ -203,7 +242,12 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
                     port(
                         &p.port,
                         p.head.as_ref().map(|o| (&o.package, &o.version, &o.path)),
-                        p.item.as_ref().map(|o| (&o.package, &o.version, &o.path)),
+                        p.item
+                            .as_ref()
+                            .map(|o| Some((&o.package, &o.version, &o.path))),
+                        // The reader offers no nested stream: such a port
+                        // is a problem, not an entry.
+                        false,
                     )
                 })
                 .collect();
@@ -224,30 +268,179 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
         read.difference(&built)
             .map(|entry| format!("read from source, not registered by the build: {entry}")),
     );
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::new(problems.join("\n")))
-    }
+    problems
 }
 
 fn wire(wire: bool) -> &'static str {
     if wire { "wire" } else { "local" }
 }
 
-/// A port, with each message by package, version, and path.
+/// A port, with each message by package, version, and path. `item` is
+/// `Some` for a streamed request, with its item, `None` for `()`.
+type Message<'a> = (&'a String, &'a String, &'a String);
+
 fn port(
     name: &str,
-    head: Option<(&String, &String, &String)>,
-    item: Option<(&String, &String, &String)>,
+    head: Option<Message<'_>>,
+    item: Option<Option<Message<'_>>>,
+    nested: bool,
 ) -> String {
-    let one = |m: Option<(&String, &String, &String)>| {
+    let one = |m: Option<Message<'_>>| {
         m.map_or("()".to_string(), |(package, version, path)| {
             format!("{path} ({package} {version})")
         })
     };
+    let nested = if nested { ", nested" } else { "" };
     match item {
-        None => format!("{name}={}", one(head)),
-        Some(_) => format!("{name}={} + stream {}", one(head), one(item)),
+        None => format!("{name}={}{nested}", one(head)),
+        Some(item) => format!("{name}={} + stream {}{nested}", one(head), one(item)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gdl_extract::{ExportEntry, MessageEntry, NodeEntry, PortEntry};
+    use gdl_message::{Catalogue, ExportInfo, MessageInfo, NodeInfo, PortInfo, RoleInfo};
+
+    use super::*;
+
+    const PROTOCOLS: &str = "/crates/protocols";
+    const FACADE: &str = "/crates/facade";
+
+    fn built_origin(path: &str) -> gdl_message::Origin {
+        gdl_message::Origin {
+            package: "protocols".into(),
+            version: "0.1.0".into(),
+            dir: PROTOCOLS.into(),
+            path: path.into(),
+        }
+    }
+
+    fn read_origin(path: &str) -> gdl_extract::Origin {
+        gdl_extract::Origin {
+            package: "protocols".into(),
+            version: "0.1.0".into(),
+            source: format!("path+file://{PROTOCOLS}"),
+            path: path.into(),
+        }
+    }
+
+    /// A facade that exports `protocols::Words`, and has one forward node
+    /// whose `In` is `Streamed<Words, Words>`, as a build registers it.
+    fn registered(words_wire: bool, nested: bool) -> Catalogue {
+        Catalogue {
+            messages: vec![MessageInfo {
+                package: "protocols".into(),
+                version: "0.1.0".into(),
+                dir: PROTOCOLS.into(),
+                name: "Words".into(),
+                path: "protocols::Words".into(),
+                wire: words_wire,
+            }],
+            exports: vec![ExportInfo {
+                package: "facade".into(),
+                version: "0.1.0".into(),
+                dir: FACADE.into(),
+                name: "Words".into(),
+                path: "facade::Words".into(),
+                origin: built_origin("protocols::Words"),
+            }],
+            nodes: vec![NodeInfo {
+                package: "facade".into(),
+                version: "0.1.0".into(),
+                dir: FACADE.into(),
+                name: "Stage".into(),
+                path: "facade::Stage".into(),
+                roles: vec![RoleInfo {
+                    role: "forward".into(),
+                    ports: vec![
+                        PortInfo {
+                            port: "In".into(),
+                            streamed: true,
+                            nested,
+                            head: Some(built_origin("protocols::Words")),
+                            item: Some(built_origin("protocols::Words")),
+                        },
+                        PortInfo {
+                            port: "Out".into(),
+                            streamed: false,
+                            nested: false,
+                            head: Some(built_origin("protocols::Words")),
+                            item: None,
+                        },
+                    ],
+                }],
+            }],
+        }
+    }
+
+    /// The facade as the reader finds it: `Words` is a wire type.
+    fn read() -> Offer {
+        Offer {
+            package: "facade".into(),
+            version: "0.1.0".into(),
+            source: format!("path+file://{FACADE}"),
+            messages: Vec::<MessageEntry>::new(),
+            exports: vec![ExportEntry {
+                name: "Words".into(),
+                path: "facade::Words".into(),
+                origin: read_origin("protocols::Words"),
+                wire: true,
+            }],
+            nodes: vec![NodeEntry {
+                name: "Stage".into(),
+                role: "forward".into(),
+                ty: "facade::Stage".into(),
+                ports: vec![
+                    PortEntry {
+                        port: "In".into(),
+                        head: Some(read_origin("protocols::Words")),
+                        item: Some(read_origin("protocols::Words")),
+                    },
+                    PortEntry {
+                        port: "Out".into(),
+                        head: Some(read_origin("protocols::Words")),
+                        item: None,
+                    },
+                ],
+            }],
+        }
+    }
+
+    fn facade(dir: &str) -> bool {
+        dir == FACADE
+    }
+
+    #[test]
+    fn a_build_that_agrees_has_no_differences() {
+        assert_eq!(
+            differences(&registered(true, false), &facade, &read()),
+            Vec::<String>::new()
+        );
+    }
+
+    /// The reader may take a message for a wire type that is not one (its
+    /// serde impls borrow, say); the export's entry claims the capability,
+    /// so it is compared with the build's, though another crate defines
+    /// the message.
+    #[test]
+    fn an_exports_wire_capability_is_compared() {
+        let problems = differences(&registered(false, false), &facade, &read());
+        assert_eq!(
+            problems,
+            [
+                "registered by the build, not read from source: export `Words` at `facade::Words`, of `protocols::Words` (protocols 0.1.0), local",
+                "read from source, not registered by the build: export `Words` at `facade::Words`, of `protocols::Words` (protocols 0.1.0), wire",
+            ]
+        );
+    }
+
+    /// A port the build finds nested, where the source shows a flat
+    /// stream (a `cfg` the reader cannot evaluate chose it), differs.
+    #[test]
+    fn a_nested_port_differs_from_a_flat_one() {
+        let problems = differences(&registered(true, true), &facade, &read());
+        assert_eq!(problems.len(), 2, "{problems:#?}");
+        assert!(problems[0].contains(", nested"), "{}", problems[0]);
     }
 }

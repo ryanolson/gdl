@@ -159,11 +159,13 @@ fn derives(ty: &TypeDef, name: &str) -> bool {
 }
 
 /// Whether a type is a wire type: it derives `Serialize` and `Deserialize`,
-/// or its crate implements them for it.
+/// or its crate implements them for it. A derived `Deserialize` of a type
+/// that borrows is not `DeserializeOwned`, so it gives no codec.
 fn wire(resolver: &mut Resolver<'_>, krate: usize, module: usize, index: usize) -> bool {
     let ty = &resolver.crates[krate].modules[module].types[index];
     let derived = |name| derives(ty, name);
-    let (mut serialize, mut deserialize) = (derived("Serialize"), derived("Deserialize"));
+    let (mut serialize, mut deserialize) =
+        (derived("Serialize"), derived("Deserialize") && !ty.borrows);
     if serialize && deserialize {
         return true;
     }
@@ -173,7 +175,7 @@ fn wire(resolver: &mut Resolver<'_>, krate: usize, module: usize, index: usize) 
             .impls
             .iter()
             .filter_map(|i| {
-                let last = i.trait_path.as_ref()?.segments.last()?.ident.to_string();
+                let last = imported_as(resolver, krate, m, i.trait_path.as_ref()?)?;
                 Some((last, i.self_ty.clone()))
             })
             .collect();
@@ -195,8 +197,8 @@ fn wire(resolver: &mut Resolver<'_>, krate: usize, module: usize, index: usize) 
 }
 
 /// Whether `attrs` hold the marker `name`: written `<krate>::<name>` for
-/// one of `krates`, or `<name>` where a `use` of the module imports it from
-/// one of them.
+/// one of `krates`, or a single name that a `use` of the module binds to
+/// `<krate>::<name>`, under that name or another.
 fn marked(
     attrs: &[Meta],
     name: &str,
@@ -209,8 +211,8 @@ fn marked(
         let (path, _) = segments(meta.path());
         match path.as_slice() {
             [k, n] => n == name && krates.contains(&k.as_str()),
-            [n] if n == name => resolver.crates[krate].modules[module].uses.iter().any(|u| {
-                u.name.as_deref() == Some(name)
+            [n] => resolver.crates[krate].modules[module].uses.iter().any(|u| {
+                u.name.as_deref() == Some(n.as_str())
                     && u.path.len() == 2
                     && krates.contains(&u.path[0].as_str())
                     && u.path[1] == name
@@ -245,7 +247,7 @@ fn node(
             .impls
             .iter()
             .filter_map(|i| {
-                let role = i.trait_path.as_ref()?.segments.last()?.ident.to_string();
+                let role = imported_as(resolver, krate, m, i.trait_path.as_ref()?)?;
                 Some((role, i.self_ty.clone(), i.types.clone()))
             })
             .collect();
@@ -285,7 +287,7 @@ fn node(
                 "{at}: node `{name}`: its impl has no `type {port}`"
             ));
         };
-        let (head, item) = match streamed(port_ty) {
+        let (head, item) = match streamed(resolver, krate, impl_module, port_ty) {
             Some((head, item)) => (head, Some(item)),
             None => (port_ty, None),
         };
@@ -335,15 +337,21 @@ fn role_of(name: &str) -> Option<(&'static str, &'static [&'static str])> {
     }
 }
 
-/// A streamed request's head and item: `Streamed<H, T>`.
-fn streamed(ty: &syn::Type) -> Option<(&syn::Type, &syn::Type)> {
+/// A streamed request's head and item: `Streamed<H, T>`, in module
+/// `module`.
+fn streamed<'t>(
+    resolver: &Resolver<'_>,
+    krate: usize,
+    module: usize,
+    ty: &'t syn::Type,
+) -> Option<(&'t syn::Type, &'t syn::Type)> {
     let syn::Type::Path(path) = ty else {
         return None;
     };
-    let last = path.path.segments.last()?;
-    if last.ident != "Streamed" {
+    if imported_as(resolver, krate, module, &path.path)? != "Streamed" {
         return None;
     }
+    let last = path.path.segments.last()?;
     let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
         return None;
     };
@@ -377,4 +385,28 @@ fn message_type(
     let (path, absolute) = segments(&path.path);
     let def = resolver.resolve(krate, module, &path, absolute)?;
     message(resolver, def)
+}
+
+/// The name a trait or type path ends in, through a rename: `Stage` after
+/// `use gdl::Forward as Stage` is `Forward`. Role traits, `Streamed`, and
+/// serde's traits are matched by name, as derives are; this follows one
+/// `use` of a single-name path in its module, so a rename does not hide
+/// them.
+fn imported_as(
+    resolver: &Resolver<'_>,
+    krate: usize,
+    module: usize,
+    path: &syn::Path,
+) -> Option<String> {
+    let (segments, absolute) = segments(path);
+    let last = segments.last()?.clone();
+    if segments.len() > 1 || absolute {
+        return Some(last);
+    }
+    let renamed = resolver.crates[krate].modules[module]
+        .uses
+        .iter()
+        .find(|u| u.name.as_deref() == Some(last.as_str()))
+        .and_then(|u| u.path.last().cloned());
+    Some(renamed.unwrap_or(last))
 }

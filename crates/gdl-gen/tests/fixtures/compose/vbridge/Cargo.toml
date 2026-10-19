@@ -7,6 +7,8 @@ publish = false
 [dependencies]
 gdl-message = { path = "../../../../../gdl-message" }
 vproto = { path = "../vproto-1" }
+# Both versions, so that a directory of either names one package.
+vproto-next = { package = "vproto", path = "../vproto-2" }
 
 # Not a member of the repository workspace: it is read by the tests, and
 # built only for the contracts they generate.

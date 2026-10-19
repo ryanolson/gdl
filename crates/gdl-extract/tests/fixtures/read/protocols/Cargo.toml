@@ -1,12 +1,13 @@
 [package]
 name = "read-protocols"
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
+version = "0.0.0"
+edition = "2024"
+publish = false
 
 [features]
 extra = []
 
+# Written out, not inherited, as in `quirks`, which `--verify` builds.
 [dependencies]
-gdl-message = { workspace = true }
-serde = { workspace = true }
+gdl-message = { path = "../../../../../gdl-message" }
+serde = { version = "1", features = ["derive"] }

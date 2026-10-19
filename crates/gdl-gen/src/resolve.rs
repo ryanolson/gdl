@@ -125,16 +125,21 @@ pub(crate) fn resolve(
                 "message `{name}` ({users}) is in no listed crate{}",
                 missing_hint(name, &candidates)
             )),
-            [_] => {
+            [origin] => {
                 // An export first: its path is public, though the
                 // definition's may not be; the defining package's own
-                // export before another's.
-                let best = found
+                // export before another's. Any offer of the message
+                // counts, under whatever name it is exported.
+                let best = candidates
                     .iter()
-                    .min_by_key(|c| match c.export {
-                        Some(true) => 0,
-                        Some(false) => 1,
-                        None => 2,
+                    .filter(|c| c.origin == **origin)
+                    .min_by_key(|c| {
+                        let rank = match c.export {
+                            Some(true) => 0,
+                            Some(false) => 1,
+                            None => 2,
+                        };
+                        (rank, c.name != *name)
                     })
                     .expect("one candidate at least");
                 resolved.insert(
@@ -347,6 +352,24 @@ pub(crate) mod tests {
         assert_eq!(
             paths(&both),
             [("Words", "facade::Words", "chat::engine::Words")]
+        );
+    }
+
+    /// An export under another name is still a public path of the message:
+    /// the graph's name finds the definition, and the contract names the
+    /// message through the export.
+    #[test]
+    fn a_renamed_export_is_a_public_path_of_its_message() {
+        let offers = [offer(
+            "chat",
+            &["chat::inner::Prompt"],
+            &[("Public", "chat::Public", "chat", "chat::inner::Prompt")],
+        )];
+        let resolved =
+            resolve(&uses(&[("Prompt", &["A"])]), &offers, &BTreeMap::new()).expect("resolved");
+        assert_eq!(
+            paths(&resolved),
+            [("Prompt", "chat::Public", "chat::inner::Prompt")]
         );
     }
 

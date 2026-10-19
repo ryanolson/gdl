@@ -21,6 +21,8 @@ pub(crate) struct Crate {
 
 pub(crate) struct Module {
     pub(crate) parent: Option<usize>,
+    /// Who can see it from outside its parent.
+    pub(crate) vis: Vis,
     /// Its names from the crate root, the root's empty.
     pub(crate) path: Vec<String>,
     pub(crate) children: BTreeMap<String, usize>,
@@ -32,14 +34,41 @@ pub(crate) struct Module {
 /// A struct, an enum, or a union.
 pub(crate) struct TypeDef {
     pub(crate) name: String,
+    pub(crate) vis: Vis,
     pub(crate) attrs: Vec<Meta>,
+    /// Whether a field borrows: a reference in its type, or
+    /// `#[serde(borrow)]`. Derived `Deserialize` then is not
+    /// `DeserializeOwned`, and the type has no codec.
+    pub(crate) borrows: bool,
     pub(crate) at: Location,
+}
+
+/// Who can see an item: anyone, its crate (`pub(crate)`, `pub(super)`,
+/// `pub(in ..)`, read as the crate), or its module and the modules in it.
+/// A glob imports only what its module can see.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Vis {
+    Public,
+    Crate,
+    Private,
+}
+
+impl Vis {
+    fn of(vis: &syn::Visibility) -> Self {
+        match vis {
+            syn::Visibility::Public(_) => Self::Public,
+            syn::Visibility::Restricted(r) if r.path.is_ident("self") => Self::Private,
+            syn::Visibility::Restricted(_) => Self::Crate,
+            syn::Visibility::Inherited => Self::Private,
+        }
+    }
 }
 
 /// One name a `use` (or an `extern crate`) brings in, or one glob.
 pub(crate) struct Use {
     /// The name it binds; `None` for a glob.
     pub(crate) name: Option<String>,
+    pub(crate) vis: Vis,
     /// The path it imports, or the module a glob imports from.
     pub(crate) path: Vec<String>,
     /// Whether the path starts with `::`: an external crate.
@@ -96,19 +125,22 @@ impl Crate {
             features,
             problems,
         };
-        krate.modules.push(Module::empty(None, Vec::new()));
+        krate
+            .modules
+            .push(Module::empty(None, Vec::new(), Vis::Public));
         let dir = root.parent().unwrap_or(Path::new("")).to_path_buf();
         if let Some(items) = reader.file(root) {
-            reader.items(&mut krate, 0, &items, root, &dir);
+            reader.items(&mut krate, 0, &items, root, &dir, &dir);
         }
         krate
     }
 }
 
 impl Module {
-    fn empty(parent: Option<usize>, path: Vec<String>) -> Self {
+    fn empty(parent: Option<usize>, path: Vec<String>, vis: Vis) -> Self {
         Self {
             parent,
+            vis,
             path,
             children: BTreeMap::new(),
             types: Vec::new(),
@@ -135,7 +167,11 @@ impl Reader<'_> {
             }
         };
         match syn::parse_file(&text) {
-            Ok(file) => Some(file.items),
+            // A file's own `#![cfg]` can remove all of it.
+            Ok(file) => Some(match self.settings.attributes(&file.attrs, self.features) {
+                Some(_) => file.items,
+                None => Vec::new(),
+            }),
             Err(e) => {
                 let start = e.span().start();
                 self.problems.push(format!(
@@ -150,8 +186,18 @@ impl Reader<'_> {
     }
 
     /// Read `items` of module `module`, which is in `file`; its child
-    /// modules' files are under `dir`.
-    fn items(&mut self, krate: &mut Crate, module: usize, items: &[Item], file: &Path, dir: &Path) {
+    /// modules' files are under `dir`, and a `#[path]` on one is relative
+    /// to `base`: the file's directory at the top of a file, and `dir` in
+    /// an inline module.
+    fn items(
+        &mut self,
+        krate: &mut Crate,
+        module: usize,
+        items: &[Item],
+        file: &Path,
+        dir: &Path,
+        base: &Path,
+    ) {
         let at = |span: proc_macro2::Span| {
             let start = span.start();
             Location {
@@ -167,17 +213,23 @@ impl Reader<'_> {
             match item {
                 Item::Struct(s) => krate.modules[module].types.push(TypeDef {
                     name: s.ident.unraw().to_string(),
+                    vis: Vis::of(&s.vis),
                     attrs,
+                    borrows: s.fields.iter().any(borrows),
                     at: at(s.ident.span()),
                 }),
                 Item::Enum(e) => krate.modules[module].types.push(TypeDef {
                     name: e.ident.unraw().to_string(),
+                    vis: Vis::of(&e.vis),
                     attrs,
+                    borrows: e.variants.iter().flat_map(|v| &v.fields).any(borrows),
                     at: at(e.ident.span()),
                 }),
                 Item::Union(u) => krate.modules[module].types.push(TypeDef {
                     name: u.ident.unraw().to_string(),
+                    vis: Vis::of(&u.vis),
                     attrs,
+                    borrows: u.fields.named.iter().any(borrows),
                     at: at(u.ident.span()),
                 }),
                 Item::Use(u) => {
@@ -186,6 +238,7 @@ impl Reader<'_> {
                     for (name, path) in uses {
                         krate.modules[module].uses.push(Use {
                             name,
+                            vis: Vis::of(&u.vis),
                             path,
                             absolute: u.leading_colon.is_some(),
                             attrs: attrs.clone(),
@@ -200,10 +253,17 @@ impl Reader<'_> {
                         .map_or(&e.ident, |(_, alias)| alias)
                         .unraw()
                         .to_string();
+                    // `extern crate self as name` names this crate.
+                    let (path, absolute) = if e.ident == "self" {
+                        (vec!["crate".to_string()], false)
+                    } else {
+                        (vec![e.ident.unraw().to_string()], true)
+                    };
                     krate.modules[module].uses.push(Use {
                         name: Some(name),
-                        path: vec![e.ident.unraw().to_string()],
-                        absolute: true,
+                        vis: Vis::of(&e.vis),
+                        path,
+                        absolute,
                         attrs,
                         at: at(e.span()),
                     });
@@ -214,6 +274,9 @@ impl Reader<'_> {
                         .iter()
                         .filter_map(|item| match item {
                             syn::ImplItem::Type(t) => {
+                                // Of two `type In` under exclusive `cfg`,
+                                // the one that holds.
+                                self.settings.attributes(&t.attrs, self.features)?;
                                 Some((t.ident.unraw().to_string(), t.ty.clone(), at(t.ty.span())))
                             }
                             _ => None,
@@ -230,7 +293,9 @@ impl Reader<'_> {
                     let mut path = krate.modules[module].path.clone();
                     path.push(name.clone());
                     let child = krate.modules.len();
-                    krate.modules.push(Module::empty(Some(module), path));
+                    krate
+                        .modules
+                        .push(Module::empty(Some(module), path, Vis::of(&m.vis)));
                     krate.modules[module].children.insert(name.clone(), child);
                     let explicit = attrs.iter().find_map(|meta| match meta {
                         Meta::NameValue(nv) if nv.path.is_ident("path") => match &nv.value {
@@ -243,22 +308,27 @@ impl Reader<'_> {
                         _ => None,
                     });
                     match (&m.content, explicit) {
-                        (Some((_, inner)), _) => {
-                            self.items(krate, child, inner, file, &dir.join(&name));
+                        (Some((_, inner)), explicit) => {
+                            let inner_dir = dir.join(explicit.unwrap_or(name));
+                            self.items(krate, child, inner, file, &inner_dir, &inner_dir);
                         }
                         (None, Some(explicit)) => {
-                            let target = file.parent().unwrap_or(dir).join(explicit);
+                            let target = base.join(explicit);
                             let child_dir = target.parent().unwrap_or(dir).to_path_buf();
                             if let Some(items) = self.file(&target) {
-                                self.items(krate, child, &items, &target, &child_dir);
+                                self.items(krate, child, &items, &target, &child_dir, &child_dir);
                             }
                         }
                         (None, None) => {
                             let flat = dir.join(format!("{name}.rs"));
                             let nested = dir.join(&name).join("mod.rs");
-                            let target = if flat.exists() { flat } else { nested };
+                            let (target, base) = if flat.exists() {
+                                (flat, dir.to_path_buf())
+                            } else {
+                                (nested, dir.join(&name))
+                            };
                             if let Some(items) = self.file(&target) {
-                                self.items(krate, child, &items, &target, &dir.join(&name));
+                                self.items(krate, child, &items, &target, &dir.join(&name), &base);
                             }
                         }
                     }
@@ -319,5 +389,38 @@ fn flatten(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Option<Strin
                 flatten(tree, prefix, out);
             }
         }
+    }
+}
+
+/// Whether a field borrows: a reference anywhere in its type, or
+/// `#[serde(borrow)]`.
+fn borrows(field: &syn::Field) -> bool {
+    let borrow = field.attrs.iter().any(|a| match &a.meta {
+        Meta::List(list) if list.path.is_ident("serde") => list
+            .tokens
+            .clone()
+            .into_iter()
+            .any(|t| matches!(t, proc_macro2::TokenTree::Ident(i) if i == "borrow")),
+        _ => false,
+    });
+    borrow || reference(&field.ty)
+}
+
+fn reference(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Reference(_) => true,
+        syn::Type::Array(a) => reference(&a.elem),
+        syn::Type::Slice(s) => reference(&s.elem),
+        syn::Type::Group(g) => reference(&g.elem),
+        syn::Type::Paren(p) => reference(&p.elem),
+        syn::Type::Tuple(t) => t.elems.iter().any(reference),
+        syn::Type::Path(p) => p.path.segments.iter().any(|s| match &s.arguments {
+            syn::PathArguments::AngleBracketed(args) => args.args.iter().any(|a| match a {
+                syn::GenericArgument::Type(t) => reference(t),
+                _ => false,
+            }),
+            _ => false,
+        }),
+        _ => false,
     }
 }

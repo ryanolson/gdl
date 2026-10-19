@@ -50,6 +50,28 @@ use inner::Words as Reexported;
 #[derive(gdl_message::Message)]
 struct r#Raw;
 
+/// A module spelled raw: `module_path!` keeps the `r#`, and the
+/// catalogue drops it, as the source reader does.
+pub mod r#type {
+    /// In a keyword module.
+    #[derive(gdl_message::Message)]
+    pub struct Kept;
+}
+
+/// An export of a message in a keyword module.
+#[gdl_message::export]
+pub use r#type::Kept as Typed;
+
+mod selfish {
+    /// Exported as `{self}`.
+    #[derive(gdl_message::Message)]
+    pub struct Selfish;
+}
+
+/// `{self}` binds the name before it.
+#[gdl_message::export]
+pub use selfish::Selfish::{self};
+
 /// Not derived: not in the catalogue.
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
@@ -163,6 +185,18 @@ fn an_export_registers_its_public_path_and_origin() {
                 "gdl-message",
                 "catalogue::inner::Words"
             ),
+            (
+                "Selfish",
+                "catalogue::Selfish",
+                "gdl-message",
+                "catalogue::selfish::Selfish"
+            ),
+            (
+                "Typed",
+                "catalogue::Typed",
+                "gdl-message",
+                "catalogue::type::Kept"
+            ),
         ]
     );
     assert_eq!(catalogue.exports[0].origin.package, "gdl-message");
@@ -186,4 +220,26 @@ fn the_catalogue_round_trips_through_toml_in_a_fixed_order() {
     assert_eq!(catalogue.messages, sorted);
     let back = Catalogue::from_toml(&catalogue.to_toml()).expect("catalogue");
     assert_eq!(back, catalogue);
+}
+
+/// Paths are written without `r#`, whatever `module_path!` gives: the
+/// source reader writes them so, and the generator escapes each keyword
+/// where it writes a path in code.
+#[test]
+fn a_raw_module_is_registered_by_its_plain_name() {
+    let catalogue = Catalogue::linked();
+    let kept = find(&catalogue, "Kept");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].path, "catalogue::type::Kept");
+    let typed = catalogue
+        .exports
+        .iter()
+        .find(|e| e.name == "Typed")
+        .expect("exported");
+    assert_eq!(typed.origin.path, "catalogue::type::Kept");
+    assert_eq!(
+        <r#type::Kept as Message>::IDENTITY.path,
+        "catalogue::r#type::Kept",
+        "the identity keeps the compiler's spelling; the catalogue drops it"
+    );
 }

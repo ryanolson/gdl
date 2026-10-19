@@ -192,7 +192,10 @@ fn an_export_carries_its_messages_wire_capability() {
 fn a_package_is_found_by_directory_or_by_name_and_version() {
     let workspace = workspace();
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/read/facade");
-    assert_eq!(workspace.package_in(&dir), Some("read-facade".to_string()));
+    assert_eq!(
+        workspace.package_in(&dir),
+        Some("read-facade@0.0.0".to_string())
+    );
     assert_eq!(workspace.package_in(Path::new("/nowhere")), None);
     let offer = workspace
         .extract("read-protocols@0.0.0")
@@ -215,5 +218,108 @@ fn an_offer_round_trips_as_a_catalogue_entry() {
     assert_eq!(
         gdl_extract::Offer::from_toml(&offer.to_toml()).expect("entry"),
         offer
+    );
+}
+
+/// Rust read as the compiler reads it: a file's own `cfg`, `#[path]` in
+/// an inline module, globs that import only what their module can see,
+/// renamed imports of the markers, role traits, and `Streamed`, `cfg` on
+/// associated types, serde impls that borrow, raw identifiers, `extern
+/// crate self`, and a cycle of globs. `cargo gdl extract --verify` checks
+/// the same crate against its build.
+#[test]
+fn rust_is_read_as_the_compiler_reads_it() {
+    // A cycle of globs once took exponential time: the reader runs on a
+    // thread, and a slow read fails the test instead of hanging it.
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(workspace().extract("read-quirks").expect("package"));
+    });
+    let extraction = receive
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the read ends");
+    clean(&extraction);
+    let offer = &extraction.offer;
+    let messages: Vec<(&str, &str, bool)> = offer
+        .messages
+        .iter()
+        .map(|m| (m.name.as_str(), m.path.as_str(), m.wire))
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            ("Actual", "read_quirks::Actual", false),
+            ("Aliased", "read_quirks::defs::Aliased", false),
+            ("Borrowed", "read_quirks::Borrowed", false),
+            ("Correct", "read_quirks::inline::nested::Correct", false),
+            ("Payload", "read_quirks::hidden::Payload", false),
+            ("Payload", "read_quirks::visible::Payload", false),
+            ("Wrong", "read_quirks::Wrong", false),
+            ("match", "read_quirks::type::match", false),
+        ]
+    );
+    let exports: Vec<(&str, &str, String)> = offer
+        .exports
+        .iter()
+        .map(|e| (e.name.as_str(), e.path.as_str(), origin(&e.origin)))
+        .collect();
+    assert_eq!(
+        exports,
+        [
+            (
+                "Aliased",
+                "read_quirks::Aliased",
+                "read-quirks 0.0.0 read_quirks::defs::Aliased".to_string()
+            ),
+            (
+                "Chosen",
+                "read_quirks::Chosen",
+                "read-quirks 0.0.0 read_quirks::visible::Payload".to_string()
+            ),
+            (
+                "Cycled",
+                "read_quirks::cycle::Cycled",
+                "read-protocols 0.0.0 read_protocols::Words".to_string()
+            ),
+            (
+                "Matched",
+                "read_quirks::Matched",
+                "read-quirks 0.0.0 read_quirks::type::match".to_string()
+            ),
+            (
+                "SelfAlias",
+                "read_quirks::SelfAlias",
+                "read-quirks 0.0.0 read_quirks::visible::Payload".to_string()
+            ),
+        ]
+    );
+    let nodes: Vec<String> = offer
+        .nodes
+        .iter()
+        .map(|n| {
+            let ports: Vec<String> = n
+                .ports
+                .iter()
+                .map(|p| {
+                    let path = |o: &Option<Origin>| {
+                        o.as_ref().map_or("()", |o| o.path.as_str()).to_string()
+                    };
+                    match &p.item {
+                        None => format!("{}={}", p.port, path(&p.head)),
+                        Some(_) => {
+                            format!("{}={} + stream {}", p.port, path(&p.head), path(&p.item))
+                        }
+                    }
+                })
+                .collect();
+            format!("{} {}: {}", n.role, n.name, ports.join(", "))
+        })
+        .collect();
+    assert_eq!(
+        nodes,
+        [
+            "forward Renamed: In=read_quirks::Actual + stream read_quirks::Actual, Out=read_quirks::Actual",
+            "forward Selected: In=read_quirks::Actual, Out=read_quirks::Actual",
+        ]
     );
 }

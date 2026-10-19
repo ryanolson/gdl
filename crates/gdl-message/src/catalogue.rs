@@ -59,9 +59,20 @@ impl From<crate::Identity> for Origin {
             package: id.package.to_string(),
             version: id.version.to_string(),
             dir: id.dir.to_string(),
-            path: id.path.to_string(),
+            path: plain(id.path),
         }
     }
+}
+
+/// `path` with each segment's `r#` dropped. `module_path!` keeps the
+/// spelling of a raw module (`r#type`); a catalogue holds names, as the
+/// source reader and graph files write them, and code that writes a path
+/// escapes each keyword again.
+fn plain(path: &str) -> String {
+    path.split("::")
+        .map(|segment| segment.strip_prefix("r#").unwrap_or(segment))
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 /// A message offered under another public path.
@@ -200,7 +211,7 @@ pub mod registry {
                 version: self.version.to_string(),
                 dir: self.dir.to_string(),
                 name: self.name.to_string(),
-                path: format!("{}::{}", self.module, self.name),
+                path: super::plain(&format!("{}::{}", self.module, self.name)),
                 wire: (self.wire)(),
             }
         }
@@ -226,7 +237,7 @@ pub mod registry {
                 version: self.version.to_string(),
                 dir: self.dir.to_string(),
                 name: self.name.to_string(),
-                path: format!("{}::{}", self.module, self.name),
+                path: super::plain(&format!("{}::{}", self.module, self.name)),
                 origin: self.origin.into(),
             }
         }

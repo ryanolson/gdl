@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::cfg::Settings;
 use crate::metadata::Graph;
-use crate::tree::Crate;
+use crate::tree::{Crate, Vis};
 
 /// What a path names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +27,9 @@ pub(crate) struct Resolver<'a> {
     by_package: HashMap<usize, Option<usize>>,
     /// Problems met reading a crate's files.
     pub(crate) problems: Vec<String>,
+    /// The names being looked up, by crate and module: globs can import
+    /// each other, and a name met again on the way is not there.
+    visiting: Vec<(usize, usize, String)>,
 }
 
 /// How deep `use` chains and globs may go before the reader stops: far
@@ -41,6 +44,7 @@ impl<'a> Resolver<'a> {
             crates: Vec::new(),
             by_package: HashMap::new(),
             problems: Vec::new(),
+            visiting: Vec::new(),
         }
     }
 
@@ -110,7 +114,7 @@ impl<'a> Resolver<'a> {
             at = match segment.as_str() {
                 "super" => Def::Module(c, self.crates[c].modules[m].parent?),
                 "self" => at,
-                name => self.member(c, m, name, depth + 1)?,
+                name => self.lookup(c, m, name, None, depth + 1)?,
             };
         }
         Some(at)
@@ -118,7 +122,7 @@ impl<'a> Resolver<'a> {
 
     /// A name in scope in a module: its members, else a dependency.
     fn scope(&mut self, krate: usize, module: usize, name: &str, depth: usize) -> Option<Def> {
-        self.member(krate, module, name, depth)
+        self.lookup(krate, module, name, None, depth)
             .or_else(|| self.external(krate, name))
     }
 
@@ -146,20 +150,60 @@ impl<'a> Resolver<'a> {
         name: &str,
         depth: usize,
     ) -> Option<Def> {
+        self.lookup(krate, module, name, None, depth)
+    }
+
+    /// `member`, of the items that module `viewer` can see, when a glob
+    /// in `viewer` looks.
+    fn lookup(
+        &mut self,
+        krate: usize,
+        module: usize,
+        name: &str,
+        viewer: Option<(usize, usize)>,
+        depth: usize,
+    ) -> Option<Def> {
         if depth > DEPTH {
             return None;
         }
+        let key = (krate, module, name.to_string());
+        if self.visiting.contains(&key) {
+            return None;
+        }
+        self.visiting.push(key);
+        let found = self.held(krate, module, name, viewer, depth);
+        self.visiting.pop();
+        found
+    }
+
+    fn held(
+        &mut self,
+        krate: usize,
+        module: usize,
+        name: &str,
+        viewer: Option<(usize, usize)>,
+        depth: usize,
+    ) -> Option<Def> {
+        let sees = |this: &Self, vis: Vis| {
+            viewer.is_none_or(|viewer| this.visible(vis, (krate, module), viewer))
+        };
         let m = &self.crates[krate].modules[module];
-        if let Some(i) = m.types.iter().position(|t| t.name == name) {
+        if let Some(i) = m
+            .types
+            .iter()
+            .position(|t| t.name == name && sees(self, t.vis))
+        {
             return Some(Def::Type(krate, module, i));
         }
-        if let Some(&child) = m.children.get(name) {
+        if let Some(&child) = m.children.get(name)
+            && sees(self, self.crates[krate].modules[child].vis)
+        {
             return Some(Def::Module(krate, child));
         }
         let named: Vec<(Vec<String>, bool)> = m
             .uses
             .iter()
-            .filter(|u| u.name.as_deref() == Some(name))
+            .filter(|u| u.name.as_deref() == Some(name) && sees(self, u.vis))
             .map(|u| (u.path.clone(), u.absolute))
             .collect();
         for (path, absolute) in named {
@@ -170,18 +214,42 @@ impl<'a> Resolver<'a> {
         let globs: Vec<(Vec<String>, bool)> = self.crates[krate].modules[module]
             .uses
             .iter()
-            .filter(|u| u.name.is_none())
+            .filter(|u| u.name.is_none() && sees(self, u.vis))
             .map(|u| (u.path.clone(), u.absolute))
             .collect();
         for (path, absolute) in globs {
             if let Some(Def::Module(c, m)) = self.path(krate, module, &path, absolute, depth + 1)
                 && (c, m) != (krate, module)
-                && let Some(def) = self.member(c, m, name, depth + 1)
+                && let Some(def) = self.lookup(c, m, name, Some((krate, module)), depth + 1)
             {
                 return Some(def);
             }
         }
         None
+    }
+
+    /// Whether module `viewer` can see an item of module `owner` with
+    /// visibility `vis`: a private item is seen in its module and the
+    /// modules inside it.
+    fn visible(&self, vis: Vis, owner: (usize, usize), viewer: (usize, usize)) -> bool {
+        match vis {
+            Vis::Public => true,
+            Vis::Crate => owner.0 == viewer.0,
+            Vis::Private => {
+                if owner.0 != viewer.0 {
+                    return false;
+                }
+                let modules = &self.crates[owner.0].modules;
+                let mut at = Some(viewer.1);
+                while let Some(m) = at {
+                    if m == owner.1 {
+                        return true;
+                    }
+                    at = modules[m].parent;
+                }
+                false
+            }
+        }
     }
 }
 

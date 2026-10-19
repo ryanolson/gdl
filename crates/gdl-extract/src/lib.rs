@@ -87,12 +87,14 @@ impl Workspace {
         })
     }
 
-    /// The name of the package whose manifest is in `dir`, if this
-    /// workspace resolved it.
+    /// The package whose manifest is in `dir`, as `name@version`, if this
+    /// workspace resolved it. The version is part of the answer: the
+    /// workspace may resolve other versions of the same name.
     pub fn package_in(&self, dir: &Path) -> Option<String> {
-        self.graph
-            .package_in(dir)
-            .map(|i| self.graph.packages[i].name.clone())
+        self.graph.package_in(dir).map(|i| {
+            let package = &self.graph.packages[i];
+            format!("{}@{}", package.name, package.version)
+        })
     }
 }
 
