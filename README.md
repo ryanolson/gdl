@@ -120,7 +120,7 @@ pin = { Chunk = "chat_protocols::Chunk" }   # optional
 path = "../../crates/gdl"
 ```
 
-`cargo gdl resolve --spec gdl.toml` prints the type that each message name resolves to, and whether it is a wire type:
+`cargo gdl resolve --spec gdl.toml` prints the type that each message name resolves to, and whether it is a wire type. It fetches a crate listed by version into `--target-dir` (`target` beside the spec by default):
 
 ```text
 Chunk   chat_protocols::Chunk          wire

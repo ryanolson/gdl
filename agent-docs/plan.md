@@ -720,11 +720,14 @@ crates/
   gdl-syntax/   the graph syntax: parser and checked model, shared by graph! and gdl-gen;
                 a graph file's manifest built without compiling its contract
   gdl-message/  derive(Message), the Message and Shape traits, the message catalogue
-  gdl-extract/  the source reader: a crate's messages, exports, and nodes, read without a build
+  gdl-extract/  the source reader: a crate's messages, exports, and nodes, read without a build;
+                the working catalogue
   gdl-macros/   graph! proc macro, derive(Message), derive(Node), #[export]
-  gdl-gen/      the cargo-gdl binary: cargo gdl extract, resolve, generate, diagram
+  gdl-gen/      the cargo-gdl binary: cargo gdl extract, catalog, resolve, generate, diagram, export;
+                check, for a server
+  gdl-web/      the composer: a page and its axum server, over a working catalogue
 examples/
-  chat/         contract crate, implementation crates, placement configs, generated segments
+  chat/         a graph file, its protocols crate, node crates, the spec, generated contract and segments
   asr/          a streamed request: contract, implementations, generated segments, in-process demo
 ```
 

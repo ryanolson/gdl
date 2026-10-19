@@ -3,7 +3,7 @@
 //! ```text
 //! cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--target-dir <dir>]
 //! cargo gdl catalog <dir>
-//! cargo gdl resolve --spec <gdl.toml>
+//! cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
@@ -30,7 +30,7 @@ use gdl_gen::Format;
 
 const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--target-dir <dir>]
        cargo gdl catalog <dir>
-       cargo gdl resolve --spec <gdl.toml>
+       cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
