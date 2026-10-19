@@ -206,6 +206,17 @@ sh chat/build-all.sh          # one `cargo build` per segment, into chat/target
 
 Each crate in the archive is its own Cargo workspace, so each segment's build resolves only the dependencies of the nodes that it hosts. The builds share one target directory. `GDL_PROFILE` picks the profile (`release` by default), and the script passes its arguments on to `cargo build`. A crate outside the archive is named by its absolute path on the machine that wrote the archive, so the archive builds on that machine. A crate named by a version or a git revision builds anywhere. Two exports of one spec are the same bytes.
 
+## Compose in a browser
+
+`gdl-web` serves the composer: a page that builds a graph from the nodes and messages of a working catalogue.
+
+```bash
+cargo run -p gdl-web -- --catalog catalogue --gdl-path crates/gdl
+# gdl-web: serving http://127.0.0.1:8080/
+```
+
+Add a crate by `name@version`: the server fetches it from crates.io and reads it, building nothing. Choose the source's messages, then the nodes of each hop. Each slot offers only the nodes whose port carries the message that arrives there. Click an edge to cut it: each group of nodes that the cuts leave connected is a segment. **Check** shows the graph file and spec that the draft becomes, and every problem that generating it would find, or its crossings and diagram. **Download** gives the archive that `cargo gdl export` writes. The server compiles nothing, so a node crate that needs CUDA composes like any other. Generated crates take gdl from `--gdl-path`, or from `--gdl-git <url> --gdl-rev <rev>`.
+
 ## Draw a graph
 
 `cargo gdl diagram` writes the placed graph to stdout as Graphviz DOT or as a Mermaid flowchart. It writes no files.
@@ -336,6 +347,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |
 | `crates/gdl-extract` | The source reader: what a crate offers to graphs (messages, exports, and nodes), read from its source without building it; and the working catalogue of such offers |
 | `crates/gdl-macros` | The `graph!` macro, `derive(Message)`, `derive(Node)`, and `#[export]` |
+| `crates/gdl-web` | The composer: a page and its server, which check and export graphs built from a working catalogue |
 | `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `catalog`, `resolve`, `generate`, `diagram`, and `export` |
 | `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |
 | `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |
