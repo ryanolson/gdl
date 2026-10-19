@@ -309,7 +309,12 @@ impl Reader<'_> {
                     });
                     match (&m.content, explicit) {
                         (Some((_, inner)), explicit) => {
-                            let inner_dir = dir.join(explicit.unwrap_or(name));
+                            // Its own `#[path]` is relative to `base`, as a
+                            // module file's is; its name, to `dir`.
+                            let inner_dir = match explicit {
+                                Some(explicit) => base.join(explicit),
+                                None => dir.join(name),
+                            };
                             self.items(krate, child, inner, file, &inner_dir, &inner_dir);
                         }
                         (None, Some(explicit)) => {
@@ -392,18 +397,23 @@ fn flatten(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Option<Strin
     }
 }
 
-/// Whether a field borrows: a reference anywhere in its type, or
-/// `#[serde(borrow)]`.
+/// Whether a field borrows when deserialized: a reference anywhere in its
+/// type, or `#[serde(borrow)]`, unless serde skips deserializing it.
 fn borrows(field: &syn::Field) -> bool {
-    let borrow = field.attrs.iter().any(|a| match &a.meta {
-        Meta::List(list) if list.path.is_ident("serde") => list
-            .tokens
-            .clone()
-            .into_iter()
-            .any(|t| matches!(t, proc_macro2::TokenTree::Ident(i) if i == "borrow")),
-        _ => false,
-    });
-    borrow || reference(&field.ty)
+    let serde = |word: &str| {
+        field.attrs.iter().any(|a| match &a.meta {
+            Meta::List(list) if list.path.is_ident("serde") => list
+                .tokens
+                .clone()
+                .into_iter()
+                .any(|t| matches!(t, proc_macro2::TokenTree::Ident(i) if i == word)),
+            _ => false,
+        })
+    };
+    if serde("skip") || serde("skip_deserializing") {
+        return false;
+    }
+    serde("borrow") || reference(&field.ty)
 }
 
 fn reference(ty: &syn::Type) -> bool {

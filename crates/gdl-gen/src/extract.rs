@@ -48,17 +48,19 @@ pub struct Extracted {
 /// resolved from a manifest of our own under `target`. Every problem the
 /// reader meets is an error: an entry is written for a crate read whole.
 pub fn extract(krate: &Crate, target: &Path) -> Result<Extracted, Error> {
-    let (workspace, spec) = match krate {
+    let (workspace, located, extraction) = match krate {
         Crate::Path(dir) => {
             let workspace = Workspace::load(&dir.join("Cargo.toml"))
                 .map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
-            let name = workspace.package_in(dir).ok_or_else(|| {
+            let missing = || {
                 Error::new(format!(
                     "{}: cargo metadata resolves no package there",
                     dir.display()
                 ))
-            })?;
-            (workspace, name)
+            };
+            let located = workspace.locate_in(dir).ok_or_else(missing)?;
+            let extraction = workspace.extract_in(dir).ok_or_else(missing)?;
+            (workspace, located, extraction)
         }
         Crate::Registry { name, version } => {
             let scratch = target
@@ -66,15 +68,16 @@ pub fn extract(krate: &Crate, target: &Path) -> Result<Extracted, Error> {
                 .join(format!("fetch-{name}-{version}"));
             let workspace = Workspace::fetch(name, version, &scratch)
                 .map_err(|e| Error::new(format!("{name}@{version}: {e}")))?;
-            (workspace, format!("{name}@{version}"))
+            let spec = format!("{name}@{version}");
+            let located = workspace
+                .locate(&spec)
+                .map_err(|e| Error::new(e.to_string()))?;
+            let extraction = workspace
+                .extract(&spec)
+                .map_err(|e| Error::new(e.to_string()))?;
+            (workspace, located, extraction)
         }
     };
-    let located = workspace
-        .locate(&spec)
-        .map_err(|e| Error::new(e.to_string()))?;
-    let extraction = workspace
-        .extract(&format!("{}@{}", located.name, located.version))
-        .map_err(|e| Error::new(e.to_string()))?;
     if !extraction.problems.is_empty() {
         return Err(Error::new(extraction.problems.join("\n")));
     }

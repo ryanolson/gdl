@@ -27,10 +27,15 @@ pub(crate) struct Resolver<'a> {
     by_package: HashMap<usize, Option<usize>>,
     /// Problems met reading a crate's files.
     pub(crate) problems: Vec<String>,
-    /// The names being looked up, by crate and module: globs can import
-    /// each other, and a name met again on the way is not there.
-    visiting: Vec<(usize, usize, String)>,
+    /// Within one query, each lookup of a name in a module by a viewer,
+    /// and its answer: `None` while it is in progress. Globs can import
+    /// each other, so a lookup met again on the way finds nothing new,
+    /// and one met again by another path is answered once.
+    known: HashMap<Lookup, Option<Def>>,
 }
+
+/// A lookup: crate, module, name, and the viewer, if a glob looks.
+type Lookup = (usize, usize, String, Option<(usize, usize)>);
 
 /// How deep `use` chains and globs may go before the reader stops: far
 /// beyond what real code needs, and a bound on a cycle.
@@ -44,7 +49,7 @@ impl<'a> Resolver<'a> {
             crates: Vec::new(),
             by_package: HashMap::new(),
             problems: Vec::new(),
-            visiting: Vec::new(),
+            known: HashMap::new(),
         }
     }
 
@@ -82,6 +87,7 @@ impl<'a> Resolver<'a> {
         path: &[String],
         absolute: bool,
     ) -> Option<Def> {
+        self.known.clear();
         self.path(krate, module, path, absolute, 0)
     }
 
@@ -150,11 +156,14 @@ impl<'a> Resolver<'a> {
         name: &str,
         depth: usize,
     ) -> Option<Def> {
+        self.known.clear();
         self.lookup(krate, module, name, None, depth)
     }
 
-    /// `member`, of the items that module `viewer` can see, when a glob
-    /// in `viewer` looks.
+    /// `member`, of the items that module `viewer` can see: the module
+    /// whose glob began the search. A glob passes on only what the module
+    /// that holds it can see, and visibility only narrows along a chain of
+    /// globs, so each item is checked against the first module.
     fn lookup(
         &mut self,
         krate: usize,
@@ -166,13 +175,13 @@ impl<'a> Resolver<'a> {
         if depth > DEPTH {
             return None;
         }
-        let key = (krate, module, name.to_string());
-        if self.visiting.contains(&key) {
-            return None;
+        let key = (krate, module, name.to_string(), viewer);
+        if let Some(&known) = self.known.get(&key) {
+            return known;
         }
-        self.visiting.push(key);
+        self.known.insert(key.clone(), None);
         let found = self.held(krate, module, name, viewer, depth);
-        self.visiting.pop();
+        self.known.insert(key, found);
         found
     }
 
@@ -220,7 +229,13 @@ impl<'a> Resolver<'a> {
         for (path, absolute) in globs {
             if let Some(Def::Module(c, m)) = self.path(krate, module, &path, absolute, depth + 1)
                 && (c, m) != (krate, module)
-                && let Some(def) = self.lookup(c, m, name, Some((krate, module)), depth + 1)
+                && let Some(def) = self.lookup(
+                    c,
+                    m,
+                    name,
+                    Some(viewer.unwrap_or((krate, module))),
+                    depth + 1,
+                )
             {
                 return Some(def);
             }

@@ -185,28 +185,23 @@ fn offers(dirs: &[&Path]) -> Result<Vec<gdl_extract::Offer>, Error> {
     let mut offers = Vec::with_capacity(dirs.len());
     let mut problems = Vec::new();
     for dir in dirs {
-        let known = workspaces
-            .iter()
-            .find_map(|w| w.package_in(dir).map(|spec| (w, spec)));
-        let (workspace, name) = match known {
-            Some(found) => found,
+        // Crates of one workspace share its `cargo metadata`.
+        let known = workspaces.iter().find_map(|w| w.extract_in(dir));
+        let extraction = match known {
+            Some(extraction) => extraction,
             None => {
                 let workspace = gdl_extract::Workspace::load(&dir.join("Cargo.toml"))
                     .map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
-                workspaces.push(workspace);
-                let workspace = workspaces.last().expect("just pushed");
-                let name = workspace.package_in(dir).ok_or_else(|| {
+                let extraction = workspace.extract_in(dir).ok_or_else(|| {
                     Error::new(format!(
                         "{}: cargo metadata resolves no package there",
                         dir.display()
                     ))
                 })?;
-                (workspace, name)
+                workspaces.push(workspace);
+                extraction
             }
         };
-        let extraction = workspace
-            .extract(&name)
-            .map_err(|e| Error::new(e.to_string()))?;
         problems.extend(extraction.problems);
         offers.push(extraction.offer);
     }

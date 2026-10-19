@@ -192,11 +192,19 @@ fn an_export_carries_its_messages_wire_capability() {
 fn a_package_is_found_by_directory_or_by_name_and_version() {
     let workspace = workspace();
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/read/facade");
+    let located = workspace.locate_in(&dir).expect("found");
     assert_eq!(
-        workspace.package_in(&dir),
-        Some("read-facade@0.0.0".to_string())
+        (
+            located.name.as_str(),
+            located.version.as_str(),
+            located.path
+        ),
+        ("read-facade", "0.0.0", true)
     );
-    assert_eq!(workspace.package_in(Path::new("/nowhere")), None);
+    let offer = workspace.extract_in(&dir).expect("found").offer;
+    assert_eq!(offer.package, "read-facade");
+    assert!(workspace.locate_in(Path::new("/nowhere")).is_none());
+    assert!(workspace.extract_in(Path::new("/nowhere")).is_none());
     let offer = workspace
         .extract("read-protocols@0.0.0")
         .expect("package")
@@ -225,7 +233,7 @@ fn an_offer_round_trips_as_a_catalogue_entry() {
 /// an inline module, globs that import only what their module can see,
 /// renamed imports of the markers, role traits, and `Streamed`, `cfg` on
 /// associated types, serde impls that borrow, raw identifiers, `extern
-/// crate self`, and a cycle of globs. `cargo gdl extract --verify` checks
+/// crate self`, and cycles of globs. `cargo gdl extract --verify` checks
 /// the same crate against its build.
 #[test]
 fn rust_is_read_as_the_compiler_reads_it() {
@@ -252,8 +260,10 @@ fn rust_is_read_as_the_compiler_reads_it() {
             ("Aliased", "read_quirks::defs::Aliased", false),
             ("Borrowed", "read_quirks::Borrowed", false),
             ("Correct", "read_quirks::inline::nested::Correct", false),
+            ("Leaf", "read_quirks::paths::nested::leaf::Leaf", false),
             ("Payload", "read_quirks::hidden::Payload", false),
             ("Payload", "read_quirks::visible::Payload", false),
+            ("Skipping", "read_quirks::Skipping", true),
             ("Wrong", "read_quirks::Wrong", false),
             ("match", "read_quirks::type::match", false),
         ]
@@ -282,9 +292,19 @@ fn rust_is_read_as_the_compiler_reads_it() {
                 "read-protocols 0.0.0 read_protocols::Words".to_string()
             ),
             (
+                "Many",
+                "read_quirks::many::Many",
+                "read-protocols 0.0.0 read_protocols::Words".to_string()
+            ),
+            (
                 "Matched",
                 "read_quirks::Matched",
                 "read-quirks 0.0.0 read_quirks::type::match".to_string()
+            ),
+            (
+                "Passed",
+                "read_quirks::Passed",
+                "read-quirks 0.0.0 read_quirks::visible::Payload".to_string()
             ),
             (
                 "SelfAlias",

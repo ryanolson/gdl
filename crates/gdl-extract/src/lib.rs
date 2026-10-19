@@ -74,27 +74,35 @@ impl Workspace {
         Ok(markers::extract(&self.graph, &self.settings, package))
     }
 
+    /// What the package whose manifest is in `dir` offers, if this
+    /// workspace resolved it. A directory is one package, where a name and
+    /// version may be two, from two sources.
+    pub fn extract_in(&self, dir: &Path) -> Option<Extraction> {
+        let package = self.graph.package_in(dir)?;
+        Some(markers::extract(&self.graph, &self.settings, package))
+    }
+
     /// Where package `spec` (a name, or `name@version`) is: its version,
     /// its manifest's directory, and whether that is a path package, which
     /// a dependency names by that directory rather than by version.
     pub fn locate(&self, spec: &str) -> Result<Located, Error> {
-        let package = &self.graph.packages[self.graph.package(spec).map_err(Error)?];
-        Ok(Located {
+        Ok(self.located(self.graph.package(spec).map_err(Error)?))
+    }
+
+    /// The package whose manifest is in `dir`, if this workspace resolved
+    /// it, as [`Workspace::locate`] gives it.
+    pub fn locate_in(&self, dir: &Path) -> Option<Located> {
+        Some(self.located(self.graph.package_in(dir)?))
+    }
+
+    fn located(&self, package: usize) -> Located {
+        let package = &self.graph.packages[package];
+        Located {
             name: package.name.clone(),
             version: package.version.clone(),
             dir: package.dir.clone(),
             path: package.source.starts_with("path+"),
-        })
-    }
-
-    /// The package whose manifest is in `dir`, as `name@version`, if this
-    /// workspace resolved it. The version is part of the answer: the
-    /// workspace may resolve other versions of the same name.
-    pub fn package_in(&self, dir: &Path) -> Option<String> {
-        self.graph.package_in(dir).map(|i| {
-            let package = &self.graph.packages[i];
-            format!("{}@{}", package.name, package.version)
-        })
+        }
     }
 }
 
