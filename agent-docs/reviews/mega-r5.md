@@ -1,8 +1,17 @@
-# Whole-repository mega review, pass 5
+# Milestones 10 to 18, mega review pass 5
 
-Reviewer: fresh Codex (`gpt-6-astra`) session, read-only, `thermo-nuclear-code-quality-review` over the whole repository at `6ec06a7`. Raw text: `mega-r5-raw.txt`. ACTIONABLE: 2.
+Reviewer: a fresh Fable subagent, read-only, running the thermo-nuclear code-quality review over `main..HEAD` (73 commits, 233 files). It checked the fixes of `mega-r4.md` first, by probe and by mutation, then read the whole diff fresh. In a scratch copy it ran:
+- the workspace suite (46 targets, all green), clippy, and fmt;
+- `generate --check` of both examples;
+- a Node probe of the page's script.
 
-| # | Severity | Finding | Ruling | Evidence and fix |
+Verdict: REJECT, 2 actionable, both minor.
+
+Pass 4's four fixes held, and the two with tests failed when mutated. The reviewer also traced the reader's in-progress memoisation and found that a query cannot wrongly come back empty.
+
+| # | Finding | Ruling | Test | Fix |
 |---|---|---|---|---|
-| 1 | P2 | A caller's trait with a `from(&str)` function, implemented for `String`, makes the expansion's `String::from` ambiguous | valid | `tests/pass/graph-caller-traits.rs` (E0034). Fix: `<::std::string::String as ::core::convert::From<&::core::primitive::str>>::from`. The first form of the fix wrote `&str`, which `graph-shadowed-prelude.rs` caught (its caller defines `str`) |
-| 2 | P3 | The stop-forwarding layer in `inbound_items` is unreachable: both callers pass `None` | valid | Both calls pass `None`, and stop already reaches the producer through the watcher (outer end) and the pump's upstream canceller (backward runs). Fix: `inbound_items` is a plain frame-to-item adapter; `StopSource` and its two impls are gone. Behavior is unchanged; the full suite passes |
+| R5-1 | the page kept an inner end that no slot would offer after a forward node was removed, and a whole hop after the source's request changed (the server then refused the draft) | valid | none in the suite (ruling 85); a Node probe of `prune` with a stubbed page passes after the fix | `prune` drops, before each render, any chosen node whose port no longer carries the arriving message, and everything after it |
+| R5-2 | `Names::new` listed crates by two rules in two passes | valid (structure) | the draft tests, unchanged | one pass per message finds the crate that offers it at a public path (its own definition or export, else another crate's export), lists that crate, and records the path |
+
+The workspace suite, clippy, and fmt pass after the fixes.

@@ -94,9 +94,44 @@ function chip(text, remove) {
   return span;
 }
 
+// A chosen node whose port no longer carries the message that arrives
+// there (a node before it was removed, or the source's request changed)
+// is dropped with everything after it: a slot keeps only what it would
+// offer now.
+function prune(hop, request) {
+  let current = request;
+  const fits = hop.forward.findIndex((n) => {
+    const ok = samePort(portOf(port(n.node, "In")), current);
+    if (ok) current = portOf(port(n.node, "Out"));
+    return !ok;
+  });
+  if (fits !== -1) {
+    hop.forward.splice(fits);
+    hop.inner = null;
+  }
+  if (hop.inner) {
+    const role = hop.inner.node.role;
+    const takes = portOf(port(hop.inner.node, role === "operator" ? "UpReq" : "Req"));
+    if (!samePort(takes, current)) hop.inner = null;
+  }
+  if (!hop.inner) {
+    hop.nested = null;
+    hop.backward = [];
+    return;
+  }
+  let item = port(hop.inner.node, hop.inner.node.role === "operator" ? "UpItem" : "Item").head || null;
+  const stale = hop.backward.findIndex((n) => {
+    const ok = same(port(n.node, "In").head, item);
+    if (ok) item = port(n.node, "Out").head || null;
+    return !ok;
+  });
+  if (stale !== -1) hop.backward.splice(stale);
+}
+
 // One hop's editor. `request` is the message that arrives; returns the
 // item the hop streams back, or null while it has no inner end.
 function hopEditor(hop, request, into) {
+  prune(hop, request);
   const all = nodes();
   let current = request;
   const forward = document.createElement("div");

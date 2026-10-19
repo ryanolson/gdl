@@ -299,80 +299,67 @@ impl Names {
             crates: BTreeSet::new(),
             pins: BTreeMap::new(),
         };
-        // Each message's name where it is defined, and its crate.
+        // Each message: its name where it is defined, and the crate that
+        // offers it at a public path (its own, or one that exports it, when
+        // its own defines it in a private module). That crate is listed.
         let mut defined: Vec<(&Origin, &str)> = Vec::new();
+        let mut public: BTreeMap<&Origin, &str> = BTreeMap::new();
         for origin in used {
             let key = format!("{}@{}", origin.package, origin.version);
-            let message = entries.get(&key).and_then(|entry| {
-                (entry.offer.source == origin.source)
-                    .then(|| entry.offer.messages.iter().find(|m| m.path == origin.path))
-                    .flatten()
-            });
-            match message {
-                Some(message) => {
-                    names.crates.insert(key);
+            let Some(own) = entries
+                .get(&key)
+                .filter(|e| e.offer.source == origin.source)
+            else {
+                problems.push(format!(
+                    "message `{}`: its crate, {key}, is not in the catalogue: add it first",
+                    origin.path
+                ));
+                continue;
+            };
+            let Some(message) = own.offer.messages.iter().find(|m| m.path == origin.path) else {
+                problems.push(format!(
+                    "message `{}`: {key} does not define it",
+                    origin.path
+                ));
+                continue;
+            };
+            let offered_at = if message.public {
+                Some((key.clone(), message.path.as_str()))
+            } else {
+                public_export(own, origin)
+                    .map(|e| (key.clone(), e.path.as_str()))
+                    .or_else(|| {
+                        entries.iter().find_map(|(key, entry)| {
+                            public_export(entry, origin).map(|e| (key.clone(), e.path.as_str()))
+                        })
+                    })
+            };
+            match offered_at {
+                Some((listed, path)) => {
+                    names.crates.insert(listed);
+                    public.insert(origin, path);
                     defined.push((origin, &message.name));
                 }
                 None => problems.push(format!(
-                    "message `{}`: its crate, {key}, is not in the catalogue: add it first",
+                    "message `{}` has no public path in the catalogue's crates: export it",
                     origin.path
                 )),
-            }
-        }
-        // A message its crate does not offer at a public path (it is in a
-        // private module) is offered through a crate that exports it
-        // publicly, which the spec lists too.
-        for (origin, _) in &defined {
-            let key = format!("{}@{}", origin.package, origin.version);
-            let defining = &entries[&key].offer;
-            if defining
-                .messages
-                .iter()
-                .any(|m| m.path == origin.path && m.public)
-                || defining
-                    .exports
-                    .iter()
-                    .any(|e| e.origin == **origin && e.public)
-            {
-                continue;
-            }
-            let facade = entries.iter().find(|(_, entry)| {
-                entry
-                    .offer
-                    .exports
-                    .iter()
-                    .any(|e| e.origin == **origin && e.public)
-            });
-            if let Some((key, _)) = facade {
-                names.crates.insert(key.clone());
             }
         }
         // What the listed crates offer by each name: the messages a name
         // could resolve to.
         let mut offered: BTreeMap<&str, BTreeSet<Origin>> = BTreeMap::new();
-        let mut public: BTreeMap<Origin, String> = BTreeMap::new();
         for key in &names.crates {
             let offer = &entries[key].offer;
             for m in &offer.messages {
-                let origin = Origin {
+                offered.entry(&m.name).or_default().insert(Origin {
                     package: offer.package.clone(),
                     version: offer.version.clone(),
                     source: offer.source.clone(),
                     path: m.path.clone(),
-                };
-                if m.public {
-                    public
-                        .entry(origin.clone())
-                        .or_insert_with(|| m.path.clone());
-                }
-                offered.entry(&m.name).or_default().insert(origin);
+                });
             }
             for e in &offer.exports {
-                if e.public {
-                    public
-                        .entry(e.origin.clone())
-                        .or_insert_with(|| e.path.clone());
-                }
                 offered.entry(&e.name).or_default().insert(e.origin.clone());
             }
         }
@@ -387,15 +374,9 @@ impl Names {
             // Pinned where the name alone would not resolve to it.
             let ambiguous = offered.get(graph_name.as_str()).is_none_or(|o| o.len() > 1);
             if graph_name != name || ambiguous {
-                match public.get(origin) {
-                    Some(path) => {
-                        names.pins.insert(graph_name.clone(), path.clone());
-                    }
-                    None => problems.push(format!(
-                        "message `{}` has no public path in the catalogue's crates: export it",
-                        origin.path
-                    )),
-                }
+                names
+                    .pins
+                    .insert(graph_name.clone(), public[origin].to_string());
             }
             names.names.insert(origin.clone(), graph_name);
         }
@@ -407,6 +388,15 @@ impl Names {
     fn name(&self, origin: &Origin) -> String {
         gdl_syntax::identifier(&self.names[origin])
     }
+}
+
+/// `entry`'s public export of `origin`, if it has one.
+fn public_export<'e>(entry: &'e Entry, origin: &Origin) -> Option<&'e gdl_extract::ExportEntry> {
+    entry
+        .offer
+        .exports
+        .iter()
+        .find(|e| e.origin == *origin && e.public)
 }
 
 /// A request position as the graph file writes it.
