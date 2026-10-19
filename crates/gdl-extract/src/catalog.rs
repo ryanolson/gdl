@@ -118,9 +118,10 @@ impl Catalog {
         Ok(catalog)
     }
 
-    /// Add `entry`, writing its file. An entry already there is kept, file
-    /// and all, whoever wrote it: a crate version never changes. The entry
-    /// the catalogue holds, and its file.
+    /// Add `entry`, writing its file. An entry of its version from its
+    /// source already there is kept, file and all, whoever wrote it: a crate
+    /// version never changes. One from another source is an error. The
+    /// entry the catalogue holds, and its file.
     pub fn add(&mut self, entry: Entry) -> Result<(&Entry, PathBuf), Error> {
         let key = entry.key();
         let file = self.file(&entry);
@@ -154,7 +155,16 @@ impl Catalog {
                 Entry::from_toml(&text).map_err(|e| Error(format!("{}: {e}", file.display())))?;
             self.index(written);
         }
-        Ok((&self.entries[&key], file))
+        // Kept only if it is this crate: one version from two sources (a
+        // registry, a directory) is two crates, and the catalogue holds one.
+        let held = &self.entries[&key];
+        if held.offer.source != entry.offer.source {
+            return Err(Error(format!(
+                "{key} is already in the catalogue from {}, not from {}",
+                held.offer.source, entry.offer.source
+            )));
+        }
+        Ok((held, file))
     }
 
     /// Every entry, by `name@version`.

@@ -391,6 +391,28 @@ pub(crate) mod tests {
         );
     }
 
+    /// One crate exporting one message under two names: the export of the
+    /// graph's name is the path, whatever order the offers come in, since
+    /// the contract hash covers the path.
+    #[test]
+    fn an_export_of_the_graphs_name_is_chosen_among_a_crates_exports() {
+        for exported in [
+            [
+                ("Alias", "chat::Alias", "chat", "chat::inner::Words"),
+                ("Words", "chat::Words", "chat", "chat::inner::Words"),
+            ],
+            [
+                ("Words", "chat::Words", "chat", "chat::inner::Words"),
+                ("Alias", "chat::Alias", "chat", "chat::inner::Words"),
+            ],
+        ] {
+            let offers = [offer("chat", &["chat::inner::Words"], &exported)];
+            let resolved =
+                resolve(&uses(&[("Words", &["A"])]), &offers, &BTreeMap::new()).expect("resolved");
+            assert_eq!(resolved["Words"].path, "chat::Words");
+        }
+    }
+
     /// A crate's own export comes before its private definition path, and
     /// before another crate's export.
     #[test]

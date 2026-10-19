@@ -362,8 +362,8 @@ async fn adding_a_crate_writes_only_under_the_target() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Identical drafts checked at once all check: they share one directory,
-/// and none reads another's half-written file.
+/// Identical drafts checked at once all check: each is read from its own
+/// text, and nothing is shared between them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn identical_checks_at_once_all_succeed() {
     let dir = scratch("concurrent");
@@ -403,4 +403,35 @@ async fn a_renamed_node_is_pinned() {
     let spec = body["spec"].as_str().expect("spec");
     assert!(spec.contains("Model = \"regnodes::Engine\""), "{spec}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Adds of one crate at once (a double click, or two users) share the
+/// fetch's scratch directory: each must read a whole manifest there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adds_of_one_crate_at_once_all_succeed() {
+    // The race showed in about one run in ten of eight adds; several
+    // rounds make a regression fail here, not now and then.
+    for round in 0..6 {
+        let dir = scratch(&format!("adds-{round}"));
+        let router = router(&dir, dir.join("catalogue"));
+        let adds: Vec<_> = (0..8)
+            .map(|_| {
+                let router = router.clone();
+                tokio::spawn(async move {
+                    json_call(
+                        &router,
+                        "POST",
+                        "/api/catalog",
+                        Some(json!({ "crate": "regproto@0.1.0" })),
+                    )
+                    .await
+                })
+            })
+            .collect();
+        for add in adds {
+            let (status, body) = add.await.expect("add");
+            assert_eq!(status, StatusCode::OK, "round {round}: {body:#}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

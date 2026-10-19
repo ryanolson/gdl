@@ -618,6 +618,39 @@ mod tests {
         assert!(!error.contains("[bind."), "{error}");
     }
 
+    /// The generated contract is written to `contract/`, and a file system
+    /// that folds case would put a segment named `Contract` there too.
+    #[test]
+    fn a_graph_spec_refuses_a_segment_named_contract_in_any_case() {
+        let mut spec = spec(
+            gdl_model::Placement::new()
+                .segment("Contract", ["S"])
+                .segment("engine", ["D"]),
+            &[("D", "tiny_nodes::D")],
+        );
+        spec.source = Source::Graph(spec::GraphSource {
+            path: "/work/tiny.gdl".into(),
+            text: None,
+            crates: Vec::new(),
+            pins: Default::default(),
+            nodes: Vec::new(),
+            node_pins: Default::default(),
+        });
+        let contract = Contract {
+            package: "tiny-contract".into(),
+            lib: "tiny_contract".into(),
+            path: "/work/out/contract".into(),
+            module: "tiny_contract".into(),
+        };
+        let error = validate(&spec, &contract, &manifest())
+            .expect_err("Contract")
+            .to_string();
+        assert!(
+            error.contains("segment `Contract`: the generated contract crate is `contract/`; rename the segment"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_segment_package_may_not_take_a_dependency_name() {
         // `tiny-contract` and `tiny-nodes` are the contract and the

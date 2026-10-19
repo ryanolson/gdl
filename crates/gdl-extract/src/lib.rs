@@ -77,8 +77,19 @@ impl Workspace {
             "[package]\nname = \"gdl-extract-fetch\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
              publish = false\n\n[workspace]\n\n[dependencies]\n{name} = \"={version}\"\n"
         );
+        // Adds of one crate at once share the scratch directory: each file is
+        // written beside and renamed into place, so `cargo metadata` never
+        // reads one half written, and left alone when it already holds the text.
         let write = |path: &Path, text: &str| {
-            std::fs::write(path, text).map_err(|e| Error(format!("{}: {e}", path.display())))
+            if std::fs::read_to_string(path).is_ok_and(|held| held == text) {
+                return Ok(());
+            }
+            static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let partial = path.with_extension(format!("partial-{}-{n}", std::process::id()));
+            std::fs::write(&partial, text)
+                .and_then(|()| std::fs::rename(&partial, path))
+                .map_err(|e| Error(format!("{}: {e}", path.display())))
         };
         write(&scratch.join("Cargo.toml"), &manifest)?;
         write(&src.join("lib.rs"), "")?;

@@ -195,3 +195,28 @@ fn adders_at_once_agree_on_one_entry() {
     assert_eq!(left, ["0.0.0.toml"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A version already there is kept when it comes from the same source; one
+/// from another source is another crate, and the add says so instead of
+/// keeping the first as if it were the second.
+#[test]
+fn a_version_from_another_source_is_refused() {
+    let dir = scratch("sources");
+    let workspace = workspace();
+    let mut catalog = Catalog::load(&dir).expect("catalogue");
+    let mut registry = entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z");
+    let path_source = registry.offer.source.clone();
+    registry.offer.source = "registry+https://github.com/rust-lang/crates.io-index".into();
+    catalog.add(registry).expect("added");
+    let error = catalog
+        .add(entry(&workspace, "read-protocols", "2026-10-18T21:04:06Z"))
+        .expect_err("another source")
+        .to_string();
+    assert_eq!(
+        error,
+        format!(
+            "read-protocols@0.0.0 is already in the catalogue from registry+https://github.com/rust-lang/crates.io-index, not from {path_source}"
+        )
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

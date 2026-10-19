@@ -7,7 +7,7 @@
 //!
 //! It listens on `127.0.0.1:8080` unless told otherwise, prints the
 //! address it serves, and adds crates to the catalogue in `--catalog`.
-//! Crates are fetched, and drafts written, under `--target-dir`
+//! Crates are fetched under `--target-dir`
 //! (`target` here by default). Generated crates take gdl from the path or
 //! git revision given.
 
