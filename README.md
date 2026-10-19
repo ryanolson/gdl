@@ -2,7 +2,7 @@
 
 gdl is a graph definition language and runtime for request/response streaming pipelines. A request goes into a graph of nodes, and a stream of items comes back. The same graph runs in one process, or split into segments that run as separate programs and talk over [velo](https://github.com/ai-dynamo/velo).
 
-You define the graph once, with its message types. A placement puts each node in a segment. The generator, `gdl-gen`, writes one crate per segment. Each segment crate depends only on the implementations of the nodes that it hosts.
+You define the graph once, with its message types. A placement puts each node in a segment. The generator, `cargo gdl generate`, writes one crate per segment. Each segment crate depends only on the implementations of the nodes that it hosts.
 
 ## The model
 
@@ -321,7 +321,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share |
 | `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |
 | `crates/gdl-extract` | The source reader: what a crate offers to graphs (messages, exports, and nodes), read from its source without building it |
-| `crates/gdl-macros` | The `graph!` macro and `derive(Message)` |
+| `crates/gdl-macros` | The `graph!` macro, `derive(Message)`, `derive(Node)`, and `#[export]` |
 | `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `resolve`, `generate`, and `diagram` |
 | `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |
 | `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |

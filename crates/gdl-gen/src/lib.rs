@@ -232,7 +232,7 @@ struct Prepared {
 
 /// The spec's contract and its manifest. A graph file's contract is
 /// generated: its manifest is read from a copy under `target`, so that
-/// `--check` and `--diagram` write nothing in the output, and its files
+/// `--check` and `diagram` write nothing in the output, and its files
 /// are rendered for `out/contract` when `out` is given.
 fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, Error> {
     let source = match &spec.source {
