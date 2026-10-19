@@ -3,8 +3,9 @@
 //! The input is a spec ([`Spec`]): the contract crate holding the graph's
 //! `graph!` invocation, the placement of nodes into segments, and the crate
 //! and type implementing each node. The generator reads the contract's
-//! manifest by compiling the contract alone, validates the placement and the
-//! bindings against it, and writes, per segment, a crate with a library
+//! manifest by compiling the contract alone (a graph spec, below, compiles
+//! nothing), validates the placement and the bindings against it, and
+//! writes, per segment, a crate with a library
 //! (`start`, to deploy the segment inside a program) and a binary (to run
 //! it on its own). Each segment crate depends only on the implementation
 //! crates of the nodes it hosts.
@@ -22,9 +23,13 @@
 //! and the crates that offer those messages: types that derive `Message`,
 //! and `pub use` items marked `#[export]`. [`resolve`] checks that the
 //! names agree along every edge and resolves each to exactly one message,
-//! read from the crates' source by `gdl-extract`. Such a spec binds its nodes through `[nodes]`:
-//! node crates that offer them, read from their source without compiling
-//! those crates.
+//! read from the crates' source by `gdl-extract`. Such a spec binds its
+//! nodes through `[nodes]`: node crates that offer them, read from their
+//! source. Nothing is compiled: the contract's manifest is built from the
+//! graph file and the resolution, so a crate that needs CUDA, say,
+//! composes on a machine without it. [`check`] validates a spec as
+//! generating it would, writing nothing, with the crates' offers read from
+//! source or given by a loaded catalogue.
 
 mod contract;
 mod dump;
@@ -33,11 +38,14 @@ mod export;
 mod extract;
 mod names;
 mod nodes;
+mod offers;
+mod output;
 mod paths;
 mod resolve;
 mod spec;
+mod validate;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -47,8 +55,12 @@ pub use extract::{Crate, Extracted, add_to_catalog, extract, verify};
 /// The working catalogue, its entries, and what a crate offers, read from
 /// its source.
 pub use gdl_extract::{Catalog, Entry, Offer};
+use offers::offers;
+pub use offers::{CRATES_IO, Offers};
+pub use output::{drift, write};
 pub use resolve::Resolved;
 pub use spec::Spec;
+use validate::{library_clashes, validate};
 
 /// A generation failure, with everything wrong at once where possible.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,17 +89,6 @@ pub type Files = BTreeMap<PathBuf, String>;
 /// `contract/` under `out`.
 pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
     Ok(render_with(spec, out, target, emit::Deps::Relative, Offers::Read)?.0)
-}
-
-/// Where the offers of a spec's listed crates come from.
-#[derive(Debug, Clone, Copy)]
-pub enum Offers<'a> {
-    /// Read from each crate's source, a crate listed by version fetched
-    /// into the target directory first.
-    Read,
-    /// Given: the entries of a loaded catalogue, read when each was added.
-    /// A listed crate the catalogue does not hold is an error.
-    Given(&'a [Offer]),
 }
 
 /// [`render`], with dependencies named as `deps` says and offers from
@@ -253,129 +254,6 @@ fn resolved(
     Ok((file, Resolution { messages }))
 }
 
-/// What the listed crates offer, read from their source: a directory as
-/// it is, and a version fetched from crates.io into `target`, which builds
-/// nothing. Crates of one workspace share one `cargo metadata`. Every
-/// problem the reader meets is reported.
-fn offers(
-    listed: &[(&str, &str, &spec::CrateSource)],
-    target: &Path,
-    from: Offers<'_>,
-) -> Result<Vec<gdl_extract::Offer>, Error> {
-    if let Offers::Given(given) = from {
-        return listed
-            .iter()
-            .map(|&(package, lib, source)| given_offer(given, package, lib, source))
-            .collect::<Result<Vec<_>, Vec<String>>>()
-            .map_err(|problems| Error::new(problems.join("\n")));
-    }
-    let mut workspaces: Vec<gdl_extract::Workspace> = Vec::new();
-    let mut offers = Vec::with_capacity(listed.len());
-    let mut problems = Vec::new();
-    for &(package, lib, source) in listed {
-        let extraction = match source {
-            spec::CrateSource::Path(dir) => {
-                // Crates of one workspace share its `cargo metadata`.
-                match workspaces.iter().find_map(|w| w.extract_in(dir)) {
-                    Some(extraction) => extraction,
-                    None => {
-                        let workspace = gdl_extract::Workspace::load(&dir.join("Cargo.toml"))
-                            .map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
-                        let extraction = workspace.extract_in(dir).ok_or_else(|| {
-                            Error::new(format!(
-                                "{}: cargo metadata resolves no package there",
-                                dir.display()
-                            ))
-                        })?;
-                        workspaces.push(workspace);
-                        extraction
-                    }
-                }
-            }
-            spec::CrateSource::Version(version) => {
-                let scratch = target
-                    .join("gdl-gen")
-                    .join(format!("fetch-{package}-{version}"));
-                let spec = format!("{package}@{version}");
-                let fail = |e: gdl_extract::Error| Error::new(format!("{spec}: {e}"));
-                let workspace =
-                    gdl_extract::Workspace::fetch(package, version, &scratch).map_err(fail)?;
-                let located = workspace.locate(&spec).map_err(fail)?;
-                // The spec named the library for the package; generated
-                // code names the crate by its library.
-                if located.lib.as_deref().is_some_and(|l| l != lib) {
-                    return Err(Error::new(format!(
-                        "{spec}: its library is `{}`, not `{lib}`; a crate listed by version must name its library for its package",
-                        located.lib.unwrap_or_default()
-                    )));
-                }
-                workspace.extract(&spec).map_err(fail)?
-            }
-        };
-        problems.extend(extraction.problems);
-        offers.push(extraction.offer);
-    }
-    if problems.is_empty() {
-        Ok(offers)
-    } else {
-        Err(Error::new(problems.join("\n")))
-    }
-}
-
-/// crates.io, as a lockfile names it over git and over the sparse
-/// protocol: what a crate listed by version, and a manifest that depends
-/// on one by version, mean.
-pub const CRATES_IO: [&str; 2] = [
-    "registry+https://github.com/rust-lang/crates.io-index",
-    "sparse+https://index.crates.io/",
-];
-
-/// The offer of the listed crate `package` from `source` among `given`,
-/// held to the rule a read holds it to: its library is `lib`.
-fn given_offer(
-    given: &[Offer],
-    package: &str,
-    lib: &str,
-    source: &spec::CrateSource,
-) -> Result<Offer, Vec<String>> {
-    let canonical = |dir: &Path| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let found = given.iter().find(|o| {
-        o.package == package
-            && match source {
-                spec::CrateSource::Version(v) =>
-                // A version names the crates.io package, which a lockfile
-                // gives a registry source; a git package is another.
-                {
-                    o.version == *v && CRATES_IO.contains(&o.source.as_str())
-                }
-                spec::CrateSource::Path(dir) => o
-                    .source
-                    .strip_prefix("path+file://")
-                    .is_some_and(|d| canonical(Path::new(d)) == canonical(dir)),
-            }
-    });
-    let Some(offer) = found else {
-        return Err(vec![format!(
-            "`{package}` ({source}) is not in the catalogue: add it first"
-        )]);
-    };
-    // The library's name, as the reader wrote every path of the crate.
-    let library = offer
-        .messages
-        .iter()
-        .map(|m| m.path.as_str())
-        .chain(offer.exports.iter().map(|e| e.path.as_str()))
-        .chain(offer.nodes.iter().map(|n| n.ty.as_str()))
-        .find_map(|path| path.split("::").next());
-    if let Some(library) = library.filter(|l| *l != lib) {
-        return Err(vec![format!(
-            "{package}@{}: its library is `{library}`, not `{lib}`; a crate listed by version must name its library for its package",
-            offer.version
-        )]);
-    }
-    Ok(offer.clone())
-}
-
 /// The contract that a spec's segments build on, its manifest, and the
 /// files of the contract crate when the generator writes it.
 struct Prepared {
@@ -476,27 +354,6 @@ fn prepare(
     })
 }
 
-/// The message crates whose library takes a name that the generated
-/// contract uses for another crate: `gdl`, or the contract's own.
-fn library_clashes(contract: &str, crates: &[spec::MessageCrate]) -> Vec<String> {
-    crates
-        .iter()
-        .filter_map(|c| {
-            let whose = if c.lib == "gdl" {
-                "the gdl runtime's name in the generated contract"
-            } else if c.lib == contract {
-                "the generated contract's name"
-            } else {
-                return None;
-            };
-            Some(format!(
-                "[messages] crate `{}`: its library `{}` is {whose}",
-                c.package, c.lib
-            ))
-        })
-        .collect()
-}
-
 fn render_manifest(
     spec: &Spec,
     contract: &spec::Contract,
@@ -507,395 +364,6 @@ fn render_manifest(
     let layout = validate(spec, contract, manifest)?;
     let out = dump::absolute(out)?;
     emit::files(spec, contract, manifest, &layout, &out, deps)
-}
-
-/// Check the placement and the bindings against the manifest, reporting
-/// every problem found.
-fn validate(
-    spec: &Spec,
-    contract: &spec::Contract,
-    manifest: &gdl_model::Manifest,
-) -> Result<gdl_model::Layout, Error> {
-    let mut problems = spec.problems.clone();
-    // Where a node's crate comes from, as the spec writes it: a contract
-    // spec binds each node in a table, a graph spec through `[nodes]`.
-    let bound_by = |node: &str| match spec.source {
-        spec::Source::Contract(_) => format!("[bind.{node}]"),
-        spec::Source::Graph(_) => format!("node `{node}`'s [nodes] entry"),
-    };
-    let layout = match gdl_model::layout(manifest, &spec.placement) {
-        Ok(layout) => Some(layout),
-        Err(errors) => {
-            problems.push(errors.to_string());
-            None
-        }
-    };
-    if !manifest
-        .name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic())
-    {
-        problems.push(format!(
-            "graph `{}`: its name starts every package name, so it must start with a letter",
-            manifest.name
-        ));
-    }
-    // Package names are what Cargo sees: two segments that differ only in
-    // case or in `-` against `_` would build one package twice.
-    let mut packages: BTreeMap<String, &str> = BTreeMap::new();
-    for (segment, nodes) in spec.placement.segments() {
-        let hosted: BTreeSet<&str> = nodes.iter().map(String::as_str).collect();
-        let valid = !segment.is_empty()
-            && segment
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        if !valid {
-            problems.push(format!(
-                "segment `{segment}`: a segment name is letters, digits, `-`, and `_`"
-            ));
-            continue;
-        }
-        // The generated contract is written to `contract/`, whatever its
-        // package is called; case is folded for file systems that fold it.
-        if matches!(spec.source, spec::Source::Graph(_)) && segment.eq_ignore_ascii_case("contract")
-        {
-            problems.push(format!(
-                "segment `{segment}`: the generated contract crate is `contract/`; rename the segment"
-            ));
-            continue;
-        }
-        let package = emit::package(manifest, segment);
-        // A generated crate depends on the contract and on implementations
-        // by package name; Cargo cannot hold two path packages of one name.
-        if package == contract.package {
-            problems.push(format!(
-                "segment `{segment}` becomes package `{package}`, the contract's name"
-            ));
-        }
-        for (node, bind) in &spec.bind {
-            if package == bind.package {
-                problems.push(match spec.source {
-                    spec::Source::Contract(_) => format!(
-                        "segment `{segment}` becomes package `{package}`, the name of [bind.{node}]'s crate"
-                    ),
-                    spec::Source::Graph(_) => format!(
-                        "segment `{segment}` becomes package `{package}`, the name of node `{node}`'s [nodes] crate"
-                    ),
-                });
-            }
-        }
-        // Rust code names crates by library name; each crate the segment's
-        // code sees must have its own.
-        let mut seen: BTreeMap<String, String> = BTreeMap::new();
-        let mut see = |lib: &str, what: String, problems: &mut Vec<String>| {
-            if let Some(first) = seen.get(lib) {
-                if *first != what {
-                    problems.push(format!(
-                        "segment `{segment}`: crate name `{lib}` is both {first} and {what}"
-                    ));
-                }
-            } else {
-                seen.insert(lib.to_string(), what);
-            }
-        };
-        see(
-            &package.replace('-', "_"),
-            "the segment's library".into(),
-            &mut problems,
-        );
-        see(&contract.lib, "the contract".into(), &mut problems);
-        for fixed in ["gdl", "serde", "tokio", "toml"] {
-            see(fixed, format!("the `{fixed}` dependency"), &mut problems);
-        }
-        // Every crate sees these; a dependency of the same name would
-        // shadow the standard library in the generated code.
-        for builtin in ["std", "core", "alloc"] {
-            see(builtin, "the standard library".into(), &mut problems);
-        }
-        // One package may implement several nodes: it is one crate.
-        for (node, bind) in &spec.bind {
-            if hosted.contains(node.as_str()) {
-                see(
-                    &bind.lib,
-                    format!("package `{}`", bind.package),
-                    &mut problems,
-                );
-            }
-        }
-        // Cargo names dependencies by package: each key in the generated
-        // manifest must be distinct too, whatever the libraries are called.
-        let mut keys: BTreeMap<String, String> = BTreeMap::new();
-        let mut key = |name: &str, what: String, problems: &mut Vec<String>| match keys.get(name) {
-            Some(first) if *first != what => problems.push(format!(
-                "segment `{segment}`: dependency `{name}` is both {first} and {what}"
-            )),
-            Some(_) => {}
-            None => {
-                keys.insert(name.to_string(), what);
-            }
-        };
-        for fixed in ["gdl", "serde", "tokio", "toml"] {
-            key(fixed, format!("the `{fixed}` dependency"), &mut problems);
-        }
-        key(&contract.package, "the contract".into(), &mut problems);
-        for (node, bind) in &spec.bind {
-            if hosted.contains(node.as_str()) {
-                let first = spec
-                    .bind
-                    .iter()
-                    .find(|(n, b)| hosted.contains(n.as_str()) && b.package == bind.package)
-                    .map_or(node.as_str(), |(n, _)| n.as_str());
-                key(
-                    &bind.package,
-                    format!("{}'s package", bound_by(first)),
-                    &mut problems,
-                );
-            }
-        }
-        if let Some(other) = packages.insert(package.clone(), segment) {
-            problems.push(format!(
-                "segments `{other}` and `{segment}` both become package `{package}`"
-            ));
-        }
-    }
-    let mut sources: BTreeMap<&str, (spec::CrateSource, &str)> = BTreeMap::new();
-    for (node, bind) in &spec.bind {
-        match manifest.node(node) {
-            None => problems.push(format!(
-                "{}: the graph has no node `{node}`",
-                bound_by(node)
-            )),
-            Some(info) if info.role == gdl_model::Role::Source => problems.push(format!(
-                "{}: `{node}` is the source, which takes no implementation",
-                bound_by(node)
-            )),
-            Some(_) => {}
-        }
-        if bind.ty.trim().is_empty() {
-            problems.push(format!("{}: `type` is empty", bound_by(node)));
-        } else {
-            match type_crate(&bind.ty) {
-                None => problems.push(format!(
-                    "{}: type `{}` is not a Rust type path",
-                    bound_by(node),
-                    bind.ty
-                )),
-                // The bound crate is the only one of the node's that the
-                // segment depends on; a type from anywhere else cannot
-                // resolve.
-                Some(krate) if krate != bind.lib => problems.push(format!(
-                    "{}: type `{}` is not in crate `{}`",
-                    bound_by(node),
-                    bind.ty,
-                    bind.lib
-                )),
-                Some(_) => {}
-            }
-        }
-        let path = match &bind.source {
-            spec::CrateSource::Path(path) => spec::CrateSource::Path(
-                dump::absolute(path).unwrap_or_else(|_| paths::normalize(path)),
-            ),
-            version => version.clone(),
-        };
-        match sources.get(bind.package.as_str()) {
-            Some((first, other)) if *first != path => problems.push(format!(
-                "{} and {} give package `{}` two sources",
-                bound_by(other),
-                bound_by(node),
-                bind.package
-            )),
-            Some(_) => {}
-            None => {
-                sources.insert(&bind.package, (path, node));
-            }
-        }
-    }
-    // A graph spec has reported each node that did not bind already.
-    let contract_spec = matches!(spec.source, spec::Source::Contract(_));
-    for node in &manifest.nodes {
-        if contract_spec
-            && node.role != gdl_model::Role::Source
-            && !spec.bind.contains_key(&node.name)
-        {
-            problems.push(format!("node `{}` has no [bind.{}]", node.name, node.name));
-        }
-        if node.role != gdl_model::Role::Source && node.binding.is_none() {
-            problems.push(format!(
-                "node `{}` has no binding name in the manifest; rebuild the contract with this gdl",
-                node.name
-            ));
-        }
-    }
-    match (layout, problems.is_empty()) {
-        (Some(layout), true) => Ok(layout),
-        _ => Err(Error::new(problems.join("\n"))),
-    }
-}
-
-/// Write `files` under `out`, and remove generated files there that are no
-/// longer produced. Returns the removed paths. Refuses, writing nothing, if
-/// a segment crate's directory holds a file the generator did not write:
-/// whatever it is, it changes that crate's build.
-pub fn write(out: &Path, files: &Files) -> Result<Vec<PathBuf>, Error> {
-    let survey = survey(out, files)?;
-    if !survey.foreign.is_empty() {
-        let list: Vec<String> = survey
-            .foreign
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect();
-        return Err(Error::new(format!(
-            "these files in generated crates were not generated; move them out first:\n{}",
-            list.join("\n")
-        )));
-    }
-    for (path, text) in files {
-        let path = out.join(path);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
-        }
-        if std::fs::read_to_string(&path).is_ok_and(|existing| &existing == text) {
-            continue;
-        }
-        std::fs::write(&path, text).map_err(|e| io(&path, e))?;
-    }
-    for path in &survey.stale {
-        let full = out.join(path);
-        std::fs::remove_file(&full).map_err(|e| io(&full, e))?;
-    }
-    Ok(survey.stale)
-}
-
-/// How the files under `out` differ from `files`: one line per missing,
-/// changed, stale (generated, no longer produced), or unexpected (in a
-/// generated crate, not generated) file. Empty when they match.
-pub fn drift(out: &Path, files: &Files) -> Result<Vec<String>, Error> {
-    let mut found = Vec::new();
-    for (path, text) in files {
-        match std::fs::read_to_string(out.join(path)) {
-            Err(_) => found.push(format!("missing: {}", path.display())),
-            Ok(existing) if &existing != text => found.push(format!("differs: {}", path.display())),
-            Ok(_) => {}
-        }
-    }
-    let survey = survey(out, files)?;
-    found.extend(
-        survey
-            .stale
-            .iter()
-            .map(|p| format!("stale: {}", p.display())),
-    );
-    found.extend(
-        survey
-            .foreign
-            .iter()
-            .map(|p| format!("unexpected: {}", p.display())),
-    );
-    Ok(found)
-}
-
-/// Files under `out` that `files` does not hold.
-struct Survey {
-    /// Marked as generated: output of an earlier generation.
-    stale: Vec<PathBuf>,
-    /// Unmarked, inside a generated crate's directory or at a path the
-    /// generator writes.
-    foreign: Vec<PathBuf>,
-}
-
-/// Walk `out`. The one directory skipped is a crate's own build directory,
-/// `<crate>/target` holding a `CACHEDIR.TAG`, which is what building the
-/// crate on its own leaves. Neither the name alone (a segment may be called
-/// `target`) nor a tag alone (Cargo still builds a tagged `src/bin`) marks a
-/// directory as build output. Likewise a crate's `Cargo.lock` is left to
-/// whoever builds the crate on its own: it changes no source and pins only
-/// what that build resolved.
-fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
-    let crates: BTreeSet<&Path> = files
-        .keys()
-        .filter(|path| path.components().count() > 1)
-        .filter_map(|path| path.iter().next().map(Path::new))
-        .collect();
-    let mut survey = Survey {
-        stale: Vec::new(),
-        foreign: Vec::new(),
-    };
-    let mut dirs = vec![PathBuf::new()];
-    while let Some(dir) = dirs.pop() {
-        let full = out.join(&dir);
-        let mut parts = dir.iter();
-        let build_dir = match (parts.next(), parts.next(), parts.next()) {
-            (Some(krate), Some(name), None) => {
-                crates.contains(Path::new(krate)) && name == "target"
-            }
-            _ => false,
-        };
-        if build_dir && full.join("CACHEDIR.TAG").exists() {
-            continue;
-        }
-        let entries = match std::fs::read_dir(&full) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(io(&full, e)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|e| io(&full, e))?;
-            let path = dir.join(entry.file_name());
-            let kind = entry.file_type().map_err(|e| io(&full, e))?;
-            if kind.is_dir() {
-                dirs.push(path);
-                continue;
-            }
-            let lockfile = path.file_name().is_some_and(|name| name == "Cargo.lock")
-                && dir.components().count() == 1
-                && crates.contains(dir.as_path());
-            if lockfile {
-                continue;
-            }
-            let text = std::fs::read_to_string(out.join(&path)).unwrap_or_default();
-            let marked = text
-                .lines()
-                .next()
-                .is_some_and(|line| line.contains(MARKER));
-            // A file at a path the generator writes is the generator's only
-            // if it says so; a handwritten one there is never replaced.
-            if files.contains_key(&path) {
-                if !marked {
-                    survey.foreign.push(path);
-                }
-                continue;
-            }
-            let in_crate = path
-                .iter()
-                .next()
-                .is_some_and(|first| crates.contains(Path::new(first)));
-            if marked {
-                survey.stale.push(path);
-            } else if in_crate {
-                survey.foreign.push(path);
-            }
-        }
-    }
-    survey.stale.sort();
-    survey.foreign.sort();
-    Ok(survey)
-}
-
-fn io(path: &Path, error: std::io::Error) -> Error {
-    Error::new(format!("{}: {error}", path.display()))
-}
-
-/// The crate a binding's type path starts in, as cargo names the library
-/// (without a raw identifier's `r#`), or `None` if the text is not a Rust
-/// path. Parsed rather than split: a library named like a keyword appears
-/// in the path as `r#name`, and an unescaped keyword is not a path at all.
-fn type_crate(ty: &str) -> Option<String> {
-    use syn::ext::IdentExt as _;
-    let path: syn::Path = syn::parse_str(ty.trim()).ok()?;
-    let first = path.segments.first()?;
-    Some(first.ident.unraw().to_string())
 }
 
 #[cfg(test)]
@@ -1262,70 +730,6 @@ mod tests {
             "{lib}"
         );
         assert!(main.contains("build::<::tiny_nodes::D>"), "{main}");
-    }
-
-    /// Generated code names a crate by its library: a given offer whose
-    /// paths begin with another library than the listed one is refused,
-    /// as a read is.
-    #[test]
-    fn a_given_offer_names_its_library_for_its_package() {
-        let offer = Offer {
-            package: "proto".into(),
-            version: "0.1.0".into(),
-            source: CRATES_IO[0].into(),
-            messages: vec![gdl_extract::MessageEntry {
-                name: "Words".into(),
-                path: "renamed::Words".into(),
-                wire: true,
-                public: true,
-            }],
-            exports: Vec::new(),
-            nodes: Vec::new(),
-        };
-        let version = spec::CrateSource::Version("0.1.0".into());
-        let error = given_offer(std::slice::from_ref(&offer), "proto", "proto", &version)
-            .expect_err("renamed");
-        assert_eq!(
-            error,
-            [
-                "proto@0.1.0: its library is `renamed`, not `proto`; a crate listed by version must name its library for its package"
-            ]
-        );
-        let mut named = offer.clone();
-        named.messages[0].path = "proto::Words".into();
-        assert!(given_offer(&[named], "proto", "proto", &version).is_ok());
-    }
-
-    /// A crate listed by version is the registry's: a git package of the
-    /// same name and version is another crate, whatever order the catalogue
-    /// gives them in.
-    #[test]
-    fn a_version_is_matched_to_the_registry_offer() {
-        let offer = |source: &str| Offer {
-            package: "proto".into(),
-            version: "0.1.0".into(),
-            source: source.into(),
-            messages: Vec::new(),
-            exports: Vec::new(),
-            nodes: Vec::new(),
-        };
-        let git = offer("git+https://example.com/proto#abc");
-        let registry = offer("registry+https://github.com/rust-lang/crates.io-index");
-        let version = spec::CrateSource::Version("0.1.0".into());
-        assert!(given_offer(std::slice::from_ref(&git), "proto", "proto", &version).is_err());
-        // Another registry's package of that name and version is another
-        // crate: the generated manifests name crates.io.
-        let elsewhere = offer("sparse+https://registry.example.com/index/");
-        assert!(given_offer(std::slice::from_ref(&elsewhere), "proto", "proto", &version).is_err());
-        let sparse = offer("sparse+https://index.crates.io/");
-        assert!(given_offer(std::slice::from_ref(&sparse), "proto", "proto", &version).is_ok());
-        for given in [
-            [git.clone(), registry.clone()],
-            [registry.clone(), git.clone()],
-        ] {
-            let found = given_offer(&given, "proto", "proto", &version).expect("the registry's");
-            assert_eq!(found.source, registry.source);
-        }
     }
 
     /// A node crate listed by version is a dependency on exactly that
