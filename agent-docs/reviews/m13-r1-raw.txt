@@ -1,0 +1,102 @@
+=== Reviewer 1: REJECT, actionable 11
+
+READER-01 (major) crates/gdl-extract/src/resolve.rs:176
+Claim: Cyclic glob imports cause exponential resolution work and stall extraction of a compiling crate.
+Evidence: A fixture with `pub mod a { pub use crate::*; }`, an equivalent module b, root globs from a and b, and an export from dependency `review_fixture` passes cargo check. Extraction times out after 5 seconds (exit 124). Changing only the export to `::review_fixture::Aliased` completes in 0.19 seconds. member recursively revisits the same module/name through both globs; DEPTH bounds recursion depth but not the branching search before external-prelude fallback.
+Test idea: Keep the cyclic-glob fixture and assert that qualified and unqualified dependency exports resolve to the same origin within a short subprocess timeout. Reproduction: /tmp/gdl-review-reader/checks.py, test_glob_cycle and passing test_cycle_control.
+
+READER-02 (major) crates/gdl-extract/src/resolve.rs:179
+Claim: Glob resolution imports private members and can silently assign an export to the wrong message.
+Evidence: The compiling fixture has hidden::Payload private and visible::Payload public. An output module publicly glob-imports hidden first and visible second; the root exports output::Payload as Chosen. The compiled catalogue identifies visible::Payload, but extraction identifies hidden::Payload. TypeDef and Use retain no visibility, and member returns the first matching glob member without checking accessibility.
+Test idea: Compare Chosen's extracted origin with Catalogue::linked() for the private/public glob fixture. The glob_visibility assertion fails with hidden::Payload versus visible::Payload in /tmp/gdl-review-reader/harness.
+
+READER-03 (major) crates/gdl-extract/src/metadata.rs:130
+Claim: Cargo metadata's package-wide feature union is incorrectly used as the normal library's active feature set.
+Evidence: Under resolver 3, review-consumer depends normally on review-leaf without features and also uses it as a build dependency with feature extra. Payload derives serde only under extra. The compiled consumer catalogue correctly reports wire=false; extraction of its export reports wire=true with no problems. node.features includes the build dependency's features, which Cargo does not enable for the normal dependency. This reintroduces the feature-context discrepancy identified in m10-r3 under the new reader.
+Test idea: Use a normal/build dependency pair with distinct feature sets and compare extracted messages and wire capability with the consumer's compiled catalogue. /tmp/gdl-review-reader/checks.py test_feature_context fails True != False.
+
+READER-04 (major) crates/gdl-extract/src/tree.rs:138
+Claim: File-level inner cfg attributes are discarded, so disabled modules still offer messages.
+Evidence: Reader::file returns file.items without evaluating file.attrs. In a compiling fixture, lib.rs declares `pub mod gated;` and gated.rs begins with `#![cfg(any())]`, followed by a Message derive. The compiled catalogue contains no Ghost message, but extraction offers Ghost. The original fixture returned no extraction problems.
+Test idea: Assert that messages in a file disabled by an inner cfg or cfg_attr are absent, at both crate root and external-module boundaries. The file_inner_cfg assertion fails in /tmp/gdl-review-reader/harness.
+
+READER-05 (major) crates/gdl-extract/src/tree.rs:216
+Claim: Associated-type cfg attributes are ignored, causing node ports to bind to disabled types.
+Evidence: ImplItem::Type entries are collected without applying Settings::attributes. A compiling Forward impl declares `#[cfg(any())] type In = WrongPort;` followed by `#[cfg(not(any()))] type In = Actual;`. node() takes the first In entry. Extraction reports WrongPort, while the compiled Node registration reports Actual.
+Test idea: Compare a node's extracted port origins with its compiled registration when mutually exclusive cfg and cfg_attr select associated types. The cfg_associated_type assertion fails in /tmp/gdl-review-reader/harness.
+
+READER-06 (major) crates/gdl-extract/src/tree.rs:250
+Claim: A path attribute inside an inline module is resolved relative to the wrong directory.
+Evidence: For `pub mod inline { #[path = "payload.rs"] pub mod nested; }` in lib.rs, rustc reads src/inline/payload.rs, but the reader uses file.parent() and reads src/payload.rs. The fixture puts Correct in the former and Wrong in the latter. It compiles with Correct; extraction misses Correct and reads the unrelated file. Inline modules' own path attributes are also discarded by the preceding match arm.
+Test idea: Compare the catalogue for an inline module containing a path-qualified child, with different messages in the correct directory and the crate-root decoy file. The inline_path assertion fails in /tmp/gdl-review-reader/harness.
+
+READER-07 (major) crates/gdl-extract/src/markers.rs:248
+Claim: Role traits and Streamed are recognized by spelling instead of resolved identity, rejecting ordinary use aliases.
+Evidence: A compiling node uses `use gdl::Forward as Stage; impl Stage for AliasNode`. Its compiled registration has the forward role, but extraction says the crate implements no role trait. Separately, `use gdl::Streamed as Input` makes a valid streamed port fail extraction as a non-message, because streamed() at line 344 requires the literal name Streamed. These are use aliases, not the accepted unsupported `pub type` aliases.
+Test idea: Require the same extracted node entry before and after renaming imports of Forward and Streamed. Both aliased_role and aliased_stream fail against successfully compiled registrations in /tmp/gdl-review-reader/harness.
+
+READER-08 (major) crates/gdl-extract/src/markers.rs:167
+Claim: Deriving Deserialize is incorrectly treated as proof of DeserializeOwned and wire capability.
+Evidence: `#[derive(gdl_message::Message, serde::Serialize, serde::Deserialize)] pub struct Borrowed { pub text: &'static str }` compiles. Its actual wire probe returns false because it cannot deserialize owned data for every input lifetime. The reader returns true immediately upon seeing the two derives. This advertises a codec the type cannot provide.
+Test idea: Compare extracted wire capability with Catalogue::linked() for a static borrowed field and an owned String control. The wire_owned assertion fails true != false in /tmp/gdl-review-reader/harness.
+
+READER-09 (major) crates/gdl-extract/src/markers.rs:211
+Claim: An export attribute imported under another name is silently omitted.
+Evidence: The compiling fixture uses `use gdl_message::export as offer; #[offer] pub use defs::Aliased;`. The compiled catalogue registers the root export, but extraction omits it without reporting a problem. marked() accepts only the literal export spelling and a narrow direct-import form. Losing this export can leave contract generation naming the definition through its private module.
+Test idea: Compare exports before and after aliasing the attribute import; also exercise a re-exported attribute. The export_alias assertion fails in /tmp/gdl-review-reader/harness.
+
+READER-10 (major) crates/gdl-extract/src/tree.rs:205
+Claim: extern crate self aliases are resolved as nonexistent external dependencies.
+Evidence: `extern crate self as local; #[gdl_message::export] pub use local::visible::Payload as SelfAlias;` compiles and registers SelfAlias. Extraction reports that local::visible::Payload names no Message. The extern-crate item is recorded as the absolute path [self], which external() cannot resolve to the current crate.
+Test idea: Assert that an export through `extern crate self as local` has the same origin as one through crate::. The extern_self assertion fails in /tmp/gdl-review-reader/harness.
+
+READER-11 (minor) crates/gdl-extract/src/markers.rs:133
+Claim: Raw module identifiers produce definition paths that disagree with the compiled catalogue, causing false verification failures.
+Evidence: For `pub mod r#type { #[derive(gdl_message::Message)] pub struct r#match; }`, extraction records review_fixture::type::match, while the compiled registration records review_fixture::r#type::match. The reader strips module spelling before reconstructing paths; module_path! preserves it. The verify comparison compares these paths literally, so this valid crate cannot verify successfully.
+Test idea: Compare source and compiled identities, and run verification, for messages and exports inside keyword-escaped modules. The raw_identifiers assertion fails in /tmp/gdl-review-reader/harness.
+
+Notes: Reviewed HEAD 601235236152dfe62da1c9034ada9b14d1d8d3c3, concentrating on gdl-extract and its compiler/catalogue boundary. Settled limits and earlier review dispositions were read and excluded. The original worktree remains clean and unmodified; all builds and experiments used /tmp/gdl-review-reader with its own CARGO_TARGET_DIR. Existing gdl-extract tests: 9 passed. Compiled differential fixtures: 10 failing assertions and 1 passing control; additional feature/cycle checks: 2 failing assertions and 1 passing control. The role and Streamed alias failures are grouped into one finding. Tests ran under timeout. Full workspace tests were not run. No agents or phone-a-friend were used, as requested.
+
+=== Reviewer 2: REJECT, actionable 4
+
+M13-MARKERS-01 (major) crates/gdl-gen/src/extract.rs:159
+Claim: --verify ignores exported messages' wire capability and can certify an incorrect offer.
+Evidence: The export comparison includes only name, path, and origin; ExportEntry.wire is omitted. Dependency message registrations are filtered out at line 157. Reproduced with a dependency defining Words { text: &'static str } deriving Serialize, Deserialize, and Message, and a facade exporting Words. The compiled wire probe correctly reports local because Words does not implement DeserializeOwned. Verifying the defining crate fails with the wire/local discrepancy, but verifying the facade exits 0 and emits wire = true.
+Test idea: Keep the defining crate as a control and assert that extracting its facade with --verify also rejects the wire mismatch. Look up the export's origin in the compiled message catalogue and compare its wire capability. Reproduced by test_export_wire_mismatch in /tmp/gdl-review-markers/probes/regressions.py.
+
+M13-MARKERS-02 (major) crates/gdl-gen/src/extract.rs:174
+Claim: --verify discards the compiled port's nested flag, allowing a nested stream to verify as a flat stream.
+Evidence: The port summary uses only head and item identities, ignoring PortInfo.nested and streamed. Reproduced a Forward node whose source-visible In is Streamed<Words, Token>, while RUSTFLAGS='--cfg review_nested' selects In = Streamed<Streamed<Words, Hidden>, Token>. The compiled catalogue reports nested = true, but --verify exits 0 and publishes the flat port. The accepted inability to read compiler flags is not the finding: the build backstop has the discrepancy available and drops it.
+Test idea: Assert that --verify rejects this conditional-impl fixture and retain the flat implementation as a passing control. Compare the compiled stream shape, including nested, before accepting matching message identities. Reproduced by test_nested_port_mismatch in /tmp/gdl-review-markers/probes/regressions.py.
+
+M13-MARKERS-03 (minor) crates/gdl-macros/src/export.rs:63
+Claim: #[export] rejects valid self imports that the source reader supports.
+Evidence: For #[gdl_message::export] pub use defs::Words::{self};, bindings records the identifier self instead of Words. Expansion therefore emits <self as MessageTrait>::IDENTITY and fails with E0573: expected type, found module self. The same use compiles without the attribute, and the source reader correctly resolves it to Words. Both marker entry points share this expansion.
+Test idea: Add compile-pass and catalogue tests for pub use defs::Words::{self}, through both gdl_message::export and gdl::export, asserting name Words and the original message identity. Reproduced by test_export_self in /tmp/gdl-review-markers/probes/regressions.py; the attribute-free control compiles.
+
+M13-MARKERS-04 (minor) crates/gdl-gen/src/extract.rs:158
+Claim: --verify falsely rejects messages in modules spelled with raw identifiers.
+Evidence: The source reader strips r# from module identifiers, while module_path!() retains it in compiled registrations. A valid pub mod r#type containing a derived Words produces raw_module::type::Words in the offer and raw_module::r#type::Words in the catalogue. Verification reports both as missing, including an export's origin, although the crate compiles and both paths identify the same type.
+Test idea: Normalize raw identifier spelling consistently for message paths, export paths, and origin paths before comparison. Add a successful --verify fixture containing a message in pub mod r#type and an export of that message. Reproduced by test_raw_module in /tmp/gdl-review-markers/probes/regressions.py.
+
+Notes: Reviewed HEAD 6012352 with the settled rulings and prior review dispositions. Worktree unchanged; all builds and experiments used /tmp/gdl-review-markers with isolated target directories. Existing gdl-message, gdl-macros, and gdl-extract tests passed; gdl node and compile/trybuild tests passed; the existing gdl-gen verification test passed. Two separate gdl consumers linked successfully with 2 messages, 2 exports, and 2 nodes. The added isolated regression harness produced 4 expected failures and 1 passing node control. Tests used coreutils timeout. No agents or phone-a-friend were used. Full workspace suite was not run.
+
+=== Reviewer 3: REJECT, actionable 3
+
+M13-GEN-01 (major) crates/gdl-gen/src/lib.rs:207
+Claim: Preserve the package identity selected by directory when reusing a loaded workspace.
+Evidence: package_in(dir) returns only a package name, which offers() passes back to extract(). Reproduced with a listed bridge depending on vproto 0.1.0 and 0.2.0, followed by the explicit vproto-2 directory: resolution fails with 'the workspace resolves 2 packages `vproto` ... name one as `vproto@<version>`'. Reversing the same listed directories succeeds and selects 0.2.0. The directory already identifies the package; converting it to a bare name introduces ambiguity and makes resolution depend on list order.
+Test idea: Extend the version fixtures so the bridge depends on both versions. Resolve specs listing bridge and vproto-2 in both orders; require the same 0.2.0 origin. Preserve the exact selected package, including source, through extraction.
+
+M13-GEN-02 (major) crates/gdl-gen/src/extract.rs:192
+Claim: Compare exported messages' wire capability in --verify.
+Evidence: The export comparison includes its name, path, and origin package/version/path, but omits ExportEntry.wire. Dependency message registrations are excluded by the directory filter. Reproduced a dependency whose marked Token receives serde implementations through a macro, and a facade exporting Token: extraction reports wire=false; verifying the defining crate correctly reports the wire mismatch, but verifying the facade succeeds. The documented reader limitation is expected; the verification backstop silently accepting the incorrect export is the defect.
+Test idea: Keep the macro-generated serde implementations as a fixture. Require both the defining crate and its exporting facade to fail verification for the wire mismatch, with an ordinary serde-derived export as a passing control. Obtain the compiled export capability from its origin's message registration.
+
+M13-GEN-03 (minor) crates/gdl-gen/src/resolve.rs:132
+Claim: Choose the public path from all offers of the resolved origin, including renamed exports.
+Evidence: Public-path selection searches only candidates whose offered name matches the graph name. With a marked inner::Prompt in a private module and #[export] pub use inner::Prompt as PublicPrompt, resolving graph name Prompt selects alias_protocols::inner::Prompt despite the public export of that origin. The diagram command then fails with E0603. Pinning Prompt to alias_protocols::PublicPrompt succeeds. This contradicts the settled export-first path selection rule.
+Test idea: Add a renamed export to the private-module fixture. Resolve the definition's name without a pin and require the public alias path; then compile the generated contract. Retain controls for same-name exports and explicit pins.
+
+Notes: Reviewed HEAD 6012352 against the requested milestones, settled rulings, and prior dispositions. Original worktree remains unchanged. Experiments ran in /tmp/gdl-review-generator-head-WmbUTs with its own target directory and timeout guards. Existing suites passed: 87 generator tests plus 236 remaining workspace tests; 4 doctests ignored. All three chat node crates passed extract --verify. Three added regression tests failed, with passing controls. Five targeted behavior-removal mutations were caught by existing tests. Coverage limitation: dropping origin version/source from equality still passed all seven node-binding unit tests. Applicable m12 generator dispositions hold; retired nodes-file checks were treated as superseded. No material hot-path regression found. No agents or external reviewers were invoked.
+
