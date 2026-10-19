@@ -19,6 +19,7 @@ json-lines = ["dep:serde_json", "tokio/io-util"]
 dashmap = { workspace = true }
 gdl-macros = { path = "../gdl-macros" }
 gdl-message = { path = "../gdl-message" }
+gdl-model = { path = "../gdl-model" }
 futures = { workspace = true }
 pin-project-lite = { workspace = true }
 rmp-serde = { workspace = true }

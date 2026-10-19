@@ -99,3 +99,15 @@ impl fmt::Display for ErrorKind {
 
 /// The result type used across gdl.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+impl From<gdl_model::Error> for Error {
+    fn from(error: gdl_model::Error) -> Self {
+        Self::new(ErrorKind::Placement, error.to_string())
+    }
+}
+
+impl From<gdl_model::PlacementErrors> for Error {
+    fn from(errors: gdl_model::PlacementErrors) -> Self {
+        Self::new(ErrorKind::Placement, errors.to_string())
+    }
+}

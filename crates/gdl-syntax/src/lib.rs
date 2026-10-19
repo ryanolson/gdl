@@ -4,8 +4,10 @@
 //! file into the same [`Graph`] and resolves its message names. One parser
 //! serves both, so the two cannot accept different graphs.
 
+mod manifest;
 mod model;
 mod parse;
 
-pub use model::{Edge, Graph, Hop, Node, Role, identifier, message_name};
+pub use gdl_model::Role;
+pub use model::{Edge, Graph, Hop, Node, identifier, message_name};
 pub use parse::{Request, Sig};

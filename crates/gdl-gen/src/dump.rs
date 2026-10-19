@@ -14,7 +14,7 @@ use crate::spec::Contract;
 
 /// The manifest of `contract`. `target` is the cargo target directory to
 /// build in; reusing one across runs keeps the build incremental.
-pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl::Manifest, Error> {
+pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl_model::Manifest, Error> {
     let path = absolute(&contract.path)?;
     let dependencies = format!(
         "{package} = {{ path = {path} }}\n",
@@ -35,7 +35,8 @@ pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl::Manifest, Err
         &dependencies,
         &main,
     )?;
-    gdl::Manifest::from_toml(&text).map_err(|e| Error::new(format!("reading the manifest: {e}")))
+    gdl_model::Manifest::from_toml(&text)
+        .map_err(|e| Error::new(format!("reading the manifest: {e}")))
 }
 
 /// A name for generated content: the same content, the same name, within

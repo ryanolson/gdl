@@ -14,7 +14,7 @@ name = "cargo-gdl"
 path = "src/main.rs"
 
 [dependencies]
-gdl = { path = "../gdl" }
+gdl-model = { path = "../gdl-model" }
 gdl-extract = { path = "../gdl-extract" }
 gdl-message = { path = "../gdl-message" }
 gdl-syntax = { path = "../gdl-syntax" }

@@ -10,6 +10,8 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::{Ident, LitInt, LitStr, Type};
 
+use gdl_model::Role;
+
 use crate::parse::{Element, GraphInput, Request, Sig};
 
 /// A graph whose structure is checked: the result of [`Graph::parse`].
@@ -76,21 +78,6 @@ impl Node {
             Sig::Backward { .. } => Role::Backward,
         }
     }
-}
-
-/// A node's role.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Role {
-    /// The graph's entry point.
-    Source,
-    /// Owns a nested hop and sees both directions.
-    Operator,
-    /// Transforms the request.
-    Forward,
-    /// Ends a hop and produces its response.
-    Sink,
-    /// Transforms the response.
-    Backward,
 }
 
 impl Graph {

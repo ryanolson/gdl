@@ -13,7 +13,7 @@ use super::admission::{Admission, Egress};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 use crate::error::{Error, ErrorKind, Result};
-use crate::placement::Layout;
+use gdl_model::Layout;
 
 /// Runtime settings for one segment instance.
 ///

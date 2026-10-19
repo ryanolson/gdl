@@ -120,7 +120,8 @@ pub enum Format {
 /// `target` (a cargo target directory), as for [`render`].
 pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
     let manifest = prepare(spec, None, target)?.manifest;
-    let layout = gdl::layout(&manifest, &spec.placement).map_err(|e| Error::new(e.to_string()))?;
+    let layout =
+        gdl_model::layout(&manifest, &spec.placement).map_err(|e| Error::new(e.to_string()))?;
     match format {
         Format::Dot => manifest.to_dot(Some(&layout)),
         Format::Mermaid => manifest.to_mermaid(Some(&layout)),
@@ -221,7 +222,7 @@ fn offers(dirs: &[&Path]) -> Result<Vec<gdl_extract::Offer>, Error> {
 struct Prepared {
     /// The contract, at its place under the output directory.
     contract: spec::Contract,
-    manifest: gdl::Manifest,
+    manifest: gdl_model::Manifest,
     /// Empty for a contract crate the spec names.
     files: Files,
     /// A graph file's graph and its resolution: read once, so that
@@ -371,7 +372,7 @@ fn library_clashes(contract: &str, crates: &[spec::MessageCrate]) -> Vec<String>
 fn render_manifest(
     spec: &Spec,
     contract: &spec::Contract,
-    manifest: &gdl::Manifest,
+    manifest: &gdl_model::Manifest,
     out: &Path,
 ) -> Result<Files, Error> {
     let layout = validate(spec, contract, manifest)?;
@@ -384,8 +385,8 @@ fn render_manifest(
 fn validate(
     spec: &Spec,
     contract: &spec::Contract,
-    manifest: &gdl::Manifest,
-) -> Result<gdl::Layout, Error> {
+    manifest: &gdl_model::Manifest,
+) -> Result<gdl_model::Layout, Error> {
     let mut problems = spec.problems.clone();
     // Where a node's crate comes from, as the spec writes it: a contract
     // spec binds each node in a table, a graph spec through `[nodes]`.
@@ -393,7 +394,7 @@ fn validate(
         spec::Source::Contract(_) => format!("[bind.{node}]"),
         spec::Source::Graph(_) => format!("node `{node}`'s [nodes] entry"),
     };
-    let layout = match gdl::layout(manifest, &spec.placement) {
+    let layout = match gdl_model::layout(manifest, &spec.placement) {
         Ok(layout) => Some(layout),
         Err(errors) => {
             problems.push(errors.to_string());
@@ -536,7 +537,7 @@ fn validate(
                 "{}: the graph has no node `{node}`",
                 bound_by(node)
             )),
-            Some(info) if info.role == gdl::Role::Source => problems.push(format!(
+            Some(info) if info.role == gdl_model::Role::Source => problems.push(format!(
                 "{}: `{node}` is the source, which takes no implementation",
                 bound_by(node)
             )),
@@ -580,10 +581,13 @@ fn validate(
     // A graph spec has reported each node that did not bind already.
     let contract_spec = matches!(spec.source, spec::Source::Contract(_));
     for node in &manifest.nodes {
-        if contract_spec && node.role != gdl::Role::Source && !spec.bind.contains_key(&node.name) {
+        if contract_spec
+            && node.role != gdl_model::Role::Source
+            && !spec.bind.contains_key(&node.name)
+        {
             problems.push(format!("node `{}` has no [bind.{}]", node.name, node.name));
         }
-        if node.role != gdl::Role::Source && node.binding.is_none() {
+        if node.role != gdl_model::Role::Source && node.binding.is_none() {
             problems.push(format!(
                 "node `{}` has no binding name in the manifest; rebuild the contract with this gdl",
                 node.name
@@ -764,7 +768,7 @@ fn type_crate(ty: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::spec::{Bind, Contract, GdlDep, Source};
-    use gdl::{HopInfo, Manifest, NodeInfo, Role, TypeInfo};
+    use gdl_model::{HopInfo, Manifest, NodeInfo, Role, TypeInfo};
 
     /// `S => D`: a source and one sink.
     fn manifest() -> Manifest {
@@ -791,7 +795,7 @@ mod tests {
         }
     }
 
-    fn spec(placement: gdl::Placement, bind: &[(&str, &str)]) -> Spec {
+    fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
         Spec {
             file: "gdl.toml".into(),
             dir: "/work".into(),
@@ -819,7 +823,7 @@ mod tests {
         }
     }
 
-    fn check(spec: &Spec, manifest: &Manifest) -> Result<gdl::Layout, Error> {
+    fn check(spec: &Spec, manifest: &Manifest) -> Result<gdl_model::Layout, Error> {
         validate(spec, spec.contract().expect("a contract spec"), manifest)
     }
 
@@ -832,8 +836,8 @@ mod tests {
         )
     }
 
-    fn split() -> gdl::Placement {
-        gdl::Placement::new()
+    fn split() -> gdl_model::Placement {
+        gdl_model::Placement::new()
             .segment("front", ["S"])
             .segment("engine", ["D"])
     }
@@ -854,6 +858,32 @@ mod tests {
         assert_eq!(chunk(&one), ":: chat_protocols :: Chunk");
         assert_eq!(chunk(&other), ":: other_protocols :: Chunk");
         assert_ne!(one.contract_hash(), other.contract_hash());
+    }
+
+    /// A graph file's manifest, built from the graph and its resolution
+    /// without compiling anything, is the one its compiled contract prints,
+    /// hash and all: the composer builds it so, in a browser.
+    #[test]
+    fn a_graph_files_manifest_is_built_as_its_contract_prints_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let target = root.join("../../target/gdl-gen-tests");
+        for spec in [
+            root.join("../../examples/chat/gdl.toml"),
+            root.join("tests/fixtures/compose/pinned.toml"),
+            root.join("tests/fixtures/compose/versions-pinned.toml"),
+        ] {
+            let spec = Spec::load(&spec).expect("spec");
+            let prepared = prepare(&spec, None, &target).expect("prepared");
+            let (graph, resolution) = prepared.graph.as_ref().expect("a graph file");
+            let built = graph
+                .manifest(&|name| {
+                    let resolved = resolution.messages.get(name)?;
+                    Some((resolved.path.clone(), resolved.wire))
+                })
+                .expect("built");
+            assert_eq!(built, prepared.manifest);
+            assert_eq!(built.contract_hash(), prepared.manifest.contract_hash());
+        }
     }
 
     /// The generated contract depends on gdl and on each message crate by
@@ -887,7 +917,7 @@ mod tests {
 
     #[test]
     fn every_problem_is_reported_at_once() {
-        let placement = gdl::Placement::new()
+        let placement = gdl_model::Placement::new()
             .segment("front.end", ["S"])
             .segment("engine", ["D"]);
         let spec = spec(placement, &[("S", "tiny_nodes::S"), ("Q", "tiny_nodes::Q")]);
@@ -907,7 +937,7 @@ mod tests {
 
     #[test]
     fn segments_that_become_one_package_are_refused() {
-        let placement = gdl::Placement::new()
+        let placement = gdl_model::Placement::new()
             .segment("front", ["S"])
             .segment("worker-a", ["D"])
             .segment("worker_a", Vec::<String>::new());
@@ -927,7 +957,7 @@ mod tests {
     #[test]
     fn a_graph_spec_names_a_node_crate_without_bind_tables() {
         let mut spec = spec(
-            gdl::Placement::new()
+            gdl_model::Placement::new()
                 .segment("contract", ["S"])
                 .segment("nodes", ["D"]),
             &[("D", "tiny_nodes::D")],
@@ -964,7 +994,7 @@ mod tests {
         // A contract generated from a graph file is `<graph>-contract` in
         // `contract/`, so this check also keeps a segment out of its
         // directory.
-        let placement = gdl::Placement::new()
+        let placement = gdl_model::Placement::new()
             .segment("contract", ["S"])
             .segment("nodes", ["D"]);
         let spec = spec(placement, &[("D", "tiny_nodes::D")]);
@@ -1125,7 +1155,7 @@ mod tests {
         manifest.hops[0]
             .backward_types
             .push(TypeInfo::new("Item", true));
-        let placement = gdl::Placement::new()
+        let placement = gdl_model::Placement::new()
             .segment("front", ["S", "F"])
             .segment("engine", ["D"]);
         let mut spec = spec(placement, &[("D", "tiny_nodes::D"), ("F", "tiny_nodes::F")]);
@@ -1151,7 +1181,7 @@ mod tests {
 
     #[test]
     fn a_placement_error_is_reported() {
-        let placement = gdl::Placement::new().segment("front", ["S"]);
+        let placement = gdl_model::Placement::new().segment("front", ["S"]);
         let spec = spec(placement, &[("D", "tiny_nodes::D")]);
         assert!(check(&spec, &manifest()).is_err());
     }

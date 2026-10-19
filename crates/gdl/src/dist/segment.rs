@@ -12,9 +12,9 @@ use super::stages::{DBackward, DForward, DInner};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
 use crate::items::Items;
-use crate::manifest::Manifest;
-use crate::placement::{Placement, layout};
 use crate::role::Next;
+use gdl_model::Manifest;
+use gdl_model::{Placement, layout};
 
 /// One segment instance of a deployed graph, before its hops are assembled.
 ///

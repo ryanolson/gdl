@@ -1,28 +1,12 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use serde::{Deserialize, Serialize};
+use gdl_model::Role;
 
 use crate::cx::Cx;
 use crate::error::{Error, Result};
 use crate::items::Items;
 use crate::role::{Backward, Forward, Next, Operator, Sink};
-
-/// The role a node plays in a graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    /// The entry point. It has no implementation.
-    Source,
-    /// Sees both the request and the response.
-    Operator,
-    /// Transforms the request only.
-    Forward,
-    /// The innermost node.
-    Sink,
-    /// Transforms the response stream only.
-    Backward,
-}
 
 /// A node declaration: the marker type a graph definition creates for each
 /// node. It fixes the node's name and role; the role-specific declaration

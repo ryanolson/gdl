@@ -12,24 +12,18 @@
 mod compose;
 mod cx;
 mod decl;
-mod diagram;
 mod dist;
 mod error;
-mod hash;
 mod items;
 #[cfg(feature = "json-lines")]
 mod json;
-mod manifest;
-mod placement;
 mod role;
 mod streamed;
 mod wire;
 
 pub use compose::{BackwardChain, ForwardChain, Hop, Inner, OperatorStage, SinkStage, Source};
 pub use cx::{Cx, Deadline, RequestId};
-pub use decl::{
-    Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, Role, SinkDecl, SourceDecl,
-};
+pub use decl::{Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDecl, SourceDecl};
 pub use dist::{
     BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment, Entries,
     FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, Served, bind_node,
@@ -37,14 +31,13 @@ pub use dist::{
 #[cfg(feature = "fault-injection")]
 pub use dist::{Faults, Gate};
 pub use error::{Error, ErrorKind, Result};
+pub use gdl_model::{
+    CrossingReport, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement,
+    PlacementError, PlacementErrors, Role, Run, TypeInfo, WireReason, layout,
+};
 pub use items::{Items, items};
 #[cfg(feature = "json-lines")]
 pub use json::serve_json_lines;
-pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
-pub use placement::{
-    CrossingReport, HopLayout, Layout, Placement, PlacementError, PlacementErrors, Run, WireReason,
-    layout,
-};
 pub use role::{Backward, Build, Forward, Next, Operator, Sink};
 pub use streamed::Streamed;
 /// The velo version this runtime is built on: a deployment's nodes are

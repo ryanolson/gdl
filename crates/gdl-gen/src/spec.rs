@@ -50,7 +50,7 @@ pub struct Spec {
     /// How generated crates depend on gdl.
     pub(crate) gdl: GdlDep,
     /// The placement: the `[segment.*]` tables.
-    pub(crate) placement: gdl::Placement,
+    pub(crate) placement: gdl_model::Placement,
     /// Node name to implementation.
     pub(crate) bind: BTreeMap<String, Bind>,
     /// What inspecting the bound crates found wrong. Reported with every
@@ -306,7 +306,7 @@ impl Spec {
         };
         let mut placement_table = toml::Table::new();
         placement_table.insert("segment".into(), toml::Value::Table(raw.segment));
-        let placement = gdl::Placement::from_toml(&placement_table.to_string())
+        let placement = gdl_model::Placement::from_toml(&placement_table.to_string())
             .map_err(|e| Error::new(format!("{}: [segment]: {e}", file.display())))?;
         let bind = raw
             .bind
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(spec.bind["B"].path, dir.join("front"));
         assert_eq!(
             spec.placement,
-            gdl::Placement::new().segment("front", ["A", "B"])
+            gdl_model::Placement::new().segment("front", ["A", "B"])
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

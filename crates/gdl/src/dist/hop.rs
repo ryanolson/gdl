@@ -15,8 +15,8 @@ use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use crate::cx::{Cx, Deadline};
 use crate::error::{Error, ErrorKind, Result};
 use crate::items::{CHECK_INTERVAL, Items, bound, fuse, items};
-use crate::placement::HopLayout;
 use crate::role::Next;
+use gdl_model::HopLayout;
 
 /// Registers the entries a hop, and every hop nested under it, hosts in this
 /// segment.
@@ -66,7 +66,7 @@ struct HopPlan {
 
 impl HopPlan {
     fn new(hop: &HopLayout) -> Self {
-        let expand = |runs: &[crate::placement::Run]| {
+        let expand = |runs: &[gdl_model::Run]| {
             runs.iter()
                 .flat_map(|run| run.stages.iter().map(|_| run.segment.clone()))
                 .collect::<Vec<_>>()
@@ -138,7 +138,7 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
         // segment hosts, it would fail each request instead of the start.
         // Slots are checked by position, so the error names the node the
         // topology puts there, whatever placeholder fills it.
-        let path = |runs: &[crate::placement::Run]| -> Vec<(String, String)> {
+        let path = |runs: &[gdl_model::Run]| -> Vec<(String, String)> {
             runs.iter()
                 .flat_map(|run| {
                     run.stages

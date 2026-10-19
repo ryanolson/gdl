@@ -264,7 +264,7 @@ fn a_layout_of_another_graph_is_refused() {
         other.to_mermaid(Some(&reference)),
     ] {
         let error = drawn.expect_err("another graph's layout");
-        assert_eq!(error.kind(), gdl::ErrorKind::Placement);
+        assert_eq!(gdl::Error::from(error).kind(), gdl::ErrorKind::Placement);
     }
 }
 
@@ -282,7 +282,7 @@ fn an_inconsistent_manifest_is_refused() {
     for manifest in [undeclared, untyped] {
         for drawn in [manifest.to_dot(None), manifest.to_mermaid(None)] {
             let error = drawn.expect_err("inconsistent manifest");
-            assert_eq!(error.kind(), gdl::ErrorKind::Placement);
+            assert_eq!(gdl::Error::from(error).kind(), gdl::ErrorKind::Placement);
         }
     }
 }

@@ -12,8 +12,8 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use crate::decl::Role;
-use crate::error::{Error, ErrorKind};
+use crate::Error;
+use crate::Role;
 use crate::manifest::{Manifest, TypeInfo, role_tag};
 use crate::placement::{Layout, PlacementErrors, check_manifest};
 
@@ -155,14 +155,10 @@ impl Manifest {
     fn check(&self, layout: Option<&Layout>) -> Result<(), Error> {
         let errors = check_manifest(self);
         if !errors.is_empty() {
-            return Err(Error::new(
-                ErrorKind::Placement,
-                PlacementErrors(errors).to_string(),
-            ));
+            return Err(Error::new(PlacementErrors(errors).to_string()));
         }
         match layout {
             Some(layout) if layout.contract_hash() != self.contract_hash() => Err(Error::new(
-                ErrorKind::Placement,
                 "the layout was checked against another contract",
             )),
             _ => Ok(()),

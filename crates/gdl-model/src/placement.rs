@@ -3,8 +3,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::decl::Role;
-use crate::error::{Error, ErrorKind};
+use crate::Error;
+use crate::Role;
 use crate::hash::Fnv;
 use crate::manifest::{HopInfo, Manifest, TypeInfo};
 
@@ -46,7 +46,7 @@ impl Placement {
 
     /// Parse the `[segment.*]` tables of a placement file.
     pub fn from_toml(text: &str) -> Result<Self, Error> {
-        toml::from_str(text).map_err(|e| Error::new(ErrorKind::Placement, e.to_string()))
+        toml::from_str(text).map_err(|e| Error::new(e.to_string()))
     }
 
     /// Segment names and their nodes, in name order.
@@ -315,7 +315,7 @@ impl std::error::Error for PlacementErrors {}
 
 impl From<PlacementErrors> for Error {
     fn from(errors: PlacementErrors) -> Self {
-        Error::new(ErrorKind::Placement, errors.to_string())
+        Error::new(errors.to_string())
     }
 }
 

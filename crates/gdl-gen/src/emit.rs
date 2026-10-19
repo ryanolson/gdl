@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-use gdl::{Layout, Manifest, Role};
+use gdl_model::{Layout, Manifest, Role};
 
 use crate::Error;
 use crate::paths::{display, relative};

@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::decl::Role;
+use crate::Role;
 use crate::hash::Fnv;
 
 /// The shape of a graph as data: its nodes, hops, and typed edges.
@@ -180,8 +180,7 @@ impl Manifest {
 
     /// Read a manifest written by [`Manifest::to_toml`].
     pub fn from_toml(text: &str) -> Result<Self, crate::Error> {
-        toml::from_str(text)
-            .map_err(|e| crate::Error::new(crate::ErrorKind::Placement, e.to_string()))
+        toml::from_str(text).map_err(|e| crate::Error::new(e.to_string()))
     }
 }
 

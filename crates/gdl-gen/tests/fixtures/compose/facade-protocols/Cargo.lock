@@ -45,9 +45,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gdl-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "gdl-syntax"
 version = "0.1.0"
 dependencies = [
+ "gdl-model",
  "proc-macro2",
  "syn 2.0.119",
 ]
