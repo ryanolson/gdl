@@ -48,13 +48,38 @@ impl Workspace {
         })
     }
 
-    /// What package `name` offers, and every problem met reading it.
-    pub fn extract(&self, name: &str) -> Result<Extraction, Error> {
-        let package = self
-            .graph
-            .package(name)
-            .ok_or_else(|| Error(format!("the workspace has no package `{name}`")))?;
+    /// Resolve crate `name` at exactly `version`, from its registry, with a
+    /// manifest of our own in `scratch` that depends on it alone. Nothing is
+    /// built.
+    pub fn fetch(name: &str, version: &str, scratch: &Path) -> Result<Self, Error> {
+        let src = scratch.join("src");
+        std::fs::create_dir_all(&src).map_err(|e| Error(format!("{}: {e}", src.display())))?;
+        let manifest = format!(
+            "[package]\nname = \"gdl-extract-fetch\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
+             publish = false\n\n[workspace]\n\n[dependencies]\n{name} = \"={version}\"\n"
+        );
+        let write = |path: &Path, text: &str| {
+            std::fs::write(path, text).map_err(|e| Error(format!("{}: {e}", path.display())))
+        };
+        write(&scratch.join("Cargo.toml"), &manifest)?;
+        write(&src.join("lib.rs"), "")?;
+        Self::load(&scratch.join("Cargo.toml"))
+    }
+
+    /// What package `spec` offers, and every problem met reading it. `spec`
+    /// is `name` or `name@version`: a workspace member of that name, else
+    /// the one resolved package that fits.
+    pub fn extract(&self, spec: &str) -> Result<Extraction, Error> {
+        let package = self.graph.package(spec).map_err(Error)?;
         Ok(markers::extract(&self.graph, &self.settings, package))
+    }
+
+    /// The name of the package whose manifest is in `dir`, if this
+    /// workspace resolved it.
+    pub fn package_in(&self, dir: &Path) -> Option<String> {
+        self.graph
+            .package_in(dir)
+            .map(|i| self.graph.packages[i].name.clone())
     }
 }
 
@@ -88,6 +113,19 @@ pub struct Offer {
     pub nodes: Vec<NodeEntry>,
 }
 
+impl Offer {
+    /// The offer as a working-catalogue entry: TOML.
+    pub fn to_toml(&self) -> String {
+        // Strings, booleans, and lists of tables, all of which TOML holds.
+        toml::to_string(self).expect("an offer is representable in TOML")
+    }
+
+    /// Read an entry written by [`Offer::to_toml`].
+    pub fn from_toml(text: &str) -> Result<Self, Error> {
+        toml::from_str(text).map_err(|e| Error(e.to_string()))
+    }
+}
+
 /// A message a crate defines.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageEntry {
@@ -109,6 +147,8 @@ pub struct ExportEntry {
     pub path: String,
     /// The message it is.
     pub origin: Origin,
+    /// Whether the message is a wire type, as its definition shows.
+    pub wire: bool,
 }
 
 /// A message's identity: where it is defined, wherever it is offered.

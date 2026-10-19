@@ -13,6 +13,7 @@ quote = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 syn = { version = "2", features = ["full"] }
+toml = { workspace = true }
 
 [lints]
 workspace = true

@@ -70,13 +70,15 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
             };
             let found = resolver
                 .resolve(krate, module, &path, absolute)
-                .and_then(|def| message(&mut resolver, def));
+                .and_then(|def| Some((message(&mut resolver, def)?, def)));
             match found {
-                Some(origin) => offer.exports.push(ExportEntry {
+                Some((origin, Def::Type(c, m, i))) => offer.exports.push(ExportEntry {
                     path: public_path(&resolver, krate, module, &name),
                     name,
                     origin,
+                    wire: wire(&mut resolver, c, m, i),
                 }),
+                Some(_) => unreachable!("a message is a type"),
                 None => problems.push(format!(
                     "{at}: export `{name}`: `{}` names no type that derives `Message`",
                     path.join("::")

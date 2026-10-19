@@ -161,3 +161,59 @@ fn an_unknown_package_is_an_error() {
     let error = workspace().extract("no-such-crate").expect_err("unknown");
     assert!(error.to_string().contains("no-such-crate"), "{error}");
 }
+
+/// An export carries its message's wire capability, read where the message
+/// is defined, in whatever crate.
+#[test]
+fn an_export_carries_its_messages_wire_capability() {
+    let workspace = workspace();
+    let wire = |package: &str| -> Vec<(String, bool)> {
+        workspace
+            .extract(package)
+            .expect("package")
+            .offer
+            .exports
+            .iter()
+            .map(|e| (e.name.clone(), e.wire))
+            .collect()
+    };
+    assert_eq!(
+        wire("read-protocols"),
+        [("Piece".to_string(), false), ("Session".to_string(), true)]
+    );
+    assert_eq!(
+        wire("read-facade"),
+        [("Prompt".to_string(), true), ("Token".to_string(), true)]
+    );
+}
+
+/// A spec names a crate by its directory; a catalogue, by name and version.
+#[test]
+fn a_package_is_found_by_directory_or_by_name_and_version() {
+    let workspace = workspace();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/read/facade");
+    assert_eq!(workspace.package_in(&dir), Some("read-facade".to_string()));
+    assert_eq!(workspace.package_in(Path::new("/nowhere")), None);
+    let offer = workspace
+        .extract("read-protocols@0.0.0")
+        .expect("package")
+        .offer;
+    assert_eq!(offer.messages.len(), 4);
+    let error = workspace
+        .extract("read-protocols@9.9.9")
+        .expect_err("no such version");
+    assert!(
+        error.to_string().contains("read-protocols@9.9.9"),
+        "{error}"
+    );
+}
+
+/// A working-catalogue entry is the offer as TOML, and reads back the same.
+#[test]
+fn an_offer_round_trips_as_a_catalogue_entry() {
+    let offer = workspace().extract("read-engine").expect("package").offer;
+    assert_eq!(
+        gdl_extract::Offer::from_toml(&offer.to_toml()).expect("entry"),
+        offer
+    );
+}

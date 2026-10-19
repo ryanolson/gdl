@@ -18,6 +18,8 @@ pub(crate) struct Package {
     pub(crate) name: String,
     pub(crate) version: String,
     pub(crate) source: String,
+    /// The directory of its manifest.
+    pub(crate) dir: PathBuf,
     /// The library target: its crate name and root file. `None` for a
     /// package without one, which offers nothing.
     pub(crate) lib: Option<(String, PathBuf)>,
@@ -103,6 +105,11 @@ impl Graph {
             .map(|p| Package {
                 name: p.name.clone(),
                 version: p.version.clone(),
+                dir: p
+                    .manifest_path
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf(),
                 source: p.source.clone().unwrap_or_else(|| {
                     let dir = p.manifest_path.parent().unwrap_or(Path::new(""));
                     format!("path+file://{}", dir.display())
@@ -136,11 +143,41 @@ impl Graph {
         Ok(Self { packages, members })
     }
 
-    /// The workspace member named `name`.
-    pub(crate) fn package(&self, name: &str) -> Option<usize> {
-        self.members
-            .iter()
-            .copied()
-            .find(|&i| self.packages[i].name == name)
+    /// The package `name`, or `name@version`: a workspace member of that
+    /// name first, else the one package of that name (and version) among
+    /// all those resolved.
+    pub(crate) fn package(&self, spec: &str) -> Result<usize, String> {
+        let (name, version) = match spec.split_once('@') {
+            Some((name, version)) => (name, Some(version)),
+            None => (spec, None),
+        };
+        let fits = |&i: &usize| {
+            let p = &self.packages[i];
+            p.name == name && version.is_none_or(|v| p.version == v)
+        };
+        if let Some(member) = self.members.iter().copied().find(fits) {
+            return Ok(member);
+        }
+        let found: Vec<usize> = (0..self.packages.len()).filter(fits).collect();
+        match found.as_slice() {
+            [one] => Ok(*one),
+            [] => Err(format!("the workspace resolves no package `{spec}`")),
+            several => Err(format!(
+                "the workspace resolves {} packages `{name}` ({}); name one as `{name}@<version>`",
+                several.len(),
+                several
+                    .iter()
+                    .map(|&i| self.packages[i].version.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+
+    /// The package whose manifest is in `dir`.
+    pub(crate) fn package_in(&self, dir: &Path) -> Option<usize> {
+        let dir = std::fs::canonicalize(dir).ok()?;
+        (0..self.packages.len())
+            .find(|&i| std::fs::canonicalize(&self.packages[i].dir).is_ok_and(|d| d == dir))
     }
 }
