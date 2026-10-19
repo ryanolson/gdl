@@ -449,7 +449,11 @@ fn a_check_agrees_with_generation() {
         "{}\nvs\n{committed}",
         read.crossings
     );
-    assert!(read.mermaid.contains("\nflowchart LR\n"), "{}", read.mermaid);
+    assert!(
+        read.mermaid.contains("\nflowchart LR\n"),
+        "{}",
+        read.mermaid
+    );
     let offers = chat_offers();
     let given = gdl_gen::check(&spec, &target(), gdl_gen::Offers::Given(&offers)).expect("given");
     assert_eq!(given.manifest, read.manifest);

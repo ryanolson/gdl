@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gdl composer</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 1.5em; max-width: 72em; }
+  h1 { font-size: 1.3em; }
+  h2 { font-size: 1.05em; margin-top: 1.5em; }
+  section { border: 1px solid #ccc; border-radius: 6px; padding: 0.75em 1em; margin: 0.75em 0; }
+  select, input, button { font: inherit; margin: 0.15em; }
+  .slot { margin: 0.3em 0; }
+  .edge { display: inline-block; margin: 0.2em; padding: 0.15em 0.5em; border: 1px solid #888; border-radius: 4px; cursor: pointer; }
+  .edge.cut { border-color: #d62728; color: #d62728; text-decoration: line-through; }
+  .problems { color: #b00; white-space: pre-wrap; }
+  pre { background: #f6f6f6; padding: 0.5em; overflow: auto; }
+  .muted { color: #666; }
+</style>
+</head>
+<body>
+<h1>gdl composer</h1>
+<p class="muted">Build a graph from the nodes and messages of the working catalogue. The page offers only ports that carry one message; every verdict comes from the server, which applies the rules <code>cargo gdl</code> applies.</p>
+
+<section id="catalogue">
+  <h2>Catalogue</h2>
+  <div id="entries" class="muted">loading</div>
+  <form id="add">
+    <input id="crate" placeholder="name@version" size="30">
+    <button>Add from crates.io</button>
+    <span id="adding" class="muted"></span>
+  </form>
+</section>
+
+<section id="graph">
+  <h2>Graph</h2>
+  <div class="slot">Name <input id="name" value="composed" size="20"></div>
+  <div class="slot">Source <input id="source-name" value="Source" size="14">
+    takes <select id="source-request"></select>
+    and streams back <select id="source-response"></select></div>
+  <div id="hop"></div>
+</section>
+
+<section id="segments">
+  <h2>Segments</h2>
+  <p class="muted">Click an edge to cut it. Each group of nodes the cuts leave connected is one segment.</p>
+  <div id="edges"></div>
+  <div id="groups"></div>
+</section>
+
+<section>
+  <button id="check">Check</button>
+  <button id="export">Download the segments (.tar.gz)</button>
+  <div id="result"></div>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>

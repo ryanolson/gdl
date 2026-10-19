@@ -1,0 +1,25 @@
+added = "2026-10-19T00:00:00Z"
+checksum = "204dd9ea1bca6c629eb7fafeb0c24abdb6ea2219f689930b36018b397dc78555"
+package = "regproto"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+exports = []
+nodes = []
+
+[[messages]]
+name = "Local"
+path = "regproto::Local"
+wire = false
+public = true
+
+[[messages]]
+name = "Token"
+path = "regproto::Token"
+wire = true
+public = true
+
+[[messages]]
+name = "Words"
+path = "regproto::Words"
+wire = true
+public = true
