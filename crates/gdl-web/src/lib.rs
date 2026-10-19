@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! page --GET /api/catalog---------------> the catalogue's entries
-//!      --POST /api/catalog {crate}------> fetch, read, add (the only call that fetches)
+//!      --POST /api/catalog {crate}------> read (a directory, or a version fetched first), add
 //!      --POST /api/check {draft}--------> graph file + spec, checked: problems, or crossings and diagram
 //!      --POST /api/export {draft}-------> the generated crates as a .tar.gz
 //! ```
@@ -83,24 +83,16 @@ async fn entries(State(composer): Shared) -> Response {
 
 #[derive(Deserialize)]
 struct Add {
-    /// `name@version`.
+    /// `name@version` on crates.io, or a directory on the server's machine.
     #[serde(rename = "crate")]
     krate: String,
 }
 
-/// Fetch a crate version, read it, and add it. A crate read with problems
-/// adds nothing, and the problems are the answer.
+/// Read a crate, fetching a version first, and add it. A crate read with
+/// problems adds nothing, and the problems are the answer. A directory is
+/// one on the server's machine: the composer serves the machine it runs on.
 async fn add(State(composer): Shared, Json(add): Json<Add>) -> Response {
-    let Some((name, version)) = add.krate.split_once('@') else {
-        return problems(
-            StatusCode::BAD_REQUEST,
-            vec![format!("`{}` is not `name@version`", add.krate)],
-        );
-    };
-    let krate = gdl_gen::Crate::Registry {
-        name: name.to_string(),
-        version: version.to_string(),
-    };
+    let krate = gdl_gen::Crate::parse(&add.krate);
     // Fetching runs cargo, and adding writes a file: off the async threads.
     // The add is made to the served catalogue, under its lock, so two adds
     // at once both stay served; `Catalog::add` keeps whichever entry was

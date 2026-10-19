@@ -504,3 +504,102 @@ async fn a_check_refuses_an_image_name_the_export_would() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The demo, without the page: the chat example's four crates added by
+/// their directories, its graph composed, carved into three segments,
+/// checked, and exported. Nothing is fetched or built.
+#[tokio::test]
+async fn the_chat_example_composes_from_its_directories() {
+    let dir = scratch("chat");
+    let router = router(&dir, dir.join("catalogue"));
+    let chat = crates().join("../examples/chat");
+    for krate in ["protocols", "front-nodes", "engine-mock", "post-nodes"] {
+        let path = chat.join(krate).display().to_string();
+        let (status, body) = json_call(
+            &router,
+            "POST",
+            "/api/catalog",
+            Some(json!({ "crate": path })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{krate}: {body:#}");
+    }
+    let (_, catalogue) = json_call(&router, "GET", "/api/catalog", None).await;
+    let protocols = catalogue["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["package"] == "chat-protocols")
+        .expect("chat-protocols")
+        .clone();
+    let message = |name: &str| {
+        json!({
+            "package": "chat-protocols",
+            "version": protocols["version"],
+            "source": protocols["source"],
+            "path": format!("chat_protocols::{name}"),
+        })
+    };
+    let node = |name: &str, entry: &str| json!({ "name": name, "entry": entry, "node": name });
+    let draft = json!({
+        "name": "chat",
+        "source": {
+            "name": "Frontend",
+            "request": { "head": message("Prompt") },
+            "response": message("Chunk"),
+        },
+        "nodes": [
+            node("Preprocess", "chat-front-nodes@0.0.0"),
+            node("Truncate", "chat-front-nodes@0.0.0"),
+            node("Engine", "chat-engine-mock@0.0.0"),
+            node("Detokenize", "chat-post-nodes@0.0.0"),
+            node("Format", "chat-post-nodes@0.0.0"),
+            node("Number", "chat-front-nodes@0.0.0"),
+        ],
+        "hop": {
+            "inner": "Preprocess",
+            "nested": { "forward": ["Truncate"], "inner": "Engine", "backward": ["Detokenize", "Format"] },
+            "backward": ["Number"],
+        },
+        "segments": {
+            "front": ["Frontend", "Preprocess", "Truncate", "Number"],
+            "engine": ["Engine"],
+            "post": ["Detokenize", "Format"],
+        },
+    });
+    let (_, body) = json_call(&router, "POST", "/api/check", Some(draft.clone())).await;
+    assert_eq!(body["ok"], true, "{body:#}");
+    assert!(
+        body["crossings"]
+            .as_str()
+            .expect("crossings")
+            .contains("per request: 3 crossings"),
+        "{body:#}"
+    );
+    let (status, bytes) = call(&router, "POST", "/api/export", Some(draft)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+    let names: Vec<String> = archive
+        .entries()
+        .expect("entries")
+        .map(|e| {
+            e.expect("entry")
+                .path()
+                .expect("path")
+                .display()
+                .to_string()
+        })
+        .collect();
+    for segment in ["front", "engine", "post"] {
+        assert!(
+            names.contains(&format!("chat/{segment}/Cargo.toml")),
+            "{names:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

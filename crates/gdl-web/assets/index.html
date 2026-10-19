@@ -10,8 +10,14 @@
   section { border: 1px solid #ccc; border-radius: 6px; padding: 0.75em 1em; margin: 0.75em 0; }
   select, input, button { font: inherit; margin: 0.15em; }
   .slot { margin: 0.3em 0; }
-  .edge { display: inline-block; margin: 0.2em; padding: 0.15em 0.5em; border: 1px solid #888; border-radius: 4px; cursor: pointer; }
-  .edge.cut { border-color: #d62728; color: #d62728; text-decoration: line-through; }
+  .hop { display: grid; grid-template-columns: max-content max-content; gap: 2em; margin: 0.5em 0; }
+  .lane { display: flex; flex-direction: column; align-items: center; min-width: 16em; }
+  .box { border: 1px solid #666; border-radius: 6px; padding: 0.3em 0.8em; background: #f8f8f8; margin: 0.1em 0; }
+  .remove { cursor: pointer; color: #888; }
+  .arrow { cursor: pointer; color: #444; padding: 0.15em 0.5em; }
+  .arrow:hover { background: #eef; }
+  .arrow.cut { color: #d62728; text-decoration: line-through; }
+  .nested { align-self: stretch; margin: 0.5em 0 0.5em 1.5em; padding-left: 1em; border-left: 2px dashed #bbb; }
   .problems { color: #b00; white-space: pre-wrap; }
   pre { background: #f6f6f6; padding: 0.5em; overflow: auto; }
   .muted { color: #666; }
@@ -25,8 +31,8 @@
   <h2>Catalogue</h2>
   <div id="entries" class="muted">loading</div>
   <form id="add">
-    <input id="crate" placeholder="name@version" size="30">
-    <button>Add from crates.io</button>
+    <input id="crate" placeholder="name@version, or a directory" size="50">
+    <button>Add</button>
     <span id="adding" class="muted"></span>
   </form>
 </section>
@@ -43,8 +49,7 @@
 
 <section id="segments">
   <h2>Segments</h2>
-  <p class="muted">Click an edge to cut it. Each group of nodes the cuts leave connected is one segment.</p>
-  <div id="edges"></div>
+  <p class="muted">Click an arrow in the graph to cut its edge. Each group of nodes the cuts leave connected is one segment.</p>
   <div id="groups"></div>
 </section>
 

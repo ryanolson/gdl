@@ -74,7 +74,7 @@ function slot(label, candidates, choose) {
   const div = document.createElement("div");
   div.className = "slot";
   if (!candidates.length) {
-    div.innerHTML = `<span class="muted">${label}: no node in the catalogue fits here</span>`;
+    div.innerHTML = `<span class="muted">(no ${label.replace(/^(add a|choose the) /, "")} fits here)</span>`;
     return div;
   }
   const select = document.createElement("select");
@@ -85,13 +85,48 @@ function slot(label, candidates, choose) {
   return div;
 }
 
-function chip(text, remove) {
-  const span = document.createElement("span");
-  span.className = "edge";
-  span.textContent = `${text} ✕`;
-  span.title = "remove";
-  span.onclick = () => { remove(); render(); };
-  return span;
+// A message as an arrow names it: its type's name, and a streamed
+// request's item.
+const short = (origin) => origin ? origin.path.split("::").pop() : "()";
+const carried = (p) => p.item ? `${short(p.head)} + stream ${short(p.item)}` : short(p.head);
+
+// An edge: an arrow named for its message, which cuts the edge, or joins
+// it again, when clicked.
+function arrow(from, to, direction, label) {
+  const id = `${from}->${to}`;
+  const div = document.createElement("div");
+  const cut = state.cuts.has(id);
+  div.className = cut ? "arrow cut" : "arrow";
+  div.textContent = `${direction} ${label}`;
+  div.title = `${from} → ${to}: ${cut ? "cut; click to join" : "click to cut"}`;
+  div.onclick = () => { cut ? state.cuts.delete(id) : state.cuts.add(id); render(); };
+  return div;
+}
+
+// A node, with a control that removes it when it has one.
+function box(text, remove) {
+  const div = document.createElement("div");
+  div.className = "box";
+  div.textContent = text;
+  if (remove) {
+    const x = document.createElement("span");
+    x.className = "remove";
+    x.textContent = " ✕";
+    x.title = "remove";
+    x.onclick = () => { remove(); render(); };
+    div.append(x);
+  }
+  return div;
+}
+
+function lane(title) {
+  const div = document.createElement("div");
+  div.className = "lane";
+  const h = document.createElement("div");
+  h.className = "muted";
+  h.textContent = title;
+  div.append(h);
+  return div;
 }
 
 // A chosen node whose port no longer carries the message that arrives
@@ -128,56 +163,75 @@ function prune(hop, request) {
   if (stale !== -1) hop.backward.splice(stale);
 }
 
-// One hop's editor. `request` is the message that arrives; returns the
-// item the hop streams back, or null while it has no inner end.
-function hopEditor(hop, request, into) {
+// One hop, as two lanes: the request flows down from the outer end
+// through the forward nodes to the inner end, and the response flows back
+// up the lane beside it, through the backward nodes, to the outer end. An
+// operator's own hop is drawn below it, indented. `request` is the message
+// that arrives from `outer`.
+function hopEditor(hop, request, into, outer, names) {
   prune(hop, request);
   const all = nodes();
+  const grid = document.createElement("div");
+  grid.className = "hop";
+  const down = lane("request ↓");
+  const up = lane("response ↑");
+  grid.append(down, up);
+  into.append(grid);
+
   let current = request;
-  const forward = document.createElement("div");
-  forward.append("forward: ");
+  let previous = outer;
   hop.forward.forEach((n, i) => {
-    forward.append(chip(n.node.name, () => hop.forward.splice(i)));
+    const name = names.get(n);
+    down.append(arrow(previous, name, "↓", carried(current)));
+    down.append(box(`forward ${name}`, () => hop.forward.splice(i)));
     current = portOf(port(n.node, "Out"));
+    previous = name;
   });
-  into.append(forward);
-  into.append(slot("add a forward node",
+  down.append(slot("add a forward node",
     all.filter((c) => c.node.role === "forward" && samePort(portOf(port(c.node, "In")), current)),
     (c) => { hop.forward.push(c); hop.inner = null; hop.nested = null; hop.backward = []; }));
   if (!hop.inner) {
-    into.append(slot("choose the inner end",
+    down.append(slot("choose the inner end",
       all.filter((c) =>
         (c.node.role === "sink" && samePort(portOf(port(c.node, "Req")), current)) ||
         (c.node.role === "operator" && samePort(portOf(port(c.node, "UpReq")), current))),
       (c) => { hop.inner = c; hop.nested = c.node.role === "operator" ? newHop() : null; hop.backward = []; }));
-    return null;
+    return;
   }
-  const inner = document.createElement("div");
-  inner.append("inner: ", chip(`${hop.inner.node.role} ${hop.inner.node.name}`,
+  const inner = names.get(hop.inner);
+  const operator = hop.inner.node.role === "operator";
+  down.append(arrow(previous, inner, "↓", carried(current)));
+  down.append(box(`${hop.inner.node.role} ${inner}`,
     () => { hop.inner = null; hop.nested = null; hop.backward = []; }));
-  into.append(inner);
-  let item;
-  if (hop.inner.node.role === "operator") {
-    const nested = document.createElement("section");
-    nested.append(`${hop.inner.node.name}'s own hop`);
-    into.append(nested);
-    hopEditor(hop.nested, portOf(port(hop.inner.node, "DownReq")), nested);
-    item = port(hop.inner.node, "UpItem").head || null;
-  } else {
-    item = port(hop.inner.node, "Item").head || null;
+  if (operator) {
+    const nested = document.createElement("div");
+    nested.className = "nested";
+    nested.append(`${inner}'s own hop`);
+    down.append(nested);
+    hopEditor(hop.nested, portOf(port(hop.inner.node, "DownReq")), nested, inner, names);
   }
-  const backward = document.createElement("div");
-  backward.append("backward: ");
+
+  // The response, from the inner end out: each backward node, and the
+  // message on the edge into it. Drawn bottom to top, so the arrows point up.
+  let item = port(hop.inner.node, operator ? "UpItem" : "Item").head || null;
+  const steps = [];
+  let from = inner;
   hop.backward.forEach((n, i) => {
-    backward.append(chip(n.node.name, () => hop.backward.splice(i)));
+    const name = names.get(n);
+    steps.push({ from, to: name, item, n, i });
     item = port(n.node, "Out").head || null;
+    from = name;
   });
-  into.append(backward);
   const arriving = item;
-  into.append(slot("add a backward node",
+  up.append(slot("add a backward node",
     all.filter((c) => c.node.role === "backward" && same(port(c.node, "In").head, arriving)),
     (c) => hop.backward.push(c)));
-  return item;
+  up.append(arrow(from, outer, "↑", short(arriving)));
+  for (const step of steps.reverse()) {
+    up.append(box(`backward ${step.to}`, () => hop.backward.splice(step.i)));
+    up.append(arrow(step.from, step.to, "↑", short(step.item)));
+  }
+  up.append(box(`from ${inner}`));
 }
 
 // Graph names: a node's own name, numbered when it repeats.
@@ -237,20 +291,12 @@ function segments(names) {
 function render() {
   const hop = $("hop");
   hop.innerHTML = "";
-  const request = { head: chosenMessage($("source-request")), item: chosenMessage($("source-item")) };
-  hopEditor(state.hop, request, hop);
-
   const names = instances();
-  const edgeList = $("edges");
-  edgeList.innerHTML = "";
-  for (const [a, b] of edges(state.hop, $("source-name").value, names)) {
-    const id = `${a}->${b}`;
-    const span = document.createElement("span");
-    span.className = state.cuts.has(id) ? "edge cut" : "edge";
-    span.textContent = `${a} → ${b}`;
-    span.onclick = () => { state.cuts.has(id) ? state.cuts.delete(id) : state.cuts.add(id); render(); };
-    edgeList.append(span);
-  }
+  const source = $("source-name").value;
+  const request = { head: chosenMessage($("source-request")), item: chosenMessage($("source-item")) };
+  hop.append(box(`source ${source}`));
+  hopEditor(state.hop, request, hop, source, names);
+
   const groups = $("groups");
   groups.innerHTML = "";
   for (const [name, members] of Object.entries(segments(names))) {
@@ -327,6 +373,9 @@ $("add").onsubmit = async (event) => {
   await load();
 };
 
-for (const id of ["source-request", "source-item", "source-name"]) $(id).onchange = render;
+for (const id of ["source-request", "source-item"]) $(id).onchange = render;
+// Drawn as it is typed: a render when the field loses focus would replace
+// the page under a click that moved the focus, and lose the click.
+$("source-name").oninput = render;
 
 load();
