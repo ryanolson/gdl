@@ -4,6 +4,8 @@ use quote::ToTokens as _;
 use syn::punctuated::Punctuated;
 use syn::{Meta, Token};
 
+use gdl_model::Role;
+
 use crate::cfg::Settings;
 use crate::metadata::Graph;
 use crate::resolve::{Def, Resolver, segments};
@@ -292,7 +294,7 @@ fn node(
             }
         }
     }
-    let (impl_module, (role, ports), types) = match found.as_slice() {
+    let (impl_module, role, types) = match found.as_slice() {
         [] => {
             return Err(format!(
                 "{at}: node `{name}`: the crate implements no role trait for it"
@@ -300,7 +302,7 @@ fn node(
         }
         [(m, role, types)] => (*m, *role, types.clone()),
         several => {
-            let roles: Vec<&str> = several.iter().map(|(_, (role, _), _)| *role).collect();
+            let roles: Vec<&str> = several.iter().map(|(_, role, _)| role.name()).collect();
             return Err(format!(
                 "{at}: node `{name}` implements more than one role trait: {}",
                 roles.join(", ")
@@ -308,6 +310,7 @@ fn node(
         }
     };
 
+    let ports = role.ports();
     let mut entries = Vec::with_capacity(ports.len());
     for &port in ports {
         let Some((_, port_ty, port_at)) = types.iter().find(|(n, _, _)| n == port) else {
@@ -345,7 +348,7 @@ fn node(
     }
     Ok(NodeEntry {
         name,
-        role: role.to_string(),
+        role,
         ty,
         ports: entries,
     })
@@ -354,13 +357,13 @@ fn node(
 /// A trait impl's trait name, self type, and associated types.
 type RoleImpl = (String, syn::Type, Vec<(String, syn::Type, Location)>);
 
-/// A role trait's role and its ports, by the trait's name.
-fn role_of(name: &str) -> Option<(&'static str, &'static [&'static str])> {
+/// The role whose trait has this name.
+fn role_of(name: &str) -> Option<Role> {
     match name {
-        "Sink" => Some(("sink", &["Req", "Item"])),
-        "Forward" => Some(("forward", &["In", "Out"])),
-        "Backward" => Some(("backward", &["In", "Out"])),
-        "Operator" => Some(("operator", &["UpReq", "UpItem", "DownReq", "DownItem"])),
+        "Sink" => Some(Role::Sink),
+        "Forward" => Some(Role::Forward),
+        "Backward" => Some(Role::Backward),
+        "Operator" => Some(Role::Operator),
         _ => None,
     }
 }

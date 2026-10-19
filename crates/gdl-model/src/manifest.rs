@@ -145,7 +145,7 @@ impl Manifest {
         h.u64(u64::from(self.schema));
         for node in &self.nodes {
             h.str(&node.name);
-            h.str(role_tag(node.role));
+            h.str(node.role.name());
         }
         for hop in &self.hops {
             h.str(&hop.outer);
@@ -181,15 +181,5 @@ impl Manifest {
     /// Read a manifest written by [`Manifest::to_toml`].
     pub fn from_toml(text: &str) -> Result<Self, crate::Error> {
         toml::from_str(text).map_err(|e| crate::Error::new(e.to_string()))
-    }
-}
-
-pub(crate) fn role_tag(role: Role) -> &'static str {
-    match role {
-        Role::Source => "source",
-        Role::Operator => "operator",
-        Role::Forward => "forward",
-        Role::Sink => "sink",
-        Role::Backward => "backward",
     }
 }

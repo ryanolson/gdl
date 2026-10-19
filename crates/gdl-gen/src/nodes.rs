@@ -147,13 +147,13 @@ fn check(
     messages: &BTreeMap<String, Resolved>,
     problems: &mut Vec<String>,
 ) {
-    let role = crate::contract::role(match sig {
+    let role = match sig {
         Sig::Source { .. } => Role::Source,
         Sig::Sink { .. } => Role::Sink,
         Sig::Forward { .. } => Role::Forward,
         Sig::Backward { .. } => Role::Backward,
         Sig::Operator { .. } => Role::Operator,
-    });
+    };
     if entry.role != role {
         problems.push(format!(
             "node `{name}`: the graph declares a {role}, but `{bound}` is a {}",
@@ -292,11 +292,11 @@ mod tests {
 
     /// A node entry: role, name, and each port's head and item by message
     /// name (`()` for none).
-    fn node(role: &str, name: &str, ports: &[(&str, &str, Option<&str>)]) -> NodeEntry {
+    fn node(role: Role, name: &str, ports: &[(&str, &str, Option<&str>)]) -> NodeEntry {
         let side = |m: &str| (m != "()").then(|| origin(m));
         NodeEntry {
             name: name.to_string(),
-            role: role.to_string(),
+            role,
             ty: format!("x::{name}"),
             ports: ports
                 .iter()
@@ -323,7 +323,7 @@ mod tests {
     fn front() -> Vec<NodeEntry> {
         vec![
             node(
-                "operator",
+                Role::Operator,
                 "Preprocess",
                 &[
                     ("UpReq", "Prompt", None),
@@ -333,12 +333,12 @@ mod tests {
                 ],
             ),
             node(
-                "forward",
+                Role::Forward,
                 "Truncate",
                 &[("In", "Words", None), ("Out", "Words", None)],
             ),
             node(
-                "backward",
+                Role::Backward,
                 "Number",
                 &[("In", "Chunk", None), ("Out", "Chunk", None)],
             ),
@@ -347,7 +347,7 @@ mod tests {
 
     fn engine() -> Vec<NodeEntry> {
         vec![node(
-            "sink",
+            Role::Sink,
             "Engine",
             &[("Req", "Words", None), ("Item", "Token", None)],
         )]
@@ -356,12 +356,12 @@ mod tests {
     fn post() -> Vec<NodeEntry> {
         vec![
             node(
-                "backward",
+                Role::Backward,
                 "Detokenize",
                 &[("In", "Token", None), ("Out", "Piece", None)],
             ),
             node(
-                "backward",
+                Role::Backward,
                 "Format",
                 &[("In", "Piece", None), ("Out", "Text", None)],
             ),
@@ -418,17 +418,17 @@ mod tests {
     fn an_offered_node_must_match_the_graph() {
         let (crates, mut offers) = chat();
         offers[1] = offer(vec![node(
-            "sink",
+            Role::Sink,
             "Engine",
             &[("Req", "Words", None), ("Item", "Piece", None)],
         )]);
         offers[0].nodes[1] = node(
-            "backward",
+            Role::Backward,
             "Truncate",
             &[("In", "Words", None), ("Out", "Words", None)],
         );
         let mut other = node(
-            "backward",
+            Role::Backward,
             "Format",
             &[("In", "Piece", None), ("Out", "Text", None)],
         );
@@ -450,7 +450,7 @@ mod tests {
     fn a_streamed_port_must_match_the_graph() {
         let (crates, mut offers) = chat();
         offers[1] = offer(vec![node(
-            "sink",
+            Role::Sink,
             "Engine",
             &[("Req", "Words", Some("Token")), ("Item", "Token", None)],
         )]);
@@ -487,7 +487,7 @@ mod tests {
     fn a_pin_may_bind_a_node_to_one_of_another_name() {
         let (crates, mut offers) = chat();
         offers[1] = offer(vec![node(
-            "sink",
+            Role::Sink,
             "Mock",
             &[("Req", "Words", None), ("Item", "Token", None)],
         )]);

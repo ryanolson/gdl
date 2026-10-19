@@ -28,8 +28,6 @@ pub struct Catalog {
     messages: BTreeMap<String, BTreeSet<Origin>>,
     /// Node name to each node of that name.
     nodes: BTreeMap<String, Vec<NodeRef>>,
-    /// Message to each port that carries it, as its head or its item.
-    ports: BTreeMap<Origin, Vec<(NodeRef, String)>>,
 }
 
 /// One crate version in the catalogue: what it offers, and its provenance.
@@ -49,11 +47,11 @@ pub struct Entry {
 /// A node in the catalogue: its entry, by `name@version`, and its index
 /// among the entry's nodes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NodeRef {
+struct NodeRef {
     /// The entry's `name@version`.
-    pub entry: String,
+    entry: String,
     /// The node's index in the entry's offer.
-    pub index: usize,
+    index: usize,
 }
 
 impl Entry {
@@ -172,38 +170,6 @@ impl Catalog {
         self.entries.values()
     }
 
-    /// Each message named `name`, by its origin.
-    pub fn messages(&self, name: &str) -> impl Iterator<Item = &Origin> {
-        self.messages.get(name).into_iter().flatten()
-    }
-
-    /// Every message name the catalogue offers.
-    pub fn message_names(&self) -> impl Iterator<Item = &str> {
-        self.messages.keys().map(String::as_str)
-    }
-
-    /// Each node named `name`, with its entry.
-    pub fn nodes(&self, name: &str) -> impl Iterator<Item = (&Entry, &NodeEntry)> {
-        self.nodes
-            .get(name)
-            .into_iter()
-            .flatten()
-            .map(|r| self.node(r))
-    }
-
-    /// Each port that carries `origin`, as its head or its item, with its
-    /// node and entry. Two ports connect when they carry one origin.
-    pub fn ports(&self, origin: &Origin) -> impl Iterator<Item = (&Entry, &NodeEntry, &str)> {
-        self.ports
-            .get(origin)
-            .into_iter()
-            .flatten()
-            .map(|(r, port)| {
-                let (entry, node) = self.node(r);
-                (entry, node, port.as_str())
-            })
-    }
-
     fn node(&self, r: &NodeRef) -> (&Entry, &NodeEntry) {
         let entry = &self.entries[&r.entry];
         (entry, &entry.offer.nodes[r.index])
@@ -245,14 +211,6 @@ impl Catalog {
                 .entry(node.name.clone())
                 .or_default()
                 .push(r.clone());
-            for port in &node.ports {
-                for origin in port.head.iter().chain(&port.item) {
-                    let carried = self.ports.entry(origin.clone()).or_default();
-                    if !carried.iter().any(|(n, p)| *n == r && *p == port.port) {
-                        carried.push((r.clone(), port.port.clone()));
-                    }
-                }
-            }
         }
         self.entries.insert(key, entry);
     }

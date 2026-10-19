@@ -43,6 +43,9 @@ use crate::Error;
 pub struct Spec {
     /// The spec file's own path, as given.
     pub(crate) file: PathBuf,
+    /// The spec's text, when it was given as text rather than a file: an
+    /// export holds it, so the archive can export itself again.
+    pub(crate) text: Option<String>,
     /// The spec file's directory; relative paths in it resolve from here.
     pub(crate) dir: PathBuf,
     /// Where the graph is defined.
@@ -339,7 +342,9 @@ impl Spec {
     /// if it were `gdl.toml` in `dir`, which paths in it are relative to.
     /// Nothing is read from disk but the listed crates.
     pub fn from_text(spec: &str, graph: &str, dir: &Path) -> Result<Self, Error> {
+        let text = spec.to_string();
         let mut spec = Self::parse(spec, &dir.join("gdl.toml"), dir)?;
+        spec.text = Some(text);
         match &mut spec.source {
             Source::Graph(source) => source.text = Some(graph.to_string()),
             Source::Contract(_) => {
@@ -427,6 +432,7 @@ impl Spec {
             .collect();
         Ok(Self {
             file: file.to_path_buf(),
+            text: None,
             dir: dir.to_path_buf(),
             source,
             gdl,

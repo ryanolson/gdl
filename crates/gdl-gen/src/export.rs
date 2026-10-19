@@ -45,6 +45,15 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
         build_all(&segments).into_bytes(),
         0o755,
     ));
+    // A spec given as text (a composer's draft) exists nowhere else: the
+    // archive holds it and its graph file, and exports again from them.
+    // Its paths are absolute or versions, so they hold there too.
+    if let (Some(text), Source::Graph(source)) = (&spec.text, &spec.source) {
+        let graph = source.text.as_deref().unwrap_or_default();
+        let name = source.path.file_name().unwrap_or_default();
+        entries.push(("gdl.toml".into(), text.clone().into_bytes(), 0o644));
+        entries.push((PathBuf::from(name), graph.as_bytes().to_vec(), 0o644));
+    }
     if portable(spec) {
         let problems = image_problems(&graph, &segments);
         if !problems.is_empty() {
@@ -91,7 +100,7 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
 /// Whether every crate the archive depends on can be fetched anywhere: gdl
 /// and each listed crate by a version or a git revision. A contract spec's
 /// contract is a directory, so it never is.
-fn portable(spec: &Spec) -> bool {
+pub(crate) fn portable(spec: &Spec) -> bool {
     let Source::Graph(source) = &spec.source else {
         return false;
     };
@@ -137,7 +146,7 @@ fn dockerfile(graph: &str, segment: &str, package: &str) -> String {
 /// Why a segment's image name would be refused: Docker takes a name of
 /// lowercase letters, digits, and separators that starts and ends with a
 /// letter or digit, and a package name may end with `-`.
-fn image_problems(graph: &str, segments: &[&str]) -> Vec<String> {
+pub(crate) fn image_problems(graph: &str, segments: &[&str]) -> Vec<String> {
     segments
         .iter()
         .filter_map(|segment| {

@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use gdl_syntax::{Graph, Request, Role, Sig};
+use gdl_syntax::{Graph, Request, Sig};
 use syn::Type;
 
 use crate::Resolution;
@@ -82,7 +82,7 @@ pub(crate) fn body(graph: &Graph, path: &dyn Fn(&str) -> String) -> String {
     for node in &graph.nodes {
         text.push_str(&format!(
             "{:<8} {}: {};\n",
-            role(node.role()),
+            node.role().name(),
             node.ident,
             signature(&node.sig, path)
         ));
@@ -93,17 +93,6 @@ pub(crate) fn body(graph: &Graph, path: &dyn Fn(&str) -> String) -> String {
         hop(graph, 0)
     ));
     text
-}
-
-/// A node's role as the syntax writes it.
-pub(crate) fn role(role: Role) -> &'static str {
-    match role {
-        Role::Source => "source",
-        Role::Operator => "operator",
-        Role::Forward => "forward",
-        Role::Sink => "sink",
-        Role::Backward => "backward",
-    }
 }
 
 /// A node's signature as the syntax writes it, after the node's name, with

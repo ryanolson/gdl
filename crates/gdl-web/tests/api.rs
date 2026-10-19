@@ -435,3 +435,72 @@ async fn adds_of_one_crate_at_once_all_succeed() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// The archive holds the draft as its spec and graph file, so the download
+/// is the save: expanded, it exports again from what it holds.
+#[tokio::test]
+async fn an_export_holds_its_spec_and_graph_file() {
+    use std::io::Read as _;
+    let dir = scratch("saved");
+    let router = router(&dir, fixture_catalog());
+    let one = draft(
+        "regproto::Words",
+        "Engine",
+        json!({ "all": ["A", "Engine"] }),
+    );
+    let (status, bytes) = call(&router, "POST", "/api/export", Some(one)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let unpacked = dir.join("unpacked");
+    tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()))
+        .unpack(&unpacked)
+        .expect("expanded");
+    let root = unpacked.join("composed");
+    let mut cargo = String::new();
+    std::fs::File::open(root.join("all/Cargo.toml"))
+        .expect("segment")
+        .read_to_string(&mut cargo)
+        .expect("text");
+    assert_eq!(
+        cargo.lines().nth(1),
+        Some("# Regenerate with: cargo gdl export --spec ../gdl.toml --out <archive.tar.gz>")
+    );
+    assert!(root.join("graph.gdl").exists());
+    gdl_gen::Spec::load(&root.join("gdl.toml")).expect("the archived spec loads");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// When every crate can be fetched anywhere, an export builds images, and
+/// a check refuses what that export would: a segment whose image name
+/// Docker would refuse.
+#[tokio::test]
+async fn a_check_refuses_an_image_name_the_export_would() {
+    let dir = scratch("image-name");
+    let router = gdl_web::router(gdl_web::Config {
+        catalog: fixture_catalog(),
+        target: dir.join("target"),
+        gdl: gdl_web::Gdl::Git {
+            url: "https://example.com/gdl".into(),
+            rev: "abc123".into(),
+        },
+    })
+    .expect("router");
+    let named = draft(
+        "regproto::Words",
+        "Engine",
+        json!({ "front": ["A"], "engine_": ["Engine"] }),
+    );
+    let (_, body) = json_call(&router, "POST", "/api/check", Some(named.clone())).await;
+    assert_eq!(body["ok"], false, "{body:#}");
+    assert_eq!(
+        body["problems"][0],
+        "segment `engine_`: its image would be named `composed-engine-`, which Docker refuses; name the segment with a letter or digit last"
+    );
+    let (status, _) = call(&router, "POST", "/api/export", Some(named)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let _ = std::fs::remove_dir_all(&dir);
+}

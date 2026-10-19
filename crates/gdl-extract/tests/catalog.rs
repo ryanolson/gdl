@@ -55,10 +55,11 @@ fn an_entry_is_written_once() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Loading builds the index: message names to their messages, node names
-/// to their nodes, and each message to the ports that carry it.
+/// Loading builds the index, which the catalogue's text form prints:
+/// message names to their messages, and node names to their nodes with
+/// the messages at their ports.
 #[test]
-fn a_load_indexes_messages_nodes_and_ports() {
+fn a_load_indexes_messages_and_nodes() {
     let dir = scratch("index");
     let workspace = workspace();
     let mut catalog = Catalog::load(&dir).expect("an empty catalogue");
@@ -68,42 +69,17 @@ fn a_load_indexes_messages_nodes_and_ports() {
             .expect("added");
     }
     let catalog = Catalog::load(&dir).expect("loaded");
-    let paths =
-        |name: &str| -> Vec<String> { catalog.messages(name).map(|o| o.path.clone()).collect() };
-    // Defined in one crate and exported by another: one message.
-    assert_eq!(paths("Token"), ["read_protocols::engine::Token"]);
-    // Exported under another name.
-    assert_eq!(paths("Prompt"), ["read_protocols::Words"]);
-    // Two messages of one name.
-    assert_eq!(
-        paths("Payload"),
-        [
-            "read_quirks::hidden::Payload",
-            "read_quirks::visible::Payload"
-        ]
-    );
-    let renamed: Vec<(String, String)> = catalog
-        .nodes("Renamed")
-        .map(|(entry, node)| (entry.key(), node.role.clone()))
-        .collect();
-    assert_eq!(
-        renamed,
-        [("read-quirks@0.0.0".to_string(), "forward".to_string())]
-    );
-    let actual = catalog.messages("Actual").next().expect("Actual").clone();
-    let ports: Vec<(String, String)> = catalog
-        .ports(&actual)
-        .map(|(_, node, port)| (node.name.clone(), port.to_string()))
-        .collect();
-    assert_eq!(
-        ports,
-        [
-            ("Renamed".to_string(), "In".to_string()),
-            ("Renamed".to_string(), "Out".to_string()),
-            ("Selected".to_string(), "In".to_string()),
-            ("Selected".to_string(), "Out".to_string()),
-        ]
-    );
+    let text = catalog.to_string();
+    for line in [
+        // Defined in one crate and exported by another: one message.
+        "  Token: read_protocols::engine::Token (read-protocols 0.0.0)\n",
+        // Exported under another name.
+        "  Prompt: read_protocols::Words (read-protocols 0.0.0)\n",
+        // Two messages of one name.
+        "  Payload: read_quirks::hidden::Payload (read-quirks 0.0.0), read_quirks::visible::Payload (read-quirks 0.0.0)\n",
+    ] {
+        assert!(text.contains(line), "{line} in:\n{text}");
+    }
     let text = catalog.to_string();
     assert!(
         text.contains("  Renamed: forward read_quirks::Renamed (read-quirks@0.0.0)\n    In: read_quirks::Actual (read-quirks 0.0.0) + stream read_quirks::Actual (read-quirks 0.0.0)\n"),

@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gdl_extract::{Catalog, Entry, NodeEntry, Origin, PortEntry};
+use gdl_model::Role;
 use serde::Deserialize;
 
 /// The graph the page builds.
@@ -172,17 +173,19 @@ impl Draft {
                     .and_then(|p| p.head.as_ref())
                     .map_or("()".to_string(), |o| names.name(o))
             };
-            let signature = match node.role.as_str() {
-                "sink" => format!("{} -> stream {}", req("Req"), item("Item")),
-                "forward" => format!("{} -> {}", req("In"), req("Out")),
-                "backward" => format!("{} -> {}", item("In"), item("Out")),
-                _ => format!(
+            let signature = match node.role {
+                Role::Sink => format!("{} -> stream {}", req("Req"), item("Item")),
+                Role::Forward => format!("{} -> {}", req("In"), req("Out")),
+                Role::Backward => format!("{} -> {}", item("In"), item("Out")),
+                Role::Operator => format!(
                     "({} -> stream {}) over ({} -> stream {})",
                     req("UpReq"),
                     item("UpItem"),
                     req("DownReq"),
                     item("DownItem")
                 ),
+                // The reader offers no source: it implements no role trait.
+                Role::Source => continue,
             };
             text.push_str(&format!("{} {}: {signature};\n", node.role, instance.name));
         }
@@ -469,7 +472,7 @@ mod tests {
                 exports: Vec::new(),
                 nodes: vec![NodeEntry {
                     name: "Engine".into(),
-                    role: "sink".into(),
+                    role: gdl_model::Role::Sink,
                     ty: "nodes::Engine".into(),
                     ports: vec![
                         PortEntry {
@@ -635,6 +638,84 @@ mod tests {
         );
         assert!(
             rendered.spec.contains("Token2 = \"proto::Token\""),
+            "{}",
+            rendered.spec
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A node two listed crates both offer is pinned in each instance's
+    /// binding: by name alone it would bind to neither.
+    #[test]
+    fn a_node_two_crates_offer_is_pinned() {
+        let dir = std::env::temp_dir().join(format!("gdl-web-two-nodes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut catalog = catalog(&dir);
+        let engine = catalog
+            .entries()
+            .find(|e| e.offer.package == "nodes")
+            .expect("nodes")
+            .offer
+            .nodes[0]
+            .clone();
+        let cuda = Offer {
+            package: "cuda".into(),
+            version: "0.1.0".into(),
+            source: REGISTRY.into(),
+            messages: Vec::new(),
+            exports: Vec::new(),
+            nodes: vec![NodeEntry {
+                ty: "cuda::Engine".into(),
+                ..engine
+            }],
+        };
+        catalog
+            .add(Entry {
+                added: "2026-10-19T00:00:00Z".into(),
+                checksum: None,
+                offer: cuda,
+            })
+            .expect("added");
+        let draft = Draft {
+            name: "twice".into(),
+            source: Source {
+                name: "A".into(),
+                request: Port {
+                    head: Some(origin("proto::match")),
+                    item: None,
+                },
+                response: origin("proto::Token"),
+            },
+            nodes: vec![
+                Instance {
+                    name: "Engine".into(),
+                    entry: "nodes@0.1.0".into(),
+                    node: "Engine".into(),
+                },
+                Instance {
+                    name: "Engine2".into(),
+                    entry: "cuda@0.1.0".into(),
+                    node: "Engine".into(),
+                },
+            ],
+            hop: Hop {
+                forward: Vec::new(),
+                inner: "Engine".into(),
+                nested: None,
+                backward: Vec::new(),
+            },
+            segments: BTreeMap::new(),
+        };
+        let rendered = draft
+            .render(&catalog, &Gdl::Path("/gdl".into()))
+            .expect("rendered");
+        assert!(
+            rendered.spec.contains("Engine = \"nodes::Engine\""),
+            "{}",
+            rendered.spec
+        );
+        assert!(
+            rendered.spec.contains("Engine2 = \"cuda::Engine\""),
             "{}",
             rendered.spec
         );

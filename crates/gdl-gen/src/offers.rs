@@ -16,7 +16,7 @@ pub enum Offers<'a> {
     Read,
     /// Given: the entries of a loaded catalogue, read when each was added.
     /// A listed crate the catalogue does not hold is an error.
-    Given(&'a [Offer]),
+    Given(&'a [&'a Offer]),
 }
 
 /// What the listed crates offer, read from their source: a directory as
@@ -99,7 +99,7 @@ pub const CRATES_IO: [&str; 2] = [
 /// The offer of the listed crate `package` from `source` among `given`,
 /// held to the rule a read holds it to: its library is `lib`.
 pub(crate) fn given_offer(
-    given: &[Offer],
+    given: &[&Offer],
     package: &str,
     lib: &str,
     source: &spec::CrateSource,
@@ -139,7 +139,7 @@ pub(crate) fn given_offer(
             offer.version
         )]);
     }
-    Ok(offer.clone())
+    Ok((*offer).clone())
 }
 
 #[cfg(test)]
@@ -165,8 +165,7 @@ mod tests {
             nodes: Vec::new(),
         };
         let version = spec::CrateSource::Version("0.1.0".into());
-        let error = given_offer(std::slice::from_ref(&offer), "proto", "proto", &version)
-            .expect_err("renamed");
+        let error = given_offer(&[&offer], "proto", "proto", &version).expect_err("renamed");
         assert_eq!(
             error,
             [
@@ -175,7 +174,7 @@ mod tests {
         );
         let mut named = offer.clone();
         named.messages[0].path = "proto::Words".into();
-        assert!(given_offer(&[named], "proto", "proto", &version).is_ok());
+        assert!(given_offer(&[&named], "proto", "proto", &version).is_ok());
     }
 
     /// A crate listed by version is the registry's: a git package of the
@@ -194,17 +193,14 @@ mod tests {
         let git = offer("git+https://example.com/proto#abc");
         let registry = offer("registry+https://github.com/rust-lang/crates.io-index");
         let version = spec::CrateSource::Version("0.1.0".into());
-        assert!(given_offer(std::slice::from_ref(&git), "proto", "proto", &version).is_err());
+        assert!(given_offer(&[&git], "proto", "proto", &version).is_err());
         // Another registry's package of that name and version is another
         // crate: the generated manifests name crates.io.
         let elsewhere = offer("sparse+https://registry.example.com/index/");
-        assert!(given_offer(std::slice::from_ref(&elsewhere), "proto", "proto", &version).is_err());
+        assert!(given_offer(&[&elsewhere], "proto", "proto", &version).is_err());
         let sparse = offer("sparse+https://index.crates.io/");
-        assert!(given_offer(std::slice::from_ref(&sparse), "proto", "proto", &version).is_ok());
-        for given in [
-            [git.clone(), registry.clone()],
-            [registry.clone(), git.clone()],
-        ] {
+        assert!(given_offer(&[&sparse], "proto", "proto", &version).is_ok());
+        for given in [[&git, &registry], [&registry, &git]] {
             let found = given_offer(&given, "proto", "proto", &version).expect("the registry's");
             assert_eq!(found.source, registry.source);
         }

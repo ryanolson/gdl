@@ -408,7 +408,7 @@ mod tests {
             }],
             nodes: vec![NodeEntry {
                 name: "Stage".into(),
-                role: "forward".into(),
+                role: gdl_model::Role::Forward,
                 ty: "facade::Stage".into(),
                 ports: vec![
                     PortEntry {

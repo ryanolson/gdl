@@ -198,6 +198,10 @@ fn regenerate_command(
 ) -> String {
     let file = spec.file.file_name().unwrap_or_default();
     if deps == Deps::Exported {
+        // A spec given as text is in the archive, beside the segments.
+        if spec.text.is_some() {
+            return "cargo gdl export --spec ../gdl.toml --out <archive.tar.gz>".to_string();
+        }
         return export_command(&spec_dir.join(file));
     }
     let spec_file = display(&relative(crate_dir, &spec_dir.join(file)));

@@ -545,6 +545,7 @@ dependencies = [
 name = "gdl-extract"
 version = "0.1.0"
 dependencies = [
+ "gdl-model",
  "proc-macro2",
  "quote",
  "serde",
@@ -617,6 +618,7 @@ dependencies = [
  "flate2",
  "gdl-extract",
  "gdl-gen",
+ "gdl-model",
  "gdl-syntax",
  "http-body-util",
  "serde",

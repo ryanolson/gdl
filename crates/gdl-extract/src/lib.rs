@@ -32,7 +32,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub use catalog::{Catalog, Entry, NodeRef, rfc3339};
+pub use catalog::{Catalog, Entry, rfc3339};
 
 /// The packages of a Cargo workspace and of all their dependencies, as
 /// `cargo metadata` gives them, ready to read.
@@ -250,8 +250,8 @@ pub struct Origin {
 pub struct NodeEntry {
     /// The node's name: its type's name.
     pub name: String,
-    /// `sink`, `forward`, `backward`, or `operator`.
-    pub role: String,
+    /// Its role: a sink, a forward or backward node, or an operator.
+    pub role: gdl_model::Role,
     /// The implementing type, at the crate root.
     #[serde(rename = "type")]
     pub ty: String,

@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 use crate::Error;
 use crate::Role;
-use crate::manifest::{Manifest, TypeInfo, role_tag};
+use crate::manifest::{Manifest, TypeInfo};
 use crate::placement::{Layout, PlacementErrors, check_manifest};
 
 /// The color of an edge that crosses segments.
@@ -31,7 +31,7 @@ impl Manifest {
         let _ = writeln!(out, "    rankdir=LR;");
         let node = |out: &mut String, indent: &str, index: usize| {
             let info = &self.nodes[index];
-            let label = format!("{}\n{}", info.name, role_tag(info.role));
+            let label = format!("{}\n{}", info.name, info.role.name());
             let _ = writeln!(
                 out,
                 "{indent}n{index} [label={}, {}];",
@@ -97,11 +97,7 @@ impl Manifest {
         let _ = writeln!(out, "flowchart LR");
         let node = |out: &mut String, indent: &str, index: usize| {
             let info = &self.nodes[index];
-            let label = format!(
-                "\"{}<br/>{}\"",
-                mermaid_text(&info.name),
-                role_tag(info.role)
-            );
+            let label = format!("\"{}<br/>{}\"", mermaid_text(&info.name), info.role.name());
             let (open, close) = mermaid_shape(info.role);
             let _ = writeln!(out, "{indent}n{index}{open}{label}{close}");
         };

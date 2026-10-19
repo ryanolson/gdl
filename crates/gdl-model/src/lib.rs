@@ -38,6 +38,36 @@ pub enum Role {
     Backward,
 }
 
+impl Role {
+    /// The role's name, as graph files and catalogues spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Operator => "operator",
+            Self::Forward => "forward",
+            Self::Sink => "sink",
+            Self::Backward => "backward",
+        }
+    }
+
+    /// The role trait's ports, its associated types, in the order the trait
+    /// declares them. A source implements no trait, so it has none.
+    pub fn ports(self) -> &'static [&'static str] {
+        match self {
+            Self::Source => &[],
+            Self::Operator => &["UpReq", "UpItem", "DownReq", "DownItem"],
+            Self::Forward | Self::Backward => &["In", "Out"],
+            Self::Sink => &["Req", "Item"],
+        }
+    }
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// A model that cannot be read or drawn: a manifest or placement file that
 /// does not parse, or a diagram of a layout checked against another
 /// contract. `gdl` turns it into an error of kind `Placement`.

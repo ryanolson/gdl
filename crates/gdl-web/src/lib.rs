@@ -128,14 +128,9 @@ async fn add(State(composer): Shared, Json(add): Json<Add>) -> Response {
 async fn check(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
     let checked = tokio::task::spawn_blocking(move || {
         let (rendered, spec) = prepare(&composer, &draft)?;
-        let catalog = composer.catalog.read().expect("the catalogue lock");
-        let offers: Vec<gdl_gen::Offer> = catalog.entries().map(|e| e.offer.clone()).collect();
-        drop(catalog);
-        let check = gdl_gen::check(
-            &spec,
-            &composer.config.target,
-            gdl_gen::Offers::Given(&offers),
-        )
+        let check = with_offers(&composer, |offers| {
+            gdl_gen::check(&spec, &composer.config.target, offers)
+        })
         .map_err(|e| {
             (
                 Some(rendered.clone()),
@@ -169,14 +164,9 @@ async fn check(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
 async fn export(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
     let exported = tokio::task::spawn_blocking(move || {
         let (_, spec) = prepare(&composer, &draft).map_err(|(_, problems)| problems)?;
-        let catalog = composer.catalog.read().expect("the catalogue lock");
-        let offers: Vec<gdl_gen::Offer> = catalog.entries().map(|e| e.offer.clone()).collect();
-        drop(catalog);
-        gdl_gen::export(
-            &spec,
-            &composer.config.target,
-            gdl_gen::Offers::Given(&offers),
-        )
+        with_offers(&composer, |offers| {
+            gdl_gen::export(&spec, &composer.config.target, offers)
+        })
         .map_err(|e| {
             e.to_string()
                 .lines()
@@ -220,6 +210,14 @@ fn prepare(
         Ok(spec) => Ok((rendered, spec)),
         Err(error) => Err((Some(rendered), vec![error.to_string()])),
     }
+}
+
+/// `f` with the catalogue's offers, lent under its read lock: each check
+/// and export reads the catalogue as one version of it, and copies nothing.
+fn with_offers<T>(composer: &Composer, f: impl FnOnce(gdl_gen::Offers<'_>) -> T) -> T {
+    let catalog = composer.catalog.read().expect("the catalogue lock");
+    let offers: Vec<&gdl_gen::Offer> = catalog.entries().map(|e| &e.offer).collect();
+    f(gdl_gen::Offers::Given(&offers))
 }
 
 fn problems(status: StatusCode, problems: Vec<String>) -> Response {

@@ -408,7 +408,7 @@ fn a_registry_crate_enters_the_catalogue_with_its_checksum() {
     );
     let engine = &entry.offer.nodes[0];
     assert_eq!(
-        (engine.name.as_str(), engine.role.as_str()),
+        (engine.name.as_str(), engine.role.name()),
         ("Engine", "sink")
     );
     let req = engine.ports[0].head.as_ref().expect("Req");
@@ -455,11 +455,12 @@ fn a_check_agrees_with_generation() {
         read.mermaid
     );
     let offers = chat_offers();
-    let given = gdl_gen::check(&spec, &target(), gdl_gen::Offers::Given(&offers)).expect("given");
+    let lent: Vec<&gdl_gen::Offer> = offers.iter().collect();
+    let given = gdl_gen::check(&spec, &target(), gdl_gen::Offers::Given(&lent)).expect("given");
     assert_eq!(given.manifest, read.manifest);
     assert_eq!(given.crossings, read.crossings);
-    let without_engine: Vec<_> = offers
-        .into_iter()
+    let without_engine: Vec<&gdl_gen::Offer> = offers
+        .iter()
         .filter(|o| o.package != "chat-engine-mock")
         .collect();
     let error = gdl_gen::check(&spec, &target(), gdl_gen::Offers::Given(&without_engine))
