@@ -640,7 +640,7 @@ cargo gdl extract name@version --catalog <dir>
   source reader --> Offer
   Catalog::load(<dir>).add(Entry { added, checksum, offer }) --> <dir>/<name>/<version>.toml, kept if there
 cargo gdl catalog <dir>
-  Catalog::load: every entry --> index: message name -> origins, node name -> nodes (each with its ports' messages)
+  Catalog::load: every entry; the listing groups messages by name and nodes with their ports' messages
 spec [messages] / [nodes] crates = ["name@version", "dir"]
   CrateSource::Version --> fetched and read as above; generated manifests: name = { version = "=x.y.z" }
 ```
@@ -847,7 +847,7 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 73 | A catalogue entry | the offer, its checksum, and when it was added; adding a version already there keeps it: written once means never rewritten. Addendum 2026-10-19 (review `mega-r2`): only from the same source; a version from another source is an error that names both | Fable, 2026-10-18 |
 | 74 | Where a checksum comes from | the checksum Cargo locked when it fetched the crate; none for a path or git package: Cargo already verified it, and we invent nothing | Fable, 2026-10-18 |
 | 75 | When an entry was added | RFC 3339 UTC to the second, passed in by the caller: tests stay deterministic without a time crate | Fable, 2026-10-18 |
-| 76 | The catalogue's index | built at load: message name to origins, node name to nodes, origin to (node, port); which ports may pair is the grammar's Addendum 2026-10-19 (review `mega-r3`): the origin-to-port map and the query methods had no caller, and are removed; the index is the two maps that `cargo gdl catalog` prints, and a query is added when the composer needs one | Fable, 2026-10-18 |
+| 76 | The catalogue's index | built at load: message name to origins, node name to nodes, origin to (node, port); which ports may pair is the grammar's Addendum 2026-10-19 (review `mega-r3`): the origin-to-port map and the query methods had no caller, and are removed; the index is the two maps that `cargo gdl catalog` prints, and a query is added when the composer needs one. Addendum 2026-10-19 (review `mega-r4`): those two maps served only the printed listing, so the listing builds them from the entries, and a loaded catalogue holds its entries alone | Fable, 2026-10-18 |
 | 77 | When two ports connect | on equal origin, version included, as binding compares; semver unification stays open for 17 | Fable, 2026-10-18 |
 | 78 | Crates by `name@version` in a spec | fetched and read from source; a spec names no catalogue, and the generator reads source every time | Fable, 2026-10-18 |
 | 79 | How a listed crate is named in generated manifests | one `CrateSource` (a directory or a version) for every listed crate and binding; a version renders `=x.y.z`; its library must be named for its package | Fable, 2026-10-18 |

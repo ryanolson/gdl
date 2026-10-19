@@ -264,9 +264,9 @@ fn node(
     let (name, at) = (ty_def.name.clone(), ty_def.at.clone());
     let ty = format!("{}::{name}", resolver.crates[krate].name);
     // The generated segments name the type at the crate root.
-    if resolver.member(krate, 0, &name, 0) != Some(def) {
+    if resolver.public_member(krate, 0, &name) != Some(def) {
         return Err(format!(
-            "{at}: node `{name}`: the crate root does not reach it as `{ty}`"
+            "{at}: node `{name}`: the crate root does not reach it publicly as `{ty}`"
         ));
     }
 

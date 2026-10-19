@@ -161,14 +161,10 @@ pub fn check(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Check, Erro
     let prepared = prepare(spec, None, target, emit::Deps::Relative, from)?;
     let spec = bound(spec, &prepared, target, from)?;
     let layout = validate(&spec, &prepared.contract, &prepared.manifest)?;
-    // What an export of it would refuse: an image name Docker refuses,
-    // where the export builds images.
-    if export::portable(&spec) {
-        let segments: Vec<&str> = spec.placement.segments().map(|(name, _)| name).collect();
-        let problems = export::image_problems(&prepared.manifest.name, &segments);
-        if !problems.is_empty() {
-            return Err(Error::new(problems.join("\n")));
-        }
+    // What an export of it would refuse.
+    let problems = export::refusals(&spec, &prepared.manifest.name);
+    if !problems.is_empty() {
+        return Err(Error::new(problems.join("\n")));
     }
     let mermaid = prepared
         .manifest

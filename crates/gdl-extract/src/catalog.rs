@@ -1,13 +1,12 @@
 //! The working catalogue: one file per crate version, written once, and
-//! an index built in memory when the directory is loaded.
+//! loaded into memory whole.
 //!
 //! ```text
 //! <catalogue>/<name>/<version>.toml    an Entry: the Offer, and where it came from
 //! ```
 //!
 //! A crate version never changes, so an entry is never rewritten. No
-//! unified file is stored: the directory is the catalogue, and loading it
-//! builds the index.
+//! unified file is stored: the directory is the catalogue.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -18,16 +17,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, NodeEntry, Offer, Origin};
 
-/// A loaded working catalogue: its entries and their index.
+/// A loaded working catalogue: its entries, by `name@version`.
 #[derive(Debug, Default)]
 pub struct Catalog {
     dir: PathBuf,
-    /// By `name@version`.
     entries: BTreeMap<String, Entry>,
-    /// Message name to each message of that name, defined or exported.
-    messages: BTreeMap<String, BTreeSet<Origin>>,
-    /// Node name to each node of that name.
-    nodes: BTreeMap<String, Vec<NodeRef>>,
 }
 
 /// One crate version in the catalogue: what it offers, and its provenance.
@@ -42,16 +36,6 @@ pub struct Entry {
     /// What it offers.
     #[serde(flatten)]
     pub offer: Offer,
-}
-
-/// A node in the catalogue: its entry, by `name@version`, and its index
-/// among the entry's nodes.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct NodeRef {
-    /// The entry's `name@version`.
-    entry: String,
-    /// The node's index in the entry's offer.
-    index: usize,
 }
 
 impl Entry {
@@ -170,11 +154,6 @@ impl Catalog {
         self.entries.values()
     }
 
-    fn node(&self, r: &NodeRef) -> (&Entry, &NodeEntry) {
-        let entry = &self.entries[&r.entry];
-        (entry, &entry.offer.nodes[r.index])
-    }
-
     fn file(&self, entry: &Entry) -> PathBuf {
         self.dir
             .join(&entry.offer.package)
@@ -182,42 +161,12 @@ impl Catalog {
     }
 
     fn index(&mut self, entry: Entry) {
-        let key = entry.key();
-        let offer = &entry.offer;
-        for m in &offer.messages {
-            let origin = Origin {
-                package: offer.package.clone(),
-                version: offer.version.clone(),
-                source: offer.source.clone(),
-                path: m.path.clone(),
-            };
-            self.messages
-                .entry(m.name.clone())
-                .or_default()
-                .insert(origin);
-        }
-        for e in &offer.exports {
-            self.messages
-                .entry(e.name.clone())
-                .or_default()
-                .insert(e.origin.clone());
-        }
-        for (index, node) in offer.nodes.iter().enumerate() {
-            let r = NodeRef {
-                entry: key.clone(),
-                index,
-            };
-            self.nodes
-                .entry(node.name.clone())
-                .or_default()
-                .push(r.clone());
-        }
-        self.entries.insert(key, entry);
+        self.entries.insert(entry.key(), entry);
     }
 }
 
 impl std::fmt::Display for Catalog {
-    /// The index as text: each entry with its provenance, each message
+    /// The catalogue as text: each entry with its provenance, each message
     /// name with its messages, and each node with the messages at its
     /// ports, each message by origin.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -233,30 +182,56 @@ impl std::fmt::Display for Catalog {
                 entry.checksum.as_deref().unwrap_or("-")
             )?;
         }
+        // Each message name with every message of that name, defined or
+        // exported, and each node with the messages at its ports: built
+        // here, from the entries, for the one listing that needs them.
+        let mut messages: BTreeMap<&str, BTreeSet<Origin>> = BTreeMap::new();
+        let mut nodes: Vec<(&str, &Entry, &NodeEntry)> = Vec::new();
+        for entry in self.entries.values() {
+            let offer = &entry.offer;
+            for m in &offer.messages {
+                messages.entry(&m.name).or_default().insert(Origin {
+                    package: offer.package.clone(),
+                    version: offer.version.clone(),
+                    source: offer.source.clone(),
+                    path: m.path.clone(),
+                });
+            }
+            for e in &offer.exports {
+                messages
+                    .entry(&e.name)
+                    .or_default()
+                    .insert(e.origin.clone());
+            }
+            nodes.extend(
+                offer
+                    .nodes
+                    .iter()
+                    .map(|node| (node.name.as_str(), entry, node)),
+            );
+        }
+        nodes.sort_by_key(|(name, ..)| *name);
         writeln!(f, "messages:")?;
-        for (name, origins) in &self.messages {
+        for (name, origins) in &messages {
             let origins: Vec<String> = origins.iter().map(origin).collect();
             writeln!(f, "  {name}: {}", origins.join(", "))?;
         }
         writeln!(f, "nodes:")?;
-        for refs in self.nodes.values() {
-            for r in refs {
-                let (entry, node) = self.node(r);
-                writeln!(
-                    f,
-                    "  {}: {} {} ({})",
-                    node.name,
-                    node.role,
-                    node.ty,
-                    entry.key()
-                )?;
-                for port in &node.ports {
-                    let head = port.head.as_ref().map_or("()".to_string(), origin);
-                    match &port.item {
-                        None => writeln!(f, "    {}: {head}", port.port)?,
-                        Some(item) => {
-                            writeln!(f, "    {}: {head} + stream {}", port.port, origin(item))?;
-                        }
+        for (_, entry, node) in nodes {
+            writeln!(
+                f,
+                "  {}: {} {} ({})",
+                node.name,
+                node.role,
+                node.ty,
+                entry.key()
+            )?;
+            for port in &node.ports {
+                let head = port.head.as_ref().map_or("()".to_string(), origin);
+                match &port.item {
+                    None => writeln!(f, "    {}: {head}", port.port)?,
+                    Some(item) => {
+                        writeln!(f, "    {}: {head} + stream {}", port.port, origin(item))?;
                     }
                 }
             }

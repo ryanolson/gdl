@@ -143,7 +143,8 @@ fn a_node_crate_offers_its_nodes_by_message_origin() {
     let problems = extraction.problems.join("\n");
     for expected in [
         "node `Bad`: port `Req`: `String` names no type that derives `Message`",
-        "node `Buried`: the crate root does not reach it as `read_engine::Buried`",
+        "node `Buried`: the crate root does not reach it publicly as `read_engine::Buried`",
+        "node `Shy`: the crate root does not reach it publicly as `read_engine::Shy`",
         "node `Twice` implements more than one role trait: sink, backward",
         "node `Idle`: the crate implements no role trait for it",
     ] {
@@ -152,7 +153,7 @@ fn a_node_crate_offers_its_nodes_by_message_origin() {
             "{expected:?} missing from:\n{problems}"
         );
     }
-    assert_eq!(extraction.problems.len(), 4, "{problems}");
+    assert_eq!(extraction.problems.len(), 5, "{problems}");
     assert!(problems.contains("engine/src/lib.rs:"), "{problems}");
 }
 

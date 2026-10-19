@@ -30,6 +30,19 @@ mod buried {
     }
 }
 
+/// A node the crate root reaches only through a private `use`: code
+/// outside the crate cannot name it there.
+mod shy {
+    #[derive(gdl::Node)]
+    pub struct Shy;
+
+    impl gdl::Sink for Shy {
+        type Req = read_protocols::Words;
+        type Item = read_protocols::Token;
+    }
+}
+use shy::Shy;
+
 /// A node with two roles.
 #[derive(gdl::Node)]
 pub struct Twice;

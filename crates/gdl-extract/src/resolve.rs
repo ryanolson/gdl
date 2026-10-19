@@ -147,20 +147,17 @@ impl<'a> Resolver<'a> {
         Some(Def::Module(c, 0))
     }
 
-    /// A name that a module holds: a type, a child module, a name a `use`
-    /// binds, or a name a glob brings in.
-    pub(crate) fn member(
-        &mut self,
-        krate: usize,
-        module: usize,
-        name: &str,
-        depth: usize,
-    ) -> Option<Def> {
+    /// What `name` names in a module, as code outside the crate sees it:
+    /// only what is `pub` along the way. A generated segment names a node from outside.
+    pub(crate) fn public_member(&mut self, krate: usize, module: usize, name: &str) -> Option<Def> {
         self.known.clear();
-        self.lookup(krate, module, name, None, depth)
+        // No module of any crate: only a `pub` item is visible to it.
+        self.lookup(krate, module, name, Some((usize::MAX, usize::MAX)), 0)
     }
 
-    /// `member`, of the items that module `viewer` can see: the module
+    /// A name that a module holds (a type, a child module, a name a `use`
+    /// binds, or a name a glob brings in), of the items that module
+    /// `viewer` can see, if any: the module
     /// whose glob began the search. A glob passes on only what the module
     /// that holds it can see, and visibility only narrows along a chain of
     /// globs, so each item is checked against the first module.

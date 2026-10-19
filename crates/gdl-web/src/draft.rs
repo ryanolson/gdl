@@ -319,6 +319,34 @@ impl Names {
                 )),
             }
         }
+        // A message its crate does not offer at a public path (it is in a
+        // private module) is offered through a crate that exports it
+        // publicly, which the spec lists too.
+        for (origin, _) in &defined {
+            let key = format!("{}@{}", origin.package, origin.version);
+            let defining = &entries[&key].offer;
+            if defining
+                .messages
+                .iter()
+                .any(|m| m.path == origin.path && m.public)
+                || defining
+                    .exports
+                    .iter()
+                    .any(|e| e.origin == **origin && e.public)
+            {
+                continue;
+            }
+            let facade = entries.iter().find(|(_, entry)| {
+                entry
+                    .offer
+                    .exports
+                    .iter()
+                    .any(|e| e.origin == **origin && e.public)
+            });
+            if let Some((key, _)) = facade {
+                names.crates.insert(key.clone());
+            }
+        }
         // What the listed crates offer by each name: the messages a name
         // could resolve to.
         let mut offered: BTreeMap<&str, BTreeSet<Origin>> = BTreeMap::new();
@@ -719,6 +747,124 @@ mod tests {
             "{}",
             rendered.spec
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A message its crate defines in a private module, exported by a
+    /// facade crate: the draft lists the facade too, and the spec checks.
+    #[test]
+    fn a_message_exported_only_by_a_facade_is_composed() {
+        use gdl_extract::ExportEntry;
+        let dir = std::env::temp_dir().join(format!("gdl-web-facade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut catalog = Catalog::load(&dir).expect("catalogue");
+        let message = |name: &str, path: &str, public: bool| MessageEntry {
+            name: name.into(),
+            path: path.into(),
+            wire: true,
+            public,
+        };
+        let offer = |package: &str, messages, exports, nodes| Offer {
+            package: package.into(),
+            version: "0.1.0".into(),
+            source: REGISTRY.into(),
+            messages,
+            exports,
+            nodes,
+        };
+        for offer in [
+            offer(
+                "proto",
+                vec![
+                    message("Words", "proto::inner::Words", false),
+                    message("Token", "proto::Token", true),
+                ],
+                Vec::new(),
+                Vec::new(),
+            ),
+            offer(
+                "facade",
+                Vec::new(),
+                vec![ExportEntry {
+                    name: "Words".into(),
+                    path: "facade::Words".into(),
+                    origin: origin("proto::inner::Words"),
+                    wire: true,
+                    public: true,
+                }],
+                Vec::new(),
+            ),
+            offer(
+                "nodes",
+                Vec::new(),
+                Vec::new(),
+                vec![NodeEntry {
+                    name: "Engine".into(),
+                    role: Role::Sink,
+                    ty: "nodes::Engine".into(),
+                    ports: vec![
+                        PortEntry {
+                            port: "Req".into(),
+                            head: Some(origin("proto::inner::Words")),
+                            item: None,
+                        },
+                        PortEntry {
+                            port: "Item".into(),
+                            head: Some(origin("proto::Token")),
+                            item: None,
+                        },
+                    ],
+                }],
+            ),
+        ] {
+            catalog
+                .add(Entry {
+                    added: "2026-10-19T00:00:00Z".into(),
+                    checksum: None,
+                    offer,
+                })
+                .expect("added");
+        }
+        let draft = Draft {
+            name: "facaded".into(),
+            source: Source {
+                name: "A".into(),
+                request: Port {
+                    head: Some(origin("proto::inner::Words")),
+                    item: None,
+                },
+                response: origin("proto::Token"),
+            },
+            nodes: vec![Instance {
+                name: "Engine".into(),
+                entry: "nodes@0.1.0".into(),
+                node: "Engine".into(),
+            }],
+            hop: Hop {
+                forward: Vec::new(),
+                inner: "Engine".into(),
+                nested: None,
+                backward: Vec::new(),
+            },
+            segments: BTreeMap::from([(
+                "all".to_string(),
+                vec!["A".to_string(), "Engine".to_string()],
+            )]),
+        };
+        let rendered = draft
+            .render(&catalog, &Gdl::Path("/gdl".into()))
+            .expect("rendered");
+        assert!(
+            rendered
+                .spec
+                .contains("crates = [\"facade@0.1.0\", \"proto@0.1.0\"]"),
+            "{}",
+            rendered.spec
+        );
+        let spec = gdl_gen::Spec::from_text(&rendered.spec, &rendered.graph, &dir).expect("spec");
+        let offers: Vec<&gdl_gen::Offer> = catalog.entries().map(|e| &e.offer).collect();
+        gdl_gen::check(&spec, &dir.join("target"), gdl_gen::Offers::Given(&offers))
+            .expect("checks");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

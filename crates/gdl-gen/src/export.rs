@@ -54,11 +54,11 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
         entries.push(("gdl.toml".into(), text.clone().into_bytes(), 0o644));
         entries.push((PathBuf::from(name), graph.as_bytes().to_vec(), 0o644));
     }
+    let problems = refusals(spec, &graph);
+    if !problems.is_empty() {
+        return Err(Error::new(problems.join("\n")));
+    }
     if portable(spec) {
-        let problems = image_problems(&graph, &segments);
-        if !problems.is_empty() {
-            return Err(Error::new(problems.join("\n")));
-        }
         for segment in &segments {
             let package = emit::package_name(&graph, segment);
             entries.push((
@@ -97,10 +97,21 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
         .map_err(|e| Error::new(format!("compressing: {e}")))
 }
 
+/// What an export of `spec`, whose graph is `graph`, refuses beyond what
+/// rendering it does: a check refuses the same, so a spec that checks
+/// exports.
+pub(crate) fn refusals(spec: &Spec, graph: &str) -> Vec<String> {
+    if !portable(spec) {
+        return Vec::new();
+    }
+    let segments: Vec<&str> = spec.placement.segments().map(|(name, _)| name).collect();
+    image_problems(graph, &segments)
+}
+
 /// Whether every crate the archive depends on can be fetched anywhere: gdl
 /// and each listed crate by a version or a git revision. A contract spec's
 /// contract is a directory, so it never is.
-pub(crate) fn portable(spec: &Spec) -> bool {
+fn portable(spec: &Spec) -> bool {
     let Source::Graph(source) = &spec.source else {
         return false;
     };
@@ -146,7 +157,7 @@ fn dockerfile(graph: &str, segment: &str, package: &str) -> String {
 /// Why a segment's image name would be refused: Docker takes a name of
 /// lowercase letters, digits, and separators that starts and ends with a
 /// letter or digit, and a package name may end with `-`.
-pub(crate) fn image_problems(graph: &str, segments: &[&str]) -> Vec<String> {
+fn image_problems(graph: &str, segments: &[&str]) -> Vec<String> {
     segments
         .iter()
         .filter_map(|segment| {
