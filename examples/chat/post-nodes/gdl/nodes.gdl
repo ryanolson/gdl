@@ -1,0 +1,4 @@
+// The post-processing nodes: what this crate offers to graphs. gdl-gen reads this file
+// without compiling the crate; `#[gdl::node]` checks it when it compiles.
+backward Detokenize: Token -> Piece;
+backward Format: Piece -> Text;

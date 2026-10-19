@@ -55,22 +55,8 @@ impl GraphFile {
     /// each with its line and column, except a structural one: as in
     /// `graph!`, the first of those stops the check.
     pub(crate) fn parse(text: &str, file: &Path) -> Result<Self, Error> {
-        let at = |span: Span, message: &dyn std::fmt::Display| {
-            let start = span.start();
-            format!(
-                "{}:{}:{}: {message}",
-                file.display(),
-                start.line,
-                start.column + 1
-            )
-        };
-        let tokens: TokenStream = text
-            .parse()
-            .map_err(|e: proc_macro2::LexError| Error::new(at(e.span(), &e)))?;
-        let graph = Graph::parse(tokens).map_err(|error| {
-            let lines: Vec<String> = error.into_iter().map(|e| at(e.span(), &e)).collect();
-            Error::new(lines.join("\n"))
-        })?;
+        let at = |span: Span, message: &dyn std::fmt::Display| at(file, span, message);
+        let graph = Graph::parse(tokens(text, file)?).map_err(|error| located(error, file))?;
 
         let mut problems = Vec::new();
         let mut uses: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -124,6 +110,29 @@ impl GraphFile {
             Err(Error::new(problems.join("\n")))
         }
     }
+}
+
+/// `message` at `span` of `file`, as `file:line:column: message`.
+pub(crate) fn at(file: &Path, span: Span, message: &dyn std::fmt::Display) -> String {
+    let start = span.start();
+    format!(
+        "{}:{}:{}: {message}",
+        file.display(),
+        start.line,
+        start.column + 1
+    )
+}
+
+/// The tokens of `text`, read from `file`.
+pub(crate) fn tokens(text: &str, file: &Path) -> Result<TokenStream, Error> {
+    text.parse()
+        .map_err(|e: proc_macro2::LexError| Error::new(at(file, e.span(), &e)))
+}
+
+/// Each error of `error` at its place in `file`.
+pub(crate) fn located(error: syn::Error, file: &Path) -> Error {
+    let lines: Vec<String> = error.into_iter().map(|e| at(file, e.span(), &e)).collect();
+    Error::new(lines.join("\n"))
 }
 
 /// The message name at a position of a checked graph file, or `None` for

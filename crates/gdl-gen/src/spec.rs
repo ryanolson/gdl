@@ -15,6 +15,10 @@
 //! crates = ["protocols"]         # crate directories, relative to this file
 //! pin = { Chunk = "chat_protocols::Chunk" }   # optional: a name's type
 //!
+//! [nodes]                        # with [graph], instead of [bind.*]
+//! crates = ["engine-mock"]       # node crates, each with a nodes file
+//! pin = { Engine = "chat_engine_mock::Engine" }   # optional
+//!
 //! [gdl]
 //! path = "../../crates/gdl"      # or: version = "0.1"
 //!
@@ -74,6 +78,25 @@ pub(crate) struct GraphSource {
     /// Message name to the path of the type it takes, for a name that
     /// would otherwise be ambiguous or that differs from its type's.
     pub(crate) pins: BTreeMap<String, String>,
+    /// The crates whose declared nodes the graph's nodes bind to.
+    pub(crate) nodes: Vec<NodeCrate>,
+    /// Graph node name to the type of the declared node it binds to, for
+    /// a name that would otherwise be ambiguous or that differs from the
+    /// declared node's.
+    pub(crate) node_pins: BTreeMap<String, String>,
+}
+
+/// A crate that declares nodes in a nodes file.
+#[derive(Debug, Clone)]
+pub(crate) struct NodeCrate {
+    /// The package name.
+    pub(crate) package: String,
+    /// Its library's crate name, as Rust code names it.
+    pub(crate) lib: String,
+    /// Its directory, resolved.
+    pub(crate) path: PathBuf,
+    /// Its nodes file, from `[package.metadata.gdl] nodes`.
+    pub(crate) file: PathBuf,
 }
 
 /// A crate that defines messages.
@@ -157,6 +180,7 @@ struct Raw {
     contract: Option<RawContract>,
     graph: Option<RawGraph>,
     messages: Option<RawMessages>,
+    nodes: Option<RawNodes>,
     gdl: RawGdl,
     #[serde(default)]
     segment: toml::Table,
@@ -180,6 +204,14 @@ struct RawGraph {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMessages {
+    crates: Vec<PathBuf>,
+    #[serde(default)]
+    pin: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawNodes {
     crates: Vec<PathBuf>,
     #[serde(default)]
     pin: BTreeMap<String, String>,
@@ -250,7 +282,13 @@ impl Spec {
     fn parse(text: &str, file: &Path, dir: &Path) -> Result<Self, Error> {
         let raw: Raw =
             toml::from_str(text).map_err(|e| Error::new(format!("{}: {e}", file.display())))?;
+        let nodes = raw.nodes;
         let source = match (raw.contract, raw.graph, raw.messages) {
+            (Some(_), None, None) if nodes.is_some() => {
+                return Err(Error::new(
+                    "[nodes] goes with [graph]; a contract spec binds its nodes with [bind.*]",
+                ));
+            }
             (Some(contract), None, None) => {
                 let path = dir.join(&contract.path);
                 let CrateNames { package, lib } = crate_names(&path)?;
@@ -262,8 +300,13 @@ impl Spec {
                     module,
                 })
             }
+            (None, Some(_), Some(_)) if !raw.bind.is_empty() => {
+                return Err(Error::new(
+                    "[bind.*] goes with [contract]; a graph spec binds its nodes through [nodes]",
+                ));
+            }
             (None, Some(graph), Some(messages)) => {
-                Source::Graph(graph_source(dir, graph, messages)?)
+                Source::Graph(graph_source(dir, graph, messages, nodes)?)
             }
             (Some(_), Some(_), _) => {
                 return Err(Error::new("a spec has [contract] or [graph], not both"));
@@ -321,7 +364,12 @@ impl Spec {
     }
 }
 
-fn graph_source(dir: &Path, graph: RawGraph, messages: RawMessages) -> Result<GraphSource, Error> {
+fn graph_source(
+    dir: &Path,
+    graph: RawGraph,
+    messages: RawMessages,
+    nodes: Option<RawNodes>,
+) -> Result<GraphSource, Error> {
     if messages.crates.is_empty() {
         return Err(Error::new("[messages] crates lists no crate"));
     }
@@ -348,11 +396,62 @@ fn graph_source(dir: &Path, graph: RawGraph, messages: RawMessages) -> Result<Gr
         }
         crates.push(MessageCrate { package, lib, path });
     }
+    let RawNodes {
+        crates: node_dirs,
+        pin: node_pins,
+    } = nodes.unwrap_or(RawNodes {
+        crates: Vec::new(),
+        pin: BTreeMap::new(),
+    });
+    let mut nodes: Vec<NodeCrate> = Vec::with_capacity(node_dirs.len());
+    for path in node_dirs {
+        let path = dir.join(path);
+        let CrateNames { package, lib } = crate_names(&path)?;
+        if let Some(first) = nodes.iter().find(|c| c.package == package) {
+            return Err(Error::new(format!(
+                "[nodes] crates: {} and {} are both package `{package}`",
+                first.path.display(),
+                path.display()
+            )));
+        }
+        let file = nodes_file(&path)?;
+        nodes.push(NodeCrate {
+            package,
+            lib,
+            path,
+            file,
+        });
+    }
     Ok(GraphSource {
         path: dir.join(graph.path),
         crates,
         pins: messages.pin,
+        nodes,
+        node_pins,
     })
+}
+
+/// A node crate's nodes file: `[package.metadata.gdl] nodes`, relative to
+/// the crate.
+fn nodes_file(dir: &Path) -> Result<PathBuf, Error> {
+    let manifest = dir.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| Error::new(format!("reading {}: {e}", manifest.display())))?;
+    let table: toml::Table =
+        toml::from_str(&text).map_err(|e| Error::new(format!("{}: {e}", manifest.display())))?;
+    table
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("gdl"))
+        .and_then(|g| g.get("nodes"))
+        .and_then(toml::Value::as_str)
+        .map(|file| dir.join(file))
+        .ok_or_else(|| {
+            Error::new(format!(
+                "[nodes] crates: {} names no nodes file: add [package.metadata.gdl] nodes = \"<file>\" to it",
+                manifest.display()
+            ))
+        })
 }
 
 /// What a crate is called: by Cargo, and by Rust code.
@@ -463,6 +562,70 @@ mod tests {
         assert_eq!(graph.crates[0].path, dir.join("protocols"));
         assert_eq!(graph.pins["Chunk"], "chat_protocols::Chunk");
         assert!(spec.contract().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A graph spec lists its node crates, each read for its names and its
+    /// nodes file; pins choose a declared node by its type's path.
+    #[test]
+    fn a_graph_spec_reads_its_node_crates() {
+        let dir = contract_dir("nodes");
+        for (name, metadata) in [
+            ("protocols", ""),
+            (
+                "engine",
+                "[package.metadata.gdl]\nnodes = \"gdl/nodes.gdl\"\n",
+            ),
+            ("bare", ""),
+        ] {
+            std::fs::create_dir_all(dir.join(name)).expect("dir");
+            std::fs::write(
+                dir.join(name).join("Cargo.toml"),
+                format!("[package]\nname = \"chat-{name}\"\n{metadata}"),
+            )
+            .expect("write");
+        }
+        let head = "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"protocols\"]\n[gdl]\nversion = \"0.1\"\n";
+        let text = format!(
+            "{head}[nodes]\ncrates = [\"engine\"]\npin = {{ Engine = \"chat_engine::Engine\" }}\n"
+        );
+        let spec = Spec::parse(&text, &dir.join("gdl.toml"), &dir).expect("spec");
+        let Source::Graph(graph) = &spec.source else {
+            panic!("not a graph spec");
+        };
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].package, "chat-engine");
+        assert_eq!(graph.nodes[0].lib, "chat_engine");
+        assert_eq!(graph.nodes[0].file, dir.join("engine/gdl/nodes.gdl"));
+        assert_eq!(graph.node_pins["Engine"], "chat_engine::Engine");
+
+        let error = Spec::parse(
+            &format!("{head}[nodes]\ncrates = [\"bare\"]\n"),
+            &dir.join("gdl.toml"),
+            &dir,
+        )
+        .expect_err("no nodes file")
+        .to_string();
+        assert!(error.contains("names no nodes file"), "{error}");
+        let error = Spec::parse(
+            &format!("{head}[bind.Engine]\ncrate = \"chat-engine\"\npath = \"engine\"\ntype = \"chat_engine::Engine\"\n"),
+            &dir.join("gdl.toml"),
+            &dir,
+        )
+        .expect_err("a binding table")
+        .to_string();
+        assert!(
+            error.contains("a graph spec binds its nodes through [nodes]"),
+            "{error}"
+        );
+        let error = Spec::parse(
+            "[contract]\npath = \"contract\"\n[gdl]\nversion = \"0.1\"\n[nodes]\ncrates = [\"engine\"]\n",
+            &dir.join("gdl.toml"),
+            &dir,
+        )
+        .expect_err("nodes with a contract")
+        .to_string();
+        assert!(error.contains("[nodes] goes with [graph]"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

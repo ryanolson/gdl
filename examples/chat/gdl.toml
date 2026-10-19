@@ -1,6 +1,6 @@
 # The chat example's spec: the graph file, the crate that holds its
-# messages, which segment hosts which node, and which crate implements each
-# node. Generate the contract and segment crates with:
+# messages, the crates that implement its nodes, and which segment hosts
+# which node. Generate the contract and segment crates with:
 #
 #     cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --out examples/chat/segments
 
@@ -9,6 +9,11 @@ path = "chat.gdl"
 
 [messages]
 crates = ["protocols"]
+
+# The node crates: each declares its nodes in its nodes file, and each
+# graph node binds to the declared node of its name.
+[nodes]
+crates = ["front-nodes", "engine-mock", "post-nodes"]
 
 [gdl]
 path = "../../crates/gdl"
@@ -21,33 +26,3 @@ nodes = ["Engine"]
 
 [segment.post]
 nodes = ["Detokenize", "Format"]
-
-[bind.Preprocess]
-crate = "chat-front-nodes"
-path = "front-nodes"
-type = "chat_front_nodes::Preprocess"
-
-[bind.Truncate]
-crate = "chat-front-nodes"
-path = "front-nodes"
-type = "chat_front_nodes::Truncate"
-
-[bind.Number]
-crate = "chat-front-nodes"
-path = "front-nodes"
-type = "chat_front_nodes::Number"
-
-[bind.Engine]
-crate = "chat-engine-mock"
-path = "engine-mock"
-type = "chat_engine_mock::Engine"
-
-[bind.Detokenize]
-crate = "chat-post-nodes"
-path = "post-nodes"
-type = "chat_post_nodes::Detokenize"
-
-[bind.Format]
-crate = "chat-post-nodes"
-path = "post-nodes"
-type = "chat_post_nodes::Format"

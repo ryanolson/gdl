@@ -21,12 +21,15 @@
 //! `graph!` invocation, with message names where `graph!` has Rust types,
 //! and the crates that define those messages with `derive(gdl_message::Message)`.
 //! [`resolve`] checks that the names agree along every edge and resolves
-//! each to exactly one type.
+//! each to exactly one type. Such a spec binds its nodes through `[nodes]`:
+//! node crates whose nodes files declare them, read without compiling
+//! those crates.
 
 mod contract;
 mod dump;
 mod emit;
 mod names;
+mod nodes;
 mod paths;
 mod resolve;
 mod spec;
@@ -65,6 +68,22 @@ pub type Files = BTreeMap<PathBuf, String>;
 /// `contract/` under `out`.
 pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
     let prepared = prepare(spec, Some(out), target)?;
+    // A graph spec binds its nodes to the nodes its node crates declare,
+    // in place of the `[bind.*]` tables of a contract spec.
+    let bound;
+    let spec = match &spec.source {
+        spec::Source::Contract(_) => spec,
+        spec::Source::Graph(source) => {
+            let graph = names::GraphFile::read(&source.path)?.graph;
+            let declared = nodes::read(&source.nodes)?;
+            let (bind, problems) = nodes::bind(&graph, &source.nodes, &declared, &source.node_pins);
+            let mut with_binds = spec.clone();
+            with_binds.bind = bind;
+            with_binds.problems.extend(problems);
+            bound = with_binds;
+            &bound
+        }
+    };
     let mut files = render_manifest(spec, &prepared.contract, &prepared.manifest, out)?;
     files.extend(prepared.files);
     Ok(files)
@@ -489,8 +508,10 @@ fn validate(
             }
         }
     }
+    // A graph spec has reported each node that did not bind already.
+    let contract_spec = matches!(spec.source, spec::Source::Contract(_));
     for node in &manifest.nodes {
-        if node.role != gdl::Role::Source && !spec.bind.contains_key(&node.name) {
+        if contract_spec && node.role != gdl::Role::Source && !spec.bind.contains_key(&node.name) {
             problems.push(format!("node `{}` has no [bind.{}]", node.name, node.name));
         }
         if node.role != gdl::Role::Source && node.binding.is_none() {

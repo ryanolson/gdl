@@ -77,45 +77,18 @@ pub(crate) fn cargo_toml(
 /// by replacing names in the file's text: a node may share its name with a
 /// message.
 pub(crate) fn body(graph: &Graph, path: &dyn Fn(&str) -> String) -> String {
-    let ty = |ty: &Type| crate::names::message(ty).map_or_else(|| "()".to_string(), |n| path(&n));
-    let request = |req: &Request| match (&req.item, crate::names::message(&req.head)) {
-        (None, _) => ty(&req.head),
-        (Some(item), None) => format!("stream {}", ty(item)),
-        (Some(item), Some(_)) => format!("{} + stream {}", ty(&req.head), ty(item)),
-    };
     let mut text = format!(
         "name = {}, schema = {};\n",
         lit(&graph.name.value()),
         graph.schema.base10_digits()
     );
     for node in &graph.nodes {
-        let sig = match &node.sig {
-            Sig::Source { req, item } | Sig::Sink { req, item } => {
-                format!("{} -> stream {}", request(req), ty(item))
-            }
-            Sig::Operator {
-                up_req,
-                up_item,
-                down_req,
-                down_item,
-            } => format!(
-                "({} -> stream {}) over ({} -> stream {})",
-                request(up_req),
-                ty(up_item),
-                request(down_req),
-                ty(down_item)
-            ),
-            Sig::Forward { input, output } => format!("{} -> {}", request(input), request(output)),
-            Sig::Backward { input, output } => format!("{} -> {}", ty(input), ty(output)),
-        };
-        let role = match node.role() {
-            Role::Source => "source",
-            Role::Operator => "operator",
-            Role::Forward => "forward",
-            Role::Sink => "sink",
-            Role::Backward => "backward",
-        };
-        text.push_str(&format!("{role:<8} {}: {sig};\n", node.ident));
+        text.push_str(&format!(
+            "{:<8} {}: {};\n",
+            role(node.role()),
+            node.ident,
+            signature(&node.sig, path)
+        ));
     }
     text.push_str(&format!(
         "topology: {} => {};\n",
@@ -123,6 +96,47 @@ pub(crate) fn body(graph: &Graph, path: &dyn Fn(&str) -> String) -> String {
         hop(graph, 0)
     ));
     text
+}
+
+/// A node's role as the syntax writes it.
+pub(crate) fn role(role: Role) -> &'static str {
+    match role {
+        Role::Source => "source",
+        Role::Operator => "operator",
+        Role::Forward => "forward",
+        Role::Sink => "sink",
+        Role::Backward => "backward",
+    }
+}
+
+/// A node's signature as the syntax writes it, after the node's name, with
+/// each message name written as `path(name)` gives it.
+pub(crate) fn signature(sig: &Sig, path: &dyn Fn(&str) -> String) -> String {
+    let ty = |ty: &Type| crate::names::message(ty).map_or_else(|| "()".to_string(), |n| path(&n));
+    let request = |req: &Request| match (&req.item, crate::names::message(&req.head)) {
+        (None, _) => ty(&req.head),
+        (Some(item), None) => format!("stream {}", ty(item)),
+        (Some(item), Some(_)) => format!("{} + stream {}", ty(&req.head), ty(item)),
+    };
+    match sig {
+        Sig::Source { req, item } | Sig::Sink { req, item } => {
+            format!("{} -> stream {}", request(req), ty(item))
+        }
+        Sig::Operator {
+            up_req,
+            up_item,
+            down_req,
+            down_item,
+        } => format!(
+            "({} -> stream {}) over ({} -> stream {})",
+            request(up_req),
+            ty(up_item),
+            request(down_req),
+            ty(down_item)
+        ),
+        Sig::Forward { input, output } => format!("{} -> {}", request(input), request(output)),
+        Sig::Backward { input, output } => format!("{} -> {}", ty(input), ty(output)),
+    }
 }
 
 /// Hop `index` as the topology writes it after its outer end: forward

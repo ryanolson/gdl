@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 /// Splits the prompt into words, and wraps each piece of text the engine
 /// side returns as a chunk.
+#[gdl::node]
 pub struct Preprocess;
 
 impl Operator for Preprocess {
@@ -31,6 +32,7 @@ impl Operator for Preprocess {
 }
 
 /// Keeps at most `max` words.
+#[gdl::node]
 pub struct Truncate;
 
 impl Forward for Truncate {
@@ -44,6 +46,7 @@ impl Forward for Truncate {
 }
 
 /// Numbers the chunks of an answer in order.
+#[gdl::node]
 pub struct Number;
 
 impl Backward for Number {

@@ -1,0 +1,3 @@
+// The engine: what this crate offers to graphs. gdl-gen reads this file
+// without compiling the crate; `#[gdl::node]` checks it when it compiles.
+sink Engine: Words -> stream Token;

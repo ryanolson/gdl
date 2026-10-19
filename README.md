@@ -123,7 +123,7 @@ From a `[graph]` spec, the generator also generates the contract crate, in `cont
 
 ## Split a graph into segments
 
-A spec file names the graph, the placement, and the implementation of each node. `examples/chat/gdl.toml` is a full spec. This part of it shows the graph file and its messages, the placement in three segments, and one binding:
+A spec file names the graph, the placement, and the implementation of each node. `examples/chat/gdl.toml` is a full spec. It names the graph file, the crate that holds its messages, the crates that implement its nodes, and the placement in three segments:
 
 ```toml
 [graph]
@@ -131,6 +131,9 @@ path = "chat.gdl"
 
 [messages]
 crates = ["protocols"]
+
+[nodes]
+crates = ["front-nodes", "engine-mock", "post-nodes"]
 
 [gdl]
 path = "../../crates/gdl"
@@ -143,7 +146,26 @@ nodes = ["Engine"]
 
 [segment.post]
 nodes = ["Detokenize", "Format"]
+```
 
+A node crate declares the nodes it implements in a nodes file, in graph syntax, and names the file in its manifest:
+
+```toml
+# engine-mock/Cargo.toml
+[package.metadata.gdl]
+nodes = "gdl/nodes.gdl"
+```
+
+```text
+// engine-mock/gdl/nodes.gdl
+sink Engine: Words -> stream Token;
+```
+
+Each graph node binds to the node of its name that a listed crate declares. Its implementation is the type of that name at the crate's root, here `chat_engine_mock::Engine`. If two crates declare one name, add `pin = { Engine = "chat_engine_mock::Engine" }` to `[nodes]` to choose one. The graph's signature for each node must be the one that its crate declares. The generator reads nodes files without compiling the node crates, so a crate that needs CUDA, for example, does not have to build there. The implementing type carries `#[gdl::node]`. When the crate compiles, the attribute makes sure that the type is declared, sits at the crate root, and has the declared role and messages.
+
+A spec with a contract crate binds each node with a table instead:
+
+```toml
 [bind.Engine]
 crate = "chat-engine-mock"
 path = "engine-mock"

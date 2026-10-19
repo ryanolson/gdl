@@ -373,6 +373,8 @@ fn a_standalone_build_of_a_generated_crate_is_not_drift() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
+/// A node that no listed crate declares, a pin to no declared node, and a
+/// placement that leaves nodes out: all reported together.
 #[test]
 fn every_problem_in_a_spec_is_reported_at_once() {
     let dir = scratch("problems");
@@ -380,32 +382,28 @@ fn every_problem_in_a_spec_is_reported_at_once() {
     let path = |p: &str| toml::Value::String(example.join(p).display().to_string());
     let gdl = toml::Value::String(root().join("crates/gdl").display().to_string());
     let text = format!(
-        "[graph]\npath = {graph}\n[messages]\ncrates = [{protocols}]\n[gdl]\npath = {gdl}\n\
+        "[graph]\npath = {graph}\n[messages]\ncrates = [{protocols}]\n\
+         [nodes]\ncrates = [{front}, {engine}]\npin = {{ Engine = \"chat_engine_mock::Engin\" }}\n\
+         [gdl]\npath = {gdl}\n\
          [segment.front]\nnodes = [\"Frontend\", \"Preprocess\", \"Truncate\", \"Number\"]\n\
-         [segment.engine]\nnodes = [\"Engine\"]\n\
-         [bind.Preprocess]\ncrate = \"chat-front-nodes\"\npath = {front}\ntype = \"chat_front_nodes::Preprocess\"\n\
-         [bind.Truncate]\ncrate = \"chat-front-nodes\"\npath = {front}\ntype = \"chat_front_nodes::Truncate\"\n\
-         [bind.Number]\ncrate = \"chat-front-nodes\"\npath = {front}\ntype = \"chat_front_nodes::Number\"\n\
-         [bind.Engine]\ncrate = \"chat-front-nodes\"\npath = {engine}\ntype = \"chat_engine_mock::Engine\"\n\
-         [bind.Detokenize]\ncrate = \"chat-post-nodes\"\npath = {missing}\ntype = \"chat_post_nodes::Detokenize\"\n\
-         [bind.Format]\ncrate = \"chat-post-nodes\"\npath = {missing}\ntype = \"chat_post_nodes::Format\"\n",
+         [segment.engine]\nnodes = [\"Engine\"]\n",
         graph = path("chat.gdl"),
         protocols = path("protocols"),
         front = path("front-nodes"),
         engine = path("engine-mock"),
-        missing = path("no-such-crate"),
     );
     std::fs::write(dir.join("gdl.toml"), text).expect("spec");
     let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("the spec parses");
     let Err(error) = gdl_gen::render(&spec, &dir.join("segments"), &target("gdl-gen-tests")) else {
-        panic!("a spec with three problems rendered");
+        panic!("a spec with four problems rendered");
     };
     let error = error.to_string();
     for expected in [
-        // A binding naming the wrong package.
-        "holds package `chat-engine-mock`, not `chat-front-nodes`",
-        // A binding whose crate does not exist.
-        "[bind.Detokenize]: reading",
+        // A pin to a type no node crate declares.
+        "[nodes] pin `Engine`: no [nodes] crate declares `chat_engine_mock::Engin`",
+        // Nodes whose crate is not listed.
+        "node `Detokenize`: no [nodes] crate declares it",
+        "node `Format`: no [nodes] crate declares it",
         // A placement that leaves nodes out.
         "node `Detokenize` is in no segment",
     ] {
@@ -507,6 +505,15 @@ fn a_segment_cannot_take_the_contract_directory() {
         .replace(
             "crates = [\"protocols\"]",
             &format!("crates = [{:?}]", example.join("protocols")),
+        )
+        .replace(
+            "crates = [\"front-nodes\", \"engine-mock\", \"post-nodes\"]",
+            &format!(
+                "crates = [{:?}, {:?}, {:?}]",
+                example.join("front-nodes"),
+                example.join("engine-mock"),
+                example.join("post-nodes")
+            ),
         )
         .replace(
             "path = \"../../crates/gdl\"",

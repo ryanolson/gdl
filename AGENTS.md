@@ -12,7 +12,7 @@
 | `agent-docs/reviews/` | Review records for each milestone |
 | `agent-docs/perf/` | Measurements, with the command that produced them |
 | `crates/` | `gdl` (runtime), `gdl-syntax` (graph parser shared by the macro and the generator), `gdl-message` (`derive(Message)` and the message catalogue, without the runtime), `gdl-macros` (`graph!`, `derive(Message)`), `gdl-gen` (segment crate generator) |
-| `examples/chat` | A separate workspace: a graph file (`chat.gdl`), its protocols crate, its implementations, and the generated contract and segments. Regenerate with `cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --out examples/chat/segments`; never edit `segments/` by hand |
+| `examples/chat` | A separate workspace: a graph file (`chat.gdl`), its protocols crate, node crates that declare their nodes in `gdl/nodes.gdl`, and the generated contract and segments. Regenerate with `cargo run -p gdl-gen -- --spec examples/chat/gdl.toml --out examples/chat/segments`; never edit `segments/` by hand |
 | `examples/asr` | A separate workspace with a streamed request, generated segments, and a demo that runs them. Regenerate with `cargo run -p gdl-gen -- --spec examples/asr/gdl.toml --out examples/asr/segments` |
 
 ## Build, lint, test
