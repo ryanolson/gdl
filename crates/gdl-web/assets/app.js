@@ -282,7 +282,9 @@ function segments(names) {
   }
   const result = {};
   [...groups.values()].forEach((group, i) => {
-    const name = state.segmentNames[group[0]] || `s${i + 1}`;
+    // Two groups never share a name: one would replace the other.
+    let name = state.segmentNames[group[0]] || `s${i + 1}`;
+    while (name in result) name = `${name}-${i + 1}`;
     result[name] = group;
   });
   return result;
@@ -299,12 +301,22 @@ function render() {
 
   const groups = $("groups");
   groups.innerHTML = "";
-  for (const [name, members] of Object.entries(segments(names))) {
+  const named = Object.entries(segments(names));
+  for (const [name, members] of named) {
     const div = document.createElement("div");
     const input = document.createElement("input");
     input.value = name;
     input.size = 12;
-    input.onchange = () => { state.segmentNames[members[0]] = input.value; render(); };
+    input.onchange = () => {
+      // A name another segment has is refused: the two would be one.
+      if (named.some(([other, them]) => other === input.value && them[0] !== members[0])) {
+        input.value = name;
+        input.title = "another segment has that name";
+        return;
+      }
+      state.segmentNames[members[0]] = input.value;
+      render();
+    };
     div.append(input, `: ${members.join(", ")}`);
     groups.append(div);
   }

@@ -92,7 +92,10 @@ struct Add {
 /// problems adds nothing, and the problems are the answer. A directory is
 /// one on the server's machine: the composer serves the machine it runs on.
 async fn add(State(composer): Shared, Json(add): Json<Add>) -> Response {
-    let krate = gdl_gen::Crate::parse(&add.krate);
+    let krate = match gdl_gen::Crate::parse(&add.krate) {
+        Ok(krate) => krate,
+        Err(error) => return problems(StatusCode::BAD_REQUEST, vec![error.to_string()]),
+    };
     // Fetching runs cargo, and adding writes a file: off the async threads.
     // The add is made to the served catalogue, under its lock, so two adds
     // at once both stay served; `Catalog::add` keeps whichever entry was

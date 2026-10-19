@@ -94,7 +94,8 @@ fn args() -> Result<Args, String> {
     }
     let command = match command.as_str() {
         "extract" => Command::Extract {
-            krate: gdl_gen::Crate::parse(&krate.ok_or_else(|| USAGE.to_string())?),
+            krate: gdl_gen::Crate::parse(&krate.ok_or_else(|| USAGE.to_string())?)
+                .map_err(|e| e.to_string())?,
             catalog,
             verify,
         },

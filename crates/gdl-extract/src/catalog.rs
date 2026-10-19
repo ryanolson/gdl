@@ -101,12 +101,39 @@ impl Catalog {
     }
 
     /// Add `entry`, writing its file. An entry of its version from its
-    /// source already there is kept, file and all, whoever wrote it: a crate
-    /// version never changes. One from another source is an error. The
-    /// entry the catalogue holds, and its file.
+    /// source already there is kept, file and all, whoever wrote it: a
+    /// published crate version never changes. A crate from a directory
+    /// replaces its entry: it changes as it is edited. One from another
+    /// source is an error. The entry the catalogue holds, and its file.
     pub fn add(&mut self, entry: Entry) -> Result<(&Entry, PathBuf), Error> {
         let key = entry.key();
         let file = self.file(&entry);
+        // A directory's crate changes as it is edited, and has no checksum
+        // to tell versions apart: it replaces its entry, when the entry is
+        // from the same directory.
+        let edited = entry.offer.source.starts_with("path+")
+            && self
+                .entries
+                .get(&key)
+                .is_some_and(|held| held.offer.source == entry.offer.source);
+        if edited {
+            let dir = file
+                .parent()
+                .expect("an entry's file is in its package's directory");
+            static REPLACES: AtomicU64 = AtomicU64::new(0);
+            let partial = dir.join(format!(
+                ".{}.{}.r{}",
+                entry.offer.version,
+                std::process::id(),
+                REPLACES.fetch_add(1, Ordering::Relaxed)
+            ));
+            // Renamed into place: a reader sees the old entry or the new one.
+            std::fs::write(&partial, entry.to_toml())
+                .and_then(|()| std::fs::rename(&partial, &file))
+                .map_err(|e| Error(format!("{}: {e}", file.display())))?;
+            self.index(entry);
+            return Ok((&self.entries[&key], file));
+        }
         if !self.entries.contains_key(&key) {
             let dir = file
                 .parent()

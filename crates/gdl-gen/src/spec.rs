@@ -129,23 +129,17 @@ impl CrateSource {
     /// A `[messages]` or `[nodes]` entry, relative to the spec's directory
     /// `dir`: `name@version` that is not a directory names a version.
     fn parse(dir: &Path, entry: &str) -> Result<(CrateNames, Self), Error> {
-        let path = dir.join(entry);
-        match entry.split_once('@') {
-            Some((name, version)) if !path.exists() => {
-                if name.is_empty() || version.is_empty() {
-                    return Err(Error::new(format!(
-                        "`{entry}` is neither a directory nor `name@version`"
-                    )));
-                }
+        match crate::Crate::parse_in(dir, entry)? {
+            crate::Crate::Registry { name, version } => {
                 // The library is named for the package; `offers` checks
                 // this when it reads the crate.
                 let names = CrateNames {
-                    package: name.to_string(),
                     lib: name.replace('-', "_"),
+                    package: name,
                 };
-                Ok((names, Self::Version(version.to_string())))
+                Ok((names, Self::Version(version)))
             }
-            _ => Ok((crate_names(&path)?, Self::Path(path))),
+            crate::Crate::Path(path) => Ok((crate_names(&path)?, Self::Path(path))),
         }
     }
 

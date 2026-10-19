@@ -10,6 +10,13 @@ fn workspace() -> Workspace {
     Workspace::load(&manifest).expect("cargo metadata")
 }
 
+/// `entry`, as if it came from crates.io: a published version, which is
+/// written once.
+fn published(mut entry: Entry) -> Entry {
+    entry.offer.source = "registry+https://github.com/rust-lang/crates.io-index".into();
+    entry
+}
+
 fn entry(workspace: &Workspace, package: &str, added: &str) -> Entry {
     let extraction = workspace.extract(package).expect("package");
     Entry {
@@ -33,7 +40,11 @@ fn an_entry_is_written_once() {
     let workspace = workspace();
     let mut catalog = Catalog::load(&dir).expect("an empty catalogue");
     let (_, file) = catalog
-        .add(entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z"))
+        .add(published(entry(
+            &workspace,
+            "read-protocols",
+            "2026-10-18T21:04:05Z",
+        )))
         .expect("added");
     assert_eq!(file, dir.join("read-protocols/0.0.0.toml"));
     let text = std::fs::read_to_string(&file).expect("written");
@@ -41,10 +52,14 @@ fn an_entry_is_written_once() {
         text.starts_with("added = \"2026-10-18T21:04:05Z\"\n"),
         "{text}"
     );
-    // A path package has no registry checksum.
+    // The fixture's checksum is none: it was read from a directory.
     assert!(!text.contains("checksum"), "{text}");
     let (kept, _) = catalog
-        .add(entry(&workspace, "read-protocols", "2027-01-01T00:00:00Z"))
+        .add(published(entry(
+            &workspace,
+            "read-protocols",
+            "2027-01-01T00:00:00Z",
+        )))
         .expect("kept");
     assert_eq!(kept.added, "2026-10-18T21:04:05Z");
     assert_eq!(std::fs::read_to_string(&file).expect("kept"), text);
@@ -116,11 +131,19 @@ fn the_first_add_wins_across_catalogues() {
     let mut one = Catalog::load(&dir).expect("one");
     let mut two = Catalog::load(&dir).expect("two");
     let (_, file) = one
-        .add(entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z"))
+        .add(published(entry(
+            &workspace,
+            "read-protocols",
+            "2026-10-18T21:04:05Z",
+        )))
         .expect("first");
     let text = std::fs::read_to_string(&file).expect("written");
     let (kept, _) = two
-        .add(entry(&workspace, "read-protocols", "2027-01-01T00:00:00Z"))
+        .add(published(entry(
+            &workspace,
+            "read-protocols",
+            "2027-01-01T00:00:00Z",
+        )))
         .expect("second");
     assert_eq!(kept.added, "2026-10-18T21:04:05Z");
     assert_eq!(std::fs::read_to_string(&file).expect("kept"), text);
@@ -137,11 +160,11 @@ fn adders_at_once_agree_on_one_entry() {
     let kept: Vec<String> = std::thread::scope(|scope| {
         let adders: Vec<_> = (0..16)
             .map(|i| {
-                let entry = entry(
+                let entry = published(entry(
                     &workspace,
                     "read-protocols",
                     &format!("2026-10-18T21:04:{i:02}Z"),
-                );
+                ));
                 let (dir, barrier) = (&dir, &barrier);
                 scope.spawn(move || {
                     let mut catalog = Catalog::load(dir).expect("load");
@@ -193,6 +216,32 @@ fn a_version_from_another_source_is_refused() {
         format!(
             "read-protocols@0.0.0 is already in the catalogue from registry+https://github.com/rust-lang/crates.io-index, not from {path_source}"
         )
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A crate from a directory is not a published version: it changes as it
+/// is edited, so adding it again replaces its entry, file and all.
+#[test]
+fn a_directory_crate_added_again_is_replaced() {
+    let dir = scratch("edited");
+    let workspace = workspace();
+    let mut catalog = Catalog::load(&dir).expect("catalogue");
+    let first = entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z");
+    assert!(first.offer.source.starts_with("path+"));
+    catalog.add(first.clone()).expect("added");
+    let mut edited = entry(&workspace, "read-protocols", "2026-10-18T21:05:00Z");
+    edited.offer.messages.retain(|m| m.name == "Words");
+    let (held, file) = catalog.add(edited).expect("replaced");
+    assert_eq!(held.added, "2026-10-18T21:05:00Z");
+    assert_eq!(held.offer.messages.len(), 1);
+    let loaded = Catalog::load(&dir).expect("loaded");
+    let reread = loaded.entries().next().expect("one entry");
+    assert_eq!(
+        reread.offer.messages.len(),
+        1,
+        "{}",
+        std::fs::read_to_string(file).expect("file")
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

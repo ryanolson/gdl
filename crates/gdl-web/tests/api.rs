@@ -603,3 +603,68 @@ async fn the_chat_example_composes_from_its_directories() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A crate added from a directory, edited, and added again is served as it
+/// is now, not as it was first read.
+#[tokio::test]
+async fn an_edited_directory_crate_is_read_again() {
+    let dir = scratch("edited");
+    let krate = dir.join("edited");
+    std::fs::create_dir_all(krate.join("src")).expect("crate");
+    std::fs::write(
+        krate.join("Cargo.toml"),
+        "[package]\nname = \"edited\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+    )
+    .expect("manifest");
+    let write = |messages: &[&str]| {
+        let text: String = messages
+            .iter()
+            .map(|m| format!("#[derive(gdl_message::Message)]\npub struct {m};\n"))
+            .collect();
+        std::fs::write(krate.join("src/lib.rs"), text).expect("source");
+    };
+    let router = router(&dir, dir.join("catalogue"));
+    let add = json!({ "crate": krate.display().to_string() });
+    let names = |body: &Value| -> Vec<String> {
+        body["entries"][0]["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|m| m["name"].as_str().expect("name").to_string())
+            .collect()
+    };
+    write(&["One"]);
+    let (status, body) = json_call(&router, "POST", "/api/catalog", Some(add.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    let (_, body) = json_call(&router, "GET", "/api/catalog", None).await;
+    assert_eq!(names(&body), ["One"]);
+    write(&["One", "Two"]);
+    let (status, body) = json_call(&router, "POST", "/api/catalog", Some(add)).await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    let (_, body) = json_call(&router, "GET", "/api/catalog", None).await;
+    assert_eq!(names(&body), ["One", "Two"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A crate is named as a spec names one: a name with no version, or a
+/// version with no name, is refused by the one rule, before any fetch.
+#[tokio::test]
+async fn a_crate_without_a_name_or_a_version_is_refused() {
+    let dir = scratch("unnamed");
+    let router = router(&dir, dir.join("catalogue"));
+    for text in ["@1.2.3", "regproto@"] {
+        let (status, body) = json_call(
+            &router,
+            "POST",
+            "/api/catalog",
+            Some(json!({ "crate": text })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:#}");
+        assert_eq!(
+            body["problems"][0],
+            format!("`{text}` is neither a directory nor `name@version`")
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

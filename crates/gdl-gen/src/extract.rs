@@ -24,14 +24,28 @@ pub enum Crate {
 }
 
 impl Crate {
-    /// `name@version`, or a directory.
-    pub fn parse(text: &str) -> Self {
+    /// A directory, or `name@version` that is not one.
+    pub fn parse(text: &str) -> Result<Self, Error> {
+        Self::parse_in(Path::new(""), text)
+    }
+
+    /// [`Crate::parse`], with a directory relative to `base`: the one rule
+    /// for a crate named by a command line, the composer, or a spec.
+    pub(crate) fn parse_in(base: &Path, text: &str) -> Result<Self, Error> {
+        let path = base.join(text);
         match text.split_once('@') {
-            Some((name, version)) if !Path::new(text).exists() => Self::Registry {
-                name: name.to_string(),
-                version: version.to_string(),
-            },
-            _ => Self::Path(PathBuf::from(text)),
+            Some((name, version)) if !path.exists() => {
+                if name.is_empty() || version.is_empty() {
+                    return Err(Error::new(format!(
+                        "`{text}` is neither a directory nor `name@version`"
+                    )));
+                }
+                Ok(Self::Registry {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                })
+            }
+            _ => Ok(Self::Path(path)),
         }
     }
 }
