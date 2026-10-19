@@ -27,21 +27,23 @@ pub(crate) enum Deps {
     /// By paths relative to each manifest: crates generated beside the
     /// crates they depend on, and committed with them.
     Relative,
-    /// A crate outside the output by its absolute path, one inside by a
-    /// relative path, and each manifest its own workspace root: a tarball
-    /// expanded anywhere on the machine that made it, even inside another
-    /// workspace.
+    /// Every crate the spec names by its absolute path, and each manifest
+    /// its own workspace root: a tarball expanded anywhere on the machine
+    /// that made it, even inside another workspace. Only the generated
+    /// contract is inside the archive, and the segment manifests name it
+    /// by its place there; where a listed crate sits on disk decides
+    /// nothing.
     Exported,
 }
 
 impl Deps {
-    /// How a manifest in `from` names the crate in `target`, under output
-    /// `out` (both absolute), as a TOML string.
-    pub(crate) fn path(self, out: &Path, from: &Path, target: &Path) -> String {
+    /// How a manifest in `from` names the listed crate in `target` (both
+    /// absolute), as a TOML string.
+    pub(crate) fn path(self, from: &Path, target: &Path) -> String {
         let target = crate::dump::absolute(target).unwrap_or_else(|_| target.to_path_buf());
         let path = match self {
-            Self::Exported if !target.starts_with(out) => target,
-            _ => relative(from, &target),
+            Self::Exported => target,
+            Self::Relative => relative(from, &target),
         };
         crate::dump::toml_string(&display(&path))
     }
@@ -196,11 +198,21 @@ fn regenerate_command(
 ) -> String {
     let file = spec.file.file_name().unwrap_or_default();
     if deps == Deps::Exported {
-        return format!("cargo gdl export --spec {}", display(&spec_dir.join(file)));
+        return export_command(&spec_dir.join(file));
     }
     let spec_file = display(&relative(crate_dir, &spec_dir.join(file)));
     let out = display(&relative(crate_dir, out));
     format!("cargo gdl generate --spec {spec_file} --out {out}")
+}
+
+/// The command that exports from the spec at `spec`, for a comment: the
+/// path quoted, with any character that would end the comment escaped,
+/// and the archive left for the reader to name.
+fn export_command(spec: &Path) -> String {
+    format!(
+        "cargo gdl export --spec \"{}\" --out <archive.tar.gz>",
+        display(spec).escape_debug()
+    )
 }
 
 struct Unit<'a> {
@@ -286,7 +298,19 @@ impl Unit<'_> {
     }
 
     fn path_to(&self, target: &Path) -> String {
-        self.deps.path(self.out, self.crate_dir, target)
+        self.deps.path(self.crate_dir, target)
+    }
+
+    /// The contract's path: in an export, a generated contract is in the
+    /// archive beside the segment.
+    fn contract_path(&self) -> String {
+        let generated = matches!(self.spec.source, crate::spec::Source::Graph(_));
+        if self.deps == Deps::Exported && generated {
+            let path = relative(self.crate_dir, &self.out.join("contract"));
+            crate::dump::toml_string(&display(&path))
+        } else {
+            self.path_to(&self.contract.path)
+        }
     }
 
     fn cargo_toml(&self) -> String {
@@ -320,7 +344,7 @@ impl Unit<'_> {
             text,
             "{} = {{ path = {} }}",
             self.contract.package,
-            self.path_to(&self.contract.path)
+            self.contract_path()
         );
         // Each implementation crate once, however many nodes it implements.
         let mut implementations: BTreeMap<&str, &Path> = BTreeMap::new();
@@ -712,4 +736,36 @@ fn raw_string(text: &str) -> String {
     }
     let h = "#".repeat(hashes);
     format!("r{h}\"{text}\"{h}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In an export, every crate the spec names is outside the archive,
+    /// wherever it sits on disk, even under the output's directory: only
+    /// the generated contract is inside, and its manifest line says so.
+    #[test]
+    fn an_export_names_every_listed_crate_by_its_absolute_path() {
+        let out = Path::new("/work/.gdl-export");
+        let from = out.join("front");
+        assert_eq!(
+            Deps::Exported.path(&from, &out.join("nodes")),
+            "\"/work/.gdl-export/nodes\""
+        );
+        assert_eq!(
+            Deps::Relative.path(&from, &out.join("nodes")),
+            "\"../nodes\""
+        );
+    }
+
+    /// A spec's path may hold any character; the comment that names it
+    /// stays one line.
+    #[test]
+    fn the_export_command_stays_on_its_line() {
+        assert_eq!(
+            export_command(Path::new("/work/line\nbreak/gdl.toml")),
+            "cargo gdl export --spec \"/work/line\\nbreak/gdl.toml\" --out <archive.tar.gz>"
+        );
+    }
 }

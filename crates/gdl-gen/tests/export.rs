@@ -76,22 +76,30 @@ fn an_export_is_the_same_bytes_every_time() {
         if name.ends_with("Cargo.toml") {
             // Its own workspace root, wherever it is expanded.
             assert!(text.ends_with("[workspace]\n"), "{name}:\n{text}");
-            // A crate outside the archive, by its absolute path; the
-            // contract, inside it, by a relative one.
-            let gdl = text
-                .lines()
-                .find(|line| line.starts_with("gdl = "))
-                .expect("gdl");
-            let path = gdl.split('"').nth(1).expect("a path");
-            assert!(
-                Path::new(path).is_absolute() && Path::new(path).exists(),
-                "{gdl}"
-            );
+            // Every crate the spec names, by its absolute path; the
+            // contract, inside the archive, by a relative one.
+            for line in text.lines().filter(|line| line.contains("{ path = ")) {
+                let path = line.split('"').nth(1).expect("a path");
+                if line.starts_with("chat-contract = ") {
+                    assert_eq!(path, "../contract", "{name}");
+                } else {
+                    let path = Path::new(path);
+                    assert!(path.is_absolute() && path.exists(), "{line}");
+                }
+            }
             if !name.starts_with("chat/contract") {
                 assert!(
                     text.contains("chat-contract = { path = \"../contract\" }"),
                     "{text}"
                 );
+                // The command that made it, complete.
+                let spec =
+                    std::fs::canonicalize(root().join("examples/chat/gdl.toml")).expect("the spec");
+                let header = format!(
+                    "# Regenerate with: cargo gdl export --spec \"{}\" --out <archive.tar.gz>",
+                    spec.display()
+                );
+                assert_eq!(text.lines().nth(1), Some(header.as_str()), "{name}");
             }
         }
     }
@@ -113,13 +121,15 @@ fn an_expanded_export_builds_each_segment() {
         .expect("expanded");
     let build = Command::new("sh")
         .arg(dir.join("chat/build-all.sh"))
-        .args(["--offline", "--lib"])
+        .args(["--offline", "--lib", "--verbose"])
         .env("GDL_PROFILE", "dev")
         .env("CARGO_TARGET_DIR", target("examples"))
         .output()
         .expect("sh");
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(build.status.success(), "{stderr}");
+    // The script's arguments reach cargo: `--verbose` shows each rustc run.
+    assert!(stderr.contains("Running `"), "{stderr}");
     // Each segment was built from the expanded archive, not found built.
     for segment in ["engine", "front", "post"] {
         let built = format!(

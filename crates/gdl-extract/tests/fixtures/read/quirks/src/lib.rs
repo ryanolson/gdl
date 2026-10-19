@@ -73,6 +73,17 @@ pub struct Skipping {
     pub text: String,
 }
 
+// Fields under `cfg`: a skip that `cfg_attr` applies, and a reference
+// that `cfg` removes, borrow nothing.
+#[derive(gdl::Message, serde::Serialize, serde::Deserialize)]
+pub struct Configured {
+    #[cfg_attr(all(), serde(skip))]
+    pub note: &'static str,
+    #[cfg(any())]
+    pub gone: &'static str,
+    pub text: String,
+}
+
 // Raw identifiers: the catalogue and the reader both write `type::match`.
 pub mod r#type {
     #[derive(gdl::Message)]

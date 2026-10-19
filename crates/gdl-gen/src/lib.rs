@@ -347,7 +347,7 @@ fn prepare(
     if let Some(out) = out {
         let out = dump::absolute(out)?;
         let dir = out.join("contract");
-        let path = |p: &Path| deps.path(&out, &dir, p);
+        let path = |p: &Path| deps.path(&dir, p);
         files.insert(
             PathBuf::from("contract/Cargo.toml"),
             crates(&path) + deps.workspace(),

@@ -79,11 +79,18 @@ fn build_all(segments: &[&str]) -> String {
          export CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-$PWD/target}\"\n",
     );
     for segment in segments {
+        let manifest = quoted(&format!("./{segment}/Cargo.toml"));
         text.push_str(&format!(
-            "cargo build --profile \"${{GDL_PROFILE:-release}}\" --manifest-path {segment}/Cargo.toml \"$@\"\n"
+            "cargo build --profile \"${{GDL_PROFILE:-release}}\" --manifest-path {manifest} \"$@\"\n"
         ));
     }
     text
+}
+
+/// `word` as one `sh` word: in single quotes, each `'` closed, escaped,
+/// and reopened.
+fn quoted(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 fn readme(graph: &str, segments: &[&str]) -> String {
@@ -98,4 +105,24 @@ fn readme(graph: &str, segments: &[&str]) -> String {
          \n\
          A dependency outside this directory is named by its absolute path on the machine that made the archive, so the archive builds there. Crates named by a version or a git revision build anywhere.\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A segment may be named anything a TOML key holds: each manifest
+    /// path is one quoted word, and never an option to cargo.
+    #[test]
+    fn the_build_script_quotes_each_segment() {
+        let script = build_all(&["-front", "it's"]);
+        assert!(
+            script.contains(" --manifest-path './-front/Cargo.toml' \"$@\"\n"),
+            "{script}"
+        );
+        assert!(
+            script.contains(" --manifest-path './it'\\''s/Cargo.toml' \"$@\"\n"),
+            "{script}"
+        );
+    }
 }

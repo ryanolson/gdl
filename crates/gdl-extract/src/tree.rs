@@ -185,6 +185,29 @@ impl Reader<'_> {
         }
     }
 
+    /// Whether a field borrows when deserialized: a reference anywhere in
+    /// its type, or `#[serde(borrow)]`, unless serde skips deserializing it
+    /// or `cfg` removes it. `cfg_attr` applies first.
+    fn borrows(&self, field: &syn::Field) -> bool {
+        let Some(attrs) = self.settings.attributes(&field.attrs, self.features) else {
+            return false;
+        };
+        let serde = |word: &str| {
+            attrs.iter().any(|meta| match meta {
+                Meta::List(list) if list.path.is_ident("serde") => list
+                    .tokens
+                    .clone()
+                    .into_iter()
+                    .any(|t| matches!(t, proc_macro2::TokenTree::Ident(i) if i == word)),
+                _ => false,
+            })
+        };
+        if serde("skip") || serde("skip_deserializing") {
+            return false;
+        }
+        serde("borrow") || reference(&field.ty)
+    }
+
     /// Read `items` of module `module`, which is in `file`; its child
     /// modules' files are under `dir`, and a `#[path]` on one is relative
     /// to `base`: the file's directory at the top of a file, and `dir` in
@@ -215,21 +238,25 @@ impl Reader<'_> {
                     name: s.ident.unraw().to_string(),
                     vis: Vis::of(&s.vis),
                     attrs,
-                    borrows: s.fields.iter().any(borrows),
+                    borrows: s.fields.iter().any(|f| self.borrows(f)),
                     at: at(s.ident.span()),
                 }),
                 Item::Enum(e) => krate.modules[module].types.push(TypeDef {
                     name: e.ident.unraw().to_string(),
                     vis: Vis::of(&e.vis),
                     attrs,
-                    borrows: e.variants.iter().flat_map(|v| &v.fields).any(borrows),
+                    borrows: e
+                        .variants
+                        .iter()
+                        .flat_map(|v| &v.fields)
+                        .any(|f| self.borrows(f)),
                     at: at(e.ident.span()),
                 }),
                 Item::Union(u) => krate.modules[module].types.push(TypeDef {
                     name: u.ident.unraw().to_string(),
                     vis: Vis::of(&u.vis),
                     attrs,
-                    borrows: u.fields.named.iter().any(borrows),
+                    borrows: u.fields.named.iter().any(|f| self.borrows(f)),
                     at: at(u.ident.span()),
                 }),
                 Item::Use(u) => {
@@ -395,25 +422,6 @@ fn flatten(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Option<Strin
             }
         }
     }
-}
-
-/// Whether a field borrows when deserialized: a reference anywhere in its
-/// type, or `#[serde(borrow)]`, unless serde skips deserializing it.
-fn borrows(field: &syn::Field) -> bool {
-    let serde = |word: &str| {
-        field.attrs.iter().any(|a| match &a.meta {
-            Meta::List(list) if list.path.is_ident("serde") => list
-                .tokens
-                .clone()
-                .into_iter()
-                .any(|t| matches!(t, proc_macro2::TokenTree::Ident(i) if i == word)),
-            _ => false,
-        })
-    };
-    if serde("skip") || serde("skip_deserializing") {
-        return false;
-    }
-    serde("borrow") || reference(&field.ty)
 }
 
 fn reference(ty: &syn::Type) -> bool {
