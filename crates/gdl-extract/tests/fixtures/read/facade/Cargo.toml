@@ -1,0 +1,9 @@
+[package]
+name = "read-facade"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gdl-message = { workspace = true }
+protocols = { package = "read-protocols", path = "../protocols" }

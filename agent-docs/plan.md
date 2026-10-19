@@ -594,6 +594,7 @@ crates/
                 Manifest and placement model, validator, runtime (one internal velo module)
   gdl-syntax/   the graph syntax: parser and checked model, shared by graph! and gdl-gen
   gdl-message/  derive(Message), the Message and Shape traits, the message catalogue
+  gdl-extract/  the source reader: a crate's messages, exports, and nodes, read without a build
   gdl-macros/   graph! proc macro, derive(Message), #[gdl::node]
   gdl-gen/      generator binary; becomes cargo-gdl (cargo gdl extract, generate, diagram) in milestone 13,
                 with a source reader for extraction
