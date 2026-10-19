@@ -89,9 +89,18 @@ $DEMO/build/release/chat-post   $DEMO/post.toml &
 echo '{"text": "hello big wide world", "max_words": 3}' | $DEMO/build/release/chat-front $DEMO/front.toml
 ```
 
-The front segment reads one JSON request per line and writes the response items as JSON lines, after crossing to the engine and to post and back.
+The front segment reads one JSON request per line and writes the response items as JSON lines, after crossing to the engine and to post and back. It prints:
+
+```text
+front: ready
+{"item":{"index":0,"text":"[wide]"}}
+{"item":{"index":1,"text":"[big]"}}
+{"item":{"index":2,"text":"[hello]"}}
+{"done":null}
+```
 
 ## Before recording, once
 
+- **Rehearsed 2026-10-19:** scenes 6 and 7 ran as written, from an archive the server exported for this draft (with `GDL_PROFILE=dev` and a warm cache: 19 s to build), and printed the output above.
 - **Rehearse.** `the_chat_example_composes_from_its_directories` (`gdl-web/tests/api.rs`) runs scenes 2 to 5 against the server without the page. A headless Chromium probe drove the page through scenes 3 and 4 and got the expected three crossings. Still, run the whole script once by hand.
 - **Adding by git URL** is not built: the demo adds crates by their directories on this machine.
