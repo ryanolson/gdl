@@ -219,8 +219,15 @@ fn prepare(
             .map_err(|p| (None, p))?
     };
     let dir = drafts(&composer.config.target).join(format!("{:016x}", hash(&rendered)));
+    // Identical drafts share the directory: each file is written beside and
+    // renamed into place, so a check never reads another's half-written one.
     let write = |path: &Path, text: &str| {
-        std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let partial = path.with_extension(format!("{}.{n}", std::process::id()));
+        std::fs::write(&partial, text)
+            .and_then(|()| std::fs::rename(&partial, path))
+            .map_err(|e| format!("{}: {e}", path.display()))
     };
     let written = std::fs::create_dir_all(&dir)
         .map_err(|e| format!("{}: {e}", dir.display()))

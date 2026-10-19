@@ -331,7 +331,13 @@ fn given_offer(
     let found = given.iter().find(|o| {
         o.package == package
             && match source {
-                spec::CrateSource::Version(v) => o.version == *v && !o.source.starts_with("path+"),
+                spec::CrateSource::Version(v) =>
+                // A version names the crates.io package, which a lockfile
+                // gives a registry source; a git package is another.
+                {
+                    o.version == *v
+                        && (o.source.starts_with("registry+") || o.source.starts_with("sparse+"))
+                }
                 spec::CrateSource::Path(dir) => o
                     .source
                     .strip_prefix("path+file://")
@@ -1245,6 +1251,32 @@ mod tests {
             "{lib}"
         );
         assert!(main.contains("build::<::tiny_nodes::D>"), "{main}");
+    }
+
+    /// A crate listed by version is the registry's: a git package of the
+    /// same name and version is another crate, whatever order the catalogue
+    /// gives them in.
+    #[test]
+    fn a_version_is_matched_to_the_registry_offer() {
+        let offer = |source: &str| Offer {
+            package: "proto".into(),
+            version: "0.1.0".into(),
+            source: source.into(),
+            messages: Vec::new(),
+            exports: Vec::new(),
+            nodes: Vec::new(),
+        };
+        let git = offer("git+https://example.com/proto#abc");
+        let registry = offer("registry+https://github.com/rust-lang/crates.io-index");
+        let version = spec::CrateSource::Version("0.1.0".into());
+        assert!(given_offer(std::slice::from_ref(&git), "proto", "proto", &version).is_err());
+        for given in [
+            [git.clone(), registry.clone()],
+            [registry.clone(), git.clone()],
+        ] {
+            let found = given_offer(&given, "proto", "proto", &version).expect("the registry's");
+            assert_eq!(found.source, registry.source);
+        }
     }
 
     /// A node crate listed by version is a dependency on exactly that

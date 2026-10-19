@@ -55,6 +55,22 @@ impl Workspace {
     /// manifest of our own in `scratch` that depends on it alone. Nothing is
     /// built.
     pub fn fetch(name: &str, version: &str, scratch: &Path) -> Result<Self, Error> {
+        // Both are written into a manifest, and callers name the scratch
+        // directory with them: refuse anything a package name or a version
+        // cannot hold before a file is written.
+        let name_ok = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        let version_ok = !version.is_empty()
+            && version
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
+        if !name_ok || !version_ok {
+            return Err(Error(format!(
+                "`{name}@{version}` is not a package name and a version"
+            )));
+        }
         let src = scratch.join("src");
         std::fs::create_dir_all(&src).map_err(|e| Error(format!("{}: {e}", src.display())))?;
         let manifest = format!(

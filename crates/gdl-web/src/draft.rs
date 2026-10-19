@@ -170,7 +170,7 @@ impl Draft {
             let item = |name: &str| {
                 port(name)
                     .and_then(|p| p.head.as_ref())
-                    .map_or("()".to_string(), |o| names.name(o).to_string())
+                    .map_or("()".to_string(), |o| names.name(o))
             };
             let signature = match node.role.as_str() {
                 "sink" => format!("{} -> stream {}", req("Req"), item("Item")),
@@ -371,14 +371,16 @@ impl Names {
         names
     }
 
-    fn name(&self, origin: &Origin) -> &str {
-        &self.names[origin]
+    /// The message's name as the graph file spells it: raw where it is a
+    /// keyword (`r#match`), which the file reads back as the name.
+    fn name(&self, origin: &Origin) -> String {
+        gdl_syntax::identifier(&self.names[origin])
     }
 }
 
 /// A request position as the graph file writes it.
 fn request(names: &Names, head: Option<&Origin>, item: Option<&Origin>) -> String {
-    let head = head.map_or("()".to_string(), |o| names.name(o).to_string());
+    let head = head.map_or("()".to_string(), |o| names.name(o));
     match item {
         None => head,
         Some(item) if head == "()" => format!("stream {}", names.name(item)),
@@ -404,7 +406,7 @@ fn crate_list(entries: &[&Entry], problems: &mut Vec<String>) -> Vec<toml::Value
         .iter()
         .filter_map(|entry| {
             let offer = &entry.offer;
-            if offer.source.starts_with("registry+") {
+            if offer.source.starts_with("registry+") || offer.source.starts_with("sparse+") {
                 Some(format!("{}@{}", offer.package, offer.version).into())
             } else if let Some(dir) = offer.source.strip_prefix("path+file://") {
                 Some(dir.to_string().into())
@@ -418,4 +420,123 @@ fn crate_list(entries: &[&Entry], problems: &mut Vec<String>) -> Vec<toml::Value
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use gdl_extract::{MessageEntry, Offer};
+
+    use super::*;
+
+    const REGISTRY: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+    fn origin(path: &str) -> Origin {
+        Origin {
+            package: "proto".into(),
+            version: "0.1.0".into(),
+            source: REGISTRY.into(),
+            path: path.into(),
+        }
+    }
+
+    /// A catalogue of one protocols crate, whose messages are `match` (a
+    /// keyword, spelled `r#match` in Rust) and `Token`, and one node crate.
+    fn catalog(dir: &std::path::Path) -> Catalog {
+        let mut catalog = Catalog::load(dir).expect("catalogue");
+        let message = |name: &str, path: &str| MessageEntry {
+            name: name.into(),
+            path: path.into(),
+            wire: true,
+            public: true,
+        };
+        for offer in [
+            Offer {
+                package: "proto".into(),
+                version: "0.1.0".into(),
+                source: REGISTRY.into(),
+                messages: vec![
+                    message("Token", "proto::Token"),
+                    message("match", "proto::match"),
+                ],
+                exports: Vec::new(),
+                nodes: Vec::new(),
+            },
+            Offer {
+                package: "nodes".into(),
+                version: "0.1.0".into(),
+                source: REGISTRY.into(),
+                messages: Vec::new(),
+                exports: Vec::new(),
+                nodes: vec![NodeEntry {
+                    name: "Engine".into(),
+                    role: "sink".into(),
+                    ty: "nodes::Engine".into(),
+                    ports: vec![
+                        PortEntry {
+                            port: "Req".into(),
+                            head: Some(origin("proto::match")),
+                            item: None,
+                        },
+                        PortEntry {
+                            port: "Item".into(),
+                            head: Some(origin("proto::Token")),
+                            item: None,
+                        },
+                    ],
+                }],
+            },
+        ] {
+            catalog
+                .add(Entry {
+                    added: "2026-10-19T00:00:00Z".into(),
+                    checksum: None,
+                    offer,
+                })
+                .expect("added");
+        }
+        catalog
+    }
+
+    /// A message named like a keyword is written raw in the graph file,
+    /// which reads it back by its name.
+    #[test]
+    fn a_keyword_message_is_written_raw() {
+        let dir = std::env::temp_dir().join(format!("gdl-web-keyword-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let catalog = catalog(&dir);
+        let draft = Draft {
+            name: "keyword".into(),
+            source: Source {
+                name: "A".into(),
+                request: Port {
+                    head: Some(origin("proto::match")),
+                    item: None,
+                },
+                response: origin("proto::Token"),
+            },
+            nodes: vec![Instance {
+                name: "Engine".into(),
+                entry: "nodes@0.1.0".into(),
+                node: "Engine".into(),
+            }],
+            hop: Hop {
+                forward: Vec::new(),
+                inner: "Engine".into(),
+                nested: None,
+                backward: Vec::new(),
+            },
+            segments: BTreeMap::from([(
+                "all".to_string(),
+                vec!["A".to_string(), "Engine".to_string()],
+            )]),
+        };
+        let rendered = draft
+            .render(&catalog, &Gdl::Path("/gdl".into()))
+            .expect("rendered");
+        assert_eq!(
+            rendered.graph,
+            "name = \"keyword\", schema = 1;\nsource A: r#match -> stream Token;\nsink Engine: r#match -> stream Token;\ntopology: A => Engine;\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

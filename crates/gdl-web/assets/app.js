@@ -49,14 +49,18 @@ async function load() {
   $("entries").textContent = state.entries.length
     ? state.entries.map((e) => `${e.package} ${e.version}`).join(", ")
     : "empty: add a crate";
-  fillMessages($("source-request"));
+  // A streamed request may have no head, `()`; a request that is not
+  // streamed has no item.
+  fillMessages($("source-request"), "() (no head)");
+  fillMessages($("source-item"), "nothing: not streamed");
   fillMessages($("source-response"));
   render();
 }
 
-function fillMessages(select) {
+function fillMessages(select, none) {
   const chosen = select.value;
   select.innerHTML = "";
+  if (none) select.add(new Option(none, ""));
   for (const m of messages()) {
     select.add(new Option(m.label, key(m.origin)));
   }
@@ -198,7 +202,7 @@ function segments(names) {
 function render() {
   const hop = $("hop");
   hop.innerHTML = "";
-  const request = { head: chosenMessage($("source-request")), item: null };
+  const request = { head: chosenMessage($("source-request")), item: chosenMessage($("source-item")) };
   hopEditor(state.hop, request, hop);
 
   const names = instances();
@@ -237,7 +241,7 @@ function draft() {
     name: $("name").value,
     source: {
       name: $("source-name").value,
-      request: { head: chosenMessage($("source-request")) },
+      request: { head: chosenMessage($("source-request")), item: chosenMessage($("source-item")) },
       response: chosenMessage($("source-response")),
     },
     nodes: [...names.entries()].map(([n, name]) => ({ name, entry: n.entry, node: n.node.name })),
@@ -288,6 +292,6 @@ $("add").onsubmit = async (event) => {
   await load();
 };
 
-for (const id of ["source-request", "source-name"]) $(id).onchange = render;
+for (const id of ["source-request", "source-item", "source-name"]) $(id).onchange = render;
 
 load();

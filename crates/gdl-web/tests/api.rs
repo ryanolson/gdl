@@ -330,3 +330,75 @@ async fn the_page_is_served() {
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A crate is a name and a version, and nothing else: one that would name
+/// a path outside the target directory writes nothing there.
+#[tokio::test]
+async fn adding_a_crate_writes_only_under_the_target() {
+    let dir = scratch("escape");
+    let victim = dir.join("victim");
+    std::fs::create_dir_all(victim.join("src")).expect("dir");
+    std::fs::write(victim.join("Cargo.toml"), "sentinel").expect("sentinel");
+    std::fs::write(victim.join("src/lib.rs"), "sentinel").expect("sentinel");
+    let router = router(&dir, dir.join("catalogue"));
+    let (status, body) = json_call(
+        &router,
+        "POST",
+        "/api/catalog",
+        Some(json!({ "crate": "regproto@x/../../../victim" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
+    assert_eq!(
+        std::fs::read_to_string(victim.join("Cargo.toml")).expect("kept"),
+        "sentinel"
+    );
+    assert_eq!(
+        std::fs::read_to_string(victim.join("src/lib.rs")).expect("kept"),
+        "sentinel"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Identical drafts checked at once all check: they share one directory,
+/// and none reads another's half-written file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn identical_checks_at_once_all_succeed() {
+    let dir = scratch("concurrent");
+    let router = router(&dir, fixture_catalog());
+    let one = draft(
+        "regproto::Words",
+        "Engine",
+        json!({ "all": ["A", "Engine"] }),
+    );
+    let checks: Vec<_> = (0..32)
+        .map(|_| {
+            let (router, one) = (router.clone(), one.clone());
+            tokio::spawn(async move { json_call(&router, "POST", "/api/check", Some(one)).await })
+        })
+        .collect();
+    for check in checks {
+        let (_, body) = check.await.expect("check");
+        assert_eq!(body["ok"], true, "{body:#}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A graph node named otherwise than its catalogue node is bound by a pin.
+#[tokio::test]
+async fn a_renamed_node_is_pinned() {
+    let dir = scratch("renamed");
+    let router = router(&dir, fixture_catalog());
+    let mut renamed = draft(
+        "regproto::Words",
+        "Engine",
+        json!({ "all": ["A", "Model"] }),
+    );
+    renamed["nodes"][0]["name"] = json!("Model");
+    renamed["hop"]["inner"] = json!("Model");
+    let (_, body) = json_call(&router, "POST", "/api/check", Some(renamed)).await;
+    assert_eq!(body["ok"], true, "{body:#}");
+    let spec = body["spec"].as_str().expect("spec");
+    assert!(spec.contains("Model = \"regnodes::Engine\""), "{spec}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
