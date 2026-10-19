@@ -95,12 +95,7 @@ pub(crate) fn run(
 
 /// Run `cargo <args>` on the program in `work`, and return its output.
 fn cargo(work: &Path, target: &Path, args: &[&str]) -> Result<String, Error> {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
-        .args(args)
-        .arg("--manifest-path")
-        .arg(work.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", target)
+    let output = command(work, target, args)?
         .output()
         .map_err(|e| Error::new(format!("running cargo: {e}")))?;
     if !output.status.success() {
@@ -108,6 +103,23 @@ fn cargo(work: &Path, target: &Path, args: &[&str]) -> Result<String, Error> {
     }
     String::from_utf8(output.stdout)
         .map_err(|e| Error::new(format!("cargo's output is not UTF-8: {e}")))
+}
+
+/// `cargo <args>` on the program in `work`, run in `work`: Cargo reads its
+/// configuration from where it runs, and the program must see the
+/// configuration its dependencies were fetched under, as `cargo metadata`
+/// does in `gdl-extract`. Paths are absolute, so they do not depend on it.
+fn command(work: &Path, target: &Path, args: &[&str]) -> Result<Command, Error> {
+    let work = std::path::absolute(work).map_err(|e| io(work, e))?;
+    let target = std::path::absolute(target).map_err(|e| io(target, e))?;
+    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    command
+        .current_dir(&work)
+        .args(args)
+        .arg("--manifest-path")
+        .arg(work.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", target);
+    Ok(command)
 }
 
 /// Write `text` unless the file already holds it: a rewrite with the same
@@ -154,6 +166,30 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// A program builds where its manifest is, so the configuration its
+    /// dependencies were fetched under applies to its build too, whatever
+    /// directory the generator runs in; its paths are absolute.
+    #[test]
+    fn a_program_builds_in_its_own_directory() {
+        let command = command(
+            Path::new("target/x/work"),
+            Path::new("target/x"),
+            &["build"],
+        )
+        .expect("command");
+        let here = std::env::current_dir().expect("here");
+        assert_eq!(
+            command.get_current_dir(),
+            Some(here.join("target/x/work").as_path())
+        );
+        let target = command
+            .get_envs()
+            .find(|(k, _)| *k == "CARGO_TARGET_DIR")
+            .and_then(|(_, v)| v)
+            .expect("target");
+        assert_eq!(Path::new(target), here.join("target/x"));
+    }
 
     /// Every dump of one contract in a target directory builds and runs
     /// the same program path, so a dump must hold the directory's lock from

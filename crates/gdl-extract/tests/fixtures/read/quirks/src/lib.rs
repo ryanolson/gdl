@@ -84,6 +84,14 @@ pub struct Configured {
     pub text: String,
 }
 
+// A variant under `cfg`: one that `cfg` removes borrows nothing.
+#[derive(gdl::Message, serde::Serialize, serde::Deserialize)]
+pub enum Gated {
+    Owned(String),
+    #[cfg(any())]
+    Removed(&'static str),
+}
+
 // Raw identifiers: the catalogue and the reader both write `type::match`.
 pub mod r#type {
     #[derive(gdl::Message)]

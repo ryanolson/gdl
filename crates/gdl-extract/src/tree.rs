@@ -248,6 +248,8 @@ impl Reader<'_> {
                     borrows: e
                         .variants
                         .iter()
+                        // A variant `cfg` removes has no fields.
+                        .filter(|v| self.settings.attributes(&v.attrs, self.features).is_some())
                         .flat_map(|v| &v.fields)
                         .any(|f| self.borrows(f)),
                     at: at(e.ident.span()),

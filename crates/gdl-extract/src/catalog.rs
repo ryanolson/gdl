@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -118,8 +119,8 @@ impl Catalog {
     }
 
     /// Add `entry`, writing its file. An entry already there is kept, file
-    /// and all: a crate version never changes. The entry the catalogue
-    /// holds, and its file.
+    /// and all, whoever wrote it: a crate version never changes. The entry
+    /// the catalogue holds, and its file.
     pub fn add(&mut self, entry: Entry) -> Result<(&Entry, PathBuf), Error> {
         let key = entry.key();
         let file = self.file(&entry);
@@ -127,13 +128,31 @@ impl Catalog {
             let dir = file
                 .parent()
                 .expect("an entry's file is in its package's directory");
-            std::fs::create_dir_all(dir).map_err(|e| Error(format!("{}: {e}", dir.display())))?;
-            // Written beside, then renamed: a reader never sees half a file.
-            let partial = dir.join(format!(".{}.{}", entry.offer.version, std::process::id()));
-            std::fs::write(&partial, entry.to_toml())
-                .and_then(|()| std::fs::rename(&partial, &file))
-                .map_err(|e| Error(format!("{}: {e}", file.display())))?;
-            self.index(entry);
+            let fail = |path: &Path, e: std::io::Error| Error(format!("{}: {e}", path.display()));
+            std::fs::create_dir_all(dir).map_err(|e| fail(dir, e))?;
+            // Written beside under a name of this add's own, then linked into
+            // place: a link never replaces a file, so the first writer's
+            // entry stands, and a reader never sees half a file.
+            static ADDS: AtomicU64 = AtomicU64::new(0);
+            let partial = dir.join(format!(
+                ".{}.{}.{}",
+                entry.offer.version,
+                std::process::id(),
+                ADDS.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::write(&partial, entry.to_toml()).map_err(|e| fail(&partial, e))?;
+            let linked = std::fs::hard_link(&partial, &file);
+            let _ = std::fs::remove_file(&partial);
+            match linked {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(fail(&file, e)),
+            }
+            // The file is the entry, whoever wrote it.
+            let text = std::fs::read_to_string(&file).map_err(|e| fail(&file, e))?;
+            let written =
+                Entry::from_toml(&text).map_err(|e| Error(format!("{}: {e}", file.display())))?;
+            self.index(written);
         }
         Ok((&self.entries[&key], file))
     }

@@ -130,3 +130,68 @@ fn an_entry_in_the_wrong_file_is_refused() {
     assert!(error.contains("holds read-protocols@0.0.0"), "{error}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Written once, whoever writes first: a second catalogue loaded before
+/// the first added the version keeps the first one's entry, file and all.
+#[test]
+fn the_first_add_wins_across_catalogues() {
+    let dir = scratch("first");
+    let workspace = workspace();
+    let mut one = Catalog::load(&dir).expect("one");
+    let mut two = Catalog::load(&dir).expect("two");
+    let (_, file) = one
+        .add(entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z"))
+        .expect("first");
+    let text = std::fs::read_to_string(&file).expect("written");
+    let (kept, _) = two
+        .add(entry(&workspace, "read-protocols", "2027-01-01T00:00:00Z"))
+        .expect("second");
+    assert_eq!(kept.added, "2026-10-18T21:04:05Z");
+    assert_eq!(std::fs::read_to_string(&file).expect("kept"), text);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Adders at once, each with a catalogue of its own: every add succeeds,
+/// one entry is written whole, and every adder holds that one.
+#[test]
+fn adders_at_once_agree_on_one_entry() {
+    let dir = scratch("racing");
+    let workspace = workspace();
+    let barrier = std::sync::Barrier::new(16);
+    let kept: Vec<String> = std::thread::scope(|scope| {
+        let adders: Vec<_> = (0..16)
+            .map(|i| {
+                let entry = entry(
+                    &workspace,
+                    "read-protocols",
+                    &format!("2026-10-18T21:04:{i:02}Z"),
+                );
+                let (dir, barrier) = (&dir, &barrier);
+                scope.spawn(move || {
+                    let mut catalog = Catalog::load(dir).expect("load");
+                    barrier.wait();
+                    catalog.add(entry).expect("add").0.added.clone()
+                })
+            })
+            .collect();
+        adders
+            .into_iter()
+            .map(|a| a.join().expect("adder"))
+            .collect()
+    });
+    let file = dir.join("read-protocols/0.0.0.toml");
+    let written =
+        Entry::from_toml(&std::fs::read_to_string(&file).expect("written")).expect("whole");
+    assert!(
+        kept.iter().all(|added| *added == written.added),
+        "{kept:?} vs {}",
+        written.added
+    );
+    // Nothing else is left beside it.
+    let left: Vec<_> = std::fs::read_dir(dir.join("read-protocols"))
+        .expect("dir")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(left, ["0.0.0.toml"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

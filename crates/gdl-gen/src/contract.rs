@@ -166,6 +166,39 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// A message crate listed by version is a dependency on exactly that
+    /// version; one listed by directory, a path.
+    #[test]
+    fn the_contract_depends_on_each_message_crate_as_listed() {
+        use crate::spec::CrateSource;
+        let crates = [
+            MessageCrate {
+                package: "chat-protocols".into(),
+                lib: "chat_protocols".into(),
+                source: CrateSource::Version("0.3.1".into()),
+            },
+            MessageCrate {
+                package: "local-protocols".into(),
+                lib: "local_protocols".into(),
+                source: CrateSource::Path("/work/local".into()),
+            },
+        ];
+        let text = cargo_toml(
+            "chat-contract",
+            &GdlDep::Version("0.1".into()),
+            &crates,
+            &|p| format!("{:?}", p.display().to_string()),
+        );
+        assert!(
+            text.contains("chat-protocols = { version = \"=0.3.1\" }\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("local-protocols = { path = \"/work/local\" }\n"),
+            "{text}"
+        );
+    }
     use crate::names::GraphFile;
 
     fn checked(text: &str) -> Graph {

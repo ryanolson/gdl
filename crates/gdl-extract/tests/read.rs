@@ -261,6 +261,7 @@ fn rust_is_read_as_the_compiler_reads_it() {
             ("Borrowed", "read_quirks::Borrowed", false),
             ("Configured", "read_quirks::Configured", true),
             ("Correct", "read_quirks::inline::nested::Correct", false),
+            ("Gated", "read_quirks::Gated", true),
             ("Leaf", "read_quirks::paths::nested::leaf::Leaf", false),
             ("Payload", "read_quirks::hidden::Payload", false),
             ("Payload", "read_quirks::visible::Payload", false),
