@@ -123,7 +123,8 @@ pub use gdl_message::{Catalogue, Message, MessageInfo, Shape};
 /// under its own name, be reachable at the crate root under that name, and
 /// implement the declared role with the declared message at each port. The
 /// generator reads the nodes file without compiling the crate; this check
-/// keeps the file true.
+/// keeps the file true. The expansion names gdl as `::gdl`, so a node crate
+/// depends on gdl under that name.
 pub use gdl_macros::node;
 
 /// Support for macro expansions. Not a stable interface.

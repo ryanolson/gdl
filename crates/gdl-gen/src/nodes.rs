@@ -46,8 +46,15 @@ pub(crate) fn bind(
     declared: &[(usize, Node)],
     pins: &BTreeMap<String, String>,
 ) -> (BTreeMap<String, Bind>, Vec<String>) {
-    // The type a declared node names: `<lib>::<Name>`, by ruling 43.
-    let ty = |&(index, ref node): &(usize, Node)| format!("{}::{}", crates[index].lib, node.ident);
+    // The type a declared node names: `<lib>::<Name>`, by ruling 43, with a
+    // library named like a keyword (`gen`) written raw, as Rust reaches it.
+    let ty = |&(index, ref node): &(usize, Node)| {
+        format!(
+            "{}::{}",
+            gdl_syntax::identifier(&crates[index].lib),
+            node.ident
+        )
+    };
     let mut problems = Vec::new();
     for name in pins.keys() {
         let bindable = graph
@@ -275,6 +282,19 @@ mod tests {
         let pins = BTreeMap::from([("Engine".to_string(), "engine::Mock".to_string())]);
         let binds = bound(&graph(), &crates, &declared, &pins).expect("pinned");
         assert_eq!(binds["Engine"].ty, "engine::Mock");
+    }
+
+    /// A library named like a keyword is reached as `r#gen`, in the type
+    /// the segment names and in the path a pin gives.
+    #[test]
+    fn a_keyword_library_binds_by_its_raw_path() {
+        let (mut crates, declared) = chat();
+        crates[1] = krate("gen");
+        let binds = bound(&graph(), &crates, &declared, &BTreeMap::new()).expect("bound");
+        assert_eq!(binds["Engine"].ty, "r#gen::Engine");
+        assert_eq!(binds["Engine"].lib, "gen");
+        let pins = BTreeMap::from([("Engine".to_string(), "r#gen::Engine".to_string())]);
+        assert!(bound(&graph(), &crates, &declared, &pins).is_ok());
     }
 
     #[test]
