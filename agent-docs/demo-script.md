@@ -102,5 +102,6 @@ front: ready
 ## Before recording, once
 
 - **Rehearsed 2026-10-19:** scenes 6 and 7 ran as written, from an archive the server exported for this draft (with `GDL_PROFILE=dev` and a warm cache: 19 s to build), and printed the output above.
+- **velo 0.21 (2026-10-19):** gdl now takes velo from its `main` (`515941c`), which builds on macOS. Scene 7 printed the output above again on Linux. On a Mac, drop any local `[patch.crates-io]` for velo before you build.
 - **Rehearse.** `the_chat_example_composes_from_its_directories` (`gdl-web/tests/api.rs`) runs scenes 2 to 5 against the server without the page. A headless Chromium probe drove the page through scenes 3 and 4 and got the expected three crossings. Still, run the whole script once by hand.
 - **Adding by git URL** is not built: the demo adds crates by their directories on this machine.

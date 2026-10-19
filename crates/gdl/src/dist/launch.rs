@@ -179,7 +179,7 @@ mod tests {
         dir
     }
 
-    async fn node() -> std::sync::Arc<Velo> {
+    async fn node() -> Velo {
         bind_node(([127, 0, 0, 1], 0).into()).await.expect("node")
     }
 
@@ -265,7 +265,7 @@ mod membership {
     use super::*;
     use crate::dist::fabric::bind_node;
 
-    async fn node() -> std::sync::Arc<Velo> {
+    async fn node() -> Velo {
         bind_node(([127, 0, 0, 1], 0).into()).await.expect("node")
     }
 

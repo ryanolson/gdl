@@ -12,7 +12,7 @@ use common::{Events, WAIT, collect, ms, settles, tight_velo_node, velo_node};
 use futures::StreamExt;
 use gdl::{Cx, Error, ErrorKind, Faults, Placement, RuntimeConfig, Streamed, items};
 
-async fn nodes(n: usize) -> Vec<Arc<velo::Velo>> {
+async fn nodes(n: usize) -> Vec<velo::Velo> {
     let mut nodes = Vec::with_capacity(n);
     for _ in 0..n {
         nodes.push(velo_node().await);
@@ -20,7 +20,7 @@ async fn nodes(n: usize) -> Vec<Arc<velo::Velo>> {
     nodes
 }
 
-async fn tight_nodes(n: usize) -> Vec<Arc<velo::Velo>> {
+async fn tight_nodes(n: usize) -> Vec<velo::Velo> {
     let mut nodes = Vec::with_capacity(n);
     for _ in 0..n {
         nodes.push(tight_velo_node().await);
@@ -45,7 +45,7 @@ fn relayed() -> Placement {
 }
 
 fn deploy(
-    nodes: &[Arc<velo::Velo>],
+    nodes: &[velo::Velo],
     placement: &Placement,
     events: &Arc<Events>,
     config: &dyn Fn(&str) -> RuntimeConfig,
@@ -216,11 +216,11 @@ async fn a_streamed_hand_off_after_its_deadline_is_refused_and_mints_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_input_sender_that_dies_ends_the_input_with_an_error() {
     let nodes = nodes(3).await;
-    let mid = Arc::clone(&nodes[1]);
+    let mid = nodes[1].clone();
     let instances = vec![
-        ("front".to_string(), Arc::clone(&nodes[0])),
-        ("mid".to_string(), Arc::clone(&mid)),
-        ("back".to_string(), Arc::clone(&nodes[2])),
+        ("front".to_string(), nodes[0].clone()),
+        ("mid".to_string(), mid.clone()),
+        ("back".to_string(), nodes[2].clone()),
     ];
     let events = Events::new();
     let config = RuntimeConfig {

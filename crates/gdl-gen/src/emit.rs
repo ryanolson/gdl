@@ -393,8 +393,6 @@ impl Unit<'_> {
         );
         let _ = writeln!(text, "//! its own.");
         let _ = writeln!(text);
-        let _ = writeln!(text, "use std::sync::Arc;");
-        let _ = writeln!(text);
         // Paths from the crate root (`::`), here and for every
         // implementation: a hosted crate called `contract` must not be
         // shadowed by this alias.
@@ -447,7 +445,7 @@ impl Unit<'_> {
         );
         let _ = writeln!(text, "/// `roster`.");
         let _ = writeln!(text, "pub fn start(");
-        let _ = writeln!(text, "    node: Arc<gdl::velo::Velo>,");
+        let _ = writeln!(text, "    node: gdl::velo::Velo,");
         let _ = writeln!(text, "    roster: &gdl::Roster,");
         let _ = writeln!(text, "    config: gdl::RuntimeConfig,");
         let _ = writeln!(text, "    nodes: Nodes,");
@@ -565,7 +563,6 @@ impl Unit<'_> {
             );
         }
         let _ = writeln!(text);
-        let _ = writeln!(text, "use std::sync::Arc;");
         let _ = writeln!(text, "use std::time::Duration;");
         let _ = writeln!(text);
         let _ = writeln!(text, "use {lib}::{{Nodes, SEGMENT, SEGMENTS, start}};");
@@ -668,7 +665,7 @@ impl Unit<'_> {
         );
         let _ = writeln!(
             text,
-            "    let segment = start(Arc::clone(&node), &roster, config.runtime, nodes)?;"
+            "    let segment = start(node.clone(), &roster, config.runtime, nodes)?;"
         );
         let _ = writeln!(
             text,

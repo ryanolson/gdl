@@ -6,8 +6,6 @@
 //! [`start`] deploys it inside a program; the `chat-post` binary deploys it on
 //! its own.
 
-use std::sync::Arc;
-
 pub use ::chat_contract as contract;
 
 /// This segment's name in the placement.
@@ -38,7 +36,7 @@ pub struct Nodes {
 /// Deploy this segment on `node`. Every segment's instances must be in
 /// `roster`.
 pub fn start(
-    node: Arc<gdl::velo::Velo>,
+    node: gdl::velo::Velo,
     roster: &gdl::Roster,
     config: gdl::RuntimeConfig,
     nodes: Nodes,

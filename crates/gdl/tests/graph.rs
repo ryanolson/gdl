@@ -133,7 +133,7 @@ async fn every_placement_runs_through_the_generated_assembly() {
             .zip(&nodes)
             .map(|(name, node)| {
                 let deployment = Deployment::new(
-                    Arc::clone(node),
+                    node.clone(),
                     &manifest,
                     &placement,
                     name,
@@ -179,7 +179,7 @@ async fn segments_that_bind_only_their_own_nodes_run_the_graph() {
     }
     let deployment = |index: usize, name: &str| {
         Deployment::new(
-            Arc::clone(&nodes[index]),
+            nodes[index].clone(),
             &manifest,
             &placement,
             name,
@@ -247,7 +247,7 @@ async fn a_segment_that_leaves_a_hosted_node_unbound_is_refused() {
     }
     let deployment = |index: usize, name: &str| {
         Deployment::new(
-            Arc::clone(&nodes[index]),
+            nodes[index].clone(),
             &manifest,
             &placement,
             name,
@@ -343,7 +343,7 @@ async fn a_hosted_slot_holding_another_nodes_placeholder_is_refused() {
         roster.add(*name, node.peer_info());
     }
     let front = Deployment::new(
-        Arc::clone(&nodes[0]),
+        nodes[0].clone(),
         &manifest,
         &placement,
         "front",
@@ -382,7 +382,7 @@ async fn assembling_another_contracts_graph_is_refused() {
     let mut roster = Roster::new();
     roster.add("all", node.peer_info());
     let deployment = Deployment::new(
-        Arc::clone(&node),
+        node.clone(),
         &twins::manifest(),
         &placement,
         "all",

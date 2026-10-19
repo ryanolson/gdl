@@ -9,7 +9,7 @@ A general Rust tool to express request/response streaming pipelines as graphs, t
 1. **Define** a graph once: its nodes, its topology, and the message types on every edge. No node implementations.
 2. **Configure** a placement: which nodes live in which segment.
 3. **Generate** one crate per segment. A segment crate links only the implementations of the nodes placed in it, so a segment that hosts CPU-only nodes never links the GPU node's dependencies.
-4. **Run** segments as separate processes over [velo](https://github.com/ai-dynamo/velo) 0.19. Inside a segment, a hop is a plain function call. Between segments, requests travel as velo active messages and responses travel as velo streams. A streamed request's items travel as a velo stream too, into an anchor its receiver mints (7.9).
+4. **Run** segments as separate processes over [velo](https://github.com/ai-dynamo/velo) (0.19 when the runtime was built; since 2026-10-19 velo's `main` at `515941c`, see 7.8). Inside a segment, a hop is a plain function call. Between segments, requests travel as velo active messages and responses travel as velo streams. A streamed request's items travel as a velo stream too, into an anchor its receiver mints (7.9).
 
 Non-goals for the first release: streaming requests (bidirectional), fan-out ports, instance-selection policies beyond round robin, service discovery, and non-Rust segments. Section 12 lists these as later work; the design must not block them.
 
@@ -232,6 +232,8 @@ A remote forward node cannot observe cancel in the middle of its transform: no a
 - Stream items cross as `WireItem = Open | Item(bytes) | Fail(gdl::Error)`, where the bytes come from the edge's codec (msgpack). velo sees only `WireItem` (section 6). A `Fail` is followed by `finalize`. velo's own `SenderError` frame is non-terminal and carries only a string, so gdl does not use it.
 
 ### 7.8 Velo facts the runtime relies on (velo 0.19)
+
+**Addendum 2026-10-19.** gdl now depends on velo 0.21.0 by git rev (`515941c`, velo#135), because no release yet builds on macOS: 0.19 and 0.20 set `TCP_USER_TIMEOUT`, which socket2 has only on Linux. 0.21 makes `Velo` a cheap handle, so the runtime and generated segments hold `Velo`, not `Arc<Velo>`. The facts below were checked against 0.19, and the suite still passes on 0.21. When a release contains velo#135, pin it with `=x.y.z` again.
 
 | Fact | Consequence |
 |---|---|

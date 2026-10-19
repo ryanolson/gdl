@@ -17,7 +17,6 @@
 //! This segment hosts the source, which takes a streamed request. One JSON
 //! line cannot carry it, so the binary only serves; call it through the library.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use asr_front::{Nodes, SEGMENT, SEGMENTS, start};
@@ -83,7 +82,7 @@ async fn run() -> Result<(), Failure> {
         .iter()
         .map(|s| (*s, config.instances.get(*s).copied().unwrap_or(1)));
     let roster = gdl::Roster::rendezvous(&config.roster, SEGMENT, &node, expect, wait).await?;
-    let segment = start(Arc::clone(&node), &roster, config.runtime, nodes)?;
+    let segment = start(node.clone(), &roster, config.runtime, nodes)?;
     // No request may leave before every instance it can be routed to
     // has registered its handlers.
     roster

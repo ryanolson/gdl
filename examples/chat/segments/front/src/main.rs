@@ -20,7 +20,6 @@
 //! one JSON request per line on stdin and answers each with one line per
 //! item, `{"item": ...}`, then `{"done": null}` or `{"error": "..."}`.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use chat_front::{Nodes, SEGMENT, SEGMENTS, start};
@@ -93,7 +92,7 @@ async fn run() -> Result<(), Failure> {
         .iter()
         .map(|s| (*s, config.instances.get(*s).copied().unwrap_or(1)));
     let roster = gdl::Roster::rendezvous(&config.roster, SEGMENT, &node, expect, wait).await?;
-    let segment = start(Arc::clone(&node), &roster, config.runtime, nodes)?;
+    let segment = start(node.clone(), &roster, config.runtime, nodes)?;
     // No request may leave before every instance it can be routed to
     // has registered its handlers.
     roster

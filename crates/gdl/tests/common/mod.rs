@@ -768,7 +768,7 @@ use gdl::{
 
 /// A velo node whose streams buffer very little: a stalled consumer blocks
 /// its producer after a few small items instead of after a megabyte.
-pub async fn tight_velo_node() -> Arc<velo::Velo> {
+pub async fn tight_velo_node() -> velo::Velo {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let transport = velo::transports::tcp::TcpTransportBuilder::new()
         .from_listener(listener)
@@ -792,7 +792,7 @@ pub async fn tight_velo_node() -> Arc<velo::Velo> {
 
 /// A tight velo node (see [`tight_velo_node`]) that counts how often its
 /// producers waited for credit, read through [`backpressured`].
-pub async fn metered_tight_velo_node() -> (Arc<velo::Velo>, prometheus::Registry) {
+pub async fn metered_tight_velo_node() -> (velo::Velo, prometheus::Registry) {
     let registry = prometheus::Registry::new();
     let metrics = Arc::new(velo::VeloMetrics::register(&registry).expect("metrics"));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -829,7 +829,7 @@ pub fn backpressured(registry: &prometheus::Registry) -> f64 {
 }
 
 /// A velo node on loopback TCP with OS-assigned ports.
-pub async fn velo_node() -> Arc<velo::Velo> {
+pub async fn velo_node() -> velo::Velo {
     gdl::bind_node(([127, 0, 0, 1], 0).into())
         .await
         .expect("velo node")
@@ -900,7 +900,7 @@ impl<H> Cluster<H> {
 /// Deploy the reference graph under `placement` on `nodes` (one node per
 /// segment, in the placement's segment order).
 pub fn deploy(
-    nodes: &[Arc<velo::Velo>],
+    nodes: &[velo::Velo],
     placement: &gdl::Placement,
     events: &Arc<Events>,
     config: RuntimeConfig,
@@ -910,7 +910,7 @@ pub fn deploy(
         .map(|(name, _)| name.to_string())
         .collect();
     assert!(names.len() <= nodes.len(), "not enough velo nodes");
-    let instances: Vec<(String, Arc<velo::Velo>)> =
+    let instances: Vec<(String, velo::Velo)> =
         names.into_iter().zip(nodes.iter().cloned()).collect();
     deploy_instances(&instances, placement, events, config)
 }
@@ -918,7 +918,7 @@ pub fn deploy(
 /// Deploy the reference graph with explicit instances: each entry is one
 /// velo node serving the named segment. A segment may have several.
 pub fn deploy_instances(
-    instances: &[(String, Arc<velo::Velo>)],
+    instances: &[(String, velo::Velo)],
     placement: &gdl::Placement,
     events: &Arc<Events>,
     config: RuntimeConfig,
@@ -929,7 +929,7 @@ pub fn deploy_instances(
 /// Deploy the reference graph with each segment's runtime settings chosen
 /// by `config`.
 pub fn deploy_configured(
-    instances: &[(String, Arc<velo::Velo>)],
+    instances: &[(String, velo::Velo)],
     placement: &gdl::Placement,
     events: &Arc<Events>,
     config: &dyn Fn(&str) -> RuntimeConfig,
@@ -943,7 +943,7 @@ pub fn deploy_configured(
         .iter()
         .map(|(name, node)| {
             let deployment = Deployment::new(
-                Arc::clone(node),
+                node.clone(),
                 &manifest,
                 placement,
                 name,

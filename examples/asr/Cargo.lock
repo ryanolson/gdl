@@ -152,6 +152,9 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "cfg-if"
@@ -1041,9 +1044,8 @@ dependencies = [
 
 [[package]]
 name = "velo"
-version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51f46d26132a532f2d86fe9f36280caab9e100f834de101d07aa57f81fc956ea"
+version = "0.21.0"
+source = "git+https://github.com/ai-dynamo/velo?rev=515941c1181aed1965284874cca8cbaa4219e2ba#515941c1181aed1965284874cca8cbaa4219e2ba"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1072,9 +1074,8 @@ dependencies = [
 
 [[package]]
 name = "velo-ext"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ceece16d39ad1881b8cd305625c5f007c4f59b60b7798c3d218d039bb88eff0b"
+version = "0.5.6"
+source = "git+https://github.com/ai-dynamo/velo?rev=515941c1181aed1965284874cca8cbaa4219e2ba#515941c1181aed1965284874cca8cbaa4219e2ba"
 dependencies = [
  "anyhow",
  "bytes",

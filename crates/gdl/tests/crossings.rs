@@ -6,7 +6,6 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::{collect, velo_node};
@@ -161,7 +160,7 @@ async fn run(placement: Placement) -> (usize, usize) {
     let mut segments = Vec::new();
     for (name, node) in names.iter().zip(&nodes) {
         let deployment = Deployment::new(
-            Arc::clone(node),
+            node.clone(),
             &manifest,
             &placement,
             name,
@@ -206,7 +205,7 @@ async fn run_streamed(placement: Placement) -> (usize, usize) {
     let mut segments = Vec::new();
     for (name, node) in names.iter().zip(&nodes) {
         let deployment = Deployment::new(
-            Arc::clone(node),
+            node.clone(),
             &manifest,
             &placement,
             name,

@@ -69,7 +69,7 @@ pub async fn lean_front() -> LeanCaller {
     }
     let deployment = |index: usize, name: &str| {
         Deployment::new(
-            Arc::clone(&nodes[index]),
+            nodes[index].clone(),
             &manifest,
             &placement,
             name,
@@ -107,12 +107,12 @@ pub struct DirectAsk {
     ask: Ask,
 }
 
-pub async fn direct_pair() -> (Arc<velo::Velo>, velo::InstanceId) {
+pub async fn direct_pair() -> (velo::Velo, velo::InstanceId) {
     let client = velo_node().await;
     let server = velo_node().await;
     client.register_peer(server.peer_info()).expect("peer");
     server.register_peer(client.peer_info()).expect("peer");
-    let weak = Arc::downgrade(&server);
+    let weak = server.downgrade();
     server
         .register_handler(
             velo::Handler::unary_handler_async("bench-stream", move |cx: velo::Context| {
@@ -267,7 +267,7 @@ pub async fn upload_front() -> UploadCaller {
     }
     let deployment = |index: usize, name: &str| {
         Deployment::new(
-            Arc::clone(&nodes[index]),
+            nodes[index].clone(),
             &manifest,
             &placement,
             name,
@@ -308,12 +308,12 @@ pub struct DirectInput {
     ticket: Option<velo::streaming::control::StreamOpenTicket>,
 }
 
-pub async fn direct_upload_pair() -> (Arc<velo::Velo>, velo::InstanceId) {
+pub async fn direct_upload_pair() -> (velo::Velo, velo::InstanceId) {
     let client = velo_node().await;
     let server = velo_node().await;
     client.register_peer(server.peer_info()).expect("peer");
     server.register_peer(client.peer_info()).expect("peer");
-    let weak = Arc::downgrade(&server);
+    let weak = server.downgrade();
     server
         .register_handler(
             velo::Handler::unary_handler_async("bench-upload", move |cx: velo::Context| {
@@ -447,9 +447,9 @@ pub struct Setups {
     pub two: Caller,
     pub three: Caller,
     pub lean: LeanCaller,
-    pub direct: (Arc<velo::Velo>, velo::InstanceId),
+    pub direct: (velo::Velo, velo::InstanceId),
     pub upload: UploadCaller,
-    pub direct_upload: (Arc<velo::Velo>, velo::InstanceId),
+    pub direct_upload: (velo::Velo, velo::InstanceId),
 }
 
 pub async fn setups() -> Setups {

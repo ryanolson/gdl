@@ -596,7 +596,7 @@ use super::Cluster;
 /// Deploy the streamed reference graph with explicit instances, each bound
 /// with every node: a fat build that can serve any segment.
 pub fn deploy(
-    instances: &[(String, Arc<velo::Velo>)],
+    instances: &[(String, velo::Velo)],
     placement: &gdl::Placement,
     events: &Arc<Events>,
     config: RuntimeConfig,
@@ -607,7 +607,7 @@ pub fn deploy(
 /// Deploy the streamed reference graph with each segment's runtime
 /// settings chosen by `config`.
 pub fn deploy_configured(
-    instances: &[(String, Arc<velo::Velo>)],
+    instances: &[(String, velo::Velo)],
     placement: &gdl::Placement,
     events: &Arc<Events>,
     config: &dyn Fn(&str) -> RuntimeConfig,
@@ -625,7 +625,7 @@ pub fn deploy_configured(
 /// Deploy any graph: `assemble` builds each instance's root from its
 /// deployment.
 pub fn deploy_graph<H: Register>(
-    instances: &[(String, Arc<velo::Velo>)],
+    instances: &[(String, velo::Velo)],
     manifest: &gdl::Manifest,
     placement: &gdl::Placement,
     config: &dyn Fn(&str) -> RuntimeConfig,
@@ -639,7 +639,7 @@ pub fn deploy_graph<H: Register>(
         .iter()
         .map(|(name, node)| {
             let deployment = Deployment::new(
-                Arc::clone(node),
+                node.clone(),
                 manifest,
                 placement,
                 name,
@@ -655,10 +655,7 @@ pub fn deploy_graph<H: Register>(
 }
 
 /// One velo node per segment of `placement`, in its segment order.
-pub fn instances(
-    nodes: &[Arc<velo::Velo>],
-    placement: &gdl::Placement,
-) -> Vec<(String, Arc<velo::Velo>)> {
+pub fn instances(nodes: &[velo::Velo], placement: &gdl::Placement) -> Vec<(String, velo::Velo)> {
     placement
         .segments()
         .map(|(name, _)| name.to_string())
