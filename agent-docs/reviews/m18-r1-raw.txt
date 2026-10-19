@@ -1,0 +1,19 @@
+=== Reviewer 1: REJECT, actionable 3
+
+M18-REGISTRY-01 (major) crates/gdl-gen/src/lib.rs:339
+Claim: The registry-source fix still allows another registry's package to satisfy a crates.io dependency.
+Evidence: given_offer accepts any registry+ or sparse+ source. In the isolated copy, review_another_registry_cannot_replace_crates_io supplied the fixture offers with origins changed consistently to sparse+https://registry.example.com/index/. Export succeeded, but its manifests contained regproto = { version = "=0.1.0" } and regnodes = { version = "=0.1.0" }, which select crates.io. Thus validation and the eventual build use different package identities; the test expecting refusal failed.
+Test idea: Keep the alternate-registry export probe and require rejection, with canonical crates.io registry and sparse identities as passing controls. Match the registry identity, not merely its source prefix.
+
+M18-DOCKER-02 (major) crates/gdl-gen/src/export.rs:127
+Claim: An accepted segment name beginning with '-' produces a Dockerfile whose Cargo invocation fails.
+Evidence: Export accepts segment '-front' and emits RUN ["cargo", "build", "--release", "--manifest-path", "-front/Cargo.toml"]. Executing those exact arguments against a minimal standalone crate fails with "unexpected argument '-f' found". The engine control builds successfully and places its binary at the generated COPY path. Shell/JSON quoting does not prevent option parsing; build-all.sh already prefixes this path with './'.
+Test idea: Retain review_docker_run_accepts_a_leading_hyphen_segment. Prefix the Dockerfile's manifest path with './' and verify the emitted command builds both engine and -front.
+
+M18-DOCKER-03 (major) crates/gdl-gen/src/export.rs:147
+Claim: Valid segment names can generate invalid Docker image references.
+Evidence: Export accepts segment 'engine_' and emits a build-images.sh tag of 'imaged-engine-'. Docker rejects that reference with "invalid reference format" because the repository component ends in a separator. The isolated review_image_names_are_valid_docker_references test fails for this exported tag; 'imaged-engine' passes reference parsing. Cargo package-name normalization is insufficient for Docker image names.
+Test idea: Test exported tags for accepted names ending in '_' or '-', alongside an ordinary name. Produce valid, distinct Docker references or report an explicit image-export naming error before returning a purportedly buildable archive.
+
+Notes: Reviewed f02013c without modifying the target checkout; experiments are in /tmp/gdl-review-m18-focus with its own target directory. All four test-covered m17 fixes passed their tests and failed when individually reverted; streamed source-request wiring was inspected and node --check passed. CLI extraction and spec resolution rejected traversal and manifest-injection payloads before writes. Passing checks: 75 gdl-gen unit tests, 16 composition tests, 17 gdl-extract tests, 10 gdl-web tests, and deterministic export. Three added probes failed as described. portable(), ordinary COPY/context paths, standalone-workspace binary location, and script argument quoting otherwise matched the design. No additional material documentation drift found. No images were built, no full workspace suite was run, and no agents were spawned.
+
