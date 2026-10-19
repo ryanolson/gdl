@@ -1,23 +1,9 @@
-# Milestones 10 to 18, mega review pass 3
+# Whole-repository mega review, pass 3
 
-Reviewer: a fresh Fable subagent, read-only, running the thermo-nuclear code-quality review over `main..HEAD` (71 commits, 231 files). It checked the fixes of `mega-r2.md` first, then read the whole diff fresh. In a scratch copy it ran:
-- the workspace suite (46 targets, all green), clippy, and fmt;
-- `generate --check` of both examples;
-- probes and mutations.
+Reviewer: fresh Codex (`gpt-6-astra`) session, read-only, `thermo-nuclear-code-quality-review` over the whole repository at `acf6560`. Raw text: `mega-r3-raw.txt`. ACTIONABLE: 3.
 
-Verdict: REJECT, 6 actionable (1 major, 5 minor).
-
-Pass 2's fixes held, and the runtime's diff changed no hot path. The reviewer also confirmed:
-- `gdl-model`'s hash is byte-identical to the runtime's former one;
-- the Dockerfile's structure and `build-all.sh`'s quoting are as designed.
-
-| # | Finding | Ruling | Test | Fix |
+| # | Severity | Finding | Ruling | Evidence and fix |
 |---|---|---|---|---|
-| R3-1 | an archive exported from a draft named a spec file that does not exist (`<target>/gdl.toml`), and held neither the spec nor the graph file, so "the download is the save" did not hold | valid | `an_export_holds_its_spec_and_graph_file` (the archived spec loads, and the header points at it) | a spec given as text keeps its text; its export holds `gdl.toml` and the graph file, and each segment's header says `cargo gdl export --spec ../gdl.toml --out <archive.tar.gz>` |
-| R3-2 | a check passed a draft whose export refused an image name | valid | `a_check_refuses_an_image_name_the_export_would` | `check` applies the export's image-name rule when the export would build images |
-| R3-3 | the rule that pins a node two listed crates offer was untested (a mutation survived) | valid | `a_node_two_crates_offer_is_pinned` | none needed |
-| R3-4 | the role table was spelled in several crates, and a catalogue node's role was a `String` | valid | the suite | `gdl_model::Role` has `name()`, `ports()`, and `Display`; `NodeEntry.role` is a `Role` (spelled as before in TOML); the reader's table, `contract::role`, and `role_tag` go; the draft's match is exhaustive. The `derive(Node)` probe and `gdl-message`'s registry keep their strings: `gdl-message` stays without the model, and `--verify` compares through `Role::name` |
-| R3-5 | the catalogue's query methods and its origin-to-port map had no caller outside tests | valid | the index test now asserts the text form | the four methods and the map are removed; ruling 76 has an addendum |
-| R3-6 | the server cloned every offer per check and export, in two copies of one block | valid | the server tests | `Offers::Given` lends `&[&Offer]`, through one `with_offers` helper that holds the read lock |
-
-The workspace suite, clippy, and fmt pass after the fixes.
+| 1 | P2 | A segment that leaves one of its own nodes `Absent` starts, and every request then fails with `NotHosted` | valid | `a_segment_that_leaves_a_hosted_node_unbound_is_refused` (graph suite): an engine with no `D` binding and a front with no `C` binding both assembled. Fix: each role trait has a hidden `ABSENT` constant, which `Absent<N>` sets to the node's name. `Deployment::hop` collects the absent slots of its hop and refuses one that this segment hosts, with a `Placement` error that names the node. Absent slots of nodes hosted elsewhere stay allowed (same test). Plan section 6 already said that validation guarantees this; now it does |
+| 2 | P2 | Concurrent manifest dumps in one target directory share one program path, so one dump can run another's program | valid | The pass 1 fix of the milestone 5 review made the source directory private, but the built program is `target/debug/gdl-manifest-dump` for every dump. `a_dump_waits_while_another_holds_the_target_directory` (gdl-gen unit test): a dump ran while the test held the directory. Fix: a lock file in the target directory (`gdl-gen/dump.lock`, `File::lock`) is held from writing the program until it has run. The per-run source directory is gone, because the lock covers it. Plan section 9.3 has a dated addendum |
+| 3 | P3 | A type mismatch between a node and the edge before it is reported on the whole invocation, in terms of runtime types | valid | `tests/ui/graph-forward-mismatch.rs`, `graph-backward-mismatch.rs`, `graph-operator-mismatch.rs`: no error pointed at a declaration. Fix: the expansion asserts each edge's type against the declared type, spanned at the declaration, so one error now reads "expected `PhantomData<u32>`, found `PhantomData<u64>`" at the node's input type. The composition errors still appear too: the expansion cannot know at expansion time that the types differ, so it cannot leave out the code that fails |

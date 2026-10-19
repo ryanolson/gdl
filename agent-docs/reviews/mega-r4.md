@@ -1,14 +1,11 @@
-# Milestones 10 to 18, mega review pass 4
+# Whole-repository mega review, pass 4
 
-Reviewer: a fresh Fable subagent, read-only, running the thermo-nuclear code-quality review over `main..HEAD` (72 commits, 232 files). It checked the fixes of `mega-r3.md` first, then read the whole diff fresh. In a scratch copy it ran the workspace suite (42 targets, all green), clippy, and fmt, and probed with crates of its own. Verdict: REJECT, 4 actionable, all minor.
+Reviewer: fresh Codex (`gpt-6-astra`) session, read-only, `thermo-nuclear-code-quality-review` over the whole repository at `9feefcd`. Raw text: `mega-r4-raw.txt`. ACTIONABLE: 3.
 
-Pass 3's fixes held, with no regression. The runtime's diff changed no request path, and no file crosses 1000 lines; `gdl-gen/src/lib.rs` is the closest.
-
-| # | Finding | Ruling | Test | Fix |
+| # | Severity | Finding | Ruling | Evidence and fix |
 |---|---|---|---|---|
-| R4-1 | a node the crate root reaches only through a private `use` was offered at the root, which a generated segment cannot name; the derive's own check cannot see it either | valid | `a_node_crate_offers_its_nodes_by_message_origin` (fixture node `Shy`, reached by a private `use`) | the reader looks a node up at the root as code outside the crate does, through `pub` items only, and says "does not reach it publicly"; the unused `member` lookup goes |
-| R4-2 | a message defined in a private module and exported only by a facade crate could not be composed: the draft listed only the defining crate | valid | `a_message_exported_only_by_a_facade_is_composed` (the rendered spec lists the facade, and `check` passes) | a draft lists a crate that exports such a message publicly |
-| R4-3 | the catalogue's two remaining index maps served only its printed listing | valid | the catalogue tests | a loaded catalogue holds its entries alone, and the listing groups them when printed; ruling 76 has a second addendum |
-| R4-4 | `check` spelled the export's image-name refusal again | valid | `a_check_refuses_an_image_name_the_export_would` | `export::refusals` holds what an export refuses beyond rendering, and both call it |
+| 1 | P2 | A caller's trait with a `codec` method makes the wire probe's `.codec()` call ambiguous | valid | `tests/pass/graph-caller-traits.rs` (E0034). Fix: the probe traits' method is `__gdl_codec`, in the reserved namespace |
+| 2 | P3 | The dump-lock test can pass without the lock: its fixed 3 s wait can be spent rebuilding, because each dump rewrites its source and cargo relinks | valid | Fix: a dump writes a file only when its text changed, so a warm dump neither compiles nor links; the test times a warm dump and waits ten times as long (at least 2 s). With the lock removed, the test failed in 3 of 3 runs (0.15 s each); with it, it passes |
+| 3 | P3 | The README promises JSON-lines serving on the source segment even when a source type has no codec | valid | `emit.rs` serves JSON lines only when both source types are wire types. Fix: the README states the condition, that the binary stops at the end of its input when it serves, and that otherwise it serves until Ctrl-C |
 
-The workspace suite, clippy, and fmt pass after the fixes.
+Also in this round, from a question about cost: `crates/gdl/tests/crossings.rs` counts encodes and decodes of one message type. There are none in a local graph or in one segment, and one of each per message per crossing over two and three segments. The README cost section now states costs against a graph that is not cut. Before, it stated only the cost over direct velo.

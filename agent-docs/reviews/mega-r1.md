@@ -1,16 +1,13 @@
-# Milestones 10 to 18, mega review pass 1
+# Whole-repository mega review, pass 1
 
-Reviewer: a fresh Fable subagent, read-only, running the thermo-nuclear code-quality review over `main..HEAD` (`3c422e3..8c611c1`), at the owner's request. It read the whole diff (226 files) against plan 9.6 and 9.7, rulings 31 to 95, and the ten earlier review records. It ran the workspace suite in a scratch copy (46 targets, all green) and two mutation probes. Verdict: REJECT, 6 actionable (1 major, 5 minor).
+Reviewer: fresh Codex (`gpt-6-astra`) session, read-only, `thermo-nuclear-code-quality-review` over the whole repository at `e0fabb1`, with most attention on `crates/gdl-macros`, which had no review of its own. Raw text: `mega-r1-raw.txt`. ACTIONABLE: 7.
 
-It found these sound: the reader, resolution by origin, binding, the catalogue's write-once add, `--verify`, the export's determinism, ruling 88's manifest equality, and every earlier fix it spot-checked.
-
-| # | Finding | Ruling | Test | Fix |
+| # | Severity | Finding | Ruling | Evidence and fix |
 |---|---|---|---|---|
-| F1 | `gdl-gen/src/lib.rs` grew to 1511 lines with three concerns, and `validate` spelled the graph-spec condition four ways | valid | the suite, unchanged | `offers.rs` (`Offers`, `offers`, `given_offer`, `CRATES_IO`), `validate.rs`, `output.rs` (`write`, `drift`, `survey`); `lib.rs` keeps the API; `validate` names the condition once. The graph-name check in `validate` stays: it also covers contract specs, which `prepare` does not check |
-| F2 | two catalogue adds through the server at once could serve a snapshot without one of them | valid; not deterministically testable without a seam | the server tests | the add is made to the served catalogue under its lock (`Extracted::entry`, then `Catalog::add`); the two reloads are gone |
-| F3 | drafts were written to disk only so `Spec::load` could read them, and the directory grew without bound | valid | `a_draft_checks_as_its_spec_would_generate` now asserts that a check writes nothing | `Spec::from_text` takes the spec and the graph file as text; the drafts directory, its hash, and its atomic writes are gone |
-| F4 | no test covered a draft carrying two messages of one name | valid (a mutation survived) | `two_messages_of_one_name_are_named_apart_and_pinned` | none needed |
-| F5 | the library-name rule for given offers was untested | valid (a mutation survived) | `a_given_offer_names_its_library_for_its_package` | none needed. The error's wording stays: for a directory crate the spec reads the library from the crate's manifest, so only a crate listed by version can reach it |
-| F6 | documentation drift: the crate map, `resolve`'s `--target-dir`, and the module doc's claim that the contract is always compiled | valid | none | fixed in the plan, `main.rs`, the README, and `gdl-gen`'s module doc |
-
-The workspace suite, clippy, and fmt pass after the fixes.
+| 1 | P2 | A backward node that consumes ready remote input without emitting never returns to the pump, so a cancel does not reach upstream work | valid | `a_cancel_ends_work_behind_a_backward_node_that_discards_ready_input` (three segments, the post segment's F discards every item at about 200 us each): the producer never ends within 5 s. Control: the same test with a mapping F passes. Fix: the decode boundary (`until_error`) yields every `YIELD_INTERVAL` ready items, as a node boundary does |
+| 2 | P2 | The expansion changes what a port type names: `super::` inside the generated `nodes` module, a type named like a node marker, a type named like a generated generic | valid | `tests/pass/graph-relative-paths.rs` (E0425), `tests/pass/graph-name-capture.rs` (E0271). Fix: the declaration impls are written at the invocation's level, `nodes` holds only the marker structs, and generics are `__Gdl<Node>` and `__GdlBound` |
+| 3 | P2 | A node named `Deployment` shadows the `deployment` parameter of `assemble` | valid | `tests/pass/graph-local-names.rs` (E0599). Fix: each slot moves into a `__gdl_<binding>` local |
+| 4 | P2 | A contract crate that renames its gdl dependency cannot expand `graph!` | valid | `the_expansion_names_the_runtime_only_through_the_given_path` (gdl-macros unit test). Fix: `gdl::graph!` is a `macro_rules!` wrapper that passes `$crate` to the procedural macro, and the expansion names gdl only through it. An end-to-end renamed-dependency test needs a separate fixture crate, because trybuild always adds the crate under test as `gdl` |
+| 5 | P2 | Unqualified `None`, `Some`, `Ok`, and `vec!` in the expansion resolve to the caller's items | valid | `tests/pass/graph-shadowed-prelude.rs` (E0308). Fix: rooted paths |
+| 6 | P2 | Binding names: a raw node name and `Crate` panic the macro; `New` collides with `Bindings::new`; `FooBar` and `foo_bar` collide | valid | `tests/ui/graph-raw-node.rs`, `graph-binding-keyword.rs`, `graph-binding-new.rs`, `graph-binding-collision.rs`: each was a panic or a cascade of duplicate-definition errors. Fix: the model derives each binding name once and rejects these cases with an error at the node |
+| 7 | P3 | `plan.md` section 9.1 names a `CONTRACT_HASH` constant that does not exist | valid | Fix: dated addendum to section 9.1, which also records the expansion's naming rules |
