@@ -66,10 +66,18 @@ pub fn relative(from: &Path, to: &Path) -> PathBuf {
 /// A path as it appears in a generated file: forward slashes on every
 /// platform, so generated output does not depend on where it was made.
 pub fn display(path: &Path) -> String {
-    path.components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+    let mut text = String::new();
+    for component in path.components() {
+        // The root is a separator of its own.
+        if !text.is_empty() && !text.ends_with('/') {
+            text.push('/');
+        }
+        match component {
+            std::path::Component::RootDir => text.push('/'),
+            other => text.push_str(&other.as_os_str().to_string_lossy()),
+        }
+    }
+    text
 }
 
 #[cfg(test)]
@@ -131,5 +139,12 @@ mod tests {
     #[test]
     fn display_uses_forward_slashes() {
         assert_eq!(display(Path::new("../../contract")), "../../contract");
+    }
+
+    /// An exported manifest names a crate outside the archive by its
+    /// absolute path.
+    #[test]
+    fn display_writes_an_absolute_path_with_one_root() {
+        assert_eq!(display(Path::new("/work/nodes")), "/work/nodes");
     }
 }

@@ -29,6 +29,7 @@
 mod contract;
 mod dump;
 mod emit;
+mod export;
 mod extract;
 mod names;
 mod nodes;
@@ -41,6 +42,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use emit::MARKER;
+pub use export::export;
 pub use extract::{Crate, Extracted, extract, verify, write_entry};
 /// A working-catalogue entry: what a crate offers, read from its source.
 pub use gdl_extract::Offer;
@@ -73,7 +75,18 @@ pub type Files = BTreeMap<PathBuf, String>;
 /// `out`. For a graph file, the files include the contract crate, in
 /// `contract/` under `out`.
 pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
-    let prepared = prepare(spec, Some(out), target)?;
+    Ok(render_with(spec, out, target, emit::Deps::Relative)?.0)
+}
+
+/// [`render`], with dependencies named as `deps` says, and the graph's
+/// name.
+fn render_with(
+    spec: &Spec,
+    out: &Path,
+    target: &Path,
+    deps: emit::Deps,
+) -> Result<(Files, String), Error> {
+    let prepared = prepare(spec, Some(out), target, deps)?;
     // A graph spec binds its nodes to the nodes its node crates offer, read
     // from their source, in place of the `[bind.*]` tables of a contract
     // spec.
@@ -101,9 +114,9 @@ pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
             &bound
         }
     };
-    let mut files = render_manifest(spec, &prepared.contract, &prepared.manifest, out)?;
+    let mut files = render_manifest(spec, &prepared.contract, &prepared.manifest, out, deps)?;
     files.extend(prepared.files);
-    Ok(files)
+    Ok((files, prepared.manifest.name))
 }
 
 /// A diagram format for [`diagram`].
@@ -119,7 +132,7 @@ pub enum Format {
 /// edge that crosses segments marked. The contract's manifest is built in
 /// `target` (a cargo target directory), as for [`render`].
 pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
-    let manifest = prepare(spec, None, target)?.manifest;
+    let manifest = prepare(spec, None, target, emit::Deps::Relative)?.manifest;
     let layout =
         gdl_model::layout(&manifest, &spec.placement).map_err(|e| Error::new(e.to_string()))?;
     match format {
@@ -230,7 +243,12 @@ struct Prepared {
 /// generated: its manifest is read from a copy under `target`, so that
 /// `--check` and `diagram` write nothing in the output, and its files
 /// are rendered for `out/contract` when `out` is given.
-fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, Error> {
+fn prepare(
+    spec: &Spec,
+    out: Option<&Path>,
+    target: &Path,
+    deps: emit::Deps,
+) -> Result<Prepared, Error> {
     let source = match &spec.source {
         spec::Source::Contract(contract) => {
             return Ok(Prepared {
@@ -326,12 +344,13 @@ fn prepare(spec: &Spec, out: Option<&Path>, target: &Path) -> Result<Prepared, E
 
     let mut files = Files::new();
     if let Some(out) = out {
-        let dir = dump::absolute(out)?.join("contract");
-        let relative = |p: &Path| {
-            let p = dump::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-            dump::toml_string(&paths::display(&paths::relative(&dir, &p)))
-        };
-        files.insert(PathBuf::from("contract/Cargo.toml"), crates(&relative));
+        let out = dump::absolute(out)?;
+        let dir = out.join("contract");
+        let path = |p: &Path| deps.path(&out, &dir, p);
+        files.insert(
+            PathBuf::from("contract/Cargo.toml"),
+            crates(&path) + deps.workspace(),
+        );
         files.insert(PathBuf::from("contract/src/lib.rs"), lib_rs);
         contract.path = dir;
     }
@@ -369,10 +388,11 @@ fn render_manifest(
     contract: &spec::Contract,
     manifest: &gdl_model::Manifest,
     out: &Path,
+    deps: emit::Deps,
 ) -> Result<Files, Error> {
     let layout = validate(spec, contract, manifest)?;
     let out = dump::absolute(out)?;
-    emit::files(spec, contract, manifest, &layout, &out)
+    emit::files(spec, contract, manifest, &layout, &out, deps)
 }
 
 /// Check the placement and the bindings against the manifest, reporting
@@ -828,6 +848,7 @@ mod tests {
             spec.contract().expect("a contract spec"),
             manifest,
             out,
+            emit::Deps::Relative,
         )
     }
 
@@ -846,7 +867,9 @@ mod tests {
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gdl-gen-tests");
         let manifest = |file: &str| {
             let spec = Spec::load(&fixtures.join(file)).expect("spec");
-            prepare(&spec, None, &target).expect("prepared").manifest
+            prepare(&spec, None, &target, emit::Deps::Relative)
+                .expect("prepared")
+                .manifest
         };
         let (one, other) = (manifest("pinned.toml"), manifest("pinned-other.toml"));
         let chunk = |m: &Manifest| m.hops[0].backward_types[0].name.clone();
@@ -868,7 +891,7 @@ mod tests {
             root.join("tests/fixtures/compose/versions-pinned.toml"),
         ] {
             let spec = Spec::load(&spec).expect("spec");
-            let prepared = prepare(&spec, None, &target).expect("prepared");
+            let prepared = prepare(&spec, None, &target, emit::Deps::Relative).expect("prepared");
             let (graph, resolution) = prepared.graph.as_ref().expect("a graph file");
             let built = graph
                 .manifest(&|name| {

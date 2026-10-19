@@ -128,6 +128,29 @@ pub(crate) enum GdlDep {
     Path(PathBuf),
     /// A registry version requirement.
     Version(String),
+    /// A git repository at one revision: gdl is not published, and an
+    /// exported tarball must name it from any machine.
+    Git {
+        /// The repository.
+        url: String,
+        /// The commit, tag, or branch.
+        rev: String,
+    },
+}
+
+impl GdlDep {
+    /// The dependency's source, as the inside of an inline table, with a
+    /// path written as `path` writes it.
+    pub(crate) fn source(&self, path: &dyn Fn(&Path) -> String) -> String {
+        use crate::dump::toml_string;
+        match self {
+            Self::Path(p) => format!("path = {}", path(p)),
+            Self::Version(v) => format!("version = {}", toml_string(v)),
+            Self::Git { url, rev } => {
+                format!("git = {}, rev = {}", toml_string(url), toml_string(rev))
+            }
+        }
+    }
 }
 
 /// One node's implementation.
@@ -192,6 +215,8 @@ struct RawNodes {
 struct RawGdl {
     path: Option<PathBuf>,
     version: Option<String>,
+    git: Option<String>,
+    rev: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -295,12 +320,13 @@ impl Spec {
                 return Err(Error::new("a spec needs [contract] or [graph]"));
             }
         };
-        let gdl = match (raw.gdl.path, raw.gdl.version) {
-            (Some(path), None) => GdlDep::Path(dir.join(path)),
-            (None, Some(version)) => GdlDep::Version(version),
+        let gdl = match (raw.gdl.path, raw.gdl.version, raw.gdl.git, raw.gdl.rev) {
+            (Some(path), None, None, None) => GdlDep::Path(dir.join(path)),
+            (None, Some(version), None, None) => GdlDep::Version(version),
+            (None, None, Some(url), Some(rev)) => GdlDep::Git { url, rev },
             _ => {
                 return Err(Error::new(
-                    "[gdl] needs exactly one of `path` and `version`",
+                    "[gdl] needs exactly one of `path`, `version`, and `git` with `rev`",
                 ));
             }
         };
@@ -470,6 +496,36 @@ mod tests {
             spec.placement,
             gdl_model::Placement::new().segment("front", ["A", "B"])
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// gdl is not published: an exported tarball names it by a git
+    /// revision, which builds anywhere. A git source needs its revision,
+    /// and `[gdl]` takes one source.
+    #[test]
+    fn gdl_comes_from_a_path_a_version_or_a_git_revision() {
+        let dir = contract_dir("git");
+        let parse = |gdl: &str| {
+            let text = format!(
+                "[contract]\npath = \"contract\"\n[gdl]\n{gdl}\n[segment.front]\nnodes = [\"A\"]\n"
+            );
+            Spec::parse(&text, &dir.join("gdl.toml"), &dir).map(|spec| spec.gdl)
+        };
+        let git = parse("git = \"https://example.com/gdl\"\nrev = \"abc123\"").expect("git");
+        assert_eq!(
+            git.source(&|_| unreachable!("no path")),
+            r#"git = "https://example.com/gdl", rev = "abc123""#
+        );
+        for wrong in [
+            "git = \"https://example.com/gdl\"",
+            "rev = \"abc123\"",
+            "version = \"0.1\"\ngit = \"https://example.com/gdl\"\nrev = \"abc123\"",
+        ] {
+            assert_eq!(
+                parse(wrong).expect_err(wrong).to_string(),
+                "[gdl] needs exactly one of `path`, `version`, and `git` with `rev`"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

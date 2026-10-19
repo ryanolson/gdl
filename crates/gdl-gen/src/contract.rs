@@ -46,10 +46,7 @@ pub(crate) fn cargo_toml(
     crates: &[MessageCrate],
     path: &dyn Fn(&Path) -> String,
 ) -> String {
-    let gdl = match gdl {
-        GdlDep::Path(p) => format!("{{ path = {} }}", path(p)),
-        GdlDep::Version(v) => format!("{{ version = {} }}", crate::dump::toml_string(v)),
-    };
+    let gdl = format!("{{ {} }}", gdl.source(path));
     let mut text = format!(
         "# {MARKER}.\n\
          \n\

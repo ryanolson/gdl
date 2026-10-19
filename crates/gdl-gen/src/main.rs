@@ -5,6 +5,7 @@
 //! cargo gdl resolve --spec <gdl.toml>
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
+//! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
 //!
 //! `extract` reads what a crate offers (messages, exports, nodes) from its
@@ -15,7 +16,8 @@
 //! graph file resolves to. `generate` writes one crate per segment, and the
 //! contract crate of a graph file, into `--out`; with `--check` it writes
 //! nothing and fails if the files there differ. `diagram` prints the placed
-//! graph. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
+//! graph. `export` writes the generated crates as a `.tar.gz` with
+//! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.
 
 use std::path::PathBuf;
@@ -26,7 +28,8 @@ use gdl_gen::Format;
 const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--target-dir <dir>]
        cargo gdl resolve --spec <gdl.toml>
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
-       cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]";
+       cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
+       cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
 enum Command {
     Extract {
@@ -40,6 +43,9 @@ enum Command {
         check: bool,
     },
     Diagram(Format),
+    Export {
+        out: PathBuf,
+    },
 }
 
 struct Args {
@@ -91,6 +97,9 @@ fn args() -> Result<Args, String> {
         "generate" => Command::Generate {
             out: out.ok_or_else(|| USAGE.to_string())?,
             check,
+        },
+        "export" => Command::Export {
+            out: out.ok_or_else(|| USAGE.to_string())?,
         },
         "diagram" => match format.as_ref().and_then(|f| f.to_str()) {
             Some("dot") => Command::Diagram(Format::Dot),
@@ -164,6 +173,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let spec = spec()?;
             let target = target(spec.dir());
             print!("{}", gdl_gen::diagram(&spec, &target, *format)?);
+        }
+        Command::Export { out } => {
+            let spec = spec()?;
+            let target = target(spec.dir());
+            let bytes = gdl_gen::export(&spec, &target)?;
+            std::fs::write(out, bytes).map_err(|e| format!("{}: {e}", out.display()))?;
         }
         Command::Generate { out, check } => {
             let spec = spec()?;
