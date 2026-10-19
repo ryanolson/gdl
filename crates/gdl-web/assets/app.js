@@ -38,7 +38,7 @@ function messages() {
 // Every node the catalogue offers, with its entry.
 function nodes() {
   return state.entries.flatMap((entry) =>
-    (entry.nodes || []).map((node) => ({ entry: `${entry.package}@${entry.version}`, node })));
+    (entry.nodes || []).map((node) => ({ entry: `${entry.package}@${entry.version}`, source: entry.source, node })));
 }
 
 const port = (node, name) => node.ports.find((p) => p.port === name) || {};
@@ -134,7 +134,29 @@ function lane(title) {
 // there (a node before it was removed, or the source's request changed)
 // is dropped with everything after it: a slot keeps only what it would
 // offer now.
+// A chosen node as the catalogue holds it now, by its source and name: a
+// directory added again may have another version or other ports. Null when
+// the catalogue no longer offers it.
+function now(n) {
+  return nodes().find((c) => c.source === n.source && c.node.name === n.node.name) || null;
+}
+
 function prune(hop, request) {
+  // First, every choice as the catalogue holds it now; one it no longer
+  // offers is dropped with everything after it, as a misfit is below.
+  const forward = hop.forward.map(now);
+  const gone = forward.indexOf(null);
+  hop.forward = gone === -1 ? forward : forward.slice(0, gone);
+  hop.inner = gone === -1 && hop.inner ? now(hop.inner) : null;
+  if (hop.inner) {
+    const operator = hop.inner.node.role === "operator";
+    if (operator && !hop.nested) hop.nested = newHop();
+    if (!operator) hop.nested = null;
+  }
+  const backward = hop.backward.map(now);
+  const lost = backward.indexOf(null);
+  hop.backward = lost === -1 ? backward : backward.slice(0, lost);
+
   let current = request;
   const fits = hop.forward.findIndex((n) => {
     const ok = samePort(portOf(port(n.node, "In")), current);

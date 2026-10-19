@@ -98,8 +98,8 @@ async fn add(State(composer): Shared, Json(add): Json<Add>) -> Response {
     };
     // Fetching runs cargo, and adding writes a file: off the async threads.
     // The add is made to the served catalogue, under its lock, so two adds
-    // at once both stay served; `Catalog::add` keeps whichever entry was
-    // written first.
+    // at once both stay served; `Catalog::add` keeps a published version's
+    // first entry and replaces a directory's.
     let added = tokio::task::spawn_blocking(move || {
         let extracted =
             gdl_gen::extract(&krate, &composer.config.target).map_err(|e| e.to_string())?;

@@ -252,7 +252,10 @@ fn resolved(
 /// The contract that a spec's segments build on, its manifest, and the
 /// files of the contract crate when the generator writes it.
 struct Prepared {
-    /// The contract, at its place under the output directory.
+    /// The contract: a contract spec's crate, or a graph file's generated
+    /// one, at its place under the output directory when the files are
+    /// rendered (a placeholder under `target` otherwise, which nothing
+    /// reads).
     contract: spec::Contract,
     manifest: gdl_model::Manifest,
     /// Empty for a contract crate the spec names.
@@ -263,10 +266,10 @@ struct Prepared {
     graph: Option<(gdl_syntax::Graph, Resolution)>,
 }
 
-/// The spec's contract and its manifest. A graph file's contract is
-/// generated: its manifest is read from a copy under `target`, so that
-/// `--check` and `diagram` write nothing in the output, and its files
-/// are rendered for `out/contract` when `out` is given.
+/// The spec's contract and its manifest. A contract spec's manifest is read
+/// by compiling its crate. A graph file's contract is generated and nothing
+/// is compiled: its manifest is built from the graph and the resolution,
+/// and its files are rendered for `out/contract` when `out` is given.
 fn prepare(
     spec: &Spec,
     out: Option<&Path>,

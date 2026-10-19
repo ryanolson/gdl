@@ -98,8 +98,8 @@ impl Catalog {
                 )));
             }
             // One entry per directory: a catalogue written before a crate's
-            // version changed may hold its older readings too; the latest
-            // added stands.
+            // version changed may hold its older readings too; the one
+            // added last stands.
             if entry.offer.source.starts_with("path+") {
                 let same = catalog
                     .entries
@@ -107,7 +107,8 @@ impl Catalog {
                     .find(|(_, held)| held.offer.source == entry.offer.source)
                     .map(|(k, held)| (k.clone(), held.added.clone()));
                 match same {
-                    Some((_, added)) if added >= entry.added => continue,
+                    // Files are read in order: a tie goes to the one read last.
+                    Some((_, added)) if added > entry.added => continue,
                     Some((k, _)) => {
                         catalog.entries.remove(&k);
                     }

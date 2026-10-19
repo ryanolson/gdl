@@ -271,3 +271,35 @@ fn a_directory_crate_at_a_new_version_replaces_its_old_entry() {
     assert_eq!(loaded, ["read-protocols@0.2.0"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A catalogue written before a directory's entries were kept to one may
+/// hold several readings of it: a load keeps the one added last, and of
+/// two added in the same second, the one read last (the higher version).
+#[test]
+fn a_load_keeps_one_reading_of_each_directory() {
+    let dir = scratch("readings");
+    let workspace = workspace();
+    let write = |version: &str, added: &str| {
+        let mut entry = entry(&workspace, "read-protocols", added);
+        entry.offer.version = version.into();
+        let file = dir.join(format!("read-protocols/{version}.toml"));
+        std::fs::create_dir_all(file.parent().expect("dir")).expect("dir");
+        std::fs::write(file, entry.to_toml()).expect("written");
+    };
+    write("0.0.0", "2026-10-18T21:04:05Z");
+    write("0.2.0", "2026-10-18T21:05:00Z");
+    // Added before 0.2.0, though its version is higher.
+    write("0.3.0", "2026-10-18T21:04:30Z");
+    let keys = |dir: &Path| -> Vec<String> {
+        Catalog::load(dir)
+            .expect("loaded")
+            .entries()
+            .map(Entry::key)
+            .collect()
+    };
+    assert_eq!(keys(&dir), ["read-protocols@0.2.0"]);
+    // A tie goes to the file read last.
+    write("0.4.0", "2026-10-18T21:05:00Z");
+    assert_eq!(keys(&dir), ["read-protocols@0.4.0"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

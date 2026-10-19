@@ -311,10 +311,22 @@ impl Names {
                 .get(&key)
                 .filter(|e| e.offer.source == origin.source)
             else {
-                problems.push(format!(
-                    "message `{}`: its crate, {key}, is not in the catalogue: add it first",
-                    origin.path
-                ));
+                // The directory it was read from, at another version: the
+                // crates read against the old one name a message that went.
+                let now = entries.values().find(|e| {
+                    e.offer.source == origin.source && origin.source.starts_with("path+")
+                });
+                problems.push(match now {
+                    Some(now) => format!(
+                        "message `{}`: it was read from {key}, and the catalogue now holds that directory as {}: add again the crates that use it",
+                        origin.path,
+                        now.key()
+                    ),
+                    None => format!(
+                        "message `{}`: its crate, {key}, is not in the catalogue: add it first",
+                        origin.path
+                    ),
+                });
                 continue;
             };
             let Some(message) = own.offer.messages.iter().find(|m| m.path == origin.path) else {
@@ -856,6 +868,103 @@ mod tests {
         let offers: Vec<&gdl_gen::Offer> = catalog.entries().map(|e| &e.offer).collect();
         gdl_gen::check(&spec, &dir.join("target"), gdl_gen::Offers::Given(&offers))
             .expect("checks");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A node read against a directory's crate at one version, after the
+    /// directory was added again at another: the message names the version
+    /// that went, and says what to add again.
+    #[test]
+    fn a_node_read_against_an_older_version_says_to_add_it_again() {
+        let dir = std::env::temp_dir().join(format!("gdl-web-reread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut catalog = Catalog::load(&dir).expect("catalogue");
+        let path = |package: &str| format!("path+file:///work/{package}");
+        let words = Origin {
+            package: "proto".into(),
+            version: "0.1.0".into(),
+            source: path("proto"),
+            path: "proto::Words".into(),
+        };
+        for offer in [
+            Offer {
+                package: "proto".into(),
+                version: "0.2.0".into(),
+                source: path("proto"),
+                messages: vec![MessageEntry {
+                    name: "Words".into(),
+                    path: "proto::Words".into(),
+                    wire: true,
+                    public: true,
+                }],
+                exports: Vec::new(),
+                nodes: Vec::new(),
+            },
+            Offer {
+                package: "nodes".into(),
+                version: "0.1.0".into(),
+                source: path("nodes"),
+                messages: Vec::new(),
+                exports: Vec::new(),
+                nodes: vec![NodeEntry {
+                    name: "Engine".into(),
+                    role: Role::Sink,
+                    ty: "nodes::Engine".into(),
+                    ports: vec![
+                        PortEntry {
+                            port: "Req".into(),
+                            head: Some(words.clone()),
+                            item: None,
+                        },
+                        PortEntry {
+                            port: "Item".into(),
+                            head: Some(words.clone()),
+                            item: None,
+                        },
+                    ],
+                }],
+            },
+        ] {
+            catalog
+                .add(Entry {
+                    added: "2026-10-19T00:00:00Z".into(),
+                    checksum: None,
+                    offer,
+                })
+                .expect("added");
+        }
+        let draft = Draft {
+            name: "reread".into(),
+            source: Source {
+                name: "A".into(),
+                request: Port {
+                    head: Some(words.clone()),
+                    item: None,
+                },
+                response: words,
+            },
+            nodes: vec![Instance {
+                name: "Engine".into(),
+                entry: "nodes@0.1.0".into(),
+                node: "Engine".into(),
+            }],
+            hop: Hop {
+                forward: Vec::new(),
+                inner: "Engine".into(),
+                nested: None,
+                backward: Vec::new(),
+            },
+            segments: BTreeMap::new(),
+        };
+        let problems = draft
+            .render(&catalog, &Gdl::Path("/gdl".into()))
+            .expect_err("stale");
+        assert_eq!(
+            problems,
+            [
+                "message `proto::Words`: it was read from proto@0.1.0, and the catalogue now holds that directory as proto@0.2.0: add again the crates that use it"
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
