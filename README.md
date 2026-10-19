@@ -317,8 +317,9 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 
 | Path | Contents |
 |---|---|
-| `crates/gdl` | Request context, node roles, local composition, manifest, placement, and the velo runtime |
-| `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share |
+| `crates/gdl` | Request context, node roles, local composition, and the velo runtime; it re-exports the model |
+| `crates/gdl-model` | The model without the runtime: manifest, placement, layout, and diagrams. It builds for wasm, so the composer can run the same rules in a browser |
+| `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract |
 | `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |
 | `crates/gdl-extract` | The source reader: what a crate offers to graphs (messages, exports, and nodes), read from its source without building it |
 | `crates/gdl-macros` | The `graph!` macro, `derive(Message)`, `derive(Node)`, and `#[export]` |

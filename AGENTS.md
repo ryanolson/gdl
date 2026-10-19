@@ -11,7 +11,7 @@
 | `agent-docs/plan.md` | The design and milestone plan, including design rulings |
 | `agent-docs/reviews/` | Review records for each milestone |
 | `agent-docs/perf/` | Measurements, with the command that produced them |
-| `crates/` | `gdl` (runtime), `gdl-syntax` (graph parser shared by the macro and the generator), `gdl-message` (`derive(Message)` and the message catalogue, without the runtime), `gdl-extract` (reads what a crate offers from its source, without building it), `gdl-macros` (`graph!`, `derive(Message)`, `derive(Node)`, `#[export]`), `gdl-gen` (the `cargo-gdl` binary: `extract`, `resolve`, `generate`, `diagram`) |
+| `crates/` | `gdl` (runtime), `gdl-model` (manifest, placement, layout, and diagrams, without the runtime; builds for wasm), `gdl-syntax` (graph parser shared by the macro and the generator), `gdl-message` (`derive(Message)` and the message catalogue, without the runtime), `gdl-extract` (reads what a crate offers from its source, without building it), `gdl-macros` (`graph!`, `derive(Message)`, `derive(Node)`, `#[export]`), `gdl-gen` (the `cargo-gdl` binary: `extract`, `resolve`, `generate`, `diagram`) |
 | `examples/chat` | A separate workspace: a graph file (`chat.gdl`), its protocols crate, node crates that mark their nodes with `derive(gdl::Node)`, and the generated contract and segments. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments`; never edit `segments/` by hand |
 | `examples/asr` | A separate workspace with a streamed request, generated segments, and a demo that runs them. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments` |
 
@@ -20,6 +20,7 @@
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+rustup target add wasm32-unknown-unknown            # once: gdl-model's tests check the wasm build
 cargo test --workspace --no-run                   # build first: the limit is for the tests
 timeout <limit> cargo test --workspace            # full suite
 timeout <limit> cargo test -p <crate> --test <t>   # one target
