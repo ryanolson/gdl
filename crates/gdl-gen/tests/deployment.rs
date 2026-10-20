@@ -34,6 +34,9 @@ fn compose_starts_segments_only_after_hub_health() {
             ])
         );
         assert!(check["start_period"].is_string(), "{check}");
+        // The drain's bound, the request deadline by default, and a margin:
+        // Docker otherwise kills a container 10 s after stopping it.
+        assert_eq!(compose["services"][name]["stop_grace_period"], "630s");
         // Health is reported, never waited on between segments.
         let depends = compose["services"][name]["depends_on"]
             .as_object()
@@ -60,7 +63,7 @@ fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
         std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("valid test fixture");
     let text = portable_text(&text);
     let text = format!(
-        "{text}\n[deployment]\nbase_image = \"ubuntu:24.04\"\nbuild_image = \"rust:1.93-bookworm\"\nhub_image = \"debian:bookworm-slim\"\n[deployment.segment.engine]\nbase_image = \"nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04\"\n"
+        "{text}\n[deployment]\nbase_image = \"ubuntu:24.04\"\nbuild_image = \"rust:1.93-bookworm\"\nhub_image = \"debian:bookworm-slim\"\n[deployment.segment.engine]\nbase_image = \"nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04\"\n[deployment.segment.engine.config.runtime]\ndrain_ms = 90000\n"
     );
     let spec = gdl_gen::Spec::from_text(&text, &graph, &root.join("examples/api"))
         .expect("valid test fixture");
@@ -76,6 +79,11 @@ fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
             .contains("FROM nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04\n")
     );
     assert!(files[Path::new("engine/Dockerfile")].contains("FROM rust:1.93-bookworm AS build"));
+    // A drain bound set in the deployment's settings sets the grace.
+    let compose: serde_json::Value =
+        serde_json::from_str(&files[Path::new("compose.yaml")]).expect("valid test fixture");
+    assert_eq!(compose["services"]["engine"]["stop_grace_period"], "120s");
+    assert_eq!(compose["services"]["front"]["stop_grace_period"], "630s");
 }
 
 #[test]

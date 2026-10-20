@@ -26,10 +26,6 @@ impl Unit<'_> {
         let _ = writeln!(text);
         text.push_str(&self.settings_doc(&hosted, frontend, service, serves));
         let _ = writeln!(text);
-        if frontend.is_some() {
-            let _ = writeln!(text, "use std::sync::Arc;");
-            let _ = writeln!(text);
-        }
         let _ = writeln!(
             text,
             "use {}::{{Nodes, SEGMENT, SEGMENTS, start}};",
@@ -257,7 +253,17 @@ impl Unit<'_> {
             "    let segment = start(launch.node(), launch.roster(), config.runtime, nodes)?;"
         );
         let _ = writeln!(text, "    launch");
-        let _ = writeln!(text, "        .serve(|shutdown| async move {{");
+        // The runtime keeps the segment serving through the drain; the body
+        // shares it.
+        let segment = if frontend.is_some() || serves {
+            "segment"
+        } else {
+            "_segment"
+        };
+        let _ = writeln!(
+            text,
+            "        .serve(segment, |{segment}, shutdown| async move {{"
+        );
         text.push_str(&self.serve_body(frontend, service, serves));
         let _ = writeln!(text, "        }})");
         let _ = writeln!(text, "        .await?;");
@@ -278,7 +284,6 @@ impl Unit<'_> {
         let mut text = String::new();
         if frontend.is_some() {
             if let Some(service) = service {
-                let _ = writeln!(text, "            let segment = Arc::new(segment);");
                 let roots: Vec<_> = self
                     .manifest
                     .hops
@@ -334,7 +339,7 @@ impl Unit<'_> {
             } else {
                 let _ = writeln!(
                     text,
-                    "            gdl::Frontend::serve(frontend, Arc::new(segment), async move {{ shutdown.cancelled().await }}).await"
+                    "            gdl::Frontend::serve(frontend, segment, async move {{ shutdown.cancelled().await }}).await"
                 );
             }
         } else if serves {
@@ -359,7 +364,6 @@ impl Unit<'_> {
             );
         } else {
             let _ = writeln!(text, "            shutdown.cancelled().await;");
-            let _ = writeln!(text, "            drop(segment);");
             let _ = writeln!(text, "            Ok(())");
         }
         text

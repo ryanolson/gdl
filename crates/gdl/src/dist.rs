@@ -10,9 +10,11 @@ mod segment;
 mod stages;
 
 pub use fabric::bind_node;
+pub(crate) use fabric::shut_down;
 #[cfg(feature = "hub")]
 pub use fabric::{HubSession, bind_container_node};
 pub use hop::{DHop, Register};
+pub(crate) use launch::{announce, announced};
 pub use runtime::{Entries, Roster, RuntimeConfig};
 #[cfg(feature = "fault-injection")]
 pub use runtime::{Faults, Gate};

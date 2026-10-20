@@ -45,6 +45,16 @@ pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Velo> {
         .map_err(|e| transport(&e))
 }
 
+/// Stop `node` taking requests, let the handlers it is running finish
+/// within `within`, and close its transports. Called once the instance
+/// holds no request: a stream that velo still holds for a slow consumer is
+/// ended by the close (ruling 113).
+pub(crate) async fn shut_down(node: &Velo, within: std::time::Duration) {
+    node.begin_drain();
+    node.graceful_shutdown(velo::ShutdownPolicy::Timeout(within))
+        .await;
+}
+
 /// How other nodes reach `node`. velo merges the address afresh on every
 /// call, and the merged bytes differ between calls; take it once per use.
 pub(crate) fn peer(node: &Velo) -> PeerInfo {

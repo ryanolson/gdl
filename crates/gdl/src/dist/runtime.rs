@@ -51,6 +51,11 @@ pub struct RuntimeConfig {
     /// How often producers send heartbeats; a dead producer is detected
     /// after about three missed intervals. `None` keeps velo's default.
     pub heartbeat_interval: Option<Duration>,
+    /// How long a stopped instance may drain: keep serving until the
+    /// sources that send to it have drained, then until it holds no
+    /// request. `None` is `default_deadline`, since no request admitted
+    /// before the stop outlives it unless it set a longer deadline itself.
+    pub drain: Option<Duration>,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -93,6 +98,13 @@ pub struct Gate {
     pub release: tokio::sync::Notify,
 }
 
+impl RuntimeConfig {
+    /// How long a stopped instance may drain.
+    pub fn drain_bound(&self) -> Duration {
+        self.drain.unwrap_or(self.default_deadline)
+    }
+}
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
@@ -103,9 +115,10 @@ impl Default for RuntimeConfig {
             anchor_timeout: None,
             reservation_renew_interval: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
-            default_deadline: Duration::from_secs(600),
+            default_deadline: gdl_model::DEFAULT_DEADLINE,
             egress_limit: 1024,
             heartbeat_interval: None,
+            drain: None,
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -126,6 +139,7 @@ struct Settings {
     default_deadline_ms: u64,
     egress_limit: usize,
     heartbeat_interval_ms: Option<u64>,
+    drain_ms: Option<u64>,
 }
 
 impl Default for Settings {
@@ -143,6 +157,7 @@ impl Default for Settings {
             default_deadline_ms: ms(config.default_deadline),
             egress_limit: config.egress_limit,
             heartbeat_interval_ms: config.heartbeat_interval.map(ms),
+            drain_ms: config.drain.map(ms),
         }
     }
 }
@@ -162,6 +177,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             default_deadline: Duration::from_millis(s.default_deadline_ms),
             egress_limit: s.egress_limit,
             heartbeat_interval: s.heartbeat_interval_ms.map(Duration::from_millis),
+            drain: s.drain_ms.map(Duration::from_millis),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };

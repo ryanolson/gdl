@@ -91,9 +91,8 @@ async fn run() -> Result<(), Failure> {
         .await?;
     let segment = start(launch.node(), launch.roster(), config.runtime, nodes)?;
     launch
-        .serve(|shutdown| async move {
+        .serve(segment, |_segment, shutdown| async move {
             shutdown.cancelled().await;
-            drop(segment);
             Ok(())
         })
         .await?;

@@ -133,6 +133,26 @@ impl Roster {
 
 const POLL: Duration = Duration::from_millis(50);
 
+/// Announce in the roster directory `dir` that `node`, an instance of
+/// `segment`, has reached `phase`: a file in `dir/<phase>`, as `serving`
+/// is announced.
+pub(crate) fn announce(dir: &Path, phase: &str, segment: &str, node: &Velo) -> Result<()> {
+    publish(&dir.join(phase), segment, &peer(node))
+}
+
+/// The ids of the instances announced in `dir/<phase>`; none if nobody
+/// has reached it.
+pub(crate) fn announced(dir: &Path, phase: &str) -> Result<BTreeSet<String>> {
+    let dir = dir.join(phase);
+    if !dir.exists() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(read_roster(&dir)?
+        .peers()
+        .map(|peer| peer.instance_id().to_string())
+        .collect())
+}
+
 fn publish(dir: &Path, segment: &str, me: &PeerInfo) -> Result<()> {
     std::fs::create_dir_all(dir).map_err(io)?;
     let name = format!("{segment}.{}", me.instance_id());

@@ -101,7 +101,7 @@ async fn the_probes_follow_the_process() {
         "at the barrier: {body}"
     );
     launch
-        .serve(|_| async move {
+        .serve((), |_, _| async move {
             let (code, body) = get(address, "/health").await;
             assert_eq!((code, phase(&body)), (200, "ready"), "{body}");
             assert!(body.contains("\"status\":\"ready\""), "{body}");
@@ -176,7 +176,7 @@ async fn the_health_check_asks_the_listener_the_settings_name() {
         .expect("met itself");
     let checked = named("0.0.0.0", address.port());
     launch
-        .serve(|_| async move {
+        .serve((), |_, _| async move {
             checked.healthcheck().await.expect("healthy while serving");
             Ok(())
         })

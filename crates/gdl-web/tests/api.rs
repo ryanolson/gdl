@@ -956,7 +956,10 @@ async fn a_catalog_frontend_sets_the_source_binding_and_exports_its_service() {
                     text.contains("build::<http_frontend::HttpFrontend>"),
                     "{text}"
                 );
-                assert!(text.contains("gdl::Frontend::serve(frontend, Arc::new(segment)"));
+                assert!(
+                    text.contains("gdl::Frontend::serve(frontend, segment,"),
+                    "{text}"
+                );
                 assert!(!text.contains("gdl::serve_json_lines"));
                 frontend_main = true;
             } else {
@@ -1165,7 +1168,13 @@ async fn service_flags_control_required_typed_adapters_and_export_one_shared_pip
             let mut text = String::new();
             file.read_to_string(&mut text).expect("test result");
             assert!(text.contains("gdl::Service::serve"), "{text}");
-            assert_eq!(text.matches("let segment = Arc::new(segment)").count(), 1);
+            // One segment, shared through the runtime with every entry.
+            assert_eq!(
+                text.matches(".serve(segment, |segment, shutdown|").count(),
+                1,
+                "{text}"
+            );
+            assert!(!text.contains("Arc::new(segment)"), "{text}");
             assert!(text.contains("responses: None"));
             assert!(text.contains("anthropic: None"));
             assert!(text.contains("gdl::build_node::<T>"));

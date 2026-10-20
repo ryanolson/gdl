@@ -6,6 +6,11 @@ use crate::{Error, Manifest, Placement, layout};
 /// segment, and the hub's own health check, reach the hub through it; it is
 /// named once so they cannot disagree.
 pub const HUB_PUBLIC_PORT: u16 = 1337;
+
+/// The deadline a request gets when it crosses segments without one, and so
+/// by default how long a stopped segment may drain: the runtime's default,
+/// and the generated Compose file's grace before Docker kills a container.
+pub const DEFAULT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 /// The port the hub's control listener takes inside a deployment.
 pub const HUB_CONTROL_PORT: u16 = 8337;
 

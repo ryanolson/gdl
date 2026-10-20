@@ -21,7 +21,7 @@ use serde::de::DeserializeOwned;
 use velo::Velo;
 
 use crate::cx::Cx;
-use crate::dist::{Roster, RuntimeConfig, bind_node};
+use crate::dist::{Roster, RuntimeConfig, Segment, announce, announced, bind_node, shut_down};
 use crate::error::{Error, ErrorKind, Result};
 use system::{Health, Phase, SystemSettings};
 
@@ -282,10 +282,9 @@ impl<H: Hosted> ProcessConfig<H> {
     ) -> Result<Launch> {
         // The instances this one waits for before it serves: those of the
         // segments it sends to.
-        let inner: Vec<String> = gdl_model::layout(&deployment.graph, &deployment.placement)?
-            .sends_to(segment)
-            .into_iter()
-            .collect();
+        let layout = gdl_model::layout(&deployment.graph, &deployment.placement)?;
+        let inner: Vec<String> = layout.sends_to(segment).into_iter().collect();
+        let (source, reaching) = sources(&layout, &deployment.graph, segment);
         let discovery = self.discovery()?;
         let counts = match discovery {
             Discovery::Files(_) => ("[instances]", &self.instances, &self.min_replicas),
@@ -363,14 +362,27 @@ impl<H: Hosted> ProcessConfig<H> {
         // Held until the barrier: a request that reaches this instance
         // first waits, rather than leaving for a peer that is not serving.
         roster.hold();
+        let leaving = Leaving {
+            dir: match &peers {
+                Peers::Files(dir) => Some(dir.clone()),
+                #[cfg(feature = "hub")]
+                Peers::Hub(_) => None,
+            },
+            segment,
+            node: node.clone(),
+        };
         Ok(Launch {
             node,
             roster,
             peers,
             segment,
             inner,
+            source,
+            reaching,
             wait,
+            drain: self.runtime.drain_bound(),
             process: None,
+            _leaving: leaving,
         })
     }
 
@@ -396,9 +408,91 @@ pub struct Launch {
     segment: &'static str,
     /// The segments this one sends to.
     inner: Vec<String>,
+    /// Whether this segment hosts a source.
+    source: bool,
+    /// The segments hosting a source whose requests can reach this one.
+    reaching: Vec<String>,
     wait: Duration,
+    /// How long a stop may take to drain.
+    drain: Duration,
     /// Set by `launch` once the meeting is done.
     process: Option<Process>,
+    /// Dropped last, on every way out: says the instance has left.
+    _leaving: Leaving,
+}
+
+/// Announces, when dropped, that the instance has left, so that no peer's
+/// drain waits for it. In a roster directory that is a file under
+/// `left/`; at the hub, `serve` unregisters on its way out, and on any other
+/// way the registration ends with the lease. An instance that crashes
+/// leaves nothing: under a hub its lease lapses, and in a roster directory
+/// a drain that waits for it runs to its bound.
+struct Leaving {
+    dir: Option<PathBuf>,
+    segment: &'static str,
+    node: Velo,
+}
+
+impl Drop for Leaving {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            let _ = announce(dir, "left", self.segment, &self.node);
+        }
+    }
+}
+
+/// Whether `segment` hosts a source, and the segments hosting one whose
+/// requests can reach it: those it is reachable from through `sends_to`,
+/// itself included only when a path leaves it and returns.
+fn sources(
+    layout: &gdl_model::Layout,
+    graph: &gdl_model::Manifest,
+    segment: &str,
+) -> (bool, Vec<String>) {
+    let hosting: std::collections::BTreeSet<&str> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.role == gdl_model::Role::Source)
+        .filter_map(|node| layout.segment_of(&node.name))
+        .collect();
+    let reaching = hosting
+        .iter()
+        .filter(|from| {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut next: Vec<String> = layout.sends_to(from).into_iter().collect();
+            while let Some(at) = next.pop() {
+                if at == segment {
+                    return true;
+                }
+                if seen.insert(at.clone()) {
+                    next.extend(layout.sends_to(&at));
+                }
+            }
+            false
+        })
+        .map(|from| from.to_string())
+        .collect();
+    (hosting.contains(segment), reaching)
+}
+
+/// What a launch keeps serving while it drains: the started segment, whose
+/// admitted requests the drain waits to see at zero.
+pub trait Drains: Send + Sync + 'static {
+    /// Requests the instance holds now.
+    fn admitted(&self) -> usize;
+}
+
+impl<H: Send + Sync + 'static> Drains for Segment<H> {
+    fn admitted(&self) -> usize {
+        Segment::admitted(self)
+    }
+}
+
+/// A process that hosts no segment, such as a test's, holds no request.
+impl Drains for () {
+    fn admitted(&self) -> usize {
+        0
+    }
 }
 
 enum Peers {
@@ -420,21 +514,31 @@ impl Launch {
 
     /// Announce that this instance's handlers are installed, wait until
     /// every instance it can route to has announced the same, release the
-    /// roster, then run `serve` until it finishes. Its context is cancelled by SIGINT or
-    /// SIGTERM, after which `serve` is left to finish on its own terms, so a
-    /// frontend drains the requests it holds; a second signal ends the wait.
-    /// A lost hub lease cancels the context the same way, and the drained
-    /// body's result gives way to the lease's error: the process is
-    /// invisible to new peers and will be probed as dead, so the deployment
-    /// must start it again.
+    /// roster, then run `serve` with the started `segment` until it
+    /// finishes. A request that reaches this instance before the barrier
+    /// waits at the held roster.
     ///
-    /// No request may leave before every instance it can be routed to has
-    /// registered its handlers, so call this after the segment has started.
-    /// A request that reaches this instance earlier waits at the held
-    /// roster.
-    pub async fn serve<F, Fut>(mut self, serve: F) -> Result<()>
+    /// A stop (SIGINT or SIGTERM, or [`Process::stop`]) makes the instance
+    /// not ready and cancels the context `serve` gets; `serve` then finishes
+    /// on its own terms, so a frontend drains the requests it holds. The
+    /// instance keeps `segment` serving after that: a request admitted
+    /// before the stop may still cross it. It waits until every instance of
+    /// the source segments whose requests can reach it has drained (its
+    /// `serve` returned) or left, then until it holds no request, then
+    /// stops velo and leaves. A source's instance announces that it has
+    /// drained before it waits, so source segments that route to each other
+    /// never wait for each other. The drain is bounded by the runtime's
+    /// `drain` (by default the request deadline), and a second stop ends it
+    /// at once.
+    ///
+    /// A lost hub lease stops the instance the same way, skips the wait,
+    /// since the hub that would answer it is gone, and gives the lease's
+    /// error: the process is invisible to new peers and will be probed as
+    /// dead, so the deployment must start it again.
+    pub async fn serve<S, F, Fut>(mut self, segment: S, serve: F) -> Result<()>
     where
-        F: FnOnce(Cx) -> Fut,
+        S: Drains,
+        F: FnOnce(Arc<S>, Cx) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
         let process = self.process.take().ok_or_else(|| {
@@ -446,7 +550,7 @@ impl Launch {
                 Peers::Files(dir) => {
                     self.roster
                         .ready(
-                            &dir.join("ready"),
+                            &dir.join("serving"),
                             self.segment,
                             &self.node,
                             &inner,
@@ -462,8 +566,9 @@ impl Launch {
         self.roster.release();
         process.health.set(Phase::Ready);
         eprintln!("{}: ready", self.segment);
+        let segment = Arc::new(segment);
         let shutdown = Cx::new();
-        let body = serve(shutdown.clone());
+        let body = serve(Arc::clone(&segment), shutdown.clone());
         tokio::pin!(body);
         let lease = async {
             match &self.peers {
@@ -472,25 +577,115 @@ impl Launch {
                 Peers::Hub(session) => session.maintain().await,
             }
         };
-        let stop = tokio::select! {
-            result = &mut body => {
-                process.health.set(Phase::Draining);
-                return result;
-            }
-            () = process.stops(1) => Ok(()),
-            result = lease => result,
+        let (ended, stop) = tokio::select! {
+            result = &mut body => (Some(result), Ok(())),
+            () = process.stops(1) => (None, Ok(())),
+            result = lease => (None, result),
         };
+        let deadline = tokio::time::Instant::now() + self.drain;
         process.health.set(Phase::Draining);
         shutdown.cancel();
-        tokio::select! {
-            result = &mut body => stop.and(result),
-            () = process.stops(2) => Err(Error::new(
+        let second = || {
+            Error::new(
                 ErrorKind::Cancelled,
                 "stopped by a second signal before the drain finished",
-            )),
+            )
+        };
+        let result = match ended {
+            Some(result) => result,
+            None => tokio::select! {
+                result = &mut body => result,
+                () = process.stops(2) => return Err(second()),
+            },
+        };
+        if stop.is_ok() {
+            tokio::select! {
+                () = self.drain(segment.as_ref(), deadline) => {}
+                () = process.stops(2) => return Err(second()),
+            }
+        }
+        let left = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .max(Duration::from_secs(1));
+        shut_down(&self.node, left).await;
+        #[cfg(feature = "hub")]
+        if let Peers::Hub(session) = &self.peers {
+            session.leave().await;
+        }
+        stop.and(result)
+    }
+
+    /// Announce that this instance has drained if it is a source's, then
+    /// wait until every instance of the source segments that can reach it
+    /// has drained or left, then until it holds no request: each until
+    /// `deadline`. Polls; nothing is added to a request's path.
+    async fn drain(&mut self, segment: &dyn Drains, deadline: tokio::time::Instant) {
+        let reaching: Vec<&str> = self.reaching.iter().map(String::as_str).collect();
+        let pause = |every: Duration| async move {
+            if tokio::time::Instant::now() + every > deadline {
+                return false;
+            }
+            tokio::time::sleep(every).await;
+            true
+        };
+        match &mut self.peers {
+            Peers::Files(dir) => {
+                if self.source {
+                    let _ = announce(dir, "drained", self.segment, &self.node);
+                }
+                // A roster directory's rosters are the same everywhere, so
+                // this one names every instance to wait for.
+                let want: std::collections::BTreeSet<String> = self
+                    .roster
+                    .segments()
+                    .filter(|(segment, _)| reaching.contains(segment))
+                    .flat_map(|(_, peers)| peers)
+                    .map(|peer| peer.instance_id().to_string())
+                    .collect();
+                loop {
+                    let done = announced(dir, "drained")
+                        .and_then(|mut done| {
+                            done.extend(announced(dir, "left")?);
+                            Ok(done)
+                        })
+                        .is_ok_and(|done| want.is_subset(&done));
+                    if done || !pause(DRAIN_POLL).await {
+                        break;
+                    }
+                }
+            }
+            #[cfg(feature = "hub")]
+            Peers::Hub(session) => {
+                if self.source {
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let _ = session.drained(left).await;
+                }
+                // Rosters differ under a hub, so the hub's members are
+                // asked, not this instance's roster: one that joined later
+                // may route here too.
+                // A lease lost meanwhile ends the wait: the hub that would
+                // answer it is gone.
+                if !reaching.is_empty() {
+                    loop {
+                        let done = session.is_lost()
+                            || matches!(session.all_drained(&reaching).await, Ok(true));
+                        if done || !pause(crate::dist::HubSession::poll()).await {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        while segment.admitted() > 0 {
+            if !pause(DRAIN_POLL).await {
+                break;
+            }
         }
     }
 }
+
+/// How often a draining instance looks again.
+const DRAIN_POLL: Duration = Duration::from_millis(50);
 
 /// A segment process before and beyond its graph: the signals that stop it
 /// and the system listener that reports on it. Started first, before the
@@ -502,6 +697,7 @@ impl Launch {
 pub struct Process {
     /// How many stop signals have come.
     stops: tokio::sync::watch::Receiver<u32>,
+    count: Arc<tokio::sync::watch::Sender<u32>>,
     health: Arc<Health>,
     system: Option<SocketAddr>,
 }
@@ -512,7 +708,10 @@ impl Process {
     pub async fn start<H>(config: &ProcessConfig<H>) -> Result<Self> {
         let mut signals = Signals::new()?;
         let (count, stops) = tokio::sync::watch::channel(0u32);
+        let count = Arc::new(count);
+        let counting = Arc::clone(&count);
         tokio::spawn(async move {
+            let count = counting;
             loop {
                 tokio::select! {
                     () = signals.wait() => count.send_modify(|stops| *stops += 1),
@@ -527,9 +726,17 @@ impl Process {
         }
         Ok(Self {
             stops,
+            count,
             health,
             system,
         })
+    }
+
+    /// Stop the process as a signal does: the first stop drains, the
+    /// second ends the drain. For a process that embeds a segment and stops
+    /// it itself.
+    pub fn stop(&self) {
+        self.count.send_modify(|stops| *stops += 1);
     }
 
     /// The system listener's address, if it has one.

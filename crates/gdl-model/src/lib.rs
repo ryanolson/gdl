@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{
-    DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT, SegmentRegistration,
-    segment_name_problem,
+    DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
+    SegmentRegistration, segment_name_problem,
 };
 pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
 pub use placement::{

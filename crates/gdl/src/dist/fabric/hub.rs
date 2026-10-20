@@ -17,6 +17,7 @@ pub struct HubSession {
     registration: SegmentRegistration,
     loaded: Option<HubServiceRegistration>,
     serving: Option<HubServiceRegistration>,
+    drained: Option<HubServiceRegistration>,
     lease: tokio::task::JoinHandle<()>,
     lost: watch::Receiver<Option<String>>,
 }
@@ -54,6 +55,7 @@ impl HubSession {
             registration,
             loaded: None,
             serving: None,
+            drained: None,
             lease,
             lost,
         })
@@ -171,6 +173,46 @@ impl HubSession {
             }
             tokio::time::sleep(POLL).await;
         }
+    }
+
+    /// Announce that this instance, a source's, has drained the requests it
+    /// held, retried until `wait` runs out.
+    pub(crate) async fn drained(&mut self, wait: Duration) -> Result<()> {
+        if self.drained.is_none() {
+            let deadline = tokio::time::Instant::now() + wait;
+            self.drained = Some(self.announce(Phase::Drained, deadline).await?);
+        }
+        Ok(())
+    }
+
+    /// Whether every current member of `segments` has announced `drained`.
+    /// A member that left is no longer one, so it is not waited for.
+    pub(crate) async fn all_drained(&self, segments: &[&str]) -> Result<bool> {
+        let members = self.members().await?;
+        let mut drained = HashSet::new();
+        for segment in segments {
+            drained.extend(self.instances(segment, Phase::Drained).await?);
+        }
+        Ok(members
+            .iter()
+            .filter(|m| segments.contains(&m.registration.segment.as_str()))
+            .all(|m| drained.contains(&m.peer.instance_id())))
+    }
+
+    /// Leave the hub at once, rather than when the lease runs out, so that
+    /// no peer's drain waits for this instance.
+    pub(crate) async fn leave(&self) {
+        let _ = tokio::time::timeout(POLL * 50, self.client.unregister()).await;
+    }
+
+    /// Whether the lease is lost.
+    pub(crate) fn is_lost(&self) -> bool {
+        self.lost().is_err()
+    }
+
+    /// How long to wait between two questions to the hub.
+    pub(crate) fn poll() -> Duration {
+        POLL
     }
 
     /// Resolves when the lease is lost: the hub dropped the registration,
@@ -333,6 +375,7 @@ const POLL: Duration = Duration::from_millis(100);
 enum Phase {
     Loaded,
     Serving,
+    Drained,
 }
 
 /// The hub service that announces a segment's instances in `phase`. The
@@ -341,6 +384,7 @@ fn service(segment: &str, phase: Phase) -> String {
     let phase = match phase {
         Phase::Loaded => "loaded",
         Phase::Serving => "serving",
+        Phase::Drained => "drained",
     };
     format!(
         "gdl-{phase}-{}",

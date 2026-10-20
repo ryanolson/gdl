@@ -104,7 +104,7 @@ async fn run() -> Result<(), Failure> {
         .await?;
     let segment = start(launch.node(), launch.roster(), config.runtime, nodes)?;
     launch
-        .serve(|shutdown| async move {
+        .serve(segment, |segment, shutdown| async move {
             let input = tokio::io::BufReader::new(tokio::io::stdin());
             let call = |request: chat_front::contract::SourceReq| {
                 segment.call::<_, chat_front::contract::SourceItem>(gdl::Cx::new(), request)

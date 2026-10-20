@@ -195,10 +195,16 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
             }
             files.insert(path, toml::to_string_pretty(&config).map_err(io)?);
         }
+        // Docker kills a container 10 s after it stops it unless told otherwise; a segment may
+        // drain for its bound, read here from its settings as generated (an environment
+        // override at run time is not seen).
+        let config: toml::Table =
+            toml::from_str(&files[&Path::new(segment).join("config.toml")]).map_err(io)?;
+        let grace = drain_bound(&config).as_secs() + 30;
         // Health is reported, never waited on: no segment depends on another's, since segments
         // whose paths return wait for each other, and an order over them deadlocks. The start
         // period covers loading models.
-        services.insert(segment.into(),json!({"build":{"context":".","dockerfile":format!("{segment}/Dockerfile")},"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"healthcheck":{"test":["CMD","/usr/local/bin/segment","--healthcheck","/etc/gdl/config"],"interval":"5s","timeout":"3s","retries":3,"start_period":"1800s"},"ports":settings.segment.get(segment).map(|s| s.ports.clone()).unwrap_or_default()}));
+        services.insert(segment.into(),json!({"build":{"context":".","dockerfile":format!("{segment}/Dockerfile")},"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"stop_grace_period":format!("{grace}s"),"healthcheck":{"test":["CMD","/usr/local/bin/segment","--healthcheck","/etc/gdl/config"],"interval":"5s","timeout":"3s","retries":3,"start_period":"1800s"},"ports":settings.segment.get(segment).map(|s| s.ports.clone()).unwrap_or_default()}));
     }
     files.insert(
         "compose.yaml".into(),
@@ -207,6 +213,22 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
     );
     files.insert("README.md".into(), "# Docker Compose deployment\n\nRun `docker compose up --build` from this directory. The hub starts first; every segment registers its compiled contract and waits for all handlers to be ready.\n\nConfigure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.\n\nEach segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that joins later is not routed to by the segments already running, so scale before they start, or restart the stack. Kubernetes and srt-slurm are not generated.\n".into());
     Ok(files)
+}
+
+/// How long a segment with these settings may drain: `runtime.drain_ms`,
+/// else `runtime.default_deadline_ms`, else the runtime's defaults.
+fn drain_bound(config: &toml::Table) -> std::time::Duration {
+    let runtime = config.get("runtime").and_then(toml::Value::as_table);
+    let ms = |key: &str| {
+        runtime
+            .and_then(|runtime| runtime.get(key))
+            .and_then(toml::Value::as_integer)
+            .and_then(|ms| u64::try_from(ms).ok())
+    };
+    ms("drain_ms").or_else(|| ms("default_deadline_ms")).map_or(
+        gdl_model::DEFAULT_DEADLINE,
+        std::time::Duration::from_millis,
+    )
 }
 
 fn dockerfile(

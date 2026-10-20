@@ -240,8 +240,8 @@ async fn segment_processes_meet_through_a_hub() {
     assert_eq!(front.roster().instances("sink").len(), 1);
     assert_eq!(sink.roster().instances("front").len(), 1);
     let (a, b) = tokio::join!(
-        front.serve(|_| async { Ok(()) }),
-        sink.serve(|_| async { Ok(()) }),
+        front.serve((), |_, _| async { Ok(()) }),
+        sink.serve((), |_, _| async { Ok(()) }),
     );
     a.expect("front served");
     b.expect("sink served");
@@ -300,7 +300,7 @@ async fn a_segment_drains_and_stops_when_its_hub_is_gone() {
     let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen = Arc::clone(&drained);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let serving = tokio::spawn(front.serve(move |shutdown| async move {
+    let serving = tokio::spawn(front.serve((), move |_, shutdown| async move {
         // The body runs once the barrier has passed.
         let _ = ready_tx.send(());
         shutdown.cancelled().await;
@@ -309,7 +309,7 @@ async fn a_segment_drains_and_stops_when_its_hub_is_gone() {
         seen.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }));
-    let other = tokio::spawn(sink.serve(|shutdown| async move {
+    let other = tokio::spawn(sink.serve((), |_, shutdown| async move {
         shutdown.cancelled().await;
         Ok(())
     }));
@@ -719,4 +719,206 @@ async fn a_returning_forward_path_does_not_deadlock_readiness() {
     mid_result.expect("the middle serves");
     drop((front, mid));
     hub.shutdown().await.expect("valid test fixture");
+}
+
+/// Settings for an instance of `spec()` at `hub`, heartbeating every
+/// 200 ms, drained within `drain_ms`.
+fn hub_settings(hub: &velo_hub::Hub, drain_ms: u64) -> ProcessConfig<Nothing> {
+    let settings = format!(
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n[runtime]\ndrain_ms = {drain_ms}\n",
+        hub.public_addr().port(),
+        hub.control_addr().port()
+    );
+    ProcessConfig::from_figment(figment::Figment::from(figment::providers::Toml::string(
+        &settings,
+    )))
+    .expect("settings")
+}
+
+/// Under a hub, a stop of everything holds the sink until the front, the
+/// source, has drained: the sink asks the hub, not its own roster.
+#[tokio::test]
+async fn under_a_hub_the_sink_leaves_after_the_source_drains() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let config = hub_settings(&hub, 20_000);
+    let process = gdl::Process::start(&config).await.expect("process");
+    let deployment = spec();
+    let (front, sink) = tokio::join!(
+        config.launch(&process, "front", &["front", "sink"], &deployment, async {
+            Ok(())
+        }),
+        config.launch(&process, "sink", &["front", "sink"], &deployment, async {
+            Ok(())
+        }),
+    );
+    let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
+    let (front_running, front_runs) = tokio::sync::oneshot::channel();
+    let front_served = tokio::spawn(front.serve((), |_, shutdown| async move {
+        let _ = front_running.send(());
+        shutdown.cancelled().await;
+        // The front's drain: requests it holds, finishing after the stop.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(())
+    }));
+    let (sink_running, sink_runs) = tokio::sync::oneshot::channel();
+    let sink_served = tokio::spawn(async move {
+        let served = sink
+            .serve((), |_, shutdown| async move {
+                let _ = sink_running.send(());
+                shutdown.cancelled().await;
+                Ok(())
+            })
+            .await;
+        (served, tokio::time::Instant::now())
+    });
+    for runs in [front_runs, sink_runs] {
+        tokio::time::timeout(WAIT, runs)
+            .await
+            .expect("serving in time")
+            .expect("the body ran");
+    }
+    let stopped = tokio::time::Instant::now();
+    process.stop();
+    let (sink_served, sink_left) = tokio::time::timeout(WAIT, sink_served)
+        .await
+        .expect("the sink left in time")
+        .expect("the sink's task");
+    sink_served.expect("the sink served");
+    tokio::time::timeout(WAIT, front_served)
+        .await
+        .expect("the front left in time")
+        .expect("the front's task")
+        .expect("the front served");
+    assert!(
+        sink_left - stopped >= Duration::from_millis(250),
+        "the sink left before the front drained: {:?}",
+        sink_left - stopped
+    );
+}
+
+/// A source that crashes announces nothing; its lease runs out, it is no
+/// longer a member, and the sink's drain stops waiting for it.
+#[tokio::test]
+async fn a_crashed_source_ends_the_wait_with_its_lease() {
+    let hub = hub(Duration::from_secs(1)).await;
+    let config = hub_settings(&hub, 20_000);
+    let (front_process, sink_process) = (
+        gdl::Process::start(&config).await.expect("process"),
+        gdl::Process::start(&config).await.expect("process"),
+    );
+    let deployment = spec();
+    let (front, sink) = tokio::join!(
+        config.launch(
+            &front_process,
+            "front",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+        config.launch(
+            &sink_process,
+            "sink",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+    );
+    let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
+    let (front_running, front_runs) = tokio::sync::oneshot::channel();
+    let front_served = tokio::spawn(front.serve((), |_, _| async move {
+        let _ = front_running.send(());
+        std::future::pending::<gdl::Result<()>>().await
+    }));
+    let (sink_running, sink_runs) = tokio::sync::oneshot::channel();
+    let sink_served = tokio::spawn(sink.serve((), |_, shutdown| async move {
+        let _ = sink_running.send(());
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    for runs in [front_runs, sink_runs] {
+        tokio::time::timeout(WAIT, runs)
+            .await
+            .expect("serving in time")
+            .expect("the body ran");
+    }
+    // The front crashes: its task ends without a word to anyone.
+    front_served.abort();
+    sink_process.stop();
+    let stopped = tokio::time::Instant::now();
+    tokio::time::timeout(WAIT, sink_served)
+        .await
+        .expect("the sink left before the drain's bound")
+        .expect("the sink's task")
+        .expect("the sink served");
+    assert!(
+        stopped.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        stopped.elapsed()
+    );
+}
+
+/// A lease lost while the sink waits for the source ends the wait: the hub
+/// that would say the source drained is gone.
+#[tokio::test]
+async fn a_lease_lost_while_draining_ends_the_wait() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let config = hub_settings(&hub, 20_000);
+    let (front_process, sink_process) = (
+        gdl::Process::start(&config).await.expect("process"),
+        gdl::Process::start(&config).await.expect("process"),
+    );
+    let deployment = spec();
+    let (front, sink) = tokio::join!(
+        config.launch(
+            &front_process,
+            "front",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+        config.launch(
+            &sink_process,
+            "sink",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+    );
+    let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
+    let (front_running, front_runs) = tokio::sync::oneshot::channel();
+    let _front_served = tokio::spawn(front.serve((), |_, _| async move {
+        let _ = front_running.send(());
+        std::future::pending::<gdl::Result<()>>().await
+    }));
+    let (sink_running, sink_runs) = tokio::sync::oneshot::channel();
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let sink_served = tokio::spawn(sink.serve((), |_, shutdown| async move {
+        let _ = sink_running.send(());
+        shutdown.cancelled().await;
+        let _ = stopped_tx.send(());
+        Ok(())
+    }));
+    for runs in [front_runs, sink_runs] {
+        tokio::time::timeout(WAIT, runs)
+            .await
+            .expect("serving in time")
+            .expect("the body ran");
+    }
+    sink_process.stop();
+    tokio::time::timeout(WAIT, stopped_rx)
+        .await
+        .expect("the sink stopped")
+        .expect("its body ran");
+    hub.shutdown().await.expect("valid test fixture");
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(WAIT, sink_served)
+        .await
+        .expect("the sink left before the drain's bound")
+        .expect("the sink's task")
+        .expect("the sink served");
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        started.elapsed()
+    );
 }
