@@ -27,8 +27,9 @@ use velo::{
 use super::envelope::WireItem;
 use crate::error::{Error, ErrorKind, Result};
 
-/// A velo node whose TCP transport and stream listener bind `listen`. Port
-/// zero picks a free port; the node's address carries the bound one.
+/// A velo node whose TCP transport binds `listen`, carrying requests and
+/// streams alike. Port zero picks a free port; the node's address carries
+/// the bound one.
 pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Velo> {
     let transport = |e: &dyn std::fmt::Display| Error::new(ErrorKind::Transport, e.to_string());
     let listener = std::net::TcpListener::bind(listen).map_err(|e| transport(&e))?;
@@ -37,9 +38,13 @@ pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Velo> {
         .map_err(|e| transport(&e))?
         .build()
         .map_err(|e| transport(&e))?;
+    // The messenger mux carries every stream over the node's one TCP
+    // listener. gdl talks only to gdl, so the per-stream listener velo keeps
+    // for older peers would be a second port per segment, and a path whose
+    // retirement signal means less.
     Velo::builder()
         .add_transport(Arc::new(tcp))
-        .stream_bind_addr(listen.ip())
+        .mux_only()
         .build()
         .await
         .map_err(|e| transport(&e))

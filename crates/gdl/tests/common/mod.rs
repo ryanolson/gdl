@@ -793,7 +793,7 @@ pub async fn tight_velo_node() -> velo::Velo {
     };
     velo::Velo::builder()
         .add_transport(Arc::new(transport))
-        .stream_bind_addr([127, 0, 0, 1].into())
+        .mux_only()
         .messenger_mux(mux)
         .expect("mux config")
         .build()
@@ -819,7 +819,7 @@ pub async fn metered_tight_velo_node() -> (velo::Velo, prometheus::Registry) {
     };
     let node = velo::Velo::builder()
         .add_transport(Arc::new(transport))
-        .stream_bind_addr([127, 0, 0, 1].into())
+        .mux_only()
         .messenger_mux(mux)
         .expect("mux config")
         .metrics(metrics)
