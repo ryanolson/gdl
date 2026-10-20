@@ -44,7 +44,7 @@
     <div class="deploy-defaults"><label>Default runtime image<input id="deploy-base" value="debian:bookworm-slim" spellcheck="false"></label><label>Rust build image<input id="deploy-build" value="rust:1.93-slim-bookworm" spellcheck="false"></label><label>Hub runtime image<input id="deploy-hub" placeholder="Use default runtime image" spellcheck="false"></label></div>
     <div id="deploy-segments"></div>
     <h3>Generated files</h3>
-    <p class="muted">Change the settings above to regenerate. The download contains exactly this preview, plus the build sources.</p>
+    <p class="muted">Change the settings above to regenerate. The download contains exactly this preview. Only Git and crates.io packages can be deployed.</p>
     <div class="deploy-preview"><nav id="deploy-files" aria-label="Generated deployment files"></nav><div class="deploy-file"><h4 id="deploy-filename">Generated files</h4><pre><code id="deploy-code"></code></pre></div></div>
     <p class="muted">Single replica per segment. Copy the bundle to your Docker host, extract it, then run:</p><pre>cd deployment
 docker compose up --build</pre>

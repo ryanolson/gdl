@@ -1,10 +1,6 @@
 use serde::Deserialize;
 use serde_json::json;
-use std::{
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::Path;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
@@ -50,17 +46,41 @@ use crate::{
     spec::{CrateSource, GdlDep, Source},
 };
 
-/// Render a Docker Compose deployment. Local dependencies are staged separately by [`compose`].
+/// Render a Docker Compose deployment from Git or registry dependencies.
 pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
-    let GdlDep::Path(gdl) = &spec.gdl else {
+    let Source::Graph(source) = &spec.source else {
         return Err(Error::new(
-            "Compose currently requires a local GDL checkout",
+            "Deploy requires a graph definition with Git or crates.io packages, not a local contract crate",
         ));
     };
-    let root = gdl
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| Error::new("GDL workspace path is missing"))?;
+    let local: Vec<_> = source
+        .crates
+        .iter()
+        .chain(&source.nodes)
+        .filter(|listed| matches!(listed.source, CrateSource::Path(_)))
+        .map(|listed| listed.package.as_str())
+        .chain(
+            spec.bind
+                .values()
+                .filter(|binding| matches!(binding.source, CrateSource::Path(_)))
+                .map(|binding| binding.package.as_str()),
+        )
+        .collect();
+    if !local.is_empty() {
+        return Err(Error::new(format!(
+            "Deploy requires Git or crates.io node and message packages. Re-import these local packages from Git or crates.io: {}",
+            local.join(", ")
+        )));
+    }
+    let hub_install = match &spec.gdl {
+        GdlDep::Git { url, rev } => format!("--git {} --rev {}", quote(url), quote(rev)),
+        GdlDep::Version(version) => format!("--version {}", quote(version)),
+        GdlDep::Path(_) => {
+            return Err(Error::new(
+                "Deploy requires GDL from Git or crates.io; start the server with --gdl-git and --gdl-rev",
+            ));
+        }
+    };
     let (mut files, graph) =
         crate::render_with(spec, out, target, emit::Deps::Exported, Offers::Read)?;
     let checked = crate::check(spec, target, Offers::Read)?;
@@ -99,7 +119,7 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
     files.insert(
         "hub/Dockerfile".into(),
         dockerfile(
-            &format!("{}/Cargo.toml", root.display()),
+            &hub_install,
             "gdl-hub",
             "deployment.json",
             true,
@@ -172,20 +192,26 @@ fn dockerfile(
     builder: &str,
     base: &str,
 ) -> String {
-    let package_arg = if hub { " -p gdl-hub" } else { "" };
+    let build = if hub {
+        format!("cargo install {manifest} --locked --root /build-tools gdl-hub")
+    } else {
+        format!("cargo build --release --manifest-path {}", quote(manifest))
+    };
+    let binary = if hub {
+        format!("/build-tools/bin/{package}")
+    } else {
+        format!("/build/release/{package}")
+    };
     format!(
-        "# {}\nFROM {builder} AS build\nWORKDIR /app\nCOPY sources /\nCOPY . /app\nENV CARGO_TARGET_DIR=/build\nRUN cargo build --release --manifest-path {}{}\nFROM {base}\nCOPY --from=build /build/release/{package} /usr/local/bin/segment\nCOPY {config} /etc/gdl/config\nENTRYPOINT [\"/usr/local/bin/segment\",\"/etc/gdl/config\"]\n",
+        "# {}\nFROM {builder} AS build\nWORKDIR /app\nCOPY . /app\nENV CARGO_TARGET_DIR=/build\nRUN {build}\nFROM {base}\nCOPY --from=build {binary} /usr/local/bin/segment\nCOPY {config} /etc/gdl/config\nENTRYPOINT [\"/usr/local/bin/segment\",\"/etc/gdl/config\"]\n",
         emit::MARKER,
-        quote(manifest),
-        package_arg
     )
 }
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Snapshot local Git worktrees and generated crates into a new Compose build context.
-/// Ignored files, including target directories and local credentials, are not copied.
+/// Write a Compose build context whose dependencies are fetched by Cargo.
 pub fn compose(spec: &Spec, out: &Path, target: &Path) -> Result<(), Error> {
     if out.exists() {
         return Err(Error::new(
@@ -194,94 +220,7 @@ pub fn compose(spec: &Spec, out: &Path, target: &Path) -> Result<(), Error> {
     }
     let out = crate::dump::absolute(out)?;
     let files = compose_files(spec, &out, target)?;
-    let mut paths = Vec::new();
-    if let GdlDep::Path(path) = &spec.gdl {
-        paths.push(path.clone());
-    }
-    match &spec.source {
-        Source::Graph(source) => {
-            for listed in source.crates.iter().chain(&source.nodes) {
-                if let CrateSource::Path(path) = &listed.source {
-                    paths.push(path.clone());
-                }
-            }
-        }
-        Source::Contract(contract) => paths.push(contract.path.clone()),
-    }
-    for binding in spec.bind.values() {
-        if let CrateSource::Path(path) = &binding.source {
-            paths.push(path.clone());
-        }
-    }
-    let mut roots = BTreeSet::new();
-    for path in paths {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .map_err(io)?;
-        if !output.status.success() {
-            return Err(Error::new(format!(
-                "local dependency {} must belong to a Git worktree",
-                path.display()
-            )));
-        }
-        roots.insert(PathBuf::from(
-            String::from_utf8(output.stdout).map_err(io)?.trim(),
-        ));
-    }
-    let mut sources = Vec::new();
-    for root in roots {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args([
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ])
-            .output()
-            .map_err(io)?;
-        if !output.status.success() {
-            return Err(Error::new("could not list local source files"));
-        }
-        for name in output
-            .stdout
-            .split(|b| *b == 0)
-            .filter(|name| !name.is_empty())
-        {
-            let name = std::str::from_utf8(name).map_err(io)?;
-            let source = root.join(name);
-            if source.starts_with(&out) || !source.exists() {
-                continue;
-            }
-            if source
-                .symlink_metadata()
-                .map_err(io)?
-                .file_type()
-                .is_symlink()
-            {
-                continue;
-            }
-            sources.push(source);
-        }
-    }
     crate::write(&out, &files)?;
-    for source in sources {
-        let destination = out
-            .join("sources")
-            .join(source.strip_prefix("/").map_err(io)?);
-        std::fs::create_dir_all(
-            destination
-                .parent()
-                .ok_or_else(|| Error::new("missing source parent"))?,
-        )
-        .map_err(io)?;
-        std::fs::copy(&source, destination).map_err(io)?;
-    }
     Ok(())
 }
 fn io(e: impl std::fmt::Display) -> Error {
@@ -290,13 +229,13 @@ fn io(e: impl std::fmt::Display) -> Error {
 
 /// Generated files and their self-contained build archive from one snapshot.
 pub struct ComposeBundle {
-    /// Generated text files, excluding captured dependency sources.
+    /// Generated text files.
     pub files: Files,
-    /// Gzip-compressed tar containing these files and dependency sources.
+    /// Gzip-compressed tar containing these exact files.
     pub archive: Vec<u8>,
 }
 
-/// Capture the generated files and sources once for preview and download.
+/// Capture the generated files once for preview and download.
 pub fn compose_bundle(spec: &Spec, target: &Path) -> Result<ComposeBundle, Error> {
     let temp = tempfile::tempdir().map_err(io)?;
     let out = temp.path().join("deployment");
@@ -308,9 +247,6 @@ pub fn compose_bundle(spec: &Spec, target: &Path) -> Result<ComposeBundle, Error
             let entry = entry.map_err(io)?;
             let path = entry.path();
             let relative = path.strip_prefix(&out).map_err(io)?;
-            if relative.starts_with("sources") {
-                continue;
-            }
             if entry.file_type().map_err(io)?.is_dir() {
                 pending.push(path);
             } else {

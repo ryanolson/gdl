@@ -2051,7 +2051,7 @@ async function generateDeployment() {
   const revision=++deploymentRevision;
   deploymentSnapshot=null;
   $('download-deployment').disabled=true;
-  $('deploy-status').textContent='Generating files and capturing build sources…';
+  $('deploy-status').textContent='Generating files from Git and registry dependencies…';
   try {
     const payload=draft();
     payload.deployment_config=Object.fromEntries(Object.keys(payload.segments).filter(name=>deploymentConfigText[name]?.trim()).map(name=>[name,deploymentConfigText[name]]));
@@ -2062,7 +2062,7 @@ async function generateDeployment() {
     deploymentSnapshot={...result,name:payload.name};
     renderDeploymentPreview();
     $('download-deployment').disabled=false;
-    $('deploy-status').textContent='Preview ready. Download includes these exact files and the captured build sources.';
+    $('deploy-status').textContent='Preview ready. Download includes these exact files. Cargo fetches dependencies during the image build.';
   } catch(error) {
     if(revision!==deploymentRevision) return;
     $('deploy-status').textContent=error.message;

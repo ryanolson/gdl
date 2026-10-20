@@ -23,3 +23,9 @@ The build bundle snapshots non-ignored Git worktree files for local dependencies
 Native smoke-test transcript: `/tmp/gdl-native-run.log`. Native smoke-test driver: `/tmp/gdl-compose-native-check.py`. Downloaded bundle: `/Users/ryan/Downloads/composed-compose.tar.gz`. These are workstation artifacts, not repository fixtures.
 
 Docker is not installed on this workstation. The owner will run `docker compose up --build` on another machine. No container build or execution is claimed by the native checks.
+
+## 2026-10-19 addendum: portable package sources
+
+This replaces the local source snapshot design above. Deploy accepts only Git or crates.io node and message packages. GDL and the hub must also use a Git or registry dependency. The generated Dockerfiles fetch dependencies through Cargo, and the bundle contains only generated files. Local packages remain available for development and graph editing, but deployment returns an error that names the packages to re-import.
+
+The public repository is `https://github.com/ryanolson/gdl`. `examples/api/deploy.toml` pins the API example and GDL to the same commit. Preview and download still share one generated file snapshot.

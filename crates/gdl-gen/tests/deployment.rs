@@ -3,8 +3,7 @@ use std::path::Path;
 #[test]
 fn compose_starts_segments_only_after_hub_health() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let spec =
-        gdl_gen::Spec::load(&root.join("examples/api/gdl.toml")).expect("valid test fixture");
+    let spec = portable_spec(&root).expect("valid test fixture");
     let out = std::env::temp_dir().join(format!("gdl-compose-test-{}", std::process::id()));
     let files =
         gdl_gen::compose_files(&spec, &out, &root.join("target")).expect("valid test fixture");
@@ -18,7 +17,14 @@ fn compose_starts_segments_only_after_hub_health() {
         assert!(files.contains_key(&Path::new(name).join("Dockerfile")));
         assert!(files[&Path::new(name).join("config.toml")].contains("hub = \"hub\""));
     }
-    assert!(files[Path::new("hub/Dockerfile")].contains("gdl-hub"));
+    assert!(
+        files[Path::new("hub/Dockerfile")]
+            .contains("cargo install --git 'https://github.com/ryanolson/gdl'")
+    );
+    assert!(files.values().all(|text| !text.contains("COPY sources")));
+    assert!(
+        files[Path::new("front/Cargo.toml")].contains("git = \"https://github.com/ryanolson/gdl\"")
+    );
     assert!(files.contains_key(Path::new("deployment.json")));
 }
 
@@ -29,6 +35,7 @@ fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
         std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("valid test fixture");
     let graph =
         std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("valid test fixture");
+    let text = portable_text(&text);
     let text = format!(
         "{text}\n[deployment]\nbase_image = \"ubuntu:24.04\"\nbuild_image = \"rust:1.93-bookworm\"\nhub_image = \"debian:bookworm-slim\"\n[deployment.segment.engine]\nbase_image = \"nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04\"\n"
     );
@@ -52,8 +59,7 @@ fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
 fn preview_files_are_the_exact_downloaded_snapshot() {
     use std::io::Read;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let spec =
-        gdl_gen::Spec::load(&root.join("examples/api/gdl.toml")).expect("valid deployment fixture");
+    let spec = portable_spec(&root).expect("valid deployment fixture");
     let bundle =
         gdl_gen::compose_bundle(&spec, &root.join("target")).expect("valid deployment fixture");
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bundle.archive.as_slice()));
@@ -78,4 +84,28 @@ fn preview_files_are_the_exact_downloaded_snapshot() {
     assert_eq!(matched, bundle.files.len());
     assert!(bundle.files.contains_key(Path::new("compose.yaml")));
     assert!(bundle.files.contains_key(Path::new("engine/Dockerfile")));
+}
+
+#[test]
+fn deployment_rejects_local_node_and_message_crates() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spec = gdl_gen::Spec::load(&root.join("examples/api/gdl.toml")).expect("fixture");
+    let result = gdl_gen::compose_files(&spec, &root.join("target/rejected"), &root.join("target"));
+    assert!(result.is_err(), "local packages must not be deployable");
+    assert!(
+        result
+            .expect_err("rejection")
+            .to_string()
+            .contains("api-frontend")
+    );
+}
+
+fn portable_text(text: &str) -> String {
+    text.replace("crates = [\".\"]", "crates = [{ package = \"api-frontend\", git = \"https://github.com/ryanolson/gdl\", rev = \"b35714b78afb0389de84617e65b1ff75c3a1b1ce\" }]")
+        .replace("path = \"../../crates/gdl\"", "git = \"https://github.com/ryanolson/gdl\"\nrev = \"b35714b78afb0389de84617e65b1ff75c3a1b1ce\"")
+}
+fn portable_spec(root: &Path) -> Result<gdl_gen::Spec, gdl_gen::Error> {
+    let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
+    let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
+    gdl_gen::Spec::from_text(&portable_text(&text), &graph, &root.join("examples/api"))
 }

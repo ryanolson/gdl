@@ -949,39 +949,9 @@ async fn a_catalog_frontend_sets_the_source_binding_and_exports_its_service() {
         }
     }
     assert!(frontend_main);
-    draft["deployment"] = json!({"base_image":"ubuntu:24.04"});
-    let (status, preview) = json_call(&app, "POST", "/api/deploy", Some(draft.clone())).await;
-    assert_eq!(status, StatusCode::OK, "{preview:#}");
-    assert!(
-        preview["files"]["front/Dockerfile"]
-            .as_str()
-            .expect("Dockerfile")
-            .contains("FROM ubuntu:24.04")
-    );
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(preview["archive"].as_str().expect("archive"))
-        .expect("base64 archive");
-    let mut bundle = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
-    let mut matched = 0;
-    for file in bundle.entries().expect("bundle") {
-        use std::io::Read;
-        let mut file = file.expect("file");
-        let path = file
-            .path()
-            .expect("path")
-            .strip_prefix("deployment")
-            .expect("root")
-            .to_string_lossy()
-            .into_owned();
-        if let Some(expected) = preview["files"].get(&path) {
-            let mut text = String::new();
-            file.read_to_string(&mut text).expect("text");
-            assert_eq!(expected.as_str().expect("preview text"), text);
-            matched += 1;
-        }
-    }
-    assert_eq!(matched, preview["files"].as_object().expect("files").len());
+    let (status, result) = json_call(&app, "POST", "/api/deploy", Some(draft.clone())).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(result["problems"].to_string().contains("http-frontend"));
     draft["source"]["request"]["head"] = message("Chunk");
     let (_, check) = json_call(&app, "POST", "/api/check", Some(draft)).await;
     assert_eq!(check["ok"], false, "frontend contract mismatch must fail");
@@ -1309,7 +1279,7 @@ async fn endpoint_nodes_export_as_four_independent_segments() {
 }
 
 #[tokio::test]
-async fn deployment_download_requires_local_source_access() {
+async fn deployment_rejects_local_packages_without_local_access() {
     let dir = scratch("deploy-access");
     let router = router(&dir, fixture_catalog());
     let (status, _) = call(
@@ -1323,6 +1293,6 @@ async fn deployment_download_requires_local_source_access() {
         )),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let _ = std::fs::remove_dir_all(dir);
 }

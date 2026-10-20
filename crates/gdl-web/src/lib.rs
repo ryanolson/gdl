@@ -192,14 +192,8 @@ async fn export(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
     }
 }
 
-/// A Compose build context, including the local source snapshot.
+/// Preview and archive of a Compose build context with fetchable dependencies.
 async fn deploy(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
-    if composer.config.local_root.is_none() {
-        return problems(
-            StatusCode::FORBIDDEN,
-            vec!["Compose source bundles require local access enabled at launch".into()],
-        );
-    }
     let exported = tokio::task::spawn_blocking(move || {
         let (_, spec) = prepare(&composer, &draft).map_err(|(_, problems)| problems)?;
         gdl_gen::compose_bundle(&spec, &composer.config.target)

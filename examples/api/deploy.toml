@@ -1,0 +1,28 @@
+[graph]
+path = "api.gdl"
+[messages]
+crates = [{ package = "api-frontend", git = "https://github.com/ryanolson/gdl", rev = "b35714b78afb0389de84617e65b1ff75c3a1b1ce" }]
+[nodes]
+crates = [{ package = "api-frontend", git = "https://github.com/ryanolson/gdl", rev = "b35714b78afb0389de84617e65b1ff75c3a1b1ce" }]
+pin = { Http = "api_frontend::ApiFrontend", Engine = "api_frontend::Echo" }
+[entry.chat]
+target = "Http"
+forward = ["api_frontend::ExtractChat"]
+backward = ["api_frontend::FormatChat"]
+[entry.responses]
+operator = "api_frontend::ResponsesAdapter"
+nested = { target = "Http" }
+[entry.anthropic]
+operator = "api_frontend::AnthropicAdapter"
+nested = { target = "Http" }
+[config.Http]
+enabled_chat = true
+enabled_responses = true
+enabled_anthropic = true
+[gdl]
+git = "https://github.com/ryanolson/gdl"
+rev = "b35714b78afb0389de84617e65b1ff75c3a1b1ce"
+[segment.front]
+nodes = ["Http"]
+[segment.engine]
+nodes = ["Engine"]

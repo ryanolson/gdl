@@ -210,21 +210,22 @@ When every crate comes from crates.io or git (a graph spec whose crates use exac
 
 ## Docker Compose deployment
 
-The web composer's **Deploy** tab generates and previews `compose.yaml`, the hub Dockerfile, and each segment's Dockerfile and runtime config. Settings changes regenerate the preview. Download stays disabled until generation succeeds. The downloaded archive contains the exact previewed files and the captured build sources; download does not regenerate them.
+The web composer's **Deploy** tab generates and previews `compose.yaml`, the hub Dockerfile, and each segment's Dockerfile and runtime config. Settings changes regenerate the preview. Download stays disabled until generation succeeds. The downloaded archive contains the exact previewed files; download does not regenerate them.
 
 
-The **Deploy** tab follows **Graph** and **Segments**. It checks the placement, then offers Docker Compose settings and a source bundle to download. Set the default runtime image, the build image, and any per-segment overrides. Published ports and runtime TOML are configured per segment. Compose source downloads require `--local-root` at server launch. Graph and Segments retain separate zoom levels; action tooltips appear after a short hover.
+The **Deploy** tab follows **Graph** and **Segments**. It checks the placement, then offers Docker Compose settings and a build bundle to download. Set the default runtime image, the build image, and any per-segment overrides. Published ports and runtime TOML are configured per segment. Deploy accepts only Git or crates.io node and message packages. Start the server with `--gdl-git https://github.com/ryanolson/gdl --gdl-rev <commit>` to make the runtime fetchable too. Local packages remain available for graph editing. Graph and Segments retain separate zoom levels; action tooltips appear after a short hover.
 
 The CLI produces the same build directory:
 
 ```bash
-cargo run -p gdl-gen -- compose --spec gdl.toml --out /tmp/deployment
+cargo run -p gdl-gen -- compose --spec examples/api/deploy.toml --out /tmp/deployment
 # Copy this directory to the Docker host, then:
 cd /path/to/deployment
 docker compose up --build
 ```
 
-The output contains a Dockerfile and runtime config for each segment, a hub Dockerfile, `deployment.json`, `compose.yaml`, and a snapshot of the local source worktrees. The output directory must be new. Local dependencies must belong to Git worktrees. Git-ignored files and symbolic links are not included. The first implementation requires a local GDL checkout. The snapshot preserves dependency paths inside the build image; the Docker host does not need the original checkout paths.
+The output contains a Dockerfile and runtime config for each segment, a hub Dockerfile, `deployment.json`, and `compose.yaml`. The output directory must be new. Cargo fetches Git and registry dependencies during the image build. The bundle contains no local dependency source snapshot. The public example in `examples/api/deploy.toml` pins both the example package and GDL to the same Git commit.
+
 
 Image settings belong in the graph spec:
 
