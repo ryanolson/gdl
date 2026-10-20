@@ -168,7 +168,13 @@ fn a_missing_file_is_an_error() {
 async fn instances_apply_to_a_roster_directory_only() {
     let config = load(&[BASE, "[min_replicas]\nfront = 2\n"]).expect("parses");
     let Err(error) = config
-        .launch("front", &["front"], &deployment(), async { Ok(()) })
+        .launch(
+            &gdl::Process::start(&config).await.expect("process"),
+            "front",
+            &["front"],
+            &deployment(),
+            async { Ok(()) },
+        )
         .await
     else {
         panic!("min_replicas under a roster directory")
@@ -180,7 +186,13 @@ async fn instances_apply_to_a_roster_directory_only() {
     ])
     .expect("parses");
     let Err(error) = config
-        .launch("front", &["front"], &deployment(), async { Ok(()) })
+        .launch(
+            &gdl::Process::start(&config).await.expect("process"),
+            "front",
+            &["front"],
+            &deployment(),
+            async { Ok(()) },
+        )
         .await
     else {
         panic!("instances under a hub")
@@ -192,7 +204,13 @@ async fn instances_apply_to_a_roster_directory_only() {
 async fn instances_name_only_known_segments() {
     let config = load(&[BASE, "[instances]\nnope = 2\n"]).expect("parses");
     let Err(error) = config
-        .launch("front", &["front"], &deployment(), async { Ok(()) })
+        .launch(
+            &gdl::Process::start(&config).await.expect("process"),
+            "front",
+            &["front"],
+            &deployment(),
+            async { Ok(()) },
+        )
         .await
     else {
         panic!("an unknown segment")
@@ -214,7 +232,13 @@ async fn a_count_other_than_one_is_applied() {
     )])
     .expect("parses");
     let Err(error) = config
-        .launch("front", &["front"], &deployment(), async { Ok(()) })
+        .launch(
+            &gdl::Process::start(&config).await.expect("process"),
+            "front",
+            &["front"],
+            &deployment(),
+            async { Ok(()) },
+        )
         .await
     else {
         panic!("one instance met a count of two")
@@ -234,9 +258,14 @@ fn an_environment_count_overrides_the_file() {
         jail.set_env("GDL_INSTANCES__FRONT", "2");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
         let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-        let Err(error) =
-            runtime.block_on(config.launch("front", &["front"], &deployment(), async { Ok(()) }))
-        else {
+        let Err(error) = runtime.block_on(async {
+            let process = gdl::Process::start(&config).await.expect("process");
+            config
+                .launch(&process, "front", &["front"], &deployment(), async {
+                    Ok(())
+                })
+                .await
+        }) else {
             return Err("the file's count of one won".into());
         };
         assert!(error.to_string().contains("front (1 of 2)"), "{error}");

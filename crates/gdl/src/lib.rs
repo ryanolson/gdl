@@ -50,7 +50,7 @@ pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 #[cfg(feature = "json-lines")]
 pub use json::serve_json_lines;
-pub use process::{Hosted, Launch, ProcessConfig, segment_main};
+pub use process::{Hosted, Launch, Process, ProcessConfig, segment_main};
 pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
 pub use service::{Client, Endpoints, Join, Service};
 pub use streamed::Streamed;

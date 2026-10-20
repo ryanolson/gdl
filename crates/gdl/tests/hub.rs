@@ -226,10 +226,15 @@ async fn segment_processes_meet_through_a_hub() {
         figment::providers::Toml::string(&settings),
     ))
     .expect("settings");
+    let process = gdl::Process::start(&config).await.expect("process");
     let deployment = spec();
     let (front, sink) = tokio::join!(
-        config.launch("front", &["front", "sink"], &deployment, async { Ok(()) }),
-        config.launch("sink", &["front", "sink"], &deployment, async { Ok(()) }),
+        config.launch(&process, "front", &["front", "sink"], &deployment, async {
+            Ok(())
+        }),
+        config.launch(&process, "sink", &["front", "sink"], &deployment, async {
+            Ok(())
+        }),
     );
     let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
     assert_eq!(front.roster().instances("sink").len(), 1);
@@ -281,10 +286,15 @@ async fn a_segment_drains_and_stops_when_its_hub_is_gone() {
         figment::providers::Toml::string(&settings),
     ))
     .expect("settings");
+    let process = gdl::Process::start(&config).await.expect("process");
     let deployment = spec();
     let (front, sink) = tokio::join!(
-        config.launch("front", &["front", "sink"], &deployment, async { Ok(()) }),
-        config.launch("sink", &["front", "sink"], &deployment, async { Ok(()) }),
+        config.launch(&process, "front", &["front", "sink"], &deployment, async {
+            Ok(())
+        }),
+        config.launch(&process, "sink", &["front", "sink"], &deployment, async {
+            Ok(())
+        }),
     );
     let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
     let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -465,8 +475,9 @@ async fn a_lease_lost_while_loading_ends_the_launch() {
     .expect("settings");
     let (loading_tx, loading_rx) = tokio::sync::oneshot::channel();
     let launch = tokio::spawn(async move {
+        let process = gdl::Process::start(&config).await.expect("process");
         config
-            .launch("front", &["front", "sink"], &spec(), async move {
+            .launch(&process, "front", &["front", "sink"], &spec(), async move {
                 let _ = loading_tx.send(());
                 std::future::pending::<gdl::Result<()>>().await
             })

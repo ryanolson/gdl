@@ -5,7 +5,9 @@
 //!
 //! Usage: `asr-engine <config.toml> [override.toml ...]`. Files merge in argument
 //! order, then `GDL_` environment variables, with `__` between nested keys
-//! (`GDL_RUNTIME__ADMISSION_LIMIT=64`). The settings are:
+//! (`GDL_RUNTIME__ADMISSION_LIMIT=64`). `asr-engine --healthcheck <config.toml> ...`
+//! asks a running instance's health probe instead, as a container health check
+//! does. The settings are:
 //!
 //! ```toml
 //! listen = "127.0.0.1:0"  # this instance's address; under a hub, an unspecified one advertises what HOSTNAME resolves to
@@ -16,6 +18,7 @@
 //! [instances]             # optional, with a roster: instances per segment, 1 by default
 //! [min_replicas]          # optional, with a hub: loaded instances per segment to wait for, 1 by default
 //! [runtime]               # optional: gdl::RuntimeConfig
+//! [system]                # optional: the live and health probes, off unless port is set (DYN_SYSTEM_PORT)
 //! [node.Recognizer]       # optional: Recognizer's Build::Config
 //! [node.Punctuate]        # optional: Punctuate's Build::Config
 //! ```
@@ -54,9 +57,16 @@ fn main() -> std::process::ExitCode {
 async fn run() -> Result<(), Failure> {
     let paths: Vec<_> = std::env::args_os().skip(1).collect();
     if paths.is_empty() {
-        return Err("usage: asr-engine <config.toml> [override.toml ...]".into());
+        return Err("usage: asr-engine [--healthcheck] <config.toml> [override.toml ...]".into());
+    }
+    if paths[0] == "--healthcheck" {
+        gdl::ProcessConfig::<Hosted>::load(&paths[1..])?
+            .healthcheck()
+            .await?;
+        return Ok(());
     }
     let mut config = gdl::ProcessConfig::<Hosted>::load(&paths)?;
+    let process = gdl::Process::start(&config).await?;
     let nodes = Nodes {
         recognizer: build::<::asr_engine_mock::Recognizer>(
             "Recognizer",
@@ -74,7 +84,7 @@ async fn run() -> Result<(), Failure> {
         gdl::Placement::from_toml(asr_engine::PLACEMENT)?,
     )?;
     let launch = config
-        .launch(SEGMENT, SEGMENTS, &deployment, async {
+        .launch(&process, SEGMENT, SEGMENTS, &deployment, async {
             tokio::try_join!(
                 gdl::Build::ready(&nodes.recognizer),
                 gdl::Build::ready(&nodes.punctuate)

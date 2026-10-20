@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 pub mod streamed;
+pub mod system;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

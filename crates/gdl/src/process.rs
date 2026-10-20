@@ -4,10 +4,13 @@
 //! here is the same for every segment, so it is written once and tested
 //! here rather than in each generated crate.
 
+mod system;
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use figment::Figment;
@@ -20,6 +23,7 @@ use velo::Velo;
 use crate::cx::Cx;
 use crate::dist::{Roster, RuntimeConfig, bind_node};
 use crate::error::{Error, ErrorKind, Result};
+use system::{Health, Phase, SystemSettings};
 
 /// The settings of one segment process. `H` is what the segment hosts: the
 /// tables of its nodes and of its frontend or entry adapters, which the
@@ -35,6 +39,11 @@ use crate::error::{Error, ErrorKind, Result};
 /// [instances]             # optional, with a roster: instances per segment, 1 by default
 /// [min_replicas]          # optional, with a hub: loaded instances to wait for, 1 by default
 /// [runtime]               # optional: the runtime's own settings
+/// [system]                # optional: the live and health probes; off unless `port` is set
+/// port = 9090             # also DYN_SYSTEM_PORT; dynamo's meaning: negative is off, 0 ephemeral
+/// host = "0.0.0.0"        # also DYN_SYSTEM_HOST
+/// live_path = "/live"     # also DYN_SYSTEM_LIVE_PATH
+/// health_path = "/health" # also DYN_SYSTEM_HEALTH_PATH
 /// ```
 pub struct ProcessConfig<H> {
     listen: SocketAddr,
@@ -43,6 +52,7 @@ pub struct ProcessConfig<H> {
     rendezvous_ms: u64,
     instances: BTreeMap<String, usize>,
     min_replicas: BTreeMap<String, usize>,
+    system: SystemSettings,
     /// The runtime's own settings.
     pub runtime: RuntimeConfig,
     /// The tables of the hosted implementations.
@@ -66,6 +76,8 @@ struct Settings {
     min_replicas: BTreeMap<String, usize>,
     #[serde(default)]
     runtime: RuntimeConfig,
+    #[serde(default)]
+    system: SystemSettings,
 }
 
 /// What a segment hosts, as its binary declares it: the settings type's
@@ -82,7 +94,7 @@ pub trait Hosted: DeserializeOwned {
 /// `GDL_` variables read: the build scripts use the same prefix
 /// (`GDL_PROFILE`, `GDL_IMAGE_PREFIX`), and a variable meant for them must
 /// not stop a segment from starting.
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 8] = [
     "listen",
     "roster",
     "hub",
@@ -90,6 +102,7 @@ const KEYS: [&str; 7] = [
     "instances",
     "min_replicas",
     "runtime",
+    "system",
 ];
 
 fn default_rendezvous_ms() -> u64 {
@@ -136,13 +149,31 @@ impl<H: Hosted> ProcessConfig<H> {
     /// keys: `GDL_RUNTIME__ADMISSION_LIMIT=64`, or
     /// `GDL_NODE__TRUNCATE__MAX=3` for `[node.Truncate] max = 3`. A key
     /// from the environment is matched without regard to case; a file's
-    /// keys are as spelled.
+    /// keys are as spelled. dynamo's `DYN_SYSTEM_HOST`, `DYN_SYSTEM_PORT`,
+    /// `DYN_SYSTEM_LIVE_PATH`, and `DYN_SYSTEM_HEALTH_PATH` set `[system]`
+    /// too, under the `GDL_` variables, so that the dynamo operator's
+    /// probes find the listener; no other `DYN_` variable is read.
     pub fn load(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Result<Self> {
         let mut figment = Figment::new();
         for path in paths {
             figment = figment.merge(Toml::file_exact(path.as_ref()));
         }
-        Self::from_figment(figment.merge(Self::env()))
+        Self::from_figment(figment.merge(Self::dynamo_env()).merge(Self::env()))
+    }
+
+    /// dynamo's system-port variables, as `[system]` keys.
+    fn dynamo_env() -> Env {
+        Env::raw()
+            .only(&[
+                "DYN_SYSTEM_HOST",
+                "DYN_SYSTEM_PORT",
+                "DYN_SYSTEM_LIVE_PATH",
+                "DYN_SYSTEM_HEALTH_PATH",
+            ])
+            .map(|key| {
+                let key = key.as_str().to_ascii_lowercase();
+                format!("system.{}", &key["dyn_system_".len()..]).into()
+            })
     }
 
     /// The settings held by `figment`, checked.
@@ -175,10 +206,12 @@ impl<H: Hosted> ProcessConfig<H> {
             rendezvous_ms: settings.rendezvous_ms,
             instances: settings.instances,
             min_replicas: settings.min_replicas,
+            system: settings.system,
             runtime: settings.runtime,
             hosted,
         };
         config.discovery()?;
+        config.system.validate()?;
         if config.hub.as_ref().is_some_and(|hub| hub.heartbeat_ms == 0) {
             return Err(placement(
                 "`hub.heartbeat_ms` is 0; the lease needs a cadence",
@@ -221,7 +254,26 @@ impl<H: Hosted> ProcessConfig<H> {
     /// it is live, then waits for at least `[min_replicas]` loaded
     /// instances of each segment and takes those as its roster. How many
     /// instances a segment has under a hub is not fixed.
+    ///
+    /// A stop that `process` takes before the launch is done, while the
+    /// nodes load or the instances meet, ends it with `Cancelled`.
     pub async fn launch(
+        &self,
+        process: &Process,
+        segment: &'static str,
+        segments: &'static [&'static str],
+        deployment: &gdl_model::DeploymentSpec,
+        ready: impl Future<Output = Result<()>>,
+    ) -> Result<Launch> {
+        let mut launch = process
+            .starting(self.meet(segment, segments, deployment, ready))
+            .await?;
+        launch.process = Some(process.clone());
+        Ok(launch)
+    }
+
+    /// The launch itself, which a stop may cut short.
+    async fn meet(
         &self,
         segment: &'static str,
         segments: &'static [&'static str],
@@ -318,7 +370,15 @@ impl<H: Hosted> ProcessConfig<H> {
             segment,
             inner,
             wait,
+            process: None,
         })
+    }
+
+    /// Ask the system listener of a process run with these settings
+    /// whether it is healthy, as a container's health check does: `Ok` for
+    /// a 200 from its health path.
+    pub async fn healthcheck(&self) -> Result<()> {
+        system::healthcheck(&self.system).await
     }
 }
 
@@ -337,6 +397,8 @@ pub struct Launch {
     /// The segments this one sends to.
     inner: Vec<String>,
     wait: Duration,
+    /// Set by `launch` once the meeting is done.
+    process: Option<Process>,
 }
 
 enum Peers {
@@ -375,26 +437,32 @@ impl Launch {
         F: FnOnce(Cx) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        let process = self.process.take().ok_or_else(|| {
+            Error::new(ErrorKind::Placement, "a launch serves once, after `launch`")
+        })?;
         let inner: Vec<&str> = self.inner.iter().map(String::as_str).collect();
-        match &mut self.peers {
-            Peers::Files(dir) => {
-                self.roster
-                    .ready(
-                        &dir.join("ready"),
-                        self.segment,
-                        &self.node,
-                        &inner,
-                        self.wait,
-                    )
-                    .await?
+        let barrier = async {
+            match &mut self.peers {
+                Peers::Files(dir) => {
+                    self.roster
+                        .ready(
+                            &dir.join("ready"),
+                            self.segment,
+                            &self.node,
+                            &inner,
+                            self.wait,
+                        )
+                        .await
+                }
+                #[cfg(feature = "hub")]
+                Peers::Hub(session) => session.ready(&self.roster, &inner, self.wait).await,
             }
-            #[cfg(feature = "hub")]
-            Peers::Hub(session) => session.ready(&self.roster, &inner, self.wait).await?,
-        }
+        };
+        process.starting(barrier).await?;
         self.roster.release();
+        process.health.set(Phase::Ready);
         eprintln!("{}: ready", self.segment);
         let shutdown = Cx::new();
-        let mut signals = Signals::new()?;
         let body = serve(shutdown.clone());
         tokio::pin!(body);
         let lease = async {
@@ -405,17 +473,90 @@ impl Launch {
             }
         };
         let stop = tokio::select! {
-            result = &mut body => return result,
-            () = signals.wait() => Ok(()),
+            result = &mut body => {
+                process.health.set(Phase::Draining);
+                return result;
+            }
+            () = process.stops(1) => Ok(()),
             result = lease => result,
         };
+        process.health.set(Phase::Draining);
         shutdown.cancel();
         tokio::select! {
             result = &mut body => stop.and(result),
-            () = signals.wait() => Err(Error::new(
+            () = process.stops(2) => Err(Error::new(
                 ErrorKind::Cancelled,
                 "stopped by a second signal before the drain finished",
             )),
+        }
+    }
+}
+
+/// A segment process before and beyond its graph: the signals that stop it
+/// and the system listener that reports on it. Started first, before the
+/// nodes are built: a signal while they load would otherwise end the
+/// process the default way, with nothing announced, and a deployment could
+/// not tell that the process is live while it starts. A clone shares the
+/// same process.
+#[derive(Clone)]
+pub struct Process {
+    /// How many stop signals have come.
+    stops: tokio::sync::watch::Receiver<u32>,
+    health: Arc<Health>,
+    system: Option<SocketAddr>,
+}
+
+impl Process {
+    /// Take the stop signals, and bind the system listener if `config`
+    /// asks for one.
+    pub async fn start<H>(config: &ProcessConfig<H>) -> Result<Self> {
+        let mut signals = Signals::new()?;
+        let (count, stops) = tokio::sync::watch::channel(0u32);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = signals.wait() => count.send_modify(|stops| *stops += 1),
+                    () = count.closed() => return,
+                }
+            }
+        });
+        let health = Arc::new(Health::new());
+        let system = system::listen(&config.system, Arc::clone(&health)).await?;
+        if let Some(address) = system {
+            eprintln!("system listener at {address}");
+        }
+        Ok(Self {
+            stops,
+            health,
+            system,
+        })
+    }
+
+    /// The system listener's address, if it has one.
+    pub fn system_address(&self) -> Option<SocketAddr> {
+        self.system
+    }
+
+    /// Run `start`, the start of the process, unless a stop comes first,
+    /// which ends it with `Cancelled`. A stop that came before is seen at
+    /// once.
+    pub async fn starting<T, E: From<Error>>(
+        &self,
+        start: impl Future<Output = std::result::Result<T, E>>,
+    ) -> std::result::Result<T, E> {
+        tokio::select! {
+            biased;
+            () = self.stops(1) => Err(Error::new(ErrorKind::Cancelled, "stopped while starting").into()),
+            result = start => result,
+        }
+    }
+
+    /// Resolves once `n` stop signals have come.
+    async fn stops(&self, n: u32) {
+        let mut stops = self.stops.clone();
+        if stops.wait_for(|stops| *stops >= n).await.is_err() {
+            // The signal task is gone only with the runtime.
+            std::future::pending::<()>().await;
         }
     }
 }

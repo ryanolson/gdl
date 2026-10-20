@@ -18,7 +18,27 @@ fn compose_starts_segments_only_after_hub_health() {
             "service_healthy"
         );
         assert!(files.contains_key(&Path::new(name).join("Dockerfile")));
-        assert!(files[&Path::new(name).join("config.toml")].contains("[hub]\nhost = \"hub\""));
+        let config = &files[&Path::new(name).join("config.toml")];
+        assert!(config.contains("[hub]\nhost = \"hub\""));
+        // The dynamo operator's port; the probe asks the binary itself, so
+        // an image needs no HTTP client.
+        assert!(config.contains("[system]\nport = 9090"), "{config}");
+        let check = &compose["services"][name]["healthcheck"];
+        assert_eq!(
+            check["test"],
+            serde_json::json!([
+                "CMD",
+                "/usr/local/bin/segment",
+                "--healthcheck",
+                "/etc/gdl/config"
+            ])
+        );
+        assert!(check["start_period"].is_string(), "{check}");
+        // Health is reported, never waited on between segments.
+        let depends = compose["services"][name]["depends_on"]
+            .as_object()
+            .expect("depends_on");
+        assert_eq!(depends.keys().collect::<Vec<_>>(), ["hub"]);
     }
     assert!(
         files[Path::new("hub/Dockerfile")]

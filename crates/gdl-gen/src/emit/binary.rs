@@ -78,8 +78,13 @@ impl Unit<'_> {
         );
         let _ = writeln!(
             text,
-            "//! (`GDL_RUNTIME__ADMISSION_LIMIT=64`). The settings are:"
+            "//! (`GDL_RUNTIME__ADMISSION_LIMIT=64`). `{package} --healthcheck <config.toml> ...`"
         );
+        let _ = writeln!(
+            text,
+            "//! asks a running instance's health probe instead, as a container health check"
+        );
+        let _ = writeln!(text, "//! does. The settings are:");
         let _ = writeln!(text, "//!");
         let mut rows = vec![
             (
@@ -116,6 +121,11 @@ impl Unit<'_> {
             (
                 "[runtime]".to_string(),
                 "optional: gdl::RuntimeConfig".to_string(),
+            ),
+            (
+                "[system]".to_string(),
+                "optional: the live and health probes, off unless port is set (DYN_SYSTEM_PORT)"
+                    .to_string(),
             ),
         ];
         for node in hosted {
@@ -213,12 +223,22 @@ impl Unit<'_> {
         );
         let _ = writeln!(
             text,
-            "    if paths.is_empty() {{ return Err(\"usage: {package} <config.toml> [override.toml ...]\".into()); }}"
+            "    if paths.is_empty() {{ return Err(\"usage: {package} [--healthcheck] <config.toml> [override.toml ...]\".into()); }}"
+        );
+        let _ = writeln!(
+            text,
+            "    if paths[0] == \"--healthcheck\" {{ gdl::ProcessConfig::<Hosted>::load(&paths[1..])?.healthcheck().await?; return Ok(()); }}"
         );
         let _ = writeln!(
             text,
             "    let {}config = gdl::ProcessConfig::<Hosted>::load(&paths)?;",
             if takes { "mut " } else { "" }
+        );
+        // First: a stop while the nodes build is taken, and the probes say
+        // the process is live while it starts.
+        let _ = writeln!(
+            text,
+            "    let process = gdl::Process::start(&config).await?;"
         );
         text.push_str(&builds(hosted, frontend, service, self.frontend_source()));
         let _ = writeln!(
@@ -228,7 +248,7 @@ impl Unit<'_> {
         let _ = writeln!(text, "    let launch = config");
         let _ = writeln!(
             text,
-            "        .launch(SEGMENT, SEGMENTS, &deployment, {})",
+            "        .launch(&process, SEGMENT, SEGMENTS, &deployment, {})",
             ready_expression(hosted, frontend, service)
         );
         let _ = writeln!(text, "        .await?;");

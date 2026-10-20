@@ -180,7 +180,7 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
         files.insert(
             Path::new(segment).join("config.toml"),
             format!(
-                "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n[hub]\nhost = \"hub\"\n",
+                "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n[hub]\nhost = \"hub\"\n\n[system]\nport = 9090\n",
                 emit::MARKER
             ),
         );
@@ -195,7 +195,10 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
             }
             files.insert(path, toml::to_string_pretty(&config).map_err(io)?);
         }
-        services.insert(segment.into(),json!({"build":{"context":".","dockerfile":format!("{segment}/Dockerfile")},"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"ports":settings.segment.get(segment).map(|s| s.ports.clone()).unwrap_or_default()}));
+        // Health is reported, never waited on: no segment depends on another's, since segments
+        // whose paths return wait for each other, and an order over them deadlocks. The start
+        // period covers loading models.
+        services.insert(segment.into(),json!({"build":{"context":".","dockerfile":format!("{segment}/Dockerfile")},"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"healthcheck":{"test":["CMD","/usr/local/bin/segment","--healthcheck","/etc/gdl/config"],"interval":"5s","timeout":"3s","retries":3,"start_period":"1800s"},"ports":settings.segment.get(segment).map(|s| s.ports.clone()).unwrap_or_default()}));
     }
     files.insert(
         "compose.yaml".into(),
