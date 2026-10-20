@@ -785,7 +785,6 @@ async fn slow_request_only_segment_renews_reply_until_handoff_or_error() {
         let mut config = velo::streaming::ReservationConfig::default();
         config.unattached_timeout = Duration::from_millis(150);
         config.prebind_timeout = Duration::from_millis(150);
-        config.renew_interval = Duration::from_millis(30);
         let node = Arc::new(
             velo::Velo::builder()
                 .add_transport(Arc::new(tcp))
@@ -815,7 +814,10 @@ async fn slow_request_only_segment_renews_reply_until_handoff_or_error() {
             &placement,
             name,
             &roster,
-            RuntimeConfig::default(),
+            RuntimeConfig {
+                reservation_renew_interval: Duration::from_millis(30),
+                ..RuntimeConfig::default()
+            },
         )
         .expect("deployment");
         let roots = slow_request::assemble(

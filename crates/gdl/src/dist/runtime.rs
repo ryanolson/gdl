@@ -36,6 +36,8 @@ pub struct RuntimeConfig {
     pub setup_timeout: Duration,
     /// Override how long an ordinary anchor waits for its producer; `None` uses Velo defaults.
     pub anchor_timeout: Option<Duration>,
+    /// Cadence for batching held reply reservations. Defaults to 30 seconds.
+    pub reservation_renew_interval: Duration,
     /// The assumed maximum clock difference between segments.
     pub clock_skew: Duration,
     /// The deadline given to a request that crosses segments without one.
@@ -98,6 +100,7 @@ impl Default for RuntimeConfig {
             attempt_limit: 16,
             setup_timeout: Duration::from_secs(10),
             anchor_timeout: None,
+            reservation_renew_interval: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
             default_deadline: Duration::from_secs(600),
             egress_limit: 1024,
@@ -117,6 +120,7 @@ struct Settings {
     attempt_limit: usize,
     setup_timeout_ms: u64,
     anchor_timeout_ms: Option<u64>,
+    reservation_renew_interval_ms: u64,
     clock_skew_ms: u64,
     default_deadline_ms: u64,
     egress_limit: usize,
@@ -133,6 +137,7 @@ impl Default for Settings {
             attempt_limit: config.attempt_limit,
             setup_timeout_ms: ms(config.setup_timeout),
             anchor_timeout_ms: config.anchor_timeout.map(ms),
+            reservation_renew_interval_ms: ms(config.reservation_renew_interval),
             clock_skew_ms: ms(config.clock_skew),
             default_deadline_ms: ms(config.default_deadline),
             egress_limit: config.egress_limit,
@@ -151,6 +156,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             attempt_limit: s.attempt_limit,
             setup_timeout: Duration::from_millis(s.setup_timeout_ms),
             anchor_timeout: s.anchor_timeout_ms.map(Duration::from_millis),
+            reservation_renew_interval: Duration::from_millis(s.reservation_renew_interval_ms),
             clock_skew: Duration::from_millis(s.clock_skew_ms),
             default_deadline: Duration::from_millis(s.default_deadline_ms),
             egress_limit: s.egress_limit,
@@ -169,6 +175,12 @@ impl RuntimeConfig {
     /// every refused root), and velo builds its heartbeat timer with the
     /// interval, which tokio refuses with a panic when it is zero.
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.reservation_renew_interval.is_zero() {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                "runtime setting `reservation_renew_interval_ms` must be positive",
+            ));
+        }
         for (name, limit) in [
             ("admission_limit", self.admission_limit),
             ("attempt_limit", self.attempt_limit),
@@ -492,6 +504,19 @@ pub(crate) struct Served {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renewal_cadence_belongs_to_runtime_config() {
+        let defaults: RuntimeConfig = toml::from_str("").expect("defaults");
+        assert_eq!(defaults.reservation_renew_interval, Duration::from_secs(30));
+        let configured: RuntimeConfig =
+            toml::from_str("reservation_renew_interval_ms = 25").expect("cadence");
+        assert_eq!(
+            configured.reservation_renew_interval,
+            Duration::from_millis(25)
+        );
+        assert!(toml::from_str::<RuntimeConfig>("reservation_renew_interval_ms = 0").is_err());
+    }
 
     #[test]
     fn request_picker_uses_the_selected_policy_and_rejects_missing_replicas() {

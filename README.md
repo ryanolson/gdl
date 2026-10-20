@@ -482,7 +482,7 @@ Its placement puts `Resample` in a segment of its own, so the audio crosses two 
 
 The design and its rulings are in `agent-docs/plan.md`.
 
-Request-only segments hold their reply reservation until downstream acceptance or failure. One task per runtime renews held reservations in batches at Velo's configured cadence (30 seconds by default). Velo defaults to 120 seconds before ordinary attachment and 180 seconds for a prepared slot. `RuntimeConfig::anchor_timeout` optionally overrides the ordinary lifetime; `None` inherits Velo's default. Renewal does not extend request deadlines or replace attached-stream heartbeats.
+Request-only segments hold their reply reservation until downstream acceptance or failure. One task per runtime renews held reservations in batches at `RuntimeConfig::reservation_renew_interval` (30 seconds by default, configured as `reservation_renew_interval_ms`). Velo defaults to 120 seconds before ordinary attachment and 180 seconds for a prepared slot. `RuntimeConfig::anchor_timeout` optionally overrides the ordinary lifetime; `None` inherits Velo's default. Choose a renewal interval shorter than the reservation lifetime. GDL also bounds each renewal call by that interval. Velo does not schedule renewal. Renewal does not extend request deadlines or replace attached-stream heartbeats.
 
 ## Cost
 

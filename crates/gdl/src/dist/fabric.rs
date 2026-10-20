@@ -89,9 +89,10 @@ impl Fabric {
         velo: Arc<Velo>,
         anchor_timeout: Option<Duration>,
         heartbeat_interval: Option<Duration>,
+        renewal_interval: Duration,
     ) -> Self {
         Self {
-            renewals: renewal::Renewals::new(&velo),
+            renewals: renewal::Renewals::new(&velo, renewal_interval),
             velo,
             anchor_timeout,
             heartbeat_interval,

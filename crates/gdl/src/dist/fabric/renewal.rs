@@ -13,7 +13,7 @@ pub(super) struct Renewals {
     cancel: CancellationToken,
 }
 impl Renewals {
-    pub(super) fn new(velo: &Arc<Velo>) -> Arc<Self> {
+    pub(super) fn new(velo: &Arc<Velo>, interval: std::time::Duration) -> Arc<Self> {
         let renewals = Arc::new(Self {
             held: DashMap::new(),
             next: AtomicU64::new(0),
@@ -22,7 +22,6 @@ impl Renewals {
         let weak = Arc::downgrade(&renewals);
         let node = Arc::downgrade(velo);
         let cancel = renewals.cancel.clone();
-        let interval = velo.anchor_manager().reservation_renew_interval;
         tokio::spawn(async move {
             let mut ticks =
                 tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
@@ -47,8 +46,12 @@ impl Renewals {
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => break,
-                    result = node.anchor_manager().renew_reservations(&batch) => {
-                        if let Err(error) = result { tracing::warn!(%error, "reply reservation renewal failed"); }
+                    result = tokio::time::timeout(interval, node.anchor_manager().renew_reservations(&batch)) => {
+                        match result {
+                            Ok(Ok(())) => {},
+                            Ok(Err(error)) => tracing::warn!(%error, "reply reservation renewal failed"),
+                            Err(_) => tracing::warn!("reply reservation renewal timed out"),
+                        }
                     }
                 }
             }

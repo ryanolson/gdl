@@ -1243,7 +1243,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pump_takes_a_stop_that_comes_with_a_cancel_for_the_cancel() {
         let node = bind_node(([127, 0, 0, 1], 0).into()).await.expect("node");
-        let fabric = Fabric::new(node, Some(Duration::from_secs(5)), None);
+        let fabric = Fabric::new(
+            node,
+            Some(Duration::from_secs(5)),
+            None,
+            Duration::from_secs(30),
+        );
         let (_inbound, reply) = fabric.mint();
         let out = fabric.attach(&reply).await.expect("attach");
         // The consumer has cancelled, which fired the stop token too, but
@@ -1272,7 +1277,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pump_passes_a_stop_alone_to_the_attempt() {
         let node = bind_node(([127, 0, 0, 1], 0).into()).await.expect("node");
-        let fabric = Fabric::new(node, Some(Duration::from_secs(5)), None);
+        let fabric = Fabric::new(
+            node,
+            Some(Duration::from_secs(5)),
+            None,
+            Duration::from_secs(30),
+        );
         let (_inbound, reply) = fabric.mint();
         let out = fabric.attach(&reply).await.expect("attach");
         let attempt = Cx::new();
