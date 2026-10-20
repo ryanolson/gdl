@@ -4,6 +4,8 @@ gdl is a graph definition language and runtime for request/response streaming pi
 
 You define the graph once, with its message types. A placement puts each node in a segment. The generator, `cargo gdl generate`, writes one crate per segment. Each segment crate depends only on the implementations of the nodes that it hosts.
 
+
+Known limitations, with what lifts each, are in [LIMITATIONS.md](LIMITATIONS.md).
 ## The model
 
 A graph has one or more source roots, each with a nested chain of hops. A sink can receive requests from several roots through explicit connections. Each node has one of five roles:

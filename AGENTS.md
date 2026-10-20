@@ -8,6 +8,7 @@
 
 | Path | Contents |
 |------|----------|
+| `LIMITATIONS.md` | Known limitations a user can run into, each with its cause and what lifts it |
 | `agent-docs/plan.md` | The design and milestone plan, including design rulings |
 | `agent-docs/reviews/` | Review records for each milestone |
 | `agent-docs/perf/` | Measurements, with the command that produced them |
@@ -52,6 +53,7 @@ The suite runs on every change, so its speed is part of its correctness.
 ## Rules
 
 - Write the failing test first, then the fix. Keep the test.
+- A change that adds a known limitation, or lifts one, updates `LIMITATIONS.md` in the same commit.
 - No names containing `legacy`, `old`, `v1`, `v2`, `compat`, `deprecated`, or `_unused`. Change an interface and its callers together; no forwarding shims.
 - At most one `_` in a file name; use subdirectories to disambiguate.
 - Private modules with a curated `pub use` surface. Expose only what dependents import.
