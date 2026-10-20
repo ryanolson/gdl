@@ -34,8 +34,8 @@ pub struct RuntimeConfig {
     /// The longest any setup step (a forward hand-off, a run opening, an
     /// attach) may take, on top of the request's own deadline.
     pub setup_timeout: Duration,
-    /// How long a minted anchor waits for its producer.
-    pub anchor_timeout: Duration,
+    /// Override how long an ordinary anchor waits for its producer; `None` uses Velo defaults.
+    pub anchor_timeout: Option<Duration>,
     /// The assumed maximum clock difference between segments.
     pub clock_skew: Duration,
     /// The deadline given to a request that crosses segments without one.
@@ -97,7 +97,7 @@ impl Default for RuntimeConfig {
             admission_wait: Duration::from_millis(100),
             attempt_limit: 16,
             setup_timeout: Duration::from_secs(10),
-            anchor_timeout: Duration::from_secs(30),
+            anchor_timeout: None,
             clock_skew: Duration::from_millis(50),
             default_deadline: Duration::from_secs(600),
             egress_limit: 1024,
@@ -116,7 +116,7 @@ struct Settings {
     admission_wait_ms: u64,
     attempt_limit: usize,
     setup_timeout_ms: u64,
-    anchor_timeout_ms: u64,
+    anchor_timeout_ms: Option<u64>,
     clock_skew_ms: u64,
     default_deadline_ms: u64,
     egress_limit: usize,
@@ -132,7 +132,7 @@ impl Default for Settings {
             admission_wait_ms: ms(config.admission_wait),
             attempt_limit: config.attempt_limit,
             setup_timeout_ms: ms(config.setup_timeout),
-            anchor_timeout_ms: ms(config.anchor_timeout),
+            anchor_timeout_ms: config.anchor_timeout.map(ms),
             clock_skew_ms: ms(config.clock_skew),
             default_deadline_ms: ms(config.default_deadline),
             egress_limit: config.egress_limit,
@@ -150,7 +150,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             admission_wait: Duration::from_millis(s.admission_wait_ms),
             attempt_limit: s.attempt_limit,
             setup_timeout: Duration::from_millis(s.setup_timeout_ms),
-            anchor_timeout: Duration::from_millis(s.anchor_timeout_ms),
+            anchor_timeout: s.anchor_timeout_ms.map(Duration::from_millis),
             clock_skew: Duration::from_millis(s.clock_skew_ms),
             default_deadline: Duration::from_millis(s.default_deadline_ms),
             egress_limit: s.egress_limit,

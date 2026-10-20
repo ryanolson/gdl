@@ -694,6 +694,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
+ "tracing",
  "trybuild",
  "velo",
  "velo-hub",
@@ -2334,7 +2335,7 @@ dependencies = [
 [[package]]
 name = "velo"
 version = "0.21.0"
-source = "git+https://github.com/ai-dynamo/velo?rev=d793db4cc4930e1e8e3a08eff23c4643f020608d#d793db4cc4930e1e8e3a08eff23c4643f020608d"
+source = "git+https://github.com/ai-dynamo/velo?rev=20eda5e0df90809874ea222b3e1826be9b9d258c#20eda5e0df90809874ea222b3e1826be9b9d258c"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2364,7 +2365,7 @@ dependencies = [
 [[package]]
 name = "velo-ext"
 version = "0.5.6"
-source = "git+https://github.com/ai-dynamo/velo?rev=d793db4cc4930e1e8e3a08eff23c4643f020608d#d793db4cc4930e1e8e3a08eff23c4643f020608d"
+source = "git+https://github.com/ai-dynamo/velo?rev=20eda5e0df90809874ea222b3e1826be9b9d258c#20eda5e0df90809874ea222b3e1826be9b9d258c"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2384,7 +2385,7 @@ dependencies = [
 [[package]]
 name = "velo-hub"
 version = "0.21.0"
-source = "git+https://github.com/ai-dynamo/velo?rev=d793db4cc4930e1e8e3a08eff23c4643f020608d#d793db4cc4930e1e8e3a08eff23c4643f020608d"
+source = "git+https://github.com/ai-dynamo/velo?rev=20eda5e0df90809874ea222b3e1826be9b9d258c#20eda5e0df90809874ea222b3e1826be9b9d258c"
 dependencies = [
  "anyhow",
  "axum",
@@ -2407,7 +2408,7 @@ dependencies = [
 [[package]]
 name = "velo-hub-ext"
 version = "0.21.0"
-source = "git+https://github.com/ai-dynamo/velo?rev=d793db4cc4930e1e8e3a08eff23c4643f020608d#d793db4cc4930e1e8e3a08eff23c4643f020608d"
+source = "git+https://github.com/ai-dynamo/velo?rev=20eda5e0df90809874ea222b3e1826be9b9d258c#20eda5e0df90809874ea222b3e1826be9b9d258c"
 dependencies = [
  "http",
  "serde",

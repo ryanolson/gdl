@@ -29,8 +29,8 @@ toml = "0.9"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7"
 trybuild = "1"
-velo = { git = "https://github.com/ai-dynamo/velo", rev = "d793db4cc4930e1e8e3a08eff23c4643f020608d", default-features = false }
-velo-hub = { git = "https://github.com/ai-dynamo/velo", rev = "d793db4cc4930e1e8e3a08eff23c4643f020608d", default-features = false }
+velo = { git = "https://github.com/ai-dynamo/velo", rev = "20eda5e0df90809874ea222b3e1826be9b9d258c", default-features = false }
+velo-hub = { git = "https://github.com/ai-dynamo/velo", rev = "20eda5e0df90809874ea222b3e1826be9b9d258c", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

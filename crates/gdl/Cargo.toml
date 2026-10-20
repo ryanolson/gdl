@@ -17,6 +17,7 @@ hub = ["dep:velo-hub", "dep:serde_json", "tokio/net"]
 json-lines = ["dep:serde_json", "tokio/io-util"]
 
 [dependencies]
+tracing = "0.1"
 velo-hub = { workspace = true, features = ["client"], optional = true }
 figment.workspace = true
 dashmap = { workspace = true }

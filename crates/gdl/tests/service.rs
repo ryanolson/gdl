@@ -735,3 +735,131 @@ async fn endpoint_nodes_run_in_independent_segments() {
     .expect("isolated return streams");
     assert_eq!(sink.served().forwards, 2);
 }
+
+mod slow_request {
+    gdl::graph! {
+        name="slow-request", schema=1;
+        source Front: u32 -> stream u32;
+        forward A: u32 -> u32;
+        forward B: u32 -> u32;
+        forward C: u32 -> u32;
+        sink Engine: u32 -> stream u32;
+        topology: Front => A => B => C => Engine;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_request_only_segment_renews_reply_until_handoff_or_error() {
+    use gdl::{Deployment, Placement, Roster, RuntimeConfig};
+    use std::time::Duration;
+    struct Slow(usize, Arc<Vec<AtomicUsize>>);
+    impl gdl::Forward for Slow {
+        type In = u32;
+        type Out = u32;
+        async fn forward(&self, _: &Cx, value: u32) -> gdl::Result<u32> {
+            self.1[self.0].fetch_add(1, Ordering::Relaxed);
+            // Three stages deliberately outlive the initial 150 ms reservation.
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            if self.0 == 1 && value == 101 {
+                return Err(gdl::Error::node("B refused request"));
+            }
+            Ok(value + 1)
+        }
+    }
+    struct Echo;
+    impl gdl::Sink for Echo {
+        type Req = u32;
+        type Item = u32;
+        async fn generate(&self, _: Cx, value: u32) -> gdl::Result<gdl::Items<u32>> {
+            Ok(gdl::items(futures::stream::iter([Ok(value)])))
+        }
+    }
+    let names = ["front", "work", "sink"];
+    let mut nodes = Vec::new();
+    let mut roster = Roster::new();
+    for name in names {
+        let tcp = velo::transports::tcp::TcpTransportBuilder::new()
+            .bind_addr("127.0.0.1:0".parse().expect("address"))
+            .build()
+            .expect("transport");
+        let mut config = velo::streaming::ReservationConfig::default();
+        config.unattached_timeout = Duration::from_millis(150);
+        config.prebind_timeout = Duration::from_millis(150);
+        config.renew_interval = Duration::from_millis(30);
+        let node = Arc::new(
+            velo::Velo::builder()
+                .add_transport(Arc::new(tcp))
+                .reservation_config(config)
+                .messenger_mux(velo::streaming::MuxConfig {
+                    credit_sweep_interval: Duration::from_millis(10),
+                    ..Default::default()
+                })
+                .expect("mux config")
+                .build()
+                .await
+                .expect("node"),
+        );
+        roster.add(name, node.peer_info());
+        nodes.push(node);
+    }
+    let placement = Placement::new()
+        .segment("front", ["Front"])
+        .segment("work", ["A", "B", "C"])
+        .segment("sink", ["Engine"]);
+    let calls = Arc::new((0..3).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+    let mut segments = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        let deployment = Deployment::new(
+            nodes[index].clone(),
+            &slow_request::manifest(),
+            &placement,
+            name,
+            &roster,
+            RuntimeConfig::default(),
+        )
+        .expect("deployment");
+        let roots = slow_request::assemble(
+            &deployment,
+            slow_request::Bindings::new()
+                .a(Slow(0, calls.clone()))
+                .b(Slow(1, calls.clone()))
+                .c(Slow(2, calls.clone()))
+                .engine(Echo),
+        )
+        .expect("roots");
+        segments.push(deployment.start(roots).expect("segment"));
+    }
+    let mut response = tokio::time::timeout(
+        Duration::from_secs(3),
+        segments[0].call::<u32, u32>(Cx::new(), 1),
+    )
+    .await
+    .expect("bounded call")
+    .expect("slow request succeeds");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), response.next())
+            .await
+            .expect("bounded item")
+            .expect("item")
+            .expect("value"),
+        4
+    );
+    assert!(response.next().await.is_none());
+    let failed = tokio::time::timeout(
+        Duration::from_secs(3),
+        segments[0].call::<u32, u32>(Cx::new(), 100),
+    )
+    .await
+    .expect("bounded failure");
+    let error = match failed {
+        Err(error) => error,
+        Ok(_) => panic!("B must fail"),
+    };
+    assert_eq!(error.kind(), gdl::ErrorKind::Node);
+    assert_eq!(error.message(), "B refused request");
+    assert_eq!(
+        calls[2].load(Ordering::Relaxed),
+        1,
+        "C does not run after B fails"
+    );
+}

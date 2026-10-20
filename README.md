@@ -482,6 +482,8 @@ Its placement puts `Resample` in a segment of its own, so the audio crosses two 
 
 The design and its rulings are in `agent-docs/plan.md`.
 
+Request-only segments hold their reply reservation until downstream acceptance or failure. One task per runtime renews held reservations in batches at Velo's configured cadence (30 seconds by default). Velo defaults to 120 seconds before ordinary attachment and 180 seconds for a prepared slot. `RuntimeConfig::anchor_timeout` optionally overrides the ordinary lifetime; `None` inherits Velo's default. Renewal does not extend request deadlines or replace attached-stream heartbeats.
+
 ## Cost
 
 A graph that is not cut costs no encoding. A local graph is nested calls, and the nodes of one segment pass values to each other directly. A cut costs one encode and one decode for each message on each edge that crosses segments. There is one more case. If the request of a hop leaves the segment of the hop's outer end, the response items return to the outer end through an anchor. Each item is then encoded and decoded one time, also when no response edge crosses segments. A streamed request's head and each of its items are encoded once on each crossing that they go through. `crates/gdl/tests/crossings.rs` counts these encodes.

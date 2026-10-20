@@ -319,6 +319,7 @@ where
     async fn run_remote(self: &Arc<Self>, attempt: &Cx, req: F::In) -> Result<Items<B::Out>> {
         let rt = &self.rt;
         let (inbound, mut reply) = rt.fabric.mint();
+        let mut held_reply = rt.fabric.hold_reply(&reply);
         // From here on, a stop, a cancel, and the deadline must reach the
         // producer without waiting for anyone to read: during provisioning
         // and dispatch nothing reads yet, and afterwards the caller may hold
@@ -366,6 +367,10 @@ where
                     reply,
                 };
                 rt.send_open(segment, open).await?
+            };
+            held_reply = {
+                drop(held_reply);
+                rt.fabric.hold_reply(&reply)
             };
         }
         let exit = self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await?;
@@ -441,6 +446,7 @@ where
                 }
             }
         }
+        drop(held_reply);
         // As in local composition, no backward node of the outer end runs
         // before the inner end has its stream: wait for the open signal, or
         // return the failure that came instead.
@@ -520,9 +526,11 @@ where
             .forwards
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Forward { payload, reply, .. } = envelope;
+        let held_reply = rt.fabric.hold_reply(&reply);
         let hop = Arc::clone(self);
         tokio::spawn(async move {
             // However this task ends, the request's work here ends with it.
+            let _held_reply = held_reply;
             let _end = cx.cancel_on_drop();
             let upstream = guard.as_ref().map(InputGuard::canceller);
             if let Some(input) = upstream.clone() {
@@ -1235,7 +1243,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pump_takes_a_stop_that_comes_with_a_cancel_for_the_cancel() {
         let node = bind_node(([127, 0, 0, 1], 0).into()).await.expect("node");
-        let fabric = Fabric::new(node, Duration::from_secs(5), None);
+        let fabric = Fabric::new(node, Some(Duration::from_secs(5)), None);
         let (_inbound, reply) = fabric.mint();
         let out = fabric.attach(&reply).await.expect("attach");
         // The consumer has cancelled, which fired the stop token too, but
@@ -1264,7 +1272,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pump_passes_a_stop_alone_to_the_attempt() {
         let node = bind_node(([127, 0, 0, 1], 0).into()).await.expect("node");
-        let fabric = Fabric::new(node, Duration::from_secs(5), None);
+        let fabric = Fabric::new(node, Some(Duration::from_secs(5)), None);
         let (_inbound, reply) = fabric.mint();
         let out = fabric.attach(&reply).await.expect("attach");
         let attempt = Cx::new();
