@@ -96,7 +96,7 @@ async fn signals_cancel_the_serving_context_and_let_the_body_finish() {
         let (launch, address, _dir) = launched(signal.trim_start_matches('-')).await;
         let served = tokio::time::timeout(
             Duration::from_secs(5),
-            launch.serve((), |_, shutdown| async move {
+            launch.serve(common::Idle, |_, shutdown| async move {
                 // The handlers exist before the body runs, so the signal
                 // sent here cannot end the process the default way.
                 send(signal);
@@ -121,7 +121,7 @@ async fn signals_cancel_the_serving_context_and_let_the_body_finish() {
     let (launch, _, _dir) = launched("second").await;
     let served = tokio::time::timeout(
         Duration::from_secs(5),
-        launch.serve((), |_, shutdown| async move {
+        launch.serve(common::Idle, |_, shutdown| async move {
             send("-TERM");
             shutdown.cancelled().await;
             send("-TERM");

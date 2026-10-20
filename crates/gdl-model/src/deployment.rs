@@ -7,12 +7,14 @@ use crate::{Error, Manifest, Placement, layout};
 /// named once so they cannot disagree.
 pub const HUB_PUBLIC_PORT: u16 = 1337;
 
-/// The deadline a request gets when it crosses segments without one, and so
-/// by default how long a stopped segment may drain: the runtime's default,
-/// and the generated Compose file's grace before Docker kills a container.
-pub const DEFAULT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 /// The port the hub's control listener takes inside a deployment.
 pub const HUB_CONTROL_PORT: u16 = 8337;
+
+/// The deadline a request gets when it crosses segments without one, and so
+/// by default how long a stopped segment may drain. The runtime takes its
+/// default from here, and the generated Compose file waits this long plus a
+/// margin before Docker kills a stopped container.
+pub const DEFAULT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// The longest a segment name may be: a hub names a segment's readiness
 /// services `gdl-loaded-<hex>` and `gdl-serving-<hex>`, two characters

@@ -47,8 +47,8 @@ pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Velo> {
 
 /// Stop `node` taking requests, let the handlers it is running finish
 /// within `within`, and close its transports. Called once the instance
-/// holds no request: a stream that velo still holds for a slow consumer is
-/// ended by the close (ruling 113).
+/// holds no request. A stream that velo still holds for a slow consumer is
+/// ended by the close; velo gives no signal for when such output is gone.
 pub(crate) async fn shut_down(node: &Velo, within: std::time::Duration) {
     node.begin_drain();
     node.graceful_shutdown(velo::ShutdownPolicy::Timeout(within))

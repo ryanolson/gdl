@@ -265,16 +265,15 @@ impl<H: Hosted> ProcessConfig<H> {
         deployment: &gdl_model::DeploymentSpec,
         ready: impl Future<Output = Result<()>>,
     ) -> Result<Launch> {
-        let mut launch = process
-            .starting(self.meet(segment, segments, deployment, ready))
-            .await?;
-        launch.process = Some(process.clone());
-        Ok(launch)
+        process
+            .starting(self.meet(process, segment, segments, deployment, ready))
+            .await
     }
 
     /// The launch itself, which a stop may cut short.
     async fn meet(
         &self,
+        process: &Process,
         segment: &'static str,
         segments: &'static [&'static str],
         deployment: &gdl_model::DeploymentSpec,
@@ -352,7 +351,7 @@ impl<H: Hosted> ProcessConfig<H> {
             }
             #[cfg(not(feature = "hub"))]
             Discovery::Hub(hub) => {
-                let _ = ready;
+                drop(ready);
                 return Err(placement(format!(
                     "`[hub] host = {:?}`, but this binary was built without hub discovery (gdl's `hub` feature)",
                     hub.host
@@ -381,7 +380,7 @@ impl<H: Hosted> ProcessConfig<H> {
             reaching,
             wait,
             drain: self.runtime.drain_bound(),
-            process: None,
+            process: process.clone(),
             _leaving: leaving,
         })
     }
@@ -415,8 +414,7 @@ pub struct Launch {
     wait: Duration,
     /// How long a stop may take to drain.
     drain: Duration,
-    /// Set by `launch` once the meeting is done.
-    process: Option<Process>,
+    process: Process,
     /// Dropped last, on every way out: says the instance has left.
     _leaving: Leaving,
 }
@@ -457,19 +455,7 @@ fn sources(
         .collect();
     let reaching = hosting
         .iter()
-        .filter(|from| {
-            let mut seen = std::collections::BTreeSet::new();
-            let mut next: Vec<String> = layout.sends_to(from).into_iter().collect();
-            while let Some(at) = next.pop() {
-                if at == segment {
-                    return true;
-                }
-                if seen.insert(at.clone()) {
-                    next.extend(layout.sends_to(&at));
-                }
-            }
-            false
-        })
+        .filter(|from| layout.reaches(from, segment))
         .map(|from| from.to_string())
         .collect();
     (hosting.contains(segment), reaching)
@@ -485,13 +471,6 @@ pub trait Drains: Send + Sync + 'static {
 impl<H: Send + Sync + 'static> Drains for Segment<H> {
     fn admitted(&self) -> usize {
         Segment::admitted(self)
-    }
-}
-
-/// A process that hosts no segment, such as a test's, holds no request.
-impl Drains for () {
-    fn admitted(&self) -> usize {
-        0
     }
 }
 
@@ -541,9 +520,8 @@ impl Launch {
         F: FnOnce(Arc<S>, Cx) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let process = self.process.take().ok_or_else(|| {
-            Error::new(ErrorKind::Placement, "a launch serves once, after `launch`")
-        })?;
+        let process = self.process.clone();
+        let segment = Arc::new(segment);
         let inner: Vec<&str> = self.inner.iter().map(String::as_str).collect();
         let barrier = async {
             match &mut self.peers {
@@ -562,47 +540,71 @@ impl Launch {
                 Peers::Hub(session) => session.ready(&self.roster, &inner, self.wait).await,
             }
         };
-        process.starting(barrier).await?;
-        self.roster.release();
-        process.health.set(Phase::Ready);
-        eprintln!("{}: ready", self.segment);
-        let segment = Arc::new(segment);
-        let shutdown = Cx::new();
-        let body = serve(Arc::clone(&segment), shutdown.clone());
-        tokio::pin!(body);
-        let lease = async {
-            match &self.peers {
-                Peers::Files(_) => std::future::pending().await,
-                #[cfg(feature = "hub")]
-                Peers::Hub(session) => session.maintain().await,
-            }
+        let passed = tokio::select! {
+            biased;
+            () = process.stops(1) => None,
+            passed = barrier => Some(passed),
         };
-        let (ended, stop) = tokio::select! {
-            result = &mut body => (Some(result), Ok(())),
-            () = process.stops(1) => (None, Ok(())),
-            result = lease => (None, result),
-        };
-        let deadline = tokio::time::Instant::now() + self.drain;
-        process.health.set(Phase::Draining);
-        shutdown.cancel();
         let second = || {
             Error::new(
                 ErrorKind::Cancelled,
                 "stopped by a second signal before the drain finished",
             )
         };
-        let result = match ended {
-            Some(result) => result,
-            None => tokio::select! {
-                result = &mut body => result,
-                () = process.stops(2) => return Err(second()),
-            },
-        };
-        if stop.is_ok() {
-            tokio::select! {
-                () = self.drain(segment.as_ref(), deadline) => {}
-                () = process.stops(2) => return Err(second()),
+        let (result, stop, deadline) = match passed {
+            Some(Err(error)) => return Err(error),
+            // A stop during the barrier comes after this instance said it
+            // serves, so peers may already route here: it drains as after
+            // any stop, without running the body.
+            None => {
+                process.health.set(Phase::Draining);
+                let stopped = Error::new(ErrorKind::Cancelled, "stopped while starting");
+                let deadline = tokio::time::Instant::now() + self.drain;
+                (Err(stopped), Ok(()), deadline)
             }
+            Some(Ok(())) => {
+                self.roster.release();
+                process.health.set(Phase::Ready);
+                eprintln!("{}: ready", self.segment);
+                let shutdown = Cx::new();
+                let body = serve(Arc::clone(&segment), shutdown.clone());
+                tokio::pin!(body);
+                let lease = async {
+                    match &self.peers {
+                        Peers::Files(_) => std::future::pending().await,
+                        #[cfg(feature = "hub")]
+                        Peers::Hub(session) => session.maintain().await,
+                    }
+                };
+                let (ended, stop) = tokio::select! {
+                    result = &mut body => (Some(result), Ok(())),
+                    () = process.stops(1) => (None, Ok(())),
+                    result = lease => (None, result),
+                };
+                let deadline = tokio::time::Instant::now() + self.drain;
+                process.health.set(Phase::Draining);
+                shutdown.cancel();
+                // The bound ends every wait, the body's too: a request with
+                // a longer deadline of its own is cut off at it.
+                let result = match ended {
+                    Some(result) => result,
+                    None => tokio::select! {
+                        result = &mut body => result,
+                        () = process.stops(2) => return Err(second()),
+                        () = tokio::time::sleep_until(deadline) => Err(Error::new(
+                            ErrorKind::Cancelled,
+                            "the drain's bound passed before the serving body finished",
+                        )),
+                    },
+                };
+                (result, stop, deadline)
+            }
+        };
+        // A lost lease takes the hub's answers, not this instance's own
+        // requests: those are still waited for.
+        tokio::select! {
+            () = self.drain(segment.as_ref(), deadline, stop.is_ok()) => {}
+            () = process.stops(2) => return Err(second()),
         }
         let left = deadline
             .saturating_duration_since(tokio::time::Instant::now())
@@ -618,8 +620,15 @@ impl Launch {
     /// Announce that this instance has drained if it is a source's, then
     /// wait until every instance of the source segments that can reach it
     /// has drained or left, then until it holds no request: each until
-    /// `deadline`. Polls; nothing is added to a request's path.
-    async fn drain(&mut self, segment: &dyn Drains, deadline: tokio::time::Instant) {
+    /// `deadline`. With `hub` false (its lease is lost), the hub is not
+    /// asked. Polls; nothing is added to a request's path.
+    async fn drain(
+        &mut self,
+        segment: &dyn Drains,
+        deadline: tokio::time::Instant,
+        // Only a hub is asked; a roster directory has no lease to lose.
+        #[cfg_attr(not(feature = "hub"), allow(unused_variables))] hub: bool,
+    ) {
         let reaching: Vec<&str> = self.reaching.iter().map(String::as_str).collect();
         let pause = |every: Duration| async move {
             if tokio::time::Instant::now() + every > deadline {
@@ -634,7 +643,9 @@ impl Launch {
                     let _ = announce(dir, "drained", self.segment, &self.node);
                 }
                 // A roster directory's rosters are the same everywhere, so
-                // this one names every instance to wait for.
+                // this one names every instance to wait for. Reading a
+                // local directory every 50 ms blocks the runtime for
+                // microseconds; a roster directory is for local runs.
                 let want: std::collections::BTreeSet<String> = self
                     .roster
                     .segments()
@@ -655,26 +666,31 @@ impl Launch {
                 }
             }
             #[cfg(feature = "hub")]
-            Peers::Hub(session) => {
+            Peers::Hub(session) if hub => {
                 if self.source {
-                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    let _ = session.drained(left).await;
+                    let _ = session.drained(deadline).await;
                 }
                 // Rosters differ under a hub, so the hub's members are
                 // asked, not this instance's roster: one that joined later
-                // may route here too.
-                // A lease lost meanwhile ends the wait: the hub that would
-                // answer it is gone.
+                // may route here too. Each question is bounded by the
+                // deadline, since a hub can stop answering without closing
+                // its connections; a lease lost meanwhile ends the wait.
                 if !reaching.is_empty() {
                     loop {
                         let done = session.is_lost()
-                            || matches!(session.all_drained(&reaching).await, Ok(true));
+                            || matches!(
+                                tokio::time::timeout_at(deadline, session.all_drained(&reaching))
+                                    .await,
+                                Ok(Ok(true))
+                            );
                         if done || !pause(crate::dist::HubSession::poll()).await {
                             break;
                         }
                     }
                 }
             }
+            #[cfg(feature = "hub")]
+            Peers::Hub(_) => {}
         }
         while segment.admitted() > 0 {
             if !pause(DRAIN_POLL).await {

@@ -176,11 +176,20 @@ impl HubSession {
     }
 
     /// Announce that this instance, a source's, has drained the requests it
-    /// held, retried until `wait` runs out.
-    pub(crate) async fn drained(&mut self, wait: Duration) -> Result<()> {
-        if self.drained.is_none() {
-            let deadline = tokio::time::Instant::now() + wait;
-            self.drained = Some(self.announce(Phase::Drained, deadline).await?);
+    /// held, retried until `deadline`: an announcement the hub refused is
+    /// gone with its registration guard, and peers would wait for it until
+    /// their bound. Each attempt is bounded, since a hub can stop answering
+    /// without closing its connections.
+    pub(crate) async fn drained(&mut self, deadline: tokio::time::Instant) -> Result<()> {
+        while self.drained.is_none() {
+            let attempt = (tokio::time::Instant::now() + POLL * 10).min(deadline);
+            match self.announce(Phase::Drained, attempt).await {
+                Ok(registration) => self.drained = Some(registration),
+                Err(error) if tokio::time::Instant::now() + POLL >= deadline => {
+                    return Err(error);
+                }
+                Err(_) => tokio::time::sleep(POLL).await,
+            }
         }
         Ok(())
     }

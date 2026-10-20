@@ -1,4 +1,6 @@
 //! Real hub admission, rosters, and readiness over OS-assigned ports.
+
+mod common;
 use figment::providers::Format as _;
 use gdl::{
     DeploymentSpec, HopInfo, Hosted, HubSession, Manifest, NodeInfo, Placement, ProcessConfig,
@@ -240,8 +242,8 @@ async fn segment_processes_meet_through_a_hub() {
     assert_eq!(front.roster().instances("sink").len(), 1);
     assert_eq!(sink.roster().instances("front").len(), 1);
     let (a, b) = tokio::join!(
-        front.serve((), |_, _| async { Ok(()) }),
-        sink.serve((), |_, _| async { Ok(()) }),
+        front.serve(common::Idle, |_, _| async { Ok(()) }),
+        sink.serve(common::Idle, |_, _| async { Ok(()) }),
     );
     a.expect("front served");
     b.expect("sink served");
@@ -300,7 +302,7 @@ async fn a_segment_drains_and_stops_when_its_hub_is_gone() {
     let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen = Arc::clone(&drained);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let serving = tokio::spawn(front.serve((), move |_, shutdown| async move {
+    let serving = tokio::spawn(front.serve(common::Idle, move |_, shutdown| async move {
         // The body runs once the barrier has passed.
         let _ = ready_tx.send(());
         shutdown.cancelled().await;
@@ -309,7 +311,7 @@ async fn a_segment_drains_and_stops_when_its_hub_is_gone() {
         seen.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }));
-    let other = tokio::spawn(sink.serve((), |_, shutdown| async move {
+    let other = tokio::spawn(sink.serve(common::Idle, |_, shutdown| async move {
         shutdown.cancelled().await;
         Ok(())
     }));
@@ -724,10 +726,17 @@ async fn a_returning_forward_path_does_not_deadlock_readiness() {
 /// Settings for an instance of `spec()` at `hub`, heartbeating every
 /// 200 ms, drained within `drain_ms`.
 fn hub_settings(hub: &velo_hub::Hub, drain_ms: u64) -> ProcessConfig<Nothing> {
-    let settings = format!(
-        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n[runtime]\ndrain_ms = {drain_ms}\n",
+    settings_for(
         hub.public_addr().port(),
-        hub.control_addr().port()
+        hub.control_addr().port(),
+        drain_ms,
+    )
+}
+
+/// Settings for an instance of `spec()` at a hub on these ports.
+fn settings_for(public: u16, control: u16, drain_ms: u64) -> ProcessConfig<Nothing> {
+    let settings = format!(
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {public}, control_port = {control}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n[runtime]\ndrain_ms = {drain_ms}\n"
     );
     ProcessConfig::from_figment(figment::Figment::from(figment::providers::Toml::string(
         &settings,
@@ -753,7 +762,7 @@ async fn under_a_hub_the_sink_leaves_after_the_source_drains() {
     );
     let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
     let (front_running, front_runs) = tokio::sync::oneshot::channel();
-    let front_served = tokio::spawn(front.serve((), |_, shutdown| async move {
+    let front_served = tokio::spawn(front.serve(common::Idle, |_, shutdown| async move {
         let _ = front_running.send(());
         shutdown.cancelled().await;
         // The front's drain: requests it holds, finishing after the stop.
@@ -763,7 +772,7 @@ async fn under_a_hub_the_sink_leaves_after_the_source_drains() {
     let (sink_running, sink_runs) = tokio::sync::oneshot::channel();
     let sink_served = tokio::spawn(async move {
         let served = sink
-            .serve((), |_, shutdown| async move {
+            .serve(common::Idle, |_, shutdown| async move {
                 let _ = sink_running.send(());
                 shutdown.cancelled().await;
                 Ok(())
@@ -825,12 +834,12 @@ async fn a_crashed_source_ends_the_wait_with_its_lease() {
     );
     let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
     let (front_running, front_runs) = tokio::sync::oneshot::channel();
-    let front_served = tokio::spawn(front.serve((), |_, _| async move {
+    let front_served = tokio::spawn(front.serve(common::Idle, |_, _| async move {
         let _ = front_running.send(());
         std::future::pending::<gdl::Result<()>>().await
     }));
     let (sink_running, sink_runs) = tokio::sync::oneshot::channel();
-    let sink_served = tokio::spawn(sink.serve((), |_, shutdown| async move {
+    let sink_served = tokio::spawn(sink.serve(common::Idle, |_, shutdown| async move {
         let _ = sink_running.send(());
         shutdown.cancelled().await;
         Ok(())
@@ -886,13 +895,13 @@ async fn a_lease_lost_while_draining_ends_the_wait() {
     );
     let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
     let (front_running, front_runs) = tokio::sync::oneshot::channel();
-    let _front_served = tokio::spawn(front.serve((), |_, _| async move {
+    let _front_served = tokio::spawn(front.serve(common::Idle, |_, _| async move {
         let _ = front_running.send(());
         std::future::pending::<gdl::Result<()>>().await
     }));
     let (sink_running, sink_runs) = tokio::sync::oneshot::channel();
     let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
-    let sink_served = tokio::spawn(sink.serve((), |_, shutdown| async move {
+    let sink_served = tokio::spawn(sink.serve(common::Idle, |_, shutdown| async move {
         let _ = sink_running.send(());
         shutdown.cancelled().await;
         let _ = stopped_tx.send(());
@@ -921,4 +930,229 @@ async fn a_lease_lost_while_draining_ends_the_wait() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// How a [`Proxy`] treats its connections.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Forward,
+    /// Accept and hold, answering nothing: a hub that stops answering
+    /// without closing its connections.
+    Silent,
+    /// Close at once: a hub that is briefly gone.
+    Refuse,
+}
+
+/// A TCP proxy in front of one of a hub's ports, so that a test can make
+/// the hub fall silent or go away for a while under running instances.
+struct Proxy {
+    port: u16,
+    mode: tokio::sync::watch::Sender<Mode>,
+}
+
+impl Proxy {
+    async fn new(target: std::net::SocketAddr) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("valid test fixture");
+        let port = listener.local_addr().expect("valid test fixture").port();
+        let (mode, modes) = tokio::sync::watch::channel(Mode::Forward);
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                tokio::spawn(relay(client, target, modes.clone()));
+            }
+        });
+        Self { port, mode }
+    }
+
+    fn set(&self, mode: Mode) {
+        let _ = self.mode.send(mode);
+    }
+}
+
+/// Relay one connection while the mode forwards; hold it while silent;
+/// drop it once refusing.
+async fn relay(
+    mut client: tokio::net::TcpStream,
+    target: std::net::SocketAddr,
+    mut mode: tokio::sync::watch::Receiver<Mode>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Settle the mode first: hold while silent, return when refusing.
+    loop {
+        let now = *mode.borrow_and_update();
+        match now {
+            Mode::Refuse => return,
+            Mode::Silent => {
+                if mode.changed().await.is_err() {
+                    return;
+                }
+            }
+            Mode::Forward => break,
+        }
+    }
+    let Ok(mut server) = tokio::net::TcpStream::connect(target).await else {
+        return;
+    };
+    let (mut from_client, mut to_client) = client.split();
+    let (mut from_server, mut to_server) = server.split();
+    let (mut up, mut down) = ([0u8; 8192], [0u8; 8192]);
+    loop {
+        let now = *mode.borrow_and_update();
+        match now {
+            Mode::Refuse => return,
+            Mode::Silent => {
+                if mode.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            Mode::Forward => {}
+        }
+        tokio::select! {
+            read = from_client.read(&mut up) => match read {
+                Ok(n) if n > 0 => {
+                    if to_server.write_all(&up[..n]).await.is_err() {
+                        return;
+                    }
+                }
+                _ => return,
+            },
+            read = from_server.read(&mut down) => match read {
+                Ok(n) if n > 0 => {
+                    if to_client.write_all(&down[..n]).await.is_err() {
+                        return;
+                    }
+                }
+                _ => return,
+            },
+            changed = mode.changed() => if changed.is_err() {
+                return;
+            },
+        }
+    }
+}
+
+/// A source and a sink launched at `hub` through proxies, each a process of
+/// its own, both serving: the source's body never finishes, the sink's
+/// returns at its stop. The source's process, the sink's, and the sink's
+/// serving task.
+async fn proxied_pair(
+    hub: &velo_hub::Hub,
+    public: &Proxy,
+    control: &Proxy,
+    drain_ms: u64,
+) -> (
+    gdl::Process,
+    gdl::Process,
+    tokio::task::JoinHandle<gdl::Result<()>>,
+    tokio::task::JoinHandle<gdl::Result<()>>,
+) {
+    let _ = hub;
+    let config = settings_for(public.port, control.port, drain_ms);
+    let (front_process, sink_process) = (
+        gdl::Process::start(&config).await.expect("process"),
+        gdl::Process::start(&config).await.expect("process"),
+    );
+    let deployment = spec();
+    let (front, sink) = tokio::join!(
+        config.launch(
+            &front_process,
+            "front",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+        config.launch(
+            &sink_process,
+            "sink",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+    );
+    let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
+    let (front_running, front_runs) = tokio::sync::oneshot::channel();
+    let front_served = tokio::spawn(front.serve(common::Idle, |_, shutdown| async move {
+        let _ = front_running.send(());
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    let (sink_running, sink_runs) = tokio::sync::oneshot::channel();
+    let sink_served = tokio::spawn(sink.serve(common::Idle, |_, shutdown| async move {
+        let _ = sink_running.send(());
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    for runs in [front_runs, sink_runs] {
+        tokio::time::timeout(WAIT, runs)
+            .await
+            .expect("serving in time")
+            .expect("the body ran");
+    }
+    (front_process, sink_process, front_served, sink_served)
+}
+
+/// A hub that stops answering, without closing its connections, holds a
+/// draining instance no longer than its bound (plus the shutdown's own
+/// small allowance), though one question to the hub can wait a minute.
+#[tokio::test]
+async fn a_silent_hub_does_not_hold_a_drain_past_its_bound() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let (public, control) = (
+        Proxy::new(hub.public_addr()).await,
+        Proxy::new(hub.control_addr()).await,
+    );
+    let (_front, sink, _front_served, sink_served) =
+        proxied_pair(&hub, &public, &control, 2_000).await;
+    public.set(Mode::Silent);
+    control.set(Mode::Silent);
+    let stopped = tokio::time::Instant::now();
+    sink.stop();
+    tokio::time::timeout(Duration::from_secs(20), sink_served)
+        .await
+        .expect("the sink left within twenty seconds")
+        .expect("the sink's task")
+        .expect("the sink served");
+    // The bound, a second for velo, and up to five for leaving the hub.
+    assert!(
+        stopped.elapsed() < Duration::from_secs(10),
+        "a 2 s drain took {:?}",
+        stopped.elapsed()
+    );
+}
+
+/// A hub that refuses the source's `drained` for a moment does not lose
+/// it: the source retries, and the sink, waiting for it, leaves soon after
+/// the hub is back, long before its bound.
+#[tokio::test]
+async fn a_refused_drained_announcement_is_retried() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let (public, control) = (
+        Proxy::new(hub.public_addr()).await,
+        Proxy::new(hub.control_addr()).await,
+    );
+    let (front, sink, front_served, sink_served) =
+        proxied_pair(&hub, &public, &control, 20_000).await;
+    // Briefer than the lease's grace (five heartbeats of 200 ms), so the
+    // leases survive it.
+    public.set(Mode::Refuse);
+    control.set(Mode::Refuse);
+    front.stop();
+    sink.stop();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    public.set(Mode::Forward);
+    control.set(Mode::Forward);
+    let back = tokio::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(10), sink_served)
+        .await
+        .expect("the sink left once the source's drained arrived")
+        .expect("the sink's task")
+        .expect("the sink served");
+    assert!(
+        back.elapsed() < Duration::from_secs(8),
+        "the sink waited {:?} after the hub came back",
+        back.elapsed()
+    );
+    let _ = tokio::time::timeout(WAIT, front_served).await;
 }

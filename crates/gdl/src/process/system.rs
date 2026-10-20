@@ -171,7 +171,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most of a refused request read and dropped before closing.
 const DRAIN_LIMIT: usize = 64 << 10;
 
-/// Connections answered at once; more wait to be accepted.
+/// How long the listener waits after an accept fails.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+
+/// Connections answered at once; more wait to be accepted. A probe that
+/// finds them all held by silent clients waits for their read timeout; the
+/// port is the deployment's own.
 const CONNECTIONS: usize = 64;
 
 /// Bind the listener `settings` ask for, if any, and serve `health` on it
@@ -199,8 +204,16 @@ pub(crate) async fn listen(
             let Ok(permit) = Arc::clone(&slots).acquire_owned().await else {
                 return;
             };
-            let Ok((stream, _)) = listener.accept().await else {
-                continue;
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                // Out of file descriptors, the listener stays readable and
+                // every accept fails at once: without a pause the loop
+                // would spin a worker until one frees.
+                Err(_) => {
+                    drop(permit);
+                    tokio::time::sleep(ACCEPT_PAUSE).await;
+                    continue;
+                }
             };
             let (health, paths) = (Arc::clone(&health), Arc::clone(&paths));
             tokio::spawn(async move {

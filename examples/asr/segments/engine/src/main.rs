@@ -60,6 +60,9 @@ async fn run() -> Result<(), Failure> {
         return Err("usage: asr-engine [--healthcheck] <config.toml> [override.toml ...]".into());
     }
     if paths[0] == "--healthcheck" {
+        if paths.len() == 1 {
+            return Err("usage: asr-engine --healthcheck <config.toml> [override.toml ...]".into());
+        }
         gdl::ProcessConfig::<Hosted>::load(&paths[1..])?
             .healthcheck()
             .await?;

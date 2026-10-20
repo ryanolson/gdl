@@ -229,6 +229,24 @@ impl Layout {
         targets
     }
 
+    /// Whether work that `from` holds can reach `to` through one or more
+    /// sends. A segment reaches itself only when a path leaves it and
+    /// returns. A stopped instance waits for the sources that reach its
+    /// segment, since only their requests can still arrive.
+    pub fn reaches(&self, from: &str, to: &str) -> bool {
+        let mut seen = BTreeSet::new();
+        let mut next: Vec<String> = self.sends_to(from).into_iter().collect();
+        while let Some(at) = next.pop() {
+            if at == to {
+                return true;
+            }
+            if seen.insert(at.clone()) {
+                next.extend(self.sends_to(&at));
+            }
+        }
+        false
+    }
+
     /// The hops, outermost first.
     pub fn hops(&self) -> &[HopLayout] {
         &self.hops

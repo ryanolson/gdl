@@ -223,7 +223,7 @@ impl Unit<'_> {
         );
         let _ = writeln!(
             text,
-            "    if paths[0] == \"--healthcheck\" {{ gdl::ProcessConfig::<Hosted>::load(&paths[1..])?.healthcheck().await?; return Ok(()); }}"
+            "    if paths[0] == \"--healthcheck\" {{ if paths.len() == 1 {{ return Err(\"usage: {package} --healthcheck <config.toml> [override.toml ...]\".into()); }} gdl::ProcessConfig::<Hosted>::load(&paths[1..])?.healthcheck().await?; return Ok(()); }}"
         );
         let _ = writeln!(
             text,

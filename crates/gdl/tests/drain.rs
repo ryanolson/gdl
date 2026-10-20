@@ -132,8 +132,10 @@ async fn a_request_in_flight_survives_a_stop_of_everything(placement: Placement)
     );
 }
 
+/// The request completes; the side's wait for its ledger, and for the
+/// source, both hold it here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_stop_of_everything_waits_for_the_source() {
+async fn a_stop_of_everything_lets_the_request_finish() {
     a_request_in_flight_survives_a_stop_of_everything(
         Placement::new()
             .segment("front", ["A", "B", "F", "E", "G"])
@@ -154,8 +156,9 @@ async fn a_returning_path_drains_without_waiting_on_itself() {
     .await;
 }
 
-/// A source that never finishes draining holds the others only for the
-/// drain's bound; a second stop then ends it.
+/// A source whose body never finishes its drain holds the others only for
+/// the drain's bound, and is itself ended at that bound: the bound ends
+/// every wait, the serving body's too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_drain_is_bounded() {
     let placement = Placement::new()
@@ -163,14 +166,14 @@ async fn the_drain_is_bounded() {
         .segment("side", ["C", "D"]);
     let (_dir, (front, front_launch), (side, side_launch)) = launched(&placement, 400).await;
     let (front_running, front_runs) = tokio::sync::oneshot::channel();
-    let front_served = tokio::spawn(front_launch.serve((), |_, shutdown| async move {
+    let front_served = tokio::spawn(front_launch.serve(common::Idle, |_, shutdown| async move {
         let _ = front_running.send(());
         shutdown.cancelled().await;
         std::future::pending::<gdl::Result<()>>().await
     }));
     let (side_running, side_runs) = tokio::sync::oneshot::channel();
     let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
-    let side_served = tokio::spawn(side_launch.serve((), |_, shutdown| async move {
+    let side_served = tokio::spawn(side_launch.serve(common::Idle, |_, shutdown| async move {
         let _ = side_running.send(());
         shutdown.cancelled().await;
         let _ = stopped_tx.send(Instant::now());
@@ -199,13 +202,133 @@ async fn the_drain_is_bounded() {
         waited >= Duration::from_millis(350),
         "the side did not wait for the front: {waited:?}"
     );
-    front.stop();
     let front_served = tokio::time::timeout(WAIT, front_served)
         .await
-        .expect("a second stop ended the front")
+        .expect("the bound ended the front")
         .expect("the front's task");
     assert!(
-        front_served.is_err_and(|e| e.to_string().contains("second signal")),
+        front_served.is_err_and(|e| e.to_string().contains("bound")),
         "the front drained on its own"
+    );
+}
+
+/// What a segment holds, set by the test: the drain waits for it to reach
+/// zero.
+struct Held(Arc<std::sync::atomic::AtomicUsize>);
+
+impl gdl::Drains for Held {
+    fn admitted(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Once the sources that reach it have drained, an instance still waits
+/// until it holds no request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_waits_until_it_holds_no_request() {
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "F", "E", "G"])
+        .segment("side", ["C", "D"]);
+    let (_dir, (front, front_launch), (side, side_launch)) = launched(&placement, 10_000).await;
+    let held = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let (front_running, front_runs) = tokio::sync::oneshot::channel();
+    let front_served = tokio::spawn(front_launch.serve(common::Idle, |_, shutdown| async move {
+        let _ = front_running.send(());
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    let (side_running, side_runs) = tokio::sync::oneshot::channel();
+    let side_served = tokio::spawn(side_launch.serve(
+        Held(Arc::clone(&held)),
+        |_, shutdown| async move {
+            let _ = side_running.send(());
+            shutdown.cancelled().await;
+            Ok(())
+        },
+    ));
+    for runs in [front_runs, side_runs] {
+        tokio::time::timeout(WAIT, runs)
+            .await
+            .expect("serving in time")
+            .expect("the body ran");
+    }
+    front.stop();
+    side.stop();
+    tokio::time::timeout(WAIT, front_served)
+        .await
+        .expect("the front left")
+        .expect("the front's task")
+        .expect("the front served");
+    // The front has drained; the side still holds a request.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !side_served.is_finished(),
+        "the side left holding a request"
+    );
+    held.store(0, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(WAIT, side_served)
+        .await
+        .expect("the side left once it held nothing")
+        .expect("the side's task")
+        .expect("the side served");
+}
+
+/// A stop during the barrier comes after the instance said it serves, so a
+/// peer may already route to it: it drains as after any stop, waiting for
+/// the source that reaches it, and does not run its body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_at_the_barrier_still_drains() {
+    // The side sends back to the front, so its barrier waits for the front,
+    // which is not serving yet.
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "D", "F", "E", "G"])
+        .segment("side", ["C"]);
+    let (dir, (front, front_launch), (side, side_launch)) = launched(&placement, 10_000).await;
+    let side_served = tokio::spawn(side_launch.serve(common::Idle, |_, _| async move {
+        panic!("the side's body ran after a stop at its barrier")
+    }));
+    // The side has said it serves, and waits at its barrier.
+    let serving = dir.path().join("serving");
+    let started = Instant::now();
+    while !std::fs::read_dir(&serving)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .any(|e| e.file_name().to_string_lossy().starts_with("side."))
+        })
+        .unwrap_or(false)
+    {
+        assert!(started.elapsed() < WAIT, "the side never said it serves");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    side.stop();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !side_served.is_finished(),
+        "the side left without waiting for the front"
+    );
+    let (front_running, front_runs) = tokio::sync::oneshot::channel();
+    let front_served = tokio::spawn(front_launch.serve(common::Idle, |_, shutdown| async move {
+        let _ = front_running.send(());
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    tokio::time::timeout(WAIT, front_runs)
+        .await
+        .expect("the front serves")
+        .expect("its body ran");
+    front.stop();
+    tokio::time::timeout(WAIT, front_served)
+        .await
+        .expect("the front left")
+        .expect("the front's task")
+        .expect("the front served");
+    let side_served = tokio::time::timeout(WAIT, side_served)
+        .await
+        .expect("the side left once the front had drained")
+        .expect("the side's task");
+    assert!(
+        side_served.is_err_and(|e| e.to_string().contains("while starting")),
+        "the side served"
     );
 }

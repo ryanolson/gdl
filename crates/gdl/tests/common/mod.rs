@@ -27,6 +27,16 @@ use gdl::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, mpsc};
 
+/// The segment of a launch in a test that starts none: it never holds a
+/// request, so a drain waits only for its peers.
+pub struct Idle;
+
+impl gdl::Drains for Idle {
+    fn admitted(&self) -> usize {
+        0
+    }
+}
+
 // ----- messages -----
 
 /// A's request.

@@ -145,12 +145,12 @@ async fn a_launch_holds_its_roster_until_it_serves() {
     assert!(!events.has("C:early"));
     let caller = Arc::clone(&front_segment);
     let (served_front, served_side) = tokio::join!(
-        front.serve((), |_, _| async move {
+        front.serve(common::Idle, |_, _| async move {
             let out = caller.call(Cx::new(), prompt("served", plan)).await?;
             assert_eq!(collect(out).await, expected(0..2));
             Ok(())
         }),
-        side.serve((), |_, _| async { Ok(()) })
+        side.serve(common::Idle, |_, _| async { Ok(()) })
     );
     served_front.expect("a request from the serving body goes through");
     served_side.expect("the side serves");

@@ -145,6 +145,13 @@ fn a_segment_sends_to_the_next_run_and_the_runs_it_opens() {
     assert_eq!(names("fwd"), ["sink"]);
     assert!(names("sink").is_empty());
     assert!(names("bwd").is_empty());
+    // Reaching follows sends: the sink through `fwd`, never back up, and
+    // no segment reaches itself without a path that returns.
+    assert!(layout.reaches("front", "sink"));
+    assert!(layout.reaches("front", "bwd"));
+    assert!(!layout.reaches("sink", "front"));
+    assert!(!layout.reaches("fwd", "bwd"));
+    assert!(!layout.reaches("front", "front"));
 }
 
 /// A forward path that leaves a segment and comes back makes the two
@@ -191,4 +198,7 @@ fn a_forward_path_that_returns_sends_both_ways() {
     let names = |segment: &str| -> Vec<String> { layout.sends_to(segment).into_iter().collect() };
     assert_eq!(names("front"), ["mid"]);
     assert_eq!(names("mid"), ["front"]);
+    // Each reaches itself through the other.
+    assert!(layout.reaches("front", "front"));
+    assert!(layout.reaches("mid", "mid"));
 }
