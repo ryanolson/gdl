@@ -54,11 +54,15 @@ function nodes() {
 const port = (node, name) => node.ports.find((p) => p.port === name) || {};
 const portOf = (p) => ({ head: p.head || null, item: p.item || null });
 
+let exampleSource=null;
 async function load() {
   const response = await fetch("/api/catalog");
   if (!response.ok) throw new Error(`Catalog could not be loaded (${response.status}).`);
   const catalog = await response.json();
   state.entries = catalog.entries;
+  exampleSource=catalog.example;
+  $("clear-catalog").disabled=state.entries.length===0;
+  $("load-examples").hidden=state.entries.length!==0 || !exampleSource;
   $("add-local").hidden = !catalog.local_enabled;
   renderCatalog();
   fillMessages($("source-request"), "Choose input message…");
@@ -2091,4 +2095,32 @@ $('download-deployment').onclick=()=>{
   link.download=`${deploymentSnapshot.name}-compose.tar.gz`;
   link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);
   $('deploy-status').textContent='Reviewed bundle downloaded. Build and run it on your Docker host.';
+};
+
+$('load-examples').onclick=async()=>{
+  if(!exampleSource) return;
+  $('load-examples').disabled=true;
+  $('adding').textContent='Loading API frontend examples from Git…';
+  try {
+    const response=await fetch('/api/catalog',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(exampleSource)});
+    const result=await response.json();
+    if(!response.ok) throw new Error((result.problems || ['Example import failed']).join(' · '));
+    await load();
+    $('adding').textContent='Examples loaded. Choose ApiFrontend in Source settings to begin.';
+  } catch(error) { $('adding').textContent=error.message; }
+  finally { $('load-examples').disabled=false; }
+};
+
+$('clear-catalog').onclick=async()=>{
+  if(!window.confirm('Clear the catalog and current graph? Catalog entries will be archived on the server; package sources will not be deleted.')) return;
+  $('clear-catalog').disabled=true;
+  try {
+    const response=await fetch('/api/catalog/clear',{method:'POST'});
+    const result=await response.json();
+    if(!response.ok) throw new Error((result.problems || ['Could not clear catalog']).join(' · '));
+    deployOpen=false;clearTimeout(deploymentTimer);deploymentRevision++;deploymentSnapshot=null;
+    clearGraph();editHistory.length=0;historyIndex=-1;
+    await load();recordHistory();
+    $('adding').textContent=result.backup?`Catalog cleared. Entries archived at ${result.backup}`:'Catalog cleared.';
+  } catch(error) { $('adding').textContent=error.message; $('clear-catalog').disabled=false; }
 };

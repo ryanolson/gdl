@@ -262,6 +262,9 @@ The hub uses Velo main pinned to `d793db4cc4930e1e8e3a08eff23c4643f020608d`. Req
 
 ## Compose in a browser
 
+An empty catalog offers **Load examples** to import the public API frontend package from Git. With the public GDL repository configured, the import uses the server's runtime revision. **Clear catalog** asks for confirmation, archives the catalog entries on the server, and clears the current graph. It does not delete package sources.
+
+
 `gdl-web` serves the composer: a page that builds a graph from the nodes and messages of a working catalogue.
 
 ```bash

@@ -1296,3 +1296,57 @@ async fn deployment_rejects_local_packages_without_local_access() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn clear_catalog_archives_entries_and_reopens_empty() {
+    let dir = scratch("clear-catalog");
+    let catalog = dir.join("catalogue");
+    let entry = gdl_extract::Catalog::load(&fixture_catalog())
+        .expect("fixture")
+        .entries()
+        .next()
+        .expect("entry")
+        .clone();
+    gdl_extract::Catalog::load(&catalog)
+        .expect("catalog")
+        .add(entry)
+        .expect("add");
+    let app = router(&dir, catalog.clone());
+    let (status, body) = json_call(&app, "POST", "/api/catalog/clear", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let backup = body["backup"].as_str().expect("backup path");
+    assert_eq!(
+        gdl_extract::Catalog::load(Path::new(backup))
+            .expect("backup")
+            .entries()
+            .count(),
+        1
+    );
+    assert_eq!(
+        gdl_extract::Catalog::load(&catalog)
+            .expect("empty catalog")
+            .entries()
+            .count(),
+        0
+    );
+    let (_, body) = json_call(&app, "GET", "/api/catalog", None).await;
+    assert_eq!(body["entries"].as_array().expect("entries").len(), 0);
+}
+
+#[tokio::test]
+async fn examples_use_the_configured_runtime_revision() {
+    let dir = scratch("example-revision");
+    let app = gdl_web::router(gdl_web::Config {
+        catalog: dir.join("catalogue"),
+        target: dir.join("target"),
+        local_root: None,
+        gdl: gdl_web::Gdl::Git {
+            url: "https://github.com/ryanolson/gdl".into(),
+            rev: "test-revision".into(),
+        },
+    })
+    .expect("router");
+    let (_, body) = json_call(&app, "GET", "/api/catalog", None).await;
+    assert_eq!(body["example"]["revision"], "test-revision");
+    assert_eq!(body["example"]["path"], "examples/api");
+}

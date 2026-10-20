@@ -96,6 +96,7 @@ pub fn router(mut config: Config) -> Result<Router, String> {
             }),
         )
         .route("/api/catalog", get(entries).post(imports::add))
+        .route("/api/catalog/clear", axum::routing::post(clear_catalog))
         .route("/api/local", get(imports::browse))
         .route("/api/crates", get(imports::search))
         .route("/api/check", axum::routing::post(check))
@@ -115,11 +116,48 @@ async fn app_js() -> Response {
 type Shared = State<Arc<Composer>>;
 
 /// Every entry, as its file holds it.
+async fn clear_catalog(State(composer): Shared) -> Response {
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
+        let mut catalog = composer.catalog.write().map_err(|e| e.to_string())?;
+        let path = &composer.config.catalog;
+        let backup = if path.exists() {
+            let suffix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos();
+            let backup = path.with_extension(format!("cleared-{suffix}"));
+            std::fs::rename(path, &backup).map_err(|e| e.to_string())?;
+            Some(backup)
+        } else {
+            None
+        };
+        *catalog = Catalog::load(path).map_err(|e| e.to_string())?;
+        Ok(backup)
+    })
+    .await;
+    match result {
+        Ok(Ok(backup)) => Json(json!({"backup":backup})).into_response(),
+        Ok(Err(error)) => problems(StatusCode::INTERNAL_SERVER_ERROR, vec![error]),
+        Err(error) => problems(StatusCode::INTERNAL_SERVER_ERROR, vec![error.to_string()]),
+    }
+}
+
 async fn entries(State(composer): Shared) -> Response {
     let catalog = composer.catalog.read().expect("the catalogue lock");
     let entries: Vec<&gdl_extract::Entry> = catalog.entries().collect();
-    Json(json!({ "entries": entries, "local_enabled": composer.config.local_root.is_some() }))
-        .into_response()
+    let url = "https://github.com/ryanolson/gdl";
+    let revision = match &composer.config.gdl {
+        Gdl::Git {
+            url: configured,
+            rev,
+        } if configured.trim_end_matches(".git") == url => rev.as_str(),
+        _ => "e2813e7f9af25a3a09f078b83360e0668d785b44",
+    };
+    Json(
+        json!({ "entries": entries, "local_enabled": composer.config.local_root.is_some(),
+        "example": {"source":"git", "url":url, "revision":revision, "path":"examples/api"} }),
+    )
+    .into_response()
 }
 
 /// A draft's graph file and spec, and what generating them would find:

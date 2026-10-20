@@ -206,11 +206,7 @@ async fn git(
     }
     let checkout = tempfile::tempdir().map_err(|e| e.to_string())?;
     git_command(checkout.path(), &["init", "--quiet"]).await?;
-    git_command(
-        checkout.path(),
-        &["fetch", "--quiet", "--depth=1", "--", url, revision],
-    )
-    .await?;
+    git_fetch(checkout.path(), url, revision).await?;
     git_command(
         checkout.path(),
         &["checkout", "--quiet", "--detach", "FETCH_HEAD"],
@@ -258,6 +254,26 @@ async fn git(
     .map_err(|e| e.to_string())?
 }
 
+async fn git_fetch(dir: &Path, url: &str, revision: &str) -> Result<String, String> {
+    // An exact identity rewrite wins over workstation-wide HTTPS-to-SSH prefixes.
+    // Keep the import on its validated HTTP transport without changing user config.
+    let rewrite = format!("url.{url}.insteadOf={url}");
+    git_command(
+        dir,
+        &[
+            "-c",
+            &rewrite,
+            "fetch",
+            "--quiet",
+            "--depth=1",
+            "--",
+            url,
+            revision,
+        ],
+    )
+    .await
+}
+
 async fn git_command(dir: &Path, args: &[&str]) -> Result<String, String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(120),
@@ -283,4 +299,36 @@ async fn git_command(dir: &Path, args: &[&str]) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn https_import_overrides_ssh_url_rewrites() {
+        let dir = tempfile::tempdir().expect("directory");
+        super::git_command(dir.path(), &["init", "--quiet"])
+            .await
+            .expect("init");
+        super::git_command(
+            dir.path(),
+            &[
+                "config",
+                "url.ssh://example.invalid/.insteadOf",
+                "http://127.0.0.1:",
+            ],
+        )
+        .await
+        .expect("rewrite");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("port");
+        let url = format!("http://{}/repo", listener.local_addr().expect("address"));
+        drop(listener);
+        let error = super::git_fetch(dir.path(), &url, "main")
+            .await
+            .expect_err("closed port");
+        assert!(!error.contains("transport 'ssh'"), "{error}");
+        assert!(
+            error.contains("Failed to connect") || error.contains("Couldn't connect"),
+            "{error}"
+        );
+    }
 }

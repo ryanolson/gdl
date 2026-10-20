@@ -893,3 +893,32 @@ test('deployment preview rejects stale generation and disables download during e
   assert.equal(run('deploymentSnapshot'),null);
   assert.equal(run("$('download-deployment').disabled"),true);
 });
+
+test('load examples imports the advertised Git revision and reports failures', async () => {
+  const run=editor();
+  run(`exampleSource={source:'git',url:'https://github.com/ryanolson/gdl',revision:'pinned',path:'examples/api'};
+    let imported=null; load=async()=>{};
+    fetch=async(url,options)=>{imported=JSON.parse(options.body);return {ok:true,json:async()=>({})};};`);
+  await run(`$('load-examples').onclick()`);
+  assert.equal(run('imported.revision'),'pinned');
+  assert.equal(run('imported.path'),'examples/api');
+  run(`fetch=async()=>({ok:false,json:async()=>({problems:['Import failed']})});`);
+  await run(`$('load-examples').onclick()`);
+  assert.equal(run(`$('adding').textContent`),'Import failed');
+  assert.equal(run(`$('load-examples').disabled`),false);
+});
+
+test('clear catalog requires confirmation and invalidates deployment snapshots', async () => {
+  const run=editor();
+  run(`let requests=0; window.confirm=()=>false;
+    fetch=async()=>{requests++;return {ok:true,json:async()=>({backup:'/tmp/catalog-backup'})};};`);
+  await run(`$('clear-catalog').onclick()`);
+  assert.equal(run('requests'),0);
+  run(`window.confirm=()=>true;clearGraph=()=>{};load=async()=>{};recordHistory=()=>{};
+    deploymentSnapshot={archive:'stale'};deployOpen=true;`);
+  await run(`$('clear-catalog').onclick()`);
+  assert.equal(run('requests'),1);
+  assert.equal(run('deploymentSnapshot'),null);
+  assert.equal(run('deployOpen'),false);
+  assert.equal(run('editHistory.length'),0);
+});
