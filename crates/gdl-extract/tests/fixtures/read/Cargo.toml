@@ -1,0 +1,17 @@
+# Crates for the source reader's tests. They are read, never built: the
+# engine's build script fails, as one that needs CUDA would on a machine
+# without it, and the markers they use are read as text.
+[workspace]
+members = ["engine", "facade", "protocols", "quirks"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+gdl = { path = "../../../../gdl" }
+gdl-message = { path = "../../../../gdl-message" }
+read-protocols = { path = "protocols" }
+serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,45 @@
+Codex gpt-6-astra (high), bb workflow wfr_116d8840-1e79-46bb-930d-e7ef91e324ad, over 3c422e3..1db1919 (milestones 10 and 11, pass 4).
+Focuses: 1 the pass 3 redesign in depth, 2 milestones 10 and 11 at HEAD.
+
+{
+  "verdict": "REJECT",
+  "actionable": 2,
+  "findings": [
+    {
+      "id": "M10-R4-IDENTITY",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/resolve.rs",
+      "line": 101,
+      "claim": "Directory equality admits unlisted Cargo package instances, causing false ambiguity and incorrect pin resolution.",
+      "evidence": "Reproduced with both a git checkout and a vendored registry crate: list the source directory as a path dependency while another listed crate depends on that package through git or the registry. Cargo builds two package identities from the same directory, so both entries pass is_listed. Resolution rejects Chunk as ambiguous with itself. With serde enabled by default on the listed path package and disabled on the transitive git dependency, pinning directory_protocols::Chunk returns wire=false, although the listed package's control returns wire=true. Both assertions fail at HEAD; logs are /tmp/gdl-review-linker/focus.log and registry-case/result.log.",
+      "test_idea": "Add fixtures that load one physical directory through path and git/registry sources with different features. Assert that unlisted entries cannot create ambiguity or answer pins, and that the selected entry retains the listed package's wire capability. Include a control with distinct source directories."
+    },
+    {
+      "id": "M10-R4-PANIC",
+      "severity": "minor",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 83,
+      "claim": "The panic classifier mistakes compilation failures for conflicts in the catalogue executable and discards the useful compiler diagnostic.",
+      "evidence": "run() captures stderr from cargo run, including proc-macro and build-script failures. In the copied platform fixture, adding the real gdl alongside stray-gdl to stray-macro makes nothing! panic inside the compiler. Direct Cargo output reports 'proc macro panicked' at platform-protocols/src/lib.rs:3. The generator replaces this with 'the catalogue program links two message catalogues', although compilation failed and that executable never ran. The regression assertion preserving the compiler diagnostic fails; see /tmp/gdl-review-linker/host-test.log and host-raw.log.",
+      "test_idea": "Exercise a proc macro whose host dependencies contain two catalogues while the target graph contains only one. Preserve its compiler diagnostic, and classify duplicate-slice panics only after confirming the catalogue executable ran. Keep controls for an actual runtime duplicate and failed diagnostic metadata."
+    }
+  ],
+  "notes": "Completed the general and deep passes without delegation. Original worktree unchanged at 1db1919; experiments used /tmp/gdl-review-linker with isolated targets. Workspace suite: 294 passed, 2 ignored. The proc-macro regression fails against 834bbaf; the runtime-conflict regression fails with its panic handler disabled. The existing version-only test survives rollback and does not cover directory identity; a same-name/version, distinct-source control succeeds at HEAD and fails before the redesign. On aarch64 Linux, duplicate detection worked in debug, release with LTO, and release with panic=abort; reading neither catalogue causes no panic, while the generator always reads its own. Relative paths, symlink/.. resolution, duplicate listing rejection, remap-path-prefix, trim-paths, and metadata-failure fallback were checked. Other linkme platforms were source-reviewed, not executed. No additional material hot-path or architectural finding survived review."
+}
+
+{
+  "verdict": "APPROVE-WITH-CHANGES",
+  "actionable": 1,
+  "findings": [
+    {
+      "id": "M10-R4-01",
+      "severity": "minor",
+      "file": "crates/gdl-gen/src/contract.rs",
+      "line": 65,
+      "claim": "A protocols library named `gdl` resolves successfully but makes the generated contract uncompilable.",
+      "evidence": "The catalogue aliases message dependencies (dump.rs:65\u201371), explicitly supporting a library named `gdl`. Contract generation instead emits unaliased message dependencies alongside the runtime. Reproduced with package `review-protocols`, `[lib] name = \"gdl\"`, and a public derived `Prompt`: --resolve prints `Prompt  gdl::Prompt  local`, but --diagram fails with E0464 at `gdl::graph!` because two direct dependencies have the crate name `gdl`. Renaming only the protocols library to `review_messages` makes both operations succeed. Spec validation checks message libraries against each other but omits the runtime's reserved name.",
+      "test_idea": "Add an integration fixture with a protocols library named `gdl` and an ordinary-name control. Check resolution followed by contract generation. Either preserve distinct aliases through contract generation or reject the collision explicitly during spec validation. The failing assertion and passing control are in /tmp/gdl-review-fresh/probes/check_names.py."
+    }
+  ],
+  "notes": "Completed the general and deep passes over 3c422e3..1db1919, including prior dispositions and settled rulings 31\u201340. No additional material issue found in the linker-based redesign, directory identity, derive, syntax, examples, or documentation. Workspace tests passed under timeout 300: 294 passed, 0 failed, 2 ignored doctests. The focused regression ran under timeout 120: one failing assertion and one passing control, 4.231 s. Evidence is in /tmp/gdl-review-fresh/{suite.log,probe-test.log,probes/}. The reviewed worktree remains unchanged. No agents or phone-a-friend were used."
+}

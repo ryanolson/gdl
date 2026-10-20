@@ -1,0 +1,5 @@
+error: only a request can be streamed; a backward node's types are response items
+ --> tests/ui/graph-stream-backward.rs:8:21
+  |
+8 |     backward F: u32 + stream u32 -> u32;
+  |                     ^

@@ -1,0 +1,7 @@
+- **P2 — [crates/gdl/src/dist/hop.rs:132](/home/ryan/repos/dynamo-gdl/crates/gdl/src/dist/hop.rs:132): Hosted-slot validation trusts the placeholder’s name.** For `A => C => E => D`, with identical C/E port types and only E remote, `.c(Absent::<nodes::E>::new())` passes assembly despite hosted C being absent. Requests then fail with `NotHosted("E")`. This leaves mega-r3 finding 1 incompletely fixed. Validate absence against each slot’s actual topology position or declaration, and add this regression case. Verified statically.
+
+- **P2 — [crates/gdl/src/diagram.rs:88](/home/ryan/repos/dynamo-gdl/crates/gdl/src/diagram.rs:88): Mermaid titles use label escaping inside YAML.** A graph named `chat: demo` produces invalid YAML; the existing `odd "graph"` fixture produces a title parsed as just `odd`, because `#quot;` starts a comment. Both failures were reproduced with a YAML parser. Encode the title as a properly quoted YAML string, separately from flowchart labels, and test parsed title preservation.
+
+- **P3 — [README.md:146](/home/ryan/repos/dynamo-gdl/README.md:146): The encoding-cost claim omits same-segment anchors.** For the counted test graph placed as `{A,D,F} {C}`, requests cross twice and responses never cross segments, yet every response item is encoded and decoded through the outer end’s anchor. This follows settled plan §7.2. Correct the README and `tests/crossings.rs` documentation, and add this placement to the counter test with expected counts of `2 + ITEMS`. Verified statically.
+
+ACTIONABLE: 3

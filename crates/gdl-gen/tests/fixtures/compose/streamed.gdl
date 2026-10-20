@@ -1,0 +1,8 @@
+// Streamed requests, with a head and without one (`stream Chunk` is
+// `() + stream Chunk`): the manifest built without compiling must match
+// the compiled contract's here too.
+name = "streamed", schema = 1;
+source  A: Prompt + stream Chunk -> stream Chunk;
+forward C: Prompt + stream Chunk -> stream Chunk;
+sink    B: stream Chunk -> stream Chunk;
+topology: A => C => B;

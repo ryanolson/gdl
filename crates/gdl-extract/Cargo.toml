@@ -1,0 +1,21 @@
+[package]
+name = "gdl-extract"
+description = "Reads what a crate offers to gdl graphs from its source, without building it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gdl-syntax = { path = "../gdl-syntax" }
+gdl-model = { path = "../gdl-model" }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+syn = { version = "2", features = ["full"] }
+toml = { workspace = true }
+
+[lints]
+workspace = true

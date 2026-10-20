@@ -1,0 +1,8 @@
+# A registry crate whose library is not named for its package.
+[package]
+name = "regrenamed"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "renamed"

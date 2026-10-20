@@ -1,0 +1,5 @@
+error: `stream` needs the item type after it
+ --> tests/ui/graph-stream-missing-item.rs:6:28
+  |
+6 |     source A: u32 + stream -> stream u32;
+  |                            ^

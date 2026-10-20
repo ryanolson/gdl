@@ -1,0 +1,33 @@
+[package]
+name = "gdl-gen"
+description = "Generates one crate per segment of a gdl graph placement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+# `cargo-gdl` on the PATH is run by `cargo gdl`.
+autobins = false
+
+[[bin]]
+name = "cargo-gdl"
+path = "src/main.rs"
+
+[dependencies]
+tempfile = "3"
+serde_json.workspace = true
+flate2 = "1"
+gdl-model = { path = "../gdl-model" }
+gdl-extract = { path = "../gdl-extract" }
+gdl-message = { path = "../gdl-message" }
+gdl-syntax = { path = "../gdl-syntax" }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+serde = { workspace = true }
+syn = "2"
+tar = { version = "0.4", default-features = false }
+toml = { workspace = true }
+
+
+[lints]
+workspace = true

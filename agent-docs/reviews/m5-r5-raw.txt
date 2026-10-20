@@ -1,0 +1,5 @@
+1. **P2 — Regeneration can overwrite handwritten files.** [crates/gdl-gen/src/lib.rs:264](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/lib.rs:264) skips ownership checks for every expected output path. If `--out` contains a handwritten `front/Cargo.toml` and `front/src/main.rs`, generation silently replaces them despite `write` promising to refuse files it did not generate. Check existing expected paths for the generation marker before writing anything. Add a regression proving an unmarked collision rejects the operation and preserves all files.
+
+2. **P2 — Buffered output prevents incremental JSON streaming.** [crates/gdl/src/json.rs:81](/home/ryan/repos/dynamo-gdl/crates/gdl/src/json.rs:81) writes item lines but flushes only after the response stream ends. With a supported buffered `AsyncWrite`, a stream that emits one item and remains open can leave the consumer waiting indefinitely without receiving it. Flush each completed item line. Test with a buffered writer and a producer whose completion is gated on the consumer receiving its first item; the existing `Vec<u8>` tests cannot detect this failure.
+
+ACTIONABLE: 2

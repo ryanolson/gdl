@@ -1,0 +1,5 @@
+error: an export names each message it offers: a glob names none
+ --> tests/ui/export-glob.rs:9:16
+  |
+9 | pub use inner::*;
+  |                ^

@@ -1,0 +1,38 @@
+error[E0277]: `Rc<str>` cannot be sent between threads safely
+ --> tests/ui/message-not-send.rs:5:8
+  |
+5 | struct Shared {
+  |        ^^^^^^ `Rc<str>` cannot be sent between threads safely
+  |
+  = help: within `Shared`, the trait `Send` is not implemented for `Rc<str>`
+note: required because it appears within the type `Shared`
+ --> tests/ui/message-not-send.rs:5:8
+  |
+5 | struct Shared {
+  |        ^^^^^^
+note: required by a bound in `Message`
+ --> src/shape.rs
+  |
+  | pub trait Message: Send + 'static {
+  |                    ^^^^ required by this bound in `Message`
+
+error[E0277]: `Rc<str>` cannot be sent between threads safely
+ --> tests/ui/message-not-send.rs:5:8
+  |
+5 | struct Shared {
+  |        ^^^^^^ `Rc<str>` cannot be sent between threads safely
+  |
+  = help: within `Shared`, the trait `Send` is not implemented for `Rc<str>`
+note: required because it appears within the type `Shared`
+ --> tests/ui/message-not-send.rs:5:8
+  |
+5 | struct Shared {
+  |        ^^^^^^
+note: required by a bound in `IDENTITY`
+ --> src/shape.rs
+  |
+  | pub trait Message: Send + 'static {
+  |                    ^^^^ required by this bound in `Message::IDENTITY`
+...
+  |     const IDENTITY: Identity;
+  |           -------- required by a bound in this associated constant

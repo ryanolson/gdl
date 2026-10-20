@@ -1,0 +1,9 @@
+# Every message in one protocols crate.
+[graph]
+path = "chat.gdl"
+
+[messages]
+crates = ["chat-protocols"]
+
+[gdl]
+path = "../../../../gdl"

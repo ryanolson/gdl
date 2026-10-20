@@ -1,0 +1,5 @@
+error: a node type cannot be generic: a graph names one type per node
+ --> tests/ui/node-generic.rs:4:18
+  |
+4 | pub struct Engine<T>(T);
+  |                  ^

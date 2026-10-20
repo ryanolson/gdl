@@ -1,0 +1,14 @@
+[package]
+name = "other-protocols"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+chat-protocols = { path = "../chat-protocols" }
+gdl-message = { path = "../../../../../gdl-message" }
+serde = { version = "1", features = ["derive"] }
+
+# Not a member of the repository workspace: it is read by the tests, and
+# built only for the contracts they generate.
+[workspace]

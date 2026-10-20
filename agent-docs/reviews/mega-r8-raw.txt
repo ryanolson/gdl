@@ -1,0 +1,7 @@
+1. **P2 — Assembly does not verify contract identity.** [crates/gdl-macros/src/expand.rs:428](/home/ryan/repos/dynamo-gdl/crates/gdl-macros/src/expand.rs:428): An embedding caller can pass contract B’s deployment to contract A’s `assemble`. Matching hop shapes and bound slots pass validation, so A’s stages execute while envelopes advertise B’s contract hash. This bypasses mismatch detection, potentially exchanging incompatible messages silently. Check the generated contract’s hash against the deployment before constructing hops; add a regression with differing schemas.
+
+2. **P2 — Keyword-named contract libraries break the default module path.** [crates/gdl-gen/src/spec.rs:160](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/spec.rs:160): With `[lib] name = "async"` and `contract.module` omitted, the dump program emits `async::manifest()`, which Rust rejects. Both generation and `--diagram` fail for this valid contract. Escape keyword identifiers when deriving the default module path; test it against explicit `module = "r#async"`.
+
+3. **P2 — Rooted binding paths still fail with leading whitespace.** [crates/gdl-gen/src/emit.rs:192](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/emit.rs:192): `type = " ::tiny_nodes::D"` passes validation, but emission strips `::` without first handling whitespace, producing `pub d: :: ::tiny_nodes::D`. Rustfmt rejects it and generation aborts. This leaves the m5-r9 fix incomplete. Normalize the parsed path consistently for emission and extend the rooted-path regression with leading whitespace.
+
+ACTIONABLE: 3

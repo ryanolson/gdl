@@ -1,0 +1,29 @@
+# The ASR example: a graph whose requests stream. A client sends a session's
+# settings and a stream of audio; transcripts stream back while the audio
+# still streams in. A contract, the crates implementing its nodes, the
+# segment crates gdl-gen generates from `gdl.toml`, and a demo that runs the
+# three segments in one process. Its own workspace, as a deployment's would
+# be.
+[workspace]
+members = [
+    "contract",
+    "demo",
+    "dsp-nodes",
+    "engine-mock",
+    "front-nodes",
+    "segments/dsp",
+    "segments/engine",
+    "segments/front",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+futures = "0.3"
+gdl = { path = "../../crates/gdl" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

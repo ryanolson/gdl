@@ -1,0 +1,4 @@
+name = "http", schema = 1;
+source Http: Prompt -> stream Chunk;
+sink Engine: Prompt -> stream Chunk;
+topology: Http => Engine;

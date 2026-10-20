@@ -1,0 +1,141 @@
+Codex gpt-6-astra (high), bb workflow wfr_f8184ade-e96e-4185-8cb7-396e8d723a13, over 3c422e3..c439bb8.
+Focuses: 1 runtime side, 2 generator side, 3 tests and documentation.
+
+{
+  "verdict": "REJECT",
+  "actionable": 2,
+  "findings": [
+    {
+      "id": "runtime-1",
+      "severity": "major",
+      "file": "crates/gdl/src/catalogue.rs",
+      "line": 63,
+      "claim": "The unqualified MESSAGES linker-section name collides with other registries and gdl versions, causing runtime panics.",
+      "evidence": "Reproduced in /tmp/gdl-review-runtime: linking gdl 0.1.0 with a protocols crate deriving Message through a separate gdl 0.2.0 makes Catalogue::linked() panic with `duplicate #[distributed_slice] with name \"MESSAGES\"`. A second failing test, crates/gdl/tests/registry.rs in the temporary copy, reproduces the collision with one gdl version and an unrelated linkme slice named MESSAGES in another module. linkme 0.3.37 derives section names from the static identifier, without its module or crate identity. Consequently, the different-gdl case never reaches the documented 'offers no messages' diagnostic, and an unrelated registry can also break.",
+      "test_idea": "Add isolated integration fixtures for an unrelated MESSAGES slice and for two gdl identities. Assert independent registries remain usable and the mismatched runtime produces the intended diagnostic without panicking. Isolate the registry's linker namespace across unrelated crates and runtime identities."
+    },
+    {
+      "id": "runtime-2",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/resolve.rs",
+      "line": 21,
+      "claim": "Filtering catalogue entries by package name admits unlisted versions of a protocols crate; a pin can silently select the wrong type metadata.",
+      "evidence": "The derive records CARGO_PKG_NAME but no package identity, and MessageInfo paths also omit version/source identity. Reproduced with listed protocols 0.2.0 defining a serde-enabled Prompt and transitively linking protocols 0.1.0 defining a non-wire Prompt, both using the same gdl. Resolution reports `protocols::Prompt` twice as ambiguous despite only one listed crate. Adding the suggested pin to `protocols::Prompt` succeeds but prints `local`, although the listed version's Prompt is wire-capable: the pin's find() at line 43 selects the other version's entry. Both expected-behavior assertions fail in /tmp/gdl-review-runtime/duplicates/check.py.",
+      "test_idea": "Add a composition fixture with two versions of one protocols package and distinct wire capabilities. Verify listing one version selects only that identity, including when pinned. Preserve sufficient crate identity through registration and selection, or explicitly reject indistinguishable identities before resolving pins."
+    }
+  ],
+  "notes": "Completed the general and deep passes without delegation, as requested. All experiments used /tmp/gdl-review-runtime with its own target directory; the reviewed worktree remains clean. Existing catalogue tests (3), trybuild suites, parser/macro tests, and composition tests (4) passed. Trybuild completed in 51.61 s and composition in 16.55 s. A release probe retained all six fixture messages through `use chat_protocols as _` and passed TOML round-trip assertions. No new request-path work or graph! regression was found. Milestone 11 deferrals were excluded; the full workspace suite was not run."
+}
+
+{
+  "verdict": "REJECT",
+  "actionable": 3,
+  "findings": [
+    {
+      "id": "GEN-1",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/resolve.rs",
+      "line": 21,
+      "claim": "Identify listed crates by package identity, not package name: an unlisted transitive version currently supplies messages and can override a pin's wire capability.",
+      "evidence": "Reproduced with listed protocols 0.2.0 and bridge, where bridge links unlisted protocols 0.1.0. Both versions enter `offered` because their package names match. A Hidden type defined only in 0.1.0 resolves successfully as protocols::Hidden. Both versions define Chunk; pinning Chunk to protocols::Chunk selects the unlisted non-serde entry at line 43 and reports local, although the listed Chunk derives serde. Without the pin, the error lists the identical path twice. Two regression assertions fail; resolving the directly listed version alone correctly reports wire.",
+      "test_idea": "Add fixture crates containing two versions of one protocols package, with one reachable only transitively. Assert that transitive-only names cannot resolve, that the listed Chunk resolves without false ambiguity, and that a pin preserves its wire capability. Carry sufficient package identity through the catalogue and resolver, or explicitly reject indistinguishable versions."
+    },
+    {
+      "id": "GEN-2",
+      "severity": "minor",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 59,
+      "claim": "Escape Rust 2024 keywords when importing message libraries; a valid library named gen cannot resolve.",
+      "evidence": "A protocols package with `[lib] name = \"gen\"` and one derived Message passes spec loading, but catalogue generation emits `use gen as _;` into an edition-2024 program. Rust rejects it with `expected identifier, found reserved keyword gen`. The newly used default_module helper relies on syn::Ident parsing, which accepts gen without enforcing the output edition's keyword rules. The equivalent async-library control resolves successfully.",
+      "test_idea": "Add an end-to-end fixture whose library name is gen and assert successful resolution. Generate `use r#gen as _;`, or use a safe dependency alias. The isolated regression `a_rust_2024_keyword_library_resolves` fails on HEAD."
+    },
+    {
+      "id": "GEN-3",
+      "severity": "minor",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 64,
+      "claim": "Detect incompatible gdl dependencies explicitly; they do not produce separate empty catalogues as the implementation assumes.",
+      "evidence": "With [gdl] pointing to runtime 0.1.0 and a listed message crate deriving against a separate runtime 0.2.0, the dump builds but panics inside linkme: `duplicate #[distributed_slice] with name \"MESSAGES\"`. Resolution therefore never reaches the promised crate-specific 'offers no messages ... with the gdl that [gdl] names' diagnostic. The reported error contains neither the incompatible message crate nor the required remedy.",
+      "test_idea": "Add a fixture using a second gdl package identity and assert a diagnostic identifying that crate and the runtime mismatch, without a linkme panic. Validate runtime unification before running the dump, or otherwise handle duplicate registries. The isolated diagnostic regression fails on HEAD."
+    }
+  ],
+  "notes": "Completed general and deep passes for the requested generator scope at c439bb8, without delegation. Original worktree remains unchanged. In /tmp/gdl-review-generator, all 62 existing gdl-gen tests passed under timeout 120. Added isolated regression probes: four failing assertions substantiate the three findings; the control test passed. Evidence: /tmp/gdl-review-generator/crates/gdl-gen/tests/review.rs and /tmp/gdl-review-generator/regressions.log. Accepted milestone-11 limits were excluded."
+}
+
+{
+  "verdict": "APPROVE-WITH-CHANGES",
+  "actionable": 1,
+  "findings": [
+    {
+      "id": "M10-TESTS-01",
+      "severity": "minor",
+      "file": "crates/gdl-gen/src/names.rs",
+      "line": 69,
+      "claim": "Stream-shape disagreements prevent the promised collection of all edge errors, and the new tests miss this case.",
+      "evidence": "Section 9.6 promises every edge disagreement, including whether an edge is streamed. GraphFile::parse returns immediately when Graph::parse encounters the first stream-shape mismatch, before collecting name disagreements. In the isolated copy, a test with A: Head + stream Item -> stream Reply, B: Head -> Head + stream Item, C: Head -> stream Other, and topology A => B => C reported only B's stream-shape error. C's shape error and the Other/Reply response mismatch were omitted. The failing regression test and a passing three-name-mismatch control are in /tmp/gdl-review-tests-docs/crates/gdl-gen/src/names.rs. Existing tests cover multiple name mismatches and streamed head/item names, but never combine shape disagreements with other errors.",
+      "test_idea": "Add the mixed-disagreement graph to names.rs tests and require both stream-shape errors plus the response-name error, each with its position. Aggregate these edge errors before returning while preserving existing graph! diagnostics."
+    }
+  ],
+  "notes": "Completed general and deep passes without delegation. Worktree remained unchanged; experiments used /tmp/gdl-review-tests-docs with its own CARGO_TARGET_DIR. Under 120-second timeouts, all 43 generator unit tests, 4 composition tests, 1 syntax edge test, 3 catalogue tests, and both trybuild harness tests passed. Trybuild finished in 46.01 s; warm composition tests finished in 0.22 s. The added diagnostic regression failed as described; its control passed. No additional material findings within the requested tests/documentation focus. Settled milestone-11 limits were excluded."
+}
+
+{
+  "verdict": {
+    "type": "string",
+    "enum": [
+      "APPROVE",
+      "APPROVE-WITH-CHANGES",
+      "REJECT"
+    ]
+  },
+  "actionable": {
+    "type": "integer"
+  },
+  "findings": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "file",
+        "line",
+        "claim",
+        "evidence",
+        "test_idea"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "critical",
+            "major",
+            "minor"
+          ]
+        },
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "claim": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "test_idea": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "notes": {
+    "type": "string"
+  }
+}

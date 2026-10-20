@@ -1,0 +1,11 @@
+error[E0277]: the trait bound `Words: Message` is not satisfied
+ --> tests/ui/export-not-message.rs:9:16
+  |
+9 | pub use inner::Words;
+  |                ^^^^^ unsatisfied trait bound
+  |
+help: the trait `Message` is not implemented for `Words`
+ --> tests/ui/export-not-message.rs:5:5
+  |
+5 |     pub struct Words;
+  |     ^^^^^^^^^^^^^^^^

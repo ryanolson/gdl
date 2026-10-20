@@ -1,0 +1,90 @@
+Codex gpt-6-astra (high), bb workflow wfr_72580d6b-889e-4a50-b509-7c55411d6953, over 3c422e3..834bbaf (milestones 10 and 11, pass 3).
+Focuses: 1 the pass 2 fixes in depth, 2 milestones 10 and 11 at HEAD.
+
+{
+  "verdict": "REJECT",
+  "actionable": 5,
+  "findings": [
+    {
+      "id": "GEN-01",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 330,
+      "claim": "The twin-identity check still rejects packages that are never linked into the catalogue.",
+      "evidence": "Unlike the duplicate-gdl check, this loop scans metadata.packages without the linked filter. Reproduced with a listed path package review-protocols 0.0.0 and an identically named/versioned git package used only by its build script. gdl-gen refuses resolution and recommends changing a version; running its generated catalogue directly succeeds and reports only the listed package's Chunk.",
+      "test_idea": "Add a listed protocols crate with a build-only git dependency sharing its name/version. Assert resolution succeeds; retain a control that rejects a genuinely runtime-linked twin. Also cover an inactive target dependency."
+    },
+    {
+      "id": "GEN-02",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 289,
+      "claim": "The linked-package walk crosses proc-macro boundaries and falsely reports their dependencies as runtime conflicts.",
+      "evidence": "Cargo represents a dependency on a proc-macro crate as normal. The walk therefore follows protocols -> proc macro -> another gdl, although that gdl is loaded into the compiler rather than the catalogue executable. A fixture invoking a proc macro with this dependency was rejected as linking two gdls. Directly building and running the same generated catalogue succeeded.",
+      "test_idea": "Add a protocols crate that invokes a proc macro whose normal dependency is another gdl. Resolution must succeed. Exclude proc-macro compilation subtrees unless a package is separately reachable through a runtime path."
+    },
+    {
+      "id": "GEN-03",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 282,
+      "claim": "Package-level metadata merges build-only features into the walk, causing false runtime conflicts even without proc macros.",
+      "evidence": "Reproduced under resolver 3: protocols depends normally on helper without features, and its build script depends on the same helper with a feature enabling an optional second gdl. Metadata exposes that optional normal edge on helper, so the walk incorrectly includes it in the catalogue. gdl-gen rejects the spec, while direct cargo run of its generated catalogue succeeds. Skipping build edges alone does not preserve build-versus-runtime feature contexts.",
+      "test_idea": "Add the shared-helper fixture with a build-only optional dependency. Assert resolution succeeds when only the build unit enables the feature, and rejects when the runtime unit enables it. Determine runtime reachability using the applicable feature context."
+    },
+    {
+      "id": "GEN-04",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 147,
+      "claim": "The cfg probe ignores Cargo's effective compiler flags, so dependency filtering disagrees with the subsequent build.",
+      "evidence": "Platform::host invokes bare rustc --print cfg, while cargo inherits RUSTFLAGS. With RUSTFLAGS='--cfg review_active', a second gdl behind cfg(review_active) bypasses the guard and causes the generated catalogue to panic with duplicate distributed_slice GDL_MESSAGE_CATALOGUE. Conversely, cfg(not(review_active)) is falsely reported as a conflict; directly running that catalogue succeeds.",
+      "test_idea": "Run subprocess regressions with --cfg supplied through RUSTFLAGS, covering both positive and negated predicates. Obtain cfg settings from the same effective compiler configuration used for the catalogue build."
+    },
+    {
+      "id": "GEN-05",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 176,
+      "claim": "Raw cfg identifiers are compared literally, violating Cargo's identifier semantics and the fail-toward-reporting guarantee.",
+      "evidence": "Cargo accepts and preserves cfg(r#unix) in metadata, but ToString produces r#unix while rustc's settings contain unix. On Linux, the positive predicate hides a linked second gdl and the catalogue panics in linkme. The negated predicate falsely rejects an otherwise valid catalogue; its direct Cargo execution succeeds. Raw key/value names such as r#target_os use the same faulty conversion.",
+      "test_idea": "Normalize cfg identifiers with unraw before comparison. Test cfg(r#unix), cfg(not(r#unix)), and cfg(r#target_os = \"linux\") against their plain spellings, with an end-to-end duplicate-gdl control."
+    }
+  ],
+  "notes": "Completed the general and deep passes over 3c422e3..834bbaf, focused on the pass 2 fixes and settled rulings. The reviewed worktree remains clean and unchanged; no agents were spawned. Experiments and logs are in /tmp/gdl-review-pass2-focus with an independent CARGO_TARGET_DIR. All 75 gdl-gen tests and 4 catalogue tests passed under timeout. Removing the contract reservation/naming fixes, linked filter, unique temporary suffix, graph-name unraw, and derive-name unraw caused their respective regression assertions to fail in the copy. The lock wait's 2\u20135 s clamp was verified by inspection and its existing test passed. No additional material naming/reservation, writer, or hot-path issue was found. All five findings have executable reproductions; direct Cargo controls confirm the false refusals."
+}
+
+{
+  "verdict": "REJECT",
+  "actionable": 3,
+  "findings": [
+    {
+      "id": "M10-R3-01",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 330,
+      "claim": "The package-identity check still rejects twins that are only build dependencies.",
+      "evidence": "Unlike the second-gdl check, this loop scans metadata.packages without filtering to linked packages. Reproduced with a local protocols package named autocfg 1.5.1 and the registry autocfg 1.5.1 present only through build dependencies: resolve rejects it as another package 'in the program'. Cargo's normal dependency tree contains only the local package, and running the generated catalogue directly succeeds and prints its Chunk entry. This part of the stated pass-2 disposition remains unfixed.",
+      "test_idea": "Add a fixture with a listed path package and a registry package sharing its name/version, with the registry package reachable only through build dependencies or an inactive target. Assert resolution succeeds; retain a control that rejects a genuinely runtime-linked twin."
+    },
+    {
+      "id": "M10-R3-02",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 289,
+      "claim": "Normal-dependency traversal incorrectly treats proc-macro dependencies as linked into the catalogue executable.",
+      "evidence": "Cargo represents a proc-macro dependency as a normal dependency, but its dependencies link into the compiler-loaded macro library. The traversal never examines package target kinds. Reproduced with a protocols crate using review-macro, whose normal dependency is the existing stray-gdl fixture: resolve rejects the graph and identifies review-macro as the second runtime's user. The generated catalogue builds and runs successfully when invoked directly, printing exactly the protocols crate's Chunk.",
+      "test_idea": "Extend the unlinked-gdl regression fixture with a proc-macro that depends on another gdl and is invoked by the protocols crate. Assert resolution succeeds, while the existing ordinary runtime dependency case remains rejected."
+    },
+    {
+      "id": "M10-R3-03",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 147,
+      "claim": "Platform detection ignores Cargo's effective rustflags, so dependency checks can disagree with the actual build.",
+      "evidence": "Platform::host invokes rustc --print cfg directly without Cargo's flags, while the subsequent Cargo commands inherit RUSTFLAGS. Reproduced with a second gdl under target.'cfg(not(review_extra))'.dependencies and RUSTFLAGS='--cfg review_extra': Cargo excludes that dependency, but gdl-gen rejects it as linked. cargo tree confirms only gdl 0.1.0 is active, and the generated catalogue runs successfully under the same flags. The inverse predicate can also evade the intended preflight check.",
+      "test_idea": "Run the generator in child processes with custom cfg flags and positive/negative target predicates. Assert its dependency selection matches Cargo's actual build, including flags supplied through Cargo configuration or CARGO_ENCODED_RUSTFLAGS."
+    }
+  ],
+  "notes": "Reviewed 3c422e3..834bbaf using the general and deep passes, including the prior review dispositions and settled design rulings. Existing workspace suite passed under timeout 300: 295 passed, 0 failed, 2 ignored doctests. Three focused regression probes failed under timeout 120; all three generated catalogue programs succeeded as direct controls. Evidence and fixtures are in /tmp/gdl-review-full-pass3 (review.log, flags.log, control-*.log, reviewcases/, and crates/gdl-gen/tests/review.rs). Original worktree remained unchanged. No agents or phone-a-friend were used, as requested. No additional material findings survived review of derive/catalogue, syntax, resolution, contract generation, rendering, diagrams, examples, or docs."
+}

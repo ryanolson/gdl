@@ -1,0 +1,21 @@
+[package]
+name = "gdl-macros"
+description = "The graph! macro for gdl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+gdl-model = { path = "../gdl-model" }
+gdl-syntax = { path = "../gdl-syntax" }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[lints]
+workspace = true

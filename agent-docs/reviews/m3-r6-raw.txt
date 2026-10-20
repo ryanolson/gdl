@@ -1,0 +1,5 @@
+- **P1 — `crates/gdl/src/dist/hop.rs:147`: enclosing local-hop contexts survive a distributed request’s deadline.** In the two-segment placement, hop 0 is local while hop 1 crosses to D. Holding the response unread lets hop 1’s watcher cancel its own attempt, but G’s context belongs to hop 0; its deadline is enforced only when `bound` is polled. Consequently, G’s helper can live indefinitely past the deadline. The pass-5 fix is incomplete. Enforce deadline cancellation for enclosing local scopes too, without propagating individual child-attempt cancellation upward. Extend the existing held-stream regression with `G = "watch:outer-g"`.
+
+- **P2 — `crates/gdl/tests/faults.rs:461`: the producer-death test shuts down the consumer.** `Placement::segments()` iterates alphabetically, and `deploy()` assigns nodes in that order: `nodes[0]` is engine, `nodes[1]` is front. This test therefore passes on consumer shutdown without exercising remote producer death or failure propagation through post. Select the engine explicitly, shut it down, and assert a terminal error within a short bound so the default request deadline cannot satisfy the test.
+
+ACTIONABLE: 2

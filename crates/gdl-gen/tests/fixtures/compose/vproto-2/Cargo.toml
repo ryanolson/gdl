@@ -1,0 +1,13 @@
+[package]
+name = "vproto"
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gdl-message = { path = "../../../../../gdl-message" }
+serde = { version = "1", features = ["derive"] }
+
+# Not a member of the repository workspace: it is read by the tests, and
+# built only for the contracts they generate.
+[workspace]

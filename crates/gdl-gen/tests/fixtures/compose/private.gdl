@@ -1,0 +1,4 @@
+name = "private", schema = 1;
+source A: Prompt -> stream Prompt;
+sink   B: Prompt -> stream Prompt;
+topology: A => B;

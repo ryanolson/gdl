@@ -1,0 +1,27 @@
+[
+  {
+    "verdict": "APPROVE-WITH-CHANGES",
+    "actionable": 2,
+    "findings": [
+      {
+        "id": 1,
+        "severity": "minor",
+        "file": "crates/gdl/tests/inputs.rs",
+        "line": 916,
+        "claim": "The task-count baseline can falsely fail healthy runs; fix both this test and faults.rs:863\u2013885.",
+        "evidence": "Two equal samples 100 ms apart do not prove that velo has created every persistent task. Repeating each unmodified test 100 times reproduced failures in both: inputs reported 49 versus 47 tasks; faults reported 47 versus 42. Full-binary runs with task hooks and two-CPU affinity also reproduced inputs failures at 51 versus 47. Hooks identified four additional velo tasks created during the second batch (two streaming tasks and two messenger ordering lanes); the transient gdl watcher exited. These lazy transport tasks outlive the five-second assertion window. Each test has its own runtime, so other tests affect scheduling rather than directly contributing to its count.",
+        "test_idea": "Count and await request-owned gdl tasks independently of velo infrastructure, or establish transport readiness through observable state before recording the baseline. Repeat both full integration binaries under scheduling pressure, and retain a mutation that deliberately leaves one watcher alive per request to prove the revised check detects leaks."
+      },
+      {
+        "id": 2,
+        "severity": "minor",
+        "file": "crates/gdl/tests/retire.rs",
+        "line": 85,
+        "claim": "The retirement regression can pass without retirement because it never establishes that unread frames were buffered.",
+        "evidence": "The comment says all input was sent, but the fixture in common/streamed.rs:274\u2013286 reads only the first item and immediately permits the response to finish. Nothing ensures the remaining large frames reach the retained input before cancellation. In an isolated copy, replacing InputGuard's retire(Error::cancelled()) with canceller().cancel() still passed 10 of 30 repeated runs; failing runs retained roughly 264\u2013528 KB. Thus the pass-1 disposition is not reliably enforced.",
+        "test_idea": "Gate response completion on an observable condition proving that the retained input owns unread frames, using a test seam if necessary. Verify the normal implementation passes and cancellation-only retirement consistently fails across repeated scheduling variations."
+      }
+    ],
+    "notes": "Reviewed HEAD 5866e73 against both requested bases and the prior dispositions. Workspace tests passed (257 tests), and clippy passed. The pump future measures 1,616 bytes; its direct return and Consumer seam preserve the cancellation check. Isolated mutations of the pump recheck, blocked-send guard, and receiving watcher failed their regression tests; the stop-only control passed. The relay-finish limit test passed 100 repetitions. No additional runtime defect was established outside the accepted ruling-26 limits. Repository files remained unchanged; all instrumentation and mutations used a /tmp copy with separate target directories."
+  }
+]

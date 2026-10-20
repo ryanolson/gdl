@@ -1,0 +1,5 @@
+error: node is declared but not in the topology
+ --> tests/ui/graph-unwired-source.rs:8:12
+  |
+8 |     source Z: u32 -> stream u32;
+  |            ^

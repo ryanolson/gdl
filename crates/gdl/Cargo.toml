@@ -1,0 +1,65 @@
+[package]
+name = "gdl"
+description = "Graph definition language and runtime for distributed request/response streaming pipelines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Hooks that delay or drop runtime steps, for the fault tests. Never enable
+# in a deployment.
+fault-injection = []
+# `serve_json_lines`: a graph's source served as JSON lines, for the binary
+# of a segment that hosts the source.
+hub = ["dep:velo-hub", "dep:serde_json", "tokio/net"]
+json-lines = ["dep:serde_json", "tokio/io-util"]
+
+[dependencies]
+velo-hub = { workspace = true, features = ["client"], optional = true }
+figment.workspace = true
+dashmap = { workspace = true }
+gdl-macros = { path = "../gdl-macros" }
+gdl-message = { path = "../gdl-message" }
+gdl-model = { path = "../gdl-model" }
+futures = { workspace = true }
+pin-project-lite = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+velo = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+gdl-hub = { path = "../gdl-hub" }
+gdl = { path = ".", features = ["fault-injection", "json-lines"] }
+criterion = { workspace = true }
+prometheus = { workspace = true }
+velo = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+trybuild = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "hop"
+harness = false
+
+[[bench]]
+name = "remote"
+harness = false
+
+[[bench]]
+name = "footprint"
+harness = false
+
+[[test]]
+name = "hub"
+required-features = ["hub"]

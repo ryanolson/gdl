@@ -1,0 +1,11 @@
+[graph]
+path = "http.gdl"
+[messages]
+crates = ["."]
+[nodes]
+crates = ["."]
+pin = { Http = "http_frontend::HttpFrontend", Engine = "http_frontend::Echo" }
+[gdl]
+path = "../../crates/gdl"
+[segment.main]
+nodes = ["Http", "Engine"]

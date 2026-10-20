@@ -1,0 +1,9 @@
+# A misspelled name, and a listed crate that derives nothing.
+[graph]
+path = "typo.gdl"
+
+[messages]
+crates = ["chat-protocols", "empty"]
+
+[gdl]
+path = "../../../../gdl"

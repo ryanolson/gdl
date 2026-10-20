@@ -1,0 +1,20 @@
+[package]
+name = "gdl-syntax"
+description = "The gdl graph syntax: its parser and checked model, shared by graph! and gdl-gen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gdl-model = { path = "../gdl-model" }
+proc-macro2 = "1"
+syn = { version = "2", features = ["full"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+quote = "1"
+syn = { version = "2", features = ["full"] }

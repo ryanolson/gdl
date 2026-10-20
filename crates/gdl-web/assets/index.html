@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gdl composer</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/vendor/mermaid.js" defer></script>
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="topbar"><div class="brand"><span class="mark"></span><strong>DYNAMO</strong><span class="divider"></span>Graph composer</div><span class="muted">Define · Connect · Deploy</span></header>
+<div class="workspace">
+<aside aria-label="Catalog explorer">
+  <div class="aside-heading"><span class="eyebrow">WORKSPACE</span><h1 id="catalog-title">Catalog</h1><p class="muted" id="catalog-description">Your building blocks for inference.</p></div>
+  <div class="import-actions"><button id="add-registry" class="icon-button" title="Add from crates.io" aria-label="Add from crates.io"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5v8l-9 5-9-5V8zM3 8l9 5 9-5M12 13v8M7.5 5.5l9 5"/></svg></button><button id="add-git" class="icon-button" title="Add from Git" aria-label="Add from Git"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="3"/><circle cx="6" cy="19" r="3"/><circle cx="18" cy="5" r="3"/><path d="M6 8v8M18 8a8 8 0 0 1-8 8H6"/></svg></button><button id="add-local" class="icon-button" title="Add from local" aria-label="Add from local" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5h7l2 2h9v13H3z"/></svg></button></div>
+  <p id="adding" role="status" aria-live="polite"></p>
+  <label class="search"><span class="sr-only">Search packages, messages, and nodes</span><input id="search" type="search" placeholder="Search catalog…"></label>
+  <div class="catalog-views" role="group" aria-label="Catalog contents"><button id="catalog-nodes" aria-pressed="true">Nodes</button><button id="catalog-messages" aria-pressed="false">Message types</button></div>
+  <label class="catalog-grouping">Group by<select id="catalog-grouping" aria-label="Catalog grouping"><option value="packages">Packages</option><option value="flat">Flat list</option></select></label>
+  <label class="catalog-filter"><input id="catalog-compatible" type="checkbox"> Show compatible only</label>
+  <div class="section-heading"><span id="catalog-kind">PACKAGES</span> <span id="package-count">0</span></div>
+  <div id="entries"><p class="muted">Loading catalog…</p></div>
+  <div class="explorer-hint" id="catalog-hint">Expand a package to inspect its messages and nodes. Drag a message to a source port or a node to a matching slot.</div>
+</aside>
+<main>
+  <div class="toolbar"><div><span class="eyebrow">Graph Name</span><div class="graph-name"><span id="name-display">composed</span><button id="edit-name" class="icon-button" aria-label="Edit graph name" title="Edit graph name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15z"/></svg></button><input id="name" aria-label="Graph name" value="composed" spellcheck="false" hidden><button id="save-name" hidden>Save</button></div></div><div class="actions"><button id="check">Check graph</button><button id="export" class="primary" disabled>Download segments</button></div></div>
+  <div class="tabbar" role="tablist" aria-label="Editor mode"><button id="graph-tab" role="tab" aria-selected="true" aria-controls="canvas">Graph</button><button id="segments-tab" role="tab" aria-selected="false" aria-controls="canvas" disabled>Segments</button><button id="deploy-tab" role="tab" aria-selected="false" aria-controls="deploy-panel" disabled>Deploy</button><span id="flow-status" role="status">Choose the source messages to begin.</span></div>
+  <section id="canvas" role="tabpanel" aria-labelledby="graph-tab">
+    <div class="canvas-heading"><div><h2 id="canvas-title">Build your request flow</h2><p class="muted" id="canvas-help">Define the source, then connect nodes with matching message types.</p></div><span class="badge" id="node-count">1 node</span></div>
+    <section id="segments" hidden><h2>Deployment placement</h2><p class="muted">Assign nodes to segments. Request and response boundaries update together.</p><strong id="placement-summary" role="status"></strong><details><summary>Node placement</summary><div id="placements"></div></details><details><summary>Rename segments</summary><div id="groups"></div></details></section>
+    <div class="workspace-tools" aria-label="Workspace view"><label class="sr-only" for="workspace-layout">Graph layout</label><select id="workspace-layout" aria-label="Graph layout"><option value="vertical" selected>Vertical</option><option value="horizontal">Horizontal</option></select><button id="zoom-out" aria-label="Zoom out" title="Zoom out">−</button><output id="zoom-level">100%</output><button id="zoom-in" aria-label="Zoom in" title="Zoom in">+</button><button id="zoom-fit">Fit</button><button id="clear-graph" title="Clear graph (Undo restores it)">Clear graph</button><button id="undo" aria-label="Undo" title="Undo (Ctrl/⌘ Z)" disabled>↶</button><button id="redo" aria-label="Redo" title="Redo (Ctrl/⌘ Shift Z)" disabled>↷</button><span>Drag background to pan · Ctrl + scroll to zoom</span></div>
+    <div id="graph-viewport"><div id="graph-board" data-layout="vertical">
+      <div id="source-card" class="source-tile"><span class="badge accent">SOURCE</span><strong id="source-title">Source</strong><span id="source-subtitle" class="muted">Choose a frontend</span><button id="source-settings" class="node-settings" aria-label="Source settings" title="Source settings"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 3h6l1 4 4 2v6l-4 2-1 4H9l-1-4-4-2V9l4-2z"/><circle cx="12" cy="12" r="3"/></svg></button></div>
+      <div id="source-entries"></div>
+      <div class="shared-pipeline"><div id="shared-contract"></div><div id="hop"></div><div id="sink-nodes"></div></div>
+    </div></div>
+
+
+  </section>
+  <section id="deploy-panel" role="tabpanel" aria-labelledby="deploy-tab" hidden>
+    <h2>Deploy your graph</h2><p class="muted">One process per segment. The hub checks graph contracts and supplies discovery.</p>
+    <div class="deploy-targets"><button aria-pressed="true">Docker Compose</button><button disabled title="Not available yet">Kubernetes</button><button disabled title="Not available yet">srt-slurm</button></div>
+    <div class="deploy-defaults"><label>Default runtime image<input id="deploy-base" value="debian:bookworm-slim" spellcheck="false"></label><label>Rust build image<input id="deploy-build" value="rust:1.93-slim-bookworm" spellcheck="false"></label><label>Hub runtime image<input id="deploy-hub" placeholder="Use default runtime image" spellcheck="false"></label></div>
+    <div id="deploy-segments"></div>
+    <h3>Generated files</h3>
+    <p class="muted">Change the settings above to regenerate. The download contains exactly this preview, plus the build sources.</p>
+    <div class="deploy-preview"><nav id="deploy-files" aria-label="Generated deployment files"></nav><div class="deploy-file"><h4 id="deploy-filename">Generated files</h4><pre><code id="deploy-code"></code></pre></div></div>
+    <p class="muted">Single replica per segment. Copy the bundle to your Docker host, extract it, then run:</p><pre>cd deployment
+docker compose up --build</pre>
+    <button id="download-deployment" class="primary" disabled>Download Compose bundle</button><p id="deploy-status" role="status"></p>
+  </section>
+  <details class="validation"><summary>Validation &amp; generated files <span id="validation-status"></span></summary><div id="result" aria-live="polite"></div></details>
+</main>
+</div>
+<dialog id="source-dialog" aria-labelledby="source-dialog-title"><h2 id="source-dialog-title">Source settings</h2>    <div class="source-settings">
+      <div class="card-heading"><span class="badge accent">SOURCE</span><label><span class="sr-only">Source name</span><input id="source-name" value="Source" spellcheck="false"></label></div>
+      <label class="frontend-picker" for="source-frontend">Frontend<select id="source-frontend"><option value="">Programmatic source · choose messages</option></select></label>
+      <div id="source-config"></div><p id="source-help" class="muted">Choose or drop a source frontend to host a service. Its ports define the graph contract.</p>
+      <div class="source-ports" id="source-ports">
+        <div class="port-field" data-message-target="source-request"><label for="input-mode">Input</label><select id="input-mode"><option value="single">Single</option><option value="stream">Stream</option></select><label class="sr-only" for="source-request">Input message</label><select id="source-request"></select><details id="header-options" hidden><summary>Optional stream header</summary><label class="sr-only" for="source-header">Stream header message</label><select id="source-header"></select></details></div>
+        <div class="port-field" data-message-target="source-response"><label for="output-mode">Output</label><select id="output-mode" title="Single output is not supported yet"><option disabled>Single (not available yet)</option><option selected>Stream</option></select><label class="sr-only" for="source-response">Output message</label><select id="source-response"></select><span class="muted">Responses stream back to this source.</span></div>
+      </div>
+    </div>
+<div class="actions"><button onclick="this.closest('dialog').close()">Done</button></div></dialog>
+<dialog id="settings-dialog" aria-labelledby="settings-title"><h2 id="settings-title"></h2><div id="settings-fields"></div><div class="actions"><button onclick="this.closest('dialog').close()">Done</button></div></dialog>
+<dialog id="node-dialog" aria-labelledby="node-title"><h2 id="node-title">Add node</h2><label>Find a node<input id="node-search" type="search" placeholder="Search by name…"></label><div id="node-options"></div><div class="actions"><button onclick="this.closest('dialog').close()">Cancel</button></div></dialog>
+<dialog id="import-dialog" aria-labelledby="import-title">
+  <form id="add"><h2 id="import-title">Add package</h2>
+    <section id="registry-fields"><label>Search crates.io<input id="crate-query" type="search" autocomplete="off" placeholder="Search packages…"></label><div id="crate-results" role="status" aria-live="polite"></div><div class="registry-selection"><label>Package<input id="crate-name" autocomplete="off" placeholder="package-name"></label><label>Exact version<input id="crate-version" autocomplete="off" placeholder="1.2.3"></label></div></section>
+    <section id="git-fields" hidden><label>Repository URL<input id="git-url" type="url" placeholder="https://github.com/org/repo"></label><label>Branch or commit<input id="git-revision" placeholder="main" autocomplete="off"></label><label>Package path <span class="muted">(optional)</span><input id="git-path" placeholder="crates/protocols" autocomplete="off"></label><p class="muted">Leave the path empty for a package at the repository root. Imports are pinned to the resolved commit.</p></section>
+    <section id="local-fields" hidden><p class="muted">Browse the server directory enabled at launch.</p><div class="directory-heading"><button id="local-up" type="button">Up</button><strong id="local-path">/</strong></div><div id="local-directories"></div><p id="local-package" role="status"></p></section>
+    <p id="import-status" role="status" aria-live="polite"></p><div class="actions"><button id="import-cancel" type="button">Cancel</button><button id="import-submit" class="primary">Add package</button></div>
+  </form>
+</dialog>
+<dialog id="pipeline-connect-dialog" aria-labelledby="pipeline-connect-title"><h2 id="pipeline-connect-title">Connect request and response</h2><div class="catalog-views" role="group" aria-label="Connection action"><button id="destination-add" aria-pressed="true">Add node</button><button id="destination-existing" aria-pressed="false">Connect existing</button></div><div id="pipeline-choices"></div><div class="actions"><button onclick="this.closest('dialog').close()">Cancel</button></div></dialog>
+<dialog id="pipeline-dialog" aria-labelledby="pipeline-title"><form id="pipeline-form"><h2 id="pipeline-title">Pipeline contract</h2><label>Name<input id="pipeline-name" required></label><label>Input cardinality<select id="pipeline-mode"><option value="single">Single</option><option value="stream">Stream</option></select></label><label>Input message<select id="pipeline-request" required></select></label><label>Optional stream header<select id="pipeline-header"></select></label><label>Output cardinality<select disabled><option disabled>Single (not available yet)</option><option selected>Stream</option></select></label><label>Output message<select id="pipeline-response" required></select></label><div class="actions"><button type="button" onclick="this.closest('dialog').close()">Cancel</button><button class="primary">Save pipeline</button></div></form></dialog>
+<dialog id="router-target-dialog" aria-labelledby="router-target-title"><h2 id="router-target-title">Choose a request boundary</h2><p class="muted">Select the boundary whose destination replicas this router will choose. Responses keep their return anchors.</p><div id="router-targets"></div><div class="actions"><button onclick="this.closest('dialog').close()">Cancel</button></div></dialog>
+<dialog id="router-dialog" aria-labelledby="router-title"><form id="router-form"><h2 id="router-title">Request router</h2><p class="muted">Choose a destination replica for each request. Request stream items stay with that replica. Responses return to the initiating request through their response/stream anchor.</p><label>Replica selection<select id="router-policy"><option value="round_robin">Round robin</option><option value="random">Random</option></select></label><div class="actions"><button type="button" onclick="this.closest('dialog').close()">Cancel</button><button class="primary">Apply router</button></div></form></dialog>
+<dialog id="boundary-dialog" aria-labelledby="boundary-title"><form id="boundary-form"><h2 id="boundary-title"></h2><label>Move<select id="boundary-scope"><option value="node">Only this node</option><option value="downstream">Downstream chain</option></select></label><p id="boundary-help" class="muted"></p><label>Destination segment<select id="boundary-placement"></select></label><label id="boundary-new">New segment name<input id="boundary-name" required pattern="[A-Za-z][A-Za-z0-9_-]*"></label><div class="actions"><button type="button" onclick="this.closest('dialog').close()">Cancel</button><button class="primary">Apply placement</button></div></form></dialog>
+<div id="action-tooltip" role="tooltip" hidden></div>
+</body>
+</html>
+
+<dialog id="identity-dialog" aria-labelledby="identity-title"><form id="identity-form"><h2 id="identity-title">Identity</h2><p id="identity-kind" class="muted"></p><label>Identity kind<select id="identity-role"></select></label><label>Node name<input id="identity-name" required pattern="[A-Za-z][A-Za-z0-9_]*"></label><div id="identity-request-fields"><label>Request cardinality<select id="identity-mode"><option value="single">Single</option><option value="stream">Stream</option></select></label><label>Request message<select id="identity-request"></select></label><label>Optional stream header<select id="identity-header"></select></label></div><div id="identity-response-fields"><label>Response message<select id="identity-response"></select></label></div><p id="identity-error" role="alert"></p><div class="actions"><button type="button" onclick="this.closest('dialog').close()">Cancel</button><button class="primary">Add identity</button></div></form></dialog>

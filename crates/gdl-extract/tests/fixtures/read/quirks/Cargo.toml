@@ -1,0 +1,14 @@
+[package]
+name = "read-quirks"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Written out, not inherited from the workspace: `--verify` builds this
+# crate as a path dependency of a program that also depends on
+# `gdl-message` in the repository's workspace, and Cargo then reads every
+# path dependency under the repository as a member of that workspace.
+[dependencies]
+gdl = { path = "../../../../../gdl" }
+read-protocols = { path = "../protocols" }
+serde = { version = "1", features = ["derive"] }

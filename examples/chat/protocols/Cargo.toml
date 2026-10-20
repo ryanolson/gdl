@@ -1,0 +1,10 @@
+[package]
+name = "chat-protocols"
+description = "The chat example's messages"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gdl-message = { workspace = true }
+serde = { workspace = true }

@@ -1,0 +1,10 @@
+# Two crates define `Chunk`; the pin chooses the other one.
+[graph]
+path = "chat.gdl"
+
+[messages]
+crates = ["chat-protocols", "other-protocols"]
+pin = { Chunk = "other_protocols::Chunk" }
+
+[gdl]
+path = "../../../../gdl"

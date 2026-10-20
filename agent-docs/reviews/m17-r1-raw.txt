@@ -1,0 +1,29 @@
+=== Reviewer 1: REJECT, actionable 5
+
+M17-WEB-01 (major) crates/gdl-web/src/lib.rs:98
+Claim: POST /api/catalog can overwrite files outside the configured target directory.
+Evidence: The handler accepts arbitrary text on either side of '@'. extract.rs:69 embeds it in the scratch path, and Workspace::fetch writes Cargo.toml and src/lib.rs before Cargo validates it. Reproduced with target=<scratch>/target and {"crate":"regproto@x/../../../victim"}: <scratch>/victim/src/lib.rs was truncated to empty and its Cargo.toml was overwritten, although the endpoint returned 422. Validate package/version syntax before any filesystem operation.
+Test idea: Create sentinel Cargo.toml and src/lib.rs files in a sibling of target, submit that traversal payload, and assert both files remain unchanged. The reproduction review_add_cannot_escape_target fails on b252add.
+
+M17-WEB-02 (major) crates/gdl-web/src/lib.rs:223
+Claim: Concurrent checks of the same valid draft intermittently reject it because shared files are truncated during reads.
+Evidence: The content hash assigns identical drafts one directory, but every prepare call rewrites graph.gdl and gdl.toml using non-atomic fs::write. Other blocking workers can read either file between truncation and writing. A barrier-synchronized test issuing 32 identical checks in each of 10 rounds produced 270 failures out of 320 on the final run, including 'missing field gdl' and 'unexpected end of input, expected name'. Publish complete files atomically or avoid rewriting shared draft files.
+Test idea: Keep a serial success control, then concurrently check and export identical drafts and require every response to succeed. review_identical_checks_are_concurrent reproduces the failure without modifying production code.
+
+M17-GEN-03 (major) crates/gdl-gen/src/lib.rs:334
+Claim: Offers::Given accepts git offers for registry dependencies, so validation can describe a different crate from the exported build.
+Evidence: Version matching requires only matching package/version and a source that does not start with 'path+'. A git offer therefore satisfies a crates.io spec. In the reproduction, registry regproto::Local is non-wire and Offers::Read correctly rejects a cut. Given git offers of the same package/version, where Local is wire, check and export succeed; the exported contract still depends on registry regproto = { version = "=0.1.0" }. Match the actual registry source identity instead of treating every non-path source as crates.io.
+Test idea: Supply git and registry offers with identical package/version but different wire capabilities. Require registry specs to reject the git-only catalogue and select the registry offer independently of offer order. review_registry_spec_does_not_accept_git_offer currently fails.
+
+M17-WEB-04 (major) crates/gdl-web/assets/app.js:201
+Claim: The browser cannot compose a graph whose source takes a streamed request.
+Evidence: render always supplies item:null to the first hop, and draft at line 240 serializes only the request head. The HTML provides no stream-item selector. Thus a sink or operator taking Streamed<Head, Item> is filtered out for every selectable source message. A Node VM probe exercising the actual render function confirmed zero matching source choices. A separate router control successfully checks and exports streamed requests, including a headless nested stream, so this is a browser restriction rather than a server limitation.
+Test idea: Load a catalogue containing Head, Item, and a sink accepting Streamed<Head, Item>; select that source shape and verify the sink is offered and the submitted draft includes item. Also cover a headless stream. The current page-probe.cjs fails because neither source shape is expressible.
+
+M17-WEB-05 (minor) crates/gdl-web/src/draft.rs:375
+Claim: The draft renderer emits keyword-named messages without Rust identifier escaping and rejects valid catalogue types.
+Evidence: Names::name returns the definition name verbatim for graph text. A message defined as pub struct r#match is recorded as 'match', so the renderer emits 'source A: match -> stream Token' and check returns a parser error. The same graph with r#match succeeds using the same offers. An additional compiled-manifest control using the existing read-quirks r#type::r#match fixture also passes. Escape message identifiers when rendering graph syntax.
+Test idea: Render a draft carrying a keyword-named message and require check/export to succeed, retaining an escaped graph-file control. review_keyword_message_renders currently fails while its control passes.
+
+Notes: Reviewed b252add in /tmp/gdl-m17-r1; the target worktree remains clean. Experiments and logs are under /tmp/gdl-review-m17-depth with a separate CARGO_TARGET_DIR; no other checkout or agent was used. All 114 existing tests run passed: gdl-extract, gdl-web API, gdl-gen library, compose, and export, including building expanded exports. The full workspace suite was not run. Added controls passed for streamed/nested drafts, renamed node pins, and compiled-manifest equality with streamed/headless requests and raw identifiers. The equality test remains independent and detects a deliberately wrong wire bit. Seven mutation probes: six detected, one survivor—removing draft node pins leaves the existing six API tests green. All m16-r1 fixes held: first-writer catalogue behavior, Cargo working directory, cfg-removed enum variants, and exact-version coverage; reverting each relevant behavior failed its regression test. Four Rust reproduction tests and one JavaScript probe demonstrate the five findings. Accepted reader limitations and deferred milestones were excluded.
+

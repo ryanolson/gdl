@@ -1,0 +1,9 @@
+# A crate that offers `Chunk` only by exporting another crate's.
+[graph]
+path = "chunk.gdl"
+
+[messages]
+crates = ["facade-protocols"]
+
+[gdl]
+path = "../../../../gdl"

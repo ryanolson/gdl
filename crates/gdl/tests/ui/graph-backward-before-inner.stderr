@@ -1,0 +1,5 @@
+error: a backward node cannot come before the hop's sink or operator
+  --> tests/ui/graph-backward-before-inner.rs:10:20
+   |
+10 |     topology: A => G => D;
+   |                    ^

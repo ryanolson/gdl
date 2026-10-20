@@ -1,0 +1,9 @@
+# The exporting crate and the defining crate: one message, not two.
+[graph]
+path = "chunk.gdl"
+
+[messages]
+crates = ["facade-protocols", "other-protocols"]
+
+[gdl]
+path = "../../../../gdl"

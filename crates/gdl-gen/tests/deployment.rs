@@ -1,0 +1,81 @@
+//! Container deployment output contains an ordered hub and one image per segment.
+use std::path::Path;
+#[test]
+fn compose_starts_segments_only_after_hub_health() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spec =
+        gdl_gen::Spec::load(&root.join("examples/api/gdl.toml")).expect("valid test fixture");
+    let out = std::env::temp_dir().join(format!("gdl-compose-test-{}", std::process::id()));
+    let files =
+        gdl_gen::compose_files(&spec, &out, &root.join("target")).expect("valid test fixture");
+    let compose: serde_json::Value =
+        serde_json::from_str(&files[Path::new("compose.yaml")]).expect("valid test fixture");
+    for name in ["front", "engine"] {
+        assert_eq!(
+            compose["services"][name]["depends_on"]["hub"]["condition"],
+            "service_healthy"
+        );
+        assert!(files.contains_key(&Path::new(name).join("Dockerfile")));
+        assert!(files[&Path::new(name).join("config.toml")].contains("hub = \"hub\""));
+    }
+    assert!(files[Path::new("hub/Dockerfile")].contains("gdl-hub"));
+    assert!(files.contains_key(Path::new("deployment.json")));
+}
+
+#[test]
+fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text =
+        std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("valid test fixture");
+    let graph =
+        std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("valid test fixture");
+    let text = format!(
+        "{text}\n[deployment]\nbase_image = \"ubuntu:24.04\"\nbuild_image = \"rust:1.93-bookworm\"\nhub_image = \"debian:bookworm-slim\"\n[deployment.segment.engine]\nbase_image = \"nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04\"\n"
+    );
+    let spec = gdl_gen::Spec::from_text(&text, &graph, &root.join("examples/api"))
+        .expect("valid test fixture");
+    let files = gdl_gen::compose_files(
+        &spec,
+        &root.join("target/deployment-test"),
+        &root.join("target"),
+    )
+    .expect("valid test fixture");
+    assert!(files[Path::new("front/Dockerfile")].contains("FROM ubuntu:24.04\n"));
+    assert!(
+        files[Path::new("engine/Dockerfile")]
+            .contains("FROM nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04\n")
+    );
+    assert!(files[Path::new("engine/Dockerfile")].contains("FROM rust:1.93-bookworm AS build"));
+}
+
+#[test]
+fn preview_files_are_the_exact_downloaded_snapshot() {
+    use std::io::Read;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spec =
+        gdl_gen::Spec::load(&root.join("examples/api/gdl.toml")).expect("valid deployment fixture");
+    let bundle =
+        gdl_gen::compose_bundle(&spec, &root.join("target")).expect("valid deployment fixture");
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bundle.archive.as_slice()));
+    let mut matched = 0;
+    for entry in archive.entries().expect("valid deployment fixture") {
+        let mut entry = entry.expect("valid deployment fixture");
+        let path = entry
+            .path()
+            .expect("valid deployment fixture")
+            .strip_prefix("deployment")
+            .expect("valid deployment fixture")
+            .to_path_buf();
+        if let Some(expected) = bundle.files.get(&path) {
+            let mut actual = String::new();
+            entry
+                .read_to_string(&mut actual)
+                .expect("valid deployment fixture");
+            assert_eq!(&actual, expected, "{}", path.display());
+            matched += 1;
+        }
+    }
+    assert_eq!(matched, bundle.files.len());
+    assert!(bundle.files.contains_key(Path::new("compose.yaml")));
+    assert!(bundle.files.contains_key(Path::new("engine/Dockerfile")));
+}

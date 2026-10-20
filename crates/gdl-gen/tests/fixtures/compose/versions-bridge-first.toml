@@ -1,0 +1,11 @@
+# As `versions-pinned.toml`, with the bridge listed first: its workspace,
+# which holds both versions of `vproto`, is read first.
+[graph]
+path = "chunk.gdl"
+
+[messages]
+crates = ["vbridge", "vproto-2"]
+pin = { Chunk = "vproto::Chunk" }
+
+[gdl]
+path = "../../../../gdl"

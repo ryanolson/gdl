@@ -1,0 +1,71 @@
+Codex gpt-6-astra (high), bb workflow wfr_5332af1d-26f5-4a51-b111-829c68305bc2, over 3c422e3..18888c7 (milestones 10 and 11).
+Focuses: 1 runtime and macros, 2 generator, 3 tests, examples, and documentation.
+
+{
+  "verdict": "APPROVE-WITH-CHANGES",
+  "actionable": 1,
+  "findings": [
+    {
+      "id": "RUNTIME-01",
+      "severity": "minor",
+      "file": "crates/gdl-macros/src/message.rs",
+      "line": 17,
+      "claim": "Normalize raw identifiers before using them as message names: `r#Prompt` and `Prompt` name the same Rust type but currently resolve differently.",
+      "evidence": "`ident.to_string()` registers the spelling `r#Prompt`; names.rs:143 also retains raw prefixes when reading graph names. Reproduced with a listed protocols crate containing `#[derive(gdl::Message)] pub struct r#Prompt;` and a graph using `Prompt`: resolution fails with `message `Prompt` (A, B) is in no listed crate; did you mean `r#Prompt`?`. An ordinary `Plain` message in the same crate resolves successfully.",
+      "test_idea": "Add a composition regression that derives a public raw-spelled `r#Prompt` and resolves a graph using `Prompt`. Also verify raw and ordinary spellings agree across an edge. Normalize semantic names on both sides while preserving valid escaping for emitted Rust paths. The failing reproduction is in /tmp/gdl-review-runtime-18888c7-Lo6t9a/crates/gdl-gen/tests/rawprobe.rs."
+    }
+  ],
+  "notes": "Completed general and deep passes without delegation. Confirmed all five m10-r1 fixes through code inspection and regression tests. Passed catalogue (4), diagram (10), syntax edge and macro hygiene tests, graph-name checks (6), composition (7; 24.58 s), and all 28 trybuild cases (47.62 s). Additional derive hygiene, nested macro paths, package identity, and wire-capability probes passed. Tests ran under timeout in an isolated copy. graph! expansion is unchanged apart from parser extraction; streaming diagnostic aggregation is intentional. No request hot-path changes or additional material structural findings. Settled design limits were excluded. Original worktree remains clean."
+}
+
+{
+  "verdict": "REJECT",
+  "actionable": 3,
+  "findings": [
+    {
+      "id": "GEN-01",
+      "severity": "major",
+      "file": "crates/gdl-gen/src/lib.rs",
+      "line": 69,
+      "claim": "A graph name containing uppercase letters lets a segment named `contract` overwrite its own generated manifest and library with the contract files.",
+      "evidence": "Reproduced using the chat example with graph name `Chat` and `[segment.contract]` replacing `[segment.front]`. prepare() names the contract `Chat-contract`, while emit::package() normalizes the segment package to `chat-contract`, bypassing validate()'s collision checks. files.extend(prepared.files) then replaces contract/Cargo.toml and contract/src/lib.rs but retains the segment's src/main.rs, returning a broken mixed crate successfully. The lowercase `chat` control correctly rejects the segment.",
+      "test_idea": "Add a render regression test using graph name `Chat` and segment `contract`; require rejection before merging generated files. Reserve the output directory independently of package-name normalization."
+    },
+    {
+      "id": "GEN-02",
+      "severity": "minor",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 180,
+      "claim": "The duplicate-gdl guard rejects valid catalogues because it treats every package in Cargo metadata as linked into the executable.",
+      "evidence": "Reproduced on Linux with a protocols crate using the configured gdl normally and another gdl only under `[target.'cfg(windows)'.dependencies]`. resolve() reports that the message crates link multiple gdl packages. Running that exact generated catalogue directly succeeds and prints its message. The unfiltered metadata request at line 85 includes inactive-platform packages, and identities() scans the entire packages array without checking reachability or dependency kind.",
+      "test_idea": "Keep the real second-runtime rejection test and add an inactive-platform dependency control that must resolve successfully. Restrict collision checks to packages that can enter the catalogue executable; also cover build-only dependencies."
+    },
+    {
+      "id": "GEN-03",
+      "severity": "minor",
+      "file": "crates/gdl-gen/src/dump.rs",
+      "line": 301,
+      "claim": "Concurrent preparation within one process can collide on the scratch writer's PID-only temporary filename.",
+      "evidence": "prepare() writes the content-hashed scratch contract at lib.rs:206-207 outside dump::run()'s lock. Threads preparing the same cold contract therefore use the same temporary path. A barrier-synchronized test calling the unchanged writer from 16 threads with identical 1 KiB contents produced 15 ENOENT failures when competing renames consumed that shared temporary file. The earlier catalogue lock does not cover these writes.",
+      "test_idea": "Retain a concurrent identical-write regression test and cover concurrent render/diagram preparation of one cold contract. Give each write an exclusively created temporary file, or hold synchronization across scratch creation."
+    }
+  ],
+  "notes": "Completed general and deep passes over the generator changes in 3c422e3..18888c7. All 70 existing gdl-gen tests, four catalogue tests, and the syntax edge test passed under timeout. All five m10-r1 fixes hold in their regression scenarios; GEN-02 identifies an additional false-positive case in the metadata fix. Three failing probes and the successful direct-catalogue control are in /tmp/gdl-review-generator-mwfhim. Original worktree unchanged. No agents or phone-a-friend used; accepted design limits excluded."
+}
+
+{
+  "verdict": "APPROVE-WITH-CHANGES",
+  "actionable": 1,
+  "findings": [
+    {
+      "id": "M11-TESTS-01",
+      "severity": "minor",
+      "file": "crates/gdl-gen/src/lib.rs",
+      "line": 711,
+      "claim": "The new contract-hash test shares a target with the lock test, inflating its timing-based wait by tens of seconds during concurrent builds.",
+      "evidence": "Both tests use target/gdl-gen-tests. In dump.rs:348-359, the lock test measures a manifest call, multiplies its elapsed time by ten, then holds the shared lock for that duration. The measurement can include waiting for the new hash test's builds. The unmodified generator unit target took 48.73 s. In the temporary copy, retaining compiled dependencies but removing generated scratch programs and asserting wait <= 5 s failed with a calculated wait of 18.88094816 s. The same assertion passed with warm programs; all 47 unit tests completed in 2.41 s.",
+      "test_idea": "Run both tests concurrently after clearing only their generated scratch programs, and assert the lock-test wait remains bounded to a few seconds. Remove contention from its calibration or replace the elapsed-time multiplier with bounded synchronization."
+    }
+  ],
+  "notes": "Reviewed 3c422e3..18888c7 using general and deep passes without delegation. All five pass-1 fixes held under inspection and their regression tests. The unmodified workspace suite passed under timeout 300: 290 passed, 2 ignored doc tests. Chat's 12 integration tests passed, including generation/drift, CLI --check, dependency isolation, output non-mutation, and three-process behavior. Composition's 7 tests and compile/trybuild passed. No additional material documentation drift found after applying the settled addenda. Builds and experiments ran only in /tmp/gdl-review-tests with its own target directories; the reviewed worktree remains unchanged."
+}

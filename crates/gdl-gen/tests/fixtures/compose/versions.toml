@@ -1,0 +1,9 @@
+# `vproto` 0.2.0 is listed; `vbridge` links `vproto` 0.1.0.
+[graph]
+path = "versions.gdl"
+
+[messages]
+crates = ["vproto-2", "vbridge"]
+
+[gdl]
+path = "../../../../gdl"

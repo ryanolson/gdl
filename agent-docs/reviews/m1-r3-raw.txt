@@ -1,0 +1,5 @@
+- **Major — [crates/gdl/src/compose.rs:60](/home/ryan/repos/dynamo-gdl/crates/gdl/src/compose.rs:60): Setup can succeed after interruption.** If cancellation or deadline expiry coincides with a pending forward stage becoming ready, the unbiased `select!` can choose `run`, invoke the sink, and return `Ok(stream)`. There is no context check after forward work or before returning success. Prioritize interruption and recheck at these handoffs. Add a gated-forward regression proving interruption prevents sink invocation and makes `generate` return `Err`.
+
+- **Moderate — [crates/gdl/src/items.rs:144](/home/ryan/repos/dynamo-gdl/crates/gdl/src/items.rs:144): Pending streams reverse deadline precedence.** When both cancellation and deadline expiry are observable before the next periodic check, a pending producer yields `Cancelled` because this branch checks cancellation first. `Cx::check`, `Cx::done`, and the ready/EOF paths instead prefer `DeadlineExceeded`. Apply the same precedence on the pending path without adding per-item checks. Add a paused-clock regression with both signals set and a perpetually pending producer.
+
+ACTIONABLE: 2

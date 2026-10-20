@@ -1,0 +1,5 @@
+error: an export offers a public path: write `pub use`
+ --> tests/ui/export-not-pub.rs:9:1
+  |
+9 | use inner::Words;
+  | ^^^

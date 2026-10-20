@@ -1,0 +1,5 @@
+error: node `Crate` gets the binding name `crate`, which cannot name a method; rename the node
+ --> tests/ui/graph-binding-keyword.rs:8:13
+  |
+8 |     sink    Crate: u32 -> stream u32;
+  |             ^^^^^

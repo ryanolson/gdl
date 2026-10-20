@@ -1,0 +1,10 @@
+error[E0425]: cannot find type `Engine` in the crate root
+ --> tests/ui/node-not-at-root.rs:5:16
+  |
+5 |     pub struct Engine;
+  |                ^^^^^^ not found in the crate root
+  |
+help: consider importing this struct
+  |
+4 +     use crate::hidden::Engine;
+  |

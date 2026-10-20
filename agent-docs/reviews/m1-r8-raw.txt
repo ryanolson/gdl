@@ -1,0 +1,3 @@
+- **Moderate — [crates/gdl/src/cx.rs:314](/home/ryan/repos/dynamo-gdl/crates/gdl/src/cx.rs:314): Deadline conversion can extend the source’s deadline.** Static trace: with synchronized clocks, 200 ms remaining and 50 ms skew, descheduling for 100 ms between the wall-clock and monotonic reads produces a deadline 250 ms after the first sample—50 ms late. Sample the monotonic clock before the wall clock so sampling delays shorten the budget. Add a regression covering delay between samples; the existing tests assume simultaneous readings.
+
+ACTIONABLE: 1

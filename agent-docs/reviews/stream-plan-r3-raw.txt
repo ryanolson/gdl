@@ -1,0 +1,8 @@
+[
+  {
+    "verdict": "APPROVE",
+    "actionable": 0,
+    "findings": [],
+    "notes": "Rounds 1 and 2 are resolved by ruling 26's round-2 addendum. Velo 0.19 retains stop before attachment and delivers it to the sender's stop_token through same-worker attach, remote attach, and prebind/ticket open. Attach uses separate control messaging; ticket lifecycle processing is independent of data credit (streaming/control/registry.rs:177; streaming/anchor.rs:454,1525,1714,2537; messenger_mux/peer_batcher/mod.rs:663). Stop leaves sending enabled.\n\nThe relay's output pump observes stop while waiting for input or blocked sending, then stops its context and upstream anchor (crates/gdl/src/dist/hop.rs:754,800,845). Thus the route survives a stream waiting for stop before reading, an ended relay input, and value-to-stream conversion. Nested operator scopes inherit stop, while each receiving run forwards it through its own input anchor. Waiting inside forward() before handoff remains the explicitly accepted deadline-bounded limitation.\n\nNo remaining material defect requiring a milestone 7 or 8 design change was found. Input-pump cancellation must preserve the response as ruling 24 requires; existing response-pump cancellation cannot be reused blindly.\n\nValidation: four existing gdl stop fault tests and three velo stop/lifecycle tests passed under timeout 300. Exhausted-credit independence was verified in source; planned streaming-request parity tests await implementation. Repository files remain unchanged."
+  }
+]
