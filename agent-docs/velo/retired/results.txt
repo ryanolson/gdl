@@ -1,0 +1,33 @@
+base wall_ms=1252 streams_per_s=159683 ins=22606170974 cyc=16393722983
+proto wall_ms=2976 streams_per_s=67204 ins=22882870915 cyc=14468914455
+base wall_ms=3736 streams_per_s=53532 ins=23184664375 cyc=13356192963
+proto wall_ms=3305 streams_per_s=60509 ins=23060728292 cyc=14535241240
+base wall_ms=3162 streams_per_s=63251 ins=22933210663 cyc=13685797877
+proto wall_ms=2317 streams_per_s=86313 ins=22756138623 cyc=16131021835
+base wall_ms=2142 streams_per_s=93364 ins=22739210578 cyc=17097642396
+proto wall_ms=1734 streams_per_s=115293 ins=22754500314 cyc=17960388734
+base wall_ms=1740 streams_per_s=114882 ins=22505668790 cyc=17178086567
+proto wall_ms=2466 streams_per_s=81070 ins=22643782784 cyc=17022302260
+base wall_ms=2064 streams_per_s=96867 ins=22704499556 cyc=16822564528
+proto wall_ms=3627 streams_per_s=55129 ins=23151379573 cyc=14515938240
+base wall_ms=3837 streams_per_s=52119 ins=23213826206 cyc=13743356276
+proto wall_ms=3051 streams_per_s=65533 ins=23058167596 cyc=13378031671
+base wall_ms=2847 streams_per_s=70244 ins=22792260162 cyc=14229617109
+proto wall_ms=2087 streams_per_s=95817 ins=22709589496 cyc=16534942050
+base wall_ms=1843 streams_per_s=108497 ins=22708905269 cyc=18162773356
+proto wall_ms=1904 streams_per_s=105022 ins=22763543191 cyc=18089311412
+mode=Plain streams=200000 conc=64 items=4 wall_ms=2980 streams_per_s=67107 producer_msgs_per_stream=1.263 consumer_msgs_per_stream=0.004 held_us p50=0 p90=0 p99=1 ins=23051054276
+mode=Retired streams=200000 conc=64 items=4 wall_ms=2972 streams_per_s=67287 producer_msgs_per_stream=1.307 consumer_msgs_per_stream=0.003 held_us p50=131 p90=327 p99=704 ins=23082700849
+mode=Ack streams=200000 conc=64 items=4 wall_ms=2677 streams_per_s=74698 producer_msgs_per_stream=1.239 consumer_msgs_per_stream=1.004 held_us p50=545 p90=837 p99=1403 ins=29988992277
+mode=Plain streams=200000 conc=64 items=4 wall_ms=1596 streams_per_s=125263 producer_msgs_per_stream=1.126 consumer_msgs_per_stream=0.004 held_us p50=0 p90=0 p99=1 ins=22702500321
+mode=Retired streams=200000 conc=64 items=4 wall_ms=1595 streams_per_s=125358 producer_msgs_per_stream=1.126 consumer_msgs_per_stream=0.004 held_us p50=130 p90=236 p99=336 ins=22971806416
+mode=Ack streams=200000 conc=64 items=4 wall_ms=3257 streams_per_s=61402 producer_msgs_per_stream=1.293 consumer_msgs_per_stream=1.004 held_us p50=610 p90=978 p99=1800 ins=29755357475
+mode=Plain streams=200000 conc=64 items=4 wall_ms=3095 streams_per_s=64616 producer_msgs_per_stream=1.346 consumer_msgs_per_stream=0.003 held_us p50=0 p90=0 p99=1 ins=23190796691
+mode=Retired streams=200000 conc=64 items=4 wall_ms=1981 streams_per_s=100935 producer_msgs_per_stream=1.153 consumer_msgs_per_stream=0.004 held_us p50=114 p90=223 p99=473 ins=22858957321
+mode=Ack streams=200000 conc=64 items=4 wall_ms=3922 streams_per_s=50994 producer_msgs_per_stream=1.396 consumer_msgs_per_stream=1.003 held_us p50=582 p90=1252 p99=4621 ins=30098313382
+mode=Plain streams=200000 conc=64 items=4 wall_ms=3129 streams_per_s=63910 producer_msgs_per_stream=1.346 consumer_msgs_per_stream=0.002 held_us p50=0 p90=0 p99=1 ins=22900820190
+mode=Retired streams=200000 conc=64 items=4 wall_ms=2552 streams_per_s=78365 producer_msgs_per_stream=1.231 consumer_msgs_per_stream=0.003 held_us p50=149 p90=312 p99=615 ins=22991313337
+mode=Ack streams=200000 conc=64 items=4 wall_ms=3453 streams_per_s=57909 producer_msgs_per_stream=1.330 consumer_msgs_per_stream=1.004 held_us p50=636 p90=1064 p99=2453 ins=30110067733
+mode=Plain streams=200000 conc=64 items=4 wall_ms=1716 streams_per_s=116490 producer_msgs_per_stream=1.131 consumer_msgs_per_stream=0.004 held_us p50=0 p90=0 p99=1 ins=22558028358
+mode=Retired streams=200000 conc=64 items=4 wall_ms=1574 streams_per_s=126989 producer_msgs_per_stream=1.128 consumer_msgs_per_stream=0.004 held_us p50=127 p90=233 p99=329 ins=23003542437
+mode=Ack streams=200000 conc=64 items=4 wall_ms=2478 streams_per_s=80694 producer_msgs_per_stream=1.217 consumer_msgs_per_stream=1.004 held_us p50=504 p90=744 p99=1038 ins=29847330400

@@ -1,0 +1,410 @@
+diff -ru velo-base/lib/velo/src/streaming/control/registry.rs velo/lib/velo/src/streaming/control/registry.rs
+--- velo-base/lib/velo/src/streaming/control/registry.rs	2026-10-20 00:38:37
++++ velo/lib/velo/src/streaming/control/registry.rs	2026-10-20 10:14:45
+@@ -20,17 +20,87 @@
+ /// Until then a send that finds channel space is accepted, up to the free
+ /// capacity of the channel.
+ #[derive(Clone, Debug, Default)]
+-pub struct SenderClosed(Arc<AtomicBool>);
++pub struct SenderClosed(Arc<SenderState>);
+ 
++/// Per-stream state the sender and its transport slot already share. The
++/// retirement cell rides this allocation, so a stream that nobody watches
++/// pays no allocation for it, only one uncontended store when it retires.
++#[derive(Debug, Default)]
++pub struct SenderState {
++    closed: AtomicBool,
++    /// 0 live, 1 sent, 2 discarded. First writer wins.
++    retired: std::sync::atomic::AtomicU8,
++    waker: futures::task::AtomicWaker,
++}
++
+ impl SenderClosed {
+     /// Mark the sender cancelled.
+     pub fn close(&self) {
+-        self.0.store(true, Ordering::Release);
++        self.0.closed.store(true, Ordering::Release);
+     }
+ 
+     /// Whether the sender is cancelled.
+     pub fn is_closed(&self) -> bool {
+-        self.0.load(Ordering::Acquire)
++        self.0.closed.load(Ordering::Acquire)
++    }
++
++    /// Record how the stream's output left this node. Idempotent: the first
++    /// outcome stands.
++    pub(crate) fn retire(&self, sent: bool) {
++        let code = if sent { 1 } else { 2 };
++        if self
++            .0
++            .retired
++            .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire)
++            .is_ok()
++        {
++            self.0.waker.wake();
++        }
++    }
++
++    pub(crate) fn poll_retired(
++        &self,
++        cx: &mut std::task::Context<'_>,
++    ) -> std::task::Poll<crate::streaming::sender::Retirement> {
++        use crate::streaming::sender::Retirement;
++        let read = |s: &SenderState| match s.retired.load(Ordering::Acquire) {
++            1 => Some(Retirement::Sent),
++            2 => Some(Retirement::Discarded),
++            _ => None,
++        };
++        if let Some(r) = read(&self.0) {
++            return std::task::Poll::Ready(r);
++        }
++        self.0.waker.register(cx.waker());
++        match read(&self.0) {
++            Some(r) => std::task::Poll::Ready(r),
++            None => std::task::Poll::Pending,
++        }
++    }
++}
++
++/// Fires `Discarded` when dropped unless [`sent`](Self::sent) consumed it, so
++/// a task or table that dies with the stream's output still resolves the
++/// stream's [`Retired`](crate::streaming::sender::Retired).
++pub(crate) struct RetireGuard(Option<SenderClosed>);
++
++impl RetireGuard {
++    pub(crate) fn new(closed: SenderClosed) -> Self {
++        Self(Some(closed))
++    }
++
++    pub(crate) fn sent(mut self) {
++        if let Some(closed) = self.0.take() {
++            closed.retire(true);
++        }
++    }
++}
++
++impl Drop for RetireGuard {
++    fn drop(&mut self) {
++        if let Some(closed) = self.0.take() {
++            closed.retire(false);
++        }
+     }
+ }
+ 
+diff -ru velo-base/lib/velo/src/streaming/control.rs velo/lib/velo/src/streaming/control.rs
+--- velo-base/lib/velo/src/streaming/control.rs	2026-10-20 00:38:37
++++ velo/lib/velo/src/streaming/control.rs	2026-10-20 10:14:45
+@@ -262,6 +262,7 @@
+     CloseOnCancel, create_stream_stop_handler, request_sender_cancel, request_sender_stop,
+ };
+ pub use registry::{SenderClosed, SenderEntry, SenderRegistry, create_stream_cancel_handler};
++pub(crate) use registry::RetireGuard;
+ pub use ticket::StreamOpenTicket;
+ 
+ /// Request to detach the current sender from an anchor without closing it.
+diff -ru velo-base/lib/velo/src/streaming/messenger_mux/peer_batcher/mod.rs velo/lib/velo/src/streaming/messenger_mux/peer_batcher/mod.rs
+--- velo-base/lib/velo/src/streaming/messenger_mux/peer_batcher/mod.rs	2026-10-20 00:38:37
++++ velo/lib/velo/src/streaming/messenger_mux/peer_batcher/mod.rs	2026-10-20 10:24:08
+@@ -336,6 +336,7 @@
+         teardown_complete: false,
+         async_open_ack,
+         staged_credit: Vec::new(),
++        retire_on_flush: Vec::new(),
+         #[cfg(test)]
+         hooks: ctx.hooks,
+     };
+@@ -420,6 +421,10 @@
+     /// copy, kept so a batch thrown away rather than written can hand it back
+     /// — see [`Batcher::repost_staged_credit`].
+     staged_credit: Vec<(SlotId, u32)>,
++    /// Terminals in the open batch whose producers learn `Sent` once it is
++    /// admitted. Empty except at a stream's end; a dropped batch drops them,
++    /// which reports `Discarded`.
++    retire_on_flush: Vec<crate::streaming::control::RetireGuard>,
+     #[cfg(test)]
+     hooks: Option<Arc<TestHooks>>,
+ }
+@@ -833,7 +838,7 @@
+         // `docs/src/operations/response-plane-performance.md` rather than a
+         // fix owed here.
+         let seq = self.open_seq(id);
+-        self.fire_singleton(id, FenceSkip::IfAdmitted, |encoder| {
++        self.fire_singleton(id, FenceSkip::IfAdmitted, None, |encoder| {
+             encoder.push_open_slot(id, seq, anchor_id, session_id)
+         });
+         let _ = ack.send(Ok(()));
+@@ -892,6 +897,7 @@
+         &mut self,
+         id: SlotId,
+         skip: FenceSkip,
++        retire: Option<crate::streaming::control::RetireGuard>,
+         write: impl FnOnce(&mut BatchEncoder) -> Result<(), EncodeError>,
+     ) -> bool {
+         let Some(fire) = self.writer.dispatch_singleton(write) else {
+@@ -926,6 +932,11 @@
+             // singleton's entry under the same `SlotId` key and release a
+             // fence that has not actually resolved (see `fire_singleton`'s
+             // doc above).
++            if admission.is_ok()
++                && let Some(retire) = retire
++            {
++                retire.sent();
++            }
+             match admission {
+                 Ok(()) if needs_fence => control.singleton_resolved(id, true),
+                 Ok(()) => {}
+@@ -1048,7 +1059,15 @@
+         // `epoch_death` therefore finds nothing to hand back on this path, and
+         // everything to hand back on its other two.
+         self.staged_credit.clear();
+-        if let Err(writer::FlushFailed(error)) = self.writer.flush().await {
++        let flushed = self.writer.flush().await;
++        // Only a batch that ended a stream carries any. Drained in place so
++        // the vector keeps its capacity across batches.
++        if flushed.is_ok() && !self.retire_on_flush.is_empty() {
++            for guard in self.retire_on_flush.drain(..) {
++                guard.sent();
++            }
++        }
++        if let Err(writer::FlushFailed(error)) = flushed {
+             tracing::warn!(
+                 peer = %self.key.peer,
+                 lane = %self.key.lane,
+@@ -1097,6 +1116,8 @@
+     /// within an epoch. Dropping the `SelectAll` drops every slot's
+     /// `flume::Receiver`, which is the death signal a producer sees.
+     fn epoch_death(&mut self) {
++        // Terminals in the batch the epoch throws away never reached the wire.
++        self.retire_on_flush.clear();
+         let closed = self.slots.close_all();
+         self.streams = SelectAll::new();
+         if let Some(metrics) = &self.metrics {
+@@ -1203,6 +1224,7 @@
+         // re-advertise into — and the inbox is closed one line above, so a
+         // re-post would be refused anyway.
+         self.gate.discarded();
++        self.retire_on_flush.clear();
+         let closed = self.slots.close_all();
+         self.streams = SelectAll::new();
+         self.account_closed(closed);
+diff -ru velo-base/lib/velo/src/streaming/messenger_mux/peer_batcher/records.rs velo/lib/velo/src/streaming/messenger_mux/peer_batcher/records.rs
+--- velo-base/lib/velo/src/streaming/messenger_mux/peer_batcher/records.rs	2026-10-20 00:38:37
++++ velo/lib/velo/src/streaming/messenger_mux/peer_batcher/records.rs	2026-10-20 10:15:22
+@@ -218,8 +218,11 @@
+         }
+ 
+         if terminal {
+-            if let Some(slot) = self.slots.get_mut(index) {
+-                slot.lifecycle = None;
++            if let Some(slot) = self.slots.get_mut(index)
++                && let Some(entry) = slot.lifecycle.take()
++            {
++                self.retire_on_flush
++                    .push(crate::streaming::control::RetireGuard::new(entry.closed));
+             }
+             self.close_local(index);
+         }
+@@ -242,8 +245,15 @@
+         let id = slot.id;
+         let seq = slot.take_seq();
+         let close_seq = terminal.then(|| slot.take_seq());
++        let retire = if terminal {
++            slot.lifecycle
++                .take()
++                .map(|entry| crate::streaming::control::RetireGuard::new(entry.closed))
++        } else {
++            None
++        };
+ 
+-        if !self.fire_singleton(id, FenceSkip::Never, |encoder| {
++        if !self.fire_singleton(id, FenceSkip::Never, retire, |encoder| {
+             encoder.push_data(id, seq, &bytes)?;
+             match close_seq {
+                 Some(close_seq) => {
+@@ -267,9 +277,6 @@
+         // `fire_singleton`, has to stay a choice made here rather than inside
+         // `fire_singleton` itself.
+         if terminal {
+-            if let Some(slot) = self.slots.get_mut(index) {
+-                slot.lifecycle = None;
+-            }
+             self.close_local(index);
+         }
+     }
+diff -ru velo-base/lib/velo/src/streaming/messenger_mux/peer_batcher/slot_stream.rs velo/lib/velo/src/streaming/messenger_mux/peer_batcher/slot_stream.rs
+--- velo-base/lib/velo/src/streaming/messenger_mux/peer_batcher/slot_stream.rs	2026-10-20 00:38:37
++++ velo/lib/velo/src/streaming/messenger_mux/peer_batcher/slot_stream.rs	2026-10-20 10:15:22
+@@ -285,6 +285,17 @@
+     starved: bool,
+ }
+ 
++/// A slot that dies holding its producer's lifecycle never sent the terminal:
++/// the terminal path takes the lifecycle out first. Every exit (`close`,
++/// `close_all`, a dropped table) goes through here.
++impl Drop for EgressSlot {
++    fn drop(&mut self) {
++        if let Some(entry) = &self.lifecycle {
++            entry.closed.retire(false);
++        }
++    }
++}
++
+ impl EgressSlot {
+     /// Whether an outstanding singleton (rendezvous, or an `OpenSlot` under
+     /// `MuxConfig::async_open_ack`) fences this slot.
+diff -ru velo-base/lib/velo/src/streaming/sender.rs velo/lib/velo/src/streaming/sender.rs
+--- velo-base/lib/velo/src/streaming/sender.rs	2026-10-20 00:38:37
++++ velo/lib/velo/src/streaming/sender.rs	2026-10-20 10:15:06
+@@ -133,6 +133,33 @@
+     )
+ }
+ 
++/// How a stream's output left this node. See [`StreamSender::retired`].
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Retirement {
++    /// The terminal (`Finalized`, `Detached` or `Dropped`) was handed to the
++    /// transport behind every record before it. Over the mux: the batch
++    /// carrying it was admitted. On the same worker: it is in the anchor's
++    /// channel. On a per-stream transport: it is in the egress channel.
++    Sent,
++    /// The stream's slot or channel went away with output not handed on:
++    /// the consumer cancelled or dropped its anchor, the peer epoch died, or
++    /// this node shut down.
++    Discarded,
++}
++
++/// Resolves once velo on this node holds none of the stream's output.
++pub struct Retired(crate::streaming::control::SenderClosed);
++
++impl std::future::Future for Retired {
++    type Output = Retirement;
++    fn poll(
++        self: std::pin::Pin<&mut Self>,
++        cx: &mut std::task::Context<'_>,
++    ) -> std::task::Poll<Retirement> {
++        self.0.poll_retired(cx)
++    }
++}
++
+ /// Typed sender for pushing frames through the streaming channel.
+ ///
+ /// Holds a [`flume::Sender<Vec<u8>>`] for serialized frame bytes, a
+@@ -313,6 +340,13 @@
+         self.stop_token.clone()
+     }
+ 
++    /// A future that resolves once velo on this node holds none of this
++    /// stream's output, however the sender ends (finalize, detach, drop).
++    /// Allocates nothing: it shares the sender's existing per-stream state.
++    pub fn retired(&self) -> Retired {
++        Retired(self.closed.clone())
++    }
++
+     /// Send a typed item through the channel.
+     ///
+     /// Serializes `StreamFrame::Item(item)` via `rmp_serde` and pushes the
+@@ -387,7 +421,8 @@
+         self.sent_terminal = true;
+         // Clean up sender registry entry before returning
+         self.sender_registry.senders.remove(&self.sender_stream_id);
+-        send_terminal(&self.runtime, &self.tx, bytes, || {})
++        let retire = self.retire_guard();
++        send_terminal(&self.runtime, &self.tx, bytes, retire, || {})
+     }
+ 
+     /// Detach the sender from the anchor by sending a `Detached` sentinel.
+@@ -416,7 +451,8 @@
+         let (worker_id, local_id) = self.handle.unpack();
+         let sender_stream_id = self.sender_stream_id;
+         let runtime = self.runtime.clone();
+-        send_terminal(&self.runtime, &self.tx, bytes, move || {
++        let retire = self.retire_guard();
++        send_terminal(&self.runtime, &self.tx, bytes, retire, move || {
+             // The fast path runs this on the caller's thread, which may have
+             // no runtime; the unattached timeout must still be armed.
+             let _runtime = crate::streaming::tasks::enter_if_outside_runtime(&runtime);
+@@ -437,6 +473,17 @@
+ }
+ 
+ impl<T> StreamSender<T> {
++    /// Who reports this stream's retirement. Under the mux the slot does, once
++    /// the terminal's batch is admitted or the slot dies; elsewhere the
++    /// terminal reaching the channel is the last thing velo does with it.
++    fn retire_guard(&self) -> Option<crate::streaming::control::RetireGuard> {
++        let mux = self
++            .negotiated_transport
++            .as_ref()
++            .is_some_and(|key| key.as_str() == crate::streaming::MESSENGER_MUX_KEY);
++        (!mux).then(|| crate::streaming::control::RetireGuard::new(self.closed.clone()))
++    }
++
+     /// Queue one encoded `Item` frame. [`send`](Self::send) and
+     /// [`send_bytes`](StreamSender::send_bytes) share it, so they agree on
+     /// backpressure, cancel, and a closed channel.
+@@ -534,11 +581,15 @@
+     runtime: &tokio::runtime::Handle,
+     tx: &flume::Sender<Vec<u8>>,
+     bytes: Vec<u8>,
++    retire: Option<crate::streaming::control::RetireGuard>,
+     on_delivered: impl FnOnce() + Send + 'static,
+ ) -> Result<(), SendError> {
+     let bytes = match tx.try_send(bytes) {
+         Ok(()) => {
+             on_delivered();
++            if let Some(retire) = retire {
++                retire.sent();
++            }
+             return Ok(());
+         }
+         Err(flume::TrySendError::Disconnected(_)) => return Err(SendError::ChannelClosed),
+@@ -550,6 +601,9 @@
+     runtime.spawn(async move {
+         if tx.send_async(bytes).await.is_ok() {
+             on_delivered();
++            if let Some(retire) = retire {
++                retire.sent();
++            }
+         }
+     });
+     Ok(())
+@@ -570,7 +624,8 @@
+             // Never blocks — see `send_terminal`. A `Drop` that parks a runtime
+             // worker is the one thing this path may not do. Errors ignored: the
+             // channel may already be closed if the receiver was dropped first.
+-            let _ = send_terminal(&self.runtime, &self.tx, bytes, || {});
++            let retire = self.retire_guard();
++            let _ = send_terminal(&self.runtime, &self.tx, bytes, retire, || {});
+         }
+     }
+ }
+diff -ru velo-base/lib/velo/src/streaming.rs velo/lib/velo/src/streaming.rs
+--- velo-base/lib/velo/src/streaming.rs	2026-10-20 00:38:37
++++ velo/lib/velo/src/streaming.rs	2026-10-20 10:15:22
+@@ -58,6 +58,6 @@
+ pub use mpsc::{
+     MpscAnchorConfig, MpscFrame, MpscStreamAnchor, MpscStreamController, MpscStreamSender, SenderId,
+ };
+-pub use sender::StreamSender;
++pub use sender::{Retired, Retirement, StreamSender};
+ pub use tcp_transport::TcpFrameTransport;
+ pub use transport::FrameTransport;
+--- velo-base/lib/velo/Cargo.toml	2026-10-20 10:17:29
++++ velo/lib/velo/Cargo.toml	2026-10-20 10:17:55
+@@ -13,6 +13,7 @@
+ keywords.workspace = true
+ 
+ [features]
++proto_retired = []
+ # Full service APIs remain available in default builds.
+ default = ["http", "nats-transport", "grpc", "services"]
+ 
+@@ -327,3 +328,8 @@
+ [[test]]
+ name = "streaming_lifecycle_bench"
+ path = "tests/streaming/lifecycle_bench.rs"
++
++[[test]]
++name = "streaming_retired"
++path = "tests/streaming/retired.rs"
++required-features = ["proto_retired"]
