@@ -3,36 +3,15 @@
 //! with only the implementations it hosts; and the three segment binaries,
 //! run as separate processes, answer requests.
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-fn root() -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    dir.parent()
-        .and_then(Path::parent)
-        .expect("the crate sits two levels below the root")
-        .to_path_buf()
-}
-
-fn example() -> PathBuf {
-    root().join("examples/chat")
-}
-
-/// Nested cargo runs get target directories of their own: the outer
-/// `cargo test` may still hold the lock on its own.
-fn target(purpose: &str) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root().join("target"))
-        .join(purpose)
-}
-
-fn cargo() -> Command {
-    Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-}
+use common::{Running, cargo, example, root, target};
 
 /// The spec's placement draws as a diagram: one cluster per segment, and
 /// the three crossings (Truncate to Engine, Engine to Detokenize, Format to
@@ -101,16 +80,6 @@ fn only_the_engine_segment_links_the_engine_dependency() {
             links,
             "{package}:\n{tree}"
         );
-    }
-}
-
-/// A child process killed when the test ends, however it ends.
-struct Running(Child);
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 
@@ -554,190 +523,4 @@ fn a_segment_cannot_take_the_contract_directory() {
         error.contains("segment `contract`: the generated contract crate is `contract/`"),
         "{error}"
     );
-}
-
-/// A JSON-lines source stops on a signal while its input is open and idle:
-/// the graph stops, and the process does not wait on the read of stdin
-/// that never returns.
-#[cfg(unix)]
-#[test]
-fn a_json_lines_front_stops_on_a_signal_with_idle_input() {
-    let build = cargo()
-        .arg("build")
-        .arg("--manifest-path")
-        .arg(example().join("Cargo.toml"))
-        .arg("--bins")
-        .env("CARGO_TARGET_DIR", target("examples"))
-        .output()
-        .expect("cargo build");
-    assert!(
-        build.status.success(),
-        "{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let bin = target("examples").join("debug");
-    let temp = tempfile::Builder::new()
-        .prefix("gdl-chat-signal-")
-        .tempdir()
-        .expect("scratch");
-    let dir = temp.path();
-    let roster = dir.join("roster");
-    std::fs::create_dir_all(&roster).expect("roster");
-    let config = |name: &str| {
-        let path = dir.join(format!("{name}.toml"));
-        std::fs::write(
-            &path,
-            format!(
-                "listen = \"127.0.0.1:0\"\nroster = {}\n",
-                toml::Value::String(roster.display().to_string())
-            ),
-        )
-        .expect("config");
-        path
-    };
-    let spawn = |name: &str, piped: bool| {
-        let mut command = Command::new(bin.join(name));
-        command
-            .arg(config(name.trim_start_matches("chat-")))
-            .stderr(Stdio::piped());
-        if piped {
-            command.stdin(Stdio::piped()).stdout(Stdio::null());
-        } else {
-            command.stdin(Stdio::null()).stdout(Stdio::null());
-        }
-        Running(command.spawn().expect(name))
-    };
-    let _engine = spawn("chat-engine", false);
-    let _post = spawn("chat-post", false);
-    let mut front = spawn("chat-front", true);
-    // The input stays open and idle.
-    let _stdin = front.0.stdin.take().expect("stdin");
-    let stderr = front.0.stderr.take().expect("stderr");
-    let (ready_tx, ready_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            if line.contains("ready") {
-                let _ = ready_tx.send(());
-            }
-        }
-    });
-    ready_rx
-        .recv_timeout(Duration::from_secs(60))
-        .expect("the front became ready");
-    let signalled = Command::new("kill")
-        .args(["-INT", &front.0.id().to_string()])
-        .status()
-        .expect("kill");
-    assert!(signalled.success());
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = front.0.try_wait().expect("the front's state") {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(10) {
-            panic!("the front did not stop on SIGINT while its input was idle");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    assert!(status.success(), "{status}");
-}
-
-/// A signal that comes while the JSON-lines source is writing an answer
-/// ends reading, not the answer: the rest of the answer arrives, and the
-/// process exits cleanly. The engine waits half a second before each word,
-/// and the signal is sent once the first word is read, so the other two are
-/// produced after it.
-#[cfg(unix)]
-#[test]
-fn a_signal_does_not_cut_an_answer_short() {
-    let build = cargo()
-        .arg("build")
-        .arg("--manifest-path")
-        .arg(example().join("Cargo.toml"))
-        .arg("--bins")
-        .env("CARGO_TARGET_DIR", target("examples"))
-        .output()
-        .expect("cargo build");
-    assert!(
-        build.status.success(),
-        "{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let bin = target("examples").join("debug");
-    let temp = tempfile::Builder::new()
-        .prefix("gdl-chat-answer-")
-        .tempdir()
-        .expect("scratch");
-    let dir = temp.path();
-    let roster = dir.join("roster");
-    std::fs::create_dir_all(&roster).expect("roster");
-    let config = |name: &str, extra: &str| {
-        let path = dir.join(format!("{name}.toml"));
-        std::fs::write(
-            &path,
-            format!(
-                "listen = \"127.0.0.1:0\"\nroster = {}\n{extra}",
-                toml::Value::String(roster.display().to_string())
-            ),
-        )
-        .expect("config");
-        path
-    };
-    let spawn = |name: &str, config: &Path, piped: bool| {
-        let mut command = Command::new(bin.join(name));
-        command.arg(config).stderr(Stdio::null());
-        if piped {
-            command.stdin(Stdio::piped()).stdout(Stdio::piped());
-        } else {
-            command.stdin(Stdio::null()).stdout(Stdio::null());
-        }
-        Running(command.spawn().expect(name))
-    };
-    let _engine = spawn(
-        "chat-engine",
-        &config("engine", "[node.Engine]\ndelay_ms = 500\n"),
-        false,
-    );
-    let _post = spawn("chat-post", &config("post", ""), false);
-    let mut front = spawn("chat-front", &config("front", ""), true);
-    // The input stays open: only the signal ends reading.
-    let mut stdin = front.0.stdin.take().expect("stdin");
-    writeln!(stdin, r#"{{"text": "one two three", "max_words": 3}}"#).expect("request");
-    let stdout = front.0.stdout.take().expect("stdout");
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let first = rx
-        .recv_timeout(Duration::from_secs(60))
-        .expect("the first word");
-    assert!(first.starts_with(r#"{"item":"#), "{first}");
-    let signalled = Command::new("kill")
-        .args(["-INT", &front.0.id().to_string()])
-        .status()
-        .expect("kill");
-    assert!(signalled.success());
-    let rest: Vec<String> = rx.iter().take(3).collect();
-    assert_eq!(rest.len(), 3, "the answer was cut short: {first} {rest:?}");
-    assert!(
-        rest[..2].iter().all(|line| line.starts_with(r#"{"item":"#)),
-        "{rest:?}"
-    );
-    assert_eq!(rest[2], r#"{"done":null}"#);
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = front.0.try_wait().expect("the front's state") {
-            break status;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "the front did not stop after the answer"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    assert!(status.success(), "{status}");
 }
