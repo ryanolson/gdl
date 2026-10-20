@@ -120,7 +120,7 @@ fn rustfmt(text: &str) -> Result<String, Error> {
     // rustfmt reads a `rustfmt.toml` from where it runs and above. Run it
     // with a config of its own, so the output does not depend on where the
     // generator is run.
-    let config = rustfmt_config()?;
+    let (_dir, config) = rustfmt_config()?;
     let rustfmt = std::env::var_os("RUSTFMT").unwrap_or_else(|| "rustfmt".into());
     let mut child = Command::new(rustfmt)
         .args([
@@ -156,14 +156,18 @@ fn rustfmt(text: &str) -> Result<String, Error> {
     String::from_utf8(output.stdout).map_err(|e| Error::new(format!("rustfmt output: {e}")))
 }
 
-/// A directory of this process's own holding the default rustfmt config.
-fn rustfmt_config() -> Result<PathBuf, Error> {
-    let dir = std::env::temp_dir().join(format!("gdl-gen-rustfmt-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
-    let file = dir.join("rustfmt.toml");
+/// A directory of its own holding the default rustfmt config, and the
+/// config's path. The directory is removed when it is dropped: one left
+/// behind per run filled the temporary directory.
+fn rustfmt_config() -> Result<(tempfile::TempDir, PathBuf), Error> {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-gen-rustfmt-")
+        .tempdir()
+        .map_err(|e| Error::new(format!("a directory for rustfmt's config: {e}")))?;
+    let file = dir.path().join("rustfmt.toml");
     std::fs::write(&file, "edition = \"2024\"\n")
         .map_err(|e| Error::new(format!("{}: {e}", file.display())))?;
-    Ok(file)
+    Ok((dir, file))
 }
 
 /// The package name of a segment's crate.
