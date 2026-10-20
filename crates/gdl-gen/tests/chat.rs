@@ -641,3 +641,103 @@ fn a_json_lines_front_stops_on_a_signal_with_idle_input() {
     };
     assert!(status.success(), "{status}");
 }
+
+/// A signal that comes while the JSON-lines source is writing an answer
+/// ends reading, not the answer: the rest of the answer arrives, and the
+/// process exits cleanly. The engine waits half a second before each word,
+/// and the signal is sent once the first word is read, so the other two are
+/// produced after it.
+#[cfg(unix)]
+#[test]
+fn a_signal_does_not_cut_an_answer_short() {
+    let build = cargo()
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(example().join("Cargo.toml"))
+        .arg("--bins")
+        .env("CARGO_TARGET_DIR", target("examples"))
+        .output()
+        .expect("cargo build");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let bin = target("examples").join("debug");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-chat-answer-")
+        .tempdir()
+        .expect("scratch");
+    let dir = temp.path();
+    let roster = dir.join("roster");
+    std::fs::create_dir_all(&roster).expect("roster");
+    let config = |name: &str, extra: &str| {
+        let path = dir.join(format!("{name}.toml"));
+        std::fs::write(
+            &path,
+            format!(
+                "listen = \"127.0.0.1:0\"\nroster = {}\n{extra}",
+                toml::Value::String(roster.display().to_string())
+            ),
+        )
+        .expect("config");
+        path
+    };
+    let spawn = |name: &str, config: &Path, piped: bool| {
+        let mut command = Command::new(bin.join(name));
+        command.arg(config).stderr(Stdio::null());
+        if piped {
+            command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        } else {
+            command.stdin(Stdio::null()).stdout(Stdio::null());
+        }
+        Running(command.spawn().expect(name))
+    };
+    let _engine = spawn(
+        "chat-engine",
+        &config("engine", "[node.Engine]\ndelay_ms = 500\n"),
+        false,
+    );
+    let _post = spawn("chat-post", &config("post", ""), false);
+    let mut front = spawn("chat-front", &config("front", ""), true);
+    // The input stays open: only the signal ends reading.
+    let mut stdin = front.0.stdin.take().expect("stdin");
+    writeln!(stdin, r#"{{"text": "one two three", "max_words": 3}}"#).expect("request");
+    let stdout = front.0.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let first = rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the first word");
+    assert!(first.starts_with(r#"{"item":"#), "{first}");
+    let signalled = Command::new("kill")
+        .args(["-INT", &front.0.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(signalled.success());
+    let rest: Vec<String> = rx.iter().take(3).collect();
+    assert_eq!(rest.len(), 3, "the answer was cut short: {first} {rest:?}");
+    assert!(
+        rest[..2].iter().all(|line| line.starts_with(r#"{"item":"#)),
+        "{rest:?}"
+    );
+    assert_eq!(rest[2], r#"{"done":null}"#);
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = front.0.try_wait().expect("the front's state") {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the front did not stop after the answer"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status}");
+}

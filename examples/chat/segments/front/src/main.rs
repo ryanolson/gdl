@@ -96,11 +96,12 @@ async fn run() -> Result<(), Failure> {
     launch
         .serve(|shutdown| async move {
             let input = tokio::io::BufReader::new(tokio::io::stdin());
-            let call = |request: chat_front::contract::SourceReq| segment.call::<_, chat_front::contract::SourceItem>(gdl::Cx::new(), request);
-            tokio::select! {
-                result = gdl::serve_json_lines(input, tokio::io::stdout(), call) => result.map_err(|e| gdl::Error::new(gdl::ErrorKind::Transport, e.to_string())),
-                () = shutdown.cancelled() => Ok(()),
-            }
+            let call = |request: chat_front::contract::SourceReq| {
+                segment.call::<_, chat_front::contract::SourceItem>(gdl::Cx::new(), request)
+            };
+            gdl::serve_json_lines(input, tokio::io::stdout(), shutdown.cancelled(), call)
+                .await
+                .map_err(|e| gdl::Error::new(gdl::ErrorKind::Transport, e.to_string()))
         })
         .await?;
     Ok(())

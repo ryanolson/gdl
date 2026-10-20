@@ -326,13 +326,17 @@ impl Unit<'_> {
                 text,
                 "            let call = |request: {lib}::contract::SourceReq| segment.call::<_, {lib}::contract::SourceItem>(gdl::Cx::new(), request);"
             );
-            let _ = writeln!(text, "            tokio::select! {{");
+            // The stop ends reading, not the answer being written; a
+            // second signal ends the process.
             let _ = writeln!(
                 text,
-                "                result = gdl::serve_json_lines(input, tokio::io::stdout(), call) => result.map_err(|e| gdl::Error::new(gdl::ErrorKind::Transport, e.to_string())),"
+                "            gdl::serve_json_lines(input, tokio::io::stdout(), shutdown.cancelled(), call)"
             );
-            let _ = writeln!(text, "                () = shutdown.cancelled() => Ok(()),");
-            let _ = writeln!(text, "            }}");
+            let _ = writeln!(text, "                .await");
+            let _ = writeln!(
+                text,
+                "                .map_err(|e| gdl::Error::new(gdl::ErrorKind::Transport, e.to_string()))"
+            );
         } else {
             let _ = writeln!(text, "            shutdown.cancelled().await;");
             let _ = writeln!(text, "            drop(segment);");

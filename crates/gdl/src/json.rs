@@ -19,10 +19,16 @@ use crate::items::Items;
 /// malformed, the call fails, the stream ends with an error, or an item has
 /// no JSON form (a map with non-string keys, for example). In that last
 /// case the stream is dropped, which cancels it. Blank lines are skipped.
-/// Returns when `input` ends.
-pub async fn serve_json_lines<Req, Item, R, W, F, Fut>(
+///
+/// Returns when `input` ends, or once `stop` has resolved. A stop ends
+/// reading, never an answer: one that comes while an answer is being
+/// written lets it finish, and no further line is read. A process that must
+/// end an answer at once stops another way (a second signal ends a segment
+/// binary).
+pub async fn serve_json_lines<Req, Item, R, W, S, F, Fut>(
     input: R,
     mut output: W,
+    stop: S,
     mut call: F,
 ) -> std::io::Result<()>
 where
@@ -30,14 +36,24 @@ where
     Item: Serialize,
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
+    S: Future<Output = ()>,
     F: FnMut(Req) -> Fut,
     Fut: Future<Output = Result<Items<Item>>>,
 {
     let mut input = input;
     let mut bytes = Vec::new();
+    let stop = futures::FutureExt::fuse(stop);
+    tokio::pin!(stop);
     loop {
         bytes.clear();
-        if input.read_until(b'\n', &mut bytes).await? == 0 {
+        // A line cut short by the stop is dropped with the rest of the
+        // input: it was never a request.
+        let read = tokio::select! {
+            biased;
+            () = &mut stop => return Ok(()),
+            read = input.read_until(b'\n', &mut bytes) => read?,
+        };
+        if read == 0 {
             return Ok(());
         }
         // A line that is not text is a bad request, not the end of serving:
@@ -151,7 +167,7 @@ mod tests {
         };
         let serving = tokio::spawn(async move {
             let output = tokio::io::BufWriter::new(writer);
-            serve_json_lines(&b"1\n"[..], output, call).await
+            serve_json_lines(&b"1\n"[..], output, std::future::pending(), call).await
         });
         let mut lines = tokio::io::BufReader::new(reader).lines();
         let first = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
@@ -171,12 +187,87 @@ mod tests {
         serving.await.expect("join").expect("serve");
     }
 
+    /// A stop that comes while an answer is being written ends reading, not
+    /// the answer: the answer is written to its end, and the request sent
+    /// after the stop is never read.
+    #[tokio::test]
+    async fn a_stop_ends_reading_not_the_answer_being_written() {
+        let (mut input, reader) = tokio::io::duplex(1024);
+        let (writer, output) = tokio::io::duplex(64 * 1024);
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let mut released = Some(released);
+        let call = move |_: u32| {
+            let released = released.take();
+            async move {
+                let rest = futures::stream::once(async move {
+                    if let Some(released) = released {
+                        let _ = released.await;
+                    }
+                    Ok(2u32)
+                });
+                Ok(items(futures::stream::iter([Ok(1u32)]).chain(rest)))
+            }
+        };
+        let serving = tokio::spawn(async move {
+            let stop = async move {
+                let _ = stopped.await;
+            };
+            serve_json_lines(tokio::io::BufReader::new(reader), writer, stop, call).await
+        });
+        input.write_all(b"1\n").await.expect("write");
+        let mut lines = tokio::io::BufReader::new(output).lines();
+        let wait = std::time::Duration::from_secs(5);
+        let first = tokio::time::timeout(wait, lines.next_line()).await;
+        assert_eq!(
+            first.expect("in time").expect("read").as_deref(),
+            Some(r#"{"item":1}"#)
+        );
+        // The stop comes mid-answer, and another request after it.
+        let _ = stop.send(());
+        input.write_all(b"1\n").await.expect("write");
+        let _ = release.send(());
+        let mut rest = Vec::new();
+        while let Some(line) = tokio::time::timeout(wait, lines.next_line())
+            .await
+            .expect("in time")
+            .expect("read")
+        {
+            rest.push(line);
+        }
+        assert_eq!(rest, [r#"{"item":2}"#, r#"{"done":null}"#]);
+        tokio::time::timeout(wait, serving)
+            .await
+            .expect("serving ended after the answer")
+            .expect("join")
+            .expect("serve");
+    }
+
+    /// A stop while no request is being answered ends serving at once,
+    /// though the input stays open.
+    #[tokio::test]
+    async fn a_stop_while_waiting_for_a_request_ends_serving() {
+        let (_input, reader) = tokio::io::duplex(1024);
+        let call = |_: u32| async { Ok(items(futures::stream::iter([Ok(1u32)]))) };
+        let served = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            serve_json_lines(
+                tokio::io::BufReader::new(reader),
+                Vec::new(),
+                std::future::ready(()),
+                call,
+            ),
+        )
+        .await;
+        served.expect("ended in time").expect("serve");
+    }
+
     #[tokio::test]
     async fn integers_beyond_64_bits_are_served() {
         let call =
             |_: u32| async { Ok(items(futures::stream::iter([Ok((u128::MAX, i128::MIN))]))) };
         let mut output = Vec::new();
-        serve_json_lines(&b"1\n"[..], &mut output, call)
+        serve_json_lines(&b"1\n"[..], &mut output, std::future::pending(), call)
             .await
             .expect("serve");
         assert_eq!(
@@ -193,7 +284,7 @@ mod tests {
     async fn every_request_gets_one_answer_and_serving_goes_on() {
         let input: &[u8] = b"2\n\n0\nnot json\n99\n\xff\n1\n";
         let mut output = Vec::new();
-        serve_json_lines(input, &mut output, call)
+        serve_json_lines(input, &mut output, std::future::pending(), call)
             .await
             .expect("serve");
         let lines: Vec<&str> = std::str::from_utf8(&output)
