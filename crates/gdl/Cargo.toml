@@ -65,6 +65,10 @@ harness = false
 name = "footprint"
 harness = false
 
+[[bench]]
+name = "requests"
+harness = false
+
 [[test]]
 name = "hub"
 required-features = ["hub"]

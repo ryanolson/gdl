@@ -444,6 +444,7 @@ pub async fn reference_front(events: &Arc<Events>, placement: &Placement, nodes:
 
 pub struct Setups {
     pub local: Caller,
+    pub one: Caller,
     pub two: Caller,
     pub three: Caller,
     pub lean: LeanCaller,
@@ -459,6 +460,9 @@ pub async fn setups() -> Setups {
         let local = local.clone();
         Box::pin(async move { local.call(cx, req).await })
     });
+    // Every node through the distributed stages with no crossing: what the
+    // runtime adds per node, which a crossing's cost would hide.
+    let one = Placement::new().segment("front", ["A", "B", "C", "D", "F", "E", "G"]);
     let two = Placement::new()
         .segment("front", ["A", "B", "C", "F", "E", "G"])
         .segment("engine", ["D"]);
@@ -469,6 +473,7 @@ pub async fn setups() -> Setups {
     let lean = lean_front().await;
     Setups {
         local,
+        one: reference_front(&events, &one, 1).await,
         two: reference_front(&events, &two, 2).await,
         three: reference_front(&events, &three, 3).await,
         lean,

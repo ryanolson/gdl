@@ -13,7 +13,8 @@
 //! - **Codec:** one item's encode and decode as each side frames it, in
 //!   process, for the copy a crossing adds per item.
 //! - **Reference graph:** the test suites' graph (with its event log off)
-//!   local, over two segments, and over three.
+//!   local, in one segment (the distributed stages without a crossing),
+//!   over two segments, and over three.
 //! - **Upload:** a streamed request (`S => D`, `n` blobs of `size` bytes in,
 //!   one count back) over two segments, against the same exchange on velo
 //!   alone: the server mints the input anchor and answers with its ticket.
@@ -132,6 +133,10 @@ fn bench(c: &mut Criterion) {
     latency.bench_function("reference-local", |b| {
         b.to_async(&rt)
             .iter(|| reference(&setups.local, black_box(1)))
+    });
+    latency.bench_function("reference-1-segment", |b| {
+        b.to_async(&rt)
+            .iter(|| reference(&setups.one, black_box(1)))
     });
     latency.bench_function("reference-2-segments", |b| {
         b.to_async(&rt)
