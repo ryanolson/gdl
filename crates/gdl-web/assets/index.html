@@ -19,8 +19,8 @@
   <p id="adding" role="status" aria-live="polite"></p>
   <label class="search"><span class="sr-only">Search packages, messages, and nodes</span><input id="search" type="search" placeholder="Search catalog…"></label>
   <div class="catalog-views" role="group" aria-label="Catalog contents"><button id="catalog-nodes" aria-pressed="true">Nodes</button><button id="catalog-messages" aria-pressed="false">Message types</button></div>
-  <label class="catalog-grouping">Group by<select id="catalog-grouping" aria-label="Catalog grouping"><option value="packages">Packages</option><option value="flat">Flat list</option></select></label>
-  <label class="catalog-filter"><input id="catalog-compatible" type="checkbox"> Show compatible only</label>
+  <label class="catalog-grouping">Group by<select id="catalog-grouping" aria-label="Catalog grouping"><option value="packages">Packages</option><option value="flat" selected>Flat list</option></select></label>
+  <label class="catalog-filter"><input id="catalog-compatible" type="checkbox" checked> Show compatible only</label>
   <div class="section-heading"><span id="catalog-kind">PACKAGES</span> <span id="package-count">0</span></div>
   <div id="entries"><p class="muted">Loading catalog…</p></div>
   <div class="explorer-hint" id="catalog-hint">Expand a package to inspect its messages and nodes. Drag a message to a source port or a node to a matching slot.</div>
