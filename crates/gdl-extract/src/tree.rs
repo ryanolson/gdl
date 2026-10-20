@@ -90,39 +90,98 @@ pub(crate) struct Use {
     pub(crate) at: Location,
 }
 
-/// A path a `use` imports: the path before its braces, shared by every
-/// name in them, then the name's own segment, if it adds one. A copy of
-/// the shared part per name costs names times path length.
+/// A path a `use` imports: its last segment, linked to the ones before
+/// it. The names in one pair of braces share everything before the braces,
+/// and a path inside them adds one link: a copy of the shared part per
+/// name, or per nested group, costs names times path length.
 #[derive(Clone)]
 pub(crate) struct UsePath {
-    prefix: Rc<[String]>,
-    last: Option<String>,
+    last: Option<Rc<Link<String>>>,
 }
 
 impl UsePath {
     /// A path of these segments.
     fn of(segments: Vec<String>) -> Self {
+        segments
+            .into_iter()
+            .fold(Self { last: None }, |path, segment| path.push(segment))
+    }
+
+    fn push(&self, segment: String) -> Self {
         Self {
-            prefix: segments.into(),
-            last: None,
+            last: Some(Link::push(self.last.as_ref(), segment)),
         }
     }
 
-    pub(crate) fn segments(&self) -> impl Iterator<Item = &str> + Clone {
-        self.prefix
-            .iter()
+    /// Its segments, first to last.
+    pub(crate) fn segments(&self) -> Vec<&str> {
+        let mut segments: Vec<&str> = Link::values(self.last.as_deref())
             .map(String::as_str)
-            .chain(self.last.as_deref())
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.prefix.len() + usize::from(self.last.is_some())
+            .collect();
+        segments.reverse();
+        segments
     }
 
     pub(crate) fn last(&self) -> Option<&str> {
-        self.last
-            .as_deref()
-            .or(self.prefix.last().map(String::as_str))
+        self.last.as_deref().map(|link| link.value.as_str())
+    }
+}
+
+/// A value linked to the ones before it, so that what many chains share is
+/// stored once.
+struct Link<T> {
+    value: T,
+    up: Option<Rc<Link<T>>>,
+}
+
+impl<T> Link<T> {
+    fn push(up: Option<&Rc<Self>>, value: T) -> Rc<Self> {
+        Rc::new(Self {
+            value,
+            up: up.cloned(),
+        })
+    }
+
+    /// The values of the chain that ends at `last`, last first.
+    fn values(last: Option<&Self>) -> impl Iterator<Item = &T> {
+        std::iter::successors(last, |link| link.up.as_deref()).map(|link| &link.value)
+    }
+}
+
+impl<T> Drop for Link<T> {
+    // Unlinked one at a time: a chain dropped recursively takes a stack
+    // frame per link, and the source decides how long a chain is.
+    fn drop(&mut self) {
+        let mut up = self.up.take();
+        while let Some(link) = up {
+            up = match Rc::try_unwrap(link) {
+                Ok(mut link) => link.up.take(),
+                Err(_) => None,
+            };
+        }
+    }
+}
+
+/// A directory, as the chain of module names and `#[path]`s that leads to
+/// it from a file's directory. It is made a path only when a module file
+/// is looked up under it: a path per inline module costs depth times path
+/// length.
+#[derive(Clone)]
+struct Dir(Rc<Link<PathBuf>>);
+
+impl Dir {
+    fn at(path: PathBuf) -> Self {
+        Self(Link::push(None, path))
+    }
+
+    fn join(&self, part: impl Into<PathBuf>) -> Self {
+        Self(Link::push(Some(&self.0), part.into()))
+    }
+
+    fn path(&self) -> PathBuf {
+        let mut parts: Vec<&PathBuf> = Link::values(Some(&self.0)).collect();
+        parts.reverse();
+        parts.into_iter().collect()
     }
 }
 
@@ -136,7 +195,9 @@ pub(crate) struct Impl {
 /// A place in a source file.
 #[derive(Clone)]
 pub(crate) struct Location {
-    pub(crate) file: PathBuf,
+    /// Shared by every location in the file: a copy per item costs items
+    /// times the length of the file's path.
+    pub(crate) file: Rc<Path>,
     pub(crate) line: usize,
     pub(crate) column: usize,
 }
@@ -182,7 +243,7 @@ impl Crate {
         krate
             .modules
             .push(Module::empty(None, String::new(), Vis::Public));
-        let dir = root.parent().unwrap_or(Path::new("")).to_path_buf();
+        let dir = Dir::at(root.parent().unwrap_or(Path::new("")).to_path_buf());
         if let Some(items) = reader.file(root) {
             reader.items(&mut krate, 0, &items, root, &dir, &dir);
         }
@@ -272,9 +333,10 @@ const FILE_LIMIT: u64 = 16 << 20;
 
 /// The most one extraction reads in all. The reader's peak is about a
 /// hundred and twenty times a source byte on a crate of messages
-/// (`agent-docs/perf/reader-cost.md`), so this bounds it near two
-/// gigabytes, under the limit the composer sets on the process that reads
-/// an import.
+/// (`agent-docs/perf/reader-cost.md`), so this bounds what it stores near
+/// two gigabytes. Work that repeats a resolution chain per query is not
+/// bounded by it; the composer's limits on the process that reads an
+/// import bound that.
 pub(crate) const TOTAL_LIMIT: u64 = 16 << 20;
 
 /// The least a file costs the budget: a chain of tiny files is bounded by
@@ -402,14 +464,15 @@ impl Reader<'_> {
         module: usize,
         items: &[Item],
         file: &Path,
-        dir: &Path,
-        base: &Path,
+        dir: &Dir,
+        base: &Dir,
     ) {
         // The file is open while its items are read, including those of
-        // the modules it holds inline.
+        // the modules it holds inline, which `items_of` reads without
+        // opening it again.
         self.open
             .push(std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf()));
-        self.items_of(krate, module, items, file, dir, base);
+        self.items_of(krate, module, items, &file.into(), dir, base);
         self.open.pop();
     }
 
@@ -418,14 +481,14 @@ impl Reader<'_> {
         krate: &mut Crate,
         module: usize,
         items: &[Item],
-        file: &Path,
-        dir: &Path,
-        base: &Path,
+        file: &Rc<Path>,
+        dir: &Dir,
+        base: &Dir,
     ) {
         let at = |span: proc_macro2::Span| {
             let start = span.start();
             Location {
-                file: file.to_path_buf(),
+                file: Rc::clone(file),
                 line: start.line,
                 column: start.column,
             }
@@ -467,7 +530,7 @@ impl Reader<'_> {
                 }),
                 Item::Use(u) => {
                     let mut uses = Vec::new();
-                    flatten(&u.tree, &mut Vec::new(), None, &mut uses);
+                    flatten(&u.tree, &UsePath::of(Vec::new()), &mut uses);
                     let attrs: Rc<[Meta]> = attrs.into();
                     // Once per item: `span` turns the whole item into tokens.
                     let at = at(u.span());
@@ -549,22 +612,27 @@ impl Reader<'_> {
                                 Some(explicit) => base.join(explicit),
                                 None => dir.join(name),
                             };
-                            self.items(krate, child, inner, file, &inner_dir, &inner_dir);
+                            self.items_of(krate, child, inner, file, &inner_dir, &inner_dir);
                         }
                         (None, Some(explicit)) => {
-                            let target = base.join(explicit);
-                            let child_dir = target.parent().unwrap_or(dir).to_path_buf();
+                            let target = base.path().join(explicit);
+                            let child_dir = Dir::at(
+                                target
+                                    .parent()
+                                    .map_or_else(|| dir.path(), Path::to_path_buf),
+                            );
                             if let Some(items) = self.file(&target) {
                                 self.items(krate, child, &items, &target, &child_dir, &child_dir);
                             }
                         }
                         (None, None) => {
-                            let flat = dir.join(format!("{name}.rs"));
-                            let nested = dir.join(&name).join("mod.rs");
+                            let path = dir.path();
+                            let flat = path.join(format!("{name}.rs"));
+                            let nested = path.join(&name).join("mod.rs");
                             let (target, base) = if flat.exists() {
-                                (flat, dir.to_path_buf())
+                                (flat, Dir::at(path))
                             } else {
-                                (nested, dir.join(&name))
+                                (nested, Dir::at(path.join(&name)))
                             };
                             if let Some(items) = self.file(&target) {
                                 self.items(krate, child, &items, &target, &dir.join(&name), &base);
@@ -592,61 +660,35 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
 }
 
 /// Each name a use tree binds, with its full path; a glob as `None`.
-/// `group` is `prefix` in one allocation when `tree` is in braces, shared
-/// by the paths of every name in them.
-fn flatten(
-    tree: &UseTree,
-    prefix: &mut Vec<String>,
-    group: Option<&Rc<[String]>>,
-    out: &mut Vec<(Option<String>, UsePath)>,
-) {
-    let shared = |prefix: &[String]| group.cloned().unwrap_or_else(|| prefix.into());
+fn flatten(tree: &UseTree, prefix: &UsePath, out: &mut Vec<(Option<String>, UsePath)>) {
     match tree {
-        UseTree::Path(p) => {
-            prefix.push(p.ident.unraw().to_string());
-            flatten(&p.tree, prefix, None, out);
-            prefix.pop();
-        }
+        UseTree::Path(p) => flatten(&p.tree, &prefix.push(p.ident.unraw().to_string()), out),
         UseTree::Name(n) => {
             let name = n.ident.unraw().to_string();
             if name == "self" {
-                if let Some(first) = prefix.last() {
-                    let path = UsePath {
-                        prefix: shared(prefix),
-                        last: None,
-                    };
-                    out.push((Some(first.clone()), path));
+                if let Some(last) = prefix.last() {
+                    out.push((Some(last.to_string()), prefix.clone()));
                 }
             } else {
-                let path = UsePath {
-                    prefix: shared(prefix),
-                    last: Some(name.clone()),
-                };
-                out.push((Some(name), path));
+                out.push((Some(name.clone()), prefix.push(name)));
             }
         }
         UseTree::Rename(r) => {
             let name = r.ident.unraw().to_string();
-            let path = UsePath {
-                prefix: shared(prefix),
-                last: (name != "self").then_some(name),
+            let path = if name == "self" {
+                prefix.clone()
+            } else {
+                prefix.push(name)
             };
             let alias = r.rename.unraw().to_string();
             if alias != "_" {
                 out.push((Some(alias), path));
             }
         }
-        UseTree::Glob(_) => out.push((
-            None,
-            UsePath {
-                prefix: shared(prefix),
-                last: None,
-            },
-        )),
+        UseTree::Glob(_) => out.push((None, prefix.clone())),
         UseTree::Group(g) => {
-            let group: Rc<[String]> = prefix.as_slice().into();
             for tree in &g.items {
-                flatten(tree, prefix, Some(&group), out);
+                flatten(tree, prefix, out);
             }
         }
     }

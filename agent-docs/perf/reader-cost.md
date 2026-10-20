@@ -76,6 +76,24 @@ After the fix:
 - The crate's serde and role impls are resolved once and indexed by the type they are for.
 - A module indexes its types and bound names by name.
 
-The remaining cost is linear. A crate of messages peaks at about 120 times its source size above the baseline, which is the parsed file plus what the reader keeps. The 16 MiB extraction budget therefore bounds the reader near 2 GB.
+A crate of messages peaks at about 120 times its source size above the baseline, which is the parsed file plus what the reader keeps. The 16 MiB extraction budget therefore bounds what the reader stores near 2 GB.
+
+Review `m19-open-r1` found shapes the first version of this fix still made quadratic, measured with the counting allocator of `cost.rs` in a debug build:
+
+| Shape | Growth when the source doubled, before |
+|---|---|
+| paths inside braces under a long prefix, `p0::...::pn::{x::a, x::b}` | memory 4.0×, allocations 4.0× |
+| groups nested in groups, `a0::{a1::{...{z}}}` | memory 3.9×, allocations 3.7× |
+| inline modules nested deep with long names | memory 3.9× |
+| one `use` item with many attributes binding many names | allocations 4.0× |
+| a file reached by a 400-byte longer path, 20,000 names | peak 1.58× |
+
+They are fixed:
+
+- A `use` path and a module directory are each a chain of links that share what comes before them; a directory is made a path only when a module file is looked up in it.
+- The export check runs once per `use` item.
+- Locations share their file's path.
+
+Each shape is in `cost.rs` and fails on the code before. Two costs remain, bounded by the import child's limits rather than the budget. A resolution repeats per query the chain it follows: N resolutions through a K-segment path, or past K globs, cost N times K. Output whose size is itself the product also remains, such as a full path for each message of a deep chain.
 
 `crates/gdl-extract/tests/cost.rs` holds each shape at two sizes. It asserts that doubling the source at most about doubles the peak memory and the allocations, or, for the marker scan, the time. Every assertion fails on the code before the fix: memory or allocations grew 3.9 to 4.0 times when the source doubled, and time 3.7 times.

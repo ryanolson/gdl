@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 
 use crate::cfg::Settings;
-use crate::markers::{ImplOf, Traits};
 use crate::metadata::Graph;
 use crate::tree::{Crate, UsePath, Vis};
 
@@ -35,9 +34,6 @@ pub(crate) struct Resolver<'a> {
     /// each other, so a lookup met again on the way finds nothing new,
     /// and one met again by another path is answered once.
     known: HashMap<Lookup, Option<Def>>,
-    /// Per crate and kind of trait, the impls the markers look for, by the
-    /// type they are for; built on first use.
-    pub(crate) impls: HashMap<(usize, Traits), HashMap<Def, Vec<ImplOf>>>,
 }
 
 /// A lookup: crate, module, name, and the viewer, if a glob looks.
@@ -57,7 +53,6 @@ impl<'a> Resolver<'a> {
             problems: Vec::new(),
             budget: crate::tree::TOTAL_LIMIT,
             known: HashMap::new(),
-            impls: HashMap::new(),
         }
     }
 
