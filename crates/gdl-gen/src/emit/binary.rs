@@ -1,6 +1,9 @@
-//! The binary of a segment crate: `main.rs`, which reads the settings,
-//! builds what the segment hosts, and hands the rest to the runtime's
-//! process module. Written in parts, each a function, so that each kind of
+//! A segment crate's binary. Its lifecycle is the runtime's
+//! (`gdl::segment_main`); what is emitted is what differs between
+//! segments: `main.rs`, which names the segment's `Binary` and documents
+//! its settings, and the library's `Binary`, which implements
+//! `gdl::SegmentBinary` with the settings tables, how the hosted
+//! implementations are built, and what the segment serves. Each kind of
 //! segment (one that serves JSON lines, one with a frontend, one with a
 //! service of several entries, one that only serves) is one branch in one
 //! place.
@@ -17,38 +20,23 @@ impl Unit<'_> {
     pub(super) fn main_rs(&self) -> String {
         let hosted = self.hosted();
         let frontend = self.frontend();
-        let service = self.spec.service.as_ref().filter(|_| self.hosts_source());
-        let serves = self.serves();
-        let takes = !hosted.is_empty() || frontend.is_some() || service.is_some();
+        let service = self.service();
         let mut text = String::new();
         let _ = writeln!(text, "// {MARKER}.");
         let _ = writeln!(text, "// Regenerate with: {}", self.regenerate);
         let _ = writeln!(text);
-        text.push_str(&self.settings_doc(&hosted, frontend, service, serves));
-        let _ = writeln!(text);
-        let _ = writeln!(
-            text,
-            "use {}::{{Nodes, SEGMENT, SEGMENTS, start}};",
-            self.lib()
-        );
-        let _ = writeln!(text);
-        let _ = writeln!(
-            text,
-            "type Failure = Box<dyn std::error::Error + Send + Sync>;"
-        );
-        let _ = writeln!(text);
-        text.push_str(&hosted_types(&hosted, frontend, service));
+        text.push_str(&self.settings_doc(&hosted, frontend, service, self.serves()));
         let _ = writeln!(text);
         let _ = writeln!(text, "fn main() -> std::process::ExitCode {{");
-        let _ = writeln!(text, "    gdl::segment_main(SEGMENT, run())");
+        let _ = writeln!(text, "    gdl::segment_main::<{}::Binary>()", self.lib());
         let _ = writeln!(text, "}}");
-        let _ = writeln!(text);
-        text.push_str(&self.run_fn(&hosted, frontend, service, serves, takes));
-        if takes {
-            let _ = writeln!(text);
-            text.push_str(&self.build_fn());
-        }
         text
+    }
+
+    /// The service whose entries this segment serves: only the segment
+    /// hosting the source serves one.
+    fn service(&self) -> Option<&ServiceBinding> {
+        self.spec.service.as_ref().filter(|_| self.hosts_source())
     }
 
     /// The module doc: usage, the settings table, and what the binary does
@@ -199,60 +187,188 @@ impl Unit<'_> {
         text
     }
 
-    /// `run`: the settings, the hosted implementations, the launch, and the
-    /// body served until the process stops.
-    fn run_fn(
+    /// The library's part of the binary: the settings types, what the
+    /// binary builds when it hosts more than nodes, and `Binary`.
+    pub(super) fn binary_rs(&self) -> String {
+        let hosted = self.hosted();
+        let frontend = self.frontend();
+        let service = self.service();
+        let mut text = settings_types(&hosted, frontend, service);
+        let built = Built::new(&hosted, frontend, service);
+        if built.extra() {
+            let _ = writeln!(text);
+            text.push_str(&hosts_type(frontend, service));
+        }
+        let _ = writeln!(text);
+        let _ = writeln!(
+            text,
+            "/// What the `{}` binary hosts and serves; its `main` is",
+            self.package()
+        );
+        let _ = writeln!(text, "/// `gdl::segment_main::<Binary>()`.");
+        let _ = writeln!(text, "pub struct Binary;");
+        let _ = writeln!(text);
+        let _ = writeln!(text, "impl gdl::SegmentBinary for Binary {{");
+        let _ = writeln!(
+            text,
+            "    const PACKAGE: &'static str = {:?};",
+            self.package()
+        );
+        let _ = writeln!(text, "    const SEGMENT: &'static str = SEGMENT;");
+        let _ = writeln!(
+            text,
+            "    const SEGMENTS: &'static [&'static str] = SEGMENTS;"
+        );
+        let graph_configs = toml::to_string(&self.spec.config).expect("graph config tables");
+        let _ = writeln!(
+            text,
+            "    const GRAPH_CONFIG: &'static str = {graph_configs:?};"
+        );
+        let _ = writeln!(text, "    type Settings = Settings;");
+        let _ = writeln!(text, "    type Hosts = {};", built.ty());
+        let _ = writeln!(text);
+        text.push_str(&self.build_fn(&hosted, frontend, service, &built));
+        if !built.ready.is_empty() {
+            let _ = writeln!(text);
+            let _ = writeln!(
+                text,
+                "    async fn ready(hosts: &{}) -> gdl::Result<()> {{",
+                built.ty()
+            );
+            let _ = writeln!(
+                text,
+                "        tokio::try_join!({})?;",
+                built.ready.join(", ")
+            );
+            let _ = writeln!(text, "        Ok(())");
+            let _ = writeln!(text, "    }}");
+        }
+        let _ = writeln!(text);
+        let _ = writeln!(
+            text,
+            "    fn deployment() -> gdl::Result<gdl::DeploymentSpec> {{"
+        );
+        let _ = writeln!(
+            text,
+            "        Ok(gdl::DeploymentSpec::new(contract::manifest(), gdl::Placement::from_toml(PLACEMENT)?)?)"
+        );
+        let _ = writeln!(text, "    }}");
+        let _ = writeln!(text);
+        text.push_str(&self.start_fn(frontend, service, &built));
+        let _ = writeln!(text, "}}");
+        text
+    }
+
+    /// `build`: each hosted implementation from its settings table,
+    /// before the segment meets its peers, so that a bad table fails
+    /// before anyone waits for it.
+    fn build_fn(
         &self,
         hosted: &[Hosted<'_>],
         frontend: Option<&Bind>,
         service: Option<&ServiceBinding>,
-        serves: bool,
-        takes: bool,
+        built: &Built,
     ) -> String {
-        let package = self.package();
-        let lib = self.lib();
         let mut text = String::new();
-        let _ = writeln!(text, "async fn run() -> Result<(), Failure> {{");
+        let takes = !hosted.is_empty() || frontend.is_some() || service.is_some();
         let _ = writeln!(
             text,
-            "    let paths: Vec<_> = std::env::args_os().skip(1).collect();"
+            "    async fn build(settings: Settings, {}: &gdl::Builder) -> Result<{}, gdl::Failure> {{",
+            if takes { "builder" } else { "_builder" },
+            built.ty()
         );
+        let mut fields = vec!["node"];
+        if frontend.is_some() {
+            fields.push("frontend");
+        }
+        if service.is_some() {
+            fields.push("mut adapter");
+        }
         let _ = writeln!(
             text,
-            "    if paths.is_empty() {{ return Err(\"usage: {package} [--healthcheck] <config.toml> [override.toml ...]\".into()); }}"
+            "        let Settings {{ {} }} = settings;",
+            fields.join(", ")
         );
+        if hosted.is_empty() {
+            let _ = writeln!(text, "        let NodeSettings {{}} = node;");
+            let _ = writeln!(text, "        let nodes = Nodes {{}};");
+        } else {
+            let _ = writeln!(text, "        let nodes = Nodes {{");
+            for node in hosted {
+                let _ = writeln!(
+                    text,
+                    "            {}: builder.build::<::{}>(\"{}\", node.{}).await?,",
+                    node.binding, node.ty, node.name, node.binding
+                );
+            }
+            let _ = writeln!(text, "        }};");
+        }
+        if let Some(frontend) = frontend {
+            let _ = writeln!(
+                text,
+                "        let frontend = builder.build::<::{}>(\"{}\", frontend).await?;",
+                rooted(&frontend.ty),
+                self.frontend_source().expect("the pinned source").name
+            );
+        }
+        if let Some(service) = service {
+            let enabled: Vec<_> = service.nodes().iter().map(|n| n.name.clone()).collect();
+            let _ = writeln!(text, "        let enabled: &[&str] = &{enabled:?};");
+            let _ = writeln!(
+                text,
+                "        if let Some(unknown) = adapter.keys().find(|key| !enabled.contains(&key.as_str())) {{ return Err(format!(\"[adapter.{{unknown}}]: no enabled entry node of that name\").into()); }}"
+            );
+            for node in service.nodes() {
+                let _ = writeln!(
+                    text,
+                    "        let {} = builder.build::<::{}>({:?}, adapter.remove({:?})).await?;",
+                    node.variable(),
+                    rooted(&node.bind.ty),
+                    node.name,
+                    node.name
+                );
+            }
+        }
+        if built.extra() {
+            let _ = writeln!(text, "        Ok(Hosts {{ {} }})", built.fields.join(", "));
+        } else {
+            let _ = writeln!(text, "        Ok(nodes)");
+        }
+        let _ = writeln!(text, "    }}");
+        text
+    }
+
+    /// `start`: the segment's graph, and the body that serves it once
+    /// every segment is ready.
+    fn start_fn(
+        &self,
+        frontend: Option<&Bind>,
+        service: Option<&ServiceBinding>,
+        built: &Built,
+    ) -> String {
+        let serves = self.serves();
+        let mut text = String::new();
         let _ = writeln!(
             text,
-            "    if paths[0] == \"--healthcheck\" {{ if paths.len() == 1 {{ return Err(\"usage: {package} --healthcheck <config.toml> [override.toml ...]\".into()); }} gdl::ProcessConfig::<Hosted>::load(&paths[1..])?.healthcheck().await?; return Ok(()); }}"
+            "    fn start(hosts: {}, node: gdl::velo::Velo, roster: &gdl::Roster, runtime: gdl::RuntimeConfig) -> gdl::Result<gdl::Serving> {{",
+            built.ty()
         );
+        let nodes = if built.extra() {
+            let _ = writeln!(
+                text,
+                "        let Hosts {{ {} }} = hosts;",
+                built.fields.join(", ")
+            );
+            "nodes"
+        } else {
+            "hosts"
+        };
+        // The crate's own `start`: an entry node's variable cannot shadow
+        // it, since each is prefixed.
         let _ = writeln!(
             text,
-            "    let {}config = gdl::ProcessConfig::<Hosted>::load(&paths)?;",
-            if takes { "mut " } else { "" }
+            "        let segment = crate::start(node, roster, runtime, {nodes})?;"
         );
-        // First: a stop while the nodes build is taken, and the probes say
-        // the process is live while it starts.
-        let _ = writeln!(
-            text,
-            "    let process = gdl::Process::start(&config).await?;"
-        );
-        text.push_str(&builds(hosted, frontend, service, self.frontend_source()));
-        let _ = writeln!(
-            text,
-            "    let deployment = gdl::DeploymentSpec::new({lib}::contract::manifest(), gdl::Placement::from_toml({lib}::PLACEMENT)?)?;"
-        );
-        let _ = writeln!(text, "    let launch = config");
-        let _ = writeln!(
-            text,
-            "        .launch(&process, SEGMENT, SEGMENTS, &deployment, {})",
-            ready_expression(hosted, frontend, service)
-        );
-        let _ = writeln!(text, "        .await?;");
-        let _ = writeln!(
-            text,
-            "    let segment = start(launch.node(), launch.roster(), config.runtime, nodes)?;"
-        );
-        let _ = writeln!(text, "    launch");
         // The runtime keeps the segment serving through the drain; the body
         // shares it.
         let segment = if frontend.is_some() || serves {
@@ -262,13 +378,11 @@ impl Unit<'_> {
         };
         let _ = writeln!(
             text,
-            "        .serve(segment, |{segment}, shutdown| async move {{"
+            "        Ok(gdl::Serving::new(segment, |{segment}, shutdown| async move {{"
         );
         text.push_str(&self.serve_body(frontend, service, serves));
-        let _ = writeln!(text, "        }})");
-        let _ = writeln!(text, "        .await?;");
-        let _ = writeln!(text, "    Ok(())");
-        let _ = writeln!(text, "}}");
+        let _ = writeln!(text, "        }}))");
+        let _ = writeln!(text, "    }}");
         text
     }
 
@@ -280,7 +394,6 @@ impl Unit<'_> {
         service: Option<&ServiceBinding>,
         serves: bool,
     ) -> String {
-        let lib = self.lib();
         let mut text = String::new();
         if frontend.is_some() {
             if let Some(service) = service {
@@ -295,7 +408,7 @@ impl Unit<'_> {
                     })
                     .collect();
                 // A root no entry reaches has no client: the variable would
-                // be unused, and the binary built with warnings denied would
+                // be unused, and the crate built with warnings denied would
                 // not build.
                 let targeted: std::collections::BTreeSet<&str> = service
                     .entries
@@ -318,7 +431,11 @@ impl Unit<'_> {
                         "            let {variable} = segment.client(|roots| {selector}.clone());"
                     );
                 }
-                let _ = writeln!(text, "            let clients = {} {{", service.clients);
+                let _ = writeln!(
+                    text,
+                    "            let clients = ::{} {{",
+                    rooted(&service.clients)
+                );
                 for entry in &service.entries {
                     if let Some(pipeline) = &entry.pipeline {
                         let _ = writeln!(
@@ -349,7 +466,7 @@ impl Unit<'_> {
             );
             let _ = writeln!(
                 text,
-                "            let call = |request: {lib}::contract::SourceReq| segment.call::<_, {lib}::contract::SourceItem>(gdl::Cx::new(), request);"
+                "            let call = |request: contract::SourceReq| segment.call::<_, contract::SourceItem>(gdl::Cx::new(), request);"
             );
             // The stop ends reading, not the answer being written; a
             // second signal ends the process.
@@ -368,43 +485,70 @@ impl Unit<'_> {
         }
         text
     }
+}
 
-    /// `build`: one implementation from its settings table, with the
-    /// graph's own values filled in and checked.
-    fn build_fn(&self) -> String {
-        let mut text = String::new();
-        let _ = writeln!(text, "/// Build one implementation from its config table.");
-        let _ = writeln!(
-            text,
-            "async fn build<T: gdl::Build>(node: &str, config: Option<toml::Table>) -> Result<T, Failure> {{"
-        );
-        let graph_configs = toml::to_string(&self.spec.config).expect("graph config tables");
-        let _ = writeln!(
-            text,
-            "    let contracts: std::collections::BTreeMap<String, gdl::GraphConfig> = toml::from_str({graph_configs:?})?;"
-        );
-        let _ = writeln!(
-            text,
-            "    let graph = contracts.get(node).cloned().unwrap_or_default();"
-        );
-        let _ = writeln!(
-            text,
-            "    let providers = gdl::figment::Figment::from(gdl::figment::providers::Serialized::defaults(config.unwrap_or_default()));"
-        );
-        let _ = writeln!(text, "    gdl::build_node::<T>(&providers, &graph)");
-        let _ = writeln!(text, "        .await");
-        let _ = writeln!(
-            text,
-            "        .map_err(|e| format!(\"building {{node}}: {{e}}\").into())"
-        );
-        let _ = writeln!(text, "}}");
-        text
+/// A path from the crate root, written without its leading `::`: the
+/// library's `contract` alias must not shadow a crate of that name.
+fn rooted(path: &str) -> &str {
+    path.trim().trim_start_matches("::")
+}
+
+/// What `build` returns: the nodes alone, or `Hosts` when the segment also
+/// hosts the source's frontend or its entry adapters; and the readiness of
+/// each.
+struct Built {
+    /// `Hosts`' fields, none when `build` returns the nodes alone.
+    fields: Vec<String>,
+    ready: Vec<String>,
+}
+
+impl Built {
+    fn new(
+        hosted: &[Hosted<'_>],
+        frontend: Option<&Bind>,
+        service: Option<&ServiceBinding>,
+    ) -> Self {
+        let mut fields = Vec::new();
+        if frontend.is_some() || service.is_some() {
+            fields.push("nodes".to_string());
+            fields.extend(frontend.map(|_| "frontend".to_string()));
+            fields.extend(service.iter().flat_map(|s| s.nodes()).map(|n| n.variable()));
+        }
+        let nodes = if fields.is_empty() {
+            "hosts"
+        } else {
+            "hosts.nodes"
+        };
+        let mut ready: Vec<String> = hosted
+            .iter()
+            .map(|node| format!("gdl::Build::ready(&{nodes}.{})", node.binding))
+            .collect();
+        if frontend.is_some() {
+            ready.push("gdl::Build::ready(&hosts.frontend)".into());
+        }
+        if let Some(service) = service {
+            ready.extend(
+                service
+                    .nodes()
+                    .iter()
+                    .map(|node| format!("gdl::Build::ready(&hosts.{})", node.variable())),
+            );
+        }
+        Self { fields, ready }
+    }
+
+    fn extra(&self) -> bool {
+        !self.fields.is_empty()
+    }
+
+    fn ty(&self) -> &'static str {
+        if self.extra() { "Hosts" } else { "Nodes" }
     }
 }
 
-/// `Hosted` and `NodeConfigs`: the settings tables this segment takes, and
-/// what the runtime needs to know to address them from the environment.
-fn hosted_types(
+/// `Settings` and `NodeSettings`: the tables this segment takes, and what
+/// the runtime needs to know to address them from the environment.
+fn settings_types(
     hosted: &[Hosted<'_>],
     frontend: Option<&Bind>,
     service: Option<&ServiceBinding>,
@@ -412,13 +556,13 @@ fn hosted_types(
     let mut text = String::new();
     let _ = writeln!(
         text,
-        "/// What this segment hosts, as its settings name it."
+        "/// What this segment's binary hosts, as its settings name it."
     );
     let _ = writeln!(text, "#[derive(serde::Deserialize)]");
     let _ = writeln!(text, "#[serde(deny_unknown_fields)]");
-    let _ = writeln!(text, "struct Hosted {{");
+    let _ = writeln!(text, "pub struct Settings {{");
     let _ = writeln!(text, "    #[serde(default)]");
-    let _ = writeln!(text, "    node: NodeConfigs,");
+    let _ = writeln!(text, "    node: NodeSettings,");
     let mut keys = vec!["node"];
     if frontend.is_some() {
         let _ = writeln!(text, "    #[serde(default)]");
@@ -445,7 +589,7 @@ fn hosted_types(
                 .map(|node| node.name.as_str()),
         )
         .collect();
-    let _ = writeln!(text, "impl gdl::Hosted for Hosted {{");
+    let _ = writeln!(text, "impl gdl::Hosted for Settings {{");
     let _ = writeln!(text, "    const KEYS: &'static [&'static str] = &{keys:?};");
     let _ = writeln!(
         text,
@@ -456,9 +600,9 @@ fn hosted_types(
     let _ = writeln!(text, "#[derive(Default, serde::Deserialize)]");
     let _ = writeln!(text, "#[serde(deny_unknown_fields)]");
     if hosted.is_empty() {
-        let _ = writeln!(text, "struct NodeConfigs {{}}");
+        let _ = writeln!(text, "struct NodeSettings {{}}");
     } else {
-        let _ = writeln!(text, "struct NodeConfigs {{");
+        let _ = writeln!(text, "struct NodeSettings {{");
         for node in hosted {
             let _ = writeln!(text, "    #[serde(rename = \"{}\", default)]", node.name);
             let _ = writeln!(text, "    {}: Option<toml::Table>,", node.binding);
@@ -468,86 +612,29 @@ fn hosted_types(
     text
 }
 
-/// The hosted implementations, built from their tables before the segment
-/// meets its peers, so that a bad table fails before anyone waits for it.
-fn builds(
-    hosted: &[Hosted<'_>],
-    frontend: Option<&Bind>,
-    service: Option<&ServiceBinding>,
-    source: Option<&gdl_model::NodeInfo>,
-) -> String {
+/// `Hosts`: the nodes, and the source's frontend or entry adapters, which
+/// the serving body takes rather than the graph.
+fn hosts_type(frontend: Option<&Bind>, service: Option<&ServiceBinding>) -> String {
     let mut text = String::new();
-    if hosted.is_empty() {
-        let _ = writeln!(text, "    let NodeConfigs {{}} = config.hosted.node;");
-        let _ = writeln!(text, "    let nodes = Nodes {{}};");
-    } else {
-        let _ = writeln!(text, "    let nodes = Nodes {{");
-        for node in hosted {
-            let _ = writeln!(
-                text,
-                "        {}: build::<::{}>(\"{}\", config.hosted.node.{}.take()).await?,",
-                node.binding, node.ty, node.name, node.binding
-            );
-        }
-        let _ = writeln!(text, "    }};");
-    }
+    let _ = writeln!(
+        text,
+        "/// What this segment's binary builds: its nodes, and what serves the source."
+    );
+    let _ = writeln!(text, "pub struct Hosts {{");
+    let _ = writeln!(text, "    nodes: Nodes,");
     if let Some(frontend) = frontend {
-        let _ = writeln!(
-            text,
-            "    let frontend = build::<{}>(\"{}\", config.hosted.frontend.take()).await?;",
-            frontend.ty,
-            source.expect("the pinned source").name
-        );
+        let _ = writeln!(text, "    frontend: ::{},", rooted(&frontend.ty));
     }
     if let Some(service) = service {
-        let enabled: Vec<_> = service.nodes().iter().map(|n| n.name.clone()).collect();
-        let _ = writeln!(text, "    let enabled: &[&str] = &{enabled:?};");
-        let _ = writeln!(
-            text,
-            "    if let Some(unknown) = config.hosted.adapter.keys().find(|key| !enabled.contains(&key.as_str())) {{ return Err(format!(\"[adapter.{{unknown}}]: no enabled entry node of that name\").into()); }}"
-        );
         for node in service.nodes() {
             let _ = writeln!(
                 text,
-                "    let {} = build::<{}>({:?}, config.hosted.adapter.remove({:?})).await?;",
+                "    {}: ::{},",
                 node.variable(),
-                node.bind.ty,
-                node.name,
-                node.name
+                rooted(&node.bind.ty)
             );
         }
     }
+    let _ = writeln!(text, "}}");
     text
-}
-
-/// Every hosted implementation says when it can take work; the segment
-/// announces itself as loaded only then.
-fn ready_expression(
-    hosted: &[Hosted<'_>],
-    frontend: Option<&Bind>,
-    service: Option<&ServiceBinding>,
-) -> String {
-    let mut ready: Vec<String> = hosted
-        .iter()
-        .map(|node| format!("gdl::Build::ready(&nodes.{})", node.binding))
-        .collect();
-    if frontend.is_some() {
-        ready.push("gdl::Build::ready(&frontend)".into());
-    }
-    if let Some(service) = service {
-        ready.extend(
-            service
-                .nodes()
-                .iter()
-                .map(|node| format!("gdl::Build::ready(&{})", node.variable())),
-        );
-    }
-    if ready.is_empty() {
-        "async { Ok(()) }".to_string()
-    } else {
-        format!(
-            "async {{ tokio::try_join!({})?; Ok(()) }}",
-            ready.join(", ")
-        )
-    }
 }

@@ -44,7 +44,7 @@ fn the_committed_asr_segments_are_current() {
         "regenerate with `cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments`:\n{}",
         drift.join("\n")
     );
-    let front = &files[&PathBuf::from("front/src/main.rs")];
+    let front = &files[&PathBuf::from("front/src/lib.rs")];
     assert!(!front.contains("serve_json_lines"), "{front}");
     let report = &files[&PathBuf::from("crossings.txt")];
     assert!(report.contains("hop 1: 3 crossings, 3 anchors"), "{report}");

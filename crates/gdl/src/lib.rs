@@ -9,6 +9,7 @@
 //!
 //! The design and its rulings are in `agent-docs/plan.md`.
 
+mod binary;
 mod compose;
 mod config;
 mod cx;
@@ -25,6 +26,7 @@ mod service;
 mod streamed;
 mod wire;
 
+pub use binary::{Builder, Failure, SegmentBinary, Serving, run_segment, segment_main};
 pub use compose::{BackwardChain, ForwardChain, Hop, Inner, OperatorStage, SinkStage, Source};
 pub use config::build_node;
 pub use cx::{Cx, Deadline, RequestId};
@@ -50,7 +52,7 @@ pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 #[cfg(feature = "json-lines")]
 pub use json::serve_json_lines;
-pub use process::{Drains, Hosted, Launch, Process, ProcessConfig, segment_main};
+pub use process::{Drains, Hosted, Launch, Process, ProcessConfig};
 pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
 pub use service::{Client, Endpoints, Join, Service};
 pub use streamed::Streamed;

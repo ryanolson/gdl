@@ -4,7 +4,7 @@
 //! Segment `engine` of graph `chat`, hosting `Engine`.
 //!
 //! [`start`] deploys it inside a program; the `chat-engine` binary deploys it on
-//! its own.
+//! its own, through [`Binary`].
 
 pub use ::chat_contract as contract;
 
@@ -52,4 +52,76 @@ pub fn start(
     let deployment = gdl::Deployment::new(node, &manifest, &placement, SEGMENT, roster, config)?;
     let root = contract::assemble(&deployment, contract::Bindings::new().engine(nodes.engine))?;
     deployment.start(root)
+}
+
+/// What this segment's binary hosts, as its settings name it.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    #[serde(default)]
+    node: NodeSettings,
+}
+
+impl gdl::Hosted for Settings {
+    const KEYS: &'static [&'static str] = &["node"];
+    const NAMES: &'static [&'static str] = &["Engine"];
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeSettings {
+    #[serde(rename = "Engine", default)]
+    engine: Option<toml::Table>,
+}
+
+/// What the `chat-engine` binary hosts and serves; its `main` is
+/// `gdl::segment_main::<Binary>()`.
+pub struct Binary;
+
+impl gdl::SegmentBinary for Binary {
+    const PACKAGE: &'static str = "chat-engine";
+    const SEGMENT: &'static str = SEGMENT;
+    const SEGMENTS: &'static [&'static str] = SEGMENTS;
+    const GRAPH_CONFIG: &'static str =
+        "[Detokenize]\n\n[Engine]\n\n[Format]\n\n[Number]\n\n[Preprocess]\n\n[Truncate]\n";
+    type Settings = Settings;
+    type Hosts = Nodes;
+
+    async fn build(settings: Settings, builder: &gdl::Builder) -> Result<Nodes, gdl::Failure> {
+        let Settings { node } = settings;
+        let nodes = Nodes {
+            engine: builder
+                .build::<::chat_engine_mock::Engine>("Engine", node.engine)
+                .await?,
+        };
+        Ok(nodes)
+    }
+
+    async fn ready(hosts: &Nodes) -> gdl::Result<()> {
+        tokio::try_join!(gdl::Build::ready(&hosts.engine))?;
+        Ok(())
+    }
+
+    fn deployment() -> gdl::Result<gdl::DeploymentSpec> {
+        Ok(gdl::DeploymentSpec::new(
+            contract::manifest(),
+            gdl::Placement::from_toml(PLACEMENT)?,
+        )?)
+    }
+
+    fn start(
+        hosts: Nodes,
+        node: gdl::velo::Velo,
+        roster: &gdl::Roster,
+        runtime: gdl::RuntimeConfig,
+    ) -> gdl::Result<gdl::Serving> {
+        let segment = crate::start(node, roster, runtime, hosts)?;
+        Ok(gdl::Serving::new(
+            segment,
+            |_segment, shutdown| async move {
+                shutdown.cancelled().await;
+                Ok(())
+            },
+        ))
+    }
 }

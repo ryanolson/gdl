@@ -1,8 +1,8 @@
 //! What a segment's binary does besides running its graph: read its
 //! settings, find its peers, announce that it is serving, and stop when
-//! told to. A generated binary supplies only what it hosts; everything
-//! here is the same for every segment, so it is written once and tested
-//! here rather than in each generated crate.
+//! told to. A generated segment crate supplies only what it hosts;
+//! everything here is the same for every segment, so it is written once
+//! and tested here rather than in each generated crate.
 
 mod system;
 
@@ -27,7 +27,8 @@ use system::{Health, Phase, SystemSettings};
 
 /// The settings of one segment process. `H` is what the segment hosts: the
 /// tables of its nodes and of its frontend or entry adapters, which the
-/// generated binary declares. An unknown key is an error at either level.
+/// generated segment crate declares. An unknown key is an error at either
+/// level.
 ///
 /// ```toml
 /// listen = "127.0.0.1:0"  # this instance's address
@@ -232,6 +233,36 @@ impl<H: Hosted> ProcessConfig<H> {
             .lowercase(false)
     }
 
+    /// The settings without the hosted tables, and the tables: a binary
+    /// builds its nodes from the tables and launches with the rest.
+    pub(crate) fn into_hosted(self) -> (ProcessConfig<()>, H) {
+        let Self {
+            listen,
+            roster,
+            hub,
+            rendezvous_ms,
+            instances,
+            min_replicas,
+            system,
+            runtime,
+            hosted,
+        } = self;
+        let config = ProcessConfig {
+            listen,
+            roster,
+            hub,
+            rendezvous_ms,
+            instances,
+            min_replicas,
+            system,
+            runtime,
+            hosted: (),
+        };
+        (config, hosted)
+    }
+}
+
+impl<H> ProcessConfig<H> {
     fn discovery(&self) -> Result<Discovery<'_>> {
         match (&self.roster, &self.hub) {
             (Some(dir), None) => Ok(Discovery::Files(dir)),
@@ -852,33 +883,4 @@ fn canonical<H: Hosted>(key: &str) -> String {
 
 fn placement(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::Placement, message)
-}
-
-/// Run a segment binary: `run` to completion on a runtime of its own, a
-/// failure printed as `segment: error`, and the process ended. The
-/// runtime is shut down in the background rather than waited for: a read
-/// of stdin parked on its blocking pool (a JSON-lines source whose input
-/// stayed open and idle while a signal stopped the graph) would otherwise
-/// hold the process after the graph has stopped, and swallow the next
-/// signal.
-pub fn segment_main<E: std::fmt::Display>(
-    segment: &str,
-    run: impl Future<Output = std::result::Result<(), E>>,
-) -> std::process::ExitCode {
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("{segment}: {error}");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-    let result = runtime.block_on(run);
-    runtime.shutdown_background();
-    match result {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("{segment}: {error}");
-            std::process::ExitCode::FAILURE
-        }
-    }
 }

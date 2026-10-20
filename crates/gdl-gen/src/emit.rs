@@ -448,7 +448,7 @@ impl Unit<'_> {
             "//! [`start`] deploys it inside a program; the `{}` binary deploys it on",
             self.package()
         );
-        let _ = writeln!(text, "//! its own.");
+        let _ = writeln!(text, "//! its own, through [`Binary`].");
         let _ = writeln!(text);
         // Paths from the crate root (`::`), here and for every
         // implementation: a hosted crate called `contract` must not be
@@ -554,6 +554,8 @@ impl Unit<'_> {
         );
         let _ = writeln!(text, "    deployment.start(root)");
         let _ = writeln!(text, "}}");
+        let _ = writeln!(text);
+        text.push_str(&self.binary_rs());
         text
     }
 }

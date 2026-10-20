@@ -84,12 +84,12 @@ impl EntryHop {
     pub(crate) fn expression(&self) -> String {
         let chain = |nodes: &[EntryNode]| {
             nodes.iter().rev().fold("()".into(), |rest, n| {
-                format!("(Arc::new({}), {rest})", n.variable())
+                format!("(std::sync::Arc::new({}), {rest})", n.variable())
             })
         };
         let inner = match (&self.operator, &self.nested) {
             (Some(op), Some(next)) => format!(
-                "gdl::OperatorStage::new(Arc::new({}), {})",
+                "gdl::OperatorStage::new(std::sync::Arc::new({}), {})",
                 op.variable(),
                 next.expression()
             ),

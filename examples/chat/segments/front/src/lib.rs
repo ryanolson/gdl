@@ -4,7 +4,7 @@
 //! Segment `front` of graph `chat`, hosting `Frontend`, `Preprocess`, `Truncate`, `Number`.
 //!
 //! [`start`] deploys it inside a program; the `chat-front` binary deploys it on
-//! its own.
+//! its own, through [`Binary`].
 
 pub use ::chat_contract as contract;
 
@@ -62,4 +62,92 @@ pub fn start(
             .number(nodes.number),
     )?;
     deployment.start(root)
+}
+
+/// What this segment's binary hosts, as its settings name it.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    #[serde(default)]
+    node: NodeSettings,
+}
+
+impl gdl::Hosted for Settings {
+    const KEYS: &'static [&'static str] = &["node"];
+    const NAMES: &'static [&'static str] = &["Preprocess", "Truncate", "Number"];
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeSettings {
+    #[serde(rename = "Preprocess", default)]
+    preprocess: Option<toml::Table>,
+    #[serde(rename = "Truncate", default)]
+    truncate: Option<toml::Table>,
+    #[serde(rename = "Number", default)]
+    number: Option<toml::Table>,
+}
+
+/// What the `chat-front` binary hosts and serves; its `main` is
+/// `gdl::segment_main::<Binary>()`.
+pub struct Binary;
+
+impl gdl::SegmentBinary for Binary {
+    const PACKAGE: &'static str = "chat-front";
+    const SEGMENT: &'static str = SEGMENT;
+    const SEGMENTS: &'static [&'static str] = SEGMENTS;
+    const GRAPH_CONFIG: &'static str =
+        "[Detokenize]\n\n[Engine]\n\n[Format]\n\n[Number]\n\n[Preprocess]\n\n[Truncate]\n";
+    type Settings = Settings;
+    type Hosts = Nodes;
+
+    async fn build(settings: Settings, builder: &gdl::Builder) -> Result<Nodes, gdl::Failure> {
+        let Settings { node } = settings;
+        let nodes = Nodes {
+            preprocess: builder
+                .build::<::chat_front_nodes::Preprocess>("Preprocess", node.preprocess)
+                .await?,
+            truncate: builder
+                .build::<::chat_front_nodes::Truncate>("Truncate", node.truncate)
+                .await?,
+            number: builder
+                .build::<::chat_front_nodes::Number>("Number", node.number)
+                .await?,
+        };
+        Ok(nodes)
+    }
+
+    async fn ready(hosts: &Nodes) -> gdl::Result<()> {
+        tokio::try_join!(
+            gdl::Build::ready(&hosts.preprocess),
+            gdl::Build::ready(&hosts.truncate),
+            gdl::Build::ready(&hosts.number)
+        )?;
+        Ok(())
+    }
+
+    fn deployment() -> gdl::Result<gdl::DeploymentSpec> {
+        Ok(gdl::DeploymentSpec::new(
+            contract::manifest(),
+            gdl::Placement::from_toml(PLACEMENT)?,
+        )?)
+    }
+
+    fn start(
+        hosts: Nodes,
+        node: gdl::velo::Velo,
+        roster: &gdl::Roster,
+        runtime: gdl::RuntimeConfig,
+    ) -> gdl::Result<gdl::Serving> {
+        let segment = crate::start(node, roster, runtime, hosts)?;
+        Ok(gdl::Serving::new(segment, |segment, shutdown| async move {
+            let input = tokio::io::BufReader::new(tokio::io::stdin());
+            let call = |request: contract::SourceReq| {
+                segment.call::<_, contract::SourceItem>(gdl::Cx::new(), request)
+            };
+            gdl::serve_json_lines(input, tokio::io::stdout(), shutdown.cancelled(), call)
+                .await
+                .map_err(|e| gdl::Error::new(gdl::ErrorKind::Transport, e.to_string()))
+        }))
+    }
 }

@@ -4,7 +4,7 @@
 //! Segment `front` of graph `asr`, hosting `Client`, `Gateway`.
 //!
 //! [`start`] deploys it inside a program; the `asr-front` binary deploys it on
-//! its own.
+//! its own, through [`Binary`].
 
 pub use ::asr_contract as contract;
 
@@ -55,4 +55,75 @@ pub fn start(
         contract::Bindings::new().gateway(nodes.gateway),
     )?;
     deployment.start(root)
+}
+
+/// What this segment's binary hosts, as its settings name it.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    #[serde(default)]
+    node: NodeSettings,
+}
+
+impl gdl::Hosted for Settings {
+    const KEYS: &'static [&'static str] = &["node"];
+    const NAMES: &'static [&'static str] = &["Gateway"];
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeSettings {
+    #[serde(rename = "Gateway", default)]
+    gateway: Option<toml::Table>,
+}
+
+/// What the `asr-front` binary hosts and serves; its `main` is
+/// `gdl::segment_main::<Binary>()`.
+pub struct Binary;
+
+impl gdl::SegmentBinary for Binary {
+    const PACKAGE: &'static str = "asr-front";
+    const SEGMENT: &'static str = SEGMENT;
+    const SEGMENTS: &'static [&'static str] = SEGMENTS;
+    const GRAPH_CONFIG: &'static str = "";
+    type Settings = Settings;
+    type Hosts = Nodes;
+
+    async fn build(settings: Settings, builder: &gdl::Builder) -> Result<Nodes, gdl::Failure> {
+        let Settings { node } = settings;
+        let nodes = Nodes {
+            gateway: builder
+                .build::<::asr_front_nodes::Gateway>("Gateway", node.gateway)
+                .await?,
+        };
+        Ok(nodes)
+    }
+
+    async fn ready(hosts: &Nodes) -> gdl::Result<()> {
+        tokio::try_join!(gdl::Build::ready(&hosts.gateway))?;
+        Ok(())
+    }
+
+    fn deployment() -> gdl::Result<gdl::DeploymentSpec> {
+        Ok(gdl::DeploymentSpec::new(
+            contract::manifest(),
+            gdl::Placement::from_toml(PLACEMENT)?,
+        )?)
+    }
+
+    fn start(
+        hosts: Nodes,
+        node: gdl::velo::Velo,
+        roster: &gdl::Roster,
+        runtime: gdl::RuntimeConfig,
+    ) -> gdl::Result<gdl::Serving> {
+        let segment = crate::start(node, roster, runtime, hosts)?;
+        Ok(gdl::Serving::new(
+            segment,
+            |_segment, shutdown| async move {
+                shutdown.cancelled().await;
+                Ok(())
+            },
+        ))
+    }
 }

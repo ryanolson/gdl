@@ -390,13 +390,12 @@ fn generated_code_names_implementations_from_the_crate_root() {
     let spec = spec(split(), &[("D", "tiny_nodes::D")]);
     let files = rendered(&spec, &manifest(), Path::new("/work/segments")).expect("render");
     let lib = &files[&PathBuf::from("engine/src/lib.rs")];
-    let main = &files[&PathBuf::from("engine/src/main.rs")];
     assert!(lib.contains("pub d: ::tiny_nodes::D"), "{lib}");
     assert!(
         lib.contains("pub use ::tiny_contract as contract;"),
         "{lib}"
     );
-    assert!(main.contains("build::<::tiny_nodes::D>"), "{main}");
+    assert!(lib.contains(".build::<::tiny_nodes::D>("), "{lib}");
 }
 
 /// A node crate listed by version is a dependency on exactly that
@@ -594,9 +593,10 @@ fn a_streaming_source_is_not_served_as_json_lines() {
     let mut manifest = manifest();
     manifest.hops[0].forward_types = vec![TypeInfo::streamed("Req", true, "Chunk", true)];
     let files = rendered(&spec, &manifest, out).expect("render");
-    let front = &files[&PathBuf::from("front/src/main.rs")];
+    let front = &files[&PathBuf::from("front/src/lib.rs")];
     assert!(!front.contains("serve_json_lines"), "{front}");
-    assert!(front.contains("streamed request"), "{front}");
+    let usage = &files[&PathBuf::from("front/src/main.rs")];
+    assert!(usage.contains("streamed request"), "{usage}");
     assert!(!files[&PathBuf::from("front/Cargo.toml")].contains("json-lines"));
 }
 
@@ -605,9 +605,13 @@ fn only_the_source_segment_serves_json_lines() {
     let out = std::path::Path::new("/work/segments");
     let spec = spec(split(), &[("D", "tiny_nodes::D")]);
     let files = rendered(&spec, &manifest(), out).expect("render");
-    let front = &files[&PathBuf::from("front/src/main.rs")];
-    let engine = &files[&PathBuf::from("engine/src/main.rs")];
+    let front = &files[&PathBuf::from("front/src/lib.rs")];
+    let engine = &files[&PathBuf::from("engine/src/lib.rs")];
     assert!(front.contains("gdl::serve_json_lines("));
+    // The lifecycle is the runtime's: each binary only names its segment.
+    let main = &files[&PathBuf::from("engine/src/main.rs")];
+    assert!(main.contains("gdl::segment_main::<"), "{main}");
+    assert!(!main.contains("async fn"), "{main}");
     assert!(!engine.contains("serve_json_lines"));
     assert!(files[&PathBuf::from("front/Cargo.toml")].contains("json-lines"));
     assert!(!files[&PathBuf::from("engine/Cargo.toml")].contains("json-lines"));

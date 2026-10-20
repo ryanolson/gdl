@@ -4,7 +4,7 @@
 //! Segment `engine` of graph `asr`, hosting `Recognizer`, `Punctuate`.
 //!
 //! [`start`] deploys it inside a program; the `asr-engine` binary deploys it on
-//! its own.
+//! its own, through [`Binary`].
 
 pub use ::asr_contract as contract;
 
@@ -59,4 +59,83 @@ pub fn start(
             .punctuate(nodes.punctuate),
     )?;
     deployment.start(root)
+}
+
+/// What this segment's binary hosts, as its settings name it.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    #[serde(default)]
+    node: NodeSettings,
+}
+
+impl gdl::Hosted for Settings {
+    const KEYS: &'static [&'static str] = &["node"];
+    const NAMES: &'static [&'static str] = &["Recognizer", "Punctuate"];
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeSettings {
+    #[serde(rename = "Recognizer", default)]
+    recognizer: Option<toml::Table>,
+    #[serde(rename = "Punctuate", default)]
+    punctuate: Option<toml::Table>,
+}
+
+/// What the `asr-engine` binary hosts and serves; its `main` is
+/// `gdl::segment_main::<Binary>()`.
+pub struct Binary;
+
+impl gdl::SegmentBinary for Binary {
+    const PACKAGE: &'static str = "asr-engine";
+    const SEGMENT: &'static str = SEGMENT;
+    const SEGMENTS: &'static [&'static str] = SEGMENTS;
+    const GRAPH_CONFIG: &'static str = "";
+    type Settings = Settings;
+    type Hosts = Nodes;
+
+    async fn build(settings: Settings, builder: &gdl::Builder) -> Result<Nodes, gdl::Failure> {
+        let Settings { node } = settings;
+        let nodes = Nodes {
+            recognizer: builder
+                .build::<::asr_engine_mock::Recognizer>("Recognizer", node.recognizer)
+                .await?,
+            punctuate: builder
+                .build::<::asr_engine_mock::Punctuate>("Punctuate", node.punctuate)
+                .await?,
+        };
+        Ok(nodes)
+    }
+
+    async fn ready(hosts: &Nodes) -> gdl::Result<()> {
+        tokio::try_join!(
+            gdl::Build::ready(&hosts.recognizer),
+            gdl::Build::ready(&hosts.punctuate)
+        )?;
+        Ok(())
+    }
+
+    fn deployment() -> gdl::Result<gdl::DeploymentSpec> {
+        Ok(gdl::DeploymentSpec::new(
+            contract::manifest(),
+            gdl::Placement::from_toml(PLACEMENT)?,
+        )?)
+    }
+
+    fn start(
+        hosts: Nodes,
+        node: gdl::velo::Velo,
+        roster: &gdl::Roster,
+        runtime: gdl::RuntimeConfig,
+    ) -> gdl::Result<gdl::Serving> {
+        let segment = crate::start(node, roster, runtime, hosts)?;
+        Ok(gdl::Serving::new(
+            segment,
+            |_segment, shutdown| async move {
+                shutdown.cancelled().await;
+                Ok(())
+            },
+        ))
+    }
 }
