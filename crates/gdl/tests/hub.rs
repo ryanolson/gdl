@@ -56,18 +56,14 @@ async fn hub(ttl: Duration) -> velo_hub::Hub {
         .expect("valid test fixture")
 }
 
-async fn node() -> Arc<velo::Velo> {
+async fn node() -> velo::Velo {
     gdl::bind_node("127.0.0.1:0".parse().expect("valid test fixture"))
         .await
         .expect("valid test fixture")
 }
 
 /// A segment's session with `hub`, heartbeating every 200 ms.
-async fn session(
-    hub: &velo_hub::Hub,
-    segment: &str,
-    node: &Arc<velo::Velo>,
-) -> gdl::Result<HubSession> {
+async fn session(hub: &velo_hub::Hub, segment: &str, node: &velo::Velo) -> gdl::Result<HubSession> {
     HubSession::register(
         "127.0.0.1",
         hub.public_addr().port(),

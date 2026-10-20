@@ -785,19 +785,17 @@ async fn slow_request_only_segment_renews_reply_until_handoff_or_error() {
         let mut config = velo::streaming::ReservationConfig::default();
         config.unattached_timeout = Duration::from_millis(150);
         config.prebind_timeout = Duration::from_millis(150);
-        let node = Arc::new(
-            velo::Velo::builder()
-                .add_transport(Arc::new(tcp))
-                .reservation_config(config)
-                .messenger_mux(velo::streaming::MuxConfig {
-                    credit_sweep_interval: Duration::from_millis(10),
-                    ..Default::default()
-                })
-                .expect("mux config")
-                .build()
-                .await
-                .expect("node"),
-        );
+        let node = velo::Velo::builder()
+            .add_transport(Arc::new(tcp))
+            .reservation_config(config)
+            .messenger_mux(velo::streaming::MuxConfig {
+                credit_sweep_interval: Duration::from_millis(10),
+                ..Default::default()
+            })
+            .expect("mux config")
+            .build()
+            .await
+            .expect("node");
         roster.add(name, node.peer_info());
         nodes.push(node);
     }

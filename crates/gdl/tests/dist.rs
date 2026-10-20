@@ -79,17 +79,16 @@ async fn every_placement_of_the_reference_graph_matches_the_local_run() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn request_routers_keep_concurrent_responses_on_their_origin_anchors() {
     use gdl::RequestRouter;
-    use std::sync::Arc;
     let mut nodes = Vec::new();
     for _ in 0..5 {
         nodes.push(velo_node().await);
     }
     let instances = vec![
-        ("front".into(), Arc::clone(&nodes[0])),
-        ("front".into(), Arc::clone(&nodes[1])),
-        ("engine".into(), Arc::clone(&nodes[2])),
-        ("engine".into(), Arc::clone(&nodes[3])),
-        ("post".into(), Arc::clone(&nodes[4])),
+        ("front".into(), nodes[0].clone()),
+        ("front".into(), nodes[1].clone()),
+        ("engine".into(), nodes[2].clone()),
+        ("engine".into(), nodes[3].clone()),
+        ("post".into(), nodes[4].clone()),
     ];
     for router in [RequestRouter::RoundRobin, RequestRouter::Random] {
         let placement = Placement::new()
@@ -131,16 +130,15 @@ async fn request_routers_keep_concurrent_responses_on_their_origin_anchors() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn random_routing_keeps_request_items_on_one_replica() {
     use common::streamed::{Script, ask, replies, words};
-    use std::sync::Arc;
     let mut nodes = Vec::new();
     for _ in 0..4 {
         nodes.push(velo_node().await);
     }
     let instances = vec![
-        ("front".into(), Arc::clone(&nodes[0])),
-        ("engine".into(), Arc::clone(&nodes[1])),
-        ("engine".into(), Arc::clone(&nodes[2])),
-        ("post".into(), Arc::clone(&nodes[3])),
+        ("front".into(), nodes[0].clone()),
+        ("engine".into(), nodes[1].clone()),
+        ("engine".into(), nodes[2].clone()),
+        ("post".into(), nodes[3].clone()),
     ];
     let placement = Placement::new()
         .segment("front", ["A", "B", "C", "G"])

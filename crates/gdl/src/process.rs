@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use figment::Figment;
@@ -331,7 +330,7 @@ enum Discovery<'a> {
 
 /// A segment instance that has met its peers and may start its graph.
 pub struct Launch {
-    node: Arc<Velo>,
+    node: Velo,
     roster: Roster,
     peers: Peers,
     segment: &'static str,
@@ -348,8 +347,8 @@ enum Peers {
 
 impl Launch {
     /// This instance's node.
-    pub fn node(&self) -> Arc<Velo> {
-        Arc::clone(&self.node)
+    pub fn node(&self) -> Velo {
+        self.node.clone()
     }
 
     /// Every instance of every segment.

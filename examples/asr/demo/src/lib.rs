@@ -2,8 +2,6 @@
 //! process, through the libraries gdl-gen generated for them, and a client
 //! that streams a session's audio to the front segment.
 
-use std::sync::Arc;
-
 use asr_contract::{Audio, Session, Transcript};
 use gdl::{Cx, Items, Next, Register, Result, Segment, Streamed, items};
 
@@ -31,7 +29,7 @@ pub async fn start(
     }
     let config = gdl::RuntimeConfig::default;
     let engine = asr_engine::start(
-        Arc::clone(&nodes[2]),
+        nodes[2].clone(),
         &roster,
         config(),
         asr_engine::Nodes {
@@ -43,7 +41,7 @@ pub async fn start(
         },
     )?;
     let dsp = asr_dsp::start(
-        Arc::clone(&nodes[1]),
+        nodes[1].clone(),
         &roster,
         config(),
         asr_dsp::Nodes {
@@ -51,7 +49,7 @@ pub async fn start(
         },
     )?;
     let front = asr_front::start(
-        Arc::clone(&nodes[0]),
+        nodes[0].clone(),
         &roster,
         config(),
         asr_front::Nodes {

@@ -29,7 +29,7 @@ use crate::error::{Error, ErrorKind, Result};
 
 /// A velo node whose TCP transport and stream listener bind `listen`. Port
 /// zero picks a free port; the node's address carries the bound one.
-pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Arc<Velo>> {
+pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Velo> {
     let transport = |e: &dyn std::fmt::Display| Error::new(ErrorKind::Transport, e.to_string());
     let listener = std::net::TcpListener::bind(listen).map_err(|e| transport(&e))?;
     let tcp = velo::transports::tcp::TcpTransportBuilder::new()
@@ -42,7 +42,6 @@ pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Arc<Velo>> {
         .stream_bind_addr(listen.ip())
         .build()
         .await
-        .map(Arc::new)
         .map_err(|e| transport(&e))
 }
 
@@ -78,7 +77,7 @@ impl ReplyTo {
 
 /// A velo node as the runtime uses it.
 pub(crate) struct Fabric {
-    velo: Arc<Velo>,
+    velo: Velo,
     anchor_timeout: Option<Duration>,
     heartbeat_interval: Option<Duration>,
     renewals: Arc<renewal::Renewals>,
@@ -86,7 +85,7 @@ pub(crate) struct Fabric {
 
 impl Fabric {
     pub(crate) fn new(
-        velo: Arc<Velo>,
+        velo: Velo,
         anchor_timeout: Option<Duration>,
         heartbeat_interval: Option<Duration>,
         renewal_interval: Duration,

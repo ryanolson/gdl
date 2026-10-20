@@ -28,7 +28,7 @@ impl Deployment {
     /// Prepare `segment` of `manifest` under `placement`, on the velo node
     /// `velo`.
     pub fn new(
-        velo: Arc<Velo>,
+        velo: Velo,
         manifest: &Manifest,
         placement: &Placement,
         segment: &str,

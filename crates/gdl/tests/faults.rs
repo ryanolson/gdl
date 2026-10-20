@@ -10,7 +10,7 @@ use common::*;
 use futures::StreamExt;
 use gdl::{Cx, ErrorKind, Faults, Placement, RuntimeConfig};
 
-async fn nodes(n: usize) -> Vec<Arc<velo::Velo>> {
+async fn nodes(n: usize) -> Vec<velo::Velo> {
     let mut nodes = Vec::with_capacity(n);
     for _ in 0..n {
         nodes.push(velo_node().await);
@@ -442,11 +442,11 @@ async fn a_producer_whose_node_goes_away_ends_the_stream_with_an_error() {
     let nodes = nodes(3).await;
     // Named explicitly: `deploy` assigns nodes in the placement's
     // (alphabetical) segment order, which is easy to misread.
-    let engine = Arc::clone(&nodes[1]);
+    let engine = nodes[1].clone();
     let instances = vec![
-        ("front".to_string(), Arc::clone(&nodes[0])),
-        ("engine".to_string(), Arc::clone(&engine)),
-        ("post".to_string(), Arc::clone(&nodes[2])),
+        ("front".to_string(), nodes[0].clone()),
+        ("engine".to_string(), engine.clone()),
+        ("post".to_string(), nodes[2].clone()),
     ];
     let events = Events::new();
     let config = RuntimeConfig {
@@ -481,10 +481,10 @@ async fn a_producer_whose_node_goes_away_ends_the_stream_with_an_error() {
 async fn instances_of_one_segment_share_the_load() {
     let nodes = nodes(4).await;
     let instances = vec![
-        ("front".to_string(), Arc::clone(&nodes[0])),
-        ("engine".to_string(), Arc::clone(&nodes[1])),
-        ("engine".to_string(), Arc::clone(&nodes[2])),
-        ("post".to_string(), Arc::clone(&nodes[3])),
+        ("front".to_string(), nodes[0].clone()),
+        ("engine".to_string(), nodes[1].clone()),
+        ("engine".to_string(), nodes[2].clone()),
+        ("post".to_string(), nodes[3].clone()),
     ];
     let events = Events::new();
     let cluster = deploy_instances(
@@ -1044,7 +1044,7 @@ async fn a_zero_limit_is_refused_at_deployment() {
         },
     ] {
         let result = gdl::Deployment::new(
-            Arc::clone(&node),
+            node.clone(),
             &reference_manifest(|_| true),
             &placement,
             "all",
@@ -1141,7 +1141,7 @@ async fn opening_a_local_backward_run_is_bounded_by_the_setup_timeout() {
         .segment("engine", ["D"])
         .segment("post", ["E"]);
     let nodes = nodes(3).await;
-    let instances: Vec<(String, Arc<velo::Velo>)> = ["front", "engine", "post"]
+    let instances: Vec<(String, velo::Velo)> = ["front", "engine", "post"]
         .into_iter()
         .map(String::from)
         .zip(nodes.iter().cloned())
@@ -1226,7 +1226,7 @@ async fn a_stage_delivering_a_refused_hand_off_keeps_its_admission() {
         .segment("side", ["C"])
         .segment("engine", ["D"]);
     let nodes = nodes(3).await;
-    let instances: Vec<(String, Arc<velo::Velo>)> = ["front", "side", "engine"]
+    let instances: Vec<(String, velo::Velo)> = ["front", "side", "engine"]
         .into_iter()
         .map(String::from)
         .zip(nodes.iter().cloned())
@@ -1290,8 +1290,8 @@ async fn a_stage_delivering_a_refused_hand_off_keeps_its_admission() {
 async fn a_receiver_waiting_for_egress_gives_up_at_the_setup_timeout() {
     let nodes = nodes(2).await;
     let instances = vec![
-        ("front".to_string(), Arc::clone(&nodes[0])),
-        ("engine".to_string(), Arc::clone(&nodes[1])),
+        ("front".to_string(), nodes[0].clone()),
+        ("engine".to_string(), nodes[1].clone()),
     ];
     let events = Events::new();
     let cluster = deploy_configured(&instances, &two_segments(), &events, &|segment| {
@@ -1352,8 +1352,8 @@ async fn a_local_inner_end_waits_for_egress_within_the_setup_timeout() {
         .segment("post", ["F", "E"]);
     let nodes = nodes(2).await;
     let instances = vec![
-        ("front".to_string(), Arc::clone(&nodes[0])),
-        ("post".to_string(), Arc::clone(&nodes[1])),
+        ("front".to_string(), nodes[0].clone()),
+        ("post".to_string(), nodes[1].clone()),
     ];
     let events = Events::new();
     let cluster = deploy_configured(&instances, &placement, &events, &|segment| {

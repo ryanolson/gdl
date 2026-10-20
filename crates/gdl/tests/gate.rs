@@ -29,9 +29,9 @@ async fn a_held_roster_keeps_requests_until_it_is_released() {
     roster.hold();
     let events = Events::new();
     let manifest = reference_manifest(|_| true);
-    let start = |name: &str, node: &Arc<velo::Velo>| {
+    let start = |name: &str, node: &velo::Velo| {
         let deployment = Deployment::new(
-            Arc::clone(node),
+            node.clone(),
             &manifest,
             &placement,
             name,

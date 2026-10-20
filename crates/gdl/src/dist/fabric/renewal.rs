@@ -13,14 +13,16 @@ pub(super) struct Renewals {
     cancel: CancellationToken,
 }
 impl Renewals {
-    pub(super) fn new(velo: &Arc<Velo>, interval: std::time::Duration) -> Arc<Self> {
+    pub(super) fn new(velo: &Velo, interval: std::time::Duration) -> Arc<Self> {
         let renewals = Arc::new(Self {
             held: DashMap::new(),
             next: AtomicU64::new(0),
             cancel: CancellationToken::new(),
         });
         let weak = Arc::downgrade(&renewals);
-        let node = Arc::downgrade(velo);
+        // A weak handle: a strong one would keep the node's streaming alive
+        // for as long as this task runs.
+        let node = velo.downgrade();
         let cancel = renewals.cancel.clone();
         tokio::spawn(async move {
             let mut ticks =

@@ -2,7 +2,6 @@ use crate::{Error, ErrorKind, Result, Roster};
 use gdl_model::SegmentRegistration;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use velo::{InstanceId, PeerInfo, Velo, discovery::ServiceDiscovery};
@@ -365,7 +364,7 @@ struct Member {
 /// Bind a TCP node to this container's routable address: the address its
 /// `HOSTNAME` resolves to, on `port`. Binding to an unspecified address
 /// would advertise `0.0.0.0` to peers.
-pub async fn bind_container_node(port: u16) -> Result<Arc<Velo>> {
+pub async fn bind_container_node(port: u16) -> Result<Velo> {
     let host = std::env::var("HOSTNAME").map_err(|_| {
         failure("HOSTNAME is not set; under a hub a segment binds the address its container's hostname resolves to")
     })?;

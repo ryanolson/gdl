@@ -11,7 +11,7 @@ use common::{
 };
 use gdl::{Cx, Layout, Placement, RuntimeConfig, Streamed, items};
 
-async fn nodes(count: usize) -> Vec<Arc<velo::Velo>> {
+async fn nodes(count: usize) -> Vec<velo::Velo> {
     let mut nodes = Vec::with_capacity(count);
     for _ in 0..count {
         nodes.push(velo_node().await);
