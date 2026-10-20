@@ -137,8 +137,11 @@ fn three_segment_binaries_answer_requests() {
     );
     let bin = target("examples").join("debug");
 
-    let dir = std::env::temp_dir().join(format!("gdl-chat-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-chat-")
+        .tempdir()
+        .expect("scratch");
+    let dir = temp.path();
     let roster = dir.join("roster");
     std::fs::create_dir_all(&roster).expect("roster");
     let config = |name: &str, extra: &str| {
@@ -218,7 +221,6 @@ fn three_segment_binaries_answer_requests() {
         ],
         "front stderr: {stderr}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `cargo gdl generate`, run as cargo runs it.
@@ -233,18 +235,19 @@ fn gdl_gen(dir: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
         .expect("gdl-gen")
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gdl-gen-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch");
-    dir
+fn scratch(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("gdl-gen-{name}-"))
+        .tempdir()
+        .expect("scratch")
 }
 
 #[test]
 fn the_check_does_not_depend_on_where_it_runs() {
     // A rustfmt config that would reformat everything, where the generator
     // runs: generated code must not pick it up.
-    let dir = scratch("cwd");
+    let temp = scratch("cwd");
+    let dir = temp.path();
     std::fs::write(
         dir.join("rustfmt.toml"),
         "max_width = 40\nhard_tabs = true\n",
@@ -253,7 +256,7 @@ fn the_check_does_not_depend_on_where_it_runs() {
     let spec = example().join("gdl.toml");
     let out = example().join("segments");
     let output = gdl_gen(
-        &dir,
+        dir,
         &[
             "--spec".as_ref(),
             spec.as_os_str(),
@@ -267,12 +270,12 @@ fn the_check_does_not_depend_on_where_it_runs() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn the_check_reports_a_file_added_to_a_generated_crate() {
-    let out = scratch("foreign");
+    let temp = scratch("foreign");
+    let out = temp.path();
     let spec = example().join("gdl.toml");
     let generate = gdl_gen(
         &root(),
@@ -307,7 +310,6 @@ fn the_check_reports_a_file_added_to_a_generated_crate() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unexpected: front/build.rs"), "{stderr}");
-    let _ = std::fs::remove_dir_all(&out);
 }
 
 /// Generate the example into a scratch directory with the CLI.
@@ -327,25 +329,26 @@ fn generate_into(out: &Path, check: bool) -> std::process::Output {
 
 #[test]
 fn a_cache_marker_does_not_hide_a_generated_crate() {
-    let out = scratch("cachedir");
-    assert!(generate_into(&out, false).status.success());
+    let temp = scratch("cachedir");
+    let out = temp.path();
+    assert!(generate_into(out, false).status.success());
     std::fs::write(
         out.join("front/CACHEDIR.TAG"),
         "Signature: 8a477f597d28d172789f06886806bc55\n",
     )
     .expect("tag");
     std::fs::write(out.join("front/build.rs"), "fn main() {}\n").expect("build script");
-    let output = generate_into(&out, true);
+    let output = generate_into(out, true);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(stderr.contains("unexpected: front/build.rs"), "{stderr}");
-    let _ = std::fs::remove_dir_all(&out);
 }
 
 #[test]
 fn a_standalone_build_of_a_generated_crate_is_not_drift() {
-    let out = scratch("standalone");
-    assert!(generate_into(&out, false).status.success());
+    let temp = scratch("standalone");
+    let out = temp.path();
+    assert!(generate_into(out, false).status.success());
     // What building one generated crate on its own leaves behind: a
     // lockfile, and a build directory.
     let lock = cargo()
@@ -366,26 +369,26 @@ fn a_standalone_build_of_a_generated_crate_is_not_drift() {
     )
     .expect("tag");
     std::fs::write(out.join("front/target/debug/chat-front"), "binary\n").expect("output");
-    let check = generate_into(&out, true);
+    let check = generate_into(out, true);
     assert!(
         check.status.success(),
         "{}",
         String::from_utf8_lossy(&check.stderr)
     );
-    let regenerate = generate_into(&out, false);
+    let regenerate = generate_into(out, false);
     assert!(
         regenerate.status.success(),
         "{}",
         String::from_utf8_lossy(&regenerate.stderr)
     );
-    let _ = std::fs::remove_dir_all(&out);
 }
 
 /// A node that no listed crate offers, a pin to no offered node, and a
 /// placement that leaves nodes out: all reported together.
 #[test]
 fn every_problem_in_a_spec_is_reported_at_once() {
-    let dir = scratch("problems");
+    let temp = scratch("problems");
+    let dir = temp.path();
     let example = example();
     let path = |p: &str| toml::Value::String(example.join(p).display().to_string());
     let gdl = toml::Value::String(root().join("crates/gdl").display().to_string());
@@ -420,13 +423,13 @@ fn every_problem_in_a_spec_is_reported_at_once() {
             "{expected:?} missing from:\n{error}"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_cache_marker_in_a_source_directory_hides_nothing() {
-    let out = scratch("srcbin");
-    assert!(generate_into(&out, false).status.success());
+    let temp = scratch("srcbin");
+    let out = temp.path();
+    assert!(generate_into(out, false).status.success());
     let tag = "Signature: 8a477f597d28d172789f06886806bc55\n";
     // Cargo builds every file in `src/bin` as a binary, tag or not.
     std::fs::create_dir_all(out.join("front/src/bin")).expect("dir");
@@ -440,7 +443,7 @@ fn a_cache_marker_in_a_source_directory_hides_nothing() {
         "// @generated by gdl-gen; do not edit.\n",
     )
     .expect("stale");
-    let output = generate_into(&out, true);
+    let output = generate_into(out, true);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
@@ -448,7 +451,6 @@ fn a_cache_marker_in_a_source_directory_hides_nothing() {
         "{stderr}"
     );
     assert!(stderr.contains("stale: gone/src/lib.rs"), "{stderr}");
-    let _ = std::fs::remove_dir_all(&out);
 }
 
 #[test]
@@ -484,15 +486,15 @@ fn the_spec_path_may_be_given_any_way() {
 /// generated contract under the target directory, never in the output.
 #[test]
 fn rendering_a_graph_spec_writes_nothing_in_the_output() {
-    let out = scratch("render-only");
+    let temp = scratch("render-only");
+    let out = temp.path();
     let spec = gdl_gen::Spec::load(&example().join("gdl.toml")).expect("spec");
     let target = target("gdl-gen-tests");
-    let files = gdl_gen::render(&spec, &out, &target).expect("render");
+    let files = gdl_gen::render(&spec, out, &target).expect("render");
     assert!(files.contains_key(Path::new("contract/src/lib.rs")));
     gdl_gen::diagram(&spec, &target, gdl_gen::Format::Dot).expect("diagram");
-    let written: Vec<_> = std::fs::read_dir(&out).expect("out").collect();
+    let written: Vec<_> = std::fs::read_dir(out).expect("out").collect();
     assert!(written.is_empty(), "{written:?}");
-    let _ = std::fs::remove_dir_all(&out);
 }
 
 /// A segment named `contract` would share the generated contract's
@@ -501,7 +503,8 @@ fn rendering_a_graph_spec_writes_nothing_in_the_output() {
 /// the two crates' files.
 #[test]
 fn a_segment_cannot_take_the_contract_directory() {
-    let dir = scratch("contract-segment");
+    let temp = scratch("contract-segment");
+    let dir = temp.path();
     let example = example();
     let graph = std::fs::read_to_string(example.join("chat.gdl"))
         .expect("graph")
@@ -551,7 +554,6 @@ fn a_segment_cannot_take_the_contract_directory() {
         error.contains("segment `contract`: the generated contract crate is `contract/`"),
         "{error}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A JSON-lines source stops on a signal while its input is open and idle:
@@ -574,8 +576,11 @@ fn a_json_lines_front_stops_on_a_signal_with_idle_input() {
         String::from_utf8_lossy(&build.stderr)
     );
     let bin = target("examples").join("debug");
-    let dir = std::env::temp_dir().join(format!("gdl-chat-signal-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-chat-signal-")
+        .tempdir()
+        .expect("scratch");
+    let dir = temp.path();
     let roster = dir.join("roster");
     std::fs::create_dir_all(&roster).expect("roster");
     let config = |name: &str| {
@@ -635,5 +640,4 @@ fn a_json_lines_front_stops_on_a_signal_with_idle_input() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(status.success(), "{status}");
-    let _ = std::fs::remove_dir_all(&dir);
 }

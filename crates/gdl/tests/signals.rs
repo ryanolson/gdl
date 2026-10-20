@@ -51,12 +51,14 @@ fn deployment() -> DeploymentSpec {
 }
 
 /// A deployment of one segment with one instance meets at once.
-async fn launched(name: &str) -> (Launch, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("gdl-signals-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+async fn launched(name: &str) -> (Launch, tempfile::TempDir) {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("gdl-signals-{name}-"))
+        .tempdir()
+        .expect("roster directory");
     let settings = format!(
         "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 5000\n",
-        dir.display()
+        dir.path().display()
     );
     let config: ProcessConfig<Nothing> =
         ProcessConfig::from_figment(figment::Figment::from(Toml::string(&settings)))
@@ -79,7 +81,7 @@ fn send(signal: &str) {
 #[tokio::test]
 async fn signals_cancel_the_serving_context_and_let_the_body_finish() {
     for signal in ["-INT", "-TERM"] {
-        let (launch, dir) = launched(signal.trim_start_matches('-')).await;
+        let (launch, _dir) = launched(signal.trim_start_matches('-')).await;
         let served = tokio::time::timeout(
             Duration::from_secs(5),
             launch.serve(|shutdown| async move {
@@ -96,11 +98,10 @@ async fn signals_cancel_the_serving_context_and_let_the_body_finish() {
         .await
         .expect("stopped within the timeout");
         served.expect("the body's own result");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // A body that never finishes its drain is ended by a second signal.
-    let (launch, dir) = launched("second").await;
+    let (launch, _dir) = launched("second").await;
     let served = tokio::time::timeout(
         Duration::from_secs(5),
         launch.serve(|shutdown| async move {
@@ -116,5 +117,4 @@ async fn signals_cancel_the_serving_context_and_let_the_body_finish() {
         panic!("a hung drain ended on its own");
     };
     assert!(error.to_string().contains("second signal"), "{error}");
-    let _ = std::fs::remove_dir_all(&dir);
 }

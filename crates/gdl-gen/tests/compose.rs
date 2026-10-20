@@ -120,8 +120,11 @@ fn an_export_resolves_to_its_origin() {
 /// disagree fails with the file's positions.
 #[test]
 fn a_graph_whose_names_disagree_fails_before_any_crate_is_read() {
-    let dir = std::env::temp_dir().join(format!("gdl-gen-compose-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("dir");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-gen-compose-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
     let graph = std::fs::read_to_string(fixtures().join("chat.gdl"))
         .expect("graph")
         .replace("sink     Engine: Words", "sink     Engine: Tokens");
@@ -143,7 +146,6 @@ fn a_graph_whose_names_disagree_fails_before_any_crate_is_read() {
             dir.join("chat.gdl").display()
         )
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn toml_string(path: &Path) -> String {
@@ -216,13 +218,16 @@ fn the_manifest_program_runs_as_cargo_built_it() {
 /// prints the catalogue's index.
 #[test]
 fn extract_writes_a_working_catalogue_entry() {
-    let catalogue = std::env::temp_dir().join(format!("gdl-catalogue-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&catalogue);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-catalogue-")
+        .tempdir()
+        .expect("dir");
+    let catalogue = temp.path();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
         .args(["gdl", "extract"])
         .arg(fixtures().join("chat-protocols"))
         .arg("--catalog")
-        .arg(&catalogue)
+        .arg(catalogue)
         .output()
         .expect("cargo gdl");
     assert!(
@@ -249,7 +254,7 @@ fn extract_writes_a_working_catalogue_entry() {
     // `cargo gdl catalog` prints the index of what was added.
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
         .args(["gdl", "catalog"])
-        .arg(&catalogue)
+        .arg(catalogue)
         .output()
         .expect("cargo gdl");
     let text = String::from_utf8_lossy(&output.stdout);
@@ -266,7 +271,6 @@ fn extract_writes_a_working_catalogue_entry() {
         text.contains("  Words: chat_protocols::engine::Words (chat-protocols 0.0.0)\n"),
         "{text}"
     );
-    let _ = std::fs::remove_dir_all(&catalogue);
 }
 
 /// `--verify` builds the crate and compares what its markers register with
@@ -302,9 +306,12 @@ fn verify_compares_the_build_with_the_source() {
 /// `tests/fixtures/registry`, offline: a vendored registry of crates that
 /// are read, never built. Fetches under it see that registry, with its
 /// source id and checksums, as they would see crates.io.
-fn offline_registry(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gdl-registry-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn offline_registry(name: &str) -> tempfile::TempDir {
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("gdl-registry-{name}-"))
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
     std::fs::create_dir_all(dir.join(".cargo")).expect("dir");
     let registry = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/registry");
     std::fs::write(
@@ -315,14 +322,15 @@ fn offline_registry(name: &str) -> PathBuf {
         ),
     )
     .expect("config");
-    dir
+    temp
 }
 
 /// A spec lists crates by name and version: the generator fetches them,
 /// reads their source, and resolves names to messages from the registry.
 #[test]
 fn a_spec_lists_crates_by_version() {
-    let dir = offline_registry("spec");
+    let temp = offline_registry("spec");
+    let dir = temp.path();
     std::fs::write(
         dir.join("graph.gdl"),
         "name = \"versioned\", schema = 1;\nsource A: Words -> stream Token;\nsink   Engine: Words -> stream Token;\ntopology: A => Engine;\n",
@@ -353,7 +361,6 @@ fn a_spec_lists_crates_by_version() {
         )
     );
     assert!(words.wire);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Generated code names a crate by its library, and a spec that lists a
@@ -361,7 +368,8 @@ fn a_spec_lists_crates_by_version() {
 /// library is named otherwise is refused, by name.
 #[test]
 fn a_crate_listed_by_version_names_its_library_for_its_package() {
-    let dir = offline_registry("renamed");
+    let temp = offline_registry("renamed");
+    let dir = temp.path();
     std::fs::write(
         dir.join("graph.gdl"),
         "name = \"renamed\", schema = 1;\nsource A: Words -> stream Words;\nsink   B: Words -> stream Words;\ntopology: A => B;\n",
@@ -380,14 +388,14 @@ fn a_crate_listed_by_version_names_its_library_for_its_package() {
         error,
         "regrenamed@0.1.0: its library is `renamed`, not `regrenamed`; a crate listed by version must name its library for its package"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `cargo gdl extract name@version --catalog` fetches the crate, reads it,
 /// and adds it to the catalogue with the registry's checksum.
 #[test]
 fn a_registry_crate_enters_the_catalogue_with_its_checksum() {
-    let dir = offline_registry("catalogue");
+    let temp = offline_registry("catalogue");
+    let dir = temp.path();
     let catalogue = dir.join("catalogue");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
         .args(["gdl", "extract", "regnodes@0.1.0", "--catalog"])
@@ -418,7 +426,6 @@ fn a_registry_crate_enters_the_catalogue_with_its_checksum() {
         (req.package.as_str(), req.path.as_str()),
         ("regproto", "regproto::Words")
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// What each listed crate of the chat example offers, as a catalogue would
@@ -484,7 +491,8 @@ fn a_check_agrees_with_generation() {
 #[test]
 fn an_archive_of_fetchable_crates_builds_images() {
     use std::io::Read as _;
-    let dir = offline_registry("images");
+    let temp = offline_registry("images");
+    let dir = temp.path();
     std::fs::write(
         dir.join("graph.gdl"),
         "name = \"imaged\", schema = 1;\nsource A: Words -> stream Token;\nsink   Engine: Words -> stream Token;\ntopology: A => Engine;\n",
@@ -527,7 +535,6 @@ fn an_archive_of_fetchable_crates_builds_images() {
         files["imaged/engine/Cargo.toml"]
             .contains("gdl = { git = \"https://example.com/gdl\", rev = \"abc123\" }")
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A Compose deployment needs a frontend: a source without one takes its
@@ -535,7 +542,8 @@ fn an_archive_of_fetchable_crates_builds_images() {
 /// stop at once, ready.
 #[test]
 fn compose_refuses_a_source_without_a_frontend() {
-    let dir = offline_registry("compose-no-frontend");
+    let temp = offline_registry("compose-no-frontend");
+    let dir = temp.path();
     std::fs::write(
         dir.join("graph.gdl"),
         "name = \"imaged\", schema = 1;\nsource A: Words -> stream Token;\nsink   Engine: Words -> stream Token;\ntopology: A => Engine;\n",
@@ -551,5 +559,4 @@ fn compose_refuses_a_source_without_a_frontend() {
         panic!("a deployment whose source reads stdin was accepted");
     };
     assert!(error.to_string().contains("frontend"), "{error}");
-    let _ = std::fs::remove_dir_all(&dir);
 }

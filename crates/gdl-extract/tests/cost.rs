@@ -12,7 +12,6 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use gdl_extract::{Cargo, Workspace};
@@ -75,8 +74,11 @@ struct Cost {
 /// bounded in time, so a reader that runs away fails the test instead of
 /// hanging it. Returns the cost of the extraction alone and its problems.
 fn read(name: &str, files: &[(String, String)]) -> (Cost, Vec<String>) {
-    let dir: PathBuf = std::env::temp_dir().join(format!("gdl-cost-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("gdl-cost-{name}-"))
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
     std::fs::create_dir_all(dir.join("src")).expect("dir");
     std::fs::write(
         dir.join("Cargo.toml"),
@@ -106,11 +108,9 @@ fn read(name: &str, files: &[(String, String)]) -> (Cost, Vec<String>) {
             let _ = done.send((cost, extraction.problems));
         })
         .expect("thread");
-    let result = finished
+    finished
         .recv_timeout(Duration::from_secs(60))
-        .expect("the reader finished");
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+        .expect("the reader finished")
 }
 
 /// Read a shape at size `n` and at `2n`, and assert that neither the peak

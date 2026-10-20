@@ -4,9 +4,12 @@ use std::path::Path;
 fn compose_starts_segments_only_after_hub_health() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let spec = portable_spec(&root).expect("valid test fixture");
-    let out = std::env::temp_dir().join(format!("gdl-compose-test-{}", std::process::id()));
-    let files =
-        gdl_gen::compose_files(&spec, &out, &root.join("target")).expect("valid test fixture");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-test-")
+        .tempdir()
+        .expect("valid test fixture");
+    let files = gdl_gen::compose_files(&spec, temp.path(), &root.join("target"))
+        .expect("valid test fixture");
     let compose: serde_json::Value =
         serde_json::from_str(&files[Path::new("compose.yaml")]).expect("valid test fixture");
     for name in ["front", "engine"] {

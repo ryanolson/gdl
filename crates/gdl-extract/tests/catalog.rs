@@ -1,7 +1,7 @@
 //! The working catalogue: entries from the source reader's fixtures, added
 //! once with their provenance, and the index a load builds from them.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gdl_extract::{Cargo, Catalog, Entry, Workspace};
 
@@ -26,19 +26,21 @@ fn entry(workspace: &Workspace, package: &str, added: &str) -> Entry {
     }
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gdl-catalog-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+fn scratch(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("gdl-catalog-{name}-"))
+        .tempdir()
+        .expect("temporary directory")
 }
 
 /// An entry is written once, as `<name>/<version>.toml`, with when it was
 /// added; adding it again keeps the file as it was.
 #[test]
 fn an_entry_is_written_once() {
-    let dir = scratch("once");
+    let temp = scratch("once");
+    let dir = temp.path();
     let workspace = workspace();
-    let mut catalog = Catalog::load(&dir).expect("an empty catalogue");
+    let mut catalog = Catalog::load(dir).expect("an empty catalogue");
     let (_, file) = catalog
         .add(published(entry(
             &workspace,
@@ -64,10 +66,9 @@ fn an_entry_is_written_once() {
     assert_eq!(kept.added, "2026-10-18T21:04:05Z");
     assert_eq!(std::fs::read_to_string(&file).expect("kept"), text);
     // A second load reads the same entry back.
-    let loaded = Catalog::load(&dir).expect("loaded");
+    let loaded = Catalog::load(dir).expect("loaded");
     let entries: Vec<String> = loaded.entries().map(Entry::key).collect();
     assert_eq!(entries, ["read-protocols@0.0.0"]);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Loading builds the index, which the catalogue's text form prints:
@@ -75,15 +76,16 @@ fn an_entry_is_written_once() {
 /// the messages at their ports.
 #[test]
 fn a_load_indexes_messages_and_nodes() {
-    let dir = scratch("index");
+    let temp = scratch("index");
+    let dir = temp.path();
     let workspace = workspace();
-    let mut catalog = Catalog::load(&dir).expect("an empty catalogue");
+    let mut catalog = Catalog::load(dir).expect("an empty catalogue");
     for package in ["read-protocols", "read-facade", "read-quirks"] {
         catalog
             .add(entry(&workspace, package, "2026-10-18T21:04:05Z"))
             .expect("added");
     }
-    let catalog = Catalog::load(&dir).expect("loaded");
+    let catalog = Catalog::load(dir).expect("loaded");
     let text = catalog.to_string();
     for line in [
         // Defined in one crate and exported by another: one message.
@@ -100,15 +102,15 @@ fn a_load_indexes_messages_and_nodes() {
         text.contains("  Renamed: forward read_quirks::Renamed (read-quirks@0.0.0)\n    In: read_quirks::Actual (read-quirks 0.0.0) + stream read_quirks::Actual (read-quirks 0.0.0)\n"),
         "{text}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A file in the wrong place is refused: the directory is the index of
 /// the entries' names.
 #[test]
 fn an_entry_in_the_wrong_file_is_refused() {
-    let dir = scratch("misplaced");
-    let mut catalog = Catalog::load(&dir).expect("an empty catalogue");
+    let temp = scratch("misplaced");
+    let dir = temp.path();
+    let mut catalog = Catalog::load(dir).expect("an empty catalogue");
     let (_, file) = catalog
         .add(entry(
             &workspace(),
@@ -117,19 +119,19 @@ fn an_entry_in_the_wrong_file_is_refused() {
         ))
         .expect("added");
     std::fs::rename(&file, dir.join("read-protocols/9.9.9.toml")).expect("moved");
-    let error = Catalog::load(&dir).expect_err("misplaced").to_string();
+    let error = Catalog::load(dir).expect_err("misplaced").to_string();
     assert!(error.contains("holds read-protocols@0.0.0"), "{error}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Written once, whoever writes first: a second catalogue loaded before
 /// the first added the version keeps the first one's entry, file and all.
 #[test]
 fn the_first_add_wins_across_catalogues() {
-    let dir = scratch("first");
+    let temp = scratch("first");
+    let dir = temp.path();
     let workspace = workspace();
-    let mut one = Catalog::load(&dir).expect("one");
-    let mut two = Catalog::load(&dir).expect("two");
+    let mut one = Catalog::load(dir).expect("one");
+    let mut two = Catalog::load(dir).expect("two");
     let (_, file) = one
         .add(published(entry(
             &workspace,
@@ -147,14 +149,14 @@ fn the_first_add_wins_across_catalogues() {
         .expect("second");
     assert_eq!(kept.added, "2026-10-18T21:04:05Z");
     assert_eq!(std::fs::read_to_string(&file).expect("kept"), text);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Adders at once, each with a catalogue of its own: every add succeeds,
 /// one entry is written whole, and every adder holds that one.
 #[test]
 fn adders_at_once_agree_on_one_entry() {
-    let dir = scratch("racing");
+    let temp = scratch("racing");
+    let dir = temp.path();
     let workspace = workspace();
     let barrier = std::sync::Barrier::new(16);
     let kept: Vec<String> = std::thread::scope(|scope| {
@@ -192,7 +194,6 @@ fn adders_at_once_agree_on_one_entry() {
         .map(|e| e.expect("entry").file_name())
         .collect();
     assert_eq!(left, ["0.0.0.toml"]);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A version already there is kept when it comes from the same source; one
@@ -200,9 +201,10 @@ fn adders_at_once_agree_on_one_entry() {
 /// keeping the first as if it were the second.
 #[test]
 fn a_version_from_another_source_is_refused() {
-    let dir = scratch("sources");
+    let temp = scratch("sources");
+    let dir = temp.path();
     let workspace = workspace();
-    let mut catalog = Catalog::load(&dir).expect("catalogue");
+    let mut catalog = Catalog::load(dir).expect("catalogue");
     let mut registry = entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z");
     let path_source = registry.offer.source.clone();
     registry.offer.source = "registry+https://github.com/rust-lang/crates.io-index".into();
@@ -217,16 +219,16 @@ fn a_version_from_another_source_is_refused() {
             "read-protocols@0.0.0 is already in the catalogue from registry+https://github.com/rust-lang/crates.io-index, not from {path_source}"
         )
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A crate from a directory is not a published version: it changes as it
 /// is edited, so adding it again replaces its entry, file and all.
 #[test]
 fn a_directory_crate_added_again_is_replaced() {
-    let dir = scratch("edited");
+    let temp = scratch("edited");
+    let dir = temp.path();
     let workspace = workspace();
-    let mut catalog = Catalog::load(&dir).expect("catalogue");
+    let mut catalog = Catalog::load(dir).expect("catalogue");
     let first = entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z");
     assert!(first.offer.source.starts_with("path+"));
     catalog.add(first.clone()).expect("added");
@@ -235,7 +237,7 @@ fn a_directory_crate_added_again_is_replaced() {
     let (held, file) = catalog.add(edited).expect("replaced");
     assert_eq!(held.added, "2026-10-18T21:05:00Z");
     assert_eq!(held.offer.messages.len(), 1);
-    let loaded = Catalog::load(&dir).expect("loaded");
+    let loaded = Catalog::load(dir).expect("loaded");
     let reread = loaded.entries().next().expect("one entry");
     assert_eq!(
         reread.offer.messages.len(),
@@ -243,7 +245,6 @@ fn a_directory_crate_added_again_is_replaced() {
         "{}",
         std::fs::read_to_string(file).expect("file")
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A directory is one package, whatever version it says: adding it at a
@@ -251,9 +252,10 @@ fn a_directory_crate_added_again_is_replaced() {
 /// catalogue never offers two readings of one directory.
 #[test]
 fn a_directory_crate_at_a_new_version_replaces_its_old_entry() {
-    let dir = scratch("bumped");
+    let temp = scratch("bumped");
+    let dir = temp.path();
     let workspace = workspace();
-    let mut catalog = Catalog::load(&dir).expect("catalogue");
+    let mut catalog = Catalog::load(dir).expect("catalogue");
     catalog
         .add(entry(&workspace, "read-protocols", "2026-10-18T21:04:05Z"))
         .expect("added");
@@ -263,13 +265,12 @@ fn a_directory_crate_at_a_new_version_replaces_its_old_entry() {
     let keys: Vec<String> = catalog.entries().map(Entry::key).collect();
     assert_eq!(keys, ["read-protocols@0.2.0"]);
     assert!(!dir.join("read-protocols/0.0.0.toml").exists());
-    let loaded: Vec<String> = Catalog::load(&dir)
+    let loaded: Vec<String> = Catalog::load(dir)
         .expect("loaded")
         .entries()
         .map(Entry::key)
         .collect();
     assert_eq!(loaded, ["read-protocols@0.2.0"]);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A catalogue written before a directory's entries were kept to one may
@@ -277,7 +278,8 @@ fn a_directory_crate_at_a_new_version_replaces_its_old_entry() {
 /// two added in the same second, the one read last (the higher version).
 #[test]
 fn a_load_keeps_one_reading_of_each_directory() {
-    let dir = scratch("readings");
+    let temp = scratch("readings");
+    let dir = temp.path();
     let workspace = workspace();
     let write = |version: &str, added: &str| {
         let mut entry = entry(&workspace, "read-protocols", added);
@@ -297,9 +299,8 @@ fn a_load_keeps_one_reading_of_each_directory() {
             .map(Entry::key)
             .collect()
     };
-    assert_eq!(keys(&dir), ["read-protocols@0.2.0"]);
+    assert_eq!(keys(dir), ["read-protocols@0.2.0"]);
     // A tie goes to the file read last.
     write("0.4.0", "2026-10-18T21:05:00Z");
-    assert_eq!(keys(&dir), ["read-protocols@0.4.0"]);
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(keys(dir), ["read-protocols@0.4.0"]);
 }

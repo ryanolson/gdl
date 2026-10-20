@@ -378,8 +378,11 @@ fn the_reader_knows_which_paths_are_public() {
 /// and reported, rather than read until the stack runs out.
 #[test]
 fn a_module_path_cycle_is_a_problem_not_an_overflow() {
-    let dir = std::env::temp_dir().join(format!("gdl-cycle-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-cycle-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
     std::fs::create_dir_all(dir.join("src")).expect("dir");
     std::fs::write(
         dir.join("Cargo.toml"),
@@ -400,7 +403,6 @@ fn a_module_path_cycle_is_a_problem_not_an_overflow() {
         extraction.problems
     );
     assert_eq!(extraction.offer.messages.len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A crate is read from under its own directory, once per file, each file
@@ -413,8 +415,11 @@ fn a_module_path_cycle_is_a_problem_not_an_overflow() {
 /// the test instead of hanging it.
 #[test]
 fn the_reader_is_bounded_by_the_crate() {
-    let dir = std::env::temp_dir().join(format!("gdl-bounded-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-bounded-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
     std::fs::create_dir_all(dir.join("src")).expect("dir");
     std::fs::write(
         dir.join("Cargo.toml"),
@@ -473,15 +478,17 @@ fn the_reader_is_bounded_by_the_crate() {
     );
     assert!(problems.contains("in all"), "{problems}");
     assert_eq!(extraction.offer.messages.len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The budget is for the extraction in all: many files backed by one blob
 /// cost a repository nothing and would cost the reader everything.
 #[test]
 fn the_reader_is_bounded_in_total() {
-    let dir = std::env::temp_dir().join(format!("gdl-total-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-total-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
     std::fs::create_dir_all(dir.join("src")).expect("dir");
     std::fs::write(
         dir.join("Cargo.toml"),
@@ -512,15 +519,17 @@ fn the_reader_is_bounded_in_total() {
     let problems = extraction.problems.join("\n");
     assert!(problems.contains("in all"), "{problems}");
     assert_eq!(extraction.offer.messages.len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// One file may back two modules, as rustc allows: the budget, not a
 /// read-once rule, bounds what a repository can make the reader read.
 #[test]
 fn one_file_may_back_two_modules() {
-    let dir = std::env::temp_dir().join(format!("gdl-twice-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-twice-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
     std::fs::create_dir_all(dir.join("src")).expect("dir");
     std::fs::write(
         dir.join("Cargo.toml"),
@@ -542,7 +551,6 @@ fn one_file_may_back_two_modules() {
     let extraction = workspace.extract("twice").expect("the package");
     assert!(extraction.problems.is_empty(), "{:?}", extraction.problems);
     assert_eq!(extraction.offer.messages.len(), 2);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The budget counts files as well as bytes: a crate of thousands of tiny
@@ -550,8 +558,11 @@ fn one_file_may_back_two_modules() {
 /// kilobytes of the budget.
 #[test]
 fn many_tiny_files_are_bounded_by_their_number() {
-    let dir = std::env::temp_dir().join(format!("gdl-many-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-many-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
     std::fs::create_dir_all(dir.join("src")).expect("dir");
     std::fs::write(
         dir.join("Cargo.toml"),
@@ -570,5 +581,4 @@ fn many_tiny_files_are_bounded_by_their_number() {
     let extraction = workspace.extract("many").expect("the package");
     let problems = extraction.problems.join("\n");
     assert!(problems.contains("in all"), "{problems}");
-    let _ = std::fs::remove_dir_all(&dir);
 }

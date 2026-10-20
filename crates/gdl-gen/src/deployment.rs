@@ -259,7 +259,10 @@ pub struct ComposeBundle {
 
 /// Capture the generated files once for preview and download.
 pub fn compose_bundle(spec: &Spec, target: &Path) -> Result<ComposeBundle, Error> {
-    let temp = tempfile::tempdir().map_err(io)?;
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-")
+        .tempdir()
+        .map_err(io)?;
     let out = temp.path().join("deployment");
     compose(spec, &out, target)?;
     let mut files = Files::new();

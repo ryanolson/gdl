@@ -107,7 +107,10 @@ async fn backend(State(root): State<PathBuf>, request: Request) -> Response {
 
 #[tokio::test]
 async fn import_a_branch_and_subdirectory_over_http_pins_the_commit() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let work = temp.path().join("work");
     std::fs::create_dir_all(work.join("protocols/src")).expect("package");
     std::fs::write(
@@ -277,7 +280,10 @@ async fn import(app: axum::Router, url: &str, path: &str) -> (u16, String) {
 /// refused, naming both.
 #[tokio::test]
 async fn an_import_of_a_namesake_cargo_does_not_resolve_is_refused() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let (url, server, app) = served(temp.path(), |work| {
         package(&work.join("a/protocols"), "protocols", "FromA", "");
         package(&work.join("b/protocols"), "protocols", "FromB", "");
@@ -307,7 +313,10 @@ async fn an_import_of_a_namesake_cargo_does_not_resolve_is_refused() {
 /// directory that is gone.
 #[tokio::test]
 async fn a_git_import_records_git_origins_throughout() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let (url, server, app) = served(temp.path(), |work| {
         package(&work.join("protocols"), "protocols", "Words", "");
         std::fs::create_dir_all(work.join("facade/src")).expect("facade");
@@ -349,7 +358,10 @@ async fn a_git_import_records_git_origins_throughout() {
 /// would the import.
 #[tokio::test]
 async fn a_repository_cannot_choose_the_cargo_that_reads_it() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let fake = temp.path().join("fake");
     let marker = temp.path().join("marker");
     std::fs::create_dir_all(fake.join("bin")).expect("fake toolchain");
@@ -389,7 +401,10 @@ async fn a_repository_cannot_choose_the_cargo_that_reads_it() {
 /// import says so.
 #[tokio::test]
 async fn a_dependency_over_another_transport_fails_the_import() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let secret = temp.path().join("secret");
     package(&secret, "secret", "Hidden", "");
     git(&secret, &["init", "--quiet", "--initial-branch=main"]);
@@ -414,7 +429,10 @@ async fn a_dependency_over_another_transport_fails_the_import() {
 /// fail to build anywhere else, and so would a `#[path]` module.
 #[tokio::test]
 async fn a_git_package_cannot_reach_outside_its_repository() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let outside = temp.path().join("outside");
     package(&outside, "secret", "Hidden", "");
     std::fs::write(outside.join("leak.rs"), "pub struct Leaked;\n").expect("leak");
@@ -449,7 +467,10 @@ async fn a_git_package_cannot_reach_outside_its_repository() {
 /// names on this machine.
 #[tokio::test]
 async fn a_symlinked_manifest_is_refused() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let outside = temp.path().join("outside.toml");
     std::fs::write(
         &outside,
@@ -473,7 +494,10 @@ async fn a_symlinked_manifest_is_refused() {
 /// absolute ones, and the two must compare as one.
 #[tokio::test]
 async fn a_relative_target_directory_imports() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let (url, server, _) = served(temp.path(), |work| {
         package(&work.join("protocols"), "protocols", "Prompt", "");
     })
@@ -499,7 +523,10 @@ async fn a_relative_target_directory_imports() {
 /// named `registry`.
 #[tokio::test]
 async fn a_repository_may_share_files_among_its_packages() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let (url, server, app) = served(temp.path(), |work| {
         package(&work.join("crates/registry/shared"), "shared", "Words", "");
         std::fs::write(work.join("crates/registry/common.rs"), "pub struct Common;\n").expect("shared file");
@@ -525,7 +552,10 @@ async fn a_repository_may_share_files_among_its_packages() {
 /// before it is read.
 #[tokio::test]
 async fn a_manifest_over_the_limit_is_refused() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let (url, server, app) = served(temp.path(), |work| {
         package(&work.join("protocols"), "protocols", "Prompt", "");
         let mut manifest =
@@ -547,7 +577,10 @@ async fn a_manifest_over_the_limit_is_refused() {
 /// packages that depend on the registry.
 #[tokio::test]
 async fn a_vendored_registry_dependency_is_a_fetched_package() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let registry = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-gen/tests/fixtures/registry");
     std::fs::create_dir_all(temp.path().join(".cargo")).expect("config dir");
     std::fs::write(
@@ -577,7 +610,10 @@ async fn a_vendored_registry_dependency_is_a_fetched_package() {
 /// root, and a dependency elsewhere shows a second.
 #[tokio::test]
 async fn a_git_package_cannot_reach_another_checkout() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let other = temp
         .path()
         .join("elsewhere/git/checkouts/other-0123456789abcdef/abcdef0");
@@ -602,7 +638,10 @@ async fn a_git_package_cannot_reach_another_checkout() {
 /// checkout, whatever a path dependency into it claims.
 #[tokio::test]
 async fn a_git_package_cannot_reach_a_registry_directory() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let other = temp
         .path()
         .join("elsewhere/registry/src/index-0123/secret-0.1.0");
@@ -627,7 +666,10 @@ async fn a_git_package_cannot_reach_a_registry_directory() {
 /// it really is.
 #[tokio::test]
 async fn a_symlinked_path_dependency_is_refused() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let outside = temp.path().join("outside");
     package(&outside, "secret", "Hidden", "");
     let (url, server, app) = served(temp.path(), |work| {
@@ -651,7 +693,10 @@ async fn a_symlinked_path_dependency_is_refused() {
 /// crate is read in a child, which is what gives out.
 #[tokio::test]
 async fn a_crate_the_reader_cannot_survive_is_refused_not_fatal() {
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let (url, server, app) = served(temp.path(), |work| {
         package(&work.join("deep"), "deep", "Prompt", "");
         std::fs::write(
@@ -693,7 +738,10 @@ async fn an_abandoned_import_ends_its_child_and_cargo() {
             accepted.lock().expect("held").push(stream);
         }
     });
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let dependency = format!("[dependencies]\nslow = {{ git = {silent:?} }}\n");
     let (url, server, app) = served(temp.path(), |work| {
         package(&work.join("dependent"), "dependent", "Prompt", &dependency);
@@ -750,7 +798,10 @@ async fn a_child_past_its_cargo_deadline_ends_its_group() {
             accepted.lock().expect("held").push(stream);
         }
     });
-    let temp = tempfile::tempdir().expect("temp");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
     let request = json!({
         "krate": {"Git": {"name": "slow", "url": silent, "rev": "0123456789abcdef0123456789abcdef01234567", "path": ""}},
         "target": temp.path().join("target"),

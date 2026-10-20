@@ -36,6 +36,7 @@ node --test crates/gdl-web/tests/editor.cjs       # the composer's page, outside
 - On exit 124, rerun the newest test binary with `--test-threads=1 --nocapture` under a short timeout to name the hang.
 - Tests that need two or more velo nodes run them in one process over TCP on OS-assigned ports. They must not depend on NATS, etcd, or fixed ports.
 - Prove a precondition with an observable signal; never sleep and hope.
+- Tests and tools take temporary directories from `tempfile::TempDir` (`tempfile::Builder::new().prefix("gdl-<what>-").tempdir()`), so that they are removed on drop even when a test fails or panics. Hold the `TempDir` for as long as anything uses the directory, and never build a path under the system temp directory by hand.
 
 ### Keep the suite fast
 

@@ -19,15 +19,18 @@ fn a_dependency_that_never_answers_is_given_up_at_the_deadline() {
             accepted.lock().expect("the held streams").push(stream);
         }
     });
-    let scratch = std::env::temp_dir().join(format!("gdl-confined-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&scratch);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-confined-")
+        .tempdir()
+        .expect("a scratch directory");
+    let scratch = temp.path();
     let cargo = Cargo::confined(Duration::from_secs(3));
     let started = std::time::Instant::now();
     let Err(error) = Workspace::fetch_git(
         "silent",
         &format!("http://127.0.0.1:{port}/silent.git"),
         "0123456789abcdef0123456789abcdef01234567",
-        &scratch,
+        scratch,
         &cargo,
     ) else {
         panic!("a silent host resolved");
@@ -59,5 +62,4 @@ fn a_dependency_that_never_answers_is_given_up_at_the_deadline() {
             panic!("a connection git held is still open: {e}");
         }
     }
-    let _ = std::fs::remove_dir_all(&scratch);
 }

@@ -204,11 +204,13 @@ async fn instances_name_only_known_segments() {
 /// a segment expected twice waits, and says so.
 #[tokio::test]
 async fn a_count_other_than_one_is_applied() {
-    let dir = std::env::temp_dir().join(format!("gdl-count-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-count-")
+        .tempdir()
+        .expect("roster directory");
     let config = load(&[&format!(
         "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 200\n[instances]\nfront = 2\n",
-        dir.display()
+        dir.path().display()
     )])
     .expect("parses");
     let Err(error) = config
@@ -218,7 +220,6 @@ async fn a_count_other_than_one_is_applied() {
         panic!("one instance met a count of two")
     };
     assert!(error.to_string().contains("front (1 of 2)"), "{error}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A count set in the environment overrides the file's: both name the

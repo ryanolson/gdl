@@ -78,9 +78,12 @@ fn catalog(dir: &std::path::Path) -> Catalog {
 /// which reads it back by its name.
 #[test]
 fn a_keyword_message_is_written_raw() {
-    let dir = std::env::temp_dir().join(format!("gdl-web-keyword-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let catalog = catalog(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-keyword-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let catalog = catalog(dir);
     let draft = Draft {
         deployment: toml::Table::new(),
         deployment_config: BTreeMap::new(),
@@ -122,7 +125,6 @@ fn a_keyword_message_is_written_raw() {
         rendered.graph,
         "name = \"keyword\", schema = 1;\nsource A: r#match -> stream Token;\nsink Engine: r#match -> stream Token;\ntopology: A => Engine;\n"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A spec lists a registry crate by version, which means crates.io: a
@@ -155,9 +157,12 @@ fn a_crate_from_another_registry_is_refused() {
 /// name is pinned to its message, since the name alone resolves to two.
 #[test]
 fn two_messages_of_one_name_are_named_apart_and_pinned() {
-    let dir = std::env::temp_dir().join(format!("gdl-web-twins-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let mut catalog = Catalog::load(&dir).expect("catalogue");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-twins-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let mut catalog = Catalog::load(dir).expect("catalogue");
     for package in ["other", "proto"] {
         let offer = Offer {
             package: package.into(),
@@ -230,16 +235,18 @@ fn two_messages_of_one_name_are_named_apart_and_pinned() {
         "{}",
         rendered.spec
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A node two listed crates both offer is pinned in each instance's
 /// binding: by name alone it would bind to neither.
 #[test]
 fn a_node_two_crates_offer_is_pinned() {
-    let dir = std::env::temp_dir().join(format!("gdl-web-two-nodes-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let mut catalog = catalog(&dir);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-two-nodes-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let mut catalog = catalog(dir);
     let engine = catalog
         .entries()
         .find(|e| e.offer.package == "nodes")
@@ -320,7 +327,6 @@ fn a_node_two_crates_offer_is_pinned() {
         "{}",
         rendered.spec
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A message its crate defines in a private module, exported by a
@@ -328,9 +334,12 @@ fn a_node_two_crates_offer_is_pinned() {
 #[test]
 fn a_message_exported_only_by_a_facade_is_composed() {
     use gdl_extract::ExportEntry;
-    let dir = std::env::temp_dir().join(format!("gdl-web-facade-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let mut catalog = Catalog::load(&dir).expect("catalogue");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-facade-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let mut catalog = Catalog::load(dir).expect("catalogue");
     let message = |name: &str, path: &str, public: bool| MessageEntry {
         name: name.into(),
         path: path.into(),
@@ -445,10 +454,9 @@ fn a_message_exported_only_by_a_facade_is_composed() {
         "{}",
         rendered.spec
     );
-    let spec = gdl_gen::Spec::from_text(&rendered.spec, &rendered.graph, &dir).expect("spec");
+    let spec = gdl_gen::Spec::from_text(&rendered.spec, &rendered.graph, dir).expect("spec");
     let offers: Vec<&gdl_gen::Offer> = catalog.entries().map(|e| &e.offer).collect();
     gdl_gen::check(&spec, &dir.join("target"), gdl_gen::Offers::Given(&offers)).expect("checks");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A node read against a directory's crate at one version, after the
@@ -456,9 +464,12 @@ fn a_message_exported_only_by_a_facade_is_composed() {
 /// that went, and says what to add again.
 #[test]
 fn a_node_read_against_an_older_version_says_to_add_it_again() {
-    let dir = std::env::temp_dir().join(format!("gdl-web-reread-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let mut catalog = Catalog::load(&dir).expect("catalogue");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-reread-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let mut catalog = Catalog::load(dir).expect("catalogue");
     let path = |package: &str| format!("path+file:///work/{package}");
     let words = Origin {
         package: "proto".into(),
@@ -556,5 +567,4 @@ fn a_node_read_against_an_older_version_says_to_add_it_again() {
             "message `proto::Words`: it was read from proto@0.1.0, and the catalogue now holds that directory as proto@0.2.0: add again the crates that use it"
         ]
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

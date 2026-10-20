@@ -115,11 +115,11 @@ fn an_export_is_the_same_bytes_every_time() {
 fn an_expanded_export_builds_each_segment() {
     // Canonical, because cargo prints canonical package paths and macOS's
     // temporary directory is reached through a symlink.
-    let dir = std::fs::canonicalize(std::env::temp_dir())
-        .expect("temp dir")
-        .join(format!("gdl-export-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("dir");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-export-")
+        .tempdir()
+        .expect("dir");
+    let dir = std::fs::canonicalize(temp.path()).expect("temp dir");
     tar::Archive::new(flate2::read::GzDecoder::new(export().as_slice()))
         .unpack(&dir)
         .expect("expanded");
@@ -142,5 +142,4 @@ fn an_expanded_export_builds_each_segment() {
         );
         assert!(stderr.contains(&built), "{built} in:\n{stderr}");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

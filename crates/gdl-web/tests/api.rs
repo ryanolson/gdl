@@ -16,9 +16,12 @@ fn crates() -> PathBuf {
 
 /// A scratch directory whose `.cargo/config.toml` takes crates.io from the
 /// vendored registry, offline.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gdl-web-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn scratch(name: &str) -> tempfile::TempDir {
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("gdl-web-{name}-"))
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
     std::fs::create_dir_all(dir.join(".cargo")).expect("dir");
     let registry = crates().join("gdl-gen/tests/fixtures/registry");
     std::fs::write(
@@ -29,7 +32,7 @@ fn scratch(name: &str) -> PathBuf {
         ),
     )
     .expect("config");
-    dir
+    temp
 }
 
 /// The server over `catalog`, with its target directory in `dir`.
@@ -109,8 +112,9 @@ fn draft(request: &str, node: &str, segments: Value) -> Value {
 
 #[tokio::test]
 async fn the_catalogue_lists_its_entries() {
-    let dir = scratch("list");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("list");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     let (status, body) = json_call(&router, "GET", "/api/catalog", None).await;
     assert_eq!(status, StatusCode::OK);
     let keys: Vec<String> = body["entries"]
@@ -126,15 +130,15 @@ async fn the_catalogue_lists_its_entries() {
         })
         .collect();
     assert_eq!(keys, ["regnodes@0.1.0", "regproto@0.1.0"]);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A draft becomes a graph file and a spec, which check as generation
 /// would: a cut on an edge of wire types is a crossing.
 #[tokio::test]
 async fn a_draft_checks_as_its_spec_would_generate() {
-    let dir = scratch("check");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("check");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     let one = draft(
         "regproto::Words",
         "Engine",
@@ -165,7 +169,6 @@ async fn a_draft_checks_as_its_spec_would_generate() {
             .contains("per request: 2 crossings"),
         "{body:#}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// What generation refuses, a check refuses, with the reason: a cut on an
@@ -173,8 +176,9 @@ async fn a_draft_checks_as_its_spec_would_generate() {
 /// catalogue does not hold.
 #[tokio::test]
 async fn a_check_refuses_what_generation_refuses() {
-    let dir = scratch("refuse");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("refuse");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     let refused = |draft: Value| {
         let router = router.clone();
         async move {
@@ -220,15 +224,15 @@ async fn a_check_refuses_what_generation_refuses() {
         missing,
         "node `Engine`: the catalogue has no node `Engine` in `nosuch@1.0.0`"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A draft that checks exports: the archive `cargo gdl export` writes,
 /// from the catalogue's offers, with nothing fetched or built.
 #[tokio::test]
 async fn a_checked_draft_exports() {
-    let dir = scratch("export");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("export");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     let cut = draft(
         "regproto::Words",
         "Engine",
@@ -268,15 +272,15 @@ async fn a_checked_draft_exports() {
     ] {
         assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Adding a crate fetches it, reads it, and serves it; one that cannot be
 /// fetched adds nothing and says why.
 #[tokio::test]
 async fn a_crate_is_added_from_its_registry() {
-    let dir = scratch("add");
-    let router = router(&dir, dir.join("catalogue"));
+    let temp = scratch("add");
+    let dir = temp.path();
+    let router = router(dir, dir.join("catalogue"));
     let (status, body) = json_call(
         &router,
         "POST",
@@ -298,15 +302,15 @@ async fn a_crate_is_added_from_its_registry() {
     assert!(!body["problems"].as_array().expect("problems").is_empty());
     let (_, body) = json_call(&router, "GET", "/api/catalog", None).await;
     assert_eq!(body["entries"].as_array().expect("entries").len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The page is served over a socket, as a browser would ask for it.
 #[tokio::test]
 async fn the_page_is_served() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    let dir = scratch("page");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("page");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -333,13 +337,13 @@ async fn the_page_is_served() {
         "{response}"
     );
     server.abort();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn the_editor_assets_are_served() {
-    let dir = scratch("assets");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("assets");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     for (path, content_type, marker) in [
         ("/style.css", "text/css", "--green:#83d100"),
         ("/app.js", "text/javascript", "function sourcePort()"),
@@ -369,19 +373,19 @@ async fn the_editor_assets_are_served() {
             .to_bytes();
         assert!(std::str::from_utf8(&body).expect("text").contains(marker));
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A crate is a name and a version, and nothing else: one that would name
 /// a path outside the target directory writes nothing there.
 #[tokio::test]
 async fn adding_a_crate_writes_only_under_the_target() {
-    let dir = scratch("escape");
+    let temp = scratch("escape");
+    let dir = temp.path();
     let victim = dir.join("victim");
     std::fs::create_dir_all(victim.join("src")).expect("dir");
     std::fs::write(victim.join("Cargo.toml"), "sentinel").expect("sentinel");
     std::fs::write(victim.join("src/lib.rs"), "sentinel").expect("sentinel");
-    let router = router(&dir, dir.join("catalogue"));
+    let router = router(dir, dir.join("catalogue"));
     let (status, body) = json_call(
         &router,
         "POST",
@@ -398,15 +402,15 @@ async fn adding_a_crate_writes_only_under_the_target() {
         std::fs::read_to_string(victim.join("src/lib.rs")).expect("kept"),
         "sentinel"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Identical drafts checked at once all check: each is read from its own
 /// text, and nothing is shared between them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn identical_checks_at_once_all_succeed() {
-    let dir = scratch("concurrent");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("concurrent");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     let one = draft(
         "regproto::Words",
         "Engine",
@@ -422,14 +426,14 @@ async fn identical_checks_at_once_all_succeed() {
         let (_, body) = check.await.expect("check");
         assert_eq!(body["ok"], true, "{body:#}");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A graph node named otherwise than its catalogue node is bound by a pin.
 #[tokio::test]
 async fn a_renamed_node_is_pinned() {
-    let dir = scratch("renamed");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("renamed");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     let mut renamed = draft(
         "regproto::Words",
         "Engine",
@@ -441,7 +445,6 @@ async fn a_renamed_node_is_pinned() {
     assert_eq!(body["ok"], true, "{body:#}");
     let spec = body["spec"].as_str().expect("spec");
     assert!(spec.contains("Model = \"regnodes::Engine\""), "{spec}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Adds of one crate at once (a double click, or two users) share the
@@ -451,8 +454,9 @@ async fn adds_of_one_crate_at_once_all_succeed() {
     // The race showed in about one run in ten of eight adds; several
     // rounds make a regression fail here, not now and then.
     for round in 0..6 {
-        let dir = scratch(&format!("adds-{round}"));
-        let router = router(&dir, dir.join("catalogue"));
+        let temp = scratch(&format!("adds-{round}"));
+        let dir = temp.path();
+        let router = router(dir, dir.join("catalogue"));
         let adds: Vec<_> = (0..8)
             .map(|_| {
                 let router = router.clone();
@@ -471,7 +475,6 @@ async fn adds_of_one_crate_at_once_all_succeed() {
             let (status, body) = add.await.expect("add");
             assert_eq!(status, StatusCode::OK, "round {round}: {body:#}");
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -480,8 +483,9 @@ async fn adds_of_one_crate_at_once_all_succeed() {
 #[tokio::test]
 async fn an_export_holds_its_spec_and_graph_file() {
     use std::io::Read as _;
-    let dir = scratch("saved");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("saved");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     let one = draft(
         "regproto::Words",
         "Engine",
@@ -510,7 +514,6 @@ async fn an_export_holds_its_spec_and_graph_file() {
     );
     assert!(root.join("graph.gdl").exists());
     gdl_gen::Spec::load(&root.join("gdl.toml")).expect("the archived spec loads");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// When every crate can be fetched anywhere, an export builds images, and
@@ -518,7 +521,8 @@ async fn an_export_holds_its_spec_and_graph_file() {
 /// Docker would refuse.
 #[tokio::test]
 async fn a_check_refuses_an_image_name_the_export_would() {
-    let dir = scratch("image-name");
+    let temp = scratch("image-name");
+    let dir = temp.path();
     let router = gdl_web::router(gdl_web::Config {
         catalog: fixture_catalog(),
         local_root: None,
@@ -544,7 +548,6 @@ async fn a_check_refuses_an_image_name_the_export_would() {
     );
     let (status, _) = call(&router, "POST", "/api/export", Some(named)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The demo, without the page: the chat example's four crates added by
@@ -552,8 +555,9 @@ async fn a_check_refuses_an_image_name_the_export_would() {
 /// checked, and exported. Nothing is fetched or built.
 #[tokio::test]
 async fn the_chat_example_composes_from_its_directories() {
-    let dir = scratch("chat");
-    let router = local_router(&dir, &crates().join(".."));
+    let temp = scratch("chat");
+    let dir = temp.path();
+    let router = local_router(dir, &crates().join(".."));
     let chat = crates().join("../examples/chat");
     for krate in ["protocols", "front-nodes", "engine-mock", "post-nodes"] {
         let path = chat.join(krate).display().to_string();
@@ -643,14 +647,14 @@ async fn the_chat_example_composes_from_its_directories() {
             "{names:?}"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A crate added from a directory, edited, and added again is served as it
 /// is now, not as it was first read.
 #[tokio::test]
 async fn an_edited_directory_crate_is_read_again() {
-    let dir = scratch("edited");
+    let temp = scratch("edited");
+    let dir = temp.path();
     let krate = dir.join("edited");
     std::fs::create_dir_all(krate.join("src")).expect("crate");
     std::fs::write(
@@ -665,7 +669,7 @@ async fn an_edited_directory_crate_is_read_again() {
             .collect();
         std::fs::write(krate.join("src/lib.rs"), text).expect("source");
     };
-    let router = local_router(&dir, &dir);
+    let router = local_router(dir, dir);
     let add = json!({ "source":"local", "path": krate.display().to_string() });
     let names = |body: &Value| -> Vec<String> {
         body["entries"][0]["messages"]
@@ -703,15 +707,15 @@ async fn an_edited_directory_crate_is_read_again() {
     );
     assert_eq!(body["entries"][0]["version"], "0.2.0");
     assert_eq!(names(&body), ["Uno"]);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A crate is named as a spec names one: a name with no version, or a
 /// version with no name, is refused by the one rule, before any fetch.
 #[tokio::test]
 async fn a_crate_without_a_name_or_a_version_is_refused() {
-    let dir = scratch("unnamed");
-    let router = router(&dir, dir.join("catalogue"));
+    let temp = scratch("unnamed");
+    let dir = temp.path();
+    let router = router(dir, dir.join("catalogue"));
     for text in ["@1.2.3", "regproto@"] {
         let (status, body) = json_call(
             &router,
@@ -726,13 +730,13 @@ async fn a_crate_without_a_name_or_a_version_is_refused() {
             format!("`{text}` is neither a directory nor `name@version`")
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn local_imports_and_browsing_are_disabled_by_default() {
-    let dir = scratch("local-disabled");
-    let app = router(&dir, dir.join("catalog"));
+    let temp = scratch("local-disabled");
+    let dir = temp.path();
+    let app = router(dir, dir.join("catalog"));
     let (status, catalog) = json_call(&app, "GET", "/api/catalog", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(catalog["local_enabled"], false);
@@ -762,7 +766,8 @@ fn local_router(dir: &Path, root: &Path) -> axum::Router {
 
 #[tokio::test]
 async fn browsing_is_confined_to_the_local_root() {
-    let dir = scratch("browse");
+    let temp = scratch("browse");
+    let dir = temp.path();
     let root = dir.join("allowed");
     std::fs::create_dir_all(root.join("package/src")).expect("test fixture");
     std::fs::write(
@@ -770,7 +775,7 @@ async fn browsing_is_confined_to_the_local_root() {
         "[package]\nname='example'\nversion='0.1.0'\n",
     )
     .expect("test fixture");
-    let app = local_router(&dir, &root);
+    let app = local_router(dir, &root);
     let (status, body) = json_call(&app, "GET", "/api/local", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["directories"][0]["name"], "package");
@@ -782,7 +787,7 @@ async fn browsing_is_confined_to_the_local_root() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(&dir, root.join("escape")).expect("test fixture");
+        std::os::unix::fs::symlink(dir, root.join("escape")).expect("test fixture");
         let (status, _) = call(&app, "GET", "/api/local?path=escape", None).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
@@ -798,7 +803,8 @@ async fn browsing_is_confined_to_the_local_root() {
 
 #[tokio::test]
 async fn git_catalog_entries_export_fetchable_dependencies() {
-    let dir = scratch("git-export");
+    let temp = scratch("git-export");
+    let dir = temp.path();
     let commit = "0123456789abcdef0123456789abcdef01234567ab";
     let source = format!("git+https://example.com/packages?rev={commit}#{commit}");
     let replace = |value: String| {
@@ -881,8 +887,9 @@ async fn git_catalog_entries_export_fetchable_dependencies() {
 
 #[tokio::test]
 async fn git_import_rejects_non_http_sources_and_escaping_paths() {
-    let dir = scratch("git-refused");
-    let app = router(&dir, dir.join("catalog"));
+    let temp = scratch("git-refused");
+    let dir = temp.path();
+    let app = router(dir, dir.join("catalog"));
     for (url, path) in [
         ("file:///tmp/repo", ""),
         ("ssh://example.com/repo", ""),
@@ -901,8 +908,9 @@ async fn git_import_rejects_non_http_sources_and_escaping_paths() {
 
 #[tokio::test]
 async fn a_catalog_frontend_sets_the_source_binding_and_exports_its_service() {
-    let dir = scratch("frontend");
-    let app = local_router(&dir, &crates().join(".."));
+    let temp = scratch("frontend");
+    let dir = temp.path();
+    let app = local_router(dir, &crates().join(".."));
     let (status, body) = json_call(
         &app,
         "POST",
@@ -967,8 +975,9 @@ async fn a_catalog_frontend_sets_the_source_binding_and_exports_its_service() {
 
 #[tokio::test]
 async fn service_flags_control_required_typed_adapters_and_export_one_shared_pipeline() {
-    let dir = scratch("service");
-    let app = local_router(&dir, &crates().join(".."));
+    let temp = scratch("service");
+    let dir = temp.path();
+    let app = local_router(dir, &crates().join(".."));
     let (status, body) = json_call(
         &app,
         "POST",
@@ -1187,8 +1196,9 @@ async fn service_flags_control_required_typed_adapters_and_export_one_shared_pip
 
 #[tokio::test]
 async fn request_router_policy_is_checked_and_embedded_in_exported_segments() {
-    let dir = scratch("request-router");
-    let app = router(&dir, fixture_catalog());
+    let temp = scratch("request-router");
+    let dir = temp.path();
+    let app = router(dir, fixture_catalog());
     let mut cut = draft(
         "regproto::Words",
         "Engine",
@@ -1225,13 +1235,13 @@ async fn request_router_policy_is_checked_and_embedded_in_exported_segments() {
         body["ok"], true,
         "source cannot be a request routing destination"
     );
-    std::fs::remove_dir_all(dir).expect("router export fixture");
 }
 
 #[tokio::test]
 async fn endpoint_nodes_export_as_four_independent_segments() {
-    let dir = scratch("endpoint-segments");
-    let app = local_router(&dir, &crates().join(".."));
+    let temp = scratch("endpoint-segments");
+    let dir = temp.path();
+    let app = local_router(dir, &crates().join(".."));
     let (status, body) = json_call(
         &app,
         "POST",
@@ -1288,8 +1298,9 @@ async fn endpoint_nodes_export_as_four_independent_segments() {
 
 #[tokio::test]
 async fn deployment_rejects_local_packages_without_local_access() {
-    let dir = scratch("deploy-access");
-    let router = router(&dir, fixture_catalog());
+    let temp = scratch("deploy-access");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
     let (status, _) = call(
         &router,
         "POST",
@@ -1302,12 +1313,12 @@ async fn deployment_rejects_local_packages_without_local_access() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn clear_catalog_archives_entries_and_reopens_empty() {
-    let dir = scratch("clear-catalog");
+    let temp = scratch("clear-catalog");
+    let dir = temp.path();
     let catalog = dir.join("catalogue");
     let entry = gdl_extract::Catalog::load(&fixture_catalog())
         .expect("fixture")
@@ -1319,7 +1330,7 @@ async fn clear_catalog_archives_entries_and_reopens_empty() {
         .expect("catalog")
         .add(entry)
         .expect("add");
-    let app = router(&dir, catalog.clone());
+    let app = router(dir, catalog.clone());
     let (status, body) = json_call(&app, "POST", "/api/catalog/clear", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let backup = body["backup"].as_str().expect("backup path");
@@ -1343,7 +1354,8 @@ async fn clear_catalog_archives_entries_and_reopens_empty() {
 
 #[tokio::test]
 async fn examples_use_the_configured_runtime_revision() {
-    let dir = scratch("example-revision");
+    let temp = scratch("example-revision");
+    let dir = temp.path();
     let app = gdl_web::router(gdl_web::Config {
         catalog: dir.join("catalogue"),
         target: dir.join("target"),
@@ -1366,8 +1378,9 @@ async fn examples_use_the_configured_runtime_revision() {
 /// catalogue through the user's browser.
 #[tokio::test]
 async fn a_request_from_another_origin_cannot_change_the_catalogue() {
-    let dir = scratch("origin");
-    let router = router(&dir, dir.join("catalog"));
+    let temp = scratch("origin");
+    let dir = temp.path();
+    let router = router(dir, dir.join("catalog"));
     let send = |origin: Option<&str>, site: Option<&str>| {
         let mut request = Request::builder()
             .method("POST")
@@ -1425,16 +1438,16 @@ async fn a_request_from_another_origin_cannot_change_the_catalogue() {
         let status = named.oneshot(request).await.expect("response").status();
         assert_eq!(status, expected, "{host}");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The example package is offered from gdl's own repository at the
 /// revision the server takes gdl from, and not at all from a path.
 #[tokio::test]
 async fn the_example_follows_the_configured_gdl_revision() {
-    let dir = scratch("example");
+    let temp = scratch("example");
+    let dir = temp.path();
     let (_, body) = json_call(
-        &router(&dir, dir.join("catalog")),
+        &router(dir, dir.join("catalog")),
         "GET",
         "/api/catalog",
         None,
@@ -1458,5 +1471,4 @@ async fn the_example_follows_the_configured_gdl_revision() {
         body["example"],
         json!({"source": "git", "url": "https://example.com/gdl", "revision": "abc123", "path": "examples/api"})
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

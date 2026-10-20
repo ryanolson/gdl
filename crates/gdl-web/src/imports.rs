@@ -255,7 +255,10 @@ async fn git(
     // The manifest is read from the fetched objects, not from a working
     // tree: nothing is checked out, so a symlink is its link text (and
     // refused by its mode), and the blob's size is known before it is read.
-    let repo = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let repo = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .map_err(|e| e.to_string())?;
     git_command(repo.path(), &["init", "--quiet"]).await?;
     git_fetch(repo.path(), url, revision).await?;
     let commit = git_command(repo.path(), &["rev-parse", "FETCH_HEAD"])
@@ -485,7 +488,10 @@ mod tests {
                 accepted.lock().expect("held").push(stream);
             }
         });
-        let dir = tempfile::tempdir().expect("directory");
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-web-git-")
+            .tempdir()
+            .expect("directory");
         super::git_command(dir.path(), &["init", "--quiet"])
             .await
             .expect("init");
@@ -510,7 +516,10 @@ mod tests {
 
     #[tokio::test]
     async fn https_import_overrides_ssh_url_rewrites() {
-        let dir = tempfile::tempdir().expect("directory");
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-web-git-")
+            .tempdir()
+            .expect("directory");
         super::git_command(dir.path(), &["init", "--quiet"])
             .await
             .expect("init");

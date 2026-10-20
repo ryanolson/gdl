@@ -505,12 +505,15 @@ fn a_placement_error_is_reported() {
 
 #[test]
 fn drift_finds_changed_missing_and_stale_files() {
-    let out = std::env::temp_dir().join(format!("gdl-gen-drift-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&out);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-gen-drift-")
+        .tempdir()
+        .expect("dir");
+    let out = temp.path();
     let spec = spec(split(), &[("D", "tiny_nodes::D")]);
-    let files = rendered(&spec, &manifest(), &out).expect("render");
-    write(&out, &files).expect("write");
-    assert_eq!(drift(&out, &files).expect("drift"), Vec::<String>::new());
+    let files = rendered(&spec, &manifest(), out).expect("render");
+    write(out, &files).expect("write");
+    assert_eq!(drift(out, &files).expect("drift"), Vec::<String>::new());
 
     let lib = out.join("engine/src/lib.rs");
     let edited = std::fs::read_to_string(&lib).expect("read") + "\n// hand edit\n";
@@ -522,7 +525,7 @@ fn drift_finds_changed_missing_and_stale_files() {
     // Unmarked, but inside a generated crate, where Cargo would use it.
     std::fs::write(out.join("front/build.rs"), "fn main() {}\n").expect("build script");
     assert_eq!(
-        drift(&out, &files).expect("drift"),
+        drift(out, &files).expect("drift"),
         [
             "differs: engine/src/lib.rs",
             "missing: front/Cargo.toml",
@@ -530,7 +533,7 @@ fn drift_finds_changed_missing_and_stale_files() {
             "unexpected: front/build.rs",
         ]
     );
-    let refused = write(&out, &files).expect_err("a foreign file in a crate");
+    let refused = write(out, &files).expect_err("a foreign file in a crate");
     assert!(refused.to_string().contains("front/build.rs"), "{refused}");
     assert!(
         out.join("gone/src/lib.rs").exists(),
@@ -538,9 +541,9 @@ fn drift_finds_changed_missing_and_stale_files() {
     );
 
     std::fs::remove_file(out.join("front/build.rs")).expect("remove");
-    let removed = write(&out, &files).expect("rewrite");
+    let removed = write(out, &files).expect("rewrite");
     assert_eq!(removed, [PathBuf::from("gone/src/lib.rs")]);
-    assert_eq!(drift(&out, &files).expect("drift"), Vec::<String>::new());
+    assert_eq!(drift(out, &files).expect("drift"), Vec::<String>::new());
     assert!(
         out.join("notes.txt").exists(),
         "a file outside the crates is kept"
@@ -554,20 +557,22 @@ fn drift_finds_changed_missing_and_stale_files() {
     )
     .expect("tag");
     std::fs::write(out.join("engine/target/debug/out"), "build output\n").expect("output");
-    assert_eq!(drift(&out, &files).expect("drift"), Vec::<String>::new());
-    let _ = std::fs::remove_dir_all(&out);
+    assert_eq!(drift(out, &files).expect("drift"), Vec::<String>::new());
 }
 
 #[test]
 fn generation_never_replaces_a_file_it_did_not_write() {
-    let out = std::env::temp_dir().join(format!("gdl-gen-collide-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&out);
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-gen-collide-")
+        .tempdir()
+        .expect("dir");
+    let out = temp.path();
     std::fs::create_dir_all(out.join("front/src")).expect("dir");
     let handwritten = "[package]\nname = \"mine\"\n";
     std::fs::write(out.join("front/Cargo.toml"), handwritten).expect("write");
     let spec = spec(split(), &[("D", "tiny_nodes::D")]);
-    let files = rendered(&spec, &manifest(), &out).expect("render");
-    let refused = write(&out, &files).expect_err("a handwritten file is in the way");
+    let files = rendered(&spec, &manifest(), out).expect("render");
+    let refused = write(out, &files).expect_err("a handwritten file is in the way");
     assert!(
         refused.to_string().contains("front/Cargo.toml"),
         "{refused}"
@@ -580,7 +585,6 @@ fn generation_never_replaces_a_file_it_did_not_write() {
         !out.join("engine").exists(),
         "a refused write writes nothing"
     );
-    let _ = std::fs::remove_dir_all(&out);
 }
 
 #[test]

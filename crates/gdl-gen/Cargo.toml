@@ -14,7 +14,7 @@ name = "cargo-gdl"
 path = "src/main.rs"
 
 [dependencies]
-tempfile = "3"
+tempfile.workspace = true
 serde_json.workspace = true
 flate2 = "1"
 gdl-model = { path = "../gdl-model" }

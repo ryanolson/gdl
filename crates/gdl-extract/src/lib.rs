@@ -483,8 +483,11 @@ mod git_tests {
     #[test]
     fn a_git_package_in_a_subdirectory_keeps_its_commit_origin() {
         use std::process::Command;
-        let dir = std::env::temp_dir().join(format!("gdl-git-origin-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-git-origin-")
+            .tempdir()
+            .expect("test fixture");
+        let dir = temp.path();
         let repo = dir.join("repo");
         std::fs::create_dir_all(repo.join("protocols/src")).expect("test fixture");
         std::fs::write(
@@ -550,6 +553,5 @@ mod git_tests {
         );
         assert_eq!(extracted.offer.messages[0].name, "Prompt");
         assert!(!workspace.locate("protocols").expect("test fixture").path);
-        std::fs::remove_dir_all(dir).expect("test fixture");
     }
 }

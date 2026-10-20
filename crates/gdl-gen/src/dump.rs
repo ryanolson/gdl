@@ -199,10 +199,11 @@ mod tests {
     /// succeed, and the file holds the text.
     #[test]
     fn concurrent_writers_of_one_file_all_succeed() {
-        let dir = std::env::temp_dir().join(format!("gdl-gen-write-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
-        let path = dir.join("lib.rs");
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-gen-write-")
+            .tempdir()
+            .expect("dir");
+        let path = dir.path().join("lib.rs");
         let text = "x".repeat(1024);
         let barrier = std::sync::Barrier::new(16);
         let results: Vec<Result<(), Error>> = std::thread::scope(|scope| {
@@ -221,7 +222,6 @@ mod tests {
         });
         assert!(results.iter().all(Result::is_ok), "{results:?}");
         assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

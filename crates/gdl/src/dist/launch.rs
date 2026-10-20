@@ -178,10 +178,11 @@ mod tests {
     use super::*;
     use crate::dist::fabric::bind_node;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("gdl-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    fn scratch(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("gdl-{name}-"))
+            .tempdir()
+            .expect("scratch directory")
     }
 
     async fn node() -> Velo {
@@ -194,12 +195,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn segments_meet_through_a_directory() {
-        let dir = scratch("rendezvous");
+        let temp = scratch("rendezvous");
+        let dir = temp.path();
         let (a, b) = (node().await, node().await);
         let wait = Duration::from_secs(5);
         let (ra, rb) = tokio::join!(
-            Roster::rendezvous(&dir, "front", &a, [("front", 1), ("engine", 1)], wait),
-            Roster::rendezvous(&dir, "engine", &b, [("front", 1), ("engine", 1)], wait),
+            Roster::rendezvous(dir, "front", &a, [("front", 1), ("engine", 1)], wait),
+            Roster::rendezvous(dir, "engine", &b, [("front", 1), ("engine", 1)], wait),
         );
         for roster in [ra.expect("a"), rb.expect("b")] {
             assert_eq!(
@@ -211,34 +213,34 @@ mod tests {
                 [b.instance_id().to_string()]
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn a_missing_segment_ends_the_wait_with_an_error() {
-        let dir = scratch("missing");
+        let temp = scratch("missing");
+        let dir = temp.path();
         let a = node().await;
         let wait = Duration::from_millis(200);
         let result =
-            Roster::rendezvous(&dir, "front", &a, [("front", 1), ("engine", 1)], wait).await;
+            Roster::rendezvous(dir, "front", &a, [("front", 1), ("engine", 1)], wait).await;
         let Err(error) = result else {
             panic!("engine never appears, yet the rendezvous succeeded");
         };
         assert!(error.to_string().contains("engine"), "{error}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn readiness_waits_for_every_routable_instance() {
-        let dir = scratch("ready");
+        let temp = scratch("ready");
+        let dir = temp.path();
         let ready = dir.join("ready");
         let (front, first, second) = (node().await, node().await, node().await);
         let wait = Duration::from_secs(5);
         let expect = [("front", 1), ("engine", 2)];
         let (roster, _, _) = tokio::join!(
-            Roster::rendezvous(&dir, "front", &front, expect, wait),
-            Roster::rendezvous(&dir, "engine", &first, expect, wait),
-            Roster::rendezvous(&dir, "engine", &second, expect, wait),
+            Roster::rendezvous(dir, "front", &front, expect, wait),
+            Roster::rendezvous(dir, "engine", &first, expect, wait),
+            Roster::rendezvous(dir, "engine", &second, expect, wait),
         );
         let roster = roster.expect("front");
         assert_eq!(roster.instances("engine").len(), 2);
@@ -270,7 +272,6 @@ mod tests {
             .ready(&ready, "front", &front, &["engine"], wait)
             .await
             .expect("every instance the front sends to is serving");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -292,22 +293,25 @@ mod membership {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn every_instance_gets_the_same_roster() {
-        let dir = std::env::temp_dir().join(format!("gdl-same-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-same-")
+            .tempdir()
+            .expect("scratch directory");
+        let dir = temp.path();
         let (front, first, second) = (node().await, node().await, node().await);
         let expect = [("front", 1), ("engine", 2)];
         let (wait, short) = (Duration::from_secs(5), Duration::from_millis(200));
         // The front and one engine instance start first; the front must not
         // settle for the roster it sees then.
         let (early, _) = tokio::join!(
-            Roster::rendezvous(&dir, "front", &front, expect, short),
-            Roster::rendezvous(&dir, "engine", &first, expect, short),
+            Roster::rendezvous(dir, "front", &front, expect, short),
+            Roster::rendezvous(dir, "engine", &first, expect, short),
         );
         assert!(early.is_err(), "the front settled before the second engine");
         let (a, b, c) = tokio::join!(
-            Roster::rendezvous(&dir, "front", &front, expect, wait),
-            Roster::rendezvous(&dir, "engine", &first, expect, wait),
-            Roster::rendezvous(&dir, "engine", &second, expect, wait),
+            Roster::rendezvous(dir, "front", &front, expect, wait),
+            Roster::rendezvous(dir, "engine", &first, expect, wait),
+            Roster::rendezvous(dir, "engine", &second, expect, wait),
         );
         let (a, b, c) = (a.expect("front"), b.expect("first"), c.expect("second"));
         assert_eq!(ids(&a).len(), 3);
@@ -330,13 +334,12 @@ mod membership {
         );
 
         let third = node().await;
-        let Err(error) = Roster::rendezvous(&dir, "engine", &third, expect, wait).await else {
+        let Err(error) = Roster::rendezvous(dir, "engine", &third, expect, wait).await else {
             panic!("a third engine instance joined a deployment of two");
         };
         assert!(
             error.to_string().contains("3 instances of `engine`"),
             "{error}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

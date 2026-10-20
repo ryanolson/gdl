@@ -87,11 +87,13 @@ async fn a_launch_holds_its_roster_until_it_serves() {
     let manifest = reference_manifest(|_| true);
     let spec =
         DeploymentSpec::new(manifest.clone(), placement.clone()).expect("valid test fixture");
-    let dir = std::env::temp_dir().join(format!("gdl-gate-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-gate-")
+        .tempdir()
+        .expect("roster directory");
     let settings = format!(
         "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 5000\n[instances]\nfront = 1\nside = 1\n",
-        dir.display()
+        dir.path().display()
     );
     let config: ProcessConfig<Nothing> =
         ProcessConfig::from_figment(figment::Figment::from(Toml::string(&settings)))
@@ -151,5 +153,4 @@ async fn a_launch_holds_its_roster_until_it_serves() {
     );
     served_front.expect("a request from the serving body goes through");
     served_side.expect("the side serves");
-    let _ = std::fs::remove_dir_all(&dir);
 }

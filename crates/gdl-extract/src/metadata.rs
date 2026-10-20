@@ -400,9 +400,11 @@ mod tests {
     /// keeping it or cutting it.
     #[test]
     fn metadata_past_the_limit_is_refused() {
-        let pidfile =
-            std::env::temp_dir().join(format!("gdl-metadata-group-{}", std::process::id()));
-        let _ = std::fs::remove_file(&pidfile);
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-metadata-group-")
+            .tempdir()
+            .expect("temporary directory");
+        let pidfile = temp.path().join("pid");
         let mut command = std::process::Command::new("sh");
         // The group leader records itself; `sleep` is its child, and must
         // die with the group rather than with the leader alone.
@@ -431,7 +433,6 @@ mod tests {
             .trim()
             .parse()
             .expect("a pid");
-        let _ = std::fs::remove_file(&pidfile);
         // Nothing of the group is left: a signal to it finds no process.
         let gone = std::process::Command::new("kill")
             .args(["-0", "--", &format!("-{leader}")])

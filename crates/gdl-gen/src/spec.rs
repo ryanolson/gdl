@@ -606,20 +606,25 @@ pub(crate) fn default_module(lib: &str) -> String {
 mod tests {
     use super::*;
 
-    fn contract_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("gdl-gen-spec-{name}-{}", std::process::id()));
+    fn contract_dir(name: &str) -> tempfile::TempDir {
+        let temp = tempfile::Builder::new()
+            .prefix(&format!("gdl-gen-spec-{name}-"))
+            .tempdir()
+            .expect("dir");
+        let dir = temp.path();
         std::fs::create_dir_all(dir.join("contract")).expect("dir");
         std::fs::write(
             dir.join("contract/Cargo.toml"),
             "[package]\nname = \"chat-contract\"\n",
         )
         .expect("write");
-        dir
+        temp
     }
 
     #[test]
     fn a_spec_resolves_paths_from_its_own_directory() {
-        let dir = contract_dir("resolve");
+        let temp = contract_dir("resolve");
+        let dir = temp.path();
         let text = r#"
             [contract]
             path = "contract"
@@ -632,7 +637,7 @@ mod tests {
             path = "front"
             type = "front_nodes::B"
         "#;
-        let spec = Spec::parse(text, &dir.join("gdl.toml"), &dir).expect("spec");
+        let spec = Spec::parse(text, &dir.join("gdl.toml"), dir).expect("spec");
         let contract = spec.contract().expect("contract");
         assert_eq!(contract.package, "chat-contract");
         assert_eq!(contract.module, "chat_contract");
@@ -643,7 +648,6 @@ mod tests {
             spec.placement,
             gdl_model::Placement::new().segment("front", ["A", "B"])
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// gdl is not published: an exported tarball names it by a git
@@ -651,12 +655,13 @@ mod tests {
     /// and `[gdl]` takes one source.
     #[test]
     fn gdl_comes_from_a_path_a_version_or_a_git_revision() {
-        let dir = contract_dir("git");
+        let temp = contract_dir("git");
+        let dir = temp.path();
         let parse = |gdl: &str| {
             let text = format!(
                 "[contract]\npath = \"contract\"\n[gdl]\n{gdl}\n[segment.front]\nnodes = [\"A\"]\n"
             );
-            Spec::parse(&text, &dir.join("gdl.toml"), &dir).map(|spec| spec.gdl)
+            Spec::parse(&text, &dir.join("gdl.toml"), dir).map(|spec| spec.gdl)
         };
         let git = parse("git = \"https://example.com/gdl\"\nrev = \"abc123\"").expect("git");
         assert_eq!(
@@ -673,34 +678,34 @@ mod tests {
                 "[gdl] needs exactly one of `path`, `version`, and `git` with `rev`"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A listed crate is a directory, or `name@version` that is not one.
     #[test]
     fn a_listed_crate_is_a_directory_or_a_version() {
-        let dir = contract_dir("listed");
-        let (names, source) = CrateSource::parse(&dir, "contract").expect("a directory");
+        let temp = contract_dir("listed");
+        let dir = temp.path();
+        let (names, source) = CrateSource::parse(dir, "contract").expect("a directory");
         assert_eq!(names.package, "chat-contract");
         assert_eq!(source, CrateSource::Path(dir.join("contract")));
-        let (names, source) = CrateSource::parse(&dir, "chat-protocols@1.2.3").expect("a version");
+        let (names, source) = CrateSource::parse(dir, "chat-protocols@1.2.3").expect("a version");
         assert_eq!(
             (names.package.as_str(), names.lib.as_str()),
             ("chat-protocols", "chat_protocols")
         );
         assert_eq!(source, CrateSource::Version("1.2.3".into()));
-        let error = CrateSource::parse(&dir, "@1.2.3")
+        let error = CrateSource::parse(dir, "@1.2.3")
             .expect_err("no name")
             .to_string();
         assert_eq!(error, "`@1.2.3` is neither a directory nor `name@version`");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A graph spec names its graph file and the crates that define its
     /// messages, each read for its package and library names.
     #[test]
     fn a_graph_spec_reads_its_message_crates() {
-        let dir = contract_dir("graph");
+        let temp = contract_dir("graph");
+        let dir = temp.path();
         std::fs::create_dir_all(dir.join("protocols")).expect("dir");
         std::fs::write(
             dir.join("protocols/Cargo.toml"),
@@ -716,7 +721,7 @@ mod tests {
             [gdl]
             version = "0.1"
         "#;
-        let spec = Spec::parse(text, &dir.join("gdl.toml"), &dir).expect("spec");
+        let spec = Spec::parse(text, &dir.join("gdl.toml"), dir).expect("spec");
         let Source::Graph(graph) = &spec.source else {
             panic!("not a graph spec");
         };
@@ -729,14 +734,14 @@ mod tests {
         );
         assert_eq!(graph.pins["Chunk"], "chat_protocols::Chunk");
         assert!(spec.contract().is_none());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A graph spec lists its node crates, each read for its names; pins
     /// choose an offered node by its type's path.
     #[test]
     fn a_graph_spec_reads_its_node_crates() {
-        let dir = contract_dir("nodes");
+        let temp = contract_dir("nodes");
+        let dir = temp.path();
         for name in ["protocols", "engine"] {
             std::fs::create_dir_all(dir.join(name)).expect("dir");
             std::fs::write(
@@ -749,7 +754,7 @@ mod tests {
         let text = format!(
             "{head}[nodes]\ncrates = [\"engine\"]\npin = {{ Engine = \"chat_engine::Engine\" }}\n"
         );
-        let spec = Spec::parse(&text, &dir.join("gdl.toml"), &dir).expect("spec");
+        let spec = Spec::parse(&text, &dir.join("gdl.toml"), dir).expect("spec");
         let Source::Graph(graph) = &spec.source else {
             panic!("not a graph spec");
         };
@@ -761,7 +766,7 @@ mod tests {
         let error = Spec::parse(
             &format!("{head}[bind.Engine]\ncrate = \"chat-engine\"\npath = \"engine\"\ntype = \"chat_engine::Engine\"\n"),
             &dir.join("gdl.toml"),
-            &dir,
+            dir,
         )
         .expect_err("a binding table")
         .to_string();
@@ -772,17 +777,17 @@ mod tests {
         let error = Spec::parse(
             "[contract]\npath = \"contract\"\n[gdl]\nversion = \"0.1\"\n[nodes]\ncrates = [\"engine\"]\n",
             &dir.join("gdl.toml"),
-            &dir,
+            dir,
         )
         .expect_err("nodes with a contract")
         .to_string();
         assert!(error.contains("[nodes] goes with [graph]"), "{error}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_spec_has_a_contract_or_a_graph_with_its_messages() {
-        let dir = contract_dir("sources");
+        let temp = contract_dir("sources");
+        let dir = temp.path();
         std::fs::create_dir_all(dir.join("twin")).expect("dir");
         std::fs::write(
             dir.join("twin/Cargo.toml"),
@@ -816,18 +821,18 @@ mod tests {
                 "are both library `chat_contract`",
             ),
         ] {
-            let error = Spec::parse(&text, &dir.join("gdl.toml"), &dir)
+            let error = Spec::parse(&text, &dir.join("gdl.toml"), dir)
                 .err()
                 .unwrap_or_else(|| panic!("parsed:\n{text}"))
                 .to_string();
             assert!(error.contains(expected), "{error}");
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_misspelled_key_is_an_error() {
-        let dir = contract_dir("misspelled");
+        let temp = contract_dir("misspelled");
+        let dir = temp.path();
         let text = r#"
             [contract]
             path = "contract"
@@ -838,16 +843,16 @@ mod tests {
             path = "x"
             typ = "x::B"
         "#;
-        let Err(error) = Spec::parse(text, &dir.join("gdl.toml"), &dir) else {
+        let Err(error) = Spec::parse(text, &dir.join("gdl.toml"), dir) else {
             panic!("a misspelled key parsed");
         };
         assert!(error.to_string().contains("typ"), "{error}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn every_bad_binding_is_found() {
-        let dir = contract_dir("package");
+        let temp = contract_dir("package");
+        let dir = temp.path();
         std::fs::create_dir_all(dir.join("front")).expect("dir");
         std::fs::write(
             dir.join("front/Cargo.toml"),
@@ -869,15 +874,14 @@ mod tests {
             "{}",
             spec.problems[1]
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn gdl_needs_one_source() {
-        let dir = contract_dir("gdl");
+        let temp = contract_dir("gdl");
+        let dir = temp.path();
         let text = "[contract]\npath = \"contract\"\n[gdl]\n";
-        assert!(Spec::parse(text, &dir.join("gdl.toml"), &dir).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(Spec::parse(text, &dir.join("gdl.toml"), dir).is_err());
     }
 
     /// A contract library named like a keyword is reached as `r#name`.

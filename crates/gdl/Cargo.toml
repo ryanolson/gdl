@@ -47,6 +47,7 @@ prometheus = { workspace = true }
 velo = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+tempfile.workspace = true
 trybuild = { workspace = true }
 
 [lints]

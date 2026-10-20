@@ -102,8 +102,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolving_follows_a_symlink_before_a_parent_step() {
-        let root = std::env::temp_dir().join(format!("gdl-gen-resolve-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-gen-resolve-")
+            .tempdir()
+            .expect("dir");
+        let root = temp.path();
         std::fs::create_dir_all(root.join("vendor/a")).expect("dir");
         std::fs::create_dir_all(root.join("vendor/nodes")).expect("dir");
         std::fs::create_dir_all(root.join("project")).expect("dir");
@@ -119,7 +122,6 @@ mod tests {
             resolve(&root.join("project/link/../out/front")).expect("resolve"),
             root.join("vendor/out/front")
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

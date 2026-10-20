@@ -692,6 +692,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -713,6 +714,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.119",
+ "tempfile",
  "toml 0.9.12+spec-1.1.0",
 ]
 
