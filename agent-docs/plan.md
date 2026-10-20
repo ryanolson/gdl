@@ -925,3 +925,11 @@ Review pass `m19-r3`. Rulings 96 and 100 above lacked their contracts:
 | 97a | Readiness order | an instance announces `serving` before it waits for the instances in its roster of the segments it sends to (`Layout::sends_to`), which can hold cycles: a forward path that leaves a segment and comes back. The roster is held from the launch until that wait is over, so a request that arrives first waits at it, bounded by the setup timeout, and a peer's announcement is enough to route to it whatever roster the peer holds. An inductive order (announce after the segments sent to) was built and removed: it deadlocked every returning placement | agent, 2026-10-20 |
 | 100a | The names the composer's server answers to | `localhost`, IP addresses, and each `--host <name>`, on every method; any other `Host` is refused. A DNS name pointed at the user's machine would otherwise make a page elsewhere same-origin with the server | agent, 2026-10-20 |
 
+
+### 2026-10-20 addendum: the items left open by milestone 19
+
+The owner's rulings on the items `m19-r20.md` left open. The arm grammar of `[entry.*]` (r1 S2) stays open until the owner has more to decide it on.
+
+| # | Decision | Ruling | Owner |
+|---|---|---|---|
+| 102 | Who implements `ConfigSchema` | only `derive(gdl::Config)`. The trait is sealed by a hidden supertrait that the derive implements, so a hand impl fails to build with a message naming the derive. The source reader takes a config type's fields from the derive's attributes and cannot run a hand-written `graph_fields`; before the seal, such an impl built and was then refused at extraction (r5 N4) | owner, 2026-10-20 |

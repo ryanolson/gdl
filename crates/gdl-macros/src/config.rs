@@ -28,6 +28,7 @@ pub(crate) fn expand(input: &syn::DeriveInput) -> syn::Result<TokenStream> {
     let ident = &input.ident;
     let (impl_generics, ty_generics, clause) = input.generics.split_for_impl();
     Ok(quote! {
+        impl #impl_generics ::gdl::__private::ConfigDerived for #ident #ty_generics #clause {}
         impl #impl_generics ::gdl::ConfigSchema for #ident #ty_generics #clause {
             fn graph_fields() -> ::std::vec::Vec<::gdl::ConfigField> { ::std::vec![#(#values),*] }
         }

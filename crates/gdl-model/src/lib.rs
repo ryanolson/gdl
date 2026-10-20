@@ -29,6 +29,12 @@ pub use placement::{
     Run, WireReason, layout,
 };
 
+/// Support for `derive(gdl::Config)`. Not a stable interface.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::config::ConfigDerived;
+}
+
 /// The role a node plays in a graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

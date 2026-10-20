@@ -36,10 +36,22 @@ pub enum ConfigValue {
 pub type GraphConfig = BTreeMap<String, ConfigValue>;
 
 /// Metadata explicitly exposed by a node's configuration type.
-pub trait ConfigSchema {
+///
+/// Implemented only by `derive(gdl::Config)`. The source reader takes a
+/// config type's fields from the derive's attributes, without building the
+/// crate, so it cannot run a hand-written `graph_fields`; a hand impl would
+/// build and then be refused when the crate is extracted.
+pub trait ConfigSchema: ConfigDerived {
     /// Only graph-affecting fields; runtime-only fields stay private to the implementation.
     fn graph_fields() -> Vec<ConfigField>;
 }
+
+/// The seal on [`ConfigSchema`], which only `derive(gdl::Config)` implements.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` implements `ConfigSchema` by hand",
+    note = "derive it with `#[derive(gdl::Config)]`: the source reader reads only the derive"
+)]
+pub trait ConfigDerived {}
 
 /// Apply declared defaults and reject unknown fields or values of the wrong type.
 pub fn resolve_config(fields: &[ConfigField], values: &GraphConfig) -> Result<GraphConfig, Error> {

@@ -151,6 +151,7 @@ pub mod __private {
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
     pub use gdl_macros::graph;
     pub use gdl_message::__private::*;
+    pub use gdl_model::__private::*;
 
     use crate::{Backward, Forward, Frontend, Operator, Sink};
 
