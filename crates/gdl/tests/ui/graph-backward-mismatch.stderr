@@ -10,8 +10,8 @@ error[E0308]: mismatched types
 11 | | }
    | |_^ expected `Option<Codec<u64>>`, found `Option<Codec<u32>>`
    |
-   = note: expected enum `Option<gdl::Codec<u64>>`
-              found enum `Option<gdl::Codec<u32>>`
+   = note: expected enum `std::option::Option<gdl::Codec<u64>>`
+              found enum `std::option::Option<gdl::Codec<u32>>`
    = note: this error originates in the macro `$crate::wire_codec` which comes from the expansion of the macro `gdl::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0271]: type mismatch resolving `<BwdStep<__GdlSlotF, BwdEnd<u32>> as DBackward>::In == u32`

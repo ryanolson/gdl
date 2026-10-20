@@ -52,7 +52,19 @@ pub(crate) fn expand(graph: &Graph, krate: &TokenStream) -> TokenStream {
     }
 }
 
+/// `SourceReq` and `SourceItem`, for a graph with one root; with several,
+/// no root is "the" source, and the aliases would name whichever was
+/// declared first.
 fn expand_source_types(graph: &Graph, krate: &TokenStream) -> TokenStream {
+    if graph
+        .nodes
+        .iter()
+        .filter(|n| n.role() == Role::Source)
+        .count()
+        != 1
+    {
+        return TokenStream::new();
+    }
     let (req, item) = source_types(graph, krate);
     quote! {
         /// The request type the graph's source sends.

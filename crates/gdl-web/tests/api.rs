@@ -37,6 +37,8 @@ fn router(dir: &Path, catalog: PathBuf) -> axum::Router {
     gdl_web::router(gdl_web::Config {
         catalog,
         local_root: None,
+        hosts: Vec::new(),
+        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
         target: dir.join("target"),
         gdl: gdl_web::Gdl::Path(crates().join("gdl")),
     })
@@ -314,7 +316,7 @@ async fn the_page_is_served() {
         .await
         .expect("connect");
     stream
-        .write_all(b"GET / HTTP/1.1\r\nhost: composer\r\nconnection: close\r\n\r\n")
+        .write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n")
         .await
         .expect("request");
     let mut response = String::new();
@@ -520,6 +522,8 @@ async fn a_check_refuses_an_image_name_the_export_would() {
     let router = gdl_web::router(gdl_web::Config {
         catalog: fixture_catalog(),
         local_root: None,
+        hosts: Vec::new(),
+        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
         target: dir.join("target"),
         gdl: gdl_web::Gdl::Git {
             url: "https://example.com/gdl".into(),
@@ -750,6 +754,8 @@ fn local_router(dir: &Path, root: &Path) -> axum::Router {
         target: dir.join("target"),
         gdl: gdl_web::Gdl::Path(crates().join("gdl")),
         local_root: Some(root.to_path_buf()),
+        hosts: Vec::new(),
+        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
     })
     .expect("local router")
 }
@@ -816,6 +822,8 @@ async fn git_catalog_entries_export_fetchable_dependencies() {
         catalog: dir.join("catalog"),
         target: dir.join("target"),
         local_root: None,
+        hosts: Vec::new(),
+        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
         gdl: gdl_web::Gdl::Git {
             url: "https://example.com/gdl".into(),
             rev: commit.into(),
@@ -1340,6 +1348,8 @@ async fn examples_use_the_configured_runtime_revision() {
         catalog: dir.join("catalogue"),
         target: dir.join("target"),
         local_root: None,
+        hosts: Vec::new(),
+        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
         gdl: gdl_web::Gdl::Git {
             url: "https://github.com/ryanolson/gdl".into(),
             rev: "test-revision".into(),
@@ -1349,4 +1359,104 @@ async fn examples_use_the_configured_runtime_revision() {
     let (_, body) = json_call(&app, "GET", "/api/catalog", None).await;
     assert_eq!(body["example"]["revision"], "test-revision");
     assert_eq!(body["example"]["path"], "examples/api");
+}
+
+/// A browser sends `Origin` with a cross-origin `POST` even when no
+/// preflight is needed; a page elsewhere must not be able to change the
+/// catalogue through the user's browser.
+#[tokio::test]
+async fn a_request_from_another_origin_cannot_change_the_catalogue() {
+    let dir = scratch("origin");
+    let router = router(&dir, dir.join("catalog"));
+    let send = |origin: Option<&str>, site: Option<&str>| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/catalog/clear")
+            .header("host", "127.0.0.1:8080")
+            .header("content-type", "text/plain");
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        if let Some(site) = site {
+            request = request.header("sec-fetch-site", site);
+        }
+        let request = request.body(Body::empty()).expect("request");
+        let router = router.clone();
+        async move { router.oneshot(request).await.expect("response").status() }
+    };
+    assert_eq!(
+        send(Some("https://evil.example"), None).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        send(Some("http://127.0.0.1:8080"), Some("cross-site")).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(send(Some("null"), None).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        send(Some("http://127.0.0.1:8080"), Some("same-origin")).await,
+        StatusCode::OK
+    );
+    // A request without browser headers, as a script sends one.
+    assert_eq!(send(None, None).await, StatusCode::OK);
+    // A DNS name pointed at this machine makes a page elsewhere same-origin
+    // with the server; the server answers to no such name, on any method.
+    for (host, expected) in [
+        ("evil.example:8080", StatusCode::FORBIDDEN),
+        ("localhost:8080", StatusCode::OK),
+        ("[::1]:8080", StatusCode::OK),
+        ("composer.internal", StatusCode::OK),
+    ] {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/catalog")
+            .header("host", host)
+            .body(Body::empty())
+            .expect("request");
+        let named = gdl_web::router(gdl_web::Config {
+            catalog: dir.join("catalog"),
+            local_root: None,
+            hosts: vec!["composer.internal".into()],
+            extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+            target: dir.join("target"),
+            gdl: gdl_web::Gdl::Path(crates().join("gdl")),
+        })
+        .expect("router");
+        let status = named.oneshot(request).await.expect("response").status();
+        assert_eq!(status, expected, "{host}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The example package is offered from gdl's own repository at the
+/// revision the server takes gdl from, and not at all from a path.
+#[tokio::test]
+async fn the_example_follows_the_configured_gdl_revision() {
+    let dir = scratch("example");
+    let (_, body) = json_call(
+        &router(&dir, dir.join("catalog")),
+        "GET",
+        "/api/catalog",
+        None,
+    )
+    .await;
+    assert_eq!(body["example"], Value::Null);
+    let git = gdl_web::router(gdl_web::Config {
+        catalog: dir.join("catalog"),
+        local_root: None,
+        hosts: Vec::new(),
+        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        target: dir.join("target"),
+        gdl: gdl_web::Gdl::Git {
+            url: "https://example.com/gdl".into(),
+            rev: "abc123".into(),
+        },
+    })
+    .expect("router");
+    let (_, body) = json_call(&git, "GET", "/api/catalog", None).await;
+    assert_eq!(
+        body["example"],
+        json!({"source": "git", "url": "https://example.com/gdl", "revision": "abc123", "path": "examples/api"})
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

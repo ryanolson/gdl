@@ -113,7 +113,11 @@ fn an_export_is_the_same_bytes_every_time() {
 /// gdl-gen test (about 5 s): an expanded archive is new to cargo each time.
 #[test]
 fn an_expanded_export_builds_each_segment() {
-    let dir = std::env::temp_dir().join(format!("gdl-export-{}", std::process::id()));
+    // Canonical, because cargo prints canonical package paths and macOS's
+    // temporary directory is reached through a symlink.
+    let dir = std::fs::canonicalize(std::env::temp_dir())
+        .expect("temp dir")
+        .join(format!("gdl-export-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("dir");
     tar::Archive::new(flate2::read::GzDecoder::new(export().as_slice()))

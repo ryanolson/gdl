@@ -41,7 +41,7 @@ use crate::Error;
 /// A parsed and resolved generator input.
 #[derive(Debug, Clone)]
 pub struct Spec {
-    pub(crate) deployment: crate::deployment::Settings,
+    pub(crate) deployment: Option<crate::deployment::Settings>,
     pub(crate) pipeline_names: BTreeMap<String, String>,
     pub(crate) entry: BTreeMap<String, crate::service::EntrySpec>,
     pub(crate) service: Option<crate::service::ServiceBinding>,
@@ -137,6 +137,11 @@ impl CrateSource {
                 Ok((names, Self::Version(version)))
             }
             crate::Crate::Path(path) => Ok((crate_names(&path)?, Self::Path(path))),
+            // A spec names a Git package in a table, parsed as `Git` above,
+            // never in an entry's text.
+            crate::Crate::Git { .. } => {
+                unreachable!("an entry's text is a directory or name@version")
+            }
         }
     }
 
@@ -229,7 +234,7 @@ pub(crate) struct Bind {
 #[serde(deny_unknown_fields)]
 struct Raw {
     #[serde(default)]
-    deployment: crate::deployment::Settings,
+    deployment: Option<crate::deployment::Settings>,
     #[serde(default)]
     pipeline_names: BTreeMap<String, String>,
     #[serde(default)]

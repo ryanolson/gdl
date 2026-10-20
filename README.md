@@ -188,8 +188,10 @@ For a graph spec, the generator compiles nothing: it builds the contract's manif
 For each segment, the generator writes a crate with:
 
 - A library. `start(node, roster, config, nodes)` deploys the segment inside a program.
-- A binary. It builds each hosted node through `gdl::Build`, meets the other segments in a shared roster directory, and waits until every instance that it can send to is serving. Then it serves until Ctrl-C.
-- With a pinned `Frontend`, the source binary builds and runs that service using `[frontend]` configuration. Without a source pin, it instead reads one JSON request per line on stdin, writes the items as JSON lines (`gdl::serve_json_lines`), and stops at the end of the input. It does this only if the source's request type and item type both implement `Serialize` and `Deserialize`, and the request is not streamed. For other source types, the binary serves until Ctrl-C, and your own program calls the graph through the generated library.
+- A binary. It builds each hosted node through `gdl::Build`, meets the other segments in a shared roster directory, and waits until every instance that it can send to is serving; a request that reaches it earlier waits at its roster. Then it serves until SIGINT or SIGTERM, or until its hub lease is lost.
+- With a pinned `Frontend`, the source binary builds and runs that service using `[frontend]` configuration. Without a source pin, it instead reads one JSON request per line on stdin, writes the items as JSON lines (`gdl::serve_json_lines`), and stops at the end of the input. It does this only if the source's request type and item type both implement `Serialize` and `Deserialize`, and the request is not streamed. For other source types, the binary serves until it is stopped, and your own program calls the graph through the generated library.
+
+A segment binary takes its settings from TOML files, each overriding the ones before it, then from `GDL_` environment variables, with `__` between nested keys: `GDL_RUNTIME__ADMISSION_LIMIT=64`, or `GDL_NODE__TRUNCATE__MAX=3` for `[node.Truncate] max = 3`. A key set in the environment is matched without regard to case (a file's keys are as spelled), and only the settings' own keys are read, so the build scripts' `GDL_PROFILE` and `GDL_IMAGE_PREFIX` do not stop a segment from starting. A misspelled key is an error. The settings name `listen` (under a hub, an unspecified address such as `0.0.0.0:9000` advertises the address the container's `HOSTNAME` resolves to, and a concrete one is bound as given), and exactly one of `roster` (a directory every instance shares, fresh for each deployment, where `[instances]` says how many of each segment to wait for) or a `[hub]` table with the discovery hub's `host` (and, optionally, its `public_port`, `control_port`, and the lease's `heartbeat_ms`), where `[min_replicas]` says how many loaded instances of each segment to wait for. Every node's `Build::ready` is awaited before the segment announces itself; a node that loads a model after construction resolves it then. The binary stops on SIGINT or SIGTERM, and a frontend drains the requests it holds first; a second signal ends the drain. Under a hub the lease is kept by a heartbeat every `heartbeat_ms` (5 s by default) and lost after five misses: a segment whose lease is lost drains and stops, and the deployment starts it again. A segment name is lowercase and at most 58 characters, so that a count set in the environment names it and a hub can name its readiness services.
 
 The generator owns the directory of each segment crate. Each generated file starts with a do-not-edit marker. `cargo gdl generate --check` writes nothing. It fails if a generated file is missing, changed, or stale, or if a segment crate holds a file that the generator did not write.
 
@@ -224,7 +226,7 @@ cd /path/to/deployment
 docker compose up --build
 ```
 
-The output contains a Dockerfile and runtime config for each segment, a hub Dockerfile, `deployment.json`, and `compose.yaml`. The output directory must be new. Cargo fetches Git and registry dependencies during the image build. The bundle contains no local dependency source snapshot. The public example in `examples/api/deploy.toml` pins both the example package and GDL to the same Git commit.
+The output contains a Dockerfile and runtime config for each segment, a hub Dockerfile, `deployment.json`, and `compose.yaml`. The output directory must be new. Cargo fetches Git and registry dependencies during the image build. The bundle contains no local dependency source snapshot. The public example in `examples/api/deploy.toml` pins both the example package and GDL to the same Git commit. That commit must carry the runtime the generator emits for (`gdl::ProcessConfig` and `gdl::Hosted`), so bump the pin whenever the generator and the runtime change together; a bundle built against an older gdl does not compile.
 
 
 Image settings belong in the graph spec:
@@ -258,7 +260,7 @@ flowchart TD
     Ready --> Serve[Frontend accepts requests]
 ```
 
-The hub uses Velo main pinned to `d793db4cc4930e1e8e3a08eff23c4643f020608d`. Requests use the roster populated from admitted registrations. Responses retain their stream anchors. This launch supports one replica per segment and a fixed roster after startup. Restart the whole deployment after replacing a segment; live replica updates and automatic recovery are not implemented. Kubernetes and srt-slurm generation are not implemented.
+The hub is velo's, at the revision `Cargo.toml` pins, with admission restricted to one deployment: a segment built for another graph or placement is refused. Each segment registers as soon as its nodes are built, so the hub knows it is live while they load; once every node is ready it announces itself as loaded, waits for at least `[min_replicas]` loaded instances of each segment (one by default), and routes to those. It then installs its handlers, announces that it is serving, and waits for the instances in its roster that it sends to before the frontend accepts a request; a request that reaches a segment before its wait is over waits at its roster. How many instances a segment has is not fixed, but an instance that joins after a peer took its roster is not routed to by that peer; scale before the others start, or restart the stack. Kubernetes and srt-slurm generation are not implemented.
 
 ## Compose in a browser
 
@@ -274,7 +276,9 @@ cargo run -p gdl-web -- --catalog catalogue --gdl-path crates/gdl
 
 The package, Git-branch, and folder icons open the crates.io, Git, and local dialogs. Hover over an icon to see its label. **Add from crates.io** searches after a 350 ms typing pause. Select a result, then use its current version or enter another exact version. **Add from Git** takes an HTTP(S) repository URL, a branch or commit, and an optional package path within the repository. The import pins the resolved commit. Generated dependencies retain that Git URL and commit.
 
-Local imports are disabled by default, in both the page and API. To enable the directory browser, launch with `--local-root <directory>`, for example `--local-root "$PWD"`. **Add from local** then browses only that directory and its descendants. Choose a package directory and press **Add package**. The server reads source without compiling it.
+The server answers to `localhost`, IP addresses, and each name given with `--host <name>`, and refuses every other `Host`: a DNS name an attacker points at your machine would otherwise make their page same-origin with the composer in your browser. It also refuses a state-changing request whose `Origin` is not its own.
+
+Local imports are disabled by default, in both the page and API. To enable the directory browser, launch with `--local-root <directory>`, for example `--local-root "$PWD"`. **Add from local** then browses only that directory and its descendants. Choose a package directory and press **Add package**. The server reads source without compiling it, in a child process whose memory and time are limited: a crate the reader cannot handle is refused, and the server goes on.
 
 Expand a package in **Catalog** to inspect its messages and nodes. Messages show their Rust paths, visibility, and network codec availability. Nodes show their roles and ports. Search filters package names, message and node names, and Rust paths. It does not search serialized metadata.
 
@@ -310,7 +314,7 @@ timeout 60 node --test crates/gdl-web/tests/editor.cjs
 
 ## Hosted source nodes
 
-`gdl::Frontend` is the implementation contract for a source that hosts an HTTP, gRPC, or other service. It extends `Build` and declares `Req` and `Item`. Its `serve` method takes a typed `Next<Req, Item>` graph client and a shutdown future. `Build` prepares the listener. The generated binary starts serving after every segment is ready, and signals shutdown on Ctrl-C.
+`gdl::Frontend` is the implementation contract for a source that hosts an HTTP, gRPC, or other service. It extends `Build` and declares `Req` and `Item`. Its `serve` method takes a typed `Next<Req, Item>` graph client and a shutdown future. `Build` prepares the listener. The generated binary starts serving after every segment is ready, and signals shutdown on SIGINT or SIGTERM, or when its hub lease is lost.
 
 Mark the implementation with `#[derive(gdl::Node)]` to expose a `source` node in the catalog. Pin the graph source to that implementation under `[nodes] pin`. The generated source binary reads its configuration from `[frontend]`. Other segments do not build or run the frontend. Pipeline `Bindings` still contain only the nodes behind the source.
 

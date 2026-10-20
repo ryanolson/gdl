@@ -4,11 +4,11 @@
 
 use std::path::Path;
 
-use gdl_extract::{Extraction, Origin, Workspace};
+use gdl_extract::{Cargo, Extraction, Origin, Workspace};
 
 fn workspace() -> Workspace {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/read/Cargo.toml");
-    Workspace::load(&manifest).expect("cargo metadata")
+    Workspace::load(&manifest, &Cargo::trusted()).expect("cargo metadata")
 }
 
 fn origin(origin: &Origin) -> String {
@@ -372,4 +372,203 @@ fn the_reader_knows_which_paths_are_public() {
             ("read_protocols::Session", true),
         ]
     );
+}
+
+/// A module file that names itself with `#[path]` is a cycle, read once
+/// and reported, rather than read until the stack runs out.
+#[test]
+fn a_module_path_cycle_is_a_problem_not_an_overflow() {
+    let dir = std::env::temp_dir().join(format!("gdl-cycle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"cycle\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        "#[path = \"lib.rs\"]\npub mod again;\n#[derive(gdl_message::Message)]\npub struct Words;\n",
+    )
+    .expect("source");
+    let workspace =
+        Workspace::load(&dir.join("Cargo.toml"), &Cargo::trusted()).expect("cargo metadata");
+    let extraction = workspace.extract("cycle").expect("the package");
+    assert!(
+        extraction.problems.iter().any(|p| p.contains("cycle")),
+        "{:?}",
+        extraction.problems
+    );
+    assert_eq!(extraction.offer.messages.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A crate is read from under its own directory, once per file, each file
+/// a regular file of bounded size, within one budget: a `#[path]` to a
+/// device or to a file elsewhere, a pipe, a file too large, or a chain of
+/// files each naming the next twice (bounded by the budget, since each
+/// read costs at least a few kilobytes) is a problem rather than a process
+/// that never ends. The
+/// extraction runs on its own thread, so that a reader that hangs fails
+/// the test instead of hanging it.
+#[test]
+fn the_reader_is_bounded_by_the_crate() {
+    let dir = std::env::temp_dir().join(format!("gdl-bounded-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"bounded\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    // Thirty files, each naming the next twice: doubled at every level.
+    for level in 0..30 {
+        let next = level + 1;
+        std::fs::write(
+            dir.join(format!("src/m{level}.rs")),
+            format!("#[path = \"m{next}.rs\"]\npub mod a;\n#[path = \"m{next}.rs\"]\npub mod b;\n"),
+        )
+        .expect("module");
+    }
+    std::fs::write(dir.join("src/m30.rs"), "").expect("module");
+    // A pipe inside the crate, and a sparse file past the limit.
+    #[cfg(unix)]
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(dir.join("src/pipe.rs"))
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+    std::fs::File::create(dir.join("src/huge.rs"))
+        .expect("huge")
+        .set_len(17 << 20)
+        .expect("sparse");
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        "#[path = \"/dev/zero\"]\npub mod zero;\n#[path = \"pipe.rs\"]\npub mod pipe;\n#[path = \"huge.rs\"]\npub mod huge;\n#[path = \"m0.rs\"]\npub mod chain;\n#[derive(gdl_message::Message)]\npub struct Words;\n",
+    )
+    .expect("source");
+    let manifest = dir.join("Cargo.toml");
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let workspace = Workspace::load(&manifest, &Cargo::trusted()).expect("cargo metadata");
+        let _ = done.send(workspace.extract("bounded").expect("the package"));
+    });
+    let extraction = finished
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the reader finished");
+    let problems = extraction.problems.join("\n");
+    assert!(
+        problems.contains("/dev/zero") && problems.contains("outside"),
+        "{problems}"
+    );
+    assert!(
+        problems.contains("pipe.rs") && problems.contains("not a regular file"),
+        "{problems}"
+    );
+    assert!(
+        problems.contains("huge.rs") && problems.contains("larger than"),
+        "{problems}"
+    );
+    assert!(problems.contains("in all"), "{problems}");
+    assert_eq!(extraction.offer.messages.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The budget is for the extraction in all: many files backed by one blob
+/// cost a repository nothing and would cost the reader everything.
+#[test]
+fn the_reader_is_bounded_in_total() {
+    let dir = std::env::temp_dir().join(format!("gdl-total-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"total\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    // Eight modules of four megabytes of valid Rust each: more than the
+    // budget in all, well under the limit each.
+    let big: String = (0..250_000)
+        .map(|i| format!("pub struct S{i};\n"))
+        .collect();
+    let mut lib = String::new();
+    for module in 0..8 {
+        std::fs::write(dir.join(format!("src/m{module}.rs")), &big).expect("module");
+        lib.push_str(&format!("pub mod m{module};\n"));
+    }
+    lib.push_str("#[derive(gdl_message::Message)]\npub struct Words;\n");
+    std::fs::write(dir.join("src/lib.rs"), lib).expect("source");
+    let manifest = dir.join("Cargo.toml");
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let workspace = Workspace::load(&manifest, &Cargo::trusted()).expect("cargo metadata");
+        let _ = done.send(workspace.extract("total").expect("the package"));
+    });
+    let extraction = finished
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the reader finished");
+    let problems = extraction.problems.join("\n");
+    assert!(problems.contains("in all"), "{problems}");
+    assert_eq!(extraction.offer.messages.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One file may back two modules, as rustc allows: the budget, not a
+/// read-once rule, bounds what a repository can make the reader read.
+#[test]
+fn one_file_may_back_two_modules() {
+    let dir = std::env::temp_dir().join(format!("gdl-twice-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"twice\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("src/shared.rs"),
+        "#[derive(gdl_message::Message)]\npub struct Words;\n",
+    )
+    .expect("shared");
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        "#[path = \"shared.rs\"]\npub mod a;\n#[path = \"shared.rs\"]\npub mod b;\n",
+    )
+    .expect("source");
+    let workspace =
+        Workspace::load(&dir.join("Cargo.toml"), &Cargo::trusted()).expect("cargo metadata");
+    let extraction = workspace.extract("twice").expect("the package");
+    assert!(extraction.problems.is_empty(), "{:?}", extraction.problems);
+    assert_eq!(extraction.offer.messages.len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The budget counts files as well as bytes: a crate of thousands of tiny
+/// modules is refused by their number, since each costs at least a few
+/// kilobytes of the budget.
+#[test]
+fn many_tiny_files_are_bounded_by_their_number() {
+    let dir = std::env::temp_dir().join(format!("gdl-many-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"many\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    let mut lib = String::new();
+    for module in 0..5000 {
+        std::fs::write(dir.join(format!("src/m{module}.rs")), "").expect("module");
+        lib.push_str(&format!("pub mod m{module};\n"));
+    }
+    lib.push_str("#[derive(gdl_message::Message)]\npub struct Words;\n");
+    std::fs::write(dir.join("src/lib.rs"), lib).expect("source");
+    let workspace =
+        Workspace::load(&dir.join("Cargo.toml"), &Cargo::trusted()).expect("cargo metadata");
+    let extraction = workspace.extract("many").expect("the package");
+    let problems = extraction.problems.join("\n");
+    assert!(problems.contains("in all"), "{problems}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

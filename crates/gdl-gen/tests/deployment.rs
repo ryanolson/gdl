@@ -15,7 +15,7 @@ fn compose_starts_segments_only_after_hub_health() {
             "service_healthy"
         );
         assert!(files.contains_key(&Path::new(name).join("Dockerfile")));
-        assert!(files[&Path::new(name).join("config.toml")].contains("hub = \"hub\""));
+        assert!(files[&Path::new(name).join("config.toml")].contains("[hub]\nhost = \"hub\""));
     }
     assert!(
         files[Path::new("hub/Dockerfile")]

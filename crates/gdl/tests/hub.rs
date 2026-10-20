@@ -1,12 +1,536 @@
-//! Real hub admission, roster discovery and readiness over ephemeral ports.
-use gdl::{DeploymentSpec, HopInfo, HubSession, Manifest, NodeInfo, Placement, Role, TypeInfo};
+//! Real hub admission, rosters, and readiness over OS-assigned ports.
+use figment::providers::Format as _;
+use gdl::{
+    DeploymentSpec, HopInfo, Hosted, HubSession, Manifest, NodeInfo, Placement, ProcessConfig,
+    Role, TypeInfo,
+};
+use serde::Deserialize;
+use std::sync::Arc;
 use std::time::Duration;
+
+fn spec() -> DeploymentSpec {
+    let graph = Manifest {
+        name: "hub-test".into(),
+        schema: 1,
+        nodes: vec![
+            NodeInfo {
+                name: "Source".into(),
+                role: Role::Source,
+                binding: None,
+            },
+            NodeInfo {
+                name: "Echo".into(),
+                role: Role::Sink,
+                binding: Some("echo".into()),
+            },
+        ],
+        hops: vec![HopInfo {
+            outer: "Source".into(),
+            inner: "Echo".into(),
+            forward: vec![],
+            backward: vec![],
+            forward_types: vec![TypeInfo::new("Request", true)],
+            backward_types: vec![TypeInfo::new("Reply", true)],
+        }],
+    };
+    DeploymentSpec::new(
+        graph,
+        Placement::new()
+            .segment("front", ["Source"])
+            .segment("sink", ["Echo"]),
+    )
+    .expect("valid test fixture")
+}
+
+/// A hub for `spec` on OS-assigned ports, keeping a registration for `ttl`.
+async fn hub(ttl: Duration) -> velo_hub::Hub {
+    let mut config = velo_hub::HubConfig::default();
+    config.server.public_port = 0;
+    config.server.control_port = 0;
+    config.server.ttl = ttl;
+    config.server.prune_interval = Duration::from_millis(100);
+    velo_hub::Hub::builder(config)
+        .extension(gdl_hub::GraphAdmission::new(spec()))
+        .serve()
+        .await
+        .expect("valid test fixture")
+}
+
+async fn node() -> Arc<velo::Velo> {
+    gdl::bind_node("127.0.0.1:0".parse().expect("valid test fixture"))
+        .await
+        .expect("valid test fixture")
+}
+
+/// A segment's session with `hub`, heartbeating every 200 ms.
+async fn session(
+    hub: &velo_hub::Hub,
+    segment: &str,
+    node: &Arc<velo::Velo>,
+) -> gdl::Result<HubSession> {
+    HubSession::register(
+        "127.0.0.1",
+        hub.public_addr().port(),
+        hub.control_addr().port(),
+        node,
+        spec().registration(segment).expect("valid test fixture"),
+        Duration::from_millis(200),
+    )
+    .await
+}
+
+const ONE_EACH: [(&str, usize); 2] = [("front", 1), ("sink", 1)];
+const WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::test]
 async fn hub_rejects_wrong_contract_and_discovers_ready_segments() {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let graph = Manifest {
-            name: "hub-test".into(),
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let hub = hub(Duration::from_secs(30)).await;
+        let (front, sink) = (node().await, node().await);
+        let mut wrong = spec().registration("front").expect("valid test fixture");
+        wrong.contract ^= 1;
+        let refused = HubSession::register(
+            "127.0.0.1",
+            hub.public_addr().port(),
+            hub.control_addr().port(),
+            &front,
+            wrong,
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(refused.is_err(), "a different contract was admitted");
+        let mut a = session(&hub, "front", &front)
+            .await
+            .expect("front registers");
+        let mut b = session(&hub, "sink", &sink).await.expect("sink registers");
+        // A roster is the loaded instances: each announces before it waits,
+        // so the two meet however they are scheduled.
+        let (ra, rb) = tokio::join!(a.roster(&ONE_EACH, WAIT), b.roster(&ONE_EACH, WAIT));
+        let (roster, other) = (ra.expect("front's roster"), rb.expect("sink's roster"));
+        assert_eq!(roster.instances("front").len(), 1);
+        assert_eq!(roster.instances("sink").len(), 1);
+        assert_eq!(other.instances("sink").len(), 1);
+        // A minimum the deployment does not reach is a timeout that names it.
+        let Err(error) = a
+            .roster(&[("front", 1), ("sink", 2)], Duration::from_millis(300))
+            .await
+        else {
+            panic!("one sink instance met a minimum of two");
+        };
+        assert!(error.to_string().contains("sink (1 of 2)"), "{error}");
+        let (a_ready, b_ready) = tokio::join!(
+            a.ready(&roster, &["sink"], WAIT),
+            b.ready(&other, &[], WAIT)
+        );
+        a_ready.expect("front serving");
+        b_ready.expect("sink serving");
+        drop((a, b, front, sink));
+        hub.shutdown().await.expect("valid test fixture");
+    })
+    .await
+    .expect("hub startup is bounded");
+}
+
+/// A node may take longer to load than the hub keeps a registration: the
+/// session heartbeats from the moment it registers, so the instance is live
+/// throughout and still meets its peers afterwards.
+#[tokio::test]
+async fn a_load_longer_than_the_lease_still_meets() {
+    let hub = hub(Duration::from_secs(1)).await;
+    let (front, sink) = (node().await, node().await);
+    let mut a = session(&hub, "front", &front)
+        .await
+        .expect("front registers");
+    let mut b = session(&hub, "sink", &sink).await.expect("sink registers");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let (ra, rb) = tokio::join!(a.roster(&ONE_EACH, WAIT), b.roster(&ONE_EACH, WAIT));
+    ra.expect("front met the sink after loading");
+    rb.expect("sink met the front after loading");
+    hub.shutdown().await.expect("valid test fixture");
+}
+
+/// An instance that registered but has not announced `loaded` is live, not
+/// routable: it is not in any peer's roster.
+#[tokio::test]
+async fn a_live_but_unloaded_instance_is_not_in_the_roster() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let (front, first, second) = (node().await, node().await, node().await);
+    let mut a = session(&hub, "front", &front)
+        .await
+        .expect("front registers");
+    let mut b = session(&hub, "sink", &first).await.expect("sink registers");
+    let _loading = session(&hub, "sink", &second)
+        .await
+        .expect("second sink registers");
+    let (ra, rb) = tokio::join!(a.roster(&ONE_EACH, WAIT), b.roster(&ONE_EACH, WAIT));
+    rb.expect("sink's roster");
+    let roster = ra.expect("front's roster");
+    assert_eq!(roster.instances("sink").len(), 1);
+    assert_eq!(
+        roster.instances("sink")[0].instance_id(),
+        first.instance_id()
+    );
+    hub.shutdown().await.expect("valid test fixture");
+}
+
+/// A loaded instance that leaves before it serves would hold every peer
+/// that took it into its roster for the whole wait, which would then fail
+/// anyway; the peer fails at once instead, naming it.
+#[tokio::test]
+async fn a_roster_peer_that_leaves_fails_the_readiness_wait_at_once() {
+    let hub = hub(Duration::from_secs(1)).await;
+    let (front, sink) = (node().await, node().await);
+    let mut a = session(&hub, "front", &front)
+        .await
+        .expect("front registers");
+    let mut b = session(&hub, "sink", &sink).await.expect("sink registers");
+    let (ra, rb) = tokio::join!(a.roster(&ONE_EACH, WAIT), b.roster(&ONE_EACH, WAIT));
+    let roster = ra.expect("front's roster");
+    rb.expect("sink's roster");
+    // The sink crashes: its heartbeats stop, and the hub reaps it.
+    drop(b);
+    let started = tokio::time::Instant::now();
+    let Err(error) = a.ready(&roster, &["sink"], Duration::from_secs(20)).await else {
+        panic!("ready with a peer that left");
+    };
+    assert!(
+        error.to_string().contains("left the hub")
+            && error.to_string().contains(&sink.instance_id().to_string()),
+        "{error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "waited the whole timeout"
+    );
+    hub.shutdown().await.expect("valid test fixture");
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Nothing {}
+
+impl Hosted for Nothing {
+    const KEYS: &'static [&'static str] = &[];
+    const NAMES: &'static [&'static str] = &[];
+}
+
+/// Two segment processes meet through a hub as a generated binary does:
+/// `launch` registers, announces, and takes its roster; `serve` passes the
+/// readiness barrier and runs the body. A concrete `listen` address is
+/// bound as given, so no container hostname is needed.
+#[tokio::test]
+async fn segment_processes_meet_through_a_hub() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let settings = format!(
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n",
+        hub.public_addr().port(),
+        hub.control_addr().port()
+    );
+    let config: ProcessConfig<Nothing> = ProcessConfig::from_figment(figment::Figment::from(
+        figment::providers::Toml::string(&settings),
+    ))
+    .expect("settings");
+    let deployment = spec();
+    let (front, sink) = tokio::join!(
+        config.launch("front", &["front", "sink"], &deployment, async { Ok(()) }),
+        config.launch("sink", &["front", "sink"], &deployment, async { Ok(()) }),
+    );
+    let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
+    assert_eq!(front.roster().instances("sink").len(), 1);
+    assert_eq!(sink.roster().instances("front").len(), 1);
+    let (a, b) = tokio::join!(
+        front.serve(|_| async { Ok(()) }),
+        sink.serve(|_| async { Ok(()) }),
+    );
+    a.expect("front served");
+    b.expect("sink served");
+    hub.shutdown().await.expect("valid test fixture");
+}
+
+/// A hub that stops answering ends the lease after five missed
+/// heartbeats: the instance is invisible to new peers from then on.
+#[tokio::test]
+async fn a_lost_lease_is_reported() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let front = node().await;
+    let session = session(&hub, "front", &front)
+        .await
+        .expect("front registers");
+    hub.shutdown().await.expect("valid test fixture");
+    let started = tokio::time::Instant::now();
+    let Err(error) = tokio::time::timeout(WAIT, session.maintain())
+        .await
+        .expect("reported within the wait")
+    else {
+        panic!("maintain returned without a loss");
+    };
+    assert!(error.to_string().contains("has not answered"), "{error}");
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "lost before the grace"
+    );
+}
+
+/// A serving segment whose hub is gone drains and stops with the lease's
+/// error: its body sees its context cancelled and is left to finish.
+#[tokio::test]
+async fn a_segment_drains_and_stops_when_its_hub_is_gone() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let settings = format!(
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n",
+        hub.public_addr().port(),
+        hub.control_addr().port()
+    );
+    let config: ProcessConfig<Nothing> = ProcessConfig::from_figment(figment::Figment::from(
+        figment::providers::Toml::string(&settings),
+    ))
+    .expect("settings");
+    let deployment = spec();
+    let (front, sink) = tokio::join!(
+        config.launch("front", &["front", "sink"], &deployment, async { Ok(()) }),
+        config.launch("sink", &["front", "sink"], &deployment, async { Ok(()) }),
+    );
+    let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
+    let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = Arc::clone(&drained);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(front.serve(move |shutdown| async move {
+        // The body runs once the barrier has passed.
+        let _ = ready_tx.send(());
+        shutdown.cancelled().await;
+        // The drain: work the body finishes after the cancel.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }));
+    let other = tokio::spawn(sink.serve(|shutdown| async move {
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    tokio::time::timeout(WAIT, ready_rx)
+        .await
+        .expect("the barrier passed")
+        .expect("the body ran");
+    hub.shutdown().await.expect("valid test fixture");
+    let Err(error) = tokio::time::timeout(WAIT, serving)
+        .await
+        .expect("stopped within the wait")
+        .expect("the task ran")
+    else {
+        panic!("serve returned without the lease's error");
+    };
+    assert!(error.to_string().contains("has not answered"), "{error}");
+    assert!(
+        drained.load(std::sync::atomic::Ordering::SeqCst),
+        "the body was not left to drain"
+    );
+    let _ = tokio::time::timeout(WAIT, other).await;
+}
+
+/// A hub that answers "no registration", as one that restarted does (it
+/// keeps registrations in memory), ends the lease at once, not after the
+/// grace: there is nothing to wait for.
+#[tokio::test]
+async fn a_replaced_hub_ends_the_lease_at_once() {
+    let first = hub(Duration::from_secs(30)).await;
+    let (public, control) = (first.public_addr().port(), first.control_addr().port());
+    let front = node().await;
+    let session = session(&first, "front", &front)
+        .await
+        .expect("front registers");
+    first.shutdown().await.expect("valid test fixture");
+    let mut config = velo_hub::HubConfig::default();
+    config.server.public_port = public;
+    config.server.control_port = control;
+    let second = velo_hub::Hub::builder(config)
+        .extension(gdl_hub::GraphAdmission::new(spec()))
+        .serve()
+        .await
+        .expect("the ports are free again");
+    let started = tokio::time::Instant::now();
+    let Err(error) = tokio::time::timeout(WAIT, session.maintain())
+        .await
+        .expect("reported within the wait")
+    else {
+        panic!("maintain returned without a loss");
+    };
+    assert!(
+        !error.to_string().contains("has not answered"),
+        "lost through the grace, not at once: {error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "waited the grace"
+    );
+    second.shutdown().await.expect("valid test fixture");
+}
+
+/// A hub that accepts connections and never answers is noticed within the
+/// grace: each heartbeat is bounded by its own interval, and the grace
+/// counts from the last one acknowledged, not from the first failure.
+#[tokio::test]
+async fn a_silent_hub_ends_the_lease_within_the_grace() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let hub = hub(Duration::from_secs(30)).await;
+    let control = hub.control_addr();
+    let silent = Arc::new(AtomicBool::new(false));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a proxy port");
+    let proxy_port = listener.local_addr().expect("the proxy port").port();
+    let flag = Arc::clone(&silent);
+    // A proxy on the control port that forwards until told to go silent,
+    // and then swallows everything: the hub's answers stop, the
+    // connections stay open.
+    tokio::spawn(async move {
+        loop {
+            let Ok((inbound, _)) = listener.accept().await else {
+                return;
+            };
+            let Ok(outbound) = tokio::net::TcpStream::connect(control).await else {
+                return;
+            };
+            let (mut inbound_read, mut inbound_write) = inbound.into_split();
+            let (mut outbound_read, mut outbound_write) = outbound.into_split();
+            let (to_hub, from_hub) = (Arc::clone(&flag), Arc::clone(&flag));
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 16384];
+                loop {
+                    let Ok(n @ 1..) = inbound_read.read(&mut buffer).await else {
+                        return;
+                    };
+                    if to_hub.load(Ordering::SeqCst) {
+                        std::future::pending::<()>().await;
+                    }
+                    if outbound_write.write_all(&buffer[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 16384];
+                loop {
+                    let Ok(n @ 1..) = outbound_read.read(&mut buffer).await else {
+                        return;
+                    };
+                    if from_hub.load(Ordering::SeqCst) {
+                        std::future::pending::<()>().await;
+                    }
+                    if inbound_write.write_all(&buffer[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let front = node().await;
+    let session = HubSession::register(
+        "127.0.0.1",
+        hub.public_addr().port(),
+        proxy_port,
+        &front,
+        spec().registration("front").expect("valid test fixture"),
+        Duration::from_millis(200),
+    )
+    .await
+    .expect("registers through the proxy");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    silent.store(true, Ordering::SeqCst);
+    let started = tokio::time::Instant::now();
+    let Err(error) = tokio::time::timeout(WAIT, session.maintain())
+        .await
+        .expect("a silent hub is noticed within the wait")
+    else {
+        panic!("maintain returned without a loss");
+    };
+    assert!(error.to_string().contains("has not answered"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "noticed only after {:?}",
+        started.elapsed()
+    );
+    hub.shutdown().await.expect("valid test fixture");
+}
+
+/// A lease lost while the nodes load ends the launch then, not after the
+/// load: the roster taken afterwards would be refused anyway.
+#[tokio::test]
+async fn a_lease_lost_while_loading_ends_the_launch() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let settings = format!(
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n",
+        hub.public_addr().port(),
+        hub.control_addr().port()
+    );
+    let config: ProcessConfig<Nothing> = ProcessConfig::from_figment(figment::Figment::from(
+        figment::providers::Toml::string(&settings),
+    ))
+    .expect("settings");
+    let (loading_tx, loading_rx) = tokio::sync::oneshot::channel();
+    let launch = tokio::spawn(async move {
+        config
+            .launch("front", &["front", "sink"], &spec(), async move {
+                let _ = loading_tx.send(());
+                std::future::pending::<gdl::Result<()>>().await
+            })
+            .await
+            .map(|_| ())
+    });
+    tokio::time::timeout(WAIT, loading_rx)
+        .await
+        .expect("loading began within the wait")
+        .expect("loading began");
+    hub.shutdown().await.expect("valid test fixture");
+    let Err(error) = tokio::time::timeout(WAIT, launch)
+        .await
+        .expect("the launch ended within the wait")
+        .expect("the task ran")
+    else {
+        panic!("launched without a lease");
+    };
+    assert!(error.to_string().contains("has not answered"), "{error}");
+}
+
+/// A segment's session with `hub` for `chain`, heartbeating every 200 ms.
+async fn register(
+    chain: &DeploymentSpec,
+    hub: &velo_hub::Hub,
+    segment: &str,
+    node: &velo::Velo,
+) -> gdl::Result<HubSession> {
+    HubSession::register(
+        "127.0.0.1",
+        hub.public_addr().port(),
+        hub.control_addr().port(),
+        node,
+        chain.registration(segment).expect("valid test fixture"),
+        Duration::from_millis(200),
+    )
+    .await
+}
+
+/// An instance announces that it serves before it waits for the segments
+/// it sends to, so no instance waits for one that is waiting for it, and
+/// rosters need not agree: a front whose roster holds one sink is told the
+/// middle segment serves while the middle, whose roster holds two sinks,
+/// still waits for its second. A request the front sends meanwhile waits
+/// at the middle's roster.
+#[tokio::test]
+async fn an_instance_announces_before_it_waits_for_its_roster() {
+    fn hop(outer: &str, inner: &str) -> HopInfo {
+        HopInfo {
+            outer: outer.into(),
+            inner: inner.into(),
+            forward: vec![],
+            backward: vec![],
+            forward_types: vec![TypeInfo::new("Request", true)],
+            backward_types: vec![TypeInfo::new("Reply", true)],
+        }
+    }
+    let chain = DeploymentSpec::new(
+        Manifest {
+            name: "chain".into(),
             schema: 1,
             nodes: vec![
                 NodeInfo {
@@ -15,85 +539,177 @@ async fn hub_rejects_wrong_contract_and_discovers_ready_segments() {
                     binding: None,
                 },
                 NodeInfo {
+                    name: "Mid".into(),
+                    role: Role::Operator,
+                    binding: Some("mid".into()),
+                },
+                NodeInfo {
                     name: "Echo".into(),
                     role: Role::Sink,
                     binding: Some("echo".into()),
                 },
             ],
+            hops: vec![hop("Source", "Mid"), hop("Mid", "Echo")],
+        },
+        Placement::new()
+            .segment("front", ["Source"])
+            .segment("mid", ["Mid"])
+            .segment("sink", ["Echo"]),
+    )
+    .expect("valid test fixture");
+    let mut config = velo_hub::HubConfig::default();
+    config.server.public_port = 0;
+    config.server.control_port = 0;
+    let hub = velo_hub::Hub::builder(config)
+        .extension(gdl_hub::GraphAdmission::new(chain.clone()))
+        .serve()
+        .await
+        .expect("valid test fixture");
+    let (nf, ne, nt1, nt2) = (node().await, node().await, node().await, node().await);
+    let mut front = register(&chain, &hub, "front", &nf)
+        .await
+        .expect("front registers");
+    let mut mid = register(&chain, &hub, "mid", &ne)
+        .await
+        .expect("mid registers");
+    let mut first = register(&chain, &hub, "sink", &nt1)
+        .await
+        .expect("first sink registers");
+    let mut second = register(&chain, &hub, "sink", &nt2)
+        .await
+        .expect("second sink registers");
+    let one = [("front", 1), ("mid", 1), ("sink", 1)];
+    let two = [("front", 1), ("mid", 1), ("sink", 2)];
+    // The front takes its roster with one sink loaded: the second sink
+    // announces only once the front has its roster. The middle asks for
+    // both sinks, so its roster holds two.
+    let ((rf, rt2), rt1, re) = tokio::join!(
+        async {
+            let rf = front.roster(&one, WAIT).await;
+            (rf, second.roster(&one, WAIT).await)
+        },
+        first.roster(&one, WAIT),
+        mid.roster(&two, WAIT)
+    );
+    let (rf, rt1, rt2, re) = (
+        rf.expect("front's roster"),
+        rt1.expect("first sink's roster"),
+        rt2.expect("second sink's roster"),
+        re.expect("mid's roster"),
+    );
+    assert_eq!(rf.instances("sink").len(), 1);
+    assert_eq!(re.instances("sink").len(), 2);
+    // Sinks send to no one and wait for no one. The second sink has not
+    // started yet: the middle, which sends to both, keeps waiting, while
+    // the front, which sends to the middle, is done.
+    first
+        .ready(&rt1, &[], WAIT)
+        .await
+        .expect("a sink serves at once");
+    let short = Duration::from_millis(700);
+    let (mid_result, front_result) = tokio::join!(
+        mid.ready(&re, &["sink"], short),
+        front.ready(&rf, &["mid"], WAIT)
+    );
+    let Err(mid_error) = mid_result else {
+        panic!("the middle stopped waiting with a sink of its roster not serving");
+    };
+    assert!(
+        mid_error
+            .to_string()
+            .contains(&nt2.instance_id().to_string()),
+        "{mid_error}"
+    );
+    front_result.expect("the front is told the middle serves");
+    // Once the second sink serves, the middle is done too.
+    second
+        .ready(&rt2, &[], WAIT)
+        .await
+        .expect("the second sink serves");
+    mid.ready(&re, &["sink"], WAIT)
+        .await
+        .expect("the middle serves once its sinks do");
+    drop((front, mid, first, second));
+    hub.shutdown().await.expect("valid test fixture");
+}
+
+/// A forward path that leaves a segment and comes back makes the two
+/// segments send to each other. Each waits for the other to serve, so
+/// neither may wait before it announces.
+#[tokio::test]
+async fn a_returning_forward_path_does_not_deadlock_readiness() {
+    let back = DeploymentSpec::new(
+        Manifest {
+            name: "back".into(),
+            schema: 1,
+            nodes: vec![
+                NodeInfo {
+                    name: "S".into(),
+                    role: Role::Source,
+                    binding: None,
+                },
+                NodeInfo {
+                    name: "F".into(),
+                    role: Role::Forward,
+                    binding: Some("f".into()),
+                },
+                NodeInfo {
+                    name: "D".into(),
+                    role: Role::Sink,
+                    binding: Some("d".into()),
+                },
+            ],
             hops: vec![HopInfo {
-                outer: "Source".into(),
-                inner: "Echo".into(),
-                forward: vec![],
+                outer: "S".into(),
+                forward: vec!["F".into()],
+                inner: "D".into(),
                 backward: vec![],
-                forward_types: vec![TypeInfo::new("Request", true)],
+                forward_types: vec![
+                    TypeInfo::new("Request", true),
+                    TypeInfo::new("Request", true),
+                ],
                 backward_types: vec![TypeInfo::new("Reply", true)],
             }],
-        };
-        let spec = DeploymentSpec::new(
-            graph,
-            Placement::new()
-                .segment("front", ["Source"])
-                .segment("sink", ["Echo"]),
-        )
-        .expect("valid test fixture");
-        let mut config = velo_hub::HubConfig::default();
-        config.server.public_port = 0;
-        config.server.control_port = 0;
-        let hub = velo_hub::Hub::builder(config)
-            .extension(gdl_hub::GraphAdmission::new(spec.clone()))
-            .serve()
-            .await
-            .expect("valid test fixture");
-        let front = gdl::bind_node("127.0.0.1:0".parse().expect("valid test fixture"))
-            .await
-            .expect("valid test fixture");
-        let sink = gdl::bind_node("127.0.0.1:0".parse().expect("valid test fixture"))
-            .await
-            .expect("valid test fixture");
-        let public = hub.public_addr().port();
-        let control = hub.control_addr().port();
-        let mut wrong = spec.registration("front").expect("valid test fixture");
-        wrong.contract ^= 1;
-        assert!(
-            HubSession::register("127.0.0.1", public, control, &front, wrong)
-                .await
-                .is_err()
-        );
-        let mut a = HubSession::register(
-            "127.0.0.1",
-            public,
-            control,
-            &front,
-            spec.registration("front").expect("valid test fixture"),
-        )
+        },
+        Placement::new()
+            .segment("front", ["S", "D"])
+            .segment("mid", ["F"]),
+    )
+    .expect("valid test fixture");
+    let layout = gdl::layout(&back.graph, &back.placement).expect("valid test fixture");
+    let sends_to =
+        |segment: &str| -> Vec<String> { layout.sends_to(segment).into_iter().collect() };
+    let (front_to, mid_to) = (sends_to("front"), sends_to("mid"));
+    assert_eq!(
+        (front_to.as_slice(), mid_to.as_slice()),
+        (&["mid".to_string()][..], &["front".to_string()][..])
+    );
+    let mut config = velo_hub::HubConfig::default();
+    config.server.public_port = 0;
+    config.server.control_port = 0;
+    let hub = velo_hub::Hub::builder(config)
+        .extension(gdl_hub::GraphAdmission::new(back.clone()))
+        .serve()
         .await
         .expect("valid test fixture");
-        let mut b = HubSession::register(
-            "127.0.0.1",
-            public,
-            control,
-            &sink,
-            spec.registration("sink").expect("valid test fixture"),
-        )
+    let (nf, nm) = (node().await, node().await);
+    let mut front = register(&back, &hub, "front", &nf)
         .await
-        .expect("valid test fixture");
-        let segments = ["front", "sink"];
-        let wait = Duration::from_secs(2);
-        let roster = a.roster(&segments, wait).await.expect("valid test fixture");
-        assert_eq!(roster.instances("front").len(), 1);
-        assert_eq!(roster.instances("sink").len(), 1);
-        let (a_ready, b_ready) = tokio::join!(
-            a.ready(&roster, &segments, wait),
-            b.ready(&roster, &segments, wait)
-        );
-        a_ready.expect("valid test fixture");
-        b_ready.expect("valid test fixture");
-        drop(a);
-        drop(b);
-        drop(front);
-        drop(sink);
-        hub.shutdown().await.expect("valid test fixture");
-    })
-    .await
-    .expect("hub startup is bounded");
+        .expect("front registers");
+    let mut mid = register(&back, &hub, "mid", &nm)
+        .await
+        .expect("mid registers");
+    let one = [("front", 1), ("mid", 1)];
+    let (rf, rm) = tokio::join!(front.roster(&one, WAIT), mid.roster(&one, WAIT));
+    let (rf, rm) = (rf.expect("front's roster"), rm.expect("mid's roster"));
+    let front_to: Vec<&str> = front_to.iter().map(String::as_str).collect();
+    let mid_to: Vec<&str> = mid_to.iter().map(String::as_str).collect();
+    let (front_result, mid_result) = tokio::join!(
+        front.ready(&rf, &front_to, WAIT),
+        mid.ready(&rm, &mid_to, WAIT)
+    );
+    front_result.expect("the front serves");
+    mid_result.expect("the middle serves");
+    drop((front, mid));
+    hub.shutdown().await.expect("valid test fixture");
 }

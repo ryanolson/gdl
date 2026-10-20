@@ -42,8 +42,14 @@ pub(crate) fn offers(
         let (package, lib, source) = (listed.package.as_str(), listed.lib.as_str(), &listed.source);
         let extraction = match source {
             spec::CrateSource::Git { url, rev } => {
-                let workspace = gdl_extract::Workspace::fetch_git(package, url, rev, target)
-                    .map_err(|e| Error::new(e.to_string()))?;
+                let workspace = gdl_extract::Workspace::fetch_git(
+                    package,
+                    url,
+                    rev,
+                    target,
+                    &gdl_extract::Cargo::trusted(),
+                )
+                .map_err(|e| Error::new(e.to_string()))?;
                 let located = workspace
                     .locate(package)
                     .map_err(|e| Error::new(e.to_string()))?;
@@ -61,8 +67,11 @@ pub(crate) fn offers(
                 match workspaces.iter().find_map(|w| w.extract_in(dir)) {
                     Some(extraction) => extraction,
                     None => {
-                        let workspace = gdl_extract::Workspace::load(&dir.join("Cargo.toml"))
-                            .map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
+                        let workspace = gdl_extract::Workspace::load(
+                            &dir.join("Cargo.toml"),
+                            &gdl_extract::Cargo::trusted(),
+                        )
+                        .map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
                         let extraction = workspace.extract_in(dir).ok_or_else(|| {
                             Error::new(format!(
                                 "{}: cargo metadata resolves no package there",
@@ -80,8 +89,13 @@ pub(crate) fn offers(
                     .join(format!("fetch-{package}-{version}"));
                 let spec = format!("{package}@{version}");
                 let fail = |e: gdl_extract::Error| Error::new(format!("{spec}: {e}"));
-                let workspace =
-                    gdl_extract::Workspace::fetch(package, version, &scratch).map_err(fail)?;
+                let workspace = gdl_extract::Workspace::fetch(
+                    package,
+                    version,
+                    &scratch,
+                    &gdl_extract::Cargo::trusted(),
+                )
+                .map_err(fail)?;
                 let located = workspace.locate(&spec).map_err(fail)?;
                 // The spec named the library for the package; generated
                 // code names the crate by its library.

@@ -11,9 +11,12 @@
 | `agent-docs/plan.md` | The design and milestone plan, including design rulings |
 | `agent-docs/reviews/` | Review records for each milestone |
 | `agent-docs/perf/` | Measurements, with the command that produced them |
-| `crates/` | `gdl` (runtime), `gdl-model` (manifest, placement, layout, and diagrams, without the runtime; builds for wasm), `gdl-syntax` (graph parser shared by the macro and the generator), `gdl-message` (`derive(Message)` and the message catalogue, without the runtime), `gdl-extract` (reads what a crate offers from its source, without building it, and the working catalogue), `gdl-macros` (`graph!`, `derive(Message)`, `derive(Node)`, `#[export]`), `gdl-web` (the composer's page and server, on axum), `gdl-gen` (the `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `diagram`, `export`) |
+| `crates/` | `gdl` (runtime), `gdl-model` (manifest, placement, layout, and diagrams, without the runtime; builds for wasm), `gdl-syntax` (graph parser shared by the macro and the generator), `gdl-message` (`derive(Message)` and the message catalogue, without the runtime), `gdl-extract` (reads what a crate offers from its source, without building it, and the working catalogue), `gdl-macros` (`graph!`, `derive(Message)`, `derive(Node)`, `#[export]`), `gdl-web` (the composer's page and server, on axum), `gdl-gen` (the `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `diagram`, `export`, `compose`) |
 | `examples/chat` | A separate workspace: a graph file (`chat.gdl`), its protocols crate, node crates that mark their nodes with `derive(gdl::Node)`, and the generated contract and segments. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments`; never edit `segments/` by hand |
 | `examples/asr` | A separate workspace with a streamed request, generated segments, and a demo that runs them. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments` |
+| `examples/http` | A separate workspace: a hosted `Frontend` on axum, its graph, and a test that drives the generated service over HTTP |
+| `examples/api` | A separate workspace: a `Service` with three typed entry points sharing one engine, and the deployment spec that `cargo gdl compose` and the composer's Deploy tab use |
+| `crates/gdl-hub` | The discovery hub: velo-hub with admission restricted to one deployment's graph and placement |
 
 ## Build, lint, test
 
@@ -24,6 +27,9 @@ rustup target add wasm32-unknown-unknown            # once: gdl-model's tests ch
 cargo test --workspace --no-run                   # build first: the limit is for the tests
 timeout <limit> cargo test --workspace            # full suite
 timeout <limit> cargo test -p <crate> --test <t>   # one target
+node --test crates/gdl-web/tests/editor.cjs       # the composer's page, outside cargo
+(cd examples/http && timeout <limit> cargo test)  # the example workspaces are outside the root workspace
+(cd examples/api && timeout <limit> cargo test)
 ```
 
 - Always run tests under `timeout`, and size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once; a large fixed one hides it. Build first with `--no-run`, so that the limit does not have to cover compilation. Keep the measured times in agent memory, not here: they change as the suite does. Cargo prints each target's time (`finished in`).

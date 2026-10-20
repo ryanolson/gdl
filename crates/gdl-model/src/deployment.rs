@@ -2,6 +2,46 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Manifest, Placement, layout};
 
+/// The port the hub's public listener takes inside a deployment. Every
+/// segment, and the hub's own health check, reach the hub through it; it is
+/// named once so they cannot disagree.
+pub const HUB_PUBLIC_PORT: u16 = 1337;
+/// The port the hub's control listener takes inside a deployment.
+pub const HUB_CONTROL_PORT: u16 = 8337;
+
+/// The longest a segment name may be: a hub names a segment's readiness
+/// services `gdl-loaded-<hex>` and `gdl-serving-<hex>`, two characters
+/// per byte of the name, within velo-hub's 128.
+pub const SEGMENT_NAME_LIMIT: usize = 58;
+
+/// Why `name` cannot name a segment, if it cannot: the one rule the
+/// generator and the composer both apply. A segment is named in settings
+/// keys, where a key set in the environment arrives lowercased, and in a
+/// hub's service names, which have a narrow alphabet and a bound.
+pub fn segment_name_problem(name: &str) -> Option<String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Some(format!(
+            "segment `{name}`: a segment name is lowercase letters, digits, `-`, and `_`"
+        ));
+    }
+    if name.chars().any(|c| c.is_ascii_uppercase()) {
+        return Some(format!(
+            "segment `{name}`: a segment name is lowercase, so that `GDL_INSTANCES__{}` names it",
+            name.to_ascii_uppercase()
+        ));
+    }
+    if name.len() > SEGMENT_NAME_LIMIT {
+        return Some(format!(
+            "segment `{name}`: a segment name is at most {SEGMENT_NAME_LIMIT} characters, so that its hub services can be named"
+        ));
+    }
+    None
+}
+
 /// The graph and placement a deployment's discovery hub accepts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

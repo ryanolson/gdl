@@ -2,15 +2,16 @@
 //! into a working-catalogue entry, and `--verify`, which compares that with
 //! what a build of the crate registers.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use gdl_extract::{Catalog, Entry, Located, Offer, Workspace};
 
 use crate::Error;
 
-/// A crate to extract: a directory, or a version on its registry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A crate to extract: a directory, a version on its registry, or a
+/// package of a Git repository at a commit.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Crate {
     /// The crate in this directory.
     Path(PathBuf),
@@ -20,6 +21,19 @@ pub enum Crate {
         name: String,
         /// Its exact version.
         version: String,
+    },
+    /// A package of a Git repository at a commit: the one at `path` within
+    /// it, which must be the one cargo resolves by `name`.
+    Git {
+        /// The package name.
+        name: String,
+        /// The repository's URL.
+        url: String,
+        /// The commit.
+        rev: String,
+        /// The package's directory within the repository; empty for the
+        /// root.
+        path: PathBuf,
     },
 }
 
@@ -61,10 +75,19 @@ pub struct Extracted {
 /// Read what `krate` offers. Nothing is built; a registry crate is
 /// resolved from a manifest of our own under `target`. Every problem the
 /// reader meets is an error: an entry is written for a crate read whole.
-pub fn extract(krate: &Crate, target: &Path) -> Result<Extracted, Error> {
+pub fn extract(
+    krate: &Crate,
+    target: &Path,
+    cargo: &gdl_extract::Cargo,
+) -> Result<Extracted, Error> {
+    // Cargo reports absolute directories; a relative target (the default
+    // of both binaries) must compare as one.
+    let target = std::path::absolute(target)
+        .map_err(|e| Error::new(format!("{}: {e}", target.display())))?;
+    let target = target.as_path();
     let (workspace, located, extraction) = match krate {
         Crate::Path(dir) => {
-            let workspace = Workspace::load(&dir.join("Cargo.toml"))
+            let workspace = Workspace::load(&dir.join("Cargo.toml"), cargo)
                 .map_err(|e| Error::new(format!("{}: {e}", dir.display())))?;
             let missing = || {
                 Error::new(format!(
@@ -80,14 +103,58 @@ pub fn extract(krate: &Crate, target: &Path) -> Result<Extracted, Error> {
             let scratch = target
                 .join("gdl-gen")
                 .join(format!("fetch-{name}-{version}"));
-            let workspace = Workspace::fetch(name, version, &scratch)
+            let workspace = Workspace::fetch(name, version, &scratch, cargo)
                 .map_err(|e| Error::new(format!("{name}@{version}: {e}")))?;
             let spec = format!("{name}@{version}");
             let located = workspace
                 .locate(&spec)
                 .map_err(|e| Error::new(e.to_string()))?;
+            fetched_only(&workspace, &scratch)?;
             let extraction = workspace
                 .extract(&spec)
+                .map_err(|e| Error::new(e.to_string()))?;
+            (workspace, located, extraction)
+        }
+        Crate::Git {
+            name,
+            url,
+            rev,
+            path,
+        } => {
+            // Cargo resolves a Git package by name, as a generated crate's
+            // dependency will: the catalogue must say what the build will
+            // link. So the package is read through cargo, and refused when
+            // the one cargo resolves is not the directory chosen.
+            let workspace = Workspace::fetch_git(name, url, rev, target, cargo)
+                .map_err(|e| Error::new(e.to_string()))?;
+            let located = workspace
+                .locate(name)
+                .map_err(|e| Error::new(e.to_string()))?;
+            let chosen: PathBuf = path
+                .components()
+                .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                .collect();
+            // The package cargo resolved is the one chosen when it is the
+            // chosen path below the checkout's root.
+            let resolved = gdl_extract::checkout_root(&located.dir)
+                .and_then(|root| located.dir.strip_prefix(root).ok())
+                .ok_or_else(|| {
+                    Error::new(format!(
+                        "{}: not where cargo keeps its checkouts",
+                        located.dir.display()
+                    ))
+                })?;
+            if resolved != chosen {
+                return Err(Error::new(format!(
+                    "The repository has more than one package named `{name}`: a build would link `{}`, not `{}`. Rename one, or import the one cargo resolves.",
+                    resolved.display(),
+                    chosen.display()
+                )));
+            }
+            let scratch = Workspace::git_scratch(name, url, rev, target);
+            fetched_only(&workspace, &scratch)?;
+            let extraction = workspace
+                .extract(name)
                 .map_err(|e| Error::new(e.to_string()))?;
             (workspace, located, extraction)
         }
@@ -384,6 +451,58 @@ fn port(
         None => format!("{name}={}{nested}", one(head)),
         Some(item) => format!("{name}={} + stream {}{nested}", one(head), one(item)),
     }
+}
+
+/// Refuse a fetched package whose dependencies are not all fetched too: a
+/// path dependency naming a directory on this machine would be read here
+/// and fail to build anywhere else. Each package is judged by where cargo
+/// says it comes from and where, canonically, it put it: a registry
+/// package wherever cargo keeps it (a vendored directory source replaces
+/// one in place); every package of one Git source under one checkout
+/// root, the one holding the package cargo resolved for that source (a
+/// path dependency into another checkout, or through a committed symlink
+/// to a directory elsewhere, shows a second root or none); and no path
+/// package but the scratch manifest that asked. Cargo gives a Git
+/// package's path dependency its parent's Git source, so the source alone
+/// says nothing about where a package is; and a registry package's path
+/// dependency is stripped at publication, so the path arm is reached only
+/// by the scratch.
+fn fetched_only(workspace: &Workspace, scratch: &Path) -> Result<(), Error> {
+    let mut roots: BTreeMap<&str, BTreeSet<PathBuf>> = BTreeMap::new();
+    let packages: Vec<Located> = workspace.located_all().collect();
+    for package in &packages {
+        let kind = package.source.split('+').next().unwrap_or_default();
+        let dir = std::fs::canonicalize(&package.dir).unwrap_or_else(|_| package.dir.clone());
+        let fetched = match kind {
+            "registry" | "sparse" => true,
+            "git" => match gdl_extract::checkout_root(&dir) {
+                Some(root) => {
+                    roots
+                        .entry(package.source.as_str())
+                        .or_default()
+                        .insert(root.to_path_buf());
+                    true
+                }
+                None => false,
+            },
+            "path" => package.name == "gdl-extract-fetch" && package.dir.starts_with(scratch),
+            _ => false,
+        };
+        if !fetched {
+            return Err(Error::new(format!(
+                "package `{}` at {} is not a fetched package: a Git or registry package may not depend on a path on this machine",
+                package.name,
+                package.dir.display()
+            )));
+        }
+    }
+    if let Some((source, roots)) = roots.iter().find(|(_, roots)| roots.len() > 1) {
+        return Err(Error::new(format!(
+            "the packages of `{source}` are in {} checkouts; a Git package may not depend on a path outside its repository",
+            roots.len()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

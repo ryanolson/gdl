@@ -124,10 +124,16 @@ fn three_segment_binaries_answer_requests() {
         .env("CARGO_TARGET_DIR", target("examples"))
         .output()
         .expect("cargo build");
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(build.status.success(), "{stderr}");
+    // Generated code is built by people who deny warnings.
+    let warned: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("warning:") && line.contains("generated"))
+        .collect();
     assert!(
-        build.status.success(),
-        "{}",
-        String::from_utf8_lossy(&build.stderr)
+        warned.is_empty(),
+        "generated crates warned: {warned:?}\n{stderr}"
     );
     let bin = target("examples").join("debug");
 
@@ -545,5 +551,89 @@ fn a_segment_cannot_take_the_contract_directory() {
         error.contains("segment `contract`: the generated contract crate is `contract/`"),
         "{error}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A JSON-lines source stops on a signal while its input is open and idle:
+/// the graph stops, and the process does not wait on the read of stdin
+/// that never returns.
+#[cfg(unix)]
+#[test]
+fn a_json_lines_front_stops_on_a_signal_with_idle_input() {
+    let build = cargo()
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(example().join("Cargo.toml"))
+        .arg("--bins")
+        .env("CARGO_TARGET_DIR", target("examples"))
+        .output()
+        .expect("cargo build");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let bin = target("examples").join("debug");
+    let dir = std::env::temp_dir().join(format!("gdl-chat-signal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let roster = dir.join("roster");
+    std::fs::create_dir_all(&roster).expect("roster");
+    let config = |name: &str| {
+        let path = dir.join(format!("{name}.toml"));
+        std::fs::write(
+            &path,
+            format!(
+                "listen = \"127.0.0.1:0\"\nroster = {}\n",
+                toml::Value::String(roster.display().to_string())
+            ),
+        )
+        .expect("config");
+        path
+    };
+    let spawn = |name: &str, piped: bool| {
+        let mut command = Command::new(bin.join(name));
+        command
+            .arg(config(name.trim_start_matches("chat-")))
+            .stderr(Stdio::piped());
+        if piped {
+            command.stdin(Stdio::piped()).stdout(Stdio::null());
+        } else {
+            command.stdin(Stdio::null()).stdout(Stdio::null());
+        }
+        Running(command.spawn().expect(name))
+    };
+    let _engine = spawn("chat-engine", false);
+    let _post = spawn("chat-post", false);
+    let mut front = spawn("chat-front", true);
+    // The input stays open and idle.
+    let _stdin = front.0.stdin.take().expect("stdin");
+    let stderr = front.0.stderr.take().expect("stderr");
+    let (ready_tx, ready_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if line.contains("ready") {
+                let _ = ready_tx.send(());
+            }
+        }
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the front became ready");
+    let signalled = Command::new("kill")
+        .args(["-INT", &front.0.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(signalled.success());
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = front.0.try_wait().expect("the front's state") {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            panic!("the front did not stop on SIGINT while its input was idle");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status}");
     let _ = std::fs::remove_dir_all(&dir);
 }

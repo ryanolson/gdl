@@ -57,15 +57,26 @@ impl Placement {
         self
     }
 
-    /// Set the request router for the boundary entering `node`.
+    /// Set the request router for the boundary entering `node`. The default
+    /// policy is not recorded: a placement that spells it out is the same
+    /// placement, with the same hash, as one that leaves it unsaid.
     pub fn route(mut self, node: impl Into<String>, router: RequestRouter) -> Self {
-        self.routing.insert(node.into(), router);
+        let node = node.into();
+        if router == RequestRouter::default() {
+            self.routing.remove(&node);
+        } else {
+            self.routing.insert(node, router);
+        }
         self
     }
 
     /// Parse segment placement and request routing from a deployment file.
     pub fn from_toml(text: &str) -> Result<Self, Error> {
-        toml::from_str(text).map_err(|e| Error::new(e.to_string()))
+        let mut placement: Self = toml::from_str(text).map_err(|e| Error::new(e.to_string()))?;
+        placement
+            .routing
+            .retain(|_, router| *router != RequestRouter::default());
+        Ok(placement)
     }
 
     /// Segment names and their nodes, in name order.
@@ -187,6 +198,35 @@ impl Layout {
     /// The segment a node is placed in.
     pub fn segment_of(&self, node: &str) -> Option<&str> {
         self.segment_of.get(node).map(String::as_str)
+    }
+
+    /// The segments `segment` sends to: the next run of each forward path
+    /// it holds a run of, and the backward runs it opens as an outer end.
+    /// Replies ride stream anchors back and are not sends. A forward path
+    /// that leaves a segment and comes back makes two segments send to each
+    /// other, so this relation can have cycles.
+    pub fn sends_to(&self, segment: &str) -> BTreeSet<String> {
+        let mut targets = BTreeSet::new();
+        for hop in &self.hops {
+            for pair in hop.forward_runs.windows(2) {
+                if pair[0].segment == segment {
+                    targets.insert(pair[1].segment.clone());
+                }
+            }
+            if hop
+                .forward_runs
+                .first()
+                .is_some_and(|run| run.segment == segment)
+            {
+                for &run in &hop.provisioning {
+                    if let Some(run) = hop.backward_runs.get(run) {
+                        targets.insert(run.segment.clone());
+                    }
+                }
+            }
+        }
+        targets.remove(segment);
+        targets
     }
 
     /// The hops, outermost first.

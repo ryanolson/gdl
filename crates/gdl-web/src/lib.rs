@@ -38,6 +38,16 @@ pub struct Config {
     pub gdl: Gdl,
     /// Directory exposed by local browsing and imports; disabled when absent.
     pub local_root: Option<PathBuf>,
+    /// Names the server answers to besides `localhost` and IP addresses. A
+    /// request for any other name is refused: a page elsewhere whose DNS
+    /// name is pointed at this machine would otherwise be same-origin with
+    /// the server in the user's browser.
+    pub hosts: Vec<String>,
+    /// The executable that reads a crate for an import, run as a child
+    /// with `extract-child`: this server's own. Reading a crate the user
+    /// named means parsing whatever it holds, and a parser's stack or
+    /// memory giving out must end that child, not the server.
+    pub extractor: PathBuf,
 }
 
 struct Composer {
@@ -102,7 +112,75 @@ pub fn router(mut config: Config) -> Result<Router, String> {
         .route("/api/check", axum::routing::post(check))
         .route("/api/export", axum::routing::post(export))
         .route("/api/deploy", axum::routing::post(deploy))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&composer),
+            same_origin,
+        ))
         .with_state(composer))
+}
+
+/// Refuse a request the user's browser did not make to this server. A
+/// browser sends `Origin` with every cross-origin `POST`, including the
+/// "simple" ones that need no preflight, and `Sec-Fetch-Site` with every
+/// request; without this, a page elsewhere could clear the catalogue or
+/// start an import on the user's server through their browser. The `Host`
+/// is checked too, on every method: a DNS name an attacker points at this
+/// machine makes their page same-origin with the server, so the server
+/// answers only to `localhost`, IP addresses, and the names it was given.
+async fn same_origin(
+    State(composer): Shared,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let headers = request.headers();
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+    if let Some(host) = host
+        && !host_allowed(host, &composer.config.hosts)
+    {
+        return problems(
+            StatusCode::FORBIDDEN,
+            vec![format!(
+                "this server does not answer to the name `{host}`; reach it by IP address or localhost, or start it with --host"
+            )],
+        );
+    }
+    if request.method() != axum::http::Method::GET {
+        let origin = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok());
+        let same_host = match (origin, host) {
+            (None, _) => true,
+            (Some(origin), Some(host)) => origin
+                .strip_prefix("http://")
+                .or_else(|| origin.strip_prefix("https://"))
+                .is_some_and(|origin_host| origin_host == host),
+            (Some(_), None) => false,
+        };
+        let site = headers
+            .get("sec-fetch-site")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("same-origin");
+        if !same_host || !matches!(site, "same-origin" | "none") {
+            return problems(
+                StatusCode::FORBIDDEN,
+                vec!["a request from another origin cannot change this server".into()],
+            );
+        }
+    }
+    next.run(request).await
+}
+
+/// Whether `host` (a `Host` header, with or without a port) names this
+/// server: `localhost`, an IP address, or a name the server was given.
+fn host_allowed(host: &str, hosts: &[String]) -> bool {
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        host.rsplit_once(':').map_or(host, |(name, _)| name)
+    };
+    name.eq_ignore_ascii_case("localhost")
+        || name.parse::<std::net::IpAddr>().is_ok()
+        || hosts
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(name))
 }
 
 async fn app_js() -> Response {
@@ -145,18 +223,19 @@ async fn clear_catalog(State(composer): Shared) -> Response {
 async fn entries(State(composer): Shared) -> Response {
     let catalog = composer.catalog.read().expect("the catalogue lock");
     let entries: Vec<&gdl_extract::Entry> = catalog.entries().collect();
-    let url = "https://github.com/ryanolson/gdl";
-    let revision = match &composer.config.gdl {
-        Gdl::Git {
-            url: configured,
-            rev,
-        } if configured.trim_end_matches(".git") == url => rev.as_str(),
-        _ => "e2813e7f9af25a3a09f078b83360e0668d785b44",
+    // The example package lives in gdl's own repository, so the server
+    // offers it only when it takes gdl from Git, at that same revision.
+    let example = match &composer.config.gdl {
+        Gdl::Git { url, rev } => {
+            json!({"source": "git", "url": url, "revision": rev, "path": "examples/api"})
+        }
+        Gdl::Path(_) => serde_json::Value::Null,
     };
-    Json(
-        json!({ "entries": entries, "local_enabled": composer.config.local_root.is_some(),
-        "example": {"source":"git", "url":url, "revision":revision, "path":"examples/api"} }),
-    )
+    Json(json!({
+        "entries": entries,
+        "local_enabled": composer.config.local_root.is_some(),
+        "example": example,
+    }))
     .into_response()
 }
 
@@ -281,4 +360,19 @@ fn with_offers<T>(composer: &Composer, f: impl FnOnce(gdl_gen::Offers<'_>) -> T)
 
 fn problems(status: StatusCode, problems: Vec<String>) -> Response {
     (status, Json(json!({ "ok": false, "problems": problems }))).into_response()
+}
+
+/// Read one crate as the server's child, from the request the server
+/// passed (`gdl-web extract-child <request>`), and answer with the
+/// catalogue entry. Cargo is confined, as for anything a user named; the
+/// child's own memory and time are limited by the server that runs it.
+pub fn extract_child(request: &str) -> Result<String, String> {
+    let request: imports::ChildRequest =
+        serde_json::from_str(request).map_err(|e| e.to_string())?;
+    let cargo = gdl_extract::Cargo::confined_as_child(std::time::Duration::from_secs(
+        request.cargo_deadline_secs,
+    ));
+    let extracted =
+        gdl_gen::extract(&request.krate, &request.target, &cargo).map_err(|e| e.to_string())?;
+    serde_json::to_string(&extracted.entry(std::time::SystemTime::now())).map_err(|e| e.to_string())
 }

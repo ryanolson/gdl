@@ -1,6 +1,6 @@
 //! Run one graph discovery hub.
 use gdl_hub::GraphAdmission;
-use gdl_model::DeploymentSpec;
+use gdl_model::{DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT};
 use velo_hub::{Hub, HubConfig};
 
 #[tokio::main]
@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if path == "--healthcheck" {
         use std::io::{Read, Write};
         let mut stream = std::net::TcpStream::connect_timeout(
-            &"127.0.0.1:1337".parse()?,
+            &(std::net::Ipv4Addr::LOCALHOST, HUB_PUBLIC_PORT).into(),
             std::time::Duration::from_secs(1),
         )?;
         stream.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
@@ -25,7 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let spec: DeploymentSpec = serde_json::from_slice(&std::fs::read(path)?)?;
     let spec = DeploymentSpec::new(spec.graph, spec.placement)?;
-    Hub::builder(HubConfig::default())
+    let mut config = HubConfig::default();
+    config.server.public_port = HUB_PUBLIC_PORT;
+    config.server.control_port = HUB_CONTROL_PORT;
+    Hub::builder(config)
         .extension(GraphAdmission::new(spec))
         .serve()
         .await?

@@ -168,10 +168,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         } => {
             let beside = match krate {
                 gdl_gen::Crate::Path(dir) => dir.clone(),
-                gdl_gen::Crate::Registry { .. } => PathBuf::from("."),
+                gdl_gen::Crate::Registry { .. } | gdl_gen::Crate::Git { .. } => PathBuf::from("."),
             };
             let target = target(&beside);
-            let extracted = gdl_gen::extract(krate, &target)?;
+            let extracted = gdl_gen::extract(krate, &target, &gdl_extract::Cargo::trusted())?;
             if *verify {
                 gdl_gen::verify(&extracted, &target)?;
             }

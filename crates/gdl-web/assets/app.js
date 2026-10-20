@@ -1,8 +1,11 @@
-// The composer's page. It keeps a draft (the source, each hop's nodes,
-// and their segment placement), offers at each slot only the catalogue nodes whose
-// port carries the message that arrives there, and asks the server for
-// every verdict. It decides nothing itself: one copy of each rule, on the
-// server.
+// The composer's page. It keeps a draft (the source, each root's nodes,
+// their segment placement, and the routers at the boundaries), offers at
+// each slot only the catalogue nodes whose port carries the message that
+// arrives there, and asks the server for every verdict on what it would
+// generate. It judges a placement as it is edited (crossings, the codec a
+// crossing needs, what a cut carries with it) so the editor answers at
+// once; the server checks the same rules again before anything is
+// generated.
 
 "use strict";
 

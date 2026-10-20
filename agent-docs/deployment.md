@@ -10,7 +10,7 @@ The build bundle snapshots non-ignored Git worktree files for local dependencies
 
 ## Validation on 2026-10-19
 
-- Velo main: `d793db4cc4930e1e8e3a08eff23c4643f020608d`.
+- Velo: the Git revision `Cargo.toml` pins (0.21.0 at `1bbeb88` on 2026-10-20).
 - Hub integration: rejected a mismatched contract, discovered two admitted peers, and completed the readiness barrier over OS-assigned ports.
 - Generator unit tests: 86 passed. Model unit tests: 2 passed.
 - Deployment generation tests: 2 passed. Registration identity test: 1 passed.
@@ -20,7 +20,6 @@ The build bundle snapshots non-ignored Git worktree files for local dependencies
 - Browser: Graph retained 90% zoom after Segments was set to 80%. Deploy displayed four segments and downloaded a bundle with five services, per-segment Dockerfiles, the graph definition, and local sources.
 - Built all four generated binaries from the extracted source snapshot. Ran them with the hub as separate native processes. All four announced ready. The chat, responses, and messages HTTP endpoints each returned the two expected NDJSON stream items through the shared Echo sink.
 
-Native smoke-test transcript: `/tmp/gdl-native-run.log`. Native smoke-test driver: `/tmp/gdl-compose-native-check.py`. Downloaded bundle: `/Users/ryan/Downloads/composed-compose.tar.gz`. These are workstation artifacts, not repository fixtures.
 
 Docker is not installed on this workstation. The owner will run `docker compose up --build` on another machine. No container build or execution is claimed by the native checks.
 
@@ -29,3 +28,15 @@ Docker is not installed on this workstation. The owner will run `docker compose 
 This replaces the local source snapshot design above. Deploy accepts only Git or crates.io node and message packages. GDL and the hub must also use a Git or registry dependency. The generated Dockerfiles fetch dependencies through Cargo, and the bundle contains only generated files. Local packages remain available for development and graph editing, but deployment returns an error that names the packages to re-import.
 
 The public repository is `https://github.com/ryanolson/gdl`. `examples/api/deploy.toml` pins the API example and GDL to the same commit. Preview and download still share one generated file snapshot.
+
+## 2026-10-20 addendum: readiness protocol, dynamic instance counts
+
+This supersedes the one-replica rule above and records the owner's rulings of 2026-10-20. The roster is still a snapshot taken at startup; what changed is what it holds and when it is taken.
+
+- **Live, loaded, serving.** A segment registers with the hub as soon as its nodes are built, so the hub knows the process is live while the nodes load. Every node has `Build::ready`, immediate by default; once all resolve, the segment announces `loaded`. After `start` installs its handlers it announces `serving`.
+- **Rosters.** A segment waits for at least `[min_replicas]` loaded instances of each segment (one by default) and takes those as its roster. Every instance announces before it waits, so none waits for another that is waiting for it: a forward path that leaves a segment and comes back makes two segments send to each other. It then waits for every instance in its roster of the segments it sends to (`Layout::sends_to`) to be serving. Rosters need not agree, since the roster is held from the launch until that wait is over: a request that reaches an instance earlier waits at its roster, bounded by the runtime's setup timeout, instead of leaving for a peer whose handlers are not installed. How many instances a segment has is the deployment's business: the hub never refuses more, and `[instances]`, the exact count a roster directory needs, is an error under a hub.
+- **A roster directory** waits the same way: `[instances]` fixes the roster, each instance publishes that it serves, then waits for the instances of the segments it sends to.
+- **Where the launch lives.** `gdl::ProcessConfig` and `gdl::Launch` in the runtime own settings, discovery, the barriers, signals, and the hub lease; a generated binary declares what it hosts and calls them. The hub's ports are `gdl_model::HUB_PUBLIC_PORT` and `HUB_CONTROL_PORT`, named once.
+- **Settings.** Only the settings' own keys are read from `GDL_`, so the build scripts' `GDL_PROFILE` and `GDL_IMAGE_PREFIX` cannot stop a segment. Node tables are addressed by their names whatever the case of the variable. Exactly one of `roster` and `hub` is set. SIGTERM stops a segment as SIGINT does.
+- **Next (owner, 2026-10-20).** A health endpoint on each segment that answers live from the start and ready only once the graph is loaded and the barriers have passed. The phases above are the signal it would expose; the listener is not built.
+

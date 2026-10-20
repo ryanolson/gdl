@@ -27,6 +27,8 @@ pub(crate) struct Resolver<'a> {
     by_package: HashMap<usize, Option<usize>>,
     /// Problems met reading a crate's files.
     pub(crate) problems: Vec<String>,
+    /// What the extraction may still read, in bytes.
+    budget: u64,
     /// Within one query, each lookup of a name in a module by a viewer,
     /// and its answer: `None` while it is in progress. Globs can import
     /// each other, so a lookup met again on the way finds nothing new,
@@ -49,6 +51,7 @@ impl<'a> Resolver<'a> {
             crates: Vec::new(),
             by_package: HashMap::new(),
             problems: Vec::new(),
+            budget: crate::tree::TOTAL_LIMIT,
             known: HashMap::new(),
         }
     }
@@ -63,13 +66,31 @@ impl<'a> Resolver<'a> {
             .lib
             .clone()
             .map(|(name, root)| {
+                // A crate of the workspace may share files across its
+                // packages; one elsewhere, fetched from a registry or a Git
+                // checkout or a path dependency outside the workspace, has
+                // its own directory and nothing beyond it.
+                let info = &self.graph.packages[package];
+                let within = if info.source.starts_with("path+")
+                    && info.dir.starts_with(&self.graph.workspace_root)
+                {
+                    self.graph.workspace_root.as_path()
+                } else {
+                    // A Git checkout holds a whole repository, whose
+                    // packages may share files.
+                    crate::checkout_root(&info.dir).unwrap_or(info.dir.as_path())
+                };
                 let krate = Crate::read(
                     package,
                     &name,
                     &root,
+                    within,
                     self.settings,
                     &self.graph.packages[package].features,
-                    &mut self.problems,
+                    crate::tree::Ledger {
+                        problems: &mut self.problems,
+                        budget: &mut self.budget,
+                    },
                 );
                 self.crates.push(krate);
                 self.crates.len() - 1

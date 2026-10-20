@@ -87,19 +87,24 @@ impl Roster {
     }
 
     /// Publish `node` as serving in `dir`, then wait until every instance in
-    /// this roster has. Call it after the segment has started: a request
-    /// routed to an instance whose handlers do not exist yet fails, so no
-    /// instance may send before every instance it can route to is serving.
+    /// this roster of the segments this one sends to (`inner`) has. Call it
+    /// after the segment has started: a request routed to an instance whose
+    /// handlers do not exist yet fails, so no instance may send before every
+    /// instance it can route to is serving. The announcement comes first,
+    /// since two segments can send to each other.
     pub async fn ready(
         &self,
         dir: &Path,
         segment: &str,
         node: &Velo,
+        inner: &[&str],
         wait: Duration,
     ) -> Result<()> {
         publish(dir, segment, &peer(node))?;
         let want: BTreeSet<String> = self
-            .peers()
+            .segments()
+            .filter(|(segment, _)| inner.contains(segment))
+            .flat_map(|(_, peers)| peers)
             .map(|peer| peer.instance_id().to_string())
             .collect();
         let deadline = tokio::time::Instant::now() + wait;
@@ -237,13 +242,18 @@ mod tests {
         );
         let roster = roster.expect("front");
         assert_eq!(roster.instances("engine").len(), 2);
-        // One engine instance is serving; the other is still starting.
+        // One engine instance is serving; the other is still starting. An
+        // engine sends to no one and is done at once; the front, which
+        // sends to the engines, waits for both.
         roster
-            .ready(&ready, "engine", &first, Duration::from_millis(10))
+            .ready(&ready, "engine", &first, &[], Duration::from_millis(10))
             .await
-            .expect_err("the second engine and the front are not ready yet");
+            .expect("an instance that sends to no one is done at once");
         let short = Duration::from_millis(300);
-        let Err(error) = roster.ready(&ready, "front", &front, short).await else {
+        let Err(error) = roster
+            .ready(&ready, "front", &front, &["engine"], short)
+            .await
+        else {
             panic!("ready while an engine instance is still starting");
         };
         assert!(
@@ -253,9 +263,13 @@ mod tests {
             "{error}"
         );
         roster
-            .ready(&ready, "engine", &second, wait)
+            .ready(&ready, "engine", &second, &[], wait)
             .await
-            .expect("every instance is serving");
+            .expect("the second engine is done at once");
+        roster
+            .ready(&ready, "front", &front, &["engine"], wait)
+            .await
+            .expect("every instance the front sends to is serving");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

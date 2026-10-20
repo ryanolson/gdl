@@ -41,12 +41,136 @@ pub struct Workspace {
     settings: cfg::Settings,
 }
 
+/// How `cargo metadata` is run: as the user's own tool, or confined for
+/// crates the process did not write.
+#[derive(Debug, Clone, Copy)]
+pub struct Cargo {
+    deadline: Option<std::time::Duration>,
+    /// Whether a confined cargo gets a process group of its own, which the
+    /// deadline ends with its git; a process that is itself a confined
+    /// child keeps cargo in its own group instead, so that whoever ends
+    /// the child ends cargo too.
+    own_group: bool,
+}
+
+impl Cargo {
+    /// The user's own cargo, as the command line runs it, with every
+    /// configuration it finds.
+    pub fn trusted() -> Self {
+        Self {
+            deadline: None,
+            own_group: false,
+        }
+    }
+
+    /// Cargo for crates the process did not write. Git dependencies are
+    /// fetched through the `git` command over HTTP(S) only, without the
+    /// user's git configuration or credential helpers, and never prompt;
+    /// the compiler and wrappers are fixed, whatever a crate's own
+    /// `.cargo/config` says; and a run longer than `deadline` is killed,
+    /// with the git it spawned, so a dependency that never answers does
+    /// not hold the process or cargo's package lock. Cargo still runs from
+    /// the manifest's directory: a fetch's scratch under the target
+    /// directory, where the operator's own configuration (a mirror,
+    /// `net.offline`) applies, or a local directory the operator chose to
+    /// expose. A Git checkout is never that directory, so its
+    /// configuration and toolchain file do not apply.
+    pub fn confined(deadline: std::time::Duration) -> Self {
+        Self {
+            deadline: Some(deadline),
+            own_group: true,
+        }
+    }
+
+    /// [`Cargo::confined`], for a process that is itself a confined child
+    /// in a process group of its own: cargo stays in that group, so that
+    /// the parent ending the child ends cargo and its git at once, rather
+    /// than leaving them reparented with cargo's lock. At cargo's deadline
+    /// the child must end its own group after reporting, since cargo's git
+    /// has no group of its own to end.
+    pub fn confined_as_child(deadline: std::time::Duration) -> Self {
+        Self {
+            deadline: Some(deadline),
+            own_group: false,
+        }
+    }
+
+    pub(crate) fn deadline(&self) -> Option<std::time::Duration> {
+        self.deadline
+    }
+
+    pub(crate) fn own_group(&self) -> bool {
+        self.own_group
+    }
+}
+
+/// The most of a subprocess's error output that is kept, by cargo's run
+/// here and by a server's git: enough for any message worth relaying. A
+/// Git host that streams messages without end (git relays them, asked
+/// for progress or not) fills a pipe, not the process's memory.
+pub const OUTPUT_LIMIT: u64 = 2 << 20;
+
+/// The environment under which a git that touches a repository the
+/// process did not write runs: HTTP(S) only, no prompt, none of the user's
+/// configuration or credential helpers, and a transfer that stalls for a
+/// minute given up. For cargo's own git, and for a server's.
+pub fn confined_git_env() -> [(&'static str, &'static str); 16] {
+    [
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_COUNT", "6"),
+        ("GIT_CONFIG_KEY_0", "protocol.allow"),
+        ("GIT_CONFIG_VALUE_0", "never"),
+        ("GIT_CONFIG_KEY_1", "protocol.https.allow"),
+        ("GIT_CONFIG_VALUE_1", "always"),
+        ("GIT_CONFIG_KEY_2", "protocol.http.allow"),
+        ("GIT_CONFIG_VALUE_2", "always"),
+        ("GIT_CONFIG_KEY_3", "credential.helper"),
+        ("GIT_CONFIG_VALUE_3", ""),
+        ("GIT_CONFIG_KEY_4", "http.lowSpeedLimit"),
+        ("GIT_CONFIG_VALUE_4", "1"),
+        ("GIT_CONFIG_KEY_5", "http.lowSpeedTime"),
+        ("GIT_CONFIG_VALUE_5", "60"),
+    ]
+}
+
+/// The root of the Git checkout cargo keeps `dir` in, if any: the nearest
+/// directory above it that cargo marked complete with `.cargo-ok`, under
+/// its `git/checkouts`. A `.cargo-ok` a repository commits elsewhere is
+/// not under that directory, so it does not pass for the root.
+pub fn checkout_root(dir: &Path) -> Option<&Path> {
+    dir.ancestors().find(|candidate| {
+        candidate.join(".cargo-ok").is_file()
+            && candidate
+                .ancestors()
+                .nth(2)
+                .is_some_and(|checkouts| checkouts.ends_with("git/checkouts"))
+    })
+}
+
+/// End the process group led by `pid`: a command run in its own group
+/// takes the children it spawned with it, where killing it alone would
+/// leave them running, reparented, on a transfer no one wants.
+pub fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", "--", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
 impl Workspace {
     /// Resolve the workspace or package of `manifest` with `cargo metadata`,
     /// which downloads what it lacks and builds nothing.
-    pub fn load(manifest: &Path) -> Result<Self, Error> {
+    pub fn load(manifest: &Path, cargo: &Cargo) -> Result<Self, Error> {
         Ok(Self {
-            graph: metadata::Graph::load(manifest)?,
+            graph: metadata::Graph::load(manifest, cargo)?,
             settings: cfg::Settings::host()?,
         })
     }
@@ -54,7 +178,7 @@ impl Workspace {
     /// Resolve crate `name` at exactly `version`, from its registry, with a
     /// manifest of our own in `scratch` that depends on it alone. Nothing is
     /// built.
-    pub fn fetch(name: &str, version: &str, scratch: &Path) -> Result<Self, Error> {
+    pub fn fetch(name: &str, version: &str, scratch: &Path, cargo: &Cargo) -> Result<Self, Error> {
         // Both are written into a manifest, and callers name the scratch
         // directory with them: refuse anything a package name or a version
         // cannot hold before a file is written.
@@ -75,18 +199,30 @@ impl Workspace {
             "[package]\nname = \"gdl-extract-fetch\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
              publish = false\n\n[workspace]\n\n[dependencies]\n{name} = \"={version}\"\n"
         );
-        Self::fetch_manifest(&manifest, scratch)
+        Self::fetch_manifest(&manifest, scratch, cargo)
+    }
+
+    /// The scratch directory a Git fetch of `name` at `rev` from `url`
+    /// resolves in, under `target`.
+    pub fn git_scratch(name: &str, url: &str, rev: &str, target: &Path) -> std::path::PathBuf {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (name, url, rev).hash(&mut hash);
+        target
+            .join("gdl-gen")
+            .join(format!("git-{:016x}", hash.finish()))
     }
 
     /// Resolve a Git package at `rev` with Cargo, preserving Git origins for
     /// the package and its dependencies. Nothing is built.
-    pub fn fetch_git(name: &str, url: &str, rev: &str, target: &Path) -> Result<Self, Error> {
-        use std::hash::{Hash, Hasher};
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        (name, url, rev).hash(&mut hash);
-        let scratch = target
-            .join("gdl-gen")
-            .join(format!("git-{:016x}", hash.finish()));
+    pub fn fetch_git(
+        name: &str,
+        url: &str,
+        rev: &str,
+        target: &Path,
+        cargo: &Cargo,
+    ) -> Result<Self, Error> {
+        let scratch = Self::git_scratch(name, url, rev, target);
         let quote = |s: &str| toml::Value::String(s.into()).to_string();
         let manifest = format!(
             "[package]\nname = \"gdl-extract-fetch\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\ngdl_input = {{ package = {}, git = {}, rev = {} }}\n",
@@ -94,10 +230,10 @@ impl Workspace {
             quote(url),
             quote(rev)
         );
-        Self::fetch_manifest(&manifest, &scratch)
+        Self::fetch_manifest(&manifest, &scratch, cargo)
     }
 
-    fn fetch_manifest(manifest: &str, scratch: &Path) -> Result<Self, Error> {
+    fn fetch_manifest(manifest: &str, scratch: &Path, cargo: &Cargo) -> Result<Self, Error> {
         let src = scratch.join("src");
         std::fs::create_dir_all(&src).map_err(|e| Error(format!("{}: {e}", src.display())))?;
         // Adds of one crate at once share the scratch directory: each file is
@@ -116,7 +252,7 @@ impl Workspace {
         };
         write(&scratch.join("Cargo.toml"), manifest)?;
         write(&src.join("lib.rs"), "")?;
-        Self::load(&scratch.join("Cargo.toml"))
+        Self::load(&scratch.join("Cargo.toml"), cargo)
     }
 
     /// What package `spec` offers, and every problem met reading it. `spec`
@@ -148,6 +284,11 @@ impl Workspace {
         Some(self.located(self.graph.package_in(dir)?))
     }
 
+    /// Where every resolved package is, the workspace's own included.
+    pub fn located_all(&self) -> impl Iterator<Item = Located> + '_ {
+        (0..self.graph.packages.len()).map(|package| self.located(package))
+    }
+
     fn located(&self, package: usize) -> Located {
         let package = &self.graph.packages[package];
         Located {
@@ -155,6 +296,7 @@ impl Workspace {
             version: package.version.clone(),
             dir: package.dir.clone(),
             path: package.source.starts_with("path+"),
+            source: package.source.clone(),
             checksum: package.checksum.clone(),
             lib: package.lib.as_ref().map(|(name, _)| name.clone()),
         }
@@ -172,6 +314,9 @@ pub struct Located {
     pub dir: std::path::PathBuf,
     /// Whether it is a path package.
     pub path: bool,
+    /// Its source, as cargo names it: `path+`, `git+`, `registry+`, or
+    /// `sparse+`, then where.
+    pub source: String,
     /// The registry's checksum of its `.crate`; none for a path or git
     /// package.
     pub checksum: Option<String>,
@@ -389,8 +534,14 @@ mod git_tests {
             "file://{}",
             repo.canonicalize().expect("test fixture").display()
         );
-        let workspace = Workspace::fetch_git("protocols", &url, &commit, &dir.join("target"))
-            .expect("test fixture");
+        let workspace = Workspace::fetch_git(
+            "protocols",
+            &url,
+            &commit,
+            &dir.join("target"),
+            &Cargo::trusted(),
+        )
+        .expect("test fixture");
         let extracted = workspace.extract("protocols").expect("test fixture");
         assert!(extracted.problems.is_empty(), "{:?}", extracted.problems);
         assert_eq!(

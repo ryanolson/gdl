@@ -19,6 +19,7 @@ mod identity;
 mod items;
 #[cfg(feature = "json-lines")]
 mod json;
+mod process;
 mod role;
 mod service;
 mod streamed;
@@ -40,14 +41,16 @@ pub use error::{Error, ErrorKind, Result};
 pub use figment;
 pub use gdl_macros::{Config, Endpoints};
 pub use gdl_model::{
-    ConfigField, ConfigSchema, ConfigValue, CrossingReport, DeploymentSpec, GraphConfig, HopInfo,
-    HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement, PlacementError, PlacementErrors,
-    RequestRouter, Role, Run, SegmentRegistration, TypeInfo, WireReason, layout, resolve_config,
+    ConfigField, ConfigSchema, ConfigValue, CrossingReport, DeploymentSpec, GraphConfig,
+    HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo,
+    Placement, PlacementError, PlacementErrors, RequestRouter, Role, Run, SegmentRegistration,
+    TypeInfo, WireReason, layout, resolve_config,
 };
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 #[cfg(feature = "json-lines")]
 pub use json::serve_json_lines;
+pub use process::{Hosted, Launch, ProcessConfig, segment_main};
 pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
 pub use service::{Client, Endpoints, Join, Service};
 pub use streamed::Streamed;

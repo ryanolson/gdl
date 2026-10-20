@@ -3,11 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use gdl_extract::{Catalog, Entry, Workspace};
+use gdl_extract::{Cargo, Catalog, Entry, Workspace};
 
 fn workspace() -> Workspace {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/read/Cargo.toml");
-    Workspace::load(&manifest).expect("cargo metadata")
+    Workspace::load(&manifest, &Cargo::trusted()).expect("cargo metadata")
 }
 
 /// `entry`, as if it came from crates.io: a published version, which is

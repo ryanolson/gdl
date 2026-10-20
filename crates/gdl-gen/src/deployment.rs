@@ -48,6 +48,11 @@ use crate::{
 
 /// Render a Docker Compose deployment from Git or registry dependencies.
 pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
+    // A deployment discovers its segments through the hub, whether or not
+    // the spec says anything else about it.
+    let mut spec = spec.clone();
+    let settings = spec.deployment.get_or_insert_with(Default::default).clone();
+    let spec = &spec;
     let Source::Graph(source) = &spec.source else {
         return Err(Error::new(
             "Deploy requires a graph definition with Git or crates.io packages, not a local contract crate",
@@ -84,13 +89,30 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
     let (mut files, graph) =
         crate::render_with(spec, out, target, emit::Deps::Exported, Offers::Read)?;
     let checked = crate::check(spec, target, Offers::Read)?;
+    // A source without a frontend is served on stdin, which a container
+    // has none of: the segment would read end of file and stop, ready.
+    // A graph spec pins in its `[nodes]` table, a contract spec in `[bind]`.
+    let pinned = |name: &str| {
+        spec.bind.contains_key(name)
+            || matches!(&spec.source, Source::Graph(g) if g.node_pins.contains_key(name))
+    };
+    if !checked
+        .manifest
+        .nodes
+        .iter()
+        .any(|n| n.role == gdl_model::Role::Source && pinned(&n.name))
+    {
+        return Err(Error::new(
+            "Deploy requires a frontend pinned on a source: without one, the source segment reads requests from stdin, which a container does not provide",
+        ));
+    }
     let deployment = gdl_model::DeploymentSpec::new(checked.manifest, spec.placement.clone())
         .map_err(|e| Error::new(e.to_string()))?;
     files.insert(
         "deployment.json".into(),
         serde_json::to_string_pretty(&deployment).map_err(|e| Error::new(e.to_string()))?,
     );
-    let settings = &spec.deployment;
+    let settings = &settings;
     for image in [&settings.base_image, &settings.build_image]
         .into_iter()
         .chain(settings.hub_image.iter())
@@ -158,7 +180,7 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
         files.insert(
             Path::new(segment).join("config.toml"),
             format!(
-                "# {}\nlisten = \"0.0.0.0:9000\"\nhub = \"hub\"\nrendezvous_ms = 60000\n",
+                "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n[hub]\nhost = \"hub\"\n",
                 emit::MARKER
             ),
         );
@@ -180,7 +202,7 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
         serde_json::to_string_pretty(&json!({"services":services}))
             .map_err(|e| Error::new(e.to_string()))?,
     );
-    files.insert("README.md".into(), "# Docker Compose deployment\n\nRun `docker compose up --build` from this directory. The hub starts first; every segment registers its compiled contract and waits for all handlers to be ready.\n\nConfigure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.\n\nThis deployment uses one replica per segment and a startup roster. Restart the whole stack after replacing a segment. Kubernetes and srt-slurm are not generated.\n".into());
+    files.insert("README.md".into(), "# Docker Compose deployment\n\nRun `docker compose up --build` from this directory. The hub starts first; every segment registers its compiled contract and waits for all handlers to be ready.\n\nConfigure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.\n\nEach segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that joins later is not routed to by the segments already running, so scale before they start, or restart the stack. Kubernetes and srt-slurm are not generated.\n".into());
     Ok(files)
 }
 

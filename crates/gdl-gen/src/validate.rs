@@ -5,6 +5,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{Error, Spec, dump, emit, paths, spec};
 
+/// `a`, `b`, and `c`: names in backquotes.
+fn list(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+    quoted.join(", ")
+}
+
 /// The message crates whose library takes a name that the generated
 /// contract uses for another crate: `gdl`, or the contract's own.
 pub(crate) fn library_clashes(contract: &str, crates: &[spec::ListedCrate]) -> Vec<String> {
@@ -53,22 +59,28 @@ pub(crate) fn validate(
         .iter()
         .chain(entry_nodes.iter().map(|n| (&n.name, &n.bind)))
         .collect();
-    let source_name = manifest
+    let sources: Vec<&str> = manifest
         .nodes
         .iter()
-        .find(|n| n.role == gdl_model::Role::Source)
+        .filter(|n| n.role == gdl_model::Role::Source)
         .map(|n| n.name.as_str())
-        .unwrap_or("");
-
-    if spec.service.is_none()
-        && spec.bind.contains_key(source_name)
-        && manifest
-            .nodes
-            .iter()
-            .filter(|n| n.role == gdl_model::Role::Source)
-            .count()
-            > 1
-    {
+        .collect();
+    // The source that hosts the frontend is the one the spec pins, whatever
+    // the order of declaration: a pin on any other root would otherwise be
+    // dropped without a word.
+    let pinned: Vec<&str> = sources
+        .iter()
+        .copied()
+        .filter(|s| spec.bind.contains_key(*s))
+        .collect();
+    if pinned.len() > 1 {
+        problems.push(format!(
+            "sources {} each have an implementation; one source hosts the frontend",
+            list(&pinned.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        ));
+    }
+    let source_name = pinned.first().copied().unwrap_or("");
+    if spec.service.is_none() && !pinned.is_empty() && sources.len() > 1 {
         problems.push("multiple pipeline roots require a service frontend".into());
     }
     if !spec.entry.is_empty() && spec.service.is_none() {
@@ -131,22 +143,16 @@ pub(crate) fn validate(
         if hosted.contains(source_name) {
             hosted.extend(entry_names.iter().copied());
         }
-        let valid = !segment.is_empty()
-            && segment
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        if !valid {
-            problems.push(format!(
-                "segment `{segment}`: a segment name is letters, digits, `-`, and `_`"
-            ));
-            continue;
-        }
         // The generated contract is written to `contract/`, whatever its
         // package is called; case is folded for file systems that fold it.
         if graph_spec && segment.eq_ignore_ascii_case("contract") {
             problems.push(format!(
                 "segment `{segment}`: the generated contract crate is `contract/`; rename the segment"
             ));
+            continue;
+        }
+        if let Some(problem) = gdl_model::segment_name_problem(segment) {
+            problems.push(problem);
             continue;
         }
         let package = emit::package(manifest, segment);

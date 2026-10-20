@@ -60,6 +60,15 @@ pub(crate) struct EntryHop {
     pub(crate) backward: Vec<EntryNode>,
 }
 impl EntryHop {
+    /// The roots this arm joins, through its nested arms.
+    pub(crate) fn targets(&self) -> Vec<&str> {
+        let mut targets: Vec<&str> = self.target.iter().map(String::as_str).collect();
+        if let Some(nested) = &self.nested {
+            targets.extend(nested.targets());
+        }
+        targets
+    }
+
     fn nodes(&self) -> Vec<&EntryNode> {
         let mut nodes: Vec<_> = self
             .forward
@@ -237,7 +246,17 @@ pub(crate) fn bind(
     offers: &[Offer],
     messages: &BTreeMap<String, crate::Resolved>,
 ) {
-    let source = graph.source().ident.to_string();
+    // The frontend's root is the pinned source; validation reports more
+    // than one.
+    let mut pinned = graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.sig, Sig::Source { .. }))
+        .map(|node| node.ident.to_string())
+        .filter(|name| spec.bind.contains_key(name));
+    let (Some(source), None) = (pinned.next(), pinned.next()) else {
+        return;
+    };
     let Some(frontend) = spec.bind.get(&source) else {
         return;
     };

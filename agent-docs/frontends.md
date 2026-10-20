@@ -79,6 +79,8 @@ Tests cover graph field visibility, default and override validation, enabled-ent
 
 Runtime checks on this macOS host use an isolated copy of velo 0.19.0 with its Linux-only socket option guarded. The repository still pins the published dependency. Unpatched builds remain blocked by that dependency's macOS compile error.
 
+*Correction, 2026-10-20:* the repository now pins velo by Git revision, and the suite builds and passes on macOS unpatched. The paragraph above records how the evidence was gathered on 2026-10-19.
+
 ## Entry arms and compact workspace — 2026-10-19
 
 This addendum replaces the one-operator entry restriction above. Each `[entry.name]` table now describes a pipeline arm. `forward` and `backward` list implementations in execution order. An `operator` owns a `nested` arm. An arm without an operator joins the shared internal pipeline. Generation checks every edge and the response returned to each caller.

@@ -1,0 +1,5 @@
+error[E0425]: cannot find type `SourceReq` in this scope
+  --> tests/ui/graph-two-roots-no-aliases.rs:17:12
+   |
+17 |     let _: SourceReq = 0u32;
+   |            ^^^^^^^^^ not found in this scope

@@ -106,15 +106,18 @@ impl std::fmt::Display for Location {
 }
 
 impl Crate {
-    /// Read the crate whose root file is `root`. Files that do not parse or
-    /// cannot be found are problems; the rest is read.
+    /// Read the crate whose root file is `root`, and whose files are all
+    /// under `within` and, with every other crate of the extraction, within
+    /// `budget`. Files that do not parse, cannot be found, are elsewhere,
+    /// or are on their own module path are problems; the rest is read.
     pub(crate) fn read(
         package: usize,
         name: &str,
         root: &Path,
+        within: &Path,
         settings: &Settings,
         features: &[String],
-        problems: &mut Vec<String>,
+        ledger: Ledger<'_>,
     ) -> Self {
         let mut krate = Self {
             package,
@@ -124,7 +127,9 @@ impl Crate {
         let mut reader = Reader {
             settings,
             features,
-            problems,
+            ledger,
+            within: std::fs::canonicalize(within).unwrap_or_else(|_| within.to_path_buf()),
+            open: Vec::new(),
         };
         krate
             .modules
@@ -151,18 +156,107 @@ impl Module {
     }
 }
 
+/// What one extraction shares across every crate it reads: the problems
+/// met, and what it may still read, in bytes. Many files backed by one
+/// blob cost a repository nothing and the reader everything, and a chain
+/// of files each naming the next twice doubles at every level, so the
+/// budget is for the extraction, not the crate.
+pub(crate) struct Ledger<'a> {
+    pub(crate) problems: &'a mut Vec<String>,
+    pub(crate) budget: &'a mut u64,
+}
+
 struct Reader<'a> {
     settings: &'a Settings,
     features: &'a [String],
-    problems: &'a mut Vec<String>,
+    ledger: Ledger<'a>,
+    /// The directory the crate's files must be under: a crate read from a
+    /// registry or a Git checkout may not name a file elsewhere through
+    /// `#[path]`, and a device or a file of any size is not a module.
+    within: PathBuf,
+    /// The files whose items are being read, outermost first: a `#[path]`
+    /// that names one of them is a cycle. A file named twice as two
+    /// modules is read twice, as rustc reads it; the budget bounds that.
+    open: Vec<PathBuf>,
 }
+
+/// The most a module file may hold. Generated bindings run to megabytes;
+/// nothing a person wrote runs to sixteen.
+const FILE_LIMIT: u64 = 16 << 20;
+
+/// The most one extraction reads in all. The reader keeps about forty
+/// times a source byte in memory, so this is well under a gigabyte.
+pub(crate) const TOTAL_LIMIT: u64 = 16 << 20;
+
+/// The least a file costs the budget: a chain of tiny files is bounded by
+/// their number, not their bytes.
+const LEAST_CHARGE: u64 = 4 << 10;
 
 impl Reader<'_> {
     fn file(&mut self, path: &Path) -> Option<Vec<Item>> {
+        let canonical = match std::fs::canonicalize(path) {
+            Ok(canonical) => canonical,
+            Err(e) => {
+                self.ledger
+                    .problems
+                    .push(format!("{}: cannot be read: {e}", path.display()));
+                return None;
+            }
+        };
+        if !canonical.starts_with(&self.within) {
+            self.ledger.problems.push(format!(
+                "{}: outside the package's directory {}; not read",
+                path.display(),
+                self.within.display()
+            ));
+            return None;
+        }
+        if self.open.contains(&canonical) {
+            self.ledger.problems.push(format!(
+                "{}: a module file on its own module path; the `#[path]` cycle is not read",
+                path.display()
+            ));
+            return None;
+        }
+        match std::fs::metadata(&canonical) {
+            Ok(meta) if !meta.is_file() => {
+                self.ledger
+                    .problems
+                    .push(format!("{}: not a regular file", path.display()));
+                return None;
+            }
+            Ok(meta) if meta.len() > FILE_LIMIT => {
+                self.ledger.problems.push(format!(
+                    "{}: larger than {} MiB; not read",
+                    path.display(),
+                    FILE_LIMIT >> 20
+                ));
+                return None;
+            }
+            Ok(meta) => {
+                let charge = meta.len().max(LEAST_CHARGE);
+                if charge > *self.ledger.budget {
+                    self.ledger.problems.push(format!(
+                        "{}: the files read for this extraction exceed {} MiB in all; not read",
+                        path.display(),
+                        TOTAL_LIMIT >> 20
+                    ));
+                    return None;
+                }
+                *self.ledger.budget -= charge;
+            }
+            Err(e) => {
+                self.ledger
+                    .problems
+                    .push(format!("{}: cannot be read: {e}", path.display()));
+                return None;
+            }
+        }
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) => {
-                self.problems
+                self.ledger
+                    .problems
                     .push(format!("{}: cannot be read: {e}", path.display()));
                 return None;
             }
@@ -175,7 +269,7 @@ impl Reader<'_> {
             }),
             Err(e) => {
                 let start = e.span().start();
-                self.problems.push(format!(
+                self.ledger.problems.push(format!(
                     "{}:{}:{}: does not parse: {e}",
                     path.display(),
                     start.line,
@@ -214,6 +308,23 @@ impl Reader<'_> {
     /// to `base`: the file's directory at the top of a file, and `dir` in
     /// an inline module.
     fn items(
+        &mut self,
+        krate: &mut Crate,
+        module: usize,
+        items: &[Item],
+        file: &Path,
+        dir: &Path,
+        base: &Path,
+    ) {
+        // The file is open while its items are read, including those of
+        // the modules it holds inline.
+        self.open
+            .push(std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf()));
+        self.items_of(krate, module, items, file, dir, base);
+        self.open.pop();
+    }
+
+    fn items_of(
         &mut self,
         krate: &mut Crate,
         module: usize,

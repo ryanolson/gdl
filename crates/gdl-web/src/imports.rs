@@ -75,17 +75,65 @@ pub(crate) async fn add(State(composer): Shared, Json(add): Json<Add>) -> Respon
     }
 }
 
+/// What the child reads: the crate, where cargo may fetch, and how long
+/// cargo may take.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct ChildRequest {
+    pub(crate) krate: gdl_gen::Crate,
+    pub(crate) target: PathBuf,
+    pub(crate) cargo_deadline_secs: u64,
+}
+
+/// How much a child reading one crate may take: enough for any crate a
+/// person wrote, and the end of one a repository made to exhaust the
+/// reader. The memory limit is advisory where the shell cannot set it.
+const CHILD_MEMORY_KIB: u64 = 4 << 20;
+const CHILD_CPU_SECONDS: u64 = 600;
+const CHILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(360);
+/// How long the child's cargo may take, within the child's own deadline.
+const CARGO_DEADLINE_SECS: u64 = 300;
+
+/// Read `krate` in a child process, with its memory and time limited, in
+/// its own process group: a crate that makes the reader run out of stack
+/// or memory, or never finish, is refused, and the server goes on.
 async fn extract(
     composer: Arc<Composer>,
     krate: gdl_gen::Crate,
 ) -> Result<gdl_extract::Entry, String> {
-    tokio::task::spawn_blocking(move || {
-        gdl_gen::extract(&krate, &composer.config.target)
-            .map(|extracted| extracted.entry(std::time::SystemTime::now()))
-            .map_err(|e| e.to_string())
+    let request = serde_json::to_string(&ChildRequest {
+        krate,
+        target: composer.config.target.clone(),
+        cargo_deadline_secs: CARGO_DEADLINE_SECS,
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let mut command = tokio::process::Command::new("sh");
+    command.args([
+        "-c",
+        &format!(
+            "ulimit -v {CHILD_MEMORY_KIB} 2>/dev/null; ulimit -t {CHILD_CPU_SECONDS} 2>/dev/null; exec \"$0\" extract-child \"$1\""
+        ),
+    ]);
+    command.arg(&composer.config.extractor).arg(request);
+    let output = run_bounded(command, CHILD_DEADLINE).await.map_err(|e| {
+        if e.starts_with(OUTPUT_OVERFLOW) {
+            format!(
+                "The crate offers more than an import may hold ({} MiB).",
+                gdl_extract::OUTPUT_LIMIT >> 20
+            )
+        } else {
+            e
+        }
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "The crate could not be read: the reader was stopped before it finished, so the crate needs more memory or time than an import is allowed.".to_string()
+        } else {
+            stderr
+        });
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("the reader's answer did not parse: {e}"))
 }
 
 fn local_path(composer: &Composer, path: &Path) -> Result<PathBuf, &'static str> {
@@ -204,29 +252,51 @@ async fn git(
     }) {
         return Err("Package path must be relative to the repository.".into());
     }
-    let checkout = tempfile::tempdir().map_err(|e| e.to_string())?;
-    git_command(checkout.path(), &["init", "--quiet"]).await?;
-    git_fetch(checkout.path(), url, revision).await?;
-    git_command(
-        checkout.path(),
-        &["checkout", "--quiet", "--detach", "FETCH_HEAD"],
-    )
-    .await?;
-    let commit = git_command(checkout.path(), &["rev-parse", "HEAD"])
+    // The manifest is read from the fetched objects, not from a working
+    // tree: nothing is checked out, so a symlink is its link text (and
+    // refused by its mode), and the blob's size is known before it is read.
+    let repo = tempfile::tempdir().map_err(|e| e.to_string())?;
+    git_command(repo.path(), &["init", "--quiet"]).await?;
+    git_fetch(repo.path(), url, revision).await?;
+    let commit = git_command(repo.path(), &["rev-parse", "FETCH_HEAD"])
         .await?
         .trim()
         .to_string();
-    let package = checkout
-        .path()
-        .join(path)
-        .canonicalize()
-        .map_err(|_| "Package directory does not exist in this revision.")?;
-    if !package.starts_with(checkout.path().canonicalize().map_err(|e| e.to_string())?) {
-        return Err("Package directory points outside the repository.".into());
+    let manifest_path = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .chain(["Cargo.toml"])
+        .collect::<Vec<_>>()
+        .join("/");
+    let listed = git_command(
+        repo.path(),
+        &["ls-tree", "FETCH_HEAD", "--", &manifest_path],
+    )
+    .await?;
+    let mode = listed.split_whitespace().next().unwrap_or_default();
+    match mode {
+        "100644" | "100755" => {}
+        "" => {
+            return Err(
+                "No Cargo.toml at this path; choose the package directory within the repository."
+                    .into(),
+            );
+        }
+        _ => return Err("Cargo.toml is not a regular file in this revision.".into()),
     }
-    let manifest = std::fs::read_to_string(package.join("Cargo.toml")).map_err(
-        |_| "No Cargo.toml at this path; choose the package directory within the repository.",
-    )?;
+    let object = format!("FETCH_HEAD:{manifest_path}");
+    let size: u64 = git_command(repo.path(), &["cat-file", "-s", &object])
+        .await?
+        .trim()
+        .parse()
+        .map_err(|_| "Cargo.toml has no size.".to_string())?;
+    if size > MANIFEST_LIMIT {
+        return Err("Cargo.toml is larger than 1 MiB.".into());
+    }
+    let manifest = git_command(repo.path(), &["cat-file", "-p", &object]).await?;
     let manifest: toml::Value =
         toml::from_str(&manifest).map_err(|e: toml::de::Error| e.to_string())?;
     let name = manifest
@@ -235,28 +305,21 @@ async fn git(
         .and_then(toml::Value::as_str)
         .ok_or("This is a workspace root. Enter the path to a package within it.")?
         .to_string();
-    let url = url.to_string();
-    let target = composer.config.target.clone();
-    tokio::task::spawn_blocking(move || {
-        let workspace = gdl_extract::Workspace::fetch_git(&name, &url, &commit, &target)
-            .map_err(|e| e.to_string())?;
-        let extracted = workspace.extract(&name).map_err(|e| e.to_string())?;
-        if !extracted.problems.is_empty() {
-            return Err(extracted.problems.join("\n"));
-        }
-        Ok(gdl_extract::Entry {
-            added: gdl_extract::rfc3339(std::time::SystemTime::now()),
-            checksum: None,
-            offer: extracted.offer,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    drop(repo);
+    let krate = gdl_gen::Crate::Git {
+        name,
+        url: url.to_string(),
+        rev: commit,
+        path: path.to_path_buf(),
+    };
+    extract(composer.clone(), krate).await
 }
 
 async fn git_fetch(dir: &Path, url: &str, revision: &str) -> Result<String, String> {
-    // An exact identity rewrite wins over workstation-wide HTTPS-to-SSH prefixes.
-    // Keep the import on its validated HTTP transport without changing user config.
+    // An exact identity rewrite wins over any HTTPS-to-SSH prefix that
+    // reached git despite its configuration being set aside. The package's
+    // own Git dependencies are fetched by cargo, which the server's child
+    // confines the same way (`gdl_extract::Cargo::confined_as_child`).
     let rewrite = format!("url.{url}.insteadOf={url}");
     git_command(
         dir,
@@ -274,35 +337,177 @@ async fn git_fetch(dir: &Path, url: &str, revision: &str) -> Result<String, Stri
     .await
 }
 
+/// The most a manifest may hold: a `Cargo.toml` is a page, not a megabyte.
+const MANIFEST_LIMIT: u64 = 1 << 20;
+
+/// Run git on a repository the user named, under the same confinement as
+/// cargo's git: no configuration or credential helper of the user's, no
+/// prompt, HTTP(S) only; in its own process group, which dies with the
+/// command, at the deadline or when the request is abandoned, so that a
+/// transfer no one waits for does not keep its `remote-http` helper.
 async fn git_command(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        tokio::process::Command::new("git")
-            .current_dir(dir)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args([
-                "-c",
-                "protocol.allow=never",
-                "-c",
-                "protocol.https.allow=always",
-                "-c",
-                "protocol.http.allow=always",
-            ])
-            .args(args)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| "Git operation timed out.".to_string())?
-    .map_err(|e| e.to_string())?;
+    let mut command = tokio::process::Command::new("git");
+    command
+        .current_dir(dir)
+        .envs(gdl_extract::confined_git_env())
+        .args(args);
+    let output = run_bounded(command, std::time::Duration::from_secs(120)).await?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Run `command` to completion within `deadline`. Its answer, on stdout,
+/// is refused past `gdl_extract::OUTPUT_LIMIT` rather than cut; its
+/// messages, on stderr, are kept to the limit and the rest discarded as it
+/// arrives, so a host that never stops talking fills a pipe, not the
+/// server's memory. The command's process group ends with the command,
+/// whatever ended it: when it finishes, at the deadline, or when this
+/// future is dropped before it finished.
+async fn run_bounded(
+    mut command: tokio::process::Command,
+    deadline: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let group = Group(child.id());
+    let finished = async {
+        let (stdout, stderr, status) = tokio::join!(
+            keep(child.stdout.take()),
+            keep(child.stderr.take()),
+            child.wait()
+        );
+        status.map(|status| std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    };
+    let mut output = match tokio::time::timeout(deadline, finished).await {
+        Ok(output) => output.map_err(|e| e.to_string())?,
+        Err(_) => return Err(format!("The operation timed out after {deadline:?}.")),
+    };
+    // Whatever ended the command, nothing it started outlives its answer:
+    // a child killed from outside while its cargo ran would otherwise
+    // leave that cargo, with no deadline, holding cargo's lock.
+    drop(group);
+    // An answer that was cut would be parsed as something else; a message
+    // that was cut is still a message.
+    if output.stdout.len() as u64 > gdl_extract::OUTPUT_LIMIT {
+        return Err(format!(
+            "{OUTPUT_OVERFLOW} {} MiB.",
+            gdl_extract::OUTPUT_LIMIT >> 20
+        ));
+    }
+    output.stderr.truncate(gdl_extract::OUTPUT_LIMIT as usize);
+    Ok(output)
+}
+
+const OUTPUT_OVERFLOW: &str = "The answer was larger than";
+
+/// The first `OUTPUT_LIMIT` bytes of `stream` and one more, so that the
+/// caller can tell a stream that was cut from one that fit; the rest is
+/// read and dropped.
+async fn keep<R: tokio::io::AsyncRead + Unpin>(stream: Option<R>) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut kept = Vec::new();
+    if let Some(mut stream) = stream {
+        let _ = (&mut stream)
+            .take(gdl_extract::OUTPUT_LIMIT + 1)
+            .read_to_end(&mut kept)
+            .await;
+        let _ = tokio::io::copy(&mut stream, &mut tokio::io::sink()).await;
+    }
+    kept
+}
+
+/// The process group of a git command, ended when the command's future
+/// is dropped before the command finished: at the deadline, or when the
+/// request it served was abandoned.
+struct Group(Option<u32>);
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            gdl_extract::kill_process_group(pid);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// A command's error output is kept only up to the limit, the rest read
+    /// and dropped, so a host that never stops talking costs a pipe, not
+    /// the server's memory; an answer past the limit is refused as such,
+    /// never cut and parsed.
+    #[tokio::test]
+    async fn a_command_that_never_stops_talking_is_bounded() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args([
+            "-c",
+            "head -c 50000000 /dev/zero | tr '\\0' x >&2; echo fits",
+        ]);
+        let output = super::run_bounded(command, std::time::Duration::from_secs(60))
+            .await
+            .expect("ran");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"fits\n");
+        assert_eq!(output.stderr.len() as u64, gdl_extract::OUTPUT_LIMIT);
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "head -c 50000000 /dev/zero | tr '\\0' y"]);
+        let Err(error) = super::run_bounded(command, std::time::Duration::from_secs(60)).await
+        else {
+            panic!("fifty megabytes of answer were kept or cut");
+        };
+        assert!(error.starts_with(super::OUTPUT_OVERFLOW), "{error}");
+    }
+
+    /// A fetch abandoned with its request takes its helpers with it: the
+    /// connections git held are closed once the future is dropped.
+    #[tokio::test]
+    async fn an_abandoned_fetch_ends_its_process_group() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a silent port");
+        let url = format!(
+            "http://{}/silent.git",
+            listener.local_addr().expect("address")
+        );
+        let held: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>> = Default::default();
+        let accepted = std::sync::Arc::clone(&held);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                accepted.lock().expect("held").push(stream);
+            }
+        });
+        let dir = tempfile::tempdir().expect("directory");
+        super::git_command(dir.path(), &["init", "--quiet"])
+            .await
+            .expect("init");
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::git_fetch(dir.path(), &url, "main"),
+        )
+        .await;
+        assert!(abandoned.is_err(), "a silent host answered");
+        let streams = std::mem::take(&mut *held.lock().expect("held"));
+        assert!(!streams.is_empty(), "git never connected");
+        for mut stream in streams {
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("a read timeout");
+            let mut rest = Vec::new();
+            stream
+                .read_to_end(&mut rest)
+                .expect("the connection git held is still open");
+        }
+    }
+
     #[tokio::test]
     async fn https_import_overrides_ssh_url_rewrites() {
         let dir = tempfile::tempdir().expect("directory");

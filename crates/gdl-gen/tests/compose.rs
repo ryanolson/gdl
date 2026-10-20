@@ -276,7 +276,8 @@ fn extract_writes_a_working_catalogue_entry() {
 fn verify_compares_the_build_with_the_source() {
     let read = |name: &str| {
         let krate = gdl_gen::Crate::Path(fixtures().join(name));
-        let extracted = gdl_gen::extract(&krate, &target()).expect("extracted");
+        let extracted =
+            gdl_gen::extract(&krate, &target(), &gdl_extract::Cargo::trusted()).expect("extracted");
         gdl_gen::verify(&extracted, &target())
     };
     read("exported-protocols").expect("an export agrees");
@@ -285,7 +286,8 @@ fn verify_compares_the_build_with_the_source() {
     let quirks = gdl_gen::Crate::Path(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-extract/tests/fixtures/read/quirks"),
     );
-    let extracted = gdl_gen::extract(&quirks, &target()).expect("extracted");
+    let extracted =
+        gdl_gen::extract(&quirks, &target(), &gdl_extract::Cargo::trusted()).expect("extracted");
     gdl_gen::verify(&extracted, &target()).expect("the build agrees with the reader");
     let error = read("macro-made")
         .expect_err("a macro made a message")
@@ -423,7 +425,9 @@ fn a_registry_crate_enters_the_catalogue_with_its_checksum() {
 /// hold it: read once, from source.
 fn chat_offers() -> Vec<gdl_gen::Offer> {
     let chat = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/chat");
-    let workspace = gdl_extract::Workspace::load(&chat.join("Cargo.toml")).expect("metadata");
+    let workspace =
+        gdl_extract::Workspace::load(&chat.join("Cargo.toml"), &gdl_extract::Cargo::trusted())
+            .expect("metadata");
     ["protocols", "front-nodes", "engine-mock", "post-nodes"]
         .iter()
         .map(|dir| {
@@ -523,5 +527,29 @@ fn an_archive_of_fetchable_crates_builds_images() {
         files["imaged/engine/Cargo.toml"]
             .contains("gdl = { git = \"https://example.com/gdl\", rev = \"abc123\" }")
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Compose deployment needs a frontend: a source without one takes its
+/// requests on stdin, and a container gives it none, so the segment would
+/// stop at once, ready.
+#[test]
+fn compose_refuses_a_source_without_a_frontend() {
+    let dir = offline_registry("compose-no-frontend");
+    std::fs::write(
+        dir.join("graph.gdl"),
+        "name = \"imaged\", schema = 1;\nsource A: Words -> stream Token;\nsink   Engine: Words -> stream Token;\ntopology: A => Engine;\n",
+    )
+    .expect("graph");
+    std::fs::write(
+        dir.join("gdl.toml"),
+        "[graph]\npath = \"graph.gdl\"\n[messages]\ncrates = [\"regproto@0.1.0\"]\n[nodes]\ncrates = [\"regnodes@0.1.0\"]\n[gdl]\ngit = \"https://example.com/gdl\"\nrev = \"abc123\"\n[segment.front]\nnodes = [\"A\"]\n[segment.engine]\nnodes = [\"Engine\"]\n",
+    )
+    .expect("spec");
+    let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
+    let Err(error) = gdl_gen::compose_files(&spec, &dir.join("out"), &dir.join("target")) else {
+        panic!("a deployment whose source reads stdin was accepted");
+    };
+    assert!(error.to_string().contains("frontend"), "{error}");
     let _ = std::fs::remove_dir_all(&dir);
 }

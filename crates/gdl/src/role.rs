@@ -141,6 +141,16 @@ pub trait Build: Sized + Send + Sync + 'static {
     /// The configuration section.
     type Config: DeserializeOwned + Send;
 
-    /// Construct the implementation.
+    /// Construct the implementation. Return quickly: the segment registers
+    /// with its deployment once every node is built, so that the deployment
+    /// knows the process is live while the nodes get ready.
     fn build(config: Self::Config) -> impl Future<Output = Result<Self>> + Send;
+
+    /// Resolve once the implementation can take work: a model is loaded, a
+    /// connection is open. The segment announces itself as loaded, and takes
+    /// requests, only after every node it hosts has. Ready at once by
+    /// default.
+    fn ready(&self) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 }

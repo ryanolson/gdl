@@ -17,6 +17,7 @@ pub struct Engine {
     model: &'static str,
     uppercase: bool,
     delay: Duration,
+    load: Duration,
 }
 
 /// The engine's settings: the `[node.Engine]` table of its segment's config.
@@ -38,14 +39,20 @@ impl Build for Engine {
     type Config = Settings;
 
     async fn build(settings: Settings) -> Result<Self> {
-        // Loading weights, compiling kernels: work that takes time and must
-        // finish before the segment serves.
-        tokio::time::sleep(Duration::from_millis(settings.load_ms)).await;
         Ok(Self {
             model: chat_sentinel::model(),
             uppercase: settings.uppercase,
             delay: Duration::from_millis(settings.delay_ms),
+            load: Duration::from_millis(settings.load_ms),
         })
+    }
+
+    /// Loading weights, compiling kernels: work that takes time and must
+    /// finish before the segment serves, but not before its deployment
+    /// knows the process is live.
+    async fn ready(&self) -> Result<()> {
+        tokio::time::sleep(self.load).await;
+        Ok(())
     }
 }
 

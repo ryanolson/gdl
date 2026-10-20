@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use gdl_model::{Layout, Manifest, Role};
 
+mod binary;
+
 use crate::Error;
 use crate::paths::{display, relative};
 use crate::spec::{Contract, CrateSource, Spec};
@@ -206,12 +208,17 @@ fn regenerate_command(
     }
     let spec_file = display(&relative(crate_dir, &spec_dir.join(file)));
     let out = display(&relative(crate_dir, out));
-    format!("cargo gdl generate --spec {spec_file} --out {out}")
+    format!(
+        "cargo gdl generate --spec \"{}\" --out \"{}\"",
+        spec_file.escape_debug(),
+        out.escape_debug()
+    )
 }
 
 /// The command that exports from the spec at `spec`, for a comment: the
-/// path quoted, with any character that would end the comment escaped,
-/// and the archive left for the reader to name.
+/// path quoted, with any character that would end the comment escaped (a
+/// path may hold a line break), and the archive left for the reader to
+/// name. The regenerate command quotes its paths the same way.
 fn export_command(spec: &Path) -> String {
     format!(
         "cargo gdl export --spec \"{}\" --out <archive.tar.gz>",
@@ -270,12 +277,18 @@ impl Unit<'_> {
             .collect()
     }
 
-    fn frontend(&self) -> Option<&crate::spec::Bind> {
-        let source = self
-            .manifest
+    /// The source that hosts the frontend: the one the spec pins, which
+    /// validation has checked is at most one.
+    fn frontend_source(&self) -> Option<&gdl_model::NodeInfo> {
+        self.manifest
             .nodes
             .iter()
-            .find(|node| node.role == Role::Source)?;
+            .find(|node| node.role == Role::Source && self.spec.bind.contains_key(&node.name))
+    }
+
+    /// The frontend's binding, when this segment hosts it.
+    fn frontend(&self) -> Option<&crate::spec::Bind> {
+        let source = self.frontend_source()?;
         if !self.nodes.contains(&source.name) {
             return None;
         }
@@ -359,10 +372,19 @@ impl Unit<'_> {
         let _ = writeln!(text);
         let _ = writeln!(text, "[dependencies]");
         let source = self.spec.gdl.source(&|path| self.path_to(path));
-        let gdl = if self.serves() {
-            format!("{{ {source}, features = [\"json-lines\", \"hub\"] }}")
+        // Hub discovery brings the hub client and its HTTP stack; only a
+        // spec that deploys asks for it.
+        let features: Vec<&str> = [
+            ("json-lines", self.serves()),
+            ("hub", self.spec.deployment.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(feature, wanted)| wanted.then_some(feature))
+        .collect();
+        let gdl = if features.is_empty() {
+            format!("{{ {source} }}")
         } else {
-            format!("{{ {source}, features = [\"hub\"] }}")
+            format!("{{ {source}, features = {features:?} }}")
         };
         let _ = writeln!(text, "gdl = {gdl}");
         let _ = writeln!(
@@ -396,7 +418,7 @@ impl Unit<'_> {
         );
         let _ = writeln!(
             text,
-            "tokio = {{ version = \"1\", features = [\"io-std\", \"io-util\", \"macros\", \"rt-multi-thread\", \"signal\"] }}"
+            "tokio = {{ version = \"1\", features = [\"io-std\", \"io-util\", \"macros\"] }}"
         );
         let _ = writeln!(text, "toml = \"0.9\"");
         text.push_str(self.deps.workspace());
@@ -530,422 +552,6 @@ impl Unit<'_> {
         );
         let _ = writeln!(text, "    deployment.start(root)");
         let _ = writeln!(text, "}}");
-        text
-    }
-
-    fn main_rs(&self) -> String {
-        let hosted = self.hosted();
-        let package = self.package();
-        let lib = self.lib();
-        let serves = self.serves();
-        let mut text = String::new();
-        let _ = writeln!(text, "// {MARKER}.");
-        let _ = writeln!(text, "// Regenerate with: {}", self.regenerate);
-        let _ = writeln!(text);
-        let _ = writeln!(text, "//! Runs segment `{}` on its own.", self.segment);
-        let _ = writeln!(text, "//!");
-        let _ = writeln!(
-            text,
-            "//! Usage: `{package} <config.toml> [override.toml ...]`, where the config is:"
-        );
-        let _ = writeln!(text, "//!");
-        let mut rows = vec![
-            (
-                "listen = \"127.0.0.1:0\"".to_string(),
-                "this instance's address".to_string(),
-            ),
-            (
-                "roster = \"/run/roster\"".to_string(),
-                "file discovery only; omit when hub is set".to_string(),
-            ),
-            (
-                r#"# hub = "hub""#.to_string(),
-                "hub discovery instead of a shared directory".to_string(),
-            ),
-            ("rendezvous_ms = 30000".to_string(), "optional".to_string()),
-            (
-                "[instances]".to_string(),
-                "optional: instances per segment, 1 by default".to_string(),
-            ),
-            (
-                "[runtime]".to_string(),
-                "optional: gdl::RuntimeConfig".to_string(),
-            ),
-        ];
-        for node in &hosted {
-            rows.push((
-                format!("[node.{}]", node.name),
-                format!("optional: {}'s Build::Config", node.name),
-            ));
-        }
-        if self.frontend().is_some() {
-            rows.push((
-                "[frontend]".to_string(),
-                "the source frontend's Build::Config".to_string(),
-            ));
-        }
-        let width = rows.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
-        let _ = writeln!(text, "//! ```toml");
-        for (key, comment) in rows {
-            let _ = writeln!(text, "//! {key:<width$}  # {comment}");
-        }
-        let _ = writeln!(text, "//! ```");
-        let _ = writeln!(
-            text,
-            "//! Files merge in argument order; GDL_ environment values override files."
-        );
-        let _ = writeln!(
-            text,
-            "//! Use __ between nested keys. Graph-affecting values must match the built graph."
-        );
-        if serves {
-            let _ = writeln!(text, "//!");
-            let _ = writeln!(
-                text,
-                "//! This segment hosts the source. Once every segment is ready, it reads"
-            );
-            let _ = writeln!(
-                text,
-                "//! one JSON request per line on stdin and answers each with one line per"
-            );
-            let _ = writeln!(
-                text,
-                "//! item, `{{\"item\": ...}}`, then `{{\"done\": null}}` or `{{\"error\": \"...\"}}`."
-            );
-        } else if self.frontend().is_some() {
-            let _ = writeln!(
-                text,
-                "//! The source frontend serves after rendezvous and shuts down on Ctrl-C."
-            );
-        } else if self.hosts_source() && self.streamed_source() {
-            let _ = writeln!(text, "//!");
-            let _ = writeln!(
-                text,
-                "//! This segment hosts the source, which takes a streamed request. One JSON"
-            );
-            let _ = writeln!(
-                text,
-                "//! line cannot carry it, so the binary only serves; call it through the library."
-            );
-        } else if self.hosts_source() {
-            let _ = writeln!(text, "//!");
-            let _ = writeln!(
-                text,
-                "//! This segment hosts the source, but the source's types are not serde"
-            );
-            let _ = writeln!(
-                text,
-                "//! types, so the binary only serves; call it through the library."
-            );
-        }
-        let _ = writeln!(text);
-        let _ = writeln!(text, "use std::sync::Arc;");
-        let _ = writeln!(text, "use std::time::Duration;");
-        let _ = writeln!(text);
-        let _ = writeln!(text, "use {lib}::{{Nodes, SEGMENT, SEGMENTS, start}};");
-        let _ = writeln!(text);
-        let _ = writeln!(
-            text,
-            "type Failure = Box<dyn std::error::Error + Send + Sync>;"
-        );
-        let _ = writeln!(text);
-        let _ = writeln!(text, "#[derive(serde::Deserialize)]");
-        let _ = writeln!(text, "#[serde(deny_unknown_fields)]");
-        let _ = writeln!(text, "struct Config {{");
-        let _ = writeln!(text, "    listen: std::net::SocketAddr,");
-        let _ = writeln!(
-            text,
-            "    #[serde(default)]\n    roster: std::path::PathBuf,\n    #[serde(default)]\n    hub: Option<String>,"
-        );
-        let _ = writeln!(text, "    #[serde(default = \"rendezvous_ms\")]");
-        let _ = writeln!(text, "    rendezvous_ms: u64,");
-        let _ = writeln!(text, "    #[serde(default)]");
-        let _ = writeln!(
-            text,
-            "    instances: std::collections::BTreeMap<String, usize>,"
-        );
-        let _ = writeln!(text, "    #[serde(default)]");
-        let _ = writeln!(text, "    runtime: gdl::RuntimeConfig,");
-        let _ = writeln!(text, "    #[serde(default)]");
-        let _ = writeln!(text, "    node: NodeConfigs,");
-        if self.hosts_source() && self.spec.service.is_some() {
-            let _ = writeln!(text, "    #[serde(default)]");
-            let _ = writeln!(
-                text,
-                "    adapter: std::collections::BTreeMap<String, toml::Table>,"
-            );
-        }
-        if self.frontend().is_some() {
-            let _ = writeln!(text, "    #[serde(default)]");
-            let _ = writeln!(text, "    frontend: Option<toml::Table>,");
-        }
-        let _ = writeln!(text, "}}");
-        let _ = writeln!(text);
-        let _ = writeln!(text, "fn rendezvous_ms() -> u64 {{");
-        let _ = writeln!(text, "    30_000");
-        let _ = writeln!(text, "}}");
-        let _ = writeln!(text);
-        let _ = writeln!(text, "#[derive(Default, serde::Deserialize)]");
-        let _ = writeln!(text, "#[serde(deny_unknown_fields)]");
-        if hosted.is_empty() {
-            let _ = writeln!(text, "struct NodeConfigs {{}}");
-        } else {
-            let _ = writeln!(text, "struct NodeConfigs {{");
-            for node in &hosted {
-                let _ = writeln!(text, "    #[serde(rename = \"{}\", default)]", node.name);
-                let _ = writeln!(text, "    {}: Option<toml::Table>,", node.binding);
-            }
-            let _ = writeln!(text, "}}");
-        }
-        let _ = writeln!(text);
-        let _ = writeln!(text, "#[tokio::main]");
-        let _ = writeln!(text, "async fn main() -> std::process::ExitCode {{");
-        let _ = writeln!(text, "    match run().await {{");
-        let _ = writeln!(text, "        Ok(()) => std::process::ExitCode::SUCCESS,");
-        let _ = writeln!(text, "        Err(error) => {{");
-        let _ = writeln!(text, "            eprintln!(\"{{SEGMENT}}: {{error}}\");");
-        let _ = writeln!(text, "            std::process::ExitCode::FAILURE");
-        let _ = writeln!(text, "        }}");
-        let _ = writeln!(text, "    }}");
-        let _ = writeln!(text, "}}");
-        let _ = writeln!(text);
-        let _ = writeln!(text, "async fn run() -> Result<(), Failure> {{");
-        let _ = writeln!(
-            text,
-            "    use gdl::figment::providers::{{Env, Format, Toml}};"
-        );
-        let _ = writeln!(
-            text,
-            "    let paths: Vec<_> = std::env::args_os().skip(1).collect();"
-        );
-        let _ = writeln!(
-            text,
-            "    if paths.is_empty() {{ return Err(\"usage: {package} <config.toml> [override.toml ...]\".into()); }}"
-        );
-        let _ = writeln!(
-            text,
-            "    let mut providers = gdl::figment::Figment::new();"
-        );
-        let _ = writeln!(
-            text,
-            "    for path in paths {{ providers = providers.merge(Toml::string(&std::fs::read_to_string(path)?)); }}"
-        );
-        let _ = writeln!(
-            text,
-            "    let config: Config = providers.merge(Env::prefixed(\"GDL_\").split(\"__\")).extract()?;"
-        );
-        if hosted.is_empty() {
-            let _ = writeln!(text, "    let NodeConfigs {{}} = config.node;");
-            let _ = writeln!(text, "    let nodes = Nodes {{}};");
-        } else {
-            let _ = writeln!(text, "    let nodes = Nodes {{");
-            for node in &hosted {
-                let _ = writeln!(
-                    text,
-                    "        {}: build::<::{}>(\"{}\", config.node.{}).await?,",
-                    node.binding, node.ty, node.name, node.binding
-                );
-            }
-            let _ = writeln!(text, "    }};");
-        }
-        if let Some(frontend) = self.frontend() {
-            let _ = writeln!(
-                text,
-                "    let frontend = build::<{}>(\"{}\", config.frontend).await?;",
-                frontend.ty,
-                self.manifest
-                    .nodes
-                    .iter()
-                    .find(|n| n.role == gdl_model::Role::Source)
-                    .expect("source")
-                    .name
-            );
-        }
-        if self.hosts_source()
-            && let Some(service) = &self.spec.service
-        {
-            let enabled: Vec<_> = service.nodes().iter().map(|n| n.name.clone()).collect();
-            let _ = writeln!(text, "    let enabled: &[&str] = &{enabled:?};");
-            let _ = writeln!(
-                text,
-                "    if config.adapter.keys().any(|key| !enabled.contains(&key.as_str())) {{ return Err(\"config for unknown or disabled entry node\".into()); }}"
-            );
-            for node in service.nodes() {
-                let _ = writeln!(
-                    text,
-                    "    let {} = build::<{}>({:?}, config.adapter.get({:?}).cloned()).await?;",
-                    node.variable(),
-                    node.bind.ty,
-                    node.name,
-                    node.name
-                );
-            }
-        }
-
-        let _ = writeln!(
-            text,
-            "    let node = if config.hub.is_some() {{ gdl::bind_container_node(config.listen.port()).await? }} else {{ gdl::bind_node(config.listen).await? }};"
-        );
-        let _ = writeln!(text, "    let mut hub = if let Some(host) = &config.hub {{");
-        let _ = writeln!(
-            text,
-            "        let spec = gdl::DeploymentSpec::new({lib}::contract::manifest(), gdl::Placement::from_toml({lib}::PLACEMENT)?)?;"
-        );
-        let _ = writeln!(
-            text,
-            "        Some(gdl::HubSession::register(host, 1337, 8337, &node, spec.registration(SEGMENT)?).await?)"
-        );
-        let _ = writeln!(text, "    }} else {{ None }};");
-        let _ = writeln!(
-            text,
-            "    let wait = Duration::from_millis(config.rendezvous_ms);"
-        );
-        let _ = writeln!(
-            text,
-            "    if let Some(unknown) = config.instances.keys().find(|s| !SEGMENTS.contains(&s.as_str())) {{"
-        );
-        let _ = writeln!(
-            text,
-            "        return Err(format!(\"[instances]: no segment `{{unknown}}`\").into());"
-        );
-        let _ = writeln!(text, "    }}");
-        let _ = writeln!(text, "    // Every instance waits for the same membership.");
-        let _ = writeln!(
-            text,
-            "    let expect = SEGMENTS.iter().map(|s| (*s, config.instances.get(*s).copied().unwrap_or(1)));"
-        );
-        let _ = writeln!(
-            text,
-            "    let roster = if let Some(hub) = &hub {{ hub.roster(SEGMENTS, wait).await? }} else {{ gdl::Roster::rendezvous(&config.roster, SEGMENT, &node, expect, wait).await? }};"
-        );
-        let _ = writeln!(
-            text,
-            "    let segment = start(Arc::clone(&node), &roster, config.runtime, nodes)?;"
-        );
-        let _ = writeln!(
-            text,
-            "    // No request may leave before every instance it can be routed to"
-        );
-        let _ = writeln!(text, "    // has registered its handlers.");
-        let _ = writeln!(
-            text,
-            "    if let Some(hub) = &mut hub {{ hub.ready(&roster, SEGMENTS, wait).await?; }} else {{ roster.ready(&config.roster.join(\"ready\"), SEGMENT, &node, wait).await?; }}"
-        );
-        let _ = writeln!(text, "    eprintln!(\"{{SEGMENT}}: ready\");");
-        let _ = writeln!(text, "    let running = async move {{");
-        if self.frontend().is_some() {
-            let _ = writeln!(text, "    let shutdown = gdl::Cx::new();");
-            let _ = writeln!(text, "    let stop = shutdown.clone();");
-            if let Some(service) = &self.spec.service {
-                let _ = writeln!(text, "    let segment = Arc::new(segment);");
-                let roots: Vec<_> = self
-                    .manifest
-                    .hops
-                    .iter()
-                    .filter(|h| {
-                        self.manifest
-                            .node(&h.outer)
-                            .is_some_and(|n| n.role == Role::Source)
-                    })
-                    .collect();
-                for (index, root) in roots.iter().enumerate() {
-                    let selector = if roots.len() == 1 {
-                        "roots".into()
-                    } else {
-                        format!("roots.{}0", "1.".repeat(index))
-                    };
-                    let variable = crate::service::pipeline_variable(&root.outer);
-                    let _ = writeln!(
-                        text,
-                        "    let {variable} = segment.client(|roots| {selector}.clone());"
-                    );
-                }
-                let _ = writeln!(text, "    let clients = {} {{", service.clients);
-                for entry in &service.entries {
-                    if let Some(pipeline) = &entry.pipeline {
-                        let _ = writeln!(
-                            text,
-                            "        {}: Some(gdl::Client::new(gdl::Source::new({}))),",
-                            entry.field,
-                            pipeline.expression()
-                        );
-                    } else {
-                        let _ = writeln!(text, "        {}: None,", entry.field);
-                    }
-                }
-                let _ = writeln!(text, "    }};");
-                let _ = writeln!(
-                    text,
-                    "    let serving = gdl::Service::serve(frontend, clients, async move {{ stop.cancelled().await }});"
-                );
-            } else {
-                let _ = writeln!(
-                    text,
-                    "    let serving = gdl::Frontend::serve(frontend, Arc::new(segment), async move {{ stop.cancelled().await }});"
-                );
-            }
-            let _ = writeln!(text, "    tokio::pin!(serving);");
-            let _ = writeln!(text, "    tokio::select! {{");
-            let _ = writeln!(text, "        result = &mut serving => result?,");
-            let _ = writeln!(
-                text,
-                "        signal = tokio::signal::ctrl_c() => {{ signal?; shutdown.cancel(); serving.await?; }}"
-            );
-            let _ = writeln!(text, "    }}");
-            let _ = writeln!(text, "    Ok(())");
-        } else if serves {
-            let _ = writeln!(
-                text,
-                "    let input = tokio::io::BufReader::new(tokio::io::stdin());"
-            );
-            let _ = writeln!(
-                text,
-                "    let call = |request: {lib}::contract::SourceReq| segment.call::<_, {lib}::contract::SourceItem>(gdl::Cx::new(), request);"
-            );
-            let _ = writeln!(
-                text,
-                "    gdl::serve_json_lines(input, tokio::io::stdout(), call).await?;"
-            );
-            let _ = writeln!(text, "    Ok(())");
-        } else {
-            let _ = writeln!(text, "    tokio::signal::ctrl_c().await?;");
-            let _ = writeln!(text, "    drop(segment);");
-            let _ = writeln!(text, "    Ok(())");
-        }
-        let _ = writeln!(text, "    }};");
-        let _ = writeln!(
-            text,
-            "    tokio::select! {{ result = running => result, result = async {{ match &hub {{ Some(hub) => hub.maintain().await, None => std::future::pending().await }} }} => {{ result?; Ok(()) }} }}"
-        );
-        let _ = writeln!(text, "}}");
-        if !hosted.is_empty() || self.frontend().is_some() {
-            let _ = writeln!(text);
-            let _ = writeln!(text, "/// Build one implementation from its config table.");
-            let _ = writeln!(
-                text,
-                "async fn build<T: gdl::Build>(node: &str, config: Option<toml::Table>) -> Result<T, Failure> {{"
-            );
-            let graph_configs = toml::to_string(&self.spec.config).expect("graph config tables");
-            let _ = writeln!(
-                text,
-                "    let contracts: std::collections::BTreeMap<String, gdl::GraphConfig> = toml::from_str({graph_configs:?})?;"
-            );
-            let _ = writeln!(
-                text,
-                "    let graph = contracts.get(node).cloned().unwrap_or_default();"
-            );
-            let _ = writeln!(
-                text,
-                "    let providers = gdl::figment::Figment::from(gdl::figment::providers::Serialized::defaults(config.unwrap_or_default()));"
-            );
-            let _ = writeln!(text, "    gdl::build_node::<T>(&providers, &graph)");
-            let _ = writeln!(text, "        .await");
-            let _ = writeln!(
-                text,
-                "        .map_err(|e| format!(\"building {{node}}: {{e}}\").into())"
-            );
-            let _ = writeln!(text, "}}");
-        }
         text
     }
 }

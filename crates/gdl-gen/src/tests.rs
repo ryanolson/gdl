@@ -631,7 +631,12 @@ fn entry_bindings_require_a_resolved_service() {
 
 #[test]
 fn entry_nodes_cannot_shadow_generated_dependencies() {
-    let mut spec = spec(split(), &[("D", "tiny_nodes::D")]);
+    // A service exists only for a pinned source, whose segment hosts the
+    // entry nodes.
+    let mut spec = spec(
+        split(),
+        &[("D", "tiny_nodes::D"), ("S", "tiny_nodes::Front")],
+    );
     let mut binding = spec.bind["D"].clone();
     binding.package = "tokio".into();
     binding.lib = "entry_nodes".into();
@@ -682,4 +687,93 @@ fn multiple_roots_require_a_service_for_a_hosted_frontend() {
         error.contains("multiple pipeline roots require a service frontend"),
         "{error}"
     );
+}
+
+/// `S => D` and `T => D`: two roots sharing a sink.
+fn two_roots() -> Manifest {
+    let mut manifest = manifest();
+    manifest.nodes.push(NodeInfo {
+        name: "T".into(),
+        role: Role::Source,
+        binding: None,
+    });
+    manifest.hops.push(HopInfo {
+        outer: "T".into(),
+        forward: vec![],
+        inner: "D".into(),
+        backward: vec![],
+        forward_types: vec![TypeInfo::new("Req", true)],
+        backward_types: vec![TypeInfo::new("Item", true)],
+    });
+    manifest
+}
+
+/// Which source hosts the frontend is the pin's choice, not the order of
+/// declaration: a frontend pinned on the second root used to be dropped
+/// without a word, while the same pin on the first root was refused.
+#[test]
+fn a_frontend_pin_is_judged_the_same_on_any_root() {
+    let manifest = two_roots();
+    let placement = gdl_model::Placement::new().segment("all", ["S", "T", "D"]);
+    for root in ["S", "T"] {
+        let spec = spec(
+            placement.clone(),
+            &[("D", "tiny_nodes::D"), (root, "tiny_nodes::Front")],
+        );
+        let Err(error) = check(&spec, &manifest) else {
+            panic!("a frontend on `{root}` without a service was accepted");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("multiple pipeline roots require a service frontend"),
+            "{root}: {error}"
+        );
+    }
+    let spec = spec(
+        placement,
+        &[
+            ("D", "tiny_nodes::D"),
+            ("S", "tiny_nodes::Front"),
+            ("T", "tiny_nodes::Front"),
+        ],
+    );
+    let Err(error) = check(&spec, &manifest) else {
+        panic!("two frontends were accepted");
+    };
+    assert!(
+        error.to_string().contains("one source hosts the frontend"),
+        "{error}"
+    );
+}
+
+/// A segment is named in settings keys, and a key from the environment
+/// arrives lowercased: a name with a capital could not be addressed.
+#[test]
+fn a_segment_name_is_lowercase() {
+    let placement = gdl_model::Placement::new().segment("Front", ["S", "D"]);
+    let spec = spec(placement, &[("D", "tiny_nodes::D")]);
+    let Err(error) = check(&spec, &manifest()) else {
+        panic!("a capitalized segment name was accepted");
+    };
+    assert!(
+        error.to_string().contains("GDL_INSTANCES__FRONT"),
+        "{error}"
+    );
+}
+
+/// A hub names a segment's readiness services by the name in hex: a name
+/// past the limit would register and then never announce.
+#[test]
+fn a_segment_name_is_short_enough_for_its_hub_services() {
+    let long = "s".repeat(gdl_model::SEGMENT_NAME_LIMIT + 1);
+    let placement = gdl_model::Placement::new().segment(long.as_str(), ["S", "D"]);
+    let too_long = spec(placement, &[("D", "tiny_nodes::D")]);
+    let Err(error) = check(&too_long, &manifest()) else {
+        panic!("a segment name too long for its hub services was accepted");
+    };
+    assert!(error.to_string().contains("at most"), "{error}");
+    let fits = "s".repeat(gdl_model::SEGMENT_NAME_LIMIT);
+    let placement = gdl_model::Placement::new().segment(fits.as_str(), ["S", "D"]);
+    check(&spec(placement, &[("D", "tiny_nodes::D")]), &manifest()).expect("a name at the limit");
 }

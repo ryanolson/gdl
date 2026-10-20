@@ -3,11 +3,12 @@
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, RandomState};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde::Deserialize;
+use tokio::sync::Notify;
 use velo::{InstanceId, PeerInfo};
 
 use super::admission::{Admission, Egress};
@@ -223,16 +224,43 @@ impl RuntimeConfig {
     }
 }
 
-/// The instances of every segment, as velo peers.
-#[derive(Debug, Clone, Default)]
+/// The instances of every segment, as velo peers, and whether this
+/// instance may route to them yet.
+#[derive(Debug, Clone)]
 pub struct Roster {
     segments: BTreeMap<String, Vec<PeerInfo>>,
+    /// Shared by every clone, so that the launch that holds a roster can
+    /// release the runtime that routes with it.
+    gate: Arc<Hold>,
+}
+
+impl Default for Roster {
+    fn default() -> Self {
+        Self {
+            segments: BTreeMap::new(),
+            gate: Arc::new(Hold::new(true)),
+        }
+    }
 }
 
 impl Roster {
-    /// An empty roster.
+    /// An empty roster, released.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Keep every request this instance would send until `release`. A
+    /// launched segment holds its roster until every instance it can
+    /// route to is serving: a request that arrives before then waits here,
+    /// bounded by the runtime's setup timeout, rather than failing at a
+    /// peer whose handlers do not exist yet.
+    pub fn hold(&self) {
+        self.gate.close();
+    }
+
+    /// Let requests through.
+    pub fn release(&self) {
+        self.gate.open();
     }
 
     /// Add one instance of `segment`.
@@ -245,8 +273,58 @@ impl Roster {
         self.segments.get(segment).map_or(&[], Vec::as_slice)
     }
 
+    /// Each segment with its instances.
+    pub fn segments(&self) -> impl Iterator<Item = (&str, &[PeerInfo])> {
+        self.segments
+            .iter()
+            .map(|(segment, peers)| (segment.as_str(), peers.as_slice()))
+    }
+
     pub(crate) fn peers(&self) -> impl Iterator<Item = &PeerInfo> {
         self.segments.values().flatten()
+    }
+}
+
+/// Open or closed, read without a lock on the dispatch path.
+#[derive(Debug)]
+struct Hold {
+    open: AtomicBool,
+    opened: Notify,
+}
+
+impl Hold {
+    fn new(open: bool) -> Self {
+        Self {
+            open: AtomicBool::new(open),
+            opened: Notify::new(),
+        }
+    }
+
+    fn close(&self) {
+        self.open.store(false, Ordering::Release);
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.load(Ordering::Acquire)
+    }
+
+    fn open(&self) {
+        self.open.store(true, Ordering::Release);
+        self.opened.notify_waiters();
+    }
+
+    async fn opened(&self) {
+        // Registering before the second read means an open between the two
+        // is seen by one or the other.
+        while !self.is_open() {
+            let notified = self.opened.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_open() {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -349,6 +427,7 @@ pub(crate) struct Runtime {
     pub(crate) identity: Identity,
     picker: Picker,
     open_picker: Picker,
+    gate: Arc<Hold>,
     names: Names,
     /// Forward hand-offs, backward runs, and request streams this instance
     /// has taken on.
@@ -390,6 +469,7 @@ impl Runtime {
             egress: Egress::new(config.egress_limit, config.admission_wait),
             picker: Picker::new(roster),
             open_picker: Picker::new(roster),
+            gate: Arc::clone(&roster.gate),
             names: Names {
                 forward: format!("gdl-fwd-{tag}"),
                 open: format!("gdl-open-{tag}"),
@@ -406,6 +486,24 @@ impl Runtime {
 
     pub(crate) fn names(&self) -> &Names {
         &self.names
+    }
+
+    /// Wait until the roster is released: every instance this one can
+    /// route to is serving. One atomic read once it is: the timeout is
+    /// built only for a held roster, since building one touches the
+    /// runtime's shared handle.
+    async fn released(&self) -> Result<()> {
+        if self.gate.is_open() {
+            return Ok(());
+        }
+        tokio::time::timeout(self.config.setup_timeout, self.gate.opened())
+            .await
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::Transport,
+                    "the instances this one routes to were not all serving within the setup timeout",
+                )
+            })
     }
 
     pub(crate) fn set_entries(&self, entries: &Arc<Entries>) {
@@ -426,6 +524,7 @@ impl Runtime {
     /// When the chosen instance is this one, the entry runs by a direct
     /// call: velo is not relied on to deliver a message to its own sender.
     pub(crate) async fn send_forward(&self, segment: &str, envelope: Forward) -> Result<Accepted> {
+        self.released().await?;
         let router = self
             .layout
             .request_router(envelope.hop as usize, envelope.pos as usize);
@@ -449,6 +548,7 @@ impl Runtime {
 
     /// Ask an instance of `segment` to open a backward run.
     pub(crate) async fn send_open(&self, segment: &str, open: Open) -> Result<ReplyTo> {
+        self.released().await?;
         let instance = self.open_picker.pick(segment, RequestRouter::RoundRobin)?;
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
