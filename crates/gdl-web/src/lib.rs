@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! page --GET /api/catalog---------------> the catalogue's entries
-//!      --POST /api/catalog {crate}------> read (a directory, or a version fetched first), add
+//!      --POST /api/catalog {source,...}-> fetch and read a package, then add it
 //!      --POST /api/check {draft}--------> graph file + spec, checked: problems, or crossings and diagram
 //!      --POST /api/export {draft}-------> the generated crates as a .tar.gz
 //! ```
@@ -13,6 +13,7 @@
 //! Nothing is compiled, so a crate that needs CUDA composes like any other.
 
 mod draft;
+mod imports;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -23,7 +24,6 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use gdl_extract::Catalog;
-use serde::Deserialize;
 use serde_json::json;
 
 pub use draft::{Draft, Gdl, Rendered};
@@ -36,20 +36,39 @@ pub struct Config {
     pub target: PathBuf,
     /// Where generated crates take gdl from.
     pub gdl: Gdl,
+    /// Directory exposed by local browsing and imports; disabled when absent.
+    pub local_root: Option<PathBuf>,
 }
 
 struct Composer {
     config: Config,
     catalog: RwLock<Catalog>,
+    http: reqwest::Client,
 }
 
 /// The server's routes, over the catalogue `config` names, loaded now.
-pub fn router(config: Config) -> Result<Router, String> {
+pub fn router(mut config: Config) -> Result<Router, String> {
+    config.local_root = config
+        .local_root
+        .map(|root| {
+            let root = root.canonicalize().map_err(|e| e.to_string())?;
+            if !root.is_dir() {
+                return Err("local root must be a directory".to_string());
+            }
+            Ok(root)
+        })
+        .transpose()?;
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("gdl-web/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
     let catalog = Catalog::load(&config.catalog).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&config.target)
         .map_err(|e| format!("{}: {e}", config.target.display()))?;
     let composer = Arc::new(Composer {
         config,
+        http,
         catalog: RwLock::new(catalog),
     });
     Ok(Router::new()
@@ -58,9 +77,31 @@ pub fn router(config: Config) -> Result<Router, String> {
             get(|| async { Html(include_str!("../assets/index.html")) }),
         )
         .route("/app.js", get(app_js))
-        .route("/api/catalog", get(entries).post(add))
+        .route(
+            "/vendor/mermaid.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript")],
+                    include_str!("../assets/vendor/mermaid.js"),
+                )
+            }),
+        )
+        .route(
+            "/style.css",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css")],
+                    include_str!("../assets/style.css"),
+                )
+            }),
+        )
+        .route("/api/catalog", get(entries).post(imports::add))
+        .route("/api/catalog/clear", axum::routing::post(clear_catalog))
+        .route("/api/local", get(imports::browse))
+        .route("/api/crates", get(imports::search))
         .route("/api/check", axum::routing::post(check))
         .route("/api/export", axum::routing::post(export))
+        .route("/api/deploy", axum::routing::post(deploy))
         .with_state(composer))
 }
 
@@ -75,47 +116,48 @@ async fn app_js() -> Response {
 type Shared = State<Arc<Composer>>;
 
 /// Every entry, as its file holds it.
+async fn clear_catalog(State(composer): Shared) -> Response {
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
+        let mut catalog = composer.catalog.write().map_err(|e| e.to_string())?;
+        let path = &composer.config.catalog;
+        let backup = if path.exists() {
+            let suffix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos();
+            let backup = path.with_extension(format!("cleared-{suffix}"));
+            std::fs::rename(path, &backup).map_err(|e| e.to_string())?;
+            Some(backup)
+        } else {
+            None
+        };
+        *catalog = Catalog::load(path).map_err(|e| e.to_string())?;
+        Ok(backup)
+    })
+    .await;
+    match result {
+        Ok(Ok(backup)) => Json(json!({"backup":backup})).into_response(),
+        Ok(Err(error)) => problems(StatusCode::INTERNAL_SERVER_ERROR, vec![error]),
+        Err(error) => problems(StatusCode::INTERNAL_SERVER_ERROR, vec![error.to_string()]),
+    }
+}
+
 async fn entries(State(composer): Shared) -> Response {
     let catalog = composer.catalog.read().expect("the catalogue lock");
     let entries: Vec<&gdl_extract::Entry> = catalog.entries().collect();
-    Json(json!({ "entries": entries })).into_response()
-}
-
-#[derive(Deserialize)]
-struct Add {
-    /// `name@version` on crates.io, or a directory on the server's machine.
-    #[serde(rename = "crate")]
-    krate: String,
-}
-
-/// Read a crate, fetching a version first, and add it. A crate read with
-/// problems adds nothing, and the problems are the answer. A directory is
-/// one on the server's machine: the composer serves the machine it runs on.
-async fn add(State(composer): Shared, Json(add): Json<Add>) -> Response {
-    let krate = match gdl_gen::Crate::parse(&add.krate) {
-        Ok(krate) => krate,
-        Err(error) => return problems(StatusCode::BAD_REQUEST, vec![error.to_string()]),
+    let url = "https://github.com/ryanolson/gdl";
+    let revision = match &composer.config.gdl {
+        Gdl::Git {
+            url: configured,
+            rev,
+        } if configured.trim_end_matches(".git") == url => rev.as_str(),
+        _ => "e2813e7f9af25a3a09f078b83360e0668d785b44",
     };
-    // Fetching runs cargo, and adding writes a file: off the async threads.
-    // The add is made to the served catalogue, under its lock, so two adds
-    // at once both stay served; `Catalog::add` keeps a published version's
-    // first entry and replaces a directory's.
-    let added = tokio::task::spawn_blocking(move || {
-        let extracted =
-            gdl_gen::extract(&krate, &composer.config.target).map_err(|e| e.to_string())?;
-        let entry = extracted.entry(std::time::SystemTime::now());
-        let mut catalog = composer.catalog.write().expect("the catalogue lock");
-        catalog.add(entry).map(|_| ()).map_err(|e| e.to_string())
-    })
-    .await
-    .expect("the add's thread");
-    match added {
-        Ok(()) => Json(json!({ "added": add.krate })).into_response(),
-        Err(error) => problems(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            error.lines().map(str::to_string).collect(),
-        ),
-    }
+    Json(
+        json!({ "entries": entries, "local_enabled": composer.config.local_root.is_some(),
+        "example": {"source":"git", "url":url, "revision":revision, "path":"examples/api"} }),
+    )
+    .into_response()
 }
 
 /// A draft's graph file and spec, and what generating them would find:
@@ -185,6 +227,28 @@ async fn export(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
         )
             .into_response(),
         Err(found) => problems(StatusCode::UNPROCESSABLE_ENTITY, found),
+    }
+}
+
+/// Preview and archive of a Compose build context with fetchable dependencies.
+async fn deploy(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
+    let exported = tokio::task::spawn_blocking(move || {
+        let (_, spec) = prepare(&composer, &draft).map_err(|(_, problems)| problems)?;
+        gdl_gen::compose_bundle(&spec, &composer.config.target)
+            .map_err(|error| vec![error.to_string()])
+    })
+    .await;
+    match exported {
+        Ok(Ok(bundle)) => {
+            use base64::Engine;
+            Json(serde_json::json!({
+                "files": bundle.files,
+                "archive": base64::engine::general_purpose::STANDARD.encode(bundle.archive),
+            }))
+            .into_response()
+        }
+        Ok(Err(errors)) => problems(StatusCode::UNPROCESSABLE_ENTITY, errors),
+        Err(error) => problems(StatusCode::INTERNAL_SERVER_ERROR, vec![error.to_string()]),
     }
 }
 

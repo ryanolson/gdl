@@ -1,8 +1,8 @@
 //! Binding a graph file's nodes to the nodes that node crates offer, as
 //! the source reader found them.
 //!
-//! Each graph node other than the source binds to the one offered node of
-//! its name, or to the one a pin names. The node must be what the graph
+//! Pipeline nodes bind by name or by a pin. A source binds to a frontend
+//! only when explicitly pinned. The node must be what the graph
 //! says it is: the same role, and at each port the same message, by
 //! identity, as the graph's name for that port resolved to.
 
@@ -16,7 +16,7 @@ use crate::resolve::Resolved;
 use crate::spec::CrateSource;
 use crate::spec::{Bind, ListedCrate};
 
-/// The binding of each graph node other than the source that binds, keyed
+/// The binding of each pipeline node and any explicitly pinned source, keyed
 /// by node name, and every problem with the others: reported with the
 /// spec's other problems. `offers` are the node crates' offers, in the
 /// order of `crates`; `messages` is the graph's resolution.
@@ -44,10 +44,7 @@ pub(crate) fn bind(
         .collect();
     let mut problems = Vec::new();
     for name in pins.keys() {
-        let bindable = graph
-            .nodes
-            .iter()
-            .any(|n| n.ident == name && n.role() != Role::Source);
+        let bindable = graph.nodes.iter().any(|n| n.ident == name);
         if !bindable {
             problems.push(format!(
                 "[nodes] pin `{name}`: the graph has no node `{name}` that takes an implementation"
@@ -56,7 +53,21 @@ pub(crate) fn bind(
     }
 
     let mut binds = BTreeMap::new();
-    for node in graph.nodes.iter().filter(|n| n.role() != Role::Source) {
+    for node in &graph.nodes {
+        // A programmatic source has no service to build. A pin opts into a
+        // hosted frontend instead of selecting one by a coincidental name.
+        if node.role() == Role::Source && !pins.contains_key(&node.ident.to_string()) {
+            continue;
+        }
+        if node.role() != Role::Source && node.binding.is_none() {
+            if pins.contains_key(&node.ident.to_string()) {
+                problems.push(format!(
+                    "identity node `{}` has a built-in implementation and cannot be pinned",
+                    node.ident
+                ));
+            }
+            continue;
+        }
         let name = node.ident.to_string();
         let found: Vec<&(usize, &NodeEntry)> = match pins.get(&name) {
             Some(path) => offered
@@ -110,7 +121,9 @@ pub(crate) fn bind(
         };
         let bound = ty(index, entry);
         let before = problems.len();
-        check(&name, &node.sig, entry, &bound, messages, &mut problems);
+        if !(node.role() == Role::Source && entry.clients.is_some()) {
+            check(&name, &node.sig, entry, &bound, messages, &mut problems);
+        }
         if problems.len() > before {
             continue;
         }
@@ -171,7 +184,9 @@ fn check(
     };
     let request = |req: &Request| (message(&req.head), req.item.as_ref().map(&message));
     let ports: Vec<(&str, GraphPort)> = match sig {
-        Sig::Sink { req, item } => vec![("Req", request(req)), ("Item", (message(item), None))],
+        Sig::Source { req, item } | Sig::Sink { req, item } => {
+            vec![("Req", request(req)), ("Item", (message(item), None))]
+        }
         Sig::Forward { input, output } => vec![("In", request(input)), ("Out", request(output))],
         Sig::Backward { input, output } => {
             vec![
@@ -190,7 +205,6 @@ fn check(
             ("DownReq", request(down_req)),
             ("DownItem", (message(down_item), None)),
         ],
-        Sig::Source { .. } => unreachable!("the source takes no implementation"),
     };
     let same = |graph: &Option<Named>, offered: &Option<Origin>| match (graph, offered) {
         (None, None) => true,
@@ -295,6 +309,9 @@ mod tests {
     fn node(role: Role, name: &str, ports: &[(&str, &str, Option<&str>)]) -> NodeEntry {
         let side = |m: &str| (m != "()").then(|| origin(m));
         NodeEntry {
+            entries: Vec::new(),
+            clients: None,
+            config: Vec::new(),
             name: name.to_string(),
             role,
             ty: format!("x::{name}"),
@@ -525,7 +542,7 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "[nodes] pin `Frontend`: the graph has no node `Frontend` that takes an implementation",
+                "[nodes] pin `Frontend`: no [nodes] crate offers `front::Frontend`",
                 "node `Engine`: no [nodes] crate offers it; they offer `Detokenize`, `Number`, `Preprocess`, `Truncate`",
                 "[nodes] pin `Detokenize`: no [nodes] crate offers `post::Detokeniser`",
                 "node `Format`: no [nodes] crate offers it; they offer `Detokenize`, `Number`, `Preprocess`, `Truncate`",
@@ -535,6 +552,61 @@ mod tests {
         assert_eq!(problems.len(), 6);
         assert!(
             problems[0].contains("the spec lists no [nodes] crate"),
+            "{problems:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frontend_tests {
+    use super::*;
+
+    #[test]
+    fn a_source_can_bind_a_frontend_with_matching_ports() {
+        let graph = Graph::parse("name = \"http\", schema = 1; source Http: () -> stream (); sink Engine: () -> stream (); topology: Http => Engine;".parse().expect("tokens")).expect("graph");
+        let crates = vec![ListedCrate {
+            package: "frontends".into(),
+            lib: "frontends".into(),
+            source: crate::spec::CrateSource::Path("/frontends".into()),
+        }];
+        let node = NodeEntry {
+            entries: Vec::new(),
+            clients: None,
+            config: Vec::new(),
+            name: "HttpFrontend".into(),
+            ty: "frontends::HttpFrontend".into(),
+            role: Role::Source,
+            ports: vec![
+                gdl_extract::PortEntry {
+                    port: "Req".into(),
+                    head: None,
+                    item: None,
+                },
+                gdl_extract::PortEntry {
+                    port: "Item".into(),
+                    head: None,
+                    item: None,
+                },
+            ],
+        };
+        let offer = Offer {
+            package: "frontends".into(),
+            version: "0.1.0".into(),
+            source: "path+file:///frontends".into(),
+            messages: vec![],
+            exports: vec![],
+            nodes: vec![node],
+        };
+        let (bindings, problems) = bind(
+            &graph,
+            &crates,
+            &[offer],
+            &BTreeMap::new(),
+            &BTreeMap::from([("Http".into(), "frontends::HttpFrontend".into())]),
+        );
+        assert!(bindings.contains_key("Http"), "{problems:?}");
+        assert!(
+            !problems.iter().any(|p| p.contains("`Http`")),
             "{problems:?}"
         );
     }

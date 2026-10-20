@@ -788,6 +788,7 @@ pub async fn tight_velo_node() -> Arc<velo::Velo> {
         .build()
         .await
         .expect("velo node")
+        .into()
 }
 
 /// A tight velo node (see [`tight_velo_node`]) that counts how often its
@@ -815,7 +816,7 @@ pub async fn metered_tight_velo_node() -> (Arc<velo::Velo>, prometheus::Registry
         .build()
         .await
         .expect("velo node");
-    (node, registry)
+    (Arc::new(node), registry)
 }
 
 /// How many times the producers of a metered node waited for credit.

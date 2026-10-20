@@ -71,12 +71,35 @@ impl Workspace {
                 "`{name}@{version}` is not a package name and a version"
             )));
         }
-        let src = scratch.join("src");
-        std::fs::create_dir_all(&src).map_err(|e| Error(format!("{}: {e}", src.display())))?;
         let manifest = format!(
             "[package]\nname = \"gdl-extract-fetch\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
              publish = false\n\n[workspace]\n\n[dependencies]\n{name} = \"={version}\"\n"
         );
+        Self::fetch_manifest(&manifest, scratch)
+    }
+
+    /// Resolve a Git package at `rev` with Cargo, preserving Git origins for
+    /// the package and its dependencies. Nothing is built.
+    pub fn fetch_git(name: &str, url: &str, rev: &str, target: &Path) -> Result<Self, Error> {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (name, url, rev).hash(&mut hash);
+        let scratch = target
+            .join("gdl-gen")
+            .join(format!("git-{:016x}", hash.finish()));
+        let quote = |s: &str| toml::Value::String(s.into()).to_string();
+        let manifest = format!(
+            "[package]\nname = \"gdl-extract-fetch\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\ngdl_input = {{ package = {}, git = {}, rev = {} }}\n",
+            quote(name),
+            quote(url),
+            quote(rev)
+        );
+        Self::fetch_manifest(&manifest, &scratch)
+    }
+
+    fn fetch_manifest(manifest: &str, scratch: &Path) -> Result<Self, Error> {
+        let src = scratch.join("src");
+        std::fs::create_dir_all(&src).map_err(|e| Error(format!("{}: {e}", src.display())))?;
         // Adds of one crate at once share the scratch directory: each file is
         // written beside and renamed into place, so `cargo metadata` never
         // reads one half written, and left alone when it already holds the text.
@@ -91,7 +114,7 @@ impl Workspace {
                 .and_then(|()| std::fs::rename(&partial, path))
                 .map_err(|e| Error(format!("{}: {e}", path.display())))
         };
-        write(&scratch.join("Cargo.toml"), &manifest)?;
+        write(&scratch.join("Cargo.toml"), manifest)?;
         write(&src.join("lib.rs"), "")?;
         Self::load(&scratch.join("Cargo.toml"))
     }
@@ -248,6 +271,15 @@ pub struct Origin {
 /// A node a crate implements.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeEntry {
+    /// Typed public entries of a hosted service.
+    #[serde(default)]
+    pub entries: Vec<EndpointEntry>,
+    /// The public client bundle type of a hosted service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clients: Option<String>,
+    /// Only configuration fields explicitly exposed to the graph builder.
+    #[serde(default)]
+    pub config: Vec<gdl_model::ConfigField>,
     /// The node's name: its type's name.
     pub name: String,
     /// Its role: a sink, a forward or backward node, or an operator.
@@ -257,6 +289,21 @@ pub struct NodeEntry {
     pub ty: String,
     /// Its ports, in the order the role trait declares them.
     pub ports: Vec<PortEntry>,
+}
+
+/// One independently typed public entry of a hosted service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointEntry {
+    /// Client field name.
+    pub name: String,
+    /// Public endpoint path.
+    pub path: String,
+    /// Boolean graph setting that enables this entry.
+    pub enabled: String,
+    /// Request contract.
+    pub request: PortEntry,
+    /// Response item contract.
+    pub response: PortEntry,
 }
 
 /// One port of a node: a role trait's associated type.
@@ -283,3 +330,75 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod git_tests {
+    use super::*;
+
+    #[test]
+    fn a_git_package_in_a_subdirectory_keeps_its_commit_origin() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("gdl-git-origin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("protocols/src")).expect("test fixture");
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[workspace]\nmembers=['protocols']\nresolver='3'\n",
+        )
+        .expect("test fixture");
+        std::fs::write(
+            repo.join("protocols/Cargo.toml"),
+            "[package]\nname='protocols'\nversion='0.1.0'\nedition='2024'\n",
+        )
+        .expect("test fixture");
+        std::fs::write(
+            repo.join("protocols/src/lib.rs"),
+            "#[derive(gdl_message::Message)]\npub struct Prompt;\n",
+        )
+        .expect("test fixture");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(&repo)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .expect("test fixture");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("test fixture")
+                .trim()
+                .to_string()
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "fixture"]);
+        let commit = git(&["rev-parse", "HEAD"]);
+        let url = format!(
+            "file://{}",
+            repo.canonicalize().expect("test fixture").display()
+        );
+        let workspace = Workspace::fetch_git("protocols", &url, &commit, &dir.join("target"))
+            .expect("test fixture");
+        let extracted = workspace.extract("protocols").expect("test fixture");
+        assert!(extracted.problems.is_empty(), "{:?}", extracted.problems);
+        assert_eq!(
+            extracted.offer.source,
+            format!("git+{url}?rev={commit}#{commit}")
+        );
+        assert_eq!(extracted.offer.messages[0].name, "Prompt");
+        assert!(!workspace.locate("protocols").expect("test fixture").path);
+        std::fs::remove_dir_all(dir).expect("test fixture");
+    }
+}

@@ -80,6 +80,26 @@ pub(crate) fn body(graph: &Graph, path: &dyn Fn(&str) -> String) -> String {
         graph.schema.base10_digits()
     );
     for node in &graph.nodes {
+        if node.binding.is_none() {
+            let builtin = match &node.sig {
+                Sig::Operator {
+                    up_req, up_item, ..
+                } => Some(format!(
+                    "{} -> stream {}",
+                    request_signature(up_req, path),
+                    type_name(up_item, path)
+                )),
+                Sig::Forward { input, .. } => {
+                    Some(format!("request {}", request_signature(input, path)))
+                }
+                Sig::Backward { input, .. } => Some(format!("response {}", type_name(input, path))),
+                _ => None,
+            };
+            if let Some(signature) = builtin {
+                text.push_str(&format!("identity {}: {signature};\n", node.ident));
+                continue;
+            }
+        }
         text.push_str(&format!(
             "{:<8} {}: {};\n",
             node.role().name(),
@@ -87,23 +107,26 @@ pub(crate) fn body(graph: &Graph, path: &dyn Fn(&str) -> String) -> String {
             signature(&node.sig, path)
         ));
     }
-    text.push_str(&format!(
-        "topology: {} => {};\n",
-        graph.source().ident,
-        hop(graph, 0)
-    ));
+    for (index, root) in graph
+        .hops
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| graph.node(&h.outer).role() == gdl_model::Role::Source)
+    {
+        text.push_str(&format!(
+            "topology: {} => {};\n",
+            root.outer,
+            hop(graph, index)
+        ));
+    }
     text
 }
 
 /// A node's signature as the syntax writes it, after the node's name, with
 /// each message name written as `path(name)` gives it.
 pub(crate) fn signature(sig: &Sig, path: &dyn Fn(&str) -> String) -> String {
-    let ty = |ty: &Type| crate::names::message(ty).map_or_else(|| "()".to_string(), |n| path(&n));
-    let request = |req: &Request| match (&req.item, crate::names::message(&req.head)) {
-        (None, _) => ty(&req.head),
-        (Some(item), None) => format!("stream {}", ty(item)),
-        (Some(item), Some(_)) => format!("{} + stream {}", ty(&req.head), ty(item)),
-    };
+    let ty = |ty: &Type| type_name(ty, path);
+    let request = |req: &Request| request_signature(req, path);
     match sig {
         Sig::Source { req, item } | Sig::Sink { req, item } => {
             format!("{} -> stream {}", request(req), ty(item))
@@ -122,6 +145,22 @@ pub(crate) fn signature(sig: &Sig, path: &dyn Fn(&str) -> String) -> String {
         ),
         Sig::Forward { input, output } => format!("{} -> {}", request(input), request(output)),
         Sig::Backward { input, output } => format!("{} -> {}", ty(input), ty(output)),
+    }
+}
+
+fn type_name(ty: &Type, path: &dyn Fn(&str) -> String) -> String {
+    crate::names::message(ty).map_or_else(|| "()".to_string(), |name| path(&name))
+}
+
+fn request_signature(req: &Request, path: &dyn Fn(&str) -> String) -> String {
+    match (&req.item, crate::names::message(&req.head)) {
+        (None, _) => type_name(&req.head, path),
+        (Some(item), None) => format!("stream {}", type_name(item, path)),
+        (Some(item), Some(_)) => format!(
+            "{} + stream {}",
+            type_name(&req.head, path),
+            type_name(item, path)
+        ),
     }
 }
 

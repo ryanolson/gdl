@@ -12,16 +12,74 @@ use serde::Deserialize;
 /// The graph the page builds.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Draft {
+    /// Container images, published ports and runtime configuration.
+    #[serde(default)]
+    pub deployment: toml::Table,
+    /// Runtime TOML entered per segment in the Deploy panel.
+    #[serde(default)]
+    pub deployment_config: BTreeMap<String, String>,
+    /// Built-in identity nodes, keyed by their graph name.
+    #[serde(default)]
+    pub identities: BTreeMap<String, Identity>,
+    /// Adapter instances for the enabled entries of a hosted service.
+    #[serde(default)]
+    pub entries: BTreeMap<String, EntryPipeline>,
     /// The graph's name.
     pub name: String,
-    /// The graph's entry point: it takes no implementation.
+    /// The graph's entry point, optionally bound through `nodes` to a frontend.
     pub source: Source,
     /// The graph's other nodes, each an instance of a catalogue node.
     pub nodes: Vec<Instance>,
     /// The source's hop.
     pub hop: Hop,
+    /// Additional independently wired pipeline roots.
+    #[serde(default)]
+    pub pipelines: Vec<Pipeline>,
+    /// Display names keyed by pipeline root.
+    #[serde(default)]
+    pub pipeline_names: BTreeMap<String, String>,
+    /// Request-boundary target nodes and their replica selection policies.
+    #[serde(default)]
+    pub routing: BTreeMap<String, gdl_model::RequestRouter>,
     /// Segment name to the nodes it hosts.
     pub segments: BTreeMap<String, Vec<String>>,
+}
+
+/// A built-in identity node or operator with explicit port types.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Identity {
+    Forward { request: Port },
+    Backward { response: Origin },
+    Operator { request: Port, response: Origin },
+}
+
+/// A named pipeline with its own input/output contract and topology.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pipeline {
+    /// The pipeline's entry contract and unique root name.
+    pub source: Source,
+    /// Its implementation.
+    pub hop: Hop,
+}
+
+/// An entry arm with an explicit pipeline destination or a nested operator arm.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntryPipeline {
+    /// Request transforms in order.
+    #[serde(default)]
+    pub forward: Vec<Instance>,
+    /// Optional operator before the destination pipeline.
+    pub operator: Option<Instance>,
+    /// Explicit destination root; present only at a leaf.
+    pub target: Option<String>,
+    /// The operator's downstream arm.
+    pub nested: Option<Box<EntryPipeline>>,
+    /// Response transforms in order from downstream to upstream.
+    #[serde(default)]
+    pub backward: Vec<Instance>,
 }
 
 /// The source: its name, the request it takes, and the item its response
@@ -51,6 +109,9 @@ pub struct Port {
 /// A graph node: its name, and the catalogue node it is.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Instance {
+    /// Overrides for explicitly marked graph configuration fields.
+    #[serde(default)]
+    pub config: gdl_model::GraphConfig,
     /// Its name in the graph.
     pub name: String,
     /// The catalogue entry, `name@version`.
@@ -74,6 +135,80 @@ pub struct Hop {
     /// Backward nodes, in response order.
     #[serde(default)]
     pub backward: Vec<String>,
+}
+
+fn entry_pipeline<'a>(
+    pipeline: &EntryPipeline,
+    prefix: &str,
+    entries: &BTreeMap<String, &'a Entry>,
+    packages: &mut BTreeMap<String, &'a Entry>,
+    configs: &mut toml::Table,
+    problems: &mut Vec<String>,
+) -> toml::Table {
+    let mut resolve = |instance: &Instance, name: String| -> toml::Value {
+        let found = entries.get(&instance.entry).and_then(|entry| {
+            entry
+                .offer
+                .nodes
+                .iter()
+                .find(|n| n.name == instance.node)
+                .map(|node| (*entry, node))
+        });
+        let Some((entry, node)) = found else {
+            problems.push(format!("entry node `{name}` is absent from the catalog"));
+            return "".into();
+        };
+        packages.insert(entry.key(), entry);
+        match gdl_model::resolve_config(&node.config, &instance.config) {
+            Ok(config) => {
+                configs.insert(name, toml::Value::try_from(config).expect("graph config"));
+            }
+            Err(e) => problems.push(format!("entry node `{name}`: {e}")),
+        }
+        node.ty.clone().into()
+    };
+    let mut result = toml::Table::new();
+    result.insert(
+        "forward".into(),
+        pipeline
+            .forward
+            .iter()
+            .enumerate()
+            .map(|(i, n)| resolve(n, format!("{prefix}_f{i}")))
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    result.insert(
+        "backward".into(),
+        pipeline
+            .backward
+            .iter()
+            .enumerate()
+            .map(|(i, n)| resolve(n, format!("{prefix}_b{i}")))
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    if let Some(node) = &pipeline.operator {
+        result.insert("operator".into(), resolve(node, format!("{prefix}_op")));
+    }
+    if let Some(target) = &pipeline.target {
+        result.insert("target".into(), target.clone().into());
+    }
+    if let Some(nested) = &pipeline.nested {
+        result.insert(
+            "nested".into(),
+            entry_pipeline(
+                nested,
+                &format!("{prefix}_next"),
+                entries,
+                packages,
+                configs,
+                problems,
+            )
+            .into(),
+        );
+    }
+    result
 }
 
 /// Where generated crates take gdl from: the server's setting.
@@ -130,6 +265,26 @@ impl Draft {
         used.extend(self.source.request.head.iter());
         used.extend(self.source.request.item.iter());
         used.insert(&self.source.response);
+        for pipeline in &self.pipelines {
+            used.extend(pipeline.source.request.head.iter());
+            used.extend(pipeline.source.request.item.iter());
+            used.insert(&pipeline.source.response);
+        }
+        for identity in self.identities.values() {
+            match identity {
+                Identity::Forward { request } | Identity::Operator { request, .. } => {
+                    used.extend(request.head.iter());
+                    used.extend(request.item.iter());
+                }
+                _ => {}
+            }
+            match identity {
+                Identity::Backward { response } | Identity::Operator { response, .. } => {
+                    used.insert(response);
+                }
+                _ => {}
+            }
+        }
         for (_, node) in nodes.values() {
             for port in &node.ports {
                 used.extend(port.head.iter().chain(&port.item));
@@ -184,16 +339,53 @@ impl Draft {
                     req("DownReq"),
                     item("DownItem")
                 ),
-                // The reader offers no source: it implements no role trait.
+                // The source signature was emitted above.
                 Role::Source => continue,
             };
             text.push_str(&format!("{} {}: {signature};\n", node.role, instance.name));
+        }
+        for pipeline in &self.pipelines {
+            text.push_str(&format!(
+                "source {}: {} -> stream {};\n",
+                pipeline.source.name,
+                request(
+                    names,
+                    pipeline.source.request.head.as_ref(),
+                    pipeline.source.request.item.as_ref()
+                ),
+                names.name(&pipeline.source.response)
+            ));
+        }
+        for (name, identity) in &self.identities {
+            let signature = match identity {
+                Identity::Forward { request: port } => format!(
+                    "request {}",
+                    request(names, port.head.as_ref(), port.item.as_ref())
+                ),
+                Identity::Backward { response } => format!("response {}", names.name(response)),
+                Identity::Operator {
+                    request: port,
+                    response,
+                } => format!(
+                    "{} -> stream {}",
+                    request(names, port.head.as_ref(), port.item.as_ref()),
+                    names.name(response)
+                ),
+            };
+            text.push_str(&format!("identity {name}: {signature};\n"));
         }
         text.push_str(&format!(
             "topology: {} => {};\n",
             self.source.name,
             topology(&self.hop)
         ));
+        for pipeline in &self.pipelines {
+            text.push_str(&format!(
+                "topology: {} => {};\n",
+                pipeline.source.name,
+                topology(&pipeline.hop)
+            ));
+        }
         text
     }
 
@@ -206,6 +398,30 @@ impl Draft {
         problems: &mut Vec<String>,
     ) -> String {
         let mut spec = toml::Table::new();
+        if !self.pipeline_names.is_empty() {
+            spec.insert(
+                "pipeline_names".into(),
+                toml::Value::try_from(&self.pipeline_names).expect("pipeline names"),
+            );
+        }
+        let mut configs = toml::Table::new();
+        for instance in &self.nodes {
+            if let Some((_, node)) = nodes.get(instance.name.as_str()) {
+                match gdl_model::resolve_config(&node.config, &instance.config) {
+                    Ok(config) if !config.is_empty() => {
+                        configs.insert(
+                            instance.name.clone(),
+                            toml::Value::try_from(config).expect("scalar graph values"),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => problems.push(format!("node `{}`: {error}", instance.name)),
+                }
+            }
+        }
+        if !configs.is_empty() {
+            spec.insert("config".into(), configs.into());
+        }
         let mut graph = toml::Table::new();
         graph.insert("path".into(), "graph.gdl".into());
         spec.insert("graph".into(), graph.into());
@@ -224,6 +440,27 @@ impl Draft {
         spec.insert("messages".into(), messages.into());
 
         let mut node_crates: BTreeMap<String, &Entry> = BTreeMap::new();
+        let mut adapters = toml::Table::new();
+        for (name, pipeline) in &self.entries {
+            let mut configs = toml::Table::new();
+            let value = entry_pipeline(
+                pipeline,
+                &format!("{}_{}", self.source.name, name),
+                entries,
+                &mut node_crates,
+                &mut configs,
+                problems,
+            );
+            adapters.insert(name.clone(), value.into());
+            spec.entry("config")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .expect("config table")
+                .extend(configs);
+        }
+        if !adapters.is_empty() {
+            spec.insert("entry".into(), adapters.into());
+        }
         for (entry, _) in nodes.values() {
             node_crates.insert(entry.key(), entry);
         }
@@ -235,7 +472,7 @@ impl Draft {
                 .values()
                 .filter(|e| e.offer.nodes.iter().any(|n| n.name == node.name))
                 .count();
-            if node.name != *name || offered > 1 {
+            if node.role == Role::Source || node.name != *name || offered > 1 {
                 pins.insert((*name).to_string(), node.ty.clone().into());
             }
         }
@@ -273,6 +510,40 @@ impl Draft {
             segments.insert(segment.clone(), table.into());
         }
         spec.insert("segment".into(), segments.into());
+        if !self.routing.is_empty() {
+            spec.insert(
+                "routing".into(),
+                toml::Value::try_from(&self.routing).expect("router policies are TOML strings"),
+            );
+        }
+        let mut deployment = self.deployment.clone();
+        for (name, text) in &self.deployment_config {
+            if !self.segments.contains_key(name) {
+                problems.push(format!("runtime config names unknown segment `{name}`"));
+                continue;
+            }
+            match toml::from_str::<toml::Table>(text) {
+                Ok(config) => {
+                    let segment = deployment
+                        .entry("segment")
+                        .or_insert_with(|| toml::Table::new().into());
+                    if let Some(segment) = segment.as_table_mut() {
+                        let settings = segment
+                            .entry(name.clone())
+                            .or_insert_with(|| toml::Table::new().into());
+                        if let Some(settings) = settings.as_table_mut() {
+                            settings.insert("config".into(), config.into());
+                        } else {
+                            problems.push(format!("deployment segment `{name}` must be a table"));
+                        }
+                    } else {
+                        problems.push("deployment.segment must be a table".into());
+                    }
+                }
+                Err(error) => problems.push(format!("runtime config for `{name}`: {error}")),
+            }
+        }
+        spec.insert("deployment".into(), deployment.into());
         toml::to_string(&spec).expect("a spec is representable in TOML")
     }
 }
@@ -434,7 +705,7 @@ fn topology(hop: &Hop) -> String {
 }
 
 /// Entries as a spec lists them: a registry crate by `name@version`, a
-/// path crate by its directory.
+/// path crate by its directory, and a Git crate by its URL and commit.
 fn crate_list(entries: &[&Entry], problems: &mut Vec<String>) -> Vec<toml::Value> {
     entries
         .iter()
@@ -442,11 +713,24 @@ fn crate_list(entries: &[&Entry], problems: &mut Vec<String>) -> Vec<toml::Value
             let offer = &entry.offer;
             if gdl_gen::CRATES_IO.contains(&offer.source.as_str()) {
                 Some(format!("{}@{}", offer.package, offer.version).into())
+            } else if let Some(git) = offer.source.strip_prefix("git+") {
+                let (repository, commit) = git.rsplit_once('#')?;
+                let url = repository.split('?').next()?;
+                let mut entry = toml::map::Map::new();
+                entry.insert("package".into(), offer.package.clone().into());
+                entry.insert("git".into(), url.to_string().into());
+                entry.insert("rev".into(), commit.to_string().into());
+                let lib = offer.messages.iter().map(|m| m.path.as_str())
+                    .chain(offer.nodes.iter().map(|n| n.ty.as_str()))
+                    .chain(offer.exports.iter().map(|e| e.path.as_str()))
+                    .find_map(|path| path.split("::").next());
+                if let Some(lib) = lib { entry.insert("lib".into(), lib.to_string().into()); }
+                Some(toml::Value::Table(entry))
             } else if let Some(dir) = offer.source.strip_prefix("path+file://") {
                 Some(dir.to_string().into())
             } else {
                 problems.push(format!(
-                    "{}: a crate from {} cannot be listed yet: only crates.io and directories",
+                    "{}: a crate from {} cannot be listed yet: only crates.io, Git, and directories",
                     entry.key(),
                     offer.source
                 ));
@@ -502,6 +786,9 @@ mod tests {
                 messages: Vec::new(),
                 exports: Vec::new(),
                 nodes: vec![NodeEntry {
+                    entries: Vec::new(),
+                    clients: None,
+                    config: Vec::new(),
                     name: "Engine".into(),
                     role: gdl_model::Role::Sink,
                     ty: "nodes::Engine".into(),
@@ -539,6 +826,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let catalog = catalog(&dir);
         let draft = Draft {
+            deployment: toml::Table::new(),
+            deployment_config: BTreeMap::new(),
+            identities: BTreeMap::new(),
+            pipelines: Vec::new(),
+            pipeline_names: BTreeMap::new(),
+            entries: BTreeMap::new(),
+            routing: BTreeMap::new(),
             name: "keyword".into(),
             source: Source {
                 name: "A".into(),
@@ -549,6 +843,7 @@ mod tests {
                 response: origin("proto::Token"),
             },
             nodes: vec![Instance {
+                config: Default::default(),
                 name: "Engine".into(),
                 entry: "nodes@0.1.0".into(),
                 node: "Engine".into(),
@@ -595,7 +890,7 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "proto@0.1.0: a crate from sparse+https://registry.example.com/index/ cannot be listed yet: only crates.io and directories"
+                "proto@0.1.0: a crate from sparse+https://registry.example.com/index/ cannot be listed yet: only crates.io, Git, and directories"
             ]
         );
     }
@@ -634,6 +929,13 @@ mod tests {
             ..origin("other::Token")
         };
         let draft = Draft {
+            deployment: toml::Table::new(),
+            deployment_config: BTreeMap::new(),
+            identities: BTreeMap::new(),
+            pipelines: Vec::new(),
+            pipeline_names: BTreeMap::new(),
+            entries: BTreeMap::new(),
+            routing: BTreeMap::new(),
             name: "twins".into(),
             source: Source {
                 name: "A".into(),
@@ -696,6 +998,9 @@ mod tests {
             messages: Vec::new(),
             exports: Vec::new(),
             nodes: vec![NodeEntry {
+                entries: Vec::new(),
+                clients: None,
+                config: Vec::new(),
                 ty: "cuda::Engine".into(),
                 ..engine
             }],
@@ -708,6 +1013,13 @@ mod tests {
             })
             .expect("added");
         let draft = Draft {
+            deployment: toml::Table::new(),
+            deployment_config: BTreeMap::new(),
+            identities: BTreeMap::new(),
+            pipelines: Vec::new(),
+            pipeline_names: BTreeMap::new(),
+            entries: BTreeMap::new(),
+            routing: BTreeMap::new(),
             name: "twice".into(),
             source: Source {
                 name: "A".into(),
@@ -719,11 +1031,13 @@ mod tests {
             },
             nodes: vec![
                 Instance {
+                    config: Default::default(),
                     name: "Engine".into(),
                     entry: "nodes@0.1.0".into(),
                     node: "Engine".into(),
                 },
                 Instance {
+                    config: Default::default(),
                     name: "Engine2".into(),
                     entry: "cuda@0.1.0".into(),
                     node: "Engine".into(),
@@ -802,6 +1116,9 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 vec![NodeEntry {
+                    entries: Vec::new(),
+                    clients: None,
+                    config: Vec::new(),
                     name: "Engine".into(),
                     role: Role::Sink,
                     ty: "nodes::Engine".into(),
@@ -829,6 +1146,13 @@ mod tests {
                 .expect("added");
         }
         let draft = Draft {
+            deployment: toml::Table::new(),
+            deployment_config: BTreeMap::new(),
+            identities: BTreeMap::new(),
+            pipelines: Vec::new(),
+            pipeline_names: BTreeMap::new(),
+            entries: BTreeMap::new(),
+            routing: BTreeMap::new(),
             name: "facaded".into(),
             source: Source {
                 name: "A".into(),
@@ -839,6 +1163,7 @@ mod tests {
                 response: origin("proto::Token"),
             },
             nodes: vec![Instance {
+                config: Default::default(),
                 name: "Engine".into(),
                 entry: "nodes@0.1.0".into(),
                 node: "Engine".into(),
@@ -907,6 +1232,9 @@ mod tests {
                 messages: Vec::new(),
                 exports: Vec::new(),
                 nodes: vec![NodeEntry {
+                    entries: Vec::new(),
+                    clients: None,
+                    config: Vec::new(),
                     name: "Engine".into(),
                     role: Role::Sink,
                     ty: "nodes::Engine".into(),
@@ -934,6 +1262,13 @@ mod tests {
                 .expect("added");
         }
         let draft = Draft {
+            deployment: toml::Table::new(),
+            deployment_config: BTreeMap::new(),
+            identities: BTreeMap::new(),
+            pipelines: Vec::new(),
+            pipeline_names: BTreeMap::new(),
+            entries: BTreeMap::new(),
+            routing: BTreeMap::new(),
             name: "reread".into(),
             source: Source {
                 name: "A".into(),
@@ -944,6 +1279,7 @@ mod tests {
                 response: words,
             },
             nodes: vec![Instance {
+                config: Default::default(),
                 name: "Engine".into(),
                 entry: "nodes@0.1.0".into(),
                 node: "Engine".into(),

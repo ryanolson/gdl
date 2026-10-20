@@ -2,7 +2,7 @@
 //!
 //! - `nodes`: one marker type per node, implementing the node's declaration
 //!   traits, so `gdl::Absent<nodes::X>` has exactly node X's port types;
-//! - `Bindings`: a typestate struct with one slot per non-source node,
+//! - `Bindings`: a typestate struct with one slot per node that needs an implementation,
 //!   `Absent` until bound; each setter states the node's role and types, so
 //!   a mismatched implementation fails to compile at the setter named for
 //!   the node;
@@ -144,9 +144,9 @@ fn expand_edges(graph: &Graph) -> TokenStream {
     }
 }
 
-/// Non-source nodes, in declaration order: the ones that take a binding.
+/// Nodes that take an implementation binding, in declaration order.
 fn bound_nodes(graph: &Graph) -> impl Iterator<Item = &Node> {
-    graph.nodes.iter().filter(|n| n.role() != Role::Source)
+    graph.nodes.iter().filter(|n| n.binding.is_some())
 }
 
 /// The type parameter for a node's slot.
@@ -163,7 +163,17 @@ fn field(node: &Node) -> &Ident {
 /// The local a node's slot is moved into: prefixed, so it shadows neither a
 /// parameter nor another local of the generated function.
 fn local_var(node: &Node) -> Ident {
-    let name = field(node).to_string();
+    let name = node
+        .binding
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            node.ident
+                .to_string()
+                .bytes()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        });
     format_ident!("__gdl_node_{}", name.trim_start_matches("r#"))
 }
 
@@ -438,6 +448,28 @@ fn signature(graph: &Graph, krate: &TokenStream) -> Signature {
     let nodes: Vec<&Node> = bound_nodes(graph).collect();
     let fields = nodes.iter().map(|n| field(n));
     let locals = nodes.iter().map(|n| local_var(n));
+    let builtins = graph
+        .nodes
+        .iter()
+        .filter(|n| n.binding.is_none())
+        .filter_map(|node| {
+            let local = local_var(node);
+            let implementation = match &node.sig {
+                Sig::Operator {
+                    up_req, up_item, ..
+                } => {
+                    let req = request(up_req, krate);
+                    quote!(#krate::IdentityOperator::<#req,#up_item>::new())
+                }
+                Sig::Forward { input, .. } => {
+                    let req = request(input, krate);
+                    quote!(#krate::IdentityNode::<#req>::new())
+                }
+                Sig::Backward { input, .. } => quote!(#krate::IdentityNode::<#input>::new()),
+                _ => return None,
+            };
+            Some(quote!(let #local=::std::sync::Arc::new(#implementation);))
+        });
     Signature {
         generics: nodes.iter().map(|n| generic(n)).collect(),
         bounds: nodes
@@ -448,8 +480,50 @@ fn signature(graph: &Graph, krate: &TokenStream) -> Signature {
                 quote! { #g: #bound }
             })
             .collect(),
-        unpack: quote! { let Bindings { #(#fields: #locals),* } = __gdl_bindings; },
+        unpack: quote! { let Bindings { #(#fields: #locals),* } = __gdl_bindings; #(#builtins)* },
     }
+}
+
+fn root_result(
+    graph: &Graph,
+    krate: &TokenStream,
+    generics: &[Ident],
+    distributed: bool,
+) -> (TokenStream, TokenStream) {
+    let roots: Vec<_> = graph
+        .hops
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| graph.node(&h.outer).role() == Role::Source)
+        .collect();
+    let multiple = roots.len() > 1;
+    let mut result_type = quote!(());
+    let mut result_value = quote!(());
+    for (index, hop) in roots.into_iter().rev() {
+        let Sig::Source { req, item } = &graph.node(&hop.outer).sig else {
+            unreachable!()
+        };
+        let req = request(req, krate);
+        let (ty, value) = if distributed {
+            let name = format_ident!("__gdl_hop_{}", index);
+            (
+                quote!(impl #krate::Next<#req, #item> + #krate::Register + use<#(#generics),*>),
+                quote!(#name),
+            )
+        } else {
+            let name = format_ident!("__gdl_local_{}", index);
+            (
+                quote!(#krate::Source<impl #krate::Next<#req, #item> + use<#(#generics),*>>),
+                quote!(#krate::Source::new(#name)),
+            )
+        };
+        if !multiple {
+            return (ty, value);
+        }
+        result_type = quote!((#ty, #result_type));
+        result_value = quote!((#value, #result_value));
+    }
+    (result_type, result_value)
 }
 
 fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
@@ -458,7 +532,7 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
         bounds,
         unpack,
     } = signature(graph, krate);
-    let (req, item) = source_types(graph, krate);
+    let (result_type, result_value) = root_result(graph, krate, &generics, true);
     // Innermost hop first, so each operator can take the hop below it.
     let hops = graph.hops.iter().enumerate().rev().map(|(index, hop)| {
         let name = format_ident!("__gdl_hop_{}", index);
@@ -468,7 +542,7 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
         let inner_node = graph.node(&hop.inner);
         let inner_local = local_var(inner_node);
         let inner = match inner_node.role() {
-            Role::Sink => quote! { #krate::DSink::new(#inner_local) },
+            Role::Sink => quote! { #krate::DSink::new(::std::sync::Arc::clone(&#inner_local)) },
             _ => {
                 let next = format_ident!("__gdl_hop_{}", index + 1);
                 quote! { #krate::DOperator::new(#inner_local, #next) }
@@ -484,14 +558,14 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
         pub fn assemble<#(#generics),*>(
             __gdl_deployment: &#krate::Deployment,
             __gdl_bindings: Bindings<#(#generics),*>,
-        ) -> #krate::Result<impl #krate::Next<#req, #item> + #krate::Register + use<#(#generics),*>>
+        ) -> #krate::Result<#result_type>
         where
             #(#bounds,)*
         {
             __gdl_deployment.check_contract(manifest().contract_hash())?;
             #unpack
             #(#hops)*
-            ::core::result::Result::Ok(__gdl_hop_0)
+            ::core::result::Result::Ok(#result_value)
         }
     }
 }
@@ -527,7 +601,7 @@ fn expand_local(graph: &Graph, krate: &TokenStream) -> TokenStream {
         bounds,
         unpack,
     } = signature(graph, krate);
-    let (req, item) = source_types(graph, krate);
+    let (result_type, result_value) = root_result(graph, krate, &generics, false);
     let hops = graph.hops.iter().enumerate().rev().map(|(index, hop)| {
         let name = format_ident!("__gdl_local_{}", index);
         let mut fwd = quote!(());
@@ -543,7 +617,7 @@ fn expand_local(graph: &Graph, krate: &TokenStream) -> TokenStream {
         let inner_node = graph.node(&hop.inner);
         let inner_local = local_var(inner_node);
         let inner = match inner_node.role() {
-            Role::Sink => quote! { #krate::SinkStage::new(#inner_local) },
+            Role::Sink => quote! { #krate::SinkStage::new(::std::sync::Arc::clone(&#inner_local)) },
             _ => {
                 let next = format_ident!("__gdl_local_{}", index + 1);
                 quote! { #krate::OperatorStage::new(#inner_local, #next) }
@@ -557,13 +631,13 @@ fn expand_local(graph: &Graph, krate: &TokenStream) -> TokenStream {
         /// The whole graph in one process, as nested calls.
         pub fn local<#(#generics),*>(
             __gdl_bindings: Bindings<#(#generics),*>,
-        ) -> #krate::Source<impl #krate::Next<#req, #item> + use<#(#generics),*>>
+        ) -> #result_type
         where
             #(#bounds,)*
         {
             #unpack
             #(#hops)*
-            #krate::Source::new(__gdl_local_0)
+            #result_value
         }
     }
 }

@@ -43,7 +43,12 @@ impl Deployment {
                 format!("the placement has no segment `{segment}`"),
             ));
         }
-        let fabric = Fabric::new(velo, config.anchor_timeout, config.heartbeat_interval);
+        let fabric = Fabric::new(
+            velo,
+            config.anchor_timeout,
+            config.heartbeat_interval,
+            config.reservation_renew_interval,
+        );
         let rt = Runtime::new(fabric, layout, segment.to_string(), roster, config)?;
         Ok(Self { rt: Arc::new(rt) })
     }
@@ -150,6 +155,23 @@ pub struct Segment<H> {
 }
 
 impl<H> Segment<H> {
+    /// Bind one named pipeline while keeping this segment's handlers alive.
+    pub fn client<Req, Item, N>(
+        self: &Arc<Self>,
+        select: fn(&H) -> N,
+    ) -> impl Next<Req, Item> + use<H, Req, Item, N>
+    where
+        H: Send + Sync + 'static,
+        Req: Send + 'static,
+        Item: Send + 'static,
+        N: Next<Req, Item>,
+    {
+        EntryClient {
+            segment: Arc::clone(self),
+            next: select(&self.root),
+        }
+    }
+
     /// Send one request into the graph. Valid on the segment that hosts the
     /// source.
     pub async fn call<Req, Item>(&self, cx: Cx, req: Req) -> Result<Items<Item>>
@@ -194,5 +216,40 @@ impl<H> Segment<H> {
     /// This instance's velo identity, for building a roster.
     pub fn peer_info(&self) -> velo::PeerInfo {
         self.rt.fabric.peer_info()
+    }
+}
+
+impl<H, Req, Item> Next<Req, Item> for Arc<Segment<H>>
+where
+    H: Next<Req, Item>,
+    Req: Send + 'static,
+    Item: Send + 'static,
+{
+    async fn generate(&self, cx: Cx, req: Req) -> Result<Items<Item>> {
+        self.call(cx, req).await
+    }
+}
+
+struct EntryClient<H, N> {
+    segment: Arc<Segment<H>>,
+    next: N,
+}
+impl<H, N: Clone> Clone for EntryClient<H, N> {
+    fn clone(&self) -> Self {
+        Self {
+            segment: Arc::clone(&self.segment),
+            next: self.next.clone(),
+        }
+    }
+}
+impl<H, N, Req, Item> Next<Req, Item> for EntryClient<H, N>
+where
+    H: Send + Sync + 'static,
+    N: Next<Req, Item>,
+    Req: Send + 'static,
+    Item: Send + 'static,
+{
+    async fn generate(&self, cx: Cx, req: Req) -> Result<Items<Item>> {
+        self.next.generate(cx, req).await
     }
 }

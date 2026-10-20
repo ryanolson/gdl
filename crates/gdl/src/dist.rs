@@ -10,6 +10,8 @@ mod segment;
 mod stages;
 
 pub use fabric::bind_node;
+#[cfg(feature = "hub")]
+pub use fabric::{HubSession, bind_container_node};
 pub use hop::{DHop, Register};
 pub use runtime::{Entries, Roster, RuntimeConfig};
 #[cfg(feature = "fault-injection")]

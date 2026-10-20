@@ -245,3 +245,14 @@ impl<H> Source<H> {
         self.0.generate(cx, req).await
     }
 }
+
+impl<H, Req, Item> Next<Req, Item> for Source<H>
+where
+    H: Next<Req, Item>,
+    Req: Send + 'static,
+    Item: Send + 'static,
+{
+    async fn generate(&self, cx: Cx, req: Req) -> Result<Items<Item>> {
+        self.call(cx, req).await
+    }
+}

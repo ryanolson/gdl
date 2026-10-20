@@ -41,6 +41,12 @@ use crate::Error;
 /// A parsed and resolved generator input.
 #[derive(Debug, Clone)]
 pub struct Spec {
+    pub(crate) deployment: crate::deployment::Settings,
+    pub(crate) pipeline_names: BTreeMap<String, String>,
+    pub(crate) entry: BTreeMap<String, crate::service::EntrySpec>,
+    pub(crate) service: Option<crate::service::ServiceBinding>,
+    /// Resolved graph-affecting values, keyed by node instance.
+    pub(crate) config: BTreeMap<String, gdl_model::GraphConfig>,
     /// The spec file's own path, as given.
     pub(crate) file: PathBuf,
     /// The spec's text, when it was given as text rather than a file: an
@@ -52,7 +58,7 @@ pub struct Spec {
     pub(crate) source: Source,
     /// How generated crates depend on gdl.
     pub(crate) gdl: GdlDep,
-    /// The placement: the `[segment.*]` tables.
+    /// Segment placement and request-boundary routing policies.
     pub(crate) placement: gdl_model::Placement,
     /// Node name to implementation.
     pub(crate) bind: BTreeMap<String, Bind>,
@@ -104,15 +110,16 @@ pub(crate) struct ListedCrate {
     pub(crate) source: CrateSource,
 }
 
-/// Where a crate a spec names comes from: a directory, or a version on
-/// crates.io, which the generator fetches to read and generated crates
-/// depend on exactly.
+/// A listed package source: a directory, an exact crates.io version, or a
+/// Git revision. Generated dependencies retain that source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CrateSource {
     /// Its directory, resolved.
     Path(PathBuf),
     /// An exact version on crates.io.
     Version(String),
+    /// A package from a Git repository at a revision.
+    Git { url: String, rev: String },
 }
 
 impl CrateSource {
@@ -137,6 +144,11 @@ impl CrateSource {
     /// as `path` writes it.
     pub(crate) fn source(&self, path: &dyn Fn(&Path) -> String) -> String {
         match self {
+            Self::Git { url, rev } => format!(
+                "git = {}, rev = {}",
+                crate::dump::toml_string(url),
+                crate::dump::toml_string(rev)
+            ),
             Self::Path(p) => format!("path = {}", path(p)),
             Self::Version(v) => format!("version = {}", crate::dump::toml_string(&format!("={v}"))),
         }
@@ -146,6 +158,7 @@ impl CrateSource {
 impl std::fmt::Display for CrateSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Git { url, rev } => write!(f, "{url} at {rev}"),
             Self::Path(p) => write!(f, "{}", p.display()),
             Self::Version(v) => write!(f, "version {v}"),
         }
@@ -215,6 +228,14 @@ pub(crate) struct Bind {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    #[serde(default)]
+    deployment: crate::deployment::Settings,
+    #[serde(default)]
+    pipeline_names: BTreeMap<String, String>,
+    #[serde(default)]
+    entry: BTreeMap<String, crate::service::EntrySpec>,
+    #[serde(default)]
+    config: BTreeMap<String, gdl_model::GraphConfig>,
     contract: Option<RawContract>,
     graph: Option<RawGraph>,
     messages: Option<RawMessages>,
@@ -222,6 +243,8 @@ struct Raw {
     gdl: RawGdl,
     #[serde(default)]
     segment: toml::Table,
+    #[serde(default)]
+    routing: toml::Table,
     #[serde(default)]
     bind: BTreeMap<String, RawBind>,
 }
@@ -240,9 +263,46 @@ struct RawGraph {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum RawCrate {
+    Named(String),
+    Git {
+        package: String,
+        git: String,
+        rev: String,
+        lib: Option<String>,
+    },
+}
+
+impl RawCrate {
+    fn resolve(self, dir: &Path) -> Result<(CrateNames, CrateSource), Error> {
+        match self {
+            Self::Named(entry) => CrateSource::parse(dir, &entry),
+            Self::Git {
+                package,
+                git,
+                rev,
+                lib,
+            } => {
+                if package.is_empty() || git.is_empty() || rev.is_empty() {
+                    return Err(Error::new("Git entries require package, git, and rev"));
+                }
+                Ok((
+                    CrateNames {
+                        lib: lib.unwrap_or_else(|| package.replace('-', "_")),
+                        package,
+                    },
+                    CrateSource::Git { url: git, rev },
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMessages {
-    crates: Vec<String>,
+    crates: Vec<RawCrate>,
     #[serde(default)]
     pin: BTreeMap<String, String>,
 }
@@ -250,7 +310,7 @@ struct RawMessages {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawNodes {
-    crates: Vec<String>,
+    crates: Vec<RawCrate>,
     #[serde(default)]
     pin: BTreeMap<String, String>,
 }
@@ -398,6 +458,7 @@ impl Spec {
         };
         let mut placement_table = toml::Table::new();
         placement_table.insert("segment".into(), toml::Value::Table(raw.segment));
+        placement_table.insert("routing".into(), toml::Value::Table(raw.routing));
         let placement = gdl_model::Placement::from_toml(&placement_table.to_string())
             .map_err(|e| Error::new(format!("{}: [segment]: {e}", file.display())))?;
         let bind = raw
@@ -415,6 +476,11 @@ impl Spec {
             })
             .collect();
         Ok(Self {
+            deployment: raw.deployment,
+            pipeline_names: raw.pipeline_names,
+            entry: raw.entry,
+            service: None,
+            config: raw.config,
             file: file.to_path_buf(),
             text: None,
             dir: dir.to_path_buf(),
@@ -438,7 +504,8 @@ fn graph_source(
     }
     let mut crates: Vec<ListedCrate> = Vec::with_capacity(messages.crates.len());
     for entry in messages.crates {
-        let (CrateNames { package, lib }, source) = CrateSource::parse(dir, &entry)
+        let (CrateNames { package, lib }, source) = entry
+            .resolve(dir)
             .map_err(|e| Error::new(format!("[messages] crates: {e}")))?;
         // Catalogue entries name a package, not a path: two listed packages
         // of one name could not be told apart by a pin.
@@ -470,7 +537,8 @@ fn graph_source(
     });
     let mut nodes: Vec<ListedCrate> = Vec::with_capacity(node_dirs.len());
     for entry in node_dirs {
-        let (CrateNames { package, lib }, source) = CrateSource::parse(dir, &entry)
+        let (CrateNames { package, lib }, source) = entry
+            .resolve(dir)
             .map_err(|e| Error::new(format!("[nodes] crates: {e}")))?;
         if let Some(first) = nodes.iter().find(|c| c.package == package) {
             return Err(Error::new(format!(
@@ -814,5 +882,34 @@ mod tests {
         assert_eq!(default_module("async"), "r#async");
         // A keyword only from edition 2024 on; syn takes it for a name.
         assert_eq!(default_module("gen"), "r#gen");
+    }
+}
+
+#[cfg(test)]
+mod git_tests {
+    use super::*;
+
+    #[test]
+    fn git_packages_keep_their_commit_in_generated_dependencies() {
+        let text = r#"
+[graph]
+path = "graph.gdl"
+[messages]
+crates = [{ package = "protocols", git = "https://example.com/repo", rev = "0123456789abcdef0123456789abcdef01234567ab" }]
+[gdl]
+git = "https://example.com/gdl"
+rev = "main"
+[segment.main]
+nodes = ["Source", "Engine"]
+"#;
+        let spec = Spec::parse(text, Path::new("gdl.toml"), Path::new(".")).expect("git package");
+        let Source::Graph(graph) = spec.source else {
+            panic!("graph")
+        };
+        assert_eq!(graph.crates[0].package, "protocols");
+        assert_eq!(
+            graph.crates[0].source.source(&|_| panic!("no local path")),
+            "git = \"https://example.com/repo\", rev = \"0123456789abcdef0123456789abcdef01234567ab\""
+        );
     }
 }

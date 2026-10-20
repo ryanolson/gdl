@@ -1,7 +1,7 @@
 //! `gdl-web`: serve the composer.
 //!
 //! ```text
-//! gdl-web --catalog <dir> [--listen <address>] [--target-dir <dir>]
+//! gdl-web --catalog <dir> [--listen <address>] [--target-dir <dir>] [--local-root <dir>]
 //!         (--gdl-path <dir> | --gdl-git <url> --gdl-rev <rev>)
 //! ```
 //!
@@ -9,12 +9,12 @@
 //! address it serves, and adds crates to the catalogue in `--catalog`.
 //! Crates are fetched under `--target-dir`
 //! (`target` here by default). Generated crates take gdl from the path or
-//! git revision given.
+//! git revision given. Local imports require `--local-root <dir>`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: gdl-web --catalog <dir> [--listen <address>] [--target-dir <dir>] (--gdl-path <dir> | --gdl-git <url> --gdl-rev <rev>)";
+const USAGE: &str = "usage: gdl-web --catalog <dir> [--listen <address>] [--target-dir <dir>] [--local-root <dir>] (--gdl-path <dir> | --gdl-git <url> --gdl-rev <rev>)";
 
 fn main() -> ExitCode {
     match run() {
@@ -29,10 +29,16 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let (mut catalog, mut listen, mut target) = (None, "127.0.0.1:8080".to_string(), None);
+    let mut local_root = None;
     let (mut path, mut git, mut rev) = (None, None, None);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| USAGE.to_string());
         match arg.as_str() {
+            "--local-root" => local_root = Some(PathBuf::from(value()?)),
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
             "--catalog" => catalog = Some(PathBuf::from(value()?)),
             "--listen" => listen = value()?,
             "--target-dir" => target = Some(PathBuf::from(value()?)),
@@ -53,6 +59,7 @@ fn run() -> Result<(), String> {
         catalog: catalog.ok_or_else(|| USAGE.to_string())?,
         target: target.unwrap_or_else(|| PathBuf::from("target")),
         gdl,
+        local_root,
     };
     let router = gdl_web::router(config)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;

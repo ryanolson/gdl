@@ -121,7 +121,7 @@ fn portable(spec: &Spec) -> bool {
             .iter()
             .map(|c| &c.source)
             .chain(source.nodes.iter().map(|c| &c.source))
-            .all(|s| matches!(s, CrateSource::Version(_)))
+            .all(|s| matches!(s, CrateSource::Version(_) | CrateSource::Git { .. }))
 }
 
 /// A segment's image: built in the Rust image, from the archive's root

@@ -34,6 +34,46 @@ pub(crate) fn validate(
     manifest: &gdl_model::Manifest,
 ) -> Result<gdl_model::Layout, Error> {
     let mut problems = spec.problems.clone();
+    let mut labels = BTreeSet::new();
+    for (root, name) in &spec.pipeline_names {
+        if manifest
+            .node(root)
+            .is_none_or(|n| n.role != gdl_model::Role::Source)
+        {
+            problems.push(format!("pipeline name refers to unknown root `{root}`"));
+        }
+        if name.trim().is_empty() || !labels.insert(name) {
+            problems.push("pipeline names must be nonempty and unique".into());
+        }
+    }
+    let entry_nodes = spec.service.as_ref().map(|s| s.nodes()).unwrap_or_default();
+    let entry_names: BTreeSet<_> = entry_nodes.iter().map(|n| n.name.as_str()).collect();
+    let bindings: BTreeMap<_, _> = spec
+        .bind
+        .iter()
+        .chain(entry_nodes.iter().map(|n| (&n.name, &n.bind)))
+        .collect();
+    let source_name = manifest
+        .nodes
+        .iter()
+        .find(|n| n.role == gdl_model::Role::Source)
+        .map(|n| n.name.as_str())
+        .unwrap_or("");
+
+    if spec.service.is_none()
+        && spec.bind.contains_key(source_name)
+        && manifest
+            .nodes
+            .iter()
+            .filter(|n| n.role == gdl_model::Role::Source)
+            .count()
+            > 1
+    {
+        problems.push("multiple pipeline roots require a service frontend".into());
+    }
+    if !spec.entry.is_empty() && spec.service.is_none() {
+        problems.push("entry adapters require a service frontend".into());
+    }
     // Where a node's crate comes from, as the spec writes it: a contract
     // spec binds each node in a table, a graph spec through `[nodes]`.
     let graph_spec = matches!(spec.source, spec::Source::Graph(_));
@@ -62,11 +102,35 @@ pub(crate) fn validate(
             manifest.name
         ));
     }
+    if spec.service.is_some() {
+        let host = spec
+            .placement
+            .segments()
+            .find(|(_, nodes)| nodes.iter().any(|n| n == source_name))
+            .map(|(name, _)| name);
+        for root in manifest
+            .nodes
+            .iter()
+            .filter(|n| n.role == gdl_model::Role::Source)
+        {
+            let placement = spec
+                .placement
+                .segments()
+                .find(|(_, nodes)| nodes.contains(&root.name))
+                .map(|(name, _)| name);
+            if placement != host {
+                problems.push(format!("pipeline entry `{}` must be hosted with its frontend; place its processing nodes independently", root.name));
+            }
+        }
+    }
     // Package names are what Cargo sees: two segments that differ only in
     // case or in `-` against `_` would build one package twice.
     let mut packages: BTreeMap<String, &str> = BTreeMap::new();
     for (segment, nodes) in spec.placement.segments() {
-        let hosted: BTreeSet<&str> = nodes.iter().map(String::as_str).collect();
+        let mut hosted: BTreeSet<&str> = nodes.iter().map(String::as_str).collect();
+        if hosted.contains(source_name) {
+            hosted.extend(entry_names.iter().copied());
+        }
         let valid = !segment.is_empty()
             && segment
                 .chars()
@@ -93,7 +157,7 @@ pub(crate) fn validate(
                 "segment `{segment}` becomes package `{package}`, the contract's name"
             ));
         }
-        for (node, bind) in &spec.bind {
+        for (node, bind) in &bindings {
             if package == bind.package {
                 let whose = if graph_spec {
                     format!("node `{node}`'s [nodes] crate")
@@ -134,7 +198,7 @@ pub(crate) fn validate(
             see(builtin, "the standard library".into(), &mut problems);
         }
         // One package may implement several nodes: it is one crate.
-        for (node, bind) in &spec.bind {
+        for (node, bind) in &bindings {
             if hosted.contains(node.as_str()) {
                 see(
                     &bind.lib,
@@ -159,10 +223,9 @@ pub(crate) fn validate(
             key(fixed, format!("the `{fixed}` dependency"), &mut problems);
         }
         key(&contract.package, "the contract".into(), &mut problems);
-        for (node, bind) in &spec.bind {
+        for (node, bind) in &bindings {
             if hosted.contains(node.as_str()) {
-                let first = spec
-                    .bind
+                let first = bindings
                     .iter()
                     .find(|(n, b)| hosted.contains(n.as_str()) && b.package == bind.package)
                     .map_or(node.as_str(), |(n, _)| n.as_str());
@@ -180,17 +243,17 @@ pub(crate) fn validate(
         }
     }
     let mut sources: BTreeMap<&str, (spec::CrateSource, &str)> = BTreeMap::new();
-    for (node, bind) in &spec.bind {
-        match manifest.node(node) {
-            None => problems.push(format!(
+    for (node, bind) in &bindings {
+        if manifest.node(node).is_some_and(|n| n.is_identity()) {
+            problems.push(format!(
+                "identity node `{node}` cannot take an implementation binding"
+            ));
+        }
+        if manifest.node(node).is_none() && !entry_names.contains(node.as_str()) {
+            problems.push(format!(
                 "{}: the graph has no node `{node}`",
                 bound_by(node)
-            )),
-            Some(info) if info.role == gdl_model::Role::Source => problems.push(format!(
-                "{}: `{node}` is the source, which takes no implementation",
-                bound_by(node)
-            )),
-            Some(_) => {}
+            ));
         }
         if bind.ty.trim().is_empty() {
             problems.push(format!("{}: `type` is empty", bound_by(node)));
@@ -234,13 +297,10 @@ pub(crate) fn validate(
     }
     // A graph spec has reported each node that did not bind already.
     for node in &manifest.nodes {
-        if !graph_spec
-            && node.role != gdl_model::Role::Source
-            && !spec.bind.contains_key(&node.name)
-        {
+        if !graph_spec && node.binding.is_some() && !spec.bind.contains_key(&node.name) {
             problems.push(format!("node `{}` has no [bind.{}]", node.name, node.name));
         }
-        if node.role != gdl_model::Role::Source && node.binding.is_none() {
+        if node.role == gdl_model::Role::Sink && node.binding.is_none() {
             problems.push(format!(
                 "node `{}` has no binding name in the manifest; rebuild the contract with this gdl",
                 node.name

@@ -20,6 +20,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 name = "gdl-macros"
 version = "0.1.0"
 dependencies = [
+ "gdl-model",
  "gdl-syntax",
  "proc-macro2",
  "quote",
@@ -31,6 +32,7 @@ name = "gdl-message"
 version = "0.1.0"
 dependencies = [
  "gdl-macros",
+ "gdl-model",
  "linkme",
  "serde",
  "toml",

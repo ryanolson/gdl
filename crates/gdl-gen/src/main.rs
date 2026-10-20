@@ -6,6 +6,7 @@
 //! cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
+//! cargo gdl compose --spec <gdl.toml> --out <directory> [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
 //!
@@ -33,9 +34,13 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
+       cargo gdl compose --spec <gdl.toml> --out <directory> [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
 enum Command {
+    Compose {
+        out: PathBuf,
+    },
     Extract {
         krate: gdl_gen::Crate,
         catalog: Option<PathBuf>,
@@ -104,6 +109,9 @@ fn args() -> Result<Args, String> {
         "generate" => Command::Generate {
             out: out.ok_or_else(|| USAGE.to_string())?,
             check,
+        },
+        "compose" => Command::Compose {
+            out: out.ok_or_else(|| USAGE.to_string())?,
         },
         "export" => Command::Export {
             out: out.ok_or_else(|| USAGE.to_string())?,
@@ -186,6 +194,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let spec = spec()?;
             let target = target(spec.dir());
             print!("{}", gdl_gen::diagram(&spec, &target, *format)?);
+        }
+        Command::Compose { out } => {
+            let spec = spec()?;
+            let target = target(spec.dir());
+            gdl_gen::compose(&spec, out, &target)?;
         }
         Command::Export { out } => {
             let spec = spec()?;

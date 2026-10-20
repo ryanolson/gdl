@@ -1,7 +1,13 @@
 //! The one module that calls velo. Everything else in the runtime speaks in
 //! terms of [`Fabric`], [`Inbound`], [`Outbound`], and [`ReplyTo`], so a velo
-//! upgrade touches only this file. There is deliberately no transport trait
-//! (plan section 8): no second transport exists.
+//! upgrade stays in this module, including its hub client. There is no transport
+//! trait because the runtime has no second messaging implementation.
+
+#[cfg(feature = "hub")]
+mod hub;
+mod renewal;
+#[cfg(feature = "hub")]
+pub use hub::{HubSession, bind_container_node};
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -36,6 +42,7 @@ pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Arc<Velo>> {
         .stream_bind_addr(listen.ip())
         .build()
         .await
+        .map(Arc::new)
         .map_err(|e| transport(&e))
 }
 
@@ -72,21 +79,31 @@ impl ReplyTo {
 /// A velo node as the runtime uses it.
 pub(crate) struct Fabric {
     velo: Arc<Velo>,
-    anchor_timeout: Duration,
+    anchor_timeout: Option<Duration>,
     heartbeat_interval: Option<Duration>,
+    renewals: Arc<renewal::Renewals>,
 }
 
 impl Fabric {
     pub(crate) fn new(
         velo: Arc<Velo>,
-        anchor_timeout: Duration,
+        anchor_timeout: Option<Duration>,
         heartbeat_interval: Option<Duration>,
+        renewal_interval: Duration,
     ) -> Self {
         Self {
+            renewals: renewal::Renewals::new(&velo, renewal_interval),
             velo,
             anchor_timeout,
             heartbeat_interval,
         }
+    }
+
+    pub(crate) fn hold_reply(&self, reply: &ReplyTo) -> renewal::HeldReply {
+        self.renewals.hold(velo::streaming::AnchorReservation::new(
+            StreamAnchorHandle::from_u128(reply.handle),
+            reply.ticket.as_ref(),
+        ))
     }
 
     pub(crate) fn instance(&self) -> InstanceId {
@@ -108,8 +125,7 @@ impl Fabric {
     }
 
     /// Mint an anchor for one stream of `WireItem`s, and the reply-to that
-    /// names it. Every gdl anchor gets an unattached timeout: velo's default
-    /// is none, and an anchor whose producer never arrives must not leak.
+    /// names it. Inherit Velo's reservation lifetime unless the runtime overrides it.
     /// A ticket is minted whenever velo can; a producer on this same worker
     /// ignores it and attaches, which also releases the prebind.
     pub(crate) fn mint(&self) -> (Inbound, ReplyTo) {
@@ -117,7 +133,7 @@ impl Fabric {
             .velo
             .anchor_manager()
             .create_anchor_with_config::<WireItem>(AnchorConfig {
-                unattached_timeout: Some(self.anchor_timeout),
+                unattached_timeout: self.anchor_timeout,
                 heartbeat_interval: self.heartbeat_interval,
             });
         let handle = anchor.handle();

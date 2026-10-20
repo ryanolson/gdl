@@ -246,10 +246,40 @@ fn differences(
                             )
                         })
                         .collect();
-                    format!("{}({})", r.role, ports.join(", "))
+                    let entries: Vec<_> = r
+                        .entries
+                        .iter()
+                        .map(|e| {
+                            let shape = |p: &gdl_message::PortInfo| {
+                                port(
+                                    "",
+                                    p.head.as_ref().map(|o| (&o.package, &o.version, &o.path)),
+                                    p.streamed.then(|| {
+                                        p.item.as_ref().map(|o| (&o.package, &o.version, &o.path))
+                                    }),
+                                    p.nested,
+                                )
+                            };
+                            format!(
+                                "{} {} {} {} {}",
+                                e.name,
+                                e.path,
+                                e.enabled,
+                                shape(&e.request),
+                                shape(&e.response)
+                            )
+                        })
+                        .collect();
+                    format!("{}({}) entries {:?}", r.role, ports.join(", "), entries)
                 })
                 .collect();
-            format!("node `{}` at `{}`: {}", n.name, n.path, roles.join(" "))
+            format!(
+                "node `{}` at `{}`: {} config {:?}",
+                n.name,
+                n.path,
+                roles.join(" "),
+                n.config
+            )
         }))
         .collect();
     let read: BTreeSet<String> = offer
@@ -284,12 +314,38 @@ fn differences(
                     )
                 })
                 .collect();
+            let entries: Vec<_> = n
+                .entries
+                .iter()
+                .map(|e| {
+                    let shape = |p: &gdl_extract::PortEntry| {
+                        port(
+                            "",
+                            p.head.as_ref().map(|o| (&o.package, &o.version, &o.path)),
+                            p.item
+                                .as_ref()
+                                .map(|o| Some((&o.package, &o.version, &o.path))),
+                            false,
+                        )
+                    };
+                    format!(
+                        "{} {} {} {} {}",
+                        e.name,
+                        e.path,
+                        e.enabled,
+                        shape(&e.request),
+                        shape(&e.response)
+                    )
+                })
+                .collect();
             format!(
-                "node `{}` at `{}`: {}({})",
+                "node `{}` at `{}`: {}({}) entries {:?} config {:?}",
                 n.name,
                 n.ty,
                 n.role,
-                ports.join(", ")
+                ports.join(", "),
+                entries,
+                n.config
             )
         }))
         .collect();
@@ -379,12 +435,14 @@ mod tests {
                 origin: built_origin("protocols::Words"),
             }],
             nodes: vec![NodeInfo {
+                config: Vec::new(),
                 package: "facade".into(),
                 version: "0.1.0".into(),
                 dir: FACADE.into(),
                 name: "Stage".into(),
                 path: "facade::Stage".into(),
                 roles: vec![RoleInfo {
+                    entries: Vec::new(),
                     role: "forward".into(),
                     ports: vec![
                         PortInfo {
@@ -422,6 +480,9 @@ mod tests {
                 public: true,
             }],
             nodes: vec![NodeEntry {
+                entries: Vec::new(),
+                clients: None,
+                config: Vec::new(),
                 name: "Stage".into(),
                 role: gdl_model::Role::Forward,
                 ty: "facade::Stage".into(),
@@ -443,6 +504,20 @@ mod tests {
 
     fn facade(dir: &str) -> bool {
         dir == FACADE
+    }
+
+    #[test]
+    fn endpoint_contracts_are_compared() {
+        let mut offer = read();
+        let port = offer.nodes[0].ports[1].clone();
+        offer.nodes[0].entries.push(gdl_extract::EndpointEntry {
+            name: "chat".into(),
+            path: "/chat".into(),
+            enabled: "enabled_chat".into(),
+            request: port.clone(),
+            response: port.clone(),
+        });
+        assert!(!differences(&registered(true, false), &facade, &offer).is_empty());
     }
 
     #[test]

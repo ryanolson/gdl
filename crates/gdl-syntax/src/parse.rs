@@ -12,6 +12,9 @@
 //! topology: A => B { C => D => F => E } => G;
 //! ```
 //!
+//! Built-in identities use `identity N: request Req;`, `identity N: response Item;`,
+//! or `identity N: Req -> stream Item;` for an operator. They take no implementation binding.
+//!
 //! A request position (a source's, sink's, or operator's request, and both
 //! sides of a forward node) also takes a streamed request: `Head + stream
 //! Item`, or `stream Item` for a head of `()`.
@@ -23,6 +26,9 @@ mod kw {
     syn::custom_keyword!(name);
     syn::custom_keyword!(schema);
     syn::custom_keyword!(source);
+    syn::custom_keyword!(identity);
+    syn::custom_keyword!(request);
+    syn::custom_keyword!(response);
     syn::custom_keyword!(operator);
     syn::custom_keyword!(forward);
     syn::custom_keyword!(sink);
@@ -36,11 +42,12 @@ pub(crate) struct GraphInput {
     pub(crate) name: LitStr,
     pub(crate) schema: LitInt,
     pub(crate) nodes: Vec<NodeDecl>,
-    pub(crate) topology: Vec<Element>,
+    pub(crate) topology: Vec<Vec<Element>>,
     pub(crate) topology_span: proc_macro2::Span,
 }
 
 pub(crate) struct NodeDecl {
+    pub(crate) builtin: bool,
     pub(crate) ident: Ident,
     pub(crate) sig: Sig,
 }
@@ -125,10 +132,13 @@ impl Parse for GraphInput {
         }
         let topology_kw = input.parse::<kw::topology>()?;
         input.parse::<Token![:]>()?;
-        let topology = parse_list(input)?;
+        let mut topology = vec![parse_list(input)?];
         input.parse::<Token![;]>()?;
-        if !input.is_empty() {
-            return Err(input.error("unexpected input after the topology"));
+        while !input.is_empty() {
+            input.parse::<kw::topology>()?;
+            input.parse::<Token![:]>()?;
+            topology.push(parse_list(input)?);
+            input.parse::<Token![;]>()?;
         }
         Ok(Self {
             name,
@@ -146,6 +156,9 @@ impl Parse for NodeDecl {
         let sig_kind = if lookahead.peek(kw::source) {
             input.parse::<kw::source>()?;
             0
+        } else if lookahead.peek(kw::identity) {
+            input.parse::<kw::identity>()?;
+            5
         } else if lookahead.peek(kw::operator) {
             input.parse::<kw::operator>()?;
             1
@@ -164,6 +177,31 @@ impl Parse for NodeDecl {
         let ident: Ident = input.parse()?;
         input.parse::<Token![:]>()?;
         let sig = match sig_kind {
+            5 => {
+                if input.peek(kw::request) {
+                    input.parse::<kw::request>()?;
+                    let req = request(input)?;
+                    Sig::Forward {
+                        input: req.clone(),
+                        output: req,
+                    }
+                } else if input.peek(kw::response) {
+                    input.parse::<kw::response>()?;
+                    let item = item_type(input)?;
+                    Sig::Backward {
+                        input: item.clone(),
+                        output: item,
+                    }
+                } else {
+                    let (req, item) = streaming(input)?;
+                    Sig::Operator {
+                        up_req: req.clone(),
+                        up_item: item.clone(),
+                        down_req: req,
+                        down_item: item,
+                    }
+                }
+            }
             0 => {
                 let (req, item) = streaming(input)?;
                 Sig::Source { req, item }
@@ -207,7 +245,11 @@ impl Parse for NodeDecl {
             }
         };
         input.parse::<Token![;]>()?;
-        Ok(Self { ident, sig })
+        Ok(Self {
+            ident,
+            sig,
+            builtin: sig_kind >= 5,
+        })
     }
 }
 

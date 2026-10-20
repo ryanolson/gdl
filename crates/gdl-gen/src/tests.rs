@@ -29,6 +29,11 @@ fn manifest() -> Manifest {
 
 fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
     Spec {
+        deployment: Default::default(),
+        pipeline_names: BTreeMap::new(),
+        entry: BTreeMap::new(),
+        service: None,
+        config: BTreeMap::new(),
         file: "gdl.toml".into(),
         text: None,
         dir: "/work".into(),
@@ -186,7 +191,6 @@ fn every_problem_is_reported_at_once() {
     let error = check(&spec, &manifest()).expect_err("invalid").to_string();
     for expected in [
         "segment `front.end`",
-        "[bind.S]: `S` is the source",
         "[bind.Q]: the graph has no node `Q`",
         "node `D` has no [bind.D]",
     ] {
@@ -609,4 +613,73 @@ fn only_the_source_segment_serves_json_lines() {
     );
     assert!(!files[&PathBuf::from("front/Cargo.toml")].contains("tiny-nodes"));
     assert!(files[&PathBuf::from("engine/Cargo.toml")].contains("tiny-nodes"));
+}
+
+#[test]
+fn entry_bindings_require_a_resolved_service() {
+    let mut spec = spec(gdl_model::Placement::default(), &[]);
+    spec.entry
+        .insert("chat".into(), crate::service::EntrySpec::default());
+    let error = check(&spec, &manifest())
+        .expect_err("entry without service")
+        .to_string();
+    assert!(
+        error.contains("entry adapters require a service frontend"),
+        "{error}"
+    );
+}
+
+#[test]
+fn entry_nodes_cannot_shadow_generated_dependencies() {
+    let mut spec = spec(split(), &[("D", "tiny_nodes::D")]);
+    let mut binding = spec.bind["D"].clone();
+    binding.package = "tokio".into();
+    binding.lib = "entry_nodes".into();
+    binding.ty = "entry_nodes::Transform".into();
+    spec.service = Some(crate::service::ServiceBinding {
+        clients: "entry_nodes::Clients".into(),
+        entries: vec![crate::service::EntryBinding {
+            field: "chat".into(),
+            path: "/chat".into(),
+            pipeline: Some(crate::service::EntryHop {
+                target: Some("A".into()),
+                forward: vec![crate::service::EntryNode {
+                    name: "S_chat_f0".into(),
+                    bind: binding,
+                }],
+                operator: None,
+                nested: None,
+                backward: vec![],
+            }),
+        }],
+    });
+    let error = check(&spec, &manifest())
+        .expect_err("entry dependency collision")
+        .to_string();
+    assert!(error.contains("dependency `tokio`"), "{error}");
+}
+
+#[test]
+fn multiple_roots_require_a_service_for_a_hosted_frontend() {
+    let placement = gdl_model::Placement::new().segment("front", ["S", "T", "D"]);
+    let spec = spec(
+        placement,
+        &[("S", "tiny_nodes::Frontend"), ("D", "tiny_nodes::D")],
+    );
+    let mut manifest = manifest();
+    manifest.nodes.push(NodeInfo {
+        name: "T".into(),
+        role: Role::Source,
+        binding: None,
+    });
+    let mut hop = manifest.hops[0].clone();
+    hop.outer = "T".into();
+    manifest.hops.push(hop);
+    let error = check(&spec, &manifest)
+        .expect_err("single-contract frontend cannot serve multiple roots")
+        .to_string();
+    assert!(
+        error.contains("multiple pipeline roots require a service frontend"),
+        "{error}"
+    );
 }

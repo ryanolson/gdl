@@ -22,7 +22,7 @@ pub struct Graph {
     pub schema: LitInt,
     /// Every node, in declaration order.
     pub nodes: Vec<Node>,
-    /// Outermost first.
+    /// Each source root followed by its nested hops, in topology order.
     pub hops: Vec<Hop>,
 }
 
@@ -33,7 +33,7 @@ pub struct Node {
     /// Its role and port types.
     pub sig: Sig,
     /// The node's setter on `Bindings` and its field there: the node's name
-    /// in snake case, raw when it is a keyword. The source has none.
+    /// in snake case, raw when it is a keyword. Sources and built-in identities have none.
     pub binding: Option<Ident>,
 }
 
@@ -108,6 +108,7 @@ impl Graph {
             }
             let binding = match decl.sig {
                 Sig::Source { .. } => None,
+                _ if decl.builtin => None,
                 _ => Some(binding(&decl.ident, &mut bindings)?),
             };
             nodes.push(Node {
@@ -117,20 +118,11 @@ impl Graph {
             });
         }
         let sources: Vec<&Node> = nodes.iter().filter(|n| n.role() == Role::Source).collect();
-        match sources.as_slice() {
-            [_] => {}
-            [] => {
-                return Err(syn::Error::new(
-                    input.topology_span,
-                    "a graph has exactly one source",
-                ));
-            }
-            [_, second, ..] => {
-                return Err(syn::Error::new(
-                    second.ident.span(),
-                    "a graph has exactly one source",
-                ));
-            }
+        if sources.is_empty() {
+            return Err(syn::Error::new(
+                input.topology_span,
+                "a graph needs a source",
+            ));
         }
 
         let mut builder = Builder {
@@ -140,18 +132,20 @@ impl Graph {
             hops: Vec::new(),
             streaming: None,
         };
-        let mut list = input.topology.into_iter();
-        let first = list
-            .next()
-            .ok_or_else(|| syn::Error::new(input.topology_span, "the topology is empty"))?;
-        let source = builder.node(&first.ident)?;
-        if source.role() != Role::Source || first.nested.is_some() {
-            return Err(syn::Error::new(
-                first.ident.span(),
-                "the topology starts with the source, with no braces",
-            ));
+        for topology in input.topology {
+            let mut list = topology.into_iter();
+            let first = list
+                .next()
+                .ok_or_else(|| syn::Error::new(input.topology_span, "the topology is empty"))?;
+            let source = builder.node(&first.ident)?;
+            if source.role() != Role::Source || first.nested.is_some() {
+                return Err(syn::Error::new(
+                    first.ident.span(),
+                    "the topology starts with the source, with no braces",
+                ));
+            }
+            builder.hop(first.ident, list.collect(), input.topology_span)?;
         }
-        builder.hop(first.ident, list.collect(), input.topology_span)?;
 
         for node in &nodes {
             if !builder.used.contains(&node.ident.to_string()) {
@@ -255,12 +249,12 @@ impl Graph {
             .expect("checked: every topology node is declared")
     }
 
-    /// The graph's one source.
+    /// The first declared source, which may host the frontend.
     pub fn source(&self) -> &Node {
         self.nodes
             .iter()
             .find(|n| n.role() == Role::Source)
-            .expect("checked: one source")
+            .expect("checked: at least one source")
     }
 }
 
@@ -532,7 +526,10 @@ impl<'a> Builder<'a> {
             backward_types,
         });
         match (inner_role, inner.nested) {
-            (Role::Sink, _) => self.take(&inner.ident),
+            (Role::Sink, _) => {
+                self.used.insert(inner.ident.to_string());
+                Ok(())
+            }
             // The operator is this hop's inner end and the next hop's outer
             // end; `hop` marks it used.
             (Role::Operator, Some(nested)) => {

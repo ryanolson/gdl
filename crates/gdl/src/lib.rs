@@ -10,18 +10,22 @@
 //! The design and its rulings are in `agent-docs/plan.md`.
 
 mod compose;
+mod config;
 mod cx;
 mod decl;
 mod dist;
 mod error;
+mod identity;
 mod items;
 #[cfg(feature = "json-lines")]
 mod json;
 mod role;
+mod service;
 mod streamed;
 mod wire;
 
 pub use compose::{BackwardChain, ForwardChain, Hop, Inner, OperatorStage, SinkStage, Source};
+pub use config::build_node;
 pub use cx::{Cx, Deadline, RequestId};
 pub use decl::{Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDecl, SourceDecl};
 pub use dist::{
@@ -30,15 +34,22 @@ pub use dist::{
 };
 #[cfg(feature = "fault-injection")]
 pub use dist::{Faults, Gate};
+#[cfg(feature = "hub")]
+pub use dist::{HubSession, bind_container_node};
 pub use error::{Error, ErrorKind, Result};
+pub use figment;
+pub use gdl_macros::{Config, Endpoints};
 pub use gdl_model::{
-    CrossingReport, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement,
-    PlacementError, PlacementErrors, Role, Run, TypeInfo, WireReason, layout,
+    ConfigField, ConfigSchema, ConfigValue, CrossingReport, DeploymentSpec, GraphConfig, HopInfo,
+    HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement, PlacementError, PlacementErrors,
+    RequestRouter, Role, Run, SegmentRegistration, TypeInfo, WireReason, layout, resolve_config,
 };
+pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 #[cfg(feature = "json-lines")]
 pub use json::serve_json_lines;
-pub use role::{Backward, Build, Forward, Next, Operator, Sink};
+pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
+pub use service::{Client, Endpoints, Join, Service};
 pub use streamed::Streamed;
 /// The velo version this runtime is built on: a deployment's nodes are
 /// velo nodes, and generated segment crates reach velo through here so they
@@ -138,7 +149,7 @@ pub mod __private {
     pub use gdl_macros::graph;
     pub use gdl_message::__private::*;
 
-    use crate::{Backward, Forward, Operator, Sink};
+    use crate::{Backward, Forward, Frontend, Operator, Sink};
 
     /// The type whose role traits `derive(Node)` probes. For each role, the
     /// bounded impl is on `RoleProbe<T>` and the fallback on
@@ -171,6 +182,7 @@ pub mod __private {
             {
                 fn $method(&self) -> Option<Role> {
                     Some(Role {
+                        entries: Vec::new(),
                         role: $name,
                         ports: vec![$((stringify!($port), port::<T::$port>())),+],
                     })
@@ -189,6 +201,35 @@ pub mod __private {
         };
     }
 
+    pub trait ServiceYes {
+        fn __gdl_service(&self) -> Option<Role>;
+    }
+    impl<T: crate::Service> ServiceYes for RoleProbe<T> {
+        fn __gdl_service(&self) -> Option<Role> {
+            Some(Role {
+                role: "source",
+                ports: Vec::new(),
+                entries: <T::Clients as crate::Endpoints>::entries(),
+            })
+        }
+    }
+    pub trait ServiceNo {
+        fn __gdl_service(&self) -> Option<Role>;
+    }
+    impl<T> ServiceNo for &RoleProbe<T> {
+        fn __gdl_service(&self) -> Option<Role> {
+            None
+        }
+    }
+
+    probe!(
+        FrontendYes,
+        FrontendNo,
+        __gdl_frontend,
+        Frontend,
+        "source",
+        [Req, Item]
+    );
     probe!(SinkYes, SinkNo, __gdl_sink, Sink, "sink", [Req, Item]);
     probe!(
         ForwardYes,

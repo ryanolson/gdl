@@ -95,6 +95,9 @@ pub struct ExportInfo {
 /// A type that derives `Node`, with each role trait it implements.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeInfo {
+    /// Graph-affecting configuration fields.
+    #[serde(default)]
+    pub config: Vec<gdl_model::ConfigField>,
     /// The package that defines it.
     pub package: String,
     /// That package's version.
@@ -114,10 +117,28 @@ pub struct NodeInfo {
 /// One role a node type implements.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RoleInfo {
+    /// Named public entries of a hosted service.
+    #[serde(default)]
+    pub entries: Vec<EndpointInfo>,
     /// `sink`, `forward`, `backward`, or `operator`.
     pub role: String,
     /// Its ports, in the order the role trait declares them.
     pub ports: Vec<PortInfo>,
+}
+
+/// A typed endpoint owned by one hosted frontend.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EndpointInfo {
+    /// Client field name.
+    pub name: String,
+    /// Public protocol endpoint.
+    pub path: String,
+    /// Graph configuration boolean that enables it.
+    pub enabled: String,
+    /// Request type.
+    pub request: PortInfo,
+    /// Response item type.
+    pub response: PortInfo,
 }
 
 /// One port: a role trait's associated type.
@@ -179,7 +200,7 @@ impl Catalogue {
 /// What the markers register. Not a stable interface.
 #[doc(hidden)]
 pub mod registry {
-    use super::{ExportInfo, MessageInfo, NodeInfo, PortInfo, RoleInfo};
+    use super::{EndpointInfo, ExportInfo, MessageInfo, NodeInfo, PortInfo, RoleInfo};
     use crate::{Identity, Shape};
 
     /// One entry per type that derives `Message`, collected at link time:
@@ -248,6 +269,7 @@ pub mod registry {
     pub static GDL_NODE_CATALOGUE: [Node];
 
     pub struct Node {
+        pub config: fn() -> Vec<gdl_model::ConfigField>,
         pub package: &'static str,
         pub version: &'static str,
         pub dir: &'static str,
@@ -260,8 +282,29 @@ pub mod registry {
 
     /// A role and its ports, as the derive's probe finds them.
     pub struct Role {
+        pub entries: Vec<Endpoint>,
         pub role: &'static str,
         pub ports: Vec<(&'static str, Port)>,
+    }
+
+    pub struct Endpoint {
+        pub name: &'static str,
+        pub path: &'static str,
+        pub enabled: &'static str,
+        pub request: Port,
+        pub response: Port,
+    }
+
+    impl Port {
+        fn info(self, name: &str) -> PortInfo {
+            PortInfo {
+                port: name.to_string(),
+                streamed: self.streamed,
+                nested: self.nested,
+                head: self.head.map(Into::into),
+                item: self.item.map(Into::into),
+            }
+        }
     }
 
     /// A port's shape, read from its type's `Shape`.
@@ -287,6 +330,17 @@ pub mod registry {
             let mut roles: Vec<RoleInfo> = (self.roles)()
                 .into_iter()
                 .map(|role| RoleInfo {
+                    entries: role
+                        .entries
+                        .into_iter()
+                        .map(|e| EndpointInfo {
+                            name: e.name.into(),
+                            path: e.path.into(),
+                            enabled: e.enabled.into(),
+                            request: e.request.info("Req"),
+                            response: e.response.info("Item"),
+                        })
+                        .collect(),
                     role: role.role.to_string(),
                     ports: role
                         .ports
@@ -303,6 +357,7 @@ pub mod registry {
                 .collect();
             roles.sort();
             NodeInfo {
+                config: (self.config)(),
                 package: self.package.to_string(),
                 version: self.version.to_string(),
                 dir: self.dir.to_string(),

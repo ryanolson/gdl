@@ -75,3 +75,107 @@ async fn every_placement_of_the_reference_graph_matches_the_local_run() {
         assert_eq!(got, want, "{blocks:?}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn request_routers_keep_concurrent_responses_on_their_origin_anchors() {
+    use gdl::RequestRouter;
+    use std::sync::Arc;
+    let mut nodes = Vec::new();
+    for _ in 0..5 {
+        nodes.push(velo_node().await);
+    }
+    let instances = vec![
+        ("front".into(), Arc::clone(&nodes[0])),
+        ("front".into(), Arc::clone(&nodes[1])),
+        ("engine".into(), Arc::clone(&nodes[2])),
+        ("engine".into(), Arc::clone(&nodes[3])),
+        ("post".into(), Arc::clone(&nodes[4])),
+    ];
+    for router in [RequestRouter::RoundRobin, RequestRouter::Random] {
+        let placement = Placement::new()
+            .segment("front", ["A", "B", "C", "G"])
+            .segment("engine", ["D"])
+            .segment("post", ["F", "E"])
+            .route("D", router);
+        let events = Events::new();
+        let cluster = deploy_instances(&instances, &placement, &events, RuntimeConfig::default());
+        let calls = (0..12u32).map(|i| {
+            let segment = &cluster.segments[i as usize % 2].1;
+            async move {
+                let plan = Plan {
+                    tokens: i + 1,
+                    ..Plan::default()
+                };
+                let output = segment
+                    .call(Cx::new(), prompt(&format!("r{i}"), plan))
+                    .await
+                    .expect("routing fixture");
+                assert_eq!(collect(output).await, expected(0..i + 1));
+            }
+        });
+        futures::future::join_all(calls).await;
+        let served: Vec<_> = cluster
+            .segments
+            .iter()
+            .filter(|(name, _)| name == "engine")
+            .map(|(_, s)| s.served().forwards)
+            .collect();
+        assert_eq!(served.iter().sum::<usize>(), 12);
+        if router == RequestRouter::RoundRobin {
+            assert_eq!(served, vec![6, 6]);
+        }
+        assert!(settles(&cluster).await);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn random_routing_keeps_request_items_on_one_replica() {
+    use common::streamed::{Script, ask, replies, words};
+    use std::sync::Arc;
+    let mut nodes = Vec::new();
+    for _ in 0..4 {
+        nodes.push(velo_node().await);
+    }
+    let instances = vec![
+        ("front".into(), Arc::clone(&nodes[0])),
+        ("engine".into(), Arc::clone(&nodes[1])),
+        ("engine".into(), Arc::clone(&nodes[2])),
+        ("post".into(), Arc::clone(&nodes[3])),
+    ];
+    let placement = Placement::new()
+        .segment("front", ["A", "B", "C", "G"])
+        .segment("engine", ["D"])
+        .segment("post", ["F", "E"])
+        .route("D", gdl::RequestRouter::Random);
+    let events = Events::new();
+    let cluster =
+        common::streamed::deploy(&instances, &placement, &events, RuntimeConfig::default());
+    let calls = (0..8).map(|i| {
+        let cluster = &cluster;
+        let events = &events;
+        async move {
+            let text = format!("stream-{i}");
+            let input = words(events, &["one", "two", "three"], false);
+            let output = cluster
+                .segment("front")
+                .call(Cx::new(), ask(&text, Script::default(), input))
+                .await
+                .expect("stream dispatch");
+            assert_eq!(
+                collect(output).await,
+                replies(&text, &["one", "two", "three"])
+            );
+        }
+    });
+    futures::future::join_all(calls).await;
+    assert_eq!(
+        cluster
+            .segments
+            .iter()
+            .filter(|(name, _)| name == "engine")
+            .map(|(_, s)| s.served().forwards)
+            .sum::<usize>(),
+        8
+    );
+    assert!(settles(&cluster).await);
+}

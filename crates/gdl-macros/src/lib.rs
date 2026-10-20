@@ -8,6 +8,8 @@
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as Tokens, TokenTree};
 
+mod config;
+mod endpoint;
 mod expand;
 mod export;
 mod message;
@@ -64,7 +66,7 @@ pub fn gdl_export(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// The expansion behind `gdl::Node`.
-#[proc_macro_derive(Node)]
+#[proc_macro_derive(Node, attributes(gdl))]
 pub fn node(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     result(node::expand(&input, &through_gdl()))
@@ -96,6 +98,20 @@ fn split_crate(input: Tokens) -> Option<(Tokens, Tokens)> {
         krate.extend([token]);
     }
     None
+}
+
+/// Expose explicitly marked graph configuration fields.
+#[proc_macro_derive(Config, attributes(gdl))]
+pub fn config(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    result(config::expand(&input))
+}
+
+/// Describe the typed entry clients of a hosted service.
+#[proc_macro_derive(Endpoints, attributes(gdl))]
+pub fn endpoints(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    result(endpoint::expand(&input))
 }
 
 #[cfg(test)]

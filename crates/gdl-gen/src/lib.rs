@@ -32,6 +32,7 @@
 //! source or given by a loaded catalogue.
 
 mod contract;
+mod deployment;
 mod dump;
 mod emit;
 mod export;
@@ -42,6 +43,7 @@ mod offers;
 mod output;
 mod paths;
 mod resolve;
+mod service;
 mod spec;
 mod validate;
 
@@ -49,6 +51,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub use deployment::{ComposeBundle, compose, compose_bundle, compose_files};
 use emit::MARKER;
 pub use export::export;
 pub use extract::{Crate, Extracted, add_to_catalog, extract, verify};
@@ -132,7 +135,40 @@ fn bound<'s>(
         &source.node_pins,
     );
     let mut with_binds = spec.clone();
+    for (name, binding) in &bind {
+        if let Some(node) = offers
+            .iter()
+            .flat_map(|o| &o.nodes)
+            .find(|n| n.ty == binding.ty)
+        {
+            let values = spec.config.get(name).cloned().unwrap_or_default();
+            match gdl_model::resolve_config(&node.config, &values) {
+                Ok(values) => {
+                    with_binds.config.insert(name.clone(), values);
+                }
+                Err(e) => with_binds.problems.push(format!("node `{name}`: {e}")),
+            }
+        }
+    }
     with_binds.bind = bind;
+    service::bind(
+        &mut with_binds,
+        graph,
+        &source.nodes,
+        &offers,
+        &resolution.messages,
+    );
+    for name in spec.config.keys() {
+        let adapter = with_binds
+            .service
+            .as_ref()
+            .is_some_and(|s| s.nodes().iter().any(|n| &n.name == name));
+        if !with_binds.bind.contains_key(name) && !adapter {
+            with_binds
+                .problems
+                .push(format!("config names unbound node `{name}`"));
+        }
+    }
     with_binds.problems.extend(problems);
     Ok(std::borrow::Cow::Owned(with_binds))
 }
@@ -167,7 +203,7 @@ pub fn check(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Check, Erro
         .map_err(|e| Error::new(e.to_string()))?;
     Ok(Check {
         crossings: layout.report().to_string(),
-        mermaid,
+        mermaid: service::diagram(&spec, &prepared.manifest, mermaid),
         manifest: prepared.manifest,
     })
 }

@@ -11,6 +11,7 @@ publish.workspace = true
 proc-macro = true
 
 [dependencies]
+gdl-model = { path = "../gdl-model" }
 gdl-syntax = { path = "../gdl-syntax" }
 proc-macro2 = "1"
 quote = "1"

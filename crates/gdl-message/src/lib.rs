@@ -8,7 +8,9 @@
 mod catalogue;
 mod shape;
 
-pub use catalogue::{Catalogue, ExportInfo, MessageInfo, NodeInfo, Origin, PortInfo, RoleInfo};
+pub use catalogue::{
+    Catalogue, EndpointInfo, ExportInfo, MessageInfo, NodeInfo, Origin, PortInfo, RoleInfo,
+};
 pub use shape::{Identity, Message, Shape};
 
 /// Offer a type to graph files by its name.
@@ -48,8 +50,8 @@ pub use gdl_macros::export;
 #[doc(hidden)]
 pub mod __private {
     pub use crate::catalogue::registry::{
-        Entry, Export, GDL_EXPORT_CATALOGUE, GDL_MESSAGE_CATALOGUE, GDL_NODE_CATALOGUE, Node, Port,
-        Role, port,
+        Endpoint, Entry, Export, GDL_EXPORT_CATALOGUE, GDL_MESSAGE_CATALOGUE, GDL_NODE_CATALOGUE,
+        Node, Port, Role, port,
     };
     pub use crate::shape::{Identity, Message as MessageTrait, Shape};
     pub use linkme;

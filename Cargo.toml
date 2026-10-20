@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gdl", "crates/gdl-extract", "crates/gdl-gen", "crates/gdl-macros", "crates/gdl-message", "crates/gdl-model", "crates/gdl-syntax", "crates/gdl-web"]
+members = ["crates/gdl-hub", "crates/gdl", "crates/gdl-extract", "crates/gdl-gen", "crates/gdl-macros", "crates/gdl-message", "crates/gdl-model", "crates/gdl-syntax", "crates/gdl-web"]
 # The example is its own workspace, as a deployment would be: its segment
 # crates must build with only the implementations they host.
 exclude = ["examples"]
@@ -15,6 +15,7 @@ publish = false
 [workspace.dependencies]
 criterion = { version = "0.7", default-features = false, features = ["async_tokio"] }
 dashmap = "6"
+figment = { version = "0.10.19", features = ["toml", "env", "json"] }
 futures = "0.3"
 linkme = "0.3"
 pin-project-lite = "0.2"
@@ -28,7 +29,8 @@ toml = "0.9"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7"
 trybuild = "1"
-velo = { version = "=0.19.0", default-features = false }
+velo = { git = "https://github.com/ai-dynamo/velo", rev = "1bbeb8858a072d58f69632fb2ddb52d60be5c423", default-features = false }
+velo-hub = { git = "https://github.com/ai-dynamo/velo", rev = "1bbeb8858a072d58f69632fb2ddb52d60be5c423", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

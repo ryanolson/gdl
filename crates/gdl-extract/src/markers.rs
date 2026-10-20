@@ -263,6 +263,29 @@ fn node(
     let ty_def = &resolver.crates[krate].modules[module].types[index];
     let (name, at) = (ty_def.name.clone(), ty_def.at.clone());
     let ty = format!("{}::{name}", resolver.crates[krate].name);
+    let attrs: Vec<syn::Attribute> = ty_def
+        .attrs
+        .iter()
+        .map(|meta| syn::parse_quote!(#[#meta]))
+        .collect();
+    let config_path = gdl_syntax::node_config(&attrs).map_err(|e| format!("{at}: {e}"))?;
+    let config = if let Some(path) = config_path {
+        let (path, absolute) = segments(&path);
+        let Some(Def::Type(c, m, i)) = resolver.resolve(krate, module, &path, absolute) else {
+            return Err(format!("{at}: config type cannot be resolved"));
+        };
+        let definition = &resolver.crates[c].modules[m].types[i];
+        if !derives(definition, "Config") {
+            return Err(format!("{at}: config type must derive Config"));
+        }
+        let fields = definition
+            .fields
+            .as_ref()
+            .ok_or_else(|| format!("{at}: config must be a struct"))?;
+        gdl_syntax::graph_fields(fields).map_err(|e| format!("{at}: {e}"))?
+    } else {
+        Vec::new()
+    };
     // The generated segments name the type at the crate root.
     if resolver.public_member(krate, 0, &name) != Some(def) {
         return Err(format!(
@@ -310,7 +333,65 @@ fn node(
         }
     };
 
-    let ports = role.ports();
+    let (clients, service_entries) = if let Some((_, ty, _)) =
+        types.iter().find(|(n, _, _)| n == "Clients")
+    {
+        let syn::Type::Path(path) = ty else {
+            return Err(format!("{at}: Clients must name a public Endpoints struct"));
+        };
+        let (path, absolute) = segments(&path.path);
+        let Some(Def::Type(c, m, i)) = resolver.resolve(krate, impl_module, &path, absolute) else {
+            return Err(format!("{at}: Clients cannot be resolved"));
+        };
+        let definition = &resolver.crates[c].modules[m].types[i];
+        if !derives(definition, "Endpoints") {
+            return Err(format!("{at}: Clients must derive Endpoints"));
+        }
+        let fields = definition
+            .fields
+            .as_ref()
+            .ok_or_else(|| format!("{at}: Clients must be a struct"))?;
+        let descriptors = gdl_syntax::endpoints(fields).map_err(|e| format!("{at}: {e}"))?;
+        let client_path = public_path(resolver, c, m, &definition.name);
+        let mut entries = Vec::new();
+        for entry in descriptors {
+            if !config.iter().any(|f| {
+                f.name == entry.enabled && matches!(f.default, gdl_model::ConfigValue::Bool(_))
+            }) {
+                return Err(format!(
+                    "{at}: endpoint `{}` enabling field `{}` is not a graph boolean",
+                    entry.name, entry.enabled
+                ));
+            }
+            let request = message_type(resolver, c, m, &entry.request)
+                .ok_or_else(|| format!("{at}: endpoint request must be a Message"))?;
+            let response = message_type(resolver, c, m, &entry.response)
+                .ok_or_else(|| format!("{at}: endpoint response must be a Message"))?;
+            entries.push(crate::EndpointEntry {
+                name: entry.name.to_string(),
+                path: entry.path,
+                enabled: entry.enabled,
+                request: PortEntry {
+                    port: "Req".into(),
+                    head: Some(request),
+                    item: None,
+                },
+                response: PortEntry {
+                    port: "Item".into(),
+                    head: Some(response),
+                    item: None,
+                },
+            });
+        }
+        (Some(client_path), entries)
+    } else {
+        (None, Vec::new())
+    };
+    let ports = if clients.is_some() {
+        &[][..]
+    } else {
+        role.ports()
+    };
     let mut entries = Vec::with_capacity(ports.len());
     for &port in ports {
         let Some((_, port_ty, port_at)) = types.iter().find(|(n, _, _)| n == port) else {
@@ -347,6 +428,9 @@ fn node(
         });
     }
     Ok(NodeEntry {
+        clients,
+        entries: service_entries,
+        config,
         name,
         role,
         ty,
@@ -360,6 +444,7 @@ type RoleImpl = (String, syn::Type, Vec<(String, syn::Type, Location)>);
 /// The role whose trait has this name.
 fn role_of(name: &str) -> Option<Role> {
     match name {
+        "Frontend" | "Service" => Some(Role::Source),
         "Sink" => Some(Role::Sink),
         "Forward" => Some(Role::Forward),
         "Backward" => Some(Role::Backward),

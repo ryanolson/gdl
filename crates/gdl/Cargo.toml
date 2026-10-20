@@ -13,9 +13,13 @@ publish.workspace = true
 fault-injection = []
 # `serve_json_lines`: a graph's source served as JSON lines, for the binary
 # of a segment that hosts the source.
+hub = ["dep:velo-hub", "dep:serde_json", "tokio/net"]
 json-lines = ["dep:serde_json", "tokio/io-util"]
 
 [dependencies]
+tracing = "0.1"
+velo-hub = { workspace = true, features = ["client"], optional = true }
+figment.workspace = true
 dashmap = { workspace = true }
 gdl-macros = { path = "../gdl-macros" }
 gdl-message = { path = "../gdl-message" }
@@ -33,6 +37,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
+gdl-hub = { path = "../gdl-hub" }
 gdl = { path = ".", features = ["fault-injection", "json-lines"] }
 criterion = { workspace = true }
 prometheus = { workspace = true }
@@ -55,3 +60,7 @@ harness = false
 [[bench]]
 name = "footprint"
 harness = false
+
+[[test]]
+name = "hub"
+required-features = ["hub"]

@@ -6,6 +6,30 @@ use crate::cx::Cx;
 use crate::error::Result;
 use crate::items::Items;
 
+/// A hosted entry point: an HTTP, gRPC, or other service that calls a graph.
+///
+/// `Build` prepares the service (including binding its listener). `serve`
+/// starts accepting requests once the graph is ready. Each external request
+/// gets a fresh `Cx`; dropping its response stream cancels that request.
+/// The shutdown future stops admission and asks the service to finish. The
+/// implementation owns its protocol's draining policy and returns any failure.
+/// Graph responses remain streams even when a protocol collects one response.
+pub trait Frontend: Build {
+    /// The request sent into the graph, optionally `Streamed<Head, Item>`.
+    type Req: Send + 'static;
+    /// The response item received from the graph.
+    type Item: Send + 'static;
+
+    /// Serve external requests until shutdown or a service error.
+    fn serve<N>(
+        self,
+        next: N,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> impl Future<Output = Result<()>> + Send
+    where
+        N: Next<Self::Req, Self::Item>;
+}
+
 /// The inner end of a graph: takes a request, returns a response stream.
 ///
 /// The context each node receives is how the runtime stops the node: when it

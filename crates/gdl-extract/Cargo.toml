@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+gdl-syntax = { path = "../gdl-syntax" }
 gdl-model = { path = "../gdl-model" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"

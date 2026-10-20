@@ -18,7 +18,7 @@ pub struct Manifest {
     pub schema: u32,
     /// Every node, in declaration order.
     pub nodes: Vec<NodeInfo>,
-    /// The hops from the outermost (the source's) to the innermost.
+    /// Each root followed by its nested hops, in topology order.
     pub hops: Vec<HopInfo>,
 }
 
@@ -31,10 +31,18 @@ pub struct NodeInfo {
     pub role: Role,
     /// The node's slot in the contract's `Bindings`: the name of its setter
     /// and field, as `graph!` derives it from the node's name. `None` for the
-    /// source, which takes no binding. Generated code reads it here rather
+    /// source and built-in identity nodes, which take no binding. Generated code reads it here rather
     /// than repeating the macro's naming rule.
     #[serde(default)]
     pub binding: Option<String>,
+}
+
+impl NodeInfo {
+    /// Whether the runtime supplies this node's stateless identity implementation.
+    pub fn is_identity(&self) -> bool {
+        self.binding.is_none()
+            && matches!(self.role, Role::Forward | Role::Backward | Role::Operator)
+    }
 }
 
 /// One hop: outer end, forward chain, inner end, backward chain.

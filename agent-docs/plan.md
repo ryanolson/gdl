@@ -711,6 +711,21 @@ gdl-web: Catalog behind a lock; every gdl-gen call on a blocking thread; a draft
   This matches the operators' `Up` and `Down` ports: up is toward the root. Each edge is an arrow named for its message, and a click cuts it.
 - **The demo** is scripted in `agent-docs/demo-script.md`. `the_chat_example_composes_from_its_directories` runs it against the server, without the page.
 
+**Addendum 2026-10-19 (owner request): placement and import dialogs.** This supersedes ruling 87 and the directory-import behavior above.
+
+- **Placement.** The page assigns each node to a named segment. Moving a node updates its request and response crossings together. Clicking an edge opens a dialog for the destination node. Selected cuts no longer act as intermediate state: a return path could keep the graph connected despite the apparent boundary. The page counts actual crossings, and the server checks their codecs.
+- **Import sources.** Each source has a modal dialog. Crates.io search waits 350 ms after typing and ignores stale replies. Git takes an HTTP(S) URL, a branch or commit, and an optional package subdirectory. The import resolves and pins a commit. Specs and exported manifests retain Git dependencies.
+- **Local access.** Local browsing and imports require `--local-root <directory>`. The browser lists server directories under that root. The API rejects paths and symlinks outside it. Without the option, the page offers only crates.io and Git.
+- **Evidence.** Editor tests cover placement, segment-name focus, and search races. API tests cover local confinement and Git exports. A local smart-HTTP Git server tests branch resolution and subdirectory imports without external services.
+
+**Addendum 2026-10-19 (owner request): hosted source nodes.** This supersedes the rule that a source has no implementation.
+
+- **Contract.** `Frontend: Build` declares `Req` and `Item`. `serve` takes a typed `Next<Req, Item>` client and a shutdown future. The implementation owns its listener, protocol translation, request contexts, and drain policy. GDL keeps the source role and graph grammar.
+- **Discovery and deployment.** `derive(Node)` and the source reader expose a frontend as a source with `Req` and `Item` ports. An explicit source pin selects it. The generated source binary builds it from `[frontend]` and serves after rendezvous. Pipeline bindings remain separate from the hosted service. An unpinned source remains available to callers through the segment library.
+- **Composer.** A source frontend can be selected or dragged from the catalog. Its ports fix the source messages. The exported spec retains the source pin.
+- **Output.** The graph still returns a stream. The Axum example supports streaming NDJSON and one collected HTTP response. It does not add a Single-output runtime contract.
+- **Evidence.** `examples/http` tests real HTTP requests, bind failures, source registration, and shutdown. The composer API tests source discovery, typed binding, generated service startup, and rejection of mismatched contracts. Runtime validation on this macOS host uses a temporary copy of velo with its Linux-only socket option guarded; the pinned dependency and Cargo cache remain unchanged.
+
 **Open questions.**
 
 - Settled 2026-10-18 by the owner, so no longer open: a central catalogue (there is nowhere to publish to; the working catalogue is ours), and when `cargo gdl generate` extracts (it reads source every time).
@@ -878,3 +893,7 @@ Each milestone ends with fmt, clippy (`--all-targets -D warnings`), and tests un
 | 93 | An image | a multi-stage `Dockerfile` per segment, built from the archive's root: the Rust image builds the segment, a slim Debian image runs its binary | agent, 2026-10-19 |
 | 94 | Image names | each segment's package name, after `GDL_IMAGE_PREFIX`. Addendum 2026-10-19 (review `m18-r1`): a name Docker would refuse (one ending in `-`) is an export error that names the segment | agent, 2026-10-19 |
 | 95 | Publication | not built: the registry, its credentials, and pushing are the owner's call | agent, 2026-10-19 |
+
+### 2026-10-19 addendum: request routers at segment boundaries
+
+Request boundaries now support `round_robin` and `random` replica selection. This supersedes the round-robin-only scope above. The deployment spec's `[routing]` table maps the first node in a remote forward run to its policy. Router settings participate in placement identity and are embedded in generated segments. The editor exposes the policy on the request connection in Segments mode. Request streams stay on the selected replica; return anchors retain response ownership. Backward-run provisioning uses a separate round-robin picker so provisioning does not consume the request selection sequence. Custom router implementations remain future work.

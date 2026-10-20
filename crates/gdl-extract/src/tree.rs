@@ -33,6 +33,7 @@ pub(crate) struct Module {
 
 /// A struct, an enum, or a union.
 pub(crate) struct TypeDef {
+    pub(crate) fields: Option<syn::Fields>,
     pub(crate) name: String,
     pub(crate) vis: Vis,
     pub(crate) attrs: Vec<Meta>,
@@ -235,6 +236,7 @@ impl Reader<'_> {
             };
             match item {
                 Item::Struct(s) => krate.modules[module].types.push(TypeDef {
+                    fields: Some(s.fields.clone()),
                     name: s.ident.unraw().to_string(),
                     vis: Vis::of(&s.vis),
                     attrs,
@@ -242,6 +244,7 @@ impl Reader<'_> {
                     at: at(s.ident.span()),
                 }),
                 Item::Enum(e) => krate.modules[module].types.push(TypeDef {
+                    fields: None,
                     name: e.ident.unraw().to_string(),
                     vis: Vis::of(&e.vis),
                     attrs,
@@ -255,6 +258,7 @@ impl Reader<'_> {
                     at: at(e.ident.span()),
                 }),
                 Item::Union(u) => krate.modules[module].types.push(TypeDef {
+                    fields: None,
                     name: u.ident.unraw().to_string(),
                     vis: Vis::of(&u.vis),
                     attrs,

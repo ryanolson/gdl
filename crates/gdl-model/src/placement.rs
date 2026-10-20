@@ -10,17 +10,30 @@ use crate::manifest::{HopInfo, Manifest, TypeInfo};
 
 /// Which nodes live in which segment.
 ///
-/// In a placement file this is the `[segment.<name>]` tables; other tables in
-/// the same file (bindings, the contract path) are ignored here.
+/// A placement file contains `[segment.<name>]` tables and optional `[routing]`
+/// policies. Other deployment tables are ignored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Placement {
     #[serde(rename = "segment", default)]
     segments: BTreeMap<String, SegmentSpec>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    routing: BTreeMap<String, RequestRouter>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct SegmentSpec {
     nodes: Vec<String>,
+}
+
+/// Selection of a replica when a request crosses into another segment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestRouter {
+    /// Cycle through replicas in roster order.
+    #[default]
+    RoundRobin,
+    /// Select a replica independently for each request hand-off.
+    Random,
 }
 
 impl Placement {
@@ -44,7 +57,13 @@ impl Placement {
         self
     }
 
-    /// Parse the `[segment.*]` tables of a placement file.
+    /// Set the request router for the boundary entering `node`.
+    pub fn route(mut self, node: impl Into<String>, router: RequestRouter) -> Self {
+        self.routing.insert(node.into(), router);
+        self
+    }
+
+    /// Parse segment placement and request routing from a deployment file.
     pub fn from_toml(text: &str) -> Result<Self, Error> {
         toml::from_str(text).map_err(|e| Error::new(e.to_string()))
     }
@@ -56,14 +75,21 @@ impl Placement {
             .map(|(name, spec)| (name.as_str(), spec.nodes.as_slice()))
     }
 
-    /// The placement hash: changes when any node moves, or a segment is
-    /// renamed. Node order inside a segment does not matter.
+    /// The placement hash changes with node placement, segment names, and
+    /// request routing policies. Node order inside a segment does not matter.
     pub fn hash(&self) -> u64 {
         let mut h = Fnv::new();
         for (name, spec) in &self.segments {
             h.str(name);
             let nodes: BTreeSet<&str> = spec.nodes.iter().map(String::as_str).collect();
             h.strs(&nodes.into_iter().collect::<Vec<_>>());
+        }
+        for (node, router) in &self.routing {
+            h.str(node);
+            h.str(match router {
+                RequestRouter::RoundRobin => "round_robin",
+                RequestRouter::Random => "random",
+            });
         }
         h.finish()
     }
@@ -72,10 +98,12 @@ impl Placement {
 /// A placement checked against a manifest, with every hop split into runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
+    roots: usize,
     contract_hash: u64,
     placement_hash: u64,
     segment_of: BTreeMap<String, String>,
     hops: Vec<HopLayout>,
+    routing: BTreeMap<(usize, usize), RequestRouter>,
 }
 
 /// How one hop executes under a placement.
@@ -166,9 +194,18 @@ impl Layout {
         &self.hops
     }
 
-    /// Crossings and anchors per request.
+    /// Request selector for the hand-off at a hop's forward position.
+    pub fn request_router(&self, hop: usize, position: usize) -> RequestRouter {
+        self.routing
+            .get(&(hop, position))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Crossings and anchors for one request through each root.
     pub fn report(&self) -> CrossingReport {
         CrossingReport {
+            roots: self.roots,
             hops: self
                 .hops
                 .iter()
@@ -178,19 +215,20 @@ impl Layout {
     }
 }
 
-/// What one request costs in segment crossings and anchors.
+/// Aggregate segment crossings and anchors for one request through each root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrossingReport {
+    roots: usize,
     hops: Vec<(usize, usize)>,
 }
 
 impl CrossingReport {
-    /// Crossings per request, over all hops.
+    /// Crossings for one request through each root, over all hops.
     pub fn crossings(&self) -> usize {
         self.hops.iter().map(|(c, _)| c).sum()
     }
 
-    /// Anchors per request, over all hops.
+    /// Anchors for one request through each root, over all hops.
     pub fn anchors(&self) -> usize {
         self.hops.iter().map(|(_, a)| a).sum()
     }
@@ -203,7 +241,12 @@ impl fmt::Display for CrossingReport {
         }
         write!(
             f,
-            "per request: {} crossings, {} anchors",
+            "{}: {} crossings, {} anchors",
+            if self.roots == 1 {
+                "per request"
+            } else {
+                "one request per root"
+            },
             self.crossings(),
             self.anchors()
         )
@@ -214,6 +257,8 @@ impl fmt::Display for CrossingReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PlacementError {
+    /// A router targets a node that does not start a remote request run.
+    InvalidRouter(String),
     /// The manifest itself is inconsistent.
     InvalidManifest(String),
     /// A segment lists a node the graph does not have.
@@ -267,6 +312,9 @@ pub enum WireReason {
 impl fmt::Display for PlacementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidRouter(node) => {
+                write!(f, "request router `{node}` must target a request boundary")
+            }
             Self::InvalidManifest(why) => write!(f, "invalid manifest: {why}"),
             Self::UnknownNode { segment, node } => {
                 write!(f, "segment `{segment}` lists unknown node `{node}`")
@@ -371,7 +419,31 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
     }
+    let mut routing = BTreeMap::new();
+    for (node, router) in &placement.routing {
+        let mut found = false;
+        for (index, hop) in hops.iter().enumerate() {
+            for run in hop.forward_runs.iter().skip(1) {
+                if run.stages.first() == Some(node) {
+                    routing.insert((index, run.start), *router);
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            errors.push(PlacementError::InvalidRouter(node.clone()));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(PlacementErrors(errors));
+    }
     Ok(Layout {
+        roots: manifest
+            .nodes
+            .iter()
+            .filter(|n| n.role == Role::Source)
+            .count(),
+        routing,
         contract_hash: manifest.contract_hash(),
         placement_hash: placement.hash(),
         segment_of,
@@ -496,35 +568,29 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
         return errors;
     }
     let role = |name: &str| manifest.node(name).map(|n| n.role);
-    let last = manifest.hops.len() - 1;
     for (index, hop) in manifest.hops.iter().enumerate() {
-        let expected_outer = if index == 0 {
-            Role::Source
-        } else {
-            Role::Operator
-        };
-        let expected_inner = if index == last {
-            Role::Sink
-        } else {
-            Role::Operator
-        };
-        if role(&hop.outer) != Some(expected_outer) {
+        if !matches!(role(&hop.outer), Some(Role::Source | Role::Operator)) {
             bad(format!(
-                "hop {index}: `{}` must be a {expected_outer:?}",
-                hop.outer
+                "hop {index}: its outer end must be a Source or Operator"
             ));
         }
-        if role(&hop.inner) != Some(expected_inner) {
+        if !matches!(role(&hop.inner), Some(Role::Sink | Role::Operator)) {
             bad(format!(
-                "hop {index}: `{}` must be a {expected_inner:?}",
-                hop.inner
+                "hop {index}: its inner end must be a Sink or Operator"
             ));
         }
-        if index > 0 && manifest.hops[index - 1].inner != hop.outer {
-            bad(format!(
-                "hop {index}: its outer end `{}` is not the previous hop's inner end",
-                hop.outer
-            ));
+        if role(&hop.outer) == Some(Role::Operator)
+            && (index == 0 || manifest.hops[index - 1].inner != hop.outer)
+        {
+            bad(format!("hop {index}: operator must follow its owning hop"));
+        }
+        if role(&hop.inner) == Some(Role::Operator)
+            && manifest
+                .hops
+                .get(index + 1)
+                .is_none_or(|next| next.outer != hop.inner)
+        {
+            bad(format!("hop {index}: operator must own the next hop"));
         }
         for node in &hop.forward {
             if role(node) != Some(Role::Forward) {
@@ -546,15 +612,40 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
                 "hop {index}: needs one backward type per backward edge"
             ));
         }
+        for (nodes, types) in [
+            (&hop.forward, &hop.forward_types),
+            (&hop.backward, &hop.backward_types),
+        ] {
+            for (position, name) in nodes.iter().enumerate() {
+                if manifest.node(name).is_some_and(|n| n.is_identity())
+                    && types.get(position) != types.get(position + 1)
+                {
+                    bad(format!(
+                        "identity node `{name}` must preserve its message type"
+                    ));
+                }
+            }
+        }
+        if manifest.node(&hop.inner).is_some_and(|n| n.is_identity())
+            && let Some(nested) = manifest.hops.get(index + 1)
+            && (hop.forward_types.last() != nested.forward_types.first()
+                || hop.backward_types.first() != nested.backward_types.last())
+        {
+            bad(format!(
+                "identity operator `{}` must preserve its request and response types",
+                hop.inner
+            ));
+        }
         if let Some(ty) = hop.backward_types.iter().find(|t| t.stream.is_some()) {
             bad(format!(
                 "hop {index}: response type `{ty}` is streamed; only requests can be"
             ));
         }
     }
-    // Each node fills exactly one place: the source is the first hop's outer
+    // Each node fills exactly one place: a source is a root hop's outer
     // end, an operator is one hop's inner end and the next hop's outer end,
-    // and every other node appears once. Counting catches an operator that
+    // and a sink can terminate several roots. Other nodes appear once.
+    // Counting catches an operator that
     // owns two hops, or nests under itself.
     let mut places: BTreeMap<&str, usize> = BTreeMap::new();
     for hop in &manifest.hops {
@@ -569,7 +660,7 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> Vec<PlacementError> {
     for node in &manifest.nodes {
         let expected = if node.role == Role::Operator { 2 } else { 1 };
         let found = places.get(node.name.as_str()).copied().unwrap_or(0);
-        if found > expected {
+        if found > expected && node.role != Role::Sink {
             bad(format!(
                 "node `{}` fills {found} places in the topology; a {:?} fills {expected}",
                 node.name, node.role

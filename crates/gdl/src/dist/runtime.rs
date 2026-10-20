@@ -1,6 +1,7 @@
 //! What every distributed hop of one segment instance shares.
 
 use std::collections::BTreeMap;
+use std::hash::{BuildHasher, RandomState};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use super::admission::{Admission, Egress};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 use crate::error::{Error, ErrorKind, Result};
-use gdl_model::Layout;
+use gdl_model::{Layout, RequestRouter};
 
 /// Runtime settings for one segment instance.
 ///
@@ -33,8 +34,10 @@ pub struct RuntimeConfig {
     /// The longest any setup step (a forward hand-off, a run opening, an
     /// attach) may take, on top of the request's own deadline.
     pub setup_timeout: Duration,
-    /// How long a minted anchor waits for its producer.
-    pub anchor_timeout: Duration,
+    /// Override how long an ordinary anchor waits for its producer; `None` uses Velo defaults.
+    pub anchor_timeout: Option<Duration>,
+    /// Cadence for batching held reply reservations. Defaults to 30 seconds.
+    pub reservation_renew_interval: Duration,
     /// The assumed maximum clock difference between segments.
     pub clock_skew: Duration,
     /// The deadline given to a request that crosses segments without one.
@@ -96,7 +99,8 @@ impl Default for RuntimeConfig {
             admission_wait: Duration::from_millis(100),
             attempt_limit: 16,
             setup_timeout: Duration::from_secs(10),
-            anchor_timeout: Duration::from_secs(30),
+            anchor_timeout: None,
+            reservation_renew_interval: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
             default_deadline: Duration::from_secs(600),
             egress_limit: 1024,
@@ -115,7 +119,8 @@ struct Settings {
     admission_wait_ms: u64,
     attempt_limit: usize,
     setup_timeout_ms: u64,
-    anchor_timeout_ms: u64,
+    anchor_timeout_ms: Option<u64>,
+    reservation_renew_interval_ms: u64,
     clock_skew_ms: u64,
     default_deadline_ms: u64,
     egress_limit: usize,
@@ -131,7 +136,8 @@ impl Default for Settings {
             admission_wait_ms: ms(config.admission_wait),
             attempt_limit: config.attempt_limit,
             setup_timeout_ms: ms(config.setup_timeout),
-            anchor_timeout_ms: ms(config.anchor_timeout),
+            anchor_timeout_ms: config.anchor_timeout.map(ms),
+            reservation_renew_interval_ms: ms(config.reservation_renew_interval),
             clock_skew_ms: ms(config.clock_skew),
             default_deadline_ms: ms(config.default_deadline),
             egress_limit: config.egress_limit,
@@ -149,7 +155,8 @@ impl TryFrom<Settings> for RuntimeConfig {
             admission_wait: Duration::from_millis(s.admission_wait_ms),
             attempt_limit: s.attempt_limit,
             setup_timeout: Duration::from_millis(s.setup_timeout_ms),
-            anchor_timeout: Duration::from_millis(s.anchor_timeout_ms),
+            anchor_timeout: s.anchor_timeout_ms.map(Duration::from_millis),
+            reservation_renew_interval: Duration::from_millis(s.reservation_renew_interval_ms),
             clock_skew: Duration::from_millis(s.clock_skew_ms),
             default_deadline: Duration::from_millis(s.default_deadline_ms),
             egress_limit: s.egress_limit,
@@ -168,6 +175,12 @@ impl RuntimeConfig {
     /// every refused root), and velo builds its heartbeat timer with the
     /// interval, which tokio refuses with a panic when it is zero.
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.reservation_renew_interval.is_zero() {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                "runtime setting `reservation_renew_interval_ms` must be positive",
+            ));
+        }
         for (name, limit) in [
             ("admission_limit", self.admission_limit),
             ("attempt_limit", self.attempt_limit),
@@ -237,14 +250,16 @@ impl Roster {
     }
 }
 
-/// Picks an instance of a segment, round robin.
+/// Selects a replica without a shared lock on the dispatch path.
 struct Picker {
     instances: BTreeMap<String, (Vec<InstanceId>, AtomicUsize)>,
+    random: RandomState,
 }
 
 impl Picker {
     fn new(roster: &Roster) -> Self {
         Self {
+            random: RandomState::new(),
             instances: roster
                 .segments
                 .iter()
@@ -256,7 +271,7 @@ impl Picker {
         }
     }
 
-    fn pick(&self, segment: &str) -> Result<InstanceId> {
+    fn pick(&self, segment: &str, router: RequestRouter) -> Result<InstanceId> {
         let (ids, next) = self.instances.get(segment).ok_or_else(|| {
             Error::new(
                 ErrorKind::Placement,
@@ -269,7 +284,12 @@ impl Picker {
                 format!("segment `{segment}` has no instances"),
             ));
         }
-        Ok(ids[next.fetch_add(1, Ordering::Relaxed) % ids.len()])
+        let sequence = next.fetch_add(1, Ordering::Relaxed);
+        let index = match router {
+            RequestRouter::RoundRobin => sequence % ids.len(),
+            RequestRouter::Random => (self.random.hash_one(sequence) % ids.len() as u64) as usize,
+        };
+        Ok(ids[index])
     }
 }
 
@@ -328,6 +348,7 @@ pub(crate) struct Runtime {
     pub(crate) egress: Egress,
     pub(crate) identity: Identity,
     picker: Picker,
+    open_picker: Picker,
     names: Names,
     /// Forward hand-offs, backward runs, and request streams this instance
     /// has taken on.
@@ -368,6 +389,7 @@ impl Runtime {
             ),
             egress: Egress::new(config.egress_limit, config.admission_wait),
             picker: Picker::new(roster),
+            open_picker: Picker::new(roster),
             names: Names {
                 forward: format!("gdl-fwd-{tag}"),
                 open: format!("gdl-open-{tag}"),
@@ -404,7 +426,10 @@ impl Runtime {
     /// When the chosen instance is this one, the entry runs by a direct
     /// call: velo is not relied on to deliver a message to its own sender.
     pub(crate) async fn send_forward(&self, segment: &str, envelope: Forward) -> Result<Accepted> {
-        let instance = self.picker.pick(segment)?;
+        let router = self
+            .layout
+            .request_router(envelope.hop as usize, envelope.pos as usize);
+        let instance = self.picker.pick(segment, router)?;
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
             let entry = Arc::clone(entries.forward(envelope.hop, envelope.pos)?);
@@ -424,7 +449,7 @@ impl Runtime {
 
     /// Ask an instance of `segment` to open a backward run.
     pub(crate) async fn send_open(&self, segment: &str, open: Open) -> Result<ReplyTo> {
-        let instance = self.picker.pick(segment)?;
+        let instance = self.open_picker.pick(segment, RequestRouter::RoundRobin)?;
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
             let entry = Arc::clone(entries.open(open.hop, open.pos)?);
@@ -479,6 +504,51 @@ pub(crate) struct Served {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renewal_cadence_belongs_to_runtime_config() {
+        let defaults: RuntimeConfig = toml::from_str("").expect("defaults");
+        assert_eq!(defaults.reservation_renew_interval, Duration::from_secs(30));
+        let configured: RuntimeConfig =
+            toml::from_str("reservation_renew_interval_ms = 25").expect("cadence");
+        assert_eq!(
+            configured.reservation_renew_interval,
+            Duration::from_millis(25)
+        );
+        assert!(toml::from_str::<RuntimeConfig>("reservation_renew_interval_ms = 0").is_err());
+    }
+
+    #[test]
+    fn request_picker_uses_the_selected_policy_and_rejects_missing_replicas() {
+        let ids: Vec<_> = (0..3).map(|_| InstanceId::new_v4()).collect();
+        let picker = Picker {
+            random: RandomState::new(),
+            instances: BTreeMap::from([("worker".into(), (ids.clone(), AtomicUsize::new(0)))]),
+        };
+        for index in 0..9 {
+            assert_eq!(
+                picker
+                    .pick("worker", RequestRouter::RoundRobin)
+                    .expect("replica"),
+                ids[index % 3]
+            );
+        }
+        for index in 9usize..41 {
+            let expected = ids[(picker.random.hash_one(index) % 3) as usize];
+            assert_eq!(
+                picker
+                    .pick("worker", RequestRouter::Random)
+                    .expect("replica"),
+                expected
+            );
+        }
+        assert!(picker.pick("missing", RequestRouter::Random).is_err());
+        let empty = Picker {
+            random: RandomState::new(),
+            instances: BTreeMap::from([("empty".into(), (vec![], AtomicUsize::new(0)))]),
+        };
+        assert!(empty.pick("empty", RequestRouter::RoundRobin).is_err());
+    }
 
     #[test]
     fn runtime_config_reads_milliseconds_and_keeps_defaults() {

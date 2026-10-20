@@ -41,6 +41,21 @@ pub(crate) fn offers(
     for listed in listed {
         let (package, lib, source) = (listed.package.as_str(), listed.lib.as_str(), &listed.source);
         let extraction = match source {
+            spec::CrateSource::Git { url, rev } => {
+                let workspace = gdl_extract::Workspace::fetch_git(package, url, rev, target)
+                    .map_err(|e| Error::new(e.to_string()))?;
+                let located = workspace
+                    .locate(package)
+                    .map_err(|e| Error::new(e.to_string()))?;
+                if located.lib.as_deref().is_some_and(|name| name != lib) {
+                    return Err(Error::new(format!(
+                        "{package}: its library does not match `{lib}`"
+                    )));
+                }
+                workspace
+                    .extract(package)
+                    .map_err(|e| Error::new(e.to_string()))?
+            }
             spec::CrateSource::Path(dir) => {
                 // Crates of one workspace share its `cargo metadata`.
                 match workspaces.iter().find_map(|w| w.extract_in(dir)) {
@@ -114,6 +129,9 @@ pub(crate) fn given_offer(
                 // gives a registry source; a git package is another.
                 {
                     o.version == *v && CRATES_IO.contains(&o.source.as_str())
+                }
+                spec::CrateSource::Git { url, rev } => {
+                    o.source == format!("git+{url}?rev={rev}#{rev}")
                 }
                 spec::CrateSource::Path(dir) => o
                     .source

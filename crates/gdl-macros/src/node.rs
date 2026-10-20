@@ -41,6 +41,15 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
             node
         }
     };
+    let config = if let Some(path) = gdl_syntax::node_config(&input.attrs)? {
+        quote! { || {
+            fn check<T: ::gdl::Build<Config = #path>>() {}
+            check::<#ident>();
+            <#path as ::gdl::ConfigSchema>::graph_fields()
+        } }
+    } else {
+        quote!(::std::vec::Vec::new)
+    };
     Ok(quote! {
         const _: () = {
             #root_check
@@ -48,6 +57,7 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
             #[#root::linkme::distributed_slice(#root::GDL_NODE_CATALOGUE)]
             #[linkme(crate = #root::linkme)]
             static __GDL_NODE: #root::Node = #root::Node {
+                config: #config,
                 package: ::core::env!("CARGO_PKG_NAME"),
                 version: ::core::env!("CARGO_PKG_VERSION"),
                 dir: ::core::env!("CARGO_MANIFEST_DIR"),
@@ -58,9 +68,12 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
                     use #root::{
                         BackwardNo as _, BackwardYes as _, ForwardNo as _, ForwardYes as _,
                         OperatorNo as _, OperatorYes as _, SinkNo as _, SinkYes as _,
+                        FrontendNo as _, FrontendYes as _, ServiceNo as _, ServiceYes as _,
                     };
                     let probe = #root::RoleProbe::<#ident>::new();
                     let mut roles = ::std::vec::Vec::new();
+                    roles.extend((&probe).__gdl_frontend());
+                    roles.extend((&probe).__gdl_service());
                     roles.extend((&probe).__gdl_sink());
                     roles.extend((&probe).__gdl_forward());
                     roles.extend((&probe).__gdl_backward());

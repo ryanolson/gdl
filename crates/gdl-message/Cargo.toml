@@ -10,6 +10,7 @@ publish.workspace = true
 # A protocols crate depends on this crate alone, so it builds without the
 # gdl runtime: keep the dependencies to what a derive needs.
 [dependencies]
+gdl-model = { path = "../gdl-model" }
 gdl-macros = { path = "../gdl-macros" }
 linkme = { workspace = true }
 serde = { workspace = true }

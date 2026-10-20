@@ -24,19 +24,21 @@ crates on disk --add--> catalogue --compose--> logical graph --cut--> 3 segments
 
 ```bash
 target/release/gdl-web --catalog $DEMO/catalogue --target-dir $DEMO/target \
-  --gdl-path crates/gdl --listen 127.0.0.1:8080
+  --gdl-path crates/gdl --local-root "$PWD" --listen 127.0.0.1:8080
 ```
 
 Open `http://127.0.0.1:8080/`. Say that the catalogue is empty, and that the server builds nothing: it reads crates' source.
 
 ## Scene 2: import crates (about 45 s)
 
-In **Catalogue**, add each crate by its directory:
+In **Catalog**, choose **Add from local** for each crate. Browse to its directory and press **Add package**:
 
 - `examples/chat/protocols`: the messages.
 - `examples/chat/front-nodes`: Preprocess, Truncate, Number.
 - `examples/chat/engine-mock`: Engine. The real one would need a GPU; reading its source does not.
 - `examples/chat/post-nodes`: Detokenize, Format.
+
+Expand `chat-protocols` to show its messages, even though it has no nodes. Expand a message to show its Rust path and codec availability.
 
 Point out that each crate marks its nodes with `#[derive(gdl::Node)]` and its messages with `#[derive(gdl_message::Message)]`, and that nothing else is written by hand.
 
@@ -44,27 +46,28 @@ Point out that each crate marks its nodes with `#[derive(gdl::Node)]` and its me
 
 The request flows down the page to the inner end, and the response flows back up to the source.
 
-1. Name the graph `chat`. Name the source `Frontend`. It takes `Prompt` and streams back `Chunk`.
+1. Use the pencil beside Graph Name to name the graph `chat`. Open Source settings and name the source `Frontend`. Select **Single** input with `Prompt` and **Stream** output with `Chunk`.
 2. Choose the inner end: only nodes whose request is `Prompt` are offered. Choose the operator `Preprocess`.
 3. In Preprocess's own hop:
    - add the forward node `Truncate`;
    - choose the inner end `Engine` (only a sink that takes `Words` is offered);
    - add the backward nodes `Detokenize`, then `Format`.
 4. Back in the outer hop, add the backward node `Number`.
-5. Press **Check**. It reports one segment, no crossings, and shows the graph file and the spec that the drawing became.
+5. Press **Check graph**. It reports one segment, no crossings, and shows the graph file and the spec that the drawing became.
 
 ## Scene 4: carve it into segments (about 45 s)
 
-Click three edges to cut them:
-- `Truncate → Engine`;
-- `Engine → Detokenize`;
-- `Format → Preprocess`.
+After the complete graph passes validation, open the **Segments** tab.
 
-Three segments appear. Name them `front`, `engine`, and `post`. Press **Check**: three crossings per request. Say that an edge can be cut only where its message has a codec, and show the refusal by cutting an edge whose message has none, if the example has one.
+1. Beside Engine, choose **New segment…**.
+2. Beside Detokenize, choose **New segment…**. Place Format in that same segment.
+3. Expand **Rename segments**. Name the source group `front`, the Engine group `engine`, and the Detokenize/Format group `post`.
+
+The summary shows three segments and three network crossings. Click `Truncate → Engine` to show its placement dialog. Request and response boundaries update together when a node moves. Press **Check graph** to inspect the crossing report. A crossing requires a codec for its message.
 
 ## Scene 5: download (about 15 s)
 
-Press **Download**: `chat.tar.gz`.
+Press **Download segments**: `chat.tar.gz`.
 
 ## Scene 6: build it (about 60 s)
 
