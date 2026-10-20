@@ -1,5 +1,7 @@
 //! The three markers, found in a crate's modules, and the entries they make.
 
+use std::collections::HashMap;
+
 use quote::ToTokens as _;
 use syn::punctuated::Punctuated;
 use syn::{Meta, Token};
@@ -9,7 +11,7 @@ use gdl_model::Role;
 use crate::cfg::Settings;
 use crate::metadata::Graph;
 use crate::resolve::{Def, Resolver, segments};
-use crate::tree::{Location, TypeDef, Vis};
+use crate::tree::{Location, TypeDef, UsePath, Vis};
 use crate::{ExportEntry, Extraction, MessageEntry, NodeEntry, Offer, Origin, PortEntry};
 
 /// What package `package` offers.
@@ -80,7 +82,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                 continue;
             };
             let found = resolver
-                .resolve(krate, module, &path, absolute)
+                .resolve(krate, module, path.segments(), absolute)
                 .and_then(|def| Some((message(&mut resolver, def)?, def)));
             match found {
                 Some((origin, Def::Type(c, m, i))) => offer.exports.push(ExportEntry {
@@ -93,7 +95,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                 Some(_) => unreachable!("a message is a type"),
                 None => problems.push(format!(
                     "{at}: export `{name}`: `{}` names no type that derives `Message`",
-                    path.join("::")
+                    path.segments().collect::<Vec<_>>().join("::")
                 )),
             }
         }
@@ -143,7 +145,7 @@ fn message(resolver: &mut Resolver<'_>, def: Def) -> Option<Origin> {
 
 /// A `use` an export marks: the name it binds, its path, whether that is
 /// absolute, where it is, and whether the name is public.
-type ExportUse = (Option<String>, Vec<String>, bool, Location, bool);
+type ExportUse = (Option<String>, UsePath, bool, Location, bool);
 
 /// Whether code outside the crate can name module `module`: it and every
 /// module above it are `pub`.
@@ -162,11 +164,15 @@ fn public(resolver: &Resolver<'_>, krate: usize, module: usize) -> bool {
 /// `<crate>::<module path>::<name>`.
 fn public_path(resolver: &Resolver<'_>, krate: usize, module: usize, name: &str) -> String {
     let krate = &resolver.crates[krate];
-    std::iter::once(krate.name.as_str())
-        .chain(krate.modules[module].path.iter().map(String::as_str))
-        .chain(std::iter::once(name))
-        .collect::<Vec<_>>()
-        .join("::")
+    let mut names = vec![name];
+    let mut at = module;
+    while let Some(parent) = krate.modules[at].parent {
+        names.push(&krate.modules[at].name);
+        at = parent;
+    }
+    names.push(&krate.name);
+    names.reverse();
+    names.join("::")
 }
 
 /// Whether a type derives a trait of this last name. The derive is matched
@@ -199,29 +205,9 @@ fn wire(resolver: &mut Resolver<'_>, krate: usize, module: usize, index: usize) 
     if serialize && deserialize {
         return true;
     }
-    let target = Def::Type(krate, module, index);
-    for m in 0..resolver.crates[krate].modules.len() {
-        let impls: Vec<(String, syn::Type)> = resolver.crates[krate].modules[m]
-            .impls
-            .iter()
-            .filter_map(|i| {
-                let last = imported_as(resolver, krate, m, i.trait_path.as_ref()?)?;
-                Some((last, i.self_ty.clone()))
-            })
-            .collect();
-        for (trait_name, self_ty) in impls {
-            if trait_name != "Serialize" && trait_name != "Deserialize" {
-                continue;
-            }
-            let syn::Type::Path(path) = &self_ty else {
-                continue;
-            };
-            let (path, absolute) = segments(&path.path);
-            if resolver.resolve(krate, m, &path, absolute) == Some(target) {
-                serialize |= trait_name == "Serialize";
-                deserialize |= trait_name == "Deserialize";
-            }
-        }
+    for found in impls_for(resolver, Traits::Serde, Def::Type(krate, module, index)) {
+        serialize |= found.name == "Serialize";
+        deserialize |= found.name == "Deserialize";
     }
     serialize && deserialize
 }
@@ -241,12 +227,15 @@ fn marked(
         let (path, _) = segments(meta.path());
         match path.as_slice() {
             [k, n] => n == name && krates.contains(&k.as_str()),
-            [n] => resolver.crates[krate].modules[module].uses.iter().any(|u| {
-                u.name.as_deref() == Some(n.as_str())
-                    && u.path.len() == 2
-                    && krates.contains(&u.path[0].as_str())
-                    && u.path[1] == name
-            }),
+            [n] => {
+                let m = &resolver.crates[krate].modules[module];
+                m.uses_named(n).iter().any(|&i| {
+                    let mut path = m.uses[i].path.segments();
+                    m.uses[i].path.len() == 2
+                        && path.next().is_some_and(|k| krates.contains(&k))
+                        && path.next() == Some(name)
+                })
+            }
             _ => false,
         }
     })
@@ -294,38 +283,25 @@ fn node(
     }
 
     // Its role trait impls: the one that makes it a node.
-    let mut found = Vec::new();
-    for m in 0..resolver.crates[krate].modules.len() {
-        let impls: Vec<RoleImpl> = resolver.crates[krate].modules[m]
-            .impls
-            .iter()
-            .filter_map(|i| {
-                let role = imported_as(resolver, krate, m, i.trait_path.as_ref()?)?;
-                Some((role, i.self_ty.clone(), i.types.clone()))
-            })
-            .collect();
-        for (role, self_ty, types) in impls {
-            let Some(role) = role_of(&role) else {
-                continue;
-            };
-            let syn::Type::Path(path) = &self_ty else {
-                continue;
-            };
-            let (path, absolute) = segments(&path.path);
-            if resolver.resolve(krate, m, &path, absolute) == Some(def) {
-                found.push((m, role, types));
-            }
-        }
-    }
+    let found: Vec<(Role, ImplOf)> = impls_for(resolver, Traits::Role, def)
+        .into_iter()
+        .filter_map(|found| Some((role_of(&found.name)?, found)))
+        .collect();
     let (impl_module, role, types) = match found.as_slice() {
         [] => {
             return Err(format!(
                 "{at}: node `{name}`: the crate implements no role trait for it"
             ));
         }
-        [(m, role, types)] => (*m, *role, types.clone()),
+        [(role, found)] => (
+            found.module,
+            *role,
+            resolver.crates[krate].modules[found.module].impls[found.index]
+                .types
+                .clone(),
+        ),
         several => {
-            let roles: Vec<&str> = several.iter().map(|(_, role, _)| role.name()).collect();
+            let roles: Vec<&str> = several.iter().map(|(role, _)| role.name()).collect();
             return Err(format!(
                 "{at}: node `{name}` implements more than one role trait: {}",
                 roles.join(", ")
@@ -438,8 +414,74 @@ fn node(
     })
 }
 
-/// A trait impl's trait name, self type, and associated types.
-type RoleImpl = (String, syn::Type, Vec<(String, syn::Type, Location)>);
+/// The impls of the traits of `traits` in crate `krate` of `def`'s crate,
+/// for `def`, in the order of the crate's modules. The crate's impls of
+/// those traits are resolved once and indexed by the type they are for:
+/// walking them for each type cost the crate's impls for every type.
+fn impls_for(resolver: &mut Resolver<'_>, traits: Traits, def: Def) -> Vec<ImplOf> {
+    let (Def::Type(krate, ..) | Def::Module(krate, _)) = def;
+    if !resolver.impls.contains_key(&(krate, traits)) {
+        let mut by_type: HashMap<Def, Vec<ImplOf>> = HashMap::new();
+        for module in 0..resolver.crates[krate].modules.len() {
+            let impls: Vec<(usize, String, syn::Type)> = resolver.crates[krate].modules[module]
+                .impls
+                .iter()
+                .enumerate()
+                .filter_map(|(index, i)| {
+                    let name = imported_as(resolver, krate, module, i.trait_path.as_ref()?)?;
+                    traits
+                        .holds(&name)
+                        .then(|| (index, name, i.self_ty.clone()))
+                })
+                .collect();
+            for (index, name, self_ty) in impls {
+                let syn::Type::Path(path) = &self_ty else {
+                    continue;
+                };
+                let (path, absolute) = segments(&path.path);
+                if let Some(target) = resolver.resolve(krate, module, &path, absolute) {
+                    by_type.entry(target).or_default().push(ImplOf {
+                        name,
+                        module,
+                        index,
+                    });
+                }
+            }
+        }
+        resolver.impls.insert((krate, traits), by_type);
+    }
+    resolver.impls[&(krate, traits)]
+        .get(&def)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The traits an impl index holds: serde's, for the wire check, or the
+/// role traits, for a node. Indexed apart, so that each resolves only the
+/// impls it did before there was an index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Traits {
+    Serde,
+    Role,
+}
+
+impl Traits {
+    fn holds(self, name: &str) -> bool {
+        match self {
+            Self::Serde => name == "Serialize" || name == "Deserialize",
+            Self::Role => role_of(name).is_some(),
+        }
+    }
+}
+
+/// An impl of a trait for a type: the trait's name, and the impl's module
+/// and its index among the module's impls.
+#[derive(Clone)]
+pub(crate) struct ImplOf {
+    name: String,
+    module: usize,
+    index: usize,
+}
 
 /// The role whose trait has this name.
 fn role_of(name: &str) -> Option<Role> {
@@ -519,10 +561,11 @@ fn imported_as(
     if segments.len() > 1 || absolute {
         return Some(last);
     }
-    let renamed = resolver.crates[krate].modules[module]
-        .uses
-        .iter()
-        .find(|u| u.name.as_deref() == Some(last.as_str()))
-        .and_then(|u| u.path.last().cloned());
+    let m = &resolver.crates[krate].modules[module];
+    let renamed = m
+        .uses_named(&last)
+        .first()
+        .and_then(|&i| m.uses[i].path.last())
+        .map(str::to_string);
     Some(renamed.unwrap_or(last))
 }

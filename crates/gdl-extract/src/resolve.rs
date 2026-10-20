@@ -7,11 +7,12 @@
 use std::collections::HashMap;
 
 use crate::cfg::Settings;
+use crate::markers::{ImplOf, Traits};
 use crate::metadata::Graph;
-use crate::tree::{Crate, Vis};
+use crate::tree::{Crate, UsePath, Vis};
 
 /// What a path names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Def {
     /// A module: crate and module.
     Module(usize, usize),
@@ -34,6 +35,9 @@ pub(crate) struct Resolver<'a> {
     /// each other, so a lookup met again on the way finds nothing new,
     /// and one met again by another path is answered once.
     known: HashMap<Lookup, Option<Def>>,
+    /// Per crate and kind of trait, the impls the markers look for, by the
+    /// type they are for; built on first use.
+    pub(crate) impls: HashMap<(usize, Traits), HashMap<Def, Vec<ImplOf>>>,
 }
 
 /// A lookup: crate, module, name, and the viewer, if a glob looks.
@@ -53,6 +57,7 @@ impl<'a> Resolver<'a> {
             problems: Vec::new(),
             budget: crate::tree::TOTAL_LIMIT,
             known: HashMap::new(),
+            impls: HashMap::new(),
         }
     }
 
@@ -101,44 +106,46 @@ impl<'a> Resolver<'a> {
 
     /// What `path` names in module `module` of crate `krate`. `absolute`
     /// for a path that starts with `::`.
-    pub(crate) fn resolve(
+    pub(crate) fn resolve<S: AsRef<str>>(
         &mut self,
         krate: usize,
         module: usize,
-        path: &[String],
+        path: impl IntoIterator<Item = S>,
         absolute: bool,
     ) -> Option<Def> {
         self.known.clear();
         self.path(krate, module, path, absolute, 0)
     }
 
-    fn path(
+    fn path<S: AsRef<str>>(
         &mut self,
         krate: usize,
         module: usize,
-        path: &[String],
+        path: impl IntoIterator<Item = S>,
         absolute: bool,
         depth: usize,
     ) -> Option<Def> {
         if depth > DEPTH {
             return None;
         }
-        let (first, rest) = path.split_first()?;
+        let mut path = path.into_iter();
+        let first = path.next()?;
+        let first = first.as_ref();
         let mut at = if absolute {
             self.external(krate, first)?
         } else {
-            match first.as_str() {
+            match first {
                 "crate" => Def::Module(krate, 0),
                 "self" => Def::Module(krate, module),
                 "super" => Def::Module(krate, self.crates[krate].modules[module].parent?),
                 name => self.scope(krate, module, name, depth)?,
             }
         };
-        for segment in rest {
+        for segment in path {
             let Def::Module(c, m) = at else {
                 return None;
             };
-            at = match segment.as_str() {
+            at = match segment.as_ref() {
                 "super" => Def::Module(c, self.crates[c].modules[m].parent?),
                 "self" => at,
                 name => self.lookup(c, m, name, None, depth + 1)?,
@@ -215,10 +222,10 @@ impl<'a> Resolver<'a> {
             viewer.is_none_or(|viewer| this.visible(vis, (krate, module), viewer))
         };
         let m = &self.crates[krate].modules[module];
-        if let Some(i) = m
-            .types
+        if let Some(&i) = m
+            .types_named(name)
             .iter()
-            .position(|t| t.name == name && sees(self, t.vis))
+            .find(|&&i| sees(self, m.types[i].vis))
         {
             return Some(Def::Type(krate, module, i));
         }
@@ -227,25 +234,29 @@ impl<'a> Resolver<'a> {
         {
             return Some(Def::Module(krate, child));
         }
-        let named: Vec<(Vec<String>, bool)> = m
-            .uses
+        let named: Vec<(UsePath, bool)> = m
+            .uses_named(name)
             .iter()
-            .filter(|u| u.name.as_deref() == Some(name) && sees(self, u.vis))
+            .map(|&i| &m.uses[i])
+            .filter(|u| sees(self, u.vis))
             .map(|u| (u.path.clone(), u.absolute))
             .collect();
         for (path, absolute) in named {
-            if let Some(def) = self.path(krate, module, &path, absolute, depth + 1) {
+            if let Some(def) = self.path(krate, module, path.segments(), absolute, depth + 1) {
                 return Some(def);
             }
         }
-        let globs: Vec<(Vec<String>, bool)> = self.crates[krate].modules[module]
-            .uses
+        let m = &self.crates[krate].modules[module];
+        let globs: Vec<(UsePath, bool)> = m
+            .globs()
             .iter()
-            .filter(|u| u.name.is_none() && sees(self, u.vis))
+            .map(|&i| &m.uses[i])
+            .filter(|u| sees(self, u.vis))
             .map(|u| (u.path.clone(), u.absolute))
             .collect();
         for (path, absolute) in globs {
-            if let Some(Def::Module(c, m)) = self.path(krate, module, &path, absolute, depth + 1)
+            if let Some(Def::Module(c, m)) =
+                self.path(krate, module, path.segments(), absolute, depth + 1)
                 && (c, m) != (krate, module)
                 && let Some(def) = self.lookup(
                     c,

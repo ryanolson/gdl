@@ -1,8 +1,9 @@
 //! A crate's module tree, read from its source: the items the reader needs
 //! in each module, with `cfg` applied.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
@@ -19,16 +20,25 @@ pub(crate) struct Crate {
     pub(crate) modules: Vec<Module>,
 }
 
+/// A module. Its path from the crate root is not stored: a copy per module
+/// costs the depth of the tree times the length of its paths.
 pub(crate) struct Module {
     pub(crate) parent: Option<usize>,
+    /// Its name in its parent; the root's is empty.
+    pub(crate) name: String,
     /// Who can see it from outside its parent.
     pub(crate) vis: Vis,
-    /// Its names from the crate root, the root's empty.
-    pub(crate) path: Vec<String>,
     pub(crate) children: BTreeMap<String, usize>,
     pub(crate) types: Vec<TypeDef>,
     pub(crate) uses: Vec<Use>,
     pub(crate) impls: Vec<Impl>,
+    /// The types of each name, and the uses that bind it, by index in
+    /// order: a lookup finds a name without scanning the module, which
+    /// made resolving every name of a module cost the square of its size.
+    types_named: HashMap<String, Vec<usize>>,
+    uses_named: HashMap<String, Vec<usize>>,
+    /// The uses that are globs, in order.
+    globs: Vec<usize>,
 }
 
 /// A struct, an enum, or a union.
@@ -71,11 +81,49 @@ pub(crate) struct Use {
     pub(crate) name: Option<String>,
     pub(crate) vis: Vis,
     /// The path it imports, or the module a glob imports from.
-    pub(crate) path: Vec<String>,
+    pub(crate) path: UsePath,
     /// Whether the path starts with `::`: an external crate.
     pub(crate) absolute: bool,
-    pub(crate) attrs: Vec<Meta>,
+    /// The attributes of its `use` item, shared by every name the item
+    /// binds: a copy per name costs names times attributes.
+    pub(crate) attrs: Rc<[Meta]>,
     pub(crate) at: Location,
+}
+
+/// A path a `use` imports: the path before its braces, shared by every
+/// name in them, then the name's own segment, if it adds one. A copy of
+/// the shared part per name costs names times path length.
+#[derive(Clone)]
+pub(crate) struct UsePath {
+    prefix: Rc<[String]>,
+    last: Option<String>,
+}
+
+impl UsePath {
+    /// A path of these segments.
+    fn of(segments: Vec<String>) -> Self {
+        Self {
+            prefix: segments.into(),
+            last: None,
+        }
+    }
+
+    pub(crate) fn segments(&self) -> impl Iterator<Item = &str> + Clone {
+        self.prefix
+            .iter()
+            .map(String::as_str)
+            .chain(self.last.as_deref())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.prefix.len() + usize::from(self.last.is_some())
+    }
+
+    pub(crate) fn last(&self) -> Option<&str> {
+        self.last
+            .as_deref()
+            .or(self.prefix.last().map(String::as_str))
+    }
 }
 
 pub(crate) struct Impl {
@@ -133,7 +181,7 @@ impl Crate {
         };
         krate
             .modules
-            .push(Module::empty(None, Vec::new(), Vis::Public));
+            .push(Module::empty(None, String::new(), Vis::Public));
         let dir = root.parent().unwrap_or(Path::new("")).to_path_buf();
         if let Some(items) = reader.file(root) {
             reader.items(&mut krate, 0, &items, root, &dir, &dir);
@@ -143,16 +191,54 @@ impl Crate {
 }
 
 impl Module {
-    fn empty(parent: Option<usize>, path: Vec<String>, vis: Vis) -> Self {
+    fn empty(parent: Option<usize>, name: String, vis: Vis) -> Self {
         Self {
             parent,
+            name,
             vis,
-            path,
             children: BTreeMap::new(),
             types: Vec::new(),
             uses: Vec::new(),
             impls: Vec::new(),
+            types_named: HashMap::new(),
+            uses_named: HashMap::new(),
+            globs: Vec::new(),
         }
+    }
+
+    /// The types named `name`, in order.
+    pub(crate) fn types_named(&self, name: &str) -> &[usize] {
+        self.types_named.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// The uses that bind `name`, in order.
+    pub(crate) fn uses_named(&self, name: &str) -> &[usize] {
+        self.uses_named.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// The uses that are globs, in order.
+    pub(crate) fn globs(&self) -> &[usize] {
+        &self.globs
+    }
+
+    fn add_type(&mut self, ty: TypeDef) {
+        self.types_named
+            .entry(ty.name.clone())
+            .or_default()
+            .push(self.types.len());
+        self.types.push(ty);
+    }
+
+    fn add_use(&mut self, u: Use) {
+        match &u.name {
+            Some(name) => self
+                .uses_named
+                .entry(name.clone())
+                .or_default()
+                .push(self.uses.len()),
+            None => self.globs.push(self.uses.len()),
+        }
+        self.uses.push(u);
     }
 }
 
@@ -184,8 +270,11 @@ struct Reader<'a> {
 /// nothing a person wrote runs to sixteen.
 const FILE_LIMIT: u64 = 16 << 20;
 
-/// The most one extraction reads in all. The reader keeps about forty
-/// times a source byte in memory, so this is well under a gigabyte.
+/// The most one extraction reads in all. The reader's peak is about a
+/// hundred and twenty times a source byte on a crate of messages
+/// (`agent-docs/perf/reader-cost.md`), so this bounds it near two
+/// gigabytes, under the limit the composer sets on the process that reads
+/// an import.
 pub(crate) const TOTAL_LIMIT: u64 = 16 << 20;
 
 /// The least a file costs the budget: a chain of tiny files is bounded by
@@ -346,7 +435,7 @@ impl Reader<'_> {
                 continue;
             };
             match item {
-                Item::Struct(s) => krate.modules[module].types.push(TypeDef {
+                Item::Struct(s) => krate.modules[module].add_type(TypeDef {
                     fields: Some(s.fields.clone()),
                     name: s.ident.unraw().to_string(),
                     vis: Vis::of(&s.vis),
@@ -354,7 +443,7 @@ impl Reader<'_> {
                     borrows: s.fields.iter().any(|f| self.borrows(f)),
                     at: at(s.ident.span()),
                 }),
-                Item::Enum(e) => krate.modules[module].types.push(TypeDef {
+                Item::Enum(e) => krate.modules[module].add_type(TypeDef {
                     fields: None,
                     name: e.ident.unraw().to_string(),
                     vis: Vis::of(&e.vis),
@@ -368,7 +457,7 @@ impl Reader<'_> {
                         .any(|f| self.borrows(f)),
                     at: at(e.ident.span()),
                 }),
-                Item::Union(u) => krate.modules[module].types.push(TypeDef {
+                Item::Union(u) => krate.modules[module].add_type(TypeDef {
                     fields: None,
                     name: u.ident.unraw().to_string(),
                     vis: Vis::of(&u.vis),
@@ -378,15 +467,18 @@ impl Reader<'_> {
                 }),
                 Item::Use(u) => {
                     let mut uses = Vec::new();
-                    flatten(&u.tree, &mut Vec::new(), &mut uses);
+                    flatten(&u.tree, &mut Vec::new(), None, &mut uses);
+                    let attrs: Rc<[Meta]> = attrs.into();
+                    // Once per item: `span` turns the whole item into tokens.
+                    let at = at(u.span());
                     for (name, path) in uses {
-                        krate.modules[module].uses.push(Use {
+                        krate.modules[module].add_use(Use {
                             name,
                             vis: Vis::of(&u.vis),
                             path,
                             absolute: u.leading_colon.is_some(),
                             attrs: attrs.clone(),
-                            at: at(u.span()),
+                            at: at.clone(),
                         });
                     }
                 }
@@ -403,12 +495,12 @@ impl Reader<'_> {
                     } else {
                         (vec![e.ident.unraw().to_string()], true)
                     };
-                    krate.modules[module].uses.push(Use {
+                    krate.modules[module].add_use(Use {
                         name: Some(name),
                         vis: Vis::of(&e.vis),
-                        path,
+                        path: UsePath::of(path),
                         absolute,
-                        attrs,
+                        attrs: attrs.into(),
                         at: at(e.span()),
                     });
                 }
@@ -434,12 +526,10 @@ impl Reader<'_> {
                 }
                 Item::Mod(m) => {
                     let name = m.ident.unraw().to_string();
-                    let mut path = krate.modules[module].path.clone();
-                    path.push(name.clone());
                     let child = krate.modules.len();
                     krate
                         .modules
-                        .push(Module::empty(Some(module), path, Vis::of(&m.vis)));
+                        .push(Module::empty(Some(module), name.clone(), Vis::of(&m.vis)));
                     krate.modules[module].children.insert(name.clone(), child);
                     let explicit = attrs.iter().find_map(|meta| match meta {
                         Meta::NameValue(nv) if nv.path.is_ident("path") => match &nv.value {
@@ -502,40 +592,61 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
 }
 
 /// Each name a use tree binds, with its full path; a glob as `None`.
-fn flatten(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Option<String>, Vec<String>)>) {
+/// `group` is `prefix` in one allocation when `tree` is in braces, shared
+/// by the paths of every name in them.
+fn flatten(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    group: Option<&Rc<[String]>>,
+    out: &mut Vec<(Option<String>, UsePath)>,
+) {
+    let shared = |prefix: &[String]| group.cloned().unwrap_or_else(|| prefix.into());
     match tree {
         UseTree::Path(p) => {
             prefix.push(p.ident.unraw().to_string());
-            flatten(&p.tree, prefix, out);
+            flatten(&p.tree, prefix, None, out);
             prefix.pop();
         }
         UseTree::Name(n) => {
             let name = n.ident.unraw().to_string();
             if name == "self" {
-                if let Some(last) = prefix.last() {
-                    out.push((Some(last.clone()), prefix.clone()));
+                if let Some(first) = prefix.last() {
+                    let path = UsePath {
+                        prefix: shared(prefix),
+                        last: None,
+                    };
+                    out.push((Some(first.clone()), path));
                 }
             } else {
-                let mut path = prefix.clone();
-                path.push(name.clone());
+                let path = UsePath {
+                    prefix: shared(prefix),
+                    last: Some(name.clone()),
+                };
                 out.push((Some(name), path));
             }
         }
         UseTree::Rename(r) => {
-            let mut path = prefix.clone();
             let name = r.ident.unraw().to_string();
-            if name != "self" {
-                path.push(name);
-            }
+            let path = UsePath {
+                prefix: shared(prefix),
+                last: (name != "self").then_some(name),
+            };
             let alias = r.rename.unraw().to_string();
             if alias != "_" {
                 out.push((Some(alias), path));
             }
         }
-        UseTree::Glob(_) => out.push((None, prefix.clone())),
+        UseTree::Glob(_) => out.push((
+            None,
+            UsePath {
+                prefix: shared(prefix),
+                last: None,
+            },
+        )),
         UseTree::Group(g) => {
+            let group: Rc<[String]> = prefix.as_slice().into();
             for tree in &g.items {
-                flatten(tree, prefix, out);
+                flatten(tree, prefix, Some(&group), out);
             }
         }
     }
