@@ -13,6 +13,12 @@ The owner's rulings, 2026-10-20:
 
 The owner asked for the strongest case for keeping something from dynamo. It is recorded below because it names the open questions.
 
+**Addendum 2026-10-20 (owner).** The dynamo discussion is tracked, not acted on: development stays on gdl, and this document records where gdl's decisions meet it. The owner's view:
+
+- The business logic dynamo already has, in the operator, its nodes, and its pipelines, becomes gdl nodes in a catalogue. dynamo uses its pipeline today mostly in the frontend, and as shims that wire dynamo components together rigidly, which couples a request's path to its response's. gdl decouples them.
+- A frontend serving many models is part of the message: the request names its model, and the frontend hands it to a model-specific engine, as dynamo's frontend does today. That hand-off maps to a gdl node. This answers open question 1 without a dynamic graph.
+- On the dynamo track, the first step would be the changes dynamo's axum HTTP frontend needs to serve as gdl's LLM API frontend.
+
 ## What gdl does better
 
 Each was found by reading dynamo's code; the four marked were re-read by the coordinator.
@@ -53,7 +59,7 @@ Rebuilding these takes person-years and does not differentiate gdl. The stronges
 
 ### Open questions for the owner
 
-1. Must one endpoint serve a set of models that changes at runtime? If so, gdl needs a dynamic front (a source that discovers per-model graphs through the hub) before it replaces dynamo's frontend.
+1. Must one endpoint serve a set of models that changes at runtime? If so, gdl needs a dynamic front (a source that discovers per-model graphs through the hub) before it replaces dynamo's frontend. Answered by the owner, 2026-10-20: the model is part of the message, and the hand-off to a model-specific engine is a gdl node.
 2. Is Kubernetes through the dynamo operator the deployment target that matters? If so, the operator's container contract is gdl's first compatibility requirement, and gdl should generate `DynamoGraphDeployment`s.
 3. Are the Python engines rewritten, or bridged for good?
 

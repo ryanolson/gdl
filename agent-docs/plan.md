@@ -991,4 +991,6 @@ The analysis is `agent-docs/dynamo.md`. The owner's rulings of 2026-10-20: gdl r
 | 121 | One velo | gdl moves from the branch commit `1bbeb88` to a velo release that carries reservation renewal and ruling 120, the one dynamo's runtime and kvbm move to as well, so that a process holds one velo node | owner, 2026-10-20 |
 | 122 | Engines from dynamo | a bridge crate outside the core: a dynamo engine (a remote endpoint through dynamo's client, or an `AsyncEngine` in process) as a gdl `Sink`, its stop and kill driven by the request's `Cx`. It depends on dynamo's crates; nothing else in gdl does | agent, 2026-10-20 |
 
-Open for the owner (`agent-docs/dynamo.md`): whether one endpoint must serve a set of models that changes at runtime, whether the dynamo operator is the deployment target that matters, and whether the Python engines are rewritten or bridged for good.
+Open for the owner (`agent-docs/dynamo.md`): whether the dynamo operator is the deployment target that matters, and whether the Python engines are rewritten or bridged for good. A frontend over many models is part of the message (the owner, 2026-10-20). The dynamo track is tracked, not acted on; rulings 117, 119, 121, and 122 wait for it.
+
+**Order, 2026-10-20 (owner).** Development stays on gdl: milestone 20 is bring-up and shutdown (rulings 104 to 109); node metrics (rulings 116 and 118) become milestone 21; live rosters, joining and retirement (rulings 110 to 115), become milestone 22, after velo carries ruling 120. The headings above keep their first numbers.
