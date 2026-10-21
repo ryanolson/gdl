@@ -1594,7 +1594,7 @@ dependencies = [
 [[package]]
 name = "velo"
 version = "0.21.0"
-source = "git+https://github.com/ai-dynamo/velo?rev=1bbeb8858a072d58f69632fb2ddb52d60be5c423#1bbeb8858a072d58f69632fb2ddb52d60be5c423"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#e512ba0478288867820ecfee27177fdd137224db"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1624,7 +1624,7 @@ dependencies = [
 [[package]]
 name = "velo-ext"
 version = "0.5.6"
-source = "git+https://github.com/ai-dynamo/velo?rev=1bbeb8858a072d58f69632fb2ddb52d60be5c423#1bbeb8858a072d58f69632fb2ddb52d60be5c423"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#e512ba0478288867820ecfee27177fdd137224db"
 dependencies = [
  "anyhow",
  "bytes",

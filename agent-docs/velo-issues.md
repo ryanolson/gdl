@@ -12,6 +12,8 @@ Drafts found while building the gdl runtime on velo 0.19.0. Not filed: each need
 
 **Addendum 2026-10-20.** Designed and prototyped against `1bbeb88` (ruling 120; `agent-docs/velo/retired/`): `StreamSender::retired()`, resolving `Sent` or `Discarded`, carried on the per-stream allocation the sender and its slot already share, with no wire change, no new message, and no measurable cost when unused. It needs a second change: a graceful shutdown that writes frames already admitted to a TCP or UDS writer instead of failing them. dynamo's PR 15231 has the same gap: its worker releases its in-flight count at `finish` and then shuts velo down.
 
+**Addendum 2026-10-21.** Merged into velo `main` as velo#141 (`e512ba0`), with reservation renewal (velo#139); not yet released.
+
 ## 2. Single-stream throughput in one process
 
 **Observed.** With default settings, two velo 0.19 nodes in one process over loopback TCP move one stream of small items (about 12 bytes each, `Vec<u8>` items, the server sending in a loop and finalizing) at about 12 K items/s, about 83 us per item. A one-item request (unary request carrying an anchor handle, then attach and stream) takes about 330 us. Setup: `crates/gdl/benches/remote.rs` in dynamo-gdl, `velo-direct` cases; 4 tokio worker threads.

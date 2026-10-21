@@ -25,7 +25,7 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 - **What happens:** each instance takes its roster when it launches. An instance that starts later is not routed to by the instances already running. Retiring one instance while the others keep serving is also unsupported. Every stop is treated as part of a deployment-wide stop.
 - **Workaround:** scale before the segments start, or restart the deployment.
-- **Would lift it:** milestone 22 (rulings 110 to 115). It needs velo's retirement signal (velo#141) first.
+- **Would lift it:** milestone 22 (rulings 110 to 115). It needs velo's retirement signal (velo#141), which velo `main` now carries and gdl tracks.
 
 ### A segment does not outlive a hub restart
 
@@ -60,7 +60,7 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **What happens:** when an instance exits before its consumers have read its finished streams, velo may still hold that output and lose it. A stream counts as finished once its producer calls `finalize`.
 - **When:** an instance ends on its drain bound, on a lost lease, or on a second stop. A deployment-wide stop that drains in full does not hit this: once every source has drained, every answer has been read.
 - **Why:** gdl does not yet hold a stream's egress permit and admission share until velo reports the stream retired.
-- **Would lift it:** velo's `StreamSender::retired()` (velo#141), then rulings 113 and 120 in gdl. Note that even then, an item larger than velo's eager budget (256 KiB by default) may still be staged when velo reports it sent. velo records this in its own `LIMITATIONS.md`.
+- **Would lift it:** rulings 113 and 120 in gdl (milestone 22), built on velo's `StreamSender::retired()`, which velo `main` now carries (velo#141). Note that even then, an item larger than velo's eager budget (256 KiB by default) may still be staged when velo reports it sent. velo records this in its own `LIMITATIONS.md`.
 
 ### A stop while a segment starts exits with code 1
 
