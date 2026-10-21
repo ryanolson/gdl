@@ -278,12 +278,14 @@ fn a_running_engine_serves_its_metrics() {
         );
     }
     // Ended before the engine finished its stream, which the front has
-    // read to its end.
-    let inflight = series("dynamo_component_inflight_responses");
+    // read to its end. One gauge: the engine's request is in flight until
+    // its stream ends.
+    let inflight = series("dynamo_component_inflight_requests");
     assert!(
         !inflight.is_empty() && inflight.iter().all(|line| line.ends_with(" 0")),
         "{scrape}"
     );
+    assert!(!scrape.contains("inflight_responses"), "{scrape}");
     // The figures are the segment's, not each node's: no handler-wide
     // duration, and the end to end is the source's, in the front.
     assert!(

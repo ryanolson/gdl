@@ -5,7 +5,10 @@
 //! a backward run. It has a request part, from the request's arrival until
 //! the segment hands it on or an inner end here starts its stream, and a
 //! response part, for the stream the segment then sends on; the source's
-//! visit is also the request end to end. Recorded per segment, the parts
+//! visit is also the request end to end. A visit is in flight from its
+//! beginning until the segment has nothing left to do for it, as dynamo
+//! counts a request: queued, running, or responding, whichever part it is
+//! in. Recorded per segment, the parts
 //! add: each segment's request time and the time it adds to the first
 //! item sum to the time to the first item end to end, less the wire.
 //! Recorded per node, they nest, since a node's request lasts until its
@@ -160,13 +163,14 @@ impl Figures {
 #[derive(Default)]
 #[repr(align(128))]
 struct Shard {
+    /// Visits begun here less visits ended here: a visit may end on another
+    /// thread, so only the sum over shards is the count in flight.
+    inflight: AtomicI64,
     request: Tally,
     request_path: Spans,
     response: Tally,
     first_item: Spans,
     after_first_item: Spans,
-    /// Its count in flight is not served: the request part and the
-    /// response part of the source's visits cover it.
     end_to_end: Tally,
     end_to_end_first_item: Spans,
     end_to_end_duration: Spans,
@@ -177,22 +181,17 @@ struct Shard {
 struct Tally {
     started: AtomicU64,
     cancelled: AtomicU64,
-    /// Started here less ended here: a visit may end on another thread, so
-    /// only the sum over shards is the count in flight.
-    inflight: AtomicI64,
     errors: [AtomicU64; ERROR_KINDS.len()],
 }
 
 impl Tally {
     fn start(&self) {
         self.started.fetch_add(1, Relaxed);
-        self.inflight.fetch_add(1, Relaxed);
     }
 
     /// Ended: with an error in slot `Some(Some(slot))`, a cancellation
     /// (`Some(None)`), or neither.
     fn end(&self, counted: Option<Option<usize>>) {
-        self.inflight.fetch_sub(1, Relaxed);
         match counted {
             None => {}
             Some(None) => {
@@ -287,6 +286,7 @@ impl Visit {
         end_to_end: bool,
     ) -> Owner {
         let shard = figures.shard();
+        shard.inflight.fetch_add(1, Relaxed);
         shard.request.start();
         if end_to_end {
             shard.end_to_end.started.fetch_add(1, Relaxed);
@@ -302,7 +302,9 @@ impl Visit {
         deadline: Option<Deadline>,
         parent: Option<Arc<Visit>>,
     ) -> Owner {
-        figures.shard().response.start();
+        let shard = figures.shard();
+        shard.inflight.fetch_add(1, Relaxed);
+        shard.response.start();
         let visit = Self::new(figures, Instant::now(), deadline, false, parent, RESPONDING);
         visit.begun.store(1, Relaxed);
         Owner(Arc::new(visit))
@@ -350,7 +352,7 @@ impl Visit {
             if responds {
                 self.begin();
             } else {
-                self.end_whole(sent, Ending::Finished);
+                self.leave(sent, Ending::Finished);
             }
         }
         if let Some(parent) = &self.parent {
@@ -440,7 +442,7 @@ impl Visit {
                     .observe(nanos(at.saturating_sub(first_out)));
             }
         }
-        self.end_whole(now, ending);
+        self.leave(now, ending);
     }
 
     fn end_request(&self, now: Instant, ending: Ending<'_>) {
@@ -455,9 +457,12 @@ impl Visit {
         self.figures.shard().response.start();
     }
 
-    /// The request end to end, for the source's visit: every error the
-    /// caller sees counts, relayed or not.
-    fn end_whole(&self, now: Instant, ending: Ending<'_>) {
+    /// The visit has ended: the segment has nothing left to do for it.
+    /// For the source's, the request end to end ends too, and every error
+    /// the caller sees counts, relayed or not.
+    fn leave(&self, now: Instant, ending: Ending<'_>) {
+        let shard = self.figures.shard();
+        shard.inflight.fetch_sub(1, Relaxed);
         if !self.end_to_end {
             return;
         }
@@ -465,7 +470,6 @@ impl Visit {
             Ending::Failed(error) => Some(error_slot(error.kind())),
             _ => self.counted(ending, now),
         };
-        let shard = self.figures.shard();
         shard.end_to_end.end(counted);
         shard
             .end_to_end_duration
@@ -557,7 +561,7 @@ enum Read {
     Histogram(fn(&Shard) -> &Spans),
 }
 
-/// One family: its name, help, the part whose entries have it, and where
+/// One family: its name, help, the parts whose entries have it, and where
 /// it is read.
 struct Family {
     name: &'static str,
@@ -566,10 +570,12 @@ struct Family {
     read: Read,
 }
 
-/// The sixteen families. The request path keeps dynamo's work-handler
+/// The fifteen families. The request path keeps dynamo's work-handler
 /// names; its duration does not, since dynamo's `request_duration_seconds`
-/// spans the whole handler, its stream included.
-fn families() -> [Family; 16] {
+/// spans the whole handler, its stream included. `inflight_requests` is
+/// dynamo's too, and counts as dynamo does: a request until its segment has
+/// nothing left to do for it, so every entry has it.
+fn families() -> [Family; 15] {
     use Read::*;
     let family = |name, help, part, read| Family {
         name,
@@ -598,9 +604,9 @@ fn families() -> [Family; 16] {
         ),
         family(
             "inflight_requests",
-            "Requests the segment holds that it has not handed on and whose response has not started.",
-            REQUEST,
-            Gauge(|s| &s.request.inflight),
+            "Requests received here that the segment still has work for: queued, running, or responding. A request leaves when the segment hands it on, when its response ends, or when it is cancelled or fails.",
+            REQUEST | RESPONSE,
+            Gauge(|s| &s.inflight),
         ),
         family(
             "request_path_duration_seconds",
@@ -625,12 +631,6 @@ fn families() -> [Family; 16] {
             "Response streams cancelled or dropped by their consumer.",
             RESPONSE,
             Counter(|s| &s.response.cancelled),
-        ),
-        family(
-            "inflight_responses",
-            "Response streams the segment is sending on now.",
-            RESPONSE,
-            Gauge(|s| &s.response.inflight),
         ),
         family(
             "response_time_to_first_item_seconds",
@@ -683,7 +683,7 @@ fn families() -> [Family; 16] {
 /// reads as zero.
 struct Scrape {
     entries: Entries,
-    families: [Family; 16],
+    families: [Family; 15],
     descs: Vec<Desc>,
 }
 
@@ -889,8 +889,7 @@ mod tests {
         assert!((seconds(&shard.end_to_end_first_item) - 0.115).abs() < 1e-6);
         assert!((seconds(&shard.end_to_end_duration) - 0.135).abs() < 1e-6);
         assert_eq!(count(&shard.first_item), 1, "one first item");
-        assert_eq!(shard.request.inflight.load(Relaxed), 0);
-        assert_eq!(shard.response.inflight.load(Relaxed), 0);
+        assert_eq!(shard.inflight.load(Relaxed), 0);
         assert_eq!(shard.response.started.load(Relaxed), 1);
     }
 
@@ -904,19 +903,21 @@ mod tests {
         let held = Arc::clone(owner.visit());
         tokio::time::advance(Duration::from_millis(10)).await;
         held.producing();
+        let shard = &figures.shards[0];
+        assert_eq!(shard.inflight.load(Relaxed), 1, "responding");
         tokio::time::advance(Duration::from_millis(30)).await;
         held.first_out();
         drop(owner);
-        let shard = &figures.shards[0];
         assert!((seconds(&shard.request_path) - 0.010).abs() < 1e-6);
         assert!((seconds(&shard.first_item) - 0.030).abs() < 1e-6);
         assert_eq!(shard.response.cancelled.load(Relaxed), 1, "dropped");
-        assert_eq!(shard.response.inflight.load(Relaxed), 0);
+        assert_eq!(shard.inflight.load(Relaxed), 0);
         held.end(Ending::Finished);
-        assert_eq!(shard.response.inflight.load(Relaxed), 0, "ended once");
+        assert_eq!(shard.inflight.load(Relaxed), 0, "ended once");
 
         let handed = Visit::request(figures, Instant::now(), None, false);
         handed.visit().handed_on(false, Instant::now());
+        assert_eq!(shard.inflight.load(Relaxed), 0, "left at the hand-off");
         drop(handed);
         assert_eq!(
             shard.response.started.load(Relaxed),
@@ -924,7 +925,7 @@ mod tests {
             "no second response"
         );
         assert_eq!(shard.request.started.load(Relaxed), 2);
-        assert_eq!(shard.request.inflight.load(Relaxed), 0);
+        assert_eq!(shard.inflight.load(Relaxed), 0);
         assert_eq!(shard.request.cancelled.load(Relaxed), 0);
     }
 
@@ -944,7 +945,8 @@ mod tests {
     }
 
     /// An inner end run the outer end spawns ends its parent's request
-    /// part when its sink starts.
+    /// part when its sink starts; both visits stay in flight, since both
+    /// still respond.
     #[tokio::test(start_paused = true)]
     async fn a_spawned_inner_run_ends_its_parents_request() {
         let figures = figures();
@@ -954,9 +956,13 @@ mod tests {
         tokio::time::advance(Duration::from_millis(5)).await;
         child.visit().producing();
         let shard = &figures.shards[0];
-        assert_eq!(shard.request.inflight.load(Relaxed), 0);
+        assert_eq!(count(&shard.request_path), 1);
         assert!((seconds(&shard.request_path) - 0.015).abs() < 1e-6);
-        assert_eq!(shard.response.inflight.load(Relaxed), 2);
+        assert_eq!(shard.response.started.load(Relaxed), 2);
+        assert_eq!(shard.inflight.load(Relaxed), 2);
+        drop(child);
+        drop(parent);
+        assert_eq!(shard.inflight.load(Relaxed), 0);
     }
 
     /// A relayed error is counted end to end only; a raised one where it

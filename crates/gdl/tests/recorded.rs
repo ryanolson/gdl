@@ -155,27 +155,40 @@ impl<H: gdl::Next<Prompt, Chunk>> Deployed<H> {
             .sum()
     }
 
-    /// Requests and responses in flight in every segment.
-    fn inflight(&self) -> f64 {
+    /// The entries with a visit in flight, in every segment.
+    fn busy(&self) -> Vec<String> {
         self.registries
             .keys()
-            .flat_map(|segment| {
-                ["inflight_requests", "inflight_responses"]
-                    .into_iter()
-                    .flat_map(move |metric| self.series(segment, metric))
-            })
-            .map(|(_, value)| value)
-            .sum()
+            .flat_map(|segment| self.series(segment, "inflight_requests"))
+            .filter(|(_, value)| *value != 0.0)
+            .map(|(labels, _)| labels["dynamo_endpoint"].clone())
+            .collect()
     }
 
-    /// Wait until no segment holds a request or a response.
-    async fn idle(&self) {
+    /// Wait until `inflight_requests` at `endpoint` is `value`.
+    async fn reaches(&self, endpoint: &str, value: f64) {
         let deadline = tokio::time::Instant::now() + WAIT;
-        while self.inflight() != 0.0 {
+        loop {
+            let now = self.get("inflight_requests", endpoint, &[]);
+            if now == Some(value) {
+                return;
+            }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "still in flight: {}",
-                self.inflight()
+                "inflight_requests at {endpoint} is {now:?}, not {value}"
+            );
+            tokio::time::sleep(ms(5)).await;
+        }
+    }
+
+    /// Wait until no segment holds a request.
+    async fn idle(&self) {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while !self.busy().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "still in flight: {:?}",
+                self.busy()
             );
             tokio::time::sleep(ms(5)).await;
         }
@@ -229,6 +242,15 @@ fn plan(tokens: u32) -> Plan {
         tokens,
         ..Plan::default()
     }
+}
+
+/// The middle segment only hands the request on: C's `gdl.fwd` leaves for
+/// the engine, and the response goes back to the front without it.
+fn handing_on() -> Placement {
+    Placement::new()
+        .segment("front", ["A", "B", "F", "E", "G"])
+        .segment("side", ["C"])
+        .segment("engine", ["D"])
 }
 
 /// An entry, and whether its visits have a request path.
@@ -299,6 +321,20 @@ async fn a_request_is_one_visit_of_each_segment() {
             "end_to_end_duration_seconds",
         ] {
             assert_eq!(d.count(histogram, "A"), 1.0, "{histogram}");
+        }
+        for (entry, _) in &entries {
+            assert_eq!(
+                d.get("inflight_requests", entry, &[]),
+                Some(0.0),
+                "{entry} has the gauge"
+            );
+        }
+        for segment in d.registries.keys() {
+            assert_eq!(
+                d.series(segment, "inflight_responses"),
+                vec![],
+                "one gauge, in {segment}"
+            );
         }
         let entries: Vec<&str> = entries.iter().map(|(entry, _)| *entry).collect();
         for node in ["B", "C", "D", "E", "F", "G"]
@@ -501,8 +537,8 @@ async fn a_dropped_stream_is_a_cancellation_of_every_response() {
 
 /// A deadline ends the sink's stream on the sink's clock, which runs ahead
 /// of the front's by the clock skew allowance: the sink's segment counts
-/// it, and the front relays it. A stream held unread holds its responses
-/// in flight until then.
+/// it, and the front relays it. A stream held unread holds its request in
+/// flight in each segment until then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deadline_is_counted_where_its_clock_ended_the_stream() {
     // A wide allowance: the front's own deadline comes 200 ms after the
@@ -521,8 +557,8 @@ async fn a_deadline_is_counted_where_its_clock_ended_the_stream() {
         .call(Cx::new().with_timeout(ms(400)), endless)
         .await
         .expect("call");
-    assert_eq!(d.value("inflight_responses", "D", &[]), 1.0);
-    assert_eq!(d.value("inflight_responses", "A", &[]), 1.0);
+    assert_eq!(d.value("inflight_requests", "D", &[]), 1.0);
+    assert_eq!(d.value("inflight_requests", "A", &[]), 1.0);
     let items = collect(out).await;
     assert_eq!(
         items
@@ -537,6 +573,107 @@ async fn a_deadline_is_counted_where_its_clock_ended_the_stream() {
     assert_eq!(d.value("response_errors_total", "A", &with), 0.0);
     assert_eq!(d.value("end_to_end_errors_total", "A", &with), 1.0);
     assert_eq!(d.value("response_cancellation_total", "A", &[]), 0.0);
+}
+
+/// A visit is in flight until its segment has nothing left to do for it.
+/// The engine, streaming slowly, holds its request until its stream ends,
+/// and so does the front, which relays the stream to the caller. A segment
+/// that only hands the request on lets it go at the hand-off, while the
+/// stream still flows elsewhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_is_in_flight_until_its_segment_is_done_with_it() {
+    let d = deployed(handing_on(), &|_| RuntimeConfig::default()).await;
+    let slow = Plan {
+        item_delay_ms: 100,
+        ..plan(3)
+    };
+    let mut out = d.call(Cx::new(), slow).await.expect("call");
+    next(&mut out).await.expect("not an error");
+    // The two items left are 100 ms apart: the engine is still streaming.
+    assert_eq!(d.value("inflight_requests", "D", &[]), 1.0, "the engine");
+    assert_eq!(d.value("inflight_requests", "A", &[]), 1.0, "the front");
+    assert_eq!(d.value("requests_total", "C", &[]), 1.0);
+    assert_eq!(d.value("inflight_requests", "C", &[]), 0.0, "handed on");
+    assert_eq!(d.get("responses_total", "C", &[]), None, "no response");
+    assert_eq!(collect(out).await, expected(1..3));
+    d.idle().await;
+}
+
+/// A segment that runs only part of the backward path counts its visit
+/// from the `gdl.open` that prepares the run: while the run waits for the
+/// engine's stream to exist, while it streams, and until its stream ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backward_run_is_in_flight_from_its_open() {
+    let d = deployed(three(), &|_| RuntimeConfig::default()).await;
+    let slow = Plan {
+        slow_attempt: Some((0, 300)),
+        item_delay_ms: 100,
+        ..plan(3)
+    };
+    let (out, ()) = tokio::join!(d.call(Cx::new(), slow), async {
+        d.reaches("F", 1.0).await;
+        // D sleeps 300 ms before its stream exists: F's run is waiting for
+        // activation.
+        assert_eq!(d.count("request_path_duration_seconds", "D"), 0.0);
+        assert_eq!(d.count("response_time_to_first_item_seconds", "F"), 0.0);
+    });
+    let mut out = out.expect("call");
+    next(&mut out).await.expect("not an error");
+    assert_eq!(d.value("inflight_requests", "F", &[]), 1.0, "streaming");
+    assert_eq!(collect(out).await, expected(1..3));
+    d.idle().await;
+}
+
+/// A cancel brings every segment back to zero. Every segment but the
+/// source's lets the request go at once, though the caller still holds the
+/// stream and does not read it; the source's lets it go when the caller
+/// reads the cancel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_ends_every_visit() {
+    let mut cases = placements();
+    cases.push((handing_on(), vec![("A", true), ("D", true)]));
+    for (placement, entries) in cases {
+        let d = deployed(placement, &|_| RuntimeConfig::default()).await;
+        let cx = Cx::new();
+        let mut out = d.call(cx.clone(), endless()).await.expect("call");
+        next(&mut out).await.expect("not an error");
+        for (entry, _) in &entries {
+            assert_eq!(d.value("inflight_requests", entry, &[]), 1.0, "{entry}");
+        }
+        cx.cancel();
+        for (entry, _) in entries.iter().filter(|(entry, _)| *entry != "A") {
+            d.reaches(entry, 0.0).await;
+        }
+        let error = collect(out).await.pop().and_then(Result::err);
+        assert_eq!(error.map(|e| e.kind()), Some(gdl::ErrorKind::Cancelled));
+        d.idle().await;
+        assert_eq!(d.value("end_to_end_cancellation_total", "A", &[]), 1.0);
+    }
+}
+
+/// The source's visit ends at a cancel though its caller holds the stream
+/// unread, as the owner's rule says a cancelled request does.
+#[ignore = "LIMITATIONS.md, the source's count after a cancel: the source's visit ends when its \
+            caller reads the cancel or drops the stream; nothing runs for it before then"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_ends_the_sources_visit_though_its_caller_does_not_read() {
+    for placement in [one(), two()] {
+        let d = deployed(placement, &|_| RuntimeConfig::default()).await;
+        let cx = Cx::new();
+        let mut out = d.call(cx.clone(), endless()).await.expect("call");
+        next(&mut out).await.expect("not an error");
+        cx.cancel();
+        d.idle().await;
+        drop(out);
+    }
+}
+
+fn endless() -> Plan {
+    Plan {
+        endless: true,
+        item_delay_ms: 1,
+        ..plan(0)
+    }
 }
 
 /// An operator that calls its `next` twice is one visit of its segment and
