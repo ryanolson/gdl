@@ -59,6 +59,11 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
     #[doc(hidden)]
     fn streamed(&self, out: &mut Vec<bool>);
 
+    /// Collect, for each forward edge from this part of the hop on, the
+    /// type its codec carries as the head, and the type's name.
+    #[doc(hidden)]
+    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str)>);
+
     #[doc(hidden)]
     fn walk(
         &self,
@@ -133,6 +138,11 @@ where
         self.rest.streamed(out);
     }
 
+    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str)>) {
+        out.push(C::head());
+        self.rest.heads(out);
+    }
+
     async fn walk(&self, pos: usize, end: usize, cx: &Cx, value: F::In) -> Result<FwdExit<R::Out>> {
         if pos >= end {
             return leave(self.codec, pos, value);
@@ -169,6 +179,10 @@ impl<C: RequestCodec> DForward for FwdEnd<C> {
 
     fn streamed(&self, out: &mut Vec<bool>) {
         out.push(C::STREAMED);
+    }
+
+    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str)>) {
+        out.push(C::head());
     }
 
     async fn walk(

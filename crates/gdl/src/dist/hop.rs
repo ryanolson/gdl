@@ -10,13 +10,14 @@ use futures::{Future, Stream, StreamExt};
 use super::admission::{EgressPermit, Share};
 use super::envelope::{Accepted, Forward, Open, VERSION, WireCx, WireItem};
 use super::fabric::{Canceller, Frame, Inbound, Outbound, ReplyTo, Retirer};
-use super::runtime::{Entries, Runtime};
+use super::runtime::{Entries, Handed, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use crate::cx::{Cx, Deadline};
 use crate::error::{Error, ErrorKind, Result};
 use crate::items::{CHECK_INTERVAL, Items, bound_measured, items};
 use crate::meter::{self, END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit};
 use crate::role::Next;
+use crate::select::Lease;
 use gdl_model::HopLayout;
 use tokio::time::Instant;
 
@@ -151,6 +152,9 @@ struct HopPlan {
     /// Whether each forward edge carries a streamed request, outer end
     /// first.
     fwd_streamed: Vec<bool>,
+    /// How the hand-off into each forward position chooses its instance,
+    /// resolved once; read only where a run in this segment hands on.
+    routers: Vec<Router>,
 }
 
 impl HopPlan {
@@ -178,6 +182,7 @@ impl HopPlan {
             outer_start: if last > 0 { runs[last].start } else { 1 },
             inner_end: if last > 0 { runs[1].start } else { 1 },
             fwd_streamed: hop.request_streams.clone(),
+            routers: Vec::new(),
         }
     }
 
@@ -273,7 +278,35 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
                 ),
             ));
         }
-        let plan = HopPlan::new(hop);
+        let mut plan = HopPlan::new(hop);
+        plan.routers = (0..forward.len())
+            .map(|pos| rt.router(usize::from(index), pos))
+            .collect();
+        // A selector that reads the head as a type must be given that
+        // type: each crossing this segment sends is checked against its
+        // edge's codec, which every slot has, `Absent` or not.
+        let mut heads = Vec::new();
+        fwd.heads(&mut heads);
+        for pos in 1..forward.len() {
+            let sends = forward[pos - 1].0 == rt.segment && forward[pos].0 != rt.segment;
+            let Router::Selector { name, selector } = &plan.routers[pos] else {
+                continue;
+            };
+            let (Some((wants, wanted)), Some((carries, carried))) =
+                (selector.edge(), heads.get(pos - 1))
+            else {
+                continue;
+            };
+            if sends && wants != *carries {
+                return Err(Error::new(
+                    ErrorKind::Placement,
+                    format!(
+                        "segment `{}`: selector `{name}` reads the head as `{wanted}`, but the request that crosses into `{}` (hop {index}) carries `{carried}`",
+                        rt.segment, forward[pos].1
+                    ),
+                ));
+            }
+        }
         // The source is the one outer end that is no hop's inner end.
         let outer = &forward[0].1;
         let source =
@@ -345,14 +378,15 @@ where
             root.as_ref(),
             core.rt.admission.attempt(attempt.id().as_u128()),
         )?;
-        let items = tokio::select! {
+        let (items, lease) = tokio::select! {
             biased;
             reason = attempt.done() => return meter::note(root.as_ref(), Err(reason)),
             result = core.run_remote(&attempt, req) => meter::note(root.as_ref(), result)?,
         };
         meter::note(root.as_ref(), attempt.check())?;
-        // The attempt slot is held for as long as the response stream lives.
-        let items = items_holding(items, slot);
+        // The attempt slot, and a selector's lease, are held for as long as
+        // the response stream lives: one holder, so a lease adds no wrapper.
+        let items = items_holding(items, (slot, lease));
         Ok(bound_measured(&attempt, guard, items, root))
     }
 }
@@ -422,8 +456,14 @@ where
         }
     }
 
-    /// The outer end's side of a hop that leaves its segment.
-    async fn run_remote(self: &Arc<Self>, attempt: &Cx, req: F::In) -> Result<Items<B::Out>> {
+    /// The outer end's side of a hop that leaves its segment, with the
+    /// lease of the selector that chose where it went, if one did: the
+    /// caller holds it as long as the response stream.
+    async fn run_remote(
+        self: &Arc<Self>,
+        attempt: &Cx,
+        req: F::In,
+    ) -> Result<(Items<B::Out>, Option<Lease>)> {
         let rt = &self.rt;
         let (inbound, mut reply) = rt.fabric.mint();
         let mut held_reply = rt.fabric.hold_reply(&reply);
@@ -490,6 +530,7 @@ where
             };
         }
         let exit = self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await?;
+        let mut lease = None;
         // As in local composition, nothing further starts for an interrupted
         // request. The last forward node may have ended the attempt, and a
         // hand-off sent now would start remote work under a context that
@@ -545,13 +586,20 @@ where
                     reply,
                     payload: head,
                 };
-                let (accepted, sent) = rt
+                let Handed {
+                    accepted,
+                    sent,
+                    lease: chosen,
+                } = rt
                     .send_forward(
                         &self.plan.fwd_segments[at],
+                        &self.plan.routers[at],
+                        attempt,
                         envelope,
                         attempt.visit().is_some(),
                     )
                     .await?;
+                lease = chosen;
                 // Handed on: the visit's request path ends where the
                 // hand-off left, and its response begins.
                 if let (Some(visit), Some(sent)) = (attempt.visit(), sent) {
@@ -607,7 +655,7 @@ where
             .bwd
             .enter(1, self.plan.outer_start, usize::MAX, attempt, bytes)?
         {
-            BwdExit::Here(items) => Ok(items),
+            BwdExit::Here(items) => Ok((items, lease)),
             BwdExit::Leave { .. } => Err(internal("the outer end's run left its segment")),
         }
     }
@@ -740,10 +788,16 @@ where
                         payload: head,
                     };
                     let segment = &hop.plan.fwd_segments[at];
-                    let sending = hop.rt.send_forward(segment, onward, owner.is_some());
-                    let (sent, sent_at) = match bounded(&cx, sending).await {
-                        Ok((accepted, sent_at)) => (Ok(accepted), sent_at),
-                        Err(error) => (Err(error), None),
+                    let sending = hop.rt.send_forward(
+                        segment,
+                        &hop.plan.routers[at],
+                        &cx,
+                        onward,
+                        owner.is_some(),
+                    );
+                    let (sent, sent_at, lease) = match bounded(&cx, sending).await {
+                        Ok(handed) => (Ok(handed.accepted), handed.sent, handed.lease),
+                        Err(error) => (Err(error), None, None),
                     };
                     // Handed on, the visit ends here: the response flows
                     // past this segment.
@@ -753,10 +807,12 @@ where
                         }
                     };
                     match (sent, input, egress) {
-                        // The next stage owns the reply now.
+                        // The next stage owns the reply now, and nothing of
+                        // the response passes here: the lease ends with the
+                        // acknowledgement.
                         (Ok(None), None, _) => {
                             handed();
-                            drop(share);
+                            drop((share, lease));
                         }
                         // A relay. The next stage owns the reply; this one keeps
                         // its admission share and its permit until it has sent
@@ -764,7 +820,7 @@ where
                         (Ok(Some(next)), Some(input), Some(egress)) => {
                             handed();
                             Box::pin(send_input(&hop.rt, &cx, next, input, upstream, None)).await;
-                            drop((share, egress));
+                            drop((share, egress, lease));
                         }
                         (Ok(_), _, _) => {
                             let error = disagree();

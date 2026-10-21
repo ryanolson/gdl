@@ -64,6 +64,11 @@ impl Error {
         Self::new(ErrorKind::DeadlineExceeded, "the request deadline passed")
     }
 
+    /// A routing selector could not choose an instance for the request.
+    pub fn routing(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Routing, message)
+    }
+
     /// A node was invoked in a segment that does not host it.
     pub fn not_hosted(node: &str) -> Self {
         Self::new(
@@ -117,6 +122,8 @@ pub enum ErrorKind {
     Codec,
     /// A placement or configuration is invalid.
     Placement,
+    /// A routing selector could not choose an instance for the request.
+    Routing,
 }
 
 impl fmt::Display for ErrorKind {
@@ -131,6 +138,7 @@ impl fmt::Display for ErrorKind {
             Self::Transport => "transport error",
             Self::Codec => "codec error",
             Self::Placement => "placement error",
+            Self::Routing => "routing error",
         })
     }
 }

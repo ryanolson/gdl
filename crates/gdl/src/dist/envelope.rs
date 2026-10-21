@@ -63,6 +63,11 @@ impl WireCx {
     pub(crate) fn root(&self) -> u128 {
         self.id
     }
+
+    /// Add what a routing selector chose to tell the receiver.
+    pub(crate) fn add_meta(&mut self, meta: Vec<(String, String)>) {
+        self.meta.extend(meta);
+    }
 }
 
 /// A request handed to the next segment on a hop's forward path.

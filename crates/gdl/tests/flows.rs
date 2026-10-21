@@ -5,6 +5,7 @@ mod common;
 
 use std::sync::Arc;
 
+use common::selecting::{Counting, counted};
 use common::streamed::{self, Brief, Note, Script, ask, replies, words};
 use common::{
     Cluster, Events, WAIT, collect, partitions, placement_of, settles, source_segment, velo_node,
@@ -111,12 +112,27 @@ async fn every_placement_of_the_streamed_reference_graph_matches_the_local_run()
     let events = Events::new();
     let manifest = streamed::contract::manifest();
     for (case, blocks) in all.iter().enumerate() {
+        // Every other case routes each crossing through a selector, whose
+        // leases must all be given back, a relay's included.
+        let counting = Counting::default();
+        let selected = case % 2 == 1;
         let placement = placement_of(blocks);
+        let placement = match selected {
+            true => {
+                let layout = gdl::layout(&manifest, &placement).expect("layout");
+                counted(placement, &layout)
+            }
+            false => placement,
+        };
+        let config = match selected {
+            true => counting.config(),
+            false => RuntimeConfig::default(),
+        };
         let cluster = streamed::deploy(
             &streamed::instances(&nodes, &placement),
             &placement,
             &events,
-            RuntimeConfig::default(),
+            config,
         );
         let text = format!("m{case}");
         let input = words(&events, &["x", "y"], false);
@@ -141,6 +157,10 @@ async fn every_placement_of_the_streamed_reference_graph_matches_the_local_run()
         // anchor per crossing of a streamed edge.
         let layout = gdl::layout(&manifest, &placement).expect("layout");
         assert_eq!(served_work(&cluster), expected_work(&layout), "{blocks:?}");
+        if selected {
+            assert_eq!(counting.taken(), expected_work(&layout).0, "{blocks:?}");
+            assert_eq!(counting.live(), 0, "{blocks:?}: a lease was kept");
+        }
     }
 }
 

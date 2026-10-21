@@ -12,6 +12,7 @@
 
 #![allow(dead_code)]
 
+pub mod selecting;
 pub mod streamed;
 pub mod system;
 

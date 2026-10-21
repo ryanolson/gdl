@@ -303,7 +303,14 @@ The deployment specification stores policies by the node where the remote reques
 Engine = "random"
 ```
 
-Unspecified boundaries use `round_robin`. Each dispatching process has its own selection sequence. Policies apply to the replicas in the runtime roster. A router target must start a remote request run; local nodes and response-only boundaries cannot have a request router. Custom routers are not yet supported.
+Unspecified boundaries use `round_robin`. Each dispatching process has its own selection sequence. Policies apply to the replicas in the runtime roster. A router target must start a remote request run; local nodes and response-only boundaries cannot have a request router.
+
+A boundary can also name a selector: `Engine = { selector = "least_loaded" }`. A selector is a type that implements `gdl::Selector`. It chooses one of the destination segment's eligible replicas for each request, from the same routing table that the policies use, so it never sees a replica that its sender has stopped routing to. It sees the request's context and its head: the head's own type, which the segment checks against the boundary's edge when it starts, or `gdl::Encoded` for the head's bytes. Its choice can carry a lease, which the sending segment holds while it holds the request, and metadata, which the receiving segment sees in `cx.meta()`. A selector can wait, until the request's deadline. A selector that cannot choose returns `Error::routing`. Two selectors come with gdl, and need no registration:
+
+- `affinity`: requests with the same key go to the same replica, from every sender. The key is the value of the metadata entry `[selector.affinity] key` names, or else the request's head.
+- `least_loaded`: each request goes to the replica where this sender holds the fewest leases.
+
+Another selector is registered by name in `RuntimeConfig::selectors`. A selector name is lowercase letters, digits, and `_`, and is part of the placement's identity. A selector costs a load of the routing table, a decode of the head when it reads a type, and its own work; `round_robin` and `random` do not go through it.
 
 
 Generated crates take gdl from `--gdl-path`, or from `--gdl-git <url> --gdl-rev <rev>`. The editor uses the dashboard's dark surfaces and green accents. On narrow screens, the catalog appears above the canvas.

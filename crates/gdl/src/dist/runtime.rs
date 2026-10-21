@@ -13,8 +13,10 @@ use super::admission::{Admission, Egress};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 use super::roster::{Live, Picker, Policy, Roster};
+use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
 use crate::meter::Meters;
+use crate::select::{Erased, Lease, Selectors};
 use gdl_model::{Layout, RequestRouter};
 
 /// Runtime settings for one segment instance.
@@ -61,6 +63,11 @@ pub struct RuntimeConfig {
     /// source, the request end to end; `None` records nothing. Not a setting: a segment binary gives its process's
     /// registry when its system listener can serve it.
     pub metrics: Option<prometheus::Registry>,
+    /// The selectors a crossing's router can name, by name. A name the
+    /// placement uses that is not here is gdl's own selector of that name,
+    /// with its defaults. Not a setting: a segment binary registers them
+    /// through its `Builder`.
+    pub selectors: Selectors,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -128,6 +135,7 @@ impl Default for RuntimeConfig {
             heartbeat_interval: None,
             drain: None,
             metrics: None,
+            selectors: Selectors::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -188,6 +196,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             heartbeat_interval: s.heartbeat_interval_ms.map(Duration::from_millis),
             drain: s.drain_ms.map(Duration::from_millis),
             metrics: None,
+            selectors: Selectors::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };
@@ -307,6 +316,9 @@ pub(crate) struct Runtime {
     /// Whom to route to, shared with the roster the instance launched
     /// with, which follows membership.
     routes: Arc<Live>,
+    /// The selectors this instance's crossings name, resolved once: one
+    /// per name, shared by every crossing that names it.
+    selectors: BTreeMap<String, Arc<dyn Erased>>,
     random: RandomState,
     /// Set once a retiring instance stops taking hand-offs and openings.
     closed: AtomicBool,
@@ -336,13 +348,20 @@ impl Runtime {
         config: RuntimeConfig,
         meters: Option<Meters>,
     ) -> Result<Self> {
-        if let Some((hop, at, name)) = sent_selectors(&layout, &segment).next() {
-            return Err(Error::new(
-                ErrorKind::Placement,
-                format!(
-                    "segment `{segment}` routes hop {hop}'s crossing at position {at} through selector `{name}`, which nothing registers"
-                ),
-            ));
+        let mut selectors = BTreeMap::new();
+        for (hop, at, name) in sent_selectors(&layout, &segment) {
+            if selectors.contains_key(name) {
+                continue;
+            }
+            let Some(selector) = config.selectors.resolve(name) else {
+                return Err(Error::new(
+                    ErrorKind::Placement,
+                    format!(
+                        "segment `{segment}` routes hop {hop}'s crossing at position {at} through selector `{name}`, which nothing registers and gdl does not have"
+                    ),
+                ));
+            };
+            selectors.insert(name.to_string(), selector);
         }
         for peer in roster.peers() {
             if peer.instance_id() != fabric.instance() {
@@ -362,6 +381,7 @@ impl Runtime {
             ),
             egress: Egress::new(config.egress_limit, config.admission_wait),
             routes: Arc::clone(roster.live()),
+            selectors,
             random: RandomState::new(),
             closed: AtomicBool::new(false),
             names: Names {
@@ -436,9 +456,30 @@ impl Runtime {
             .ok_or_else(|| Error::new(ErrorKind::Transport, "the segment has shut down"))
     }
 
+    /// The router of the hand-off at forward position `pos` of hop `hop`,
+    /// for a crossing this instance sends: a policy, or a selector that
+    /// `Runtime::new` resolved.
+    pub(crate) fn router(&self, hop: usize, pos: usize) -> Router {
+        match self.layout.request_router(hop, pos) {
+            RequestRouter::RoundRobin => Router::Policy(Policy::RoundRobin),
+            RequestRouter::Random => Router::Policy(Policy::Random),
+            RequestRouter::Selector(name) => match self.selectors.get(name) {
+                Some(selector) => Router::Selector {
+                    name: Arc::from(name.as_str()),
+                    selector: Arc::clone(selector),
+                },
+                // Resolved for every crossing this instance sends; another
+                // segment's crossing is never sent from here.
+                None => Router::Policy(Policy::RoundRobin),
+            },
+        }
+    }
+
     /// Hand a request to the next segment and wait for it to accept. A
     /// stage that accepts a streamed request answers with where to send its
-    /// items.
+    /// items. `router` chooses the instance: a policy picks at once; a
+    /// selector is given `cx` and the head, and what it chose comes back
+    /// with its lease, for the caller to hold while it holds the request.
     ///
     /// When the chosen instance is this one, the entry runs by a direct
     /// call: velo is not relied on to deliver a message to its own sender.
@@ -449,32 +490,37 @@ impl Runtime {
     pub(crate) async fn send_forward(
         &self,
         segment: &str,
-        envelope: Forward,
+        router: &Router,
+        cx: &Cx,
+        mut envelope: Forward,
         timed: bool,
-    ) -> Result<(Accepted, Option<tokio::time::Instant>)> {
+    ) -> Result<Handed> {
         self.released().await?;
-        let policy = match self
-            .layout
-            .request_router(envelope.hop as usize, envelope.pos as usize)
-        {
-            RequestRouter::RoundRobin => Policy::RoundRobin,
-            RequestRouter::Random => Policy::Random,
-            // Refused when the runtime was made.
-            RequestRouter::Selector(name) => {
-                return Err(Error::new(
-                    ErrorKind::Placement,
-                    format!("internal: no selector `{name}`"),
-                ));
+        let (instance, lease) = match router {
+            Router::Policy(policy) => (
+                self.routes
+                    .pick(segment, Picker::Request, *policy, &self.random)?,
+                None,
+            ),
+            Router::Selector { selector, .. } => {
+                let (instance, picked) = self
+                    .routes
+                    .choose(segment, &**selector, cx, &envelope.payload)
+                    .await?;
+                envelope.cx.add_meta(picked.meta);
+                (instance, picked.lease)
             }
         };
-        let instance = self
-            .routes
-            .pick(segment, Picker::Request, policy, &self.random)?;
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
             let entry = Arc::clone(entries.forward(envelope.hop, envelope.pos)?);
             let sent = timed.then(tokio::time::Instant::now);
-            return Ok((entry(envelope).await?, sent));
+            let accepted = entry(envelope).await?;
+            return Ok(Handed {
+                accepted,
+                sent,
+                lease,
+            });
         }
         let bytes = super::envelope::encode(&envelope)?;
         let sent = timed.then(tokio::time::Instant::now);
@@ -488,7 +534,11 @@ impl Runtime {
             )
             .await?;
         let accepted = super::envelope::decode::<Result<Accepted, Error>>(&reply)??;
-        Ok((accepted, sent))
+        Ok(Handed {
+            accepted,
+            sent,
+            lease,
+        })
     }
 
     /// Ask an instance of `segment` to open a backward run.
@@ -538,6 +588,29 @@ impl Runtime {
         }
         Ok(())
     }
+}
+
+/// How a crossing chooses its instance.
+#[derive(Clone)]
+pub(crate) enum Router {
+    /// `round_robin` or `random`: `pick`, and nothing else.
+    Policy(Policy),
+    /// A selector, by the name the placement gives it.
+    Selector {
+        name: Arc<str>,
+        selector: Arc<dyn Erased>,
+    },
+}
+
+/// A hand-off the next segment accepted.
+pub(crate) struct Handed {
+    /// What it answered: for a streamed request, where to send the items.
+    pub(crate) accepted: Accepted,
+    /// When it left, if the caller asked: after the wait for the roster,
+    /// the routing, and the encoding.
+    pub(crate) sent: Option<tokio::time::Instant>,
+    /// The selector's lease, to hold while the sender holds the request.
+    pub(crate) lease: Option<Lease>,
 }
 
 /// The selectors `segment` sends through: each crossing whose first node

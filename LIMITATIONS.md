@@ -19,6 +19,21 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Would lift it:** a control anchor per attempt, or an in-band frame down the request path. Both cost something on every request, which the owner chose not to pay.
 - **See:** ruling 26 and its addenda; the tests `a_stop_a_relay_asks_for_after_its_input_ended_waits_for_the_deadline` and `a_stop_a_relay_asks_for_as_it_finishes_waits_for_the_deadline` in `crates/gdl/tests/inputs.rs`.
 
+### A selector's lease can end at the hand-off
+
+- **What happens:** a routing selector's lease (`Choice::with_lease`) is given back when the hand-off is acknowledged, not when the response ends, if the request was sent on by a forward run in a segment that the response does not pass through. `least_loaded` there takes turns, as `round_robin` does.
+- **When:** the boundary's sending segment is not the hop's outer end, and the request is not streamed. A streamed request's relay holds the lease until its input ends.
+- **Why:** nothing of the response reaches that segment, so it has no event to end the lease on without a task per request, which the owner refused.
+- **Workaround:** place the node before the boundary in the hop's outer end's segment.
+- **See:** ruling 157.
+
+### A selector from another crate needs code that registers it
+
+- **What happens:** a generated segment binary routes only with gdl's own selectors (`affinity`, `least_loaded`). A placement that names another one fails that segment's start.
+- **Workaround:** register it in `RuntimeConfig::selectors`, in an in-process deployment or in a hand-written `SegmentBinary`'s `start`.
+- **Would lift it:** the generator binding selector crates, planned with dynamo's KV router.
+- **See:** ruling 162.
+
 ## Bring-up, shutdown, and membership
 
 ### Only a hub lets an instance join
@@ -125,7 +140,7 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### The runtime's `error_type` values are gdl's error kinds
 
-- **What happens:** `errors_total{error_type}`, and the response and end-to-end error counters, count by gdl's error kinds (`node`, `deadline_exceeded`, `truncated`, `not_hosted`, `overloaded`, `transport`, `codec`, `placement`). dynamo's work handler counts by its own steps (`deserialization`, `generate`, `publish_response`, ...), so a dashboard keyed on those values sees none.
+- **What happens:** `errors_total{error_type}`, and the response and end-to-end error counters, count by gdl's error kinds (`node`, `deadline_exceeded`, `truncated`, `not_hosted`, `overloaded`, `transport`, `codec`, `placement`, `routing`). dynamo's work handler counts by its own steps (`deserialization`, `generate`, `publish_response`, ...), so a dashboard keyed on those values sees none.
 - **Would lift it:** an adapter that translates gdl's kinds to dynamo's values. gdl keeps its own errors (the owner, 2026-10-20).
 - **See:** rulings 134 and 136.
 

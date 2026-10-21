@@ -24,6 +24,7 @@ mod meter;
 mod metrics;
 mod process;
 mod role;
+mod select;
 mod service;
 mod streamed;
 mod wire;
@@ -48,7 +49,7 @@ pub use gdl_model::{
     ConfigField, ConfigSchema, ConfigValue, CrossingReport, DeploymentSpec, GraphConfig,
     HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, MetricField,
     MetricKind, NodeInfo, Placement, PlacementError, PlacementErrors, RequestRouter, Role, Run,
-    SegmentRegistration, TypeInfo, WireReason, layout, resolve_config,
+    SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, WireReason, layout, resolve_config,
 };
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
@@ -61,6 +62,10 @@ pub use process::{Drains, Hosted, Launch, Process, ProcessConfig};
 /// registers and serves.
 pub use prometheus;
 pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
+pub use select::{
+    Affinity, AffinityConfig, Choice, Encoded, Head, Instance, InstanceId, Instances, LeastLoaded,
+    Request, Selector, Selectors,
+};
 pub use service::{Client, Endpoints, Join, Service};
 pub use streamed::Streamed;
 /// The velo version this runtime is built on: a deployment's nodes are

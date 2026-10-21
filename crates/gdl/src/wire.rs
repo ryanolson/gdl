@@ -70,6 +70,11 @@ pub trait RequestCodec: sealed::Sealed + Copy + Send + Sync + 'static {
     /// Whether the edge carries a stream.
     const STREAMED: bool;
 
+    /// The type of what crosses as the head, and its name: the value
+    /// itself, or a streamed request's head. A routing selector that reads
+    /// the head must read it as this type.
+    fn head() -> (std::any::TypeId, &'static str);
+
     /// The request as it crosses.
     fn split(&self, value: Self::Value) -> Result<Split>;
 
@@ -89,6 +94,10 @@ pub struct Split {
 impl<T: Send + 'static> RequestCodec for Codec<T> {
     type Value = T;
     const STREAMED: bool = false;
+
+    fn head() -> (std::any::TypeId, &'static str) {
+        (std::any::TypeId::of::<T>(), std::any::type_name::<T>())
+    }
 
     fn split(&self, value: T) -> Result<Split> {
         Ok(Split {
@@ -142,6 +151,10 @@ impl<H, T> fmt::Debug for StreamCodec<H, T> {
 impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
     type Value = Streamed<H, T>;
     const STREAMED: bool = true;
+
+    fn head() -> (std::any::TypeId, &'static str) {
+        (std::any::TypeId::of::<H>(), std::any::type_name::<H>())
+    }
 
     fn split(&self, value: Streamed<H, T>) -> Result<Split> {
         let (head, input) = value.into_parts();

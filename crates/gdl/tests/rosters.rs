@@ -336,6 +336,110 @@ async fn one_of_two_engines_retires_while_requests_flow() {
     left(second_served).await;
 }
 
+/// Prefers one instance whenever it is offered, and records, for each
+/// call, when it began and whether that instance was offered.
+struct Preferring {
+    preferred: u128,
+    calls: std::sync::Mutex<Vec<(Instant, bool)>>,
+}
+
+impl gdl::Selector for Preferring {
+    type Head = gdl::Encoded;
+
+    async fn select<'a>(
+        &'a self,
+        _: gdl::Request<'a, gdl::Encoded>,
+        instances: gdl::Instances<'a>,
+    ) -> gdl::Result<gdl::Choice<'a>> {
+        let preferred = instances
+            .iter()
+            .find(|instance| instance.id().as_u128() == self.preferred);
+        self.calls
+            .lock()
+            .expect("lock")
+            .push((Instant::now(), preferred.is_some()));
+        let chosen = preferred.unwrap_or_else(|| instances.get(0).expect("never empty"));
+        Ok(gdl::Choice::new(chosen))
+    }
+}
+
+/// A selector chooses from the same table `pick` does: once the front has
+/// promised to avoid a retired engine, the selector is never offered it,
+/// though it would choose it every time, and no request fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_selector_is_never_offered_an_instance_its_sender_avoids() {
+    let placement = two().route("C", gdl::RequestRouter::Selector("preferring".into()));
+    let hub = hub(&placement).await;
+    let config = settings(&hub, 20_000, "[min_replicas]\nengine = 2\n");
+    let events = Events::quiet();
+    let ((front_process, front), (first_process, first), (second_process, second)) = tokio::join!(
+        launch(&config, "front", &placement),
+        launch(&config, "engine", &placement),
+        launch(&config, "engine", &placement),
+    );
+    let (front_id, first_id) = (front.node().instance_id(), first.node().instance_id());
+    let preferring = Arc::new(Preferring {
+        preferred: first_id.as_u128(),
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut routed = quick();
+    routed
+        .selectors
+        .add("preferring", Shared(Arc::clone(&preferring)))
+        .expect("a selector");
+    let front_segment = start(&front, "front", &placement, &events, routed);
+    let first_segment = start(&first, "engine", &placement, &events, quick());
+    let second_segment = start(&second, "engine", &placement, &events, quick());
+    let (front_rx, front_served) = serve(front, front_segment);
+    let (first_rx, first_served) = serve(first, first_segment);
+    let (second_rx, second_served) = serve(second, second_segment);
+    let front_segment = ready(front_rx).await;
+    let (first_segment, _) = (ready(first_rx).await, ready(second_rx).await);
+
+    let traffic = Traffic::start(&front_segment, 4);
+    traffic.more(10).await;
+    assert!(
+        first_segment.served().forwards > 0,
+        "the preferred engine took nothing"
+    );
+    first_process.stop();
+    let promised = avoided(&hub, first_id, &[front_id]).await;
+    traffic.more(20).await;
+    assert_eq!(traffic.stop().await, 0, "a request failed");
+    left(first_served).await;
+    let calls = preferring.calls.lock().expect("lock").clone();
+    let after: Vec<bool> = calls
+        .iter()
+        .filter(|(at, _)| *at > promised)
+        .map(|(_, offered)| *offered)
+        .collect();
+    assert!(after.len() >= 20, "{} calls after the promise", after.len());
+    assert!(
+        !after.contains(&true),
+        "the selector was offered the instance its sender promised to avoid"
+    );
+
+    front_process.stop();
+    second_process.stop();
+    left(front_served).await;
+    left(second_served).await;
+}
+
+/// A selector shared with the test that reads what it recorded.
+struct Shared<S>(Arc<S>);
+
+impl<S: gdl::Selector> gdl::Selector for Shared<S> {
+    type Head = S::Head;
+
+    fn select<'a>(
+        &'a self,
+        request: gdl::Request<'a, S::Head>,
+        instances: gdl::Instances<'a>,
+    ) -> impl std::future::Future<Output = gdl::Result<gdl::Choice<'a>>> + Send + 'a {
+        self.0.select(request, instances)
+    }
+}
+
 /// Three segments in a line: the front sends to the middle, the middle to
 /// the tail.
 fn line() -> Placement {

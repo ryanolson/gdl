@@ -2,6 +2,7 @@
 
 mod common;
 
+use common::selecting::{Counting, counted};
 use common::*;
 use gdl::{Cx, Placement, RuntimeConfig};
 
@@ -40,8 +41,25 @@ async fn every_placement_of_the_reference_graph_matches_the_local_run() {
     assert_eq!(all.len(), 877);
     let events = Events::new();
     for (case, blocks) in all.iter().enumerate() {
+        // Every other case routes each crossing through a selector, whose
+        // leases must all be given back: an outer end's, a relay's, and a
+        // hand-on's each end on their own path.
+        let counting = Counting::default();
+        let selected = case % 2 == 1;
         let placement = placement_of(blocks);
-        let cluster = deploy(&nodes, &placement, &events, RuntimeConfig::default());
+        let placement = match selected {
+            true => {
+                let layout =
+                    gdl::layout(&reference_manifest(|_| true), &placement).expect("layout");
+                counted(placement, &layout)
+            }
+            false => placement,
+        };
+        let config = match selected {
+            true => counting.config(),
+            false => RuntimeConfig::default(),
+        };
+        let cluster = deploy(&nodes, &placement, &events, config);
         let plan = Plan {
             tokens: 3,
             ..Plan::default()
@@ -73,6 +91,14 @@ async fn every_placement_of_the_reference_graph_matches_the_local_run() {
             (f + s.served().forwards, r + s.served().runs)
         });
         assert_eq!(got, want, "{blocks:?}");
+        if selected {
+            assert_eq!(
+                counting.taken(),
+                want.0,
+                "{blocks:?}: a hand-off chose no instance"
+            );
+            assert_eq!(counting.live(), 0, "{blocks:?}: a lease was kept");
+        }
     }
 }
 

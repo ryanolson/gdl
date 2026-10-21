@@ -10,10 +10,18 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
+use futures::future::BoxFuture;
 use tokio::sync::Notify;
 use velo::{InstanceId, PeerInfo};
 
+use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
+use crate::select::{Erased, Instances, Picked};
+
+/// How many times a selector is asked for one hand-off before the runtime
+/// gives up: each further ask follows a membership change that made the
+/// last choice ineligible, and membership changes seconds apart.
+const CHOICES: usize = 8;
 
 /// The instances of every segment, as velo peers, and whether this
 /// instance may route to them yet.
@@ -201,18 +209,7 @@ impl Live {
         random: &RandomState,
     ) -> Result<InstanceId> {
         let table = self.table.load();
-        let route = table.segments.get(segment).ok_or_else(|| {
-            Error::new(
-                ErrorKind::Placement,
-                format!("no instance of segment `{segment}` in the roster"),
-            )
-        })?;
-        if route.eligible.is_empty() {
-            return Err(Error::new(
-                ErrorKind::Placement,
-                format!("segment `{segment}` has no instance to route to"),
-            ));
-        }
+        let route = route(&table, segment)?;
         let next = match picker {
             Picker::Request => &route.next.request,
             Picker::Open => &route.next.open,
@@ -224,6 +221,63 @@ impl Live {
         };
         Ok(route.eligible[index])
     }
+}
+
+impl Live {
+    /// Ask `selector` to choose an instance of `segment` for a request
+    /// with context `cx` and encoded head `head`, from the eligible
+    /// instances of one table. A selector may wait, so the table is checked
+    /// again when it returns: if it changed and the choice is no longer
+    /// eligible, the choice and its lease are dropped and the selector is
+    /// asked again. That check is the selection's pick: nothing waits after
+    /// it but the hand-off's encoding, as after `pick`. Boxed, so that a
+    /// built-in policy's hand-off does not carry this future's state.
+    pub(crate) fn choose<'a>(
+        &'a self,
+        segment: &'a str,
+        selector: &'a dyn Erased,
+        cx: &'a Cx,
+        head: &'a [u8],
+    ) -> BoxFuture<'a, Result<(InstanceId, Picked)>> {
+        Box::pin(async move {
+            for _ in 0..CHOICES {
+                let table = self.table.load_full();
+                let eligible = &route(&table, segment)?.eligible;
+                let picked = selector
+                    .select(cx, head, Instances::new(segment, eligible))
+                    .await?;
+                let chosen = eligible[picked.index];
+                let now = self.table.load();
+                if Arc::ptr_eq(&now, &table)
+                    || route(&now, segment).is_ok_and(|route| route.eligible.contains(&chosen))
+                {
+                    return Ok((chosen, picked));
+                }
+            }
+            Err(Error::routing(format!(
+                "the instances of segment `{segment}` changed under its selector {CHOICES} times"
+            )))
+        })
+    }
+}
+
+/// `segment`'s route in `table`, refused when the segment is unknown or
+/// has nothing to route to.
+#[inline]
+fn route<'t>(table: &'t Table, segment: &str) -> Result<&'t Route> {
+    let route = table.segments.get(segment).ok_or_else(|| {
+        Error::new(
+            ErrorKind::Placement,
+            format!("no instance of segment `{segment}` in the roster"),
+        )
+    })?;
+    if route.eligible.is_empty() {
+        return Err(Error::new(
+            ErrorKind::Placement,
+            format!("segment `{segment}` has no instance to route to"),
+        ));
+    }
+    Ok(route)
 }
 
 /// A built-in routing policy: what `pick` does with its turn.
@@ -579,5 +633,191 @@ mod tests {
             error.to_string().contains("no instance to route to"),
             "{error}"
         );
+    }
+
+    mod choose {
+        use std::sync::Mutex;
+        use std::sync::atomic::AtomicUsize;
+
+        use super::*;
+        use crate::select::{Choice, Encoded, Request, Selector, Typed};
+
+        /// Takes the first instance offered, and records what it was
+        /// offered.
+        #[derive(Default)]
+        struct First {
+            offered: Mutex<Vec<Vec<u128>>>,
+        }
+
+        impl Selector for First {
+            type Head = Encoded;
+
+            async fn select<'a>(
+                &'a self,
+                _: Request<'a, Encoded>,
+                instances: Instances<'a>,
+            ) -> Result<Choice<'a>> {
+                let ids = instances.iter().map(|i| i.id().as_u128()).collect();
+                self.offered.lock().expect("lock").push(ids);
+                Ok(Choice::new(instances.get(0).expect("one")))
+            }
+        }
+
+        async fn choose(live: &Live, selector: &dyn Erased) -> Result<InstanceId> {
+            let cx = Cx::new();
+            live.choose("worker", selector, &cx, &[])
+                .await
+                .map(|(id, _)| id)
+        }
+
+        fn raw(ids: &[InstanceId]) -> Vec<u128> {
+            ids.iter().map(|id| id.as_u128()).collect()
+        }
+
+        #[tokio::test]
+        async fn a_selector_is_offered_only_the_eligible_instances() {
+            let ids = ids(3);
+            let live = live(&ids);
+            let first = Arc::new(First::default());
+            let selector = Typed(Arc::clone(&first));
+            live.retire("worker", ids[0]);
+            assert_eq!(choose(&live, &selector).await.expect("one"), ids[1]);
+            assert_eq!(live.take_acknowledgements(), [ids[0]]);
+            // Every other instance retires: the fallback never offers the
+            // one this instance promised to avoid.
+            live.retire("worker", ids[1]);
+            live.retire("worker", ids[2]);
+            assert_eq!(choose(&live, &selector).await.expect("one"), ids[1]);
+            let offered = first.offered.lock().expect("lock").clone();
+            assert_eq!(offered, [raw(&ids[1..]), raw(&ids[1..])]);
+            // Nothing left to route to: refused before the selector is asked.
+            live.leave("worker", ids[1]);
+            live.leave("worker", ids[2]);
+            let error = choose(&live, &selector).await.expect_err("nothing left");
+            assert_eq!(error.kind(), ErrorKind::Placement);
+            assert_eq!(first.offered.lock().expect("lock").len(), 2);
+        }
+
+        /// The first call waits at a gate, then takes `target`; later calls
+        /// take the first instance. Each choice holds a lease.
+        struct Waiting {
+            target: InstanceId,
+            calls: AtomicUsize,
+            arrived: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+            leases: Arc<AtomicUsize>,
+        }
+
+        struct Lease(Arc<AtomicUsize>);
+
+        impl Drop for Lease {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        impl Selector for Waiting {
+            type Head = Encoded;
+
+            async fn select<'a>(
+                &'a self,
+                _: Request<'a, Encoded>,
+                instances: Instances<'a>,
+            ) -> Result<Choice<'a>> {
+                let chosen = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.arrived.notify_one();
+                    self.release.notified().await;
+                    instances
+                        .iter()
+                        .find(|i| i.id().as_u128() == self.target.as_u128())
+                        .expect("the target is offered")
+                } else {
+                    instances.get(0).expect("one")
+                };
+                self.leases.fetch_add(1, Ordering::SeqCst);
+                Ok(Choice::new(chosen).with_lease(Lease(Arc::clone(&self.leases))))
+            }
+        }
+
+        #[tokio::test]
+        async fn a_choice_that_retired_while_the_selector_waited_is_asked_again() {
+            let ids = ids(2);
+            let live = Arc::new(live(&ids));
+            let waiting = Arc::new(Waiting {
+                target: ids[0],
+                calls: AtomicUsize::new(0),
+                arrived: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                leases: Arc::new(AtomicUsize::new(0)),
+            });
+            let choosing = tokio::spawn({
+                let live = Arc::clone(&live);
+                let waiting = Arc::clone(&waiting);
+                async move {
+                    let selector = Typed(waiting);
+                    let cx = Cx::new();
+                    live.choose("worker", &selector, &cx, &[])
+                        .await
+                        .map(|(id, picked)| (id, picked.lease))
+                }
+            });
+            waiting.arrived.notified().await;
+            // While the selector waits, its target retires and this
+            // instance promises to avoid it.
+            live.retire("worker", ids[0]);
+            assert_eq!(live.take_acknowledgements(), [ids[0]]);
+            waiting.release.notify_one();
+            let (chosen, lease) = choosing.await.expect("joined").expect("a choice");
+            assert_eq!(chosen, ids[1], "sent to an instance it promised to avoid");
+            assert_eq!(waiting.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                waiting.leases.load(Ordering::SeqCst),
+                1,
+                "the stale choice's lease was kept"
+            );
+            drop(lease);
+            assert_eq!(waiting.leases.load(Ordering::SeqCst), 0);
+        }
+
+        /// Retires its own choice, and brings in another instance, every
+        /// time it is asked.
+        struct Churning {
+            live: Arc<Live>,
+            known: Mutex<Vec<InstanceId>>,
+        }
+
+        impl Selector for Churning {
+            type Head = Encoded;
+
+            async fn select<'a>(
+                &'a self,
+                _: Request<'a, Encoded>,
+                instances: Instances<'a>,
+            ) -> Result<Choice<'a>> {
+                let chosen = instances.get(0).expect("one");
+                let mut known = self.known.lock().expect("lock");
+                let id = *known
+                    .iter()
+                    .find(|id| id.as_u128() == chosen.id().as_u128())
+                    .expect("known");
+                self.live.retire("worker", id);
+                let joiner = InstanceId::new_v4();
+                known.push(joiner);
+                self.live.join("worker", joiner);
+                Ok(Choice::new(chosen))
+            }
+        }
+
+        #[tokio::test]
+        async fn a_table_that_keeps_changing_under_a_selector_ends_in_a_routing_error() {
+            let ids = ids(2);
+            let live = Arc::new(live(&ids));
+            let selector = Typed(Arc::new(Churning {
+                live: Arc::clone(&live),
+                known: Mutex::new(ids),
+            }));
+            let error = choose(&live, &selector).await.expect_err("never settles");
+            assert_eq!(error.kind(), ErrorKind::Routing);
+        }
     }
 }
