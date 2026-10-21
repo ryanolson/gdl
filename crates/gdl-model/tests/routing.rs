@@ -44,11 +44,11 @@ fn request_routing_survives_export_and_changes_deployment_identity() {
     let routed = layout(&manifest(), &random).expect("routing fixture");
     assert_eq!(
         routed.request_router(0, 1),
-        gdl_model::RequestRouter::Random
+        &gdl_model::RequestRouter::Random
     );
     assert_eq!(
         routed.request_router(0, 0),
-        gdl_model::RequestRouter::RoundRobin
+        &gdl_model::RequestRouter::RoundRobin
     );
 }
 
@@ -201,4 +201,102 @@ fn a_forward_path_that_returns_sends_both_ways() {
     // Each reaches itself through the other.
     assert!(layout.reaches("front", "front"));
     assert!(layout.reaches("mid", "mid"));
+}
+
+/// Placements with built-in policies keep the hash they had before
+/// selectors could be named: a deployment registered at a hub, and a
+/// generated crate's embedded placement, keep their identity.
+#[test]
+fn built_in_policies_keep_their_placement_hash() {
+    let plain = Placement::from_toml(SPLIT).expect("routing fixture");
+    let random = Placement::from_toml(&format!("{SPLIT}\n[routing]\nD='random'\n"))
+        .expect("routing fixture");
+    assert_eq!(plain.hash(), 0x54bf_62d4_99c5_f630);
+    assert_eq!(random.hash(), 0x5c17_1b68_9ce2_4d56);
+}
+
+/// A crossing may name a selector: the name is part of the placement's
+/// identity, and it survives a round trip through TOML.
+#[test]
+fn a_selector_router_round_trips_and_changes_the_identity() {
+    let plain = Placement::from_toml(SPLIT).expect("routing fixture");
+    let named = |name: &str| {
+        Placement::from_toml(&format!(
+            "{SPLIT}\n[routing]\nD = {{ selector = '{name}' }}\n"
+        ))
+        .expect("a selector router")
+    };
+    let affinity = named("affinity");
+    assert_ne!(affinity.hash(), plain.hash());
+    assert_ne!(affinity.hash(), named("kv_router").hash());
+    let random = Placement::from_toml(&format!("{SPLIT}\n[routing]\nD='random'\n"))
+        .expect("routing fixture");
+    assert_ne!(affinity.hash(), random.hash());
+    let text = toml::to_string(&affinity).expect("writes");
+    let back = Placement::from_toml(&text).expect("reads what it wrote");
+    assert_eq!(back, affinity, "{text}");
+    assert_eq!(back.hash(), affinity.hash());
+    let routed = layout(&manifest(), &affinity).expect("a layout");
+    assert_eq!(
+        routed.request_router(0, 1),
+        &gdl_model::RequestRouter::Selector("affinity".into())
+    );
+    let built = Placement::new()
+        .segment("front", ["S"])
+        .segment("worker", ["D"])
+        .route("D", gdl_model::RequestRouter::Selector("affinity".into()));
+    assert_eq!(built.hash(), affinity.hash());
+}
+
+/// A selector's name is also a settings key and a metric label, so only
+/// lowercase names are taken, and never a built-in policy's.
+#[test]
+fn a_selector_name_must_be_one_a_placement_can_use() {
+    for bad in [
+        "",
+        "Affinity",
+        "9lives",
+        "kv-router",
+        "round_robin",
+        "random",
+        &"x".repeat(65),
+    ] {
+        let text = format!("{SPLIT}\n[routing]\nD = {{ selector = '{bad}' }}\n");
+        assert!(Placement::from_toml(&text).is_err(), "accepted `{bad}`");
+        let built = Placement::new()
+            .segment("front", ["S"])
+            .segment("worker", ["D"])
+            .route("D", gdl_model::RequestRouter::Selector(bad.to_string()));
+        assert!(layout(&manifest(), &built).is_err(), "laid out `{bad}`");
+        assert!(
+            gdl_model::check_selector_name(bad).is_err(),
+            "checked `{bad}`"
+        );
+    }
+    assert!(gdl_model::check_selector_name(&"x".repeat(64)).is_ok());
+    for unknown in [
+        "D = { selector = 'affinity', weight = 2 }",
+        "D = { policy = 'affinity' }",
+    ] {
+        let text = format!("{SPLIT}\n[routing]\n{unknown}\n");
+        assert!(Placement::from_toml(&text).is_err(), "accepted {unknown}");
+    }
+    // Only a request boundary takes a selector, as with a policy.
+    let local = Placement::from_toml(
+        "[segment.all]\nnodes=['S','D']\n[routing]\nD = { selector = 'affinity' }",
+    )
+    .expect("parses");
+    assert!(layout(&manifest(), &local).is_err());
+}
+
+/// gdl's own selectors, as the composer offers them, have names a
+/// placement can use.
+#[test]
+fn gdls_own_selectors_have_usable_names() {
+    let names: Vec<&str> = gdl_model::SELECTORS.iter().map(|s| s.name).collect();
+    assert_eq!(names, ["affinity", "least_loaded"]);
+    for selector in gdl_model::SELECTORS {
+        gdl_model::check_selector_name(selector.name).expect("a usable name");
+        assert!(!selector.summary.is_empty());
+    }
 }

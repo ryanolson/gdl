@@ -95,7 +95,7 @@ async fn request_routers_keep_concurrent_responses_on_their_origin_anchors() {
             .segment("front", ["A", "B", "C", "G"])
             .segment("engine", ["D"])
             .segment("post", ["F", "E"])
-            .route("D", router);
+            .route("D", router.clone());
         let events = Events::new();
         let cluster = deploy_instances(&instances, &placement, &events, RuntimeConfig::default());
         let calls = (0..12u32).map(|i| {

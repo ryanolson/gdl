@@ -565,7 +565,7 @@ impl Draft {
         if !self.routing.is_empty() {
             spec.insert(
                 "routing".into(),
-                toml::Value::try_from(&self.routing).expect("router policies are TOML strings"),
+                toml::Value::try_from(&self.routing).expect("routers are TOML strings and tables"),
             );
         }
         let mut deployment = self.deployment.clone();

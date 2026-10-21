@@ -31,7 +31,7 @@ pub use metrics::{
 };
 pub use placement::{
     CrossingReport, HopLayout, Layout, Placement, PlacementError, PlacementErrors, RequestRouter,
-    Run, WireReason, layout,
+    Run, SELECTORS, SelectorInfo, WireReason, check_selector_name, layout,
 };
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.

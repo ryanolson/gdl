@@ -12,7 +12,7 @@ use serde::Deserialize;
 use super::admission::{Admission, Egress};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
-use super::roster::{Live, Picker, Roster};
+use super::roster::{Live, Picker, Policy, Roster};
 use crate::error::{Error, ErrorKind, Result};
 use crate::meter::Meters;
 use gdl_model::{Layout, RequestRouter};
@@ -336,6 +336,14 @@ impl Runtime {
         config: RuntimeConfig,
         meters: Option<Meters>,
     ) -> Result<Self> {
+        if let Some((hop, at, name)) = sent_selectors(&layout, &segment).next() {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                format!(
+                    "segment `{segment}` routes hop {hop}'s crossing at position {at} through selector `{name}`, which nothing registers"
+                ),
+            ));
+        }
         for peer in roster.peers() {
             if peer.instance_id() != fabric.instance() {
                 fabric.register_peer(peer.clone())?;
@@ -445,12 +453,23 @@ impl Runtime {
         timed: bool,
     ) -> Result<(Accepted, Option<tokio::time::Instant>)> {
         self.released().await?;
-        let router = self
+        let policy = match self
             .layout
-            .request_router(envelope.hop as usize, envelope.pos as usize);
+            .request_router(envelope.hop as usize, envelope.pos as usize)
+        {
+            RequestRouter::RoundRobin => Policy::RoundRobin,
+            RequestRouter::Random => Policy::Random,
+            // Refused when the runtime was made.
+            RequestRouter::Selector(name) => {
+                return Err(Error::new(
+                    ErrorKind::Placement,
+                    format!("internal: no selector `{name}`"),
+                ));
+            }
+        };
         let instance = self
             .routes
-            .pick(segment, Picker::Request, router, &self.random)?;
+            .pick(segment, Picker::Request, policy, &self.random)?;
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
             let entry = Arc::clone(entries.forward(envelope.hop, envelope.pos)?);
@@ -475,12 +494,9 @@ impl Runtime {
     /// Ask an instance of `segment` to open a backward run.
     pub(crate) async fn send_open(&self, segment: &str, open: Open) -> Result<ReplyTo> {
         self.released().await?;
-        let instance = self.routes.pick(
-            segment,
-            Picker::Open,
-            RequestRouter::RoundRobin,
-            &self.random,
-        )?;
+        let instance = self
+            .routes
+            .pick(segment, Picker::Open, Policy::RoundRobin, &self.random)?;
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
             let entry = Arc::clone(entries.open(open.hop, open.pos)?);
@@ -522,6 +538,30 @@ impl Runtime {
         }
         Ok(())
     }
+}
+
+/// The selectors `segment` sends through: each crossing whose first node
+/// is in another segment, whose sending run is in `segment`, and whose
+/// router names a selector, as (hop, position, name).
+fn sent_selectors<'a>(
+    layout: &'a Layout,
+    segment: &'a str,
+) -> impl Iterator<Item = (usize, usize, &'a str)> + 'a {
+    layout
+        .hops()
+        .iter()
+        .enumerate()
+        .flat_map(move |(hop, plan)| {
+            plan.forward_runs.windows(2).filter_map(move |pair| {
+                if pair[0].segment != segment {
+                    return None;
+                }
+                match layout.request_router(hop, pair[1].start) {
+                    RequestRouter::Selector(name) => Some((hop, pair[1].start, name.as_str())),
+                    _ => None,
+                }
+            })
+        })
 }
 
 /// Work an instance has taken on, for tests and diagnostics.

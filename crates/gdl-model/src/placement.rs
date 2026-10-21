@@ -26,7 +26,10 @@ struct SegmentSpec {
 }
 
 /// Selection of a replica when a request crosses into another segment.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// In a placement file a policy is a string (`"round_robin"`, `"random"`)
+/// and a selector a table (`{ selector = "affinity" }`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestRouter {
     /// Cycle through replicas in roster order.
@@ -34,6 +37,56 @@ pub enum RequestRouter {
     RoundRobin,
     /// Select a replica independently for each request hand-off.
     Random,
+    /// The selector of this name, which the sending segment registers or
+    /// gdl provides ([`SELECTORS`]).
+    Selector(String),
+}
+
+/// One of gdl's own selectors: a crossing can name it without anything
+/// registering it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SelectorInfo {
+    /// The name a placement uses.
+    pub name: &'static str,
+    /// What it does, in one sentence.
+    pub summary: &'static str,
+}
+
+/// gdl's own selectors, in name order.
+pub const SELECTORS: &[SelectorInfo] = &[
+    SelectorInfo {
+        name: "affinity",
+        summary: "Send requests with the same key to the same replica, from every sender: the key is a metadata value when one is set, else the request's head.",
+    },
+    SelectorInfo {
+        name: "least_loaded",
+        summary: "Send each request to the replica with the fewest requests this sender has in flight there.",
+    },
+];
+
+/// The longest selector name.
+const SELECTOR_NAME_LIMIT: usize = 64;
+
+/// Whether `name` can name a selector. A name is also the selector's
+/// settings key (`[selector.<name>]`, reachable from the environment, where
+/// case is lost) and its metrics' endpoint label, so it is lowercase ASCII
+/// letters, digits, and `_`, starting with a letter, and it is never a
+/// built-in policy's name.
+pub fn check_selector_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let shaped = chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !shaped || name.len() > SELECTOR_NAME_LIMIT {
+        return Err(format!(
+            "selector name `{name}` must be lowercase letters, digits, and `_`, start with a letter, and be at most {SELECTOR_NAME_LIMIT} characters"
+        ));
+    }
+    if matches!(name, "round_robin" | "random") {
+        return Err(format!(
+            "selector name `{name}` is a built-in policy's: write `\"{name}\"`"
+        ));
+    }
+    Ok(())
 }
 
 impl Placement {
@@ -76,6 +129,12 @@ impl Placement {
         placement
             .routing
             .retain(|_, router| *router != RequestRouter::default());
+        for (node, router) in &placement.routing {
+            if let RequestRouter::Selector(name) = router {
+                check_selector_name(name)
+                    .map_err(|why| Error::new(format!("[routing] {node}: {why}")))?;
+            }
+        }
         Ok(placement)
     }
 
@@ -97,10 +156,13 @@ impl Placement {
         }
         for (node, router) in &self.routing {
             h.str(node);
-            h.str(match router {
-                RequestRouter::RoundRobin => "round_robin",
-                RequestRouter::Random => "random",
-            });
+            match router {
+                RequestRouter::RoundRobin => h.str("round_robin"),
+                RequestRouter::Random => h.str("random"),
+                // No selector name has a `:`, so no selector hashes as a
+                // policy, and the policies keep the hash they had before.
+                RequestRouter::Selector(name) => h.str(&format!("selector:{name}")),
+            }
         }
         h.finish()
     }
@@ -252,12 +314,10 @@ impl Layout {
         &self.hops
     }
 
-    /// Request selector for the hand-off at a hop's forward position.
-    pub fn request_router(&self, hop: usize, position: usize) -> RequestRouter {
-        self.routing
-            .get(&(hop, position))
-            .copied()
-            .unwrap_or_default()
+    /// Request router for the hand-off at a hop's forward position.
+    pub fn request_router(&self, hop: usize, position: usize) -> &RequestRouter {
+        static DEFAULT: RequestRouter = RequestRouter::RoundRobin;
+        self.routing.get(&(hop, position)).unwrap_or(&DEFAULT)
     }
 
     /// Crossings and anchors for one request through each root.
@@ -317,6 +377,13 @@ impl fmt::Display for CrossingReport {
 pub enum PlacementError {
     /// A router targets a node that does not start a remote request run.
     InvalidRouter(String),
+    /// A router names a selector by a name no selector can have.
+    InvalidSelector {
+        /// The node whose boundary it routes.
+        node: String,
+        /// Why the name is refused.
+        reason: String,
+    },
     /// The manifest itself is inconsistent.
     InvalidManifest(String),
     /// A segment lists a node the graph does not have.
@@ -372,6 +439,9 @@ impl fmt::Display for PlacementError {
         match self {
             Self::InvalidRouter(node) => {
                 write!(f, "request router `{node}` must target a request boundary")
+            }
+            Self::InvalidSelector { node, reason } => {
+                write!(f, "request router `{node}`: {reason}")
             }
             Self::InvalidManifest(why) => write!(f, "invalid manifest: {why}"),
             Self::UnknownNode { segment, node } => {
@@ -479,11 +549,20 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     }
     let mut routing = BTreeMap::new();
     for (node, router) in &placement.routing {
+        if let RequestRouter::Selector(name) = router
+            && let Err(reason) = check_selector_name(name)
+        {
+            errors.push(PlacementError::InvalidSelector {
+                node: node.clone(),
+                reason,
+            });
+            continue;
+        }
         let mut found = false;
         for (index, hop) in hops.iter().enumerate() {
             for run in hop.forward_runs.iter().skip(1) {
                 if run.stages.first() == Some(node) {
-                    routing.insert((index, run.start), *router);
+                    routing.insert((index, run.start), router.clone());
                     found = true;
                 }
             }

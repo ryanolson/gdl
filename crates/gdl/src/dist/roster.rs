@@ -14,7 +14,6 @@ use tokio::sync::Notify;
 use velo::{InstanceId, PeerInfo};
 
 use crate::error::{Error, ErrorKind, Result};
-use gdl_model::RequestRouter;
 
 /// The instances of every segment, as velo peers, and whether this
 /// instance may route to them yet.
@@ -198,7 +197,7 @@ impl Live {
         &self,
         segment: &str,
         picker: Picker,
-        router: RequestRouter,
+        policy: Policy,
         random: &RandomState,
     ) -> Result<InstanceId> {
         let table = self.table.load();
@@ -219,14 +218,19 @@ impl Live {
             Picker::Open => &route.next.open,
         };
         let sequence = next.fetch_add(1, Ordering::Relaxed);
-        let index = match router {
-            RequestRouter::RoundRobin => sequence % route.eligible.len(),
-            RequestRouter::Random => {
-                (random.hash_one(sequence) % route.eligible.len() as u64) as usize
-            }
+        let index = match policy {
+            Policy::RoundRobin => sequence % route.eligible.len(),
+            Policy::Random => (random.hash_one(sequence) % route.eligible.len() as u64) as usize,
         };
         Ok(route.eligible[index])
     }
+}
+
+/// A built-in routing policy: what `pick` does with its turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Policy {
+    RoundRobin,
+    Random,
 }
 
 /// Which of the two pickers a call uses: hand-offs and backward-run
@@ -420,13 +424,8 @@ mod tests {
         let random = RandomState::new();
         (0..n)
             .map(|_| {
-                live.pick(
-                    "worker",
-                    Picker::Request,
-                    RequestRouter::RoundRobin,
-                    &random,
-                )
-                .expect("an instance")
+                live.pick("worker", Picker::Request, Policy::RoundRobin, &random)
+                    .expect("an instance")
             })
             .collect()
     }
@@ -438,23 +437,18 @@ mod tests {
         let random = RandomState::new();
         for index in 0..9 {
             let picked = live
-                .pick(
-                    "worker",
-                    Picker::Request,
-                    RequestRouter::RoundRobin,
-                    &random,
-                )
+                .pick("worker", Picker::Request, Policy::RoundRobin, &random)
                 .expect("replica");
             assert_eq!(picked, ids[index % 3]);
         }
         for index in 9usize..41 {
             let expected = ids[(random.hash_one(index) % 3) as usize];
             let picked = live
-                .pick("worker", Picker::Request, RequestRouter::Random, &random)
+                .pick("worker", Picker::Request, Policy::Random, &random)
                 .expect("replica");
             assert_eq!(picked, expected);
         }
-        let missing = live.pick("missing", Picker::Request, RequestRouter::Random, &random);
+        let missing = live.pick("missing", Picker::Request, Policy::Random, &random);
         assert!(missing.is_err());
     }
 
@@ -464,7 +458,7 @@ mod tests {
         let live = live(&ids);
         let random = RandomState::new();
         let open = |live: &Live| {
-            live.pick("worker", Picker::Open, RequestRouter::RoundRobin, &random)
+            live.pick("worker", Picker::Open, Policy::RoundRobin, &random)
                 .expect("replica")
         };
         assert_eq!(picks(&live, 3), [ids[0], ids[1], ids[0]]);
@@ -513,13 +507,8 @@ mod tests {
         live.leave("worker", joiner);
         let random = RandomState::new();
         assert!(
-            live.pick(
-                "worker",
-                Picker::Request,
-                RequestRouter::RoundRobin,
-                &random
-            )
-            .is_err(),
+            live.pick("worker", Picker::Request, Policy::RoundRobin, &random)
+                .is_err(),
             "a promise was broken: every instance left is acknowledged"
         );
     }
@@ -561,13 +550,8 @@ mod tests {
         live.leave("worker", ids[0]);
         let random = RandomState::new();
         assert!(
-            live.pick(
-                "worker",
-                Picker::Request,
-                RequestRouter::RoundRobin,
-                &random
-            )
-            .is_err()
+            live.pick("worker", Picker::Request, Policy::RoundRobin, &random)
+                .is_err()
         );
     }
 
@@ -589,12 +573,7 @@ mod tests {
         live.leave("worker", ids[0]);
         let random = RandomState::new();
         let error = live
-            .pick(
-                "worker",
-                Picker::Request,
-                RequestRouter::RoundRobin,
-                &random,
-            )
+            .pick("worker", Picker::Request, Policy::RoundRobin, &random)
             .expect_err("no instance left");
         assert!(
             error.to_string().contains("no instance to route to"),
