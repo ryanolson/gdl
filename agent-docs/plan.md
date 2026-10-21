@@ -1228,3 +1228,14 @@ Out of scope: dynamo's KV router and its event plane, the generator's binding of
 - **A request cancelled inside its selector** is not handed on: the hand-off's enclosing select is biased to the request's end, and drops the hand-off at its next await. A test holds this; no check was added (review S1).
 - **Measured** in `agent-docs/perf/m23-selectors.md`: `round_robin` and `random` within the spread of their base runs (one segment +0.4%, two −0.7% and −0.6%, three −0.2% in instructions), the call future 16 bytes larger, criterion rows and the per-item row within their spread. `least_loaded` adds about 2.5k instructions per request, and `affinity` is within the spread.
 
+### 2026-10-21 addendum: applying a deployment from the composer
+
+The owner asked that the composer find out whether its host has Docker Compose or a kubeconfig, and, with Compose, build and apply the bundle; what to do with `kubectl` is planned later.
+
+| # | Decision | Ruling | Owner |
+|---|---|---|---|
+| 166 | Detection | always on, and read-only: `docker compose version --short` and `docker info` (Compose is available only when the daemon answers too), and `kubectl config current-context` with the kubeconfig kubectl would read (the first existing file of `KUBECONFIG`, else `~/.kube/config`). Each probe is bounded (5 s), since a wedged daemon makes `docker info` wait without end. Asked on each visit to Deploy (`GET /api/targets`), not at startup | owner, 2026-10-21 |
+| 167 | Applying is opt-in | `gdl-web --docker`, as local imports take `--local-root`: applying builds images from the graph's crates and publishes ports on the host, and a server listening beyond loopback would otherwise offer that to anyone who reaches it. Without the flag, apply answers 403 and the page says how to enable it | owner, 2026-10-21 |
+| 168 | What is applied | the server generates the bundle again from the draft of the previewed snapshot, as `/api/deploy` does; it never takes files or an archive back from the page. It is placed in `<target>/deployments/gdl-<graph>`, written beside it first and moved in, so a failed generation keeps the last one; a directory there that the server did not place (no `.gdl-deployment` marker) is never removed. The files stay, for `logs` and `down` | proposed, 2026-10-21 |
+| 169 | How it runs | `docker compose -p gdl-<graph> --project-directory <dir> -f <dir>/compose.yaml up --build --detach`: one graph is one project, so applying again updates it. Not `--wait`: the segments' start period is 30 minutes. One apply per server at a time (409 otherwise). The answer streams as JSON lines (where, each output line, how it ended); the command runs to its end even if the page leaves | proposed, 2026-10-21 |
+| 170 | Kubernetes | detected and reported only (the Kubernetes button's tooltip); no manifests and no apply until a design for it is ruled. See `agent-docs/dynamo.md` for the `DynamoGraphDeployment` question | owner, 2026-10-21 |

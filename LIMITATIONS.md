@@ -217,5 +217,12 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### Only Docker Compose is generated
 
-- **What happens:** `cargo gdl compose` writes a Compose bundle. Kubernetes manifests are not generated.
+- **What happens:** `cargo gdl compose` writes a Compose bundle. Kubernetes manifests are not generated. The composer's Deploy tab reports whether the server's host has `kubectl`, a kubeconfig, and a current context, but offers nothing to apply there.
 - **Note:** a dynamo `DynamoGraphDeployment` is discussed in `agent-docs/dynamo.md`, but not decided.
+
+### The composer applies only on its own host, one deployment at a time
+
+- **What happens:** **Build and apply** runs `docker compose up --build --detach` on the host that runs `gdl-web`, with that host's Docker, and only when the server was started with `--docker`. A second apply while one runs is refused. The page shows the output of the build and the start, not the segments' health: the command returns once the containers are started, and the segments may still be loading.
+- **Why:** an apply builds images and publishes ports, so it is opt-in, as local imports are. A wait for health holds the request for the start period of the segments (30 minutes, to cover the time to load models).
+- **Workaround:** for another Docker host, download the bundle and run it there. Follow a started project with `docker compose -p gdl-<graph> logs -f`, and stop it with `docker compose -p gdl-<graph> down`.
+- **See:** plan 13, the 2026-10-21 addendum.

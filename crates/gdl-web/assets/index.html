@@ -42,15 +42,20 @@
   </section>
   <section id="deploy-panel" role="tabpanel" aria-labelledby="deploy-tab" hidden>
     <h2>Deploy your graph</h2><p class="muted">One process per segment. The hub checks graph contracts and supplies discovery.</p>
-    <div class="deploy-targets"><button aria-pressed="true">Docker Compose</button><button disabled title="Not available yet">Kubernetes</button><button disabled title="Not available yet">srt-slurm</button></div>
+    <div class="deploy-targets"><button aria-pressed="true">Docker Compose</button><button id="deploy-kubernetes" disabled title="Not available yet">Kubernetes</button><button disabled title="Not available yet">srt-slurm</button></div>
     <div class="deploy-defaults"><label>Default runtime image<input id="deploy-base" value="debian:bookworm-slim" spellcheck="false"></label><label>Rust build image<input id="deploy-build" value="rust:1.93-slim-bookworm" spellcheck="false"></label><label>Hub runtime image<input id="deploy-hub" placeholder="Use default runtime image" spellcheck="false"></label></div>
     <div id="deploy-segments"></div>
     <h3>Generated files</h3>
     <p class="muted">Change the settings above to regenerate. The download contains exactly this preview. Only Git and crates.io packages can be deployed.</p>
     <div class="deploy-preview"><nav id="deploy-files" aria-label="Generated deployment files"></nav><div class="deploy-file"><h4 id="deploy-filename">Generated files</h4><pre><code id="deploy-code"></code></pre></div></div>
+    <h3>Run on this host</h3>
+    <p id="host-status" class="muted" role="status">Checking this host for Docker Compose and Kubernetes…</p>
+    <button id="apply-deployment" class="primary" disabled>Build and apply</button>
+    <pre id="apply-log" aria-label="Apply output" hidden></pre>
+    <h3>Run elsewhere</h3>
     <p class="muted">Single replica per segment. Copy the bundle to your Docker host, extract it, then run:</p><pre>cd deployment
 docker compose up --build</pre>
-    <button id="download-deployment" class="primary" disabled>Download Compose bundle</button><p id="deploy-status" role="status"></p>
+    <button id="download-deployment" disabled>Download Compose bundle</button><p id="deploy-status" role="status"></p>
   </section>
   <details class="validation"><summary>Validation &amp; generated files <span id="validation-status"></span></summary><div id="result" aria-live="polite"></div></details>
 </main>

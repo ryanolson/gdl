@@ -2057,7 +2057,7 @@ $('deploy-tab').onclick=async()=>{
   state.mode='segments';
   await validateGraph();
   if(!state.validated) return;
-  deployOpen=true;renderDeploy();updateMode();scheduleDeployment();
+  deployOpen=true;renderDeploy();updateMode();scheduleDeployment();loadTargets();
 };
 for(const [id,key] of [['deploy-base','base_image'],['deploy-build','build_image'],['deploy-hub','hub_image']]) {
   $(id).oninput=()=>{const value=$(id).value.trim();if(value || key!=='hub_image') deploymentSettings[key]=value;else delete deploymentSettings[key];scheduleDeployment();};
@@ -2068,6 +2068,7 @@ function scheduleDeployment() {
   deploymentRevision++;
   deploymentSnapshot=null;
   $('download-deployment').disabled=true;
+  updateApply();
   $('deploy-files').replaceChildren();
   $('deploy-code').textContent='';
   $('deploy-filename').textContent='Generated files';
@@ -2079,6 +2080,7 @@ async function generateDeployment() {
   const revision=++deploymentRevision;
   deploymentSnapshot=null;
   $('download-deployment').disabled=true;
+  updateApply();
   $('deploy-status').textContent='Generating files from Git and registry dependencies…';
   try {
     const payload=draft();
@@ -2087,9 +2089,10 @@ async function generateDeployment() {
     const result=await response.json();
     if(revision!==deploymentRevision) return;
     if(!response.ok) throw new Error((result.problems || [JSON.stringify(result)]).join(' · '));
-    deploymentSnapshot={...result,name:payload.name};
+    deploymentSnapshot={...result,name:payload.name,payload};
     renderDeploymentPreview();
     $('download-deployment').disabled=false;
+    updateApply();
     $('deploy-status').textContent='Preview ready. Download includes these exact files. Cargo fetches dependencies during the image build.';
   } catch(error) {
     if(revision!==deploymentRevision) return;
@@ -2119,6 +2122,70 @@ $('download-deployment').onclick=()=>{
   link.download=`${deploymentSnapshot.name}-compose.tar.gz`;
   link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);
   $('deploy-status').textContent='Reviewed bundle downloaded. Build and run it on your Docker host.';
+};
+
+// What this host offers, asked on each visit to Deploy: Docker may have
+// started or stopped since the last one.
+let hostTargets=null, applying=false;
+async function loadTargets() {
+  try {
+    const response=await fetch('/api/targets');
+    hostTargets=response.ok?await response.json():null;
+  } catch(error) { hostTargets=null; }
+  renderTargets();
+}
+function renderTargets() {
+  const compose=hostTargets?.compose, kube=hostTargets?.kubernetes;
+  $('host-status').textContent=!hostTargets?'Could not ask the server what this host offers.'
+    :!compose.available?`Docker Compose is not available here: ${compose.problem}. Download the bundle instead.`
+    :compose.apply?`Docker Compose ${compose.version} with daemon ${compose.daemon}. Build and apply starts this preview on the server's host.`
+    :`Docker Compose ${compose.version} is available here. Start gdl-web with --docker to build and apply from this page.`;
+  $('deploy-kubernetes').title=!kube?'Not available yet'
+    :`Not available yet. Found: ${kube.kubectl?'kubectl':'no kubectl'}, ${kube.kubeconfig?`kubeconfig ${kube.kubeconfig}`:'no kubeconfig'}${kube.context?`, context ${kube.context}`:''}.`;
+  updateApply();
+}
+// Apply sends the draft of the previewed snapshot, so what starts is what
+// was reviewed; the server generates it again rather than take files back.
+function updateApply() {
+  $('apply-deployment').disabled=applying || !deploymentSnapshot || !hostTargets?.compose?.apply;
+}
+function applyEvent(event) {
+  if(event.project) {
+    applied=event;
+    $('deploy-status').textContent=`Building and starting project ${event.project} from ${event.directory}…`;
+  } else if('line' in event) {
+    $('apply-log').textContent+=`${event.line}\n`;
+    $('apply-log').scrollTop=$('apply-log').scrollHeight;
+  } else if(event.done) {
+    const project=applied?.project;
+    $('deploy-status').textContent=event.ok
+      ?`Started project ${project}. Logs: docker compose -p ${project} logs -f · Stop: docker compose -p ${project} down`
+      :`Apply failed${event.problem?`: ${event.problem}`:` with exit code ${event.code}`}. See the output above.`;
+  }
+}
+let applied=null;
+$('apply-deployment').onclick=async()=>{
+  if(!deploymentSnapshot || applying) return;
+  applying=true;applied=null;updateApply();
+  $('apply-log').hidden=false;$('apply-log').textContent='';
+  $('deploy-status').textContent='Generating the bundle on the server…';
+  try {
+    const response=await fetch('/api/deploy/apply',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(deploymentSnapshot.payload)});
+    if(!response.ok) {
+      const result=await response.json();
+      throw new Error((result.problems || ['Apply failed']).join(' · '));
+    }
+    const reader=response.body.getReader(), decoder=new TextDecoder();
+    let pending='';
+    for(;;) {
+      const {value,done}=await reader.read();
+      pending+=decoder.decode(value,{stream:!done});
+      const lines=pending.split('\n');pending=lines.pop();
+      for(const line of lines) if(line.trim()) applyEvent(JSON.parse(line));
+      if(done) break;
+    }
+  } catch(error) { $('deploy-status').textContent=error.message; }
+  finally { applying=false;updateApply(); }
 };
 
 $('load-examples').onclick=async()=>{

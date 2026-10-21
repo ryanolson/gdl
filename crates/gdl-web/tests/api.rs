@@ -42,6 +42,7 @@ fn router(dir: &Path, catalog: PathBuf) -> axum::Router {
         local_root: None,
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
         target: dir.join("target"),
         gdl: gdl_web::Gdl::Path(crates().join("gdl")),
     })
@@ -528,6 +529,7 @@ async fn a_check_refuses_an_image_name_the_export_would() {
         local_root: None,
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
         target: dir.join("target"),
         gdl: gdl_web::Gdl::Git {
             url: "https://example.com/gdl".into(),
@@ -760,6 +762,7 @@ fn local_router(dir: &Path, root: &Path) -> axum::Router {
         local_root: Some(root.to_path_buf()),
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
     })
     .expect("local router")
 }
@@ -830,6 +833,7 @@ async fn git_catalog_entries_export_fetchable_dependencies() {
         local_root: None,
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
         gdl: gdl_web::Gdl::Git {
             url: "https://example.com/gdl".into(),
             rev: commit.into(),
@@ -1371,6 +1375,102 @@ async fn deployment_rejects_local_packages_without_local_access() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// The server over the fixture catalogue, deploying with a fake `docker`
+/// in `dir` that answers the probes and records any other call in `calls`.
+/// A child `sh` writes the script: were this process to hold it open for
+/// writing, a test forking on another thread would hold it too, and running
+/// it would fail with "Text file busy".
+fn deploying_router(dir: &Path, apply: bool) -> axum::Router {
+    use std::io::Write as _;
+    let docker = dir.join("docker");
+    let script = format!(
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"compose version\") echo 5.2.0 ;;\n  \"info --format\") echo 29.6.2 ;;\n  *) echo \"$@\" >> {:?} ;;\nesac\n",
+        dir.join("calls").display().to_string()
+    );
+    let mut writer = std::process::Command::new("sh")
+        .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+        .arg(&docker)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("sh");
+    writer
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(script.as_bytes())
+        .expect("script");
+    assert!(writer.wait().expect("sh").success());
+    gdl_web::router(gdl_web::Config {
+        catalog: fixture_catalog(),
+        local_root: None,
+        hosts: Vec::new(),
+        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy {
+            docker,
+            kubectl: dir.join("no-kubectl"),
+            apply,
+        },
+        target: dir.join("target"),
+        gdl: gdl_web::Gdl::Path(crates().join("gdl")),
+    })
+    .expect("router")
+}
+
+#[tokio::test]
+async fn targets_report_compose_and_whether_this_server_applies() {
+    let temp = scratch("targets");
+    for apply in [false, true] {
+        let app = deploying_router(temp.path(), apply);
+        let (status, targets) = json_call(&app, "GET", "/api/targets", None).await;
+        assert_eq!(status, StatusCode::OK, "{targets:#}");
+        assert_eq!(targets["compose"]["version"], "5.2.0");
+        assert_eq!(targets["compose"]["available"], true);
+        assert_eq!(targets["compose"]["apply"], apply);
+        assert_eq!(targets["kubernetes"]["kubectl"], false);
+    }
+}
+
+#[tokio::test]
+async fn apply_needs_the_docker_flag() {
+    let temp = scratch("apply-flag");
+    let app = deploying_router(temp.path(), false);
+    let draft = draft(
+        "regproto::Words",
+        "Engine",
+        json!({"front":["A"],"engine":["Engine"]}),
+    );
+    let (status, body) = json_call(&app, "POST", "/api/deploy/apply", Some(draft)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
+    assert!(
+        body["problems"].to_string().contains("--docker"),
+        "{body:#}"
+    );
+    assert!(!temp.path().join("calls").exists(), "docker was not run");
+}
+
+#[tokio::test]
+async fn apply_refuses_what_deploy_refuses_and_runs_nothing() {
+    let temp = scratch("apply-local");
+    let app = deploying_router(temp.path(), true);
+    let draft = draft(
+        "regproto::Words",
+        "Engine",
+        json!({"front":["A"],"engine":["Engine"]}),
+    );
+    let (deploy, _) = json_call(&app, "POST", "/api/deploy", Some(draft.clone())).await;
+    let (status, body) = json_call(&app, "POST", "/api/deploy/apply", Some(draft.clone())).await;
+    assert_eq!(status, deploy, "{body:#}");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
+    assert!(!temp.path().join("calls").exists(), "docker was not run");
+    assert!(
+        !temp.path().join("target/deployments/gdl-composed").exists(),
+        "nothing was placed"
+    );
+    // A refusal ends the apply: the next one is not told one is running.
+    let (status, _) = json_call(&app, "POST", "/api/deploy/apply", Some(draft)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 #[tokio::test]
 async fn clear_catalog_archives_entries_and_reopens_empty() {
     let temp = scratch("clear-catalog");
@@ -1418,6 +1518,7 @@ async fn examples_use_the_configured_runtime_revision() {
         local_root: None,
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
         gdl: gdl_web::Gdl::Git {
             url: "https://github.com/ryanolson/gdl".into(),
             rev: "test-revision".into(),
@@ -1487,6 +1588,7 @@ async fn a_request_from_another_origin_cannot_change_the_catalogue() {
             local_root: None,
             hosts: vec!["composer.internal".into()],
             extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+            deploy: gdl_web::Deploy::default(),
             target: dir.join("target"),
             gdl: gdl_web::Gdl::Path(crates().join("gdl")),
         })
@@ -1515,6 +1617,7 @@ async fn the_example_follows_the_configured_gdl_revision() {
         local_root: None,
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
         target: dir.join("target"),
         gdl: gdl_web::Gdl::Git {
             url: "https://example.com/gdl".into(),

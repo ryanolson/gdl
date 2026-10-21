@@ -12,7 +12,7 @@ function editor() {
     }},
     window: {addEventListener(name, callback) {this[name] = callback;}},
     fetch: () => new Promise(() => {}),
-    setTimeout, clearTimeout, console,
+    setTimeout, clearTimeout, console, TextDecoder, TextEncoder,
   });
   vm.runInContext(fs.readFileSync(require.resolve('../assets/app.js'), 'utf8'), context);
   return (code) => vm.runInContext(code, context);
@@ -910,6 +910,50 @@ test('deployment preview rejects stale generation and disables download during e
   run('scheduleDeployment(); clearTimeout(deploymentTimer);');
   assert.equal(run('deploymentSnapshot'),null);
   assert.equal(run("$('download-deployment').disabled"),true);
+});
+
+test('apply is offered only for a current preview on a host that applies', () => {
+  const run=editor();
+  run(`deploymentSnapshot={payload:{name:'demo'}};`);
+  run(`hostTargets={compose:{available:true,apply:false,version:'5.2.0'},kubernetes:{kubectl:true,kubeconfig:null,context:null}}; renderTargets();`);
+  assert.equal(run("$('apply-deployment').disabled"),true);
+  assert.match(run("$('host-status').textContent"),/--docker/);
+  assert.match(run("$('deploy-kubernetes').title"),/kubectl, no kubeconfig/);
+  run(`hostTargets.compose.apply=true; renderTargets();`);
+  assert.equal(run("$('apply-deployment').disabled"),false);
+  run('scheduleDeployment(); clearTimeout(deploymentTimer);');
+  assert.equal(run("$('apply-deployment').disabled"),true,'a stale preview cannot be applied');
+  run(`hostTargets={compose:{available:false,apply:false,problem:'\`docker\` was not found'},kubernetes:{kubectl:false}}; deploymentSnapshot={payload:{}}; renderTargets();`);
+  assert.equal(run("$('apply-deployment').disabled"),true);
+  assert.match(run("$('host-status').textContent"),/not available here/);
+});
+
+test('apply posts the previewed draft and streams the output line by line', async () => {
+  const run=editor();
+  run(`deploymentSnapshot={payload:{name:'demo',segments:{s1:['Source']}}};
+    hostTargets={compose:{available:true,apply:true}};
+    const chunks=['{"directory":"/srv/d","project":"gdl-demo"}\\n{"line":"buil','ding"}\\n{"line":"started"}\\n','{"done":true,"ok":true,"code":0}\\n'];
+    let posted=null, during=null;
+    fetch=async(url,options)=>{posted={url,body:JSON.parse(options.body)};return {ok:true,body:{getReader(){
+      return {read:async()=>{during=during??$('apply-deployment').disabled;const next=chunks.shift();return next===undefined?{done:true}:{done:false,value:new TextEncoder().encode(next)};}};
+    }}};};`);
+  await run(`$('apply-deployment').onclick()`);
+  assert.equal(run('posted.url'),'/api/deploy/apply');
+  assert.equal(run('posted.body.name'),'demo');
+  assert.equal(run('during'),true,'apply is disabled while it runs');
+  assert.equal(run("$('apply-log').textContent"),'building\nstarted\n');
+  assert.match(run("$('deploy-status').textContent"),/Started project gdl-demo.*docker compose -p gdl-demo down/);
+  assert.equal(run("$('apply-deployment').disabled"),false);
+});
+
+test('a refused or failed apply says why', async () => {
+  const run=editor();
+  run(`deploymentSnapshot={payload:{}}; hostTargets={compose:{apply:true}};
+    fetch=async()=>({ok:false,json:async()=>({problems:['already being applied']})});`);
+  await run(`$('apply-deployment').onclick()`);
+  assert.equal(run("$('deploy-status').textContent"),'already being applied');
+  run(`applied={project:'gdl-x'}; applyEvent({done:true,ok:false,code:17});`);
+  assert.match(run("$('deploy-status').textContent"),/exit code 17/);
 });
 
 test('load examples imports the advertised Git revision and reports failures', async () => {

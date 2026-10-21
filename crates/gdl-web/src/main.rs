@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! gdl-web --catalog <dir> [--listen <address>] [--host <name>]... [--target-dir <dir>]
-//!         [--local-root <dir>] (--gdl-path <dir> | --gdl-git <url> --gdl-rev <rev>)
+//!         [--local-root <dir>] [--docker] (--gdl-path <dir> | --gdl-git <url> --gdl-rev <rev>)
 //! ```
 //!
 //! It listens on `127.0.0.1:8080` unless told otherwise, prints the
@@ -11,12 +11,14 @@
 //! no other name.
 //! Crates are fetched under `--target-dir`
 //! (`target` here by default). Generated crates take gdl from the path or
-//! git revision given. Local imports require `--local-root <dir>`.
+//! git revision given. Local imports require `--local-root <dir>`. The
+//! Deploy tab reports whether this host has Docker Compose and kubectl;
+//! building and starting a Compose deployment here requires `--docker`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: gdl-web --catalog <dir> [--listen <address>] [--host <name>]... [--target-dir <dir>] [--local-root <dir>] (--gdl-path <dir> | --gdl-git <url> --gdl-rev <rev>)";
+const USAGE: &str = "usage: gdl-web --catalog <dir> [--listen <address>] [--host <name>]... [--target-dir <dir>] [--local-root <dir>] [--docker] (--gdl-path <dir> | --gdl-git <url> --gdl-rev <rev>)";
 
 fn main() -> ExitCode {
     match run() {
@@ -54,12 +56,14 @@ fn run() -> Result<(), String> {
     let (mut catalog, mut listen, mut target) = (None, "127.0.0.1:8080".to_string(), None);
     let mut local_root = None;
     let mut hosts = Vec::new();
+    let mut deploy = gdl_web::Deploy::default();
     let (mut path, mut git, mut rev) = (None, None, None);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| USAGE.to_string());
         match arg.as_str() {
             "--local-root" => local_root = Some(PathBuf::from(value()?)),
             "--host" => hosts.push(value()?),
+            "--docker" => deploy.apply = true,
             "--help" | "-h" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -87,6 +91,7 @@ fn run() -> Result<(), String> {
         local_root,
         hosts,
         extractor: std::env::current_exe().map_err(|e| e.to_string())?,
+        deploy,
     };
     let router = gdl_web::router(config)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;

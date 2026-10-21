@@ -158,6 +158,7 @@ async fn import_a_branch_and_subdirectory_over_http_pins_the_commit() {
         local_root: None,
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
         gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl")),
     })
     .expect("composer");
@@ -230,6 +231,7 @@ async fn served(
         local_root: None,
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
         gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl")),
     })
     .expect("composer");
@@ -509,6 +511,7 @@ async fn a_relative_target_directory_imports() {
         local_root: None,
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
         gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl")),
     })
     .expect("composer");

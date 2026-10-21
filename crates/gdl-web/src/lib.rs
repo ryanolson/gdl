@@ -6,6 +6,9 @@
 //!      --POST /api/catalog {source,...}-> fetch and read a package, then add it
 //!      --POST /api/check {draft}--------> graph file + spec, checked: problems, or crossings and diagram
 //!      --POST /api/export {draft}-------> the generated crates as a .tar.gz
+//!      --POST /api/deploy {draft}-------> the Compose bundle, previewed and archived
+//!      --GET /api/targets---------------> what this host can deploy to (see `host`)
+//!      --POST /api/deploy/apply {draft}-> the bundle built and started on this host
 //! ```
 //!
 //! The page offers only ports of one message to join, but decides nothing:
@@ -13,6 +16,7 @@
 //! Nothing is compiled, so a crate that needs CUDA composes like any other.
 
 mod draft;
+mod host;
 mod imports;
 
 use std::path::PathBuf;
@@ -23,10 +27,12 @@ use axum::extract::{Json, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
+use futures::StreamExt as _;
 use gdl_extract::Catalog;
 use serde_json::json;
 
 pub use draft::{Draft, Gdl, Rendered};
+pub use host::Deploy;
 
 /// What the server serves from.
 pub struct Config {
@@ -48,12 +54,15 @@ pub struct Config {
     /// named means parsing whatever it holds, and a parser's stack or
     /// memory giving out must end that child, not the server.
     pub extractor: PathBuf,
+    /// What the Deploy tab detects on this host, and whether it may apply.
+    pub deploy: Deploy,
 }
 
 struct Composer {
     config: Config,
     catalog: RwLock<Catalog>,
     http: reqwest::Client,
+    applying: host::Applying,
 }
 
 /// The server's routes, over the catalogue `config` names, loaded now.
@@ -80,6 +89,7 @@ pub fn router(mut config: Config) -> Result<Router, String> {
         config,
         http,
         catalog: RwLock::new(catalog),
+        applying: host::Applying::default(),
     });
     Ok(Router::new()
         .route(
@@ -112,6 +122,8 @@ pub fn router(mut config: Config) -> Result<Router, String> {
         .route("/api/check", axum::routing::post(check))
         .route("/api/export", axum::routing::post(export))
         .route("/api/deploy", axum::routing::post(deploy))
+        .route("/api/deploy/apply", axum::routing::post(apply))
+        .route("/api/targets", get(targets))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&composer),
             same_origin,
@@ -330,6 +342,65 @@ async fn deploy(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
         Ok(Err(errors)) => problems(StatusCode::UNPROCESSABLE_ENTITY, errors),
         Err(error) => problems(StatusCode::INTERNAL_SERVER_ERROR, vec![error.to_string()]),
     }
+}
+
+async fn targets(State(composer): Shared) -> Response {
+    Json(host::targets(&composer.config.deploy).await).into_response()
+}
+
+/// Generate the draft's Compose bundle as `/api/deploy` does, place it in
+/// `<target>/deployments/<project>`, and build and start it there. The
+/// answer is one JSON object per line: where it was placed, then the
+/// command's output as it comes, then how it ended. The bundle is
+/// generated here from the draft, never taken from the page.
+async fn apply(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
+    if !composer.config.deploy.apply {
+        return problems(
+            StatusCode::FORBIDDEN,
+            vec!["this server does not apply deployments; start it with --docker, or download the bundle".into()],
+        );
+    }
+    let Some(running) = composer.applying.start() else {
+        return problems(
+            StatusCode::CONFLICT,
+            vec![
+                "a deployment is already being applied on this host; wait for it to finish".into(),
+            ],
+        );
+    };
+    let project = host::project(&draft.name);
+    let placed = tokio::task::spawn_blocking({
+        let composer = Arc::clone(&composer);
+        let project = project.clone();
+        move || {
+            let (_, spec) = prepare(&composer, &draft).map_err(|(_, problems)| problems)?;
+            let target = &composer.config.target;
+            host::place(&target.join("deployments"), &project, |dir| {
+                gdl_gen::compose(&spec, dir, target).map_err(|e| e.to_string())
+            })
+            .map_err(|error| error.lines().map(str::to_string).collect::<Vec<_>>())
+        }
+    })
+    .await;
+    let dir = match placed {
+        Ok(Ok(dir)) => dir,
+        Ok(Err(found)) => return problems(StatusCode::UNPROCESSABLE_ENTITY, found),
+        Err(error) => {
+            return problems(StatusCode::INTERNAL_SERVER_ERROR, vec![error.to_string()]);
+        }
+    };
+    let head = json!({"directory": dir, "project": project});
+    let events = host::compose_up(&composer.config.deploy.docker, &dir, &project, running);
+    let lines = futures::stream::once(async move { head })
+        .chain(futures::stream::unfold(events, |mut events| async move {
+            events.recv().await.map(|event| (event, events))
+        }))
+        .map(|event| Ok::<_, std::convert::Infallible>(format!("{event}\n")));
+    (
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        axum::body::Body::from_stream(lines),
+    )
+        .into_response()
 }
 
 /// The draft rendered, and its spec read from the text: nothing is

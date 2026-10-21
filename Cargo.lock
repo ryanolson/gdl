@@ -806,6 +806,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "flate2",
+ "futures",
  "gdl-extract",
  "gdl-gen",
  "gdl-model",
