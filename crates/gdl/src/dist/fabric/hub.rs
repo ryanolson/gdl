@@ -147,6 +147,13 @@ impl HubSession {
         let mut last = String::new();
         loop {
             self.lost()?;
+            // Who to judge is fixed before the hub is asked: an instance the
+            // follower adds meanwhile is missing from the answer, and must
+            // not be taken for one that left.
+            let candidates: Vec<(&str, Vec<InstanceId>)> = inner
+                .iter()
+                .map(|segment| (*segment, live.members(segment)))
+                .collect();
             match tokio::time::timeout_at(deadline, self.serving_members(inner)).await {
                 // A poll cut short by the deadline says nothing an earlier
                 // answer did not; the shortfall it reported stands.
@@ -157,9 +164,10 @@ impl HubSession {
                 }
                 Ok(Ok((members, serving))) => {
                     let mut missing = Vec::new();
-                    for segment in inner {
+                    for (segment, ids) in &candidates {
+                        let segment = *segment;
                         let mut gone = Vec::new();
-                        for id in live.members(segment) {
+                        for id in ids.iter().copied() {
                             if !members.contains(&id) {
                                 live.leave(segment, id);
                                 gone.push(format!("{segment}/{id}"));
@@ -275,6 +283,7 @@ impl HubSession {
             acknowledged: HashMap::new(),
             unsent: Vec::new(),
             forget: Vec::new(),
+            unresolved: Vec::new(),
         };
         if let Some(earlier) = self.follower.replace(tokio::spawn(follower.run())) {
             earlier.abort();
@@ -300,6 +309,8 @@ impl HubSession {
         deadline: tokio::time::Instant,
     ) -> Result<HubServiceRegistration> {
         loop {
+            // A lost lease took the registration this would belong to.
+            self.lost()?;
             let attempt = (tokio::time::Instant::now() + POLL * 10).min(deadline);
             match self.announce(phase, attempt).await {
                 Ok(registration) => return Ok(registration),
@@ -482,6 +493,10 @@ struct Follower {
     unsent: Vec<InstanceId>,
     /// Instances that left, to unregister from velo once their time comes.
     forget: Vec<(tokio::time::Instant, InstanceId)>,
+    /// Ready instances not added yet, by segment, because the hub did not
+    /// say who they are: retried each tick, so that one failed question
+    /// does not leave a joiner out for good.
+    unresolved: Vec<(String, InstanceId)>,
 }
 
 /// Which service a watch follows.
@@ -563,7 +578,12 @@ impl Follower {
                     .boxed(),
             );
         }
-        if let Ok(members) = members(&self.client, &self.registration).await {
+        // Without the members, an instance that left while nothing watched
+        // would stay routable: start again rather than go on without them.
+        let Ok(members) = members(&self.client, &self.registration).await else {
+            return None;
+        };
+        {
             let present: HashSet<InstanceId> =
                 members.iter().map(|m| m.peer.instance_id()).collect();
             let gone: Vec<(String, InstanceId)> = self
@@ -599,27 +619,12 @@ impl Follower {
                 }
             }
             Watched::Ready => {
-                let new: Vec<InstanceId> = added
-                    .into_iter()
-                    .filter(|id| *id != self.me && !self.live.routes_to(*id))
-                    .collect();
-                if new.is_empty() {
-                    return;
-                }
-                let Ok(members) = members(&self.client, &self.registration).await else {
-                    return;
-                };
-                for member in members {
-                    let id = member.peer.instance_id();
-                    if !new.contains(&id) || member.registration.segment != segment {
-                        continue;
-                    }
-                    // Registered before it is routable: a call addressed
-                    // by instance finds no peer it was not told of.
-                    if super::register_peer(&self.node, member.peer).is_ok() {
-                        self.live.join(segment, id);
+                for id in added.into_iter().filter(|id| *id != self.me) {
+                    if !self.unresolved.iter().any(|(_, known)| *known == id) {
+                        self.unresolved.push((segment.to_string(), id));
                     }
                 }
+                self.resolve().await;
             }
             Watched::Serving => {
                 let me = self.me;
@@ -630,8 +635,37 @@ impl Follower {
         }
     }
 
+    /// Add the ready instances not added yet, as the hub names them. One
+    /// that is no longer a member has left, and is dropped; one the hub
+    /// could not be asked about stays for the next tick.
+    async fn resolve(&mut self) {
+        let live = &self.live;
+        self.unresolved.retain(|(_, id)| !live.routes_to(*id));
+        if self.unresolved.is_empty() {
+            return;
+        }
+        let Ok(members) = members(&self.client, &self.registration).await else {
+            return;
+        };
+        for (segment, id) in std::mem::take(&mut self.unresolved) {
+            let Some(member) = members.iter().find(|m| m.peer.instance_id() == id) else {
+                continue;
+            };
+            if member.registration.segment != segment {
+                continue;
+            }
+            // Registered before it is routable: a call addressed by
+            // instance finds no peer it was not told of.
+            match super::register_peer(&self.node, member.peer.clone()) {
+                Ok(()) => self.live.join(&segment, id),
+                Err(_) => self.unresolved.push((segment, id)),
+            }
+        }
+    }
+
     fn left(&mut self, segment: &str, id: InstanceId) {
         self.live.leave(segment, id);
+        self.unresolved.retain(|(_, unresolved)| *unresolved != id);
         // Dropping the promise ends it at the hub, in the background.
         self.acknowledged.remove(&id);
         self.unsent.retain(|unsent| *unsent != id);
@@ -670,6 +704,9 @@ impl Follower {
             super::unregister_peer(node, *id);
             false
         });
+        if !self.unresolved.is_empty() {
+            self.resolve().await;
+        }
         if !self.unsent.is_empty() {
             self.acknowledge().await;
         }
@@ -812,6 +849,79 @@ async fn container_address(port: u16) -> Result<std::net::SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::{Phase, service};
+
+    /// A node bound under a hub streams to an anchor minted by a peer it was
+    /// never told of, as an engine does to a joiner's anchor before its
+    /// follower has seen the joiner: velo asks the hub who the peer is. A
+    /// node bound without the hub cannot, which shows what the hub adds;
+    /// that absence takes a bounded wait of two seconds to show.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_node_under_a_hub_reaches_a_peer_it_was_never_told_of() {
+        use super::super::{Fabric, Frame, bind_node, bind_under_hub};
+        use crate::dist::envelope::WireItem;
+        use futures::StreamExt;
+        use std::time::Duration;
+
+        let mut config = velo_hub::HubConfig::default();
+        config.server.public_port = 0;
+        config.server.control_port = 0;
+        let hub = velo_hub::Hub::builder(config)
+            .serve()
+            .await
+            .expect("valid test fixture");
+        let (public, control) = (hub.public_addr().port(), hub.control_addr().port());
+        let local = "127.0.0.1:0".parse().expect("valid test fixture");
+        let owner = bind_node(local).await.expect("node");
+        let client = velo_hub::client::HubClient::builder()
+            .host("127.0.0.1")
+            .public_port(public)
+            .control_port(control)
+            .build()
+            .expect("valid test fixture");
+        client
+            .register(&owner, Default::default())
+            .await
+            .expect("the owner registers");
+        let fabric = |node| Fabric::new(node, None, None, Duration::from_secs(30));
+        let owner = fabric(owner);
+        let bound = |under_hub: bool| async move {
+            match under_hub {
+                true => bind_under_hub(local, "127.0.0.1", public, control).await,
+                false => bind_node(local).await,
+            }
+            .expect("node")
+        };
+
+        // A ticket opens without asking the owner; the stream's batches are
+        // what go to its worker, so delivery is the witness.
+        let delivered = |attacher: Fabric| {
+            let (mut inbound, reply) = owner.mint();
+            async move {
+                let sent = async {
+                    let out = attacher.attach(&reply).await.ok()?;
+                    out.send(WireItem::Item(vec![7])).await.ok()?;
+                    out.finish().await;
+                    Some(())
+                };
+                let wait = Duration::from_secs(2);
+                let _ = tokio::time::timeout(wait, sent).await;
+                matches!(
+                    tokio::time::timeout(wait, inbound.next()).await,
+                    Ok(Some(Frame::Item(item))) if item == [7]
+                )
+            }
+        };
+        assert!(
+            !delivered(fabric(bound(false).await)).await,
+            "a node that knows no hub reached a peer it was never told of"
+        );
+        assert!(
+            delivered(fabric(bound(true).await)).await,
+            "a node under the hub did not reach a peer it was never told of"
+        );
+        drop(client);
+        hub.shutdown().await.expect("valid test fixture");
+    }
 
     /// The segment name limit is set by the hub's service names: the
     /// longest name allowed fits, and one byte more does not.

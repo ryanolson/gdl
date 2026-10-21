@@ -800,8 +800,10 @@ async fn a_joining_source_serves() {
 }
 
 /// A backward segment that joins is opened by the front once it is ready,
-/// and the engine attaches to the anchors it mints, though the engine may
-/// not have heard of it yet: velo finds it through the hub.
+/// and the engine streams to the anchors it mints. The engine may or may
+/// not have heard of the joiner by then; the case where it has not, which
+/// velo resolves through the hub, is proved on its own in
+/// `fabric/hub.rs`'s unit tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_joining_backward_segment_is_opened_and_attached_to() {
     let placement = Placement::new()

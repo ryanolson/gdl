@@ -320,6 +320,63 @@ async fn a_lost_lease_is_reported() {
     );
 }
 
+/// A stop just after the hub went away: the retirement cannot be
+/// announced, and the lease is lost meanwhile. The instance stops trying
+/// once the lease is lost and drains what it holds (nothing), rather than
+/// retrying the announcement until its 20 s bound.
+#[tokio::test]
+async fn a_lease_lost_while_announcing_a_retirement_ends_the_wait() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let config = hub_settings(&hub, 20_000);
+    let front_process = gdl::Process::start(&config).await.expect("process");
+    let sink_process = gdl::Process::start(&config).await.expect("process");
+    let deployment = spec();
+    let (front, sink) = tokio::join!(
+        config.launch(
+            &front_process,
+            "front",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+        config.launch(
+            &sink_process,
+            "sink",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+    );
+    let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
+    let (running, runs) = tokio::sync::oneshot::channel();
+    let _front = tokio::spawn(front.serve(common::Idle, |_, shutdown| async move {
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    let sink_served = tokio::spawn(sink.serve(common::Idle, |_, shutdown| async move {
+        let _ = running.send(());
+        shutdown.cancelled().await;
+        Ok(())
+    }));
+    tokio::time::timeout(WAIT, runs)
+        .await
+        .expect("serving in time")
+        .expect("the body ran");
+    hub.shutdown().await.expect("valid test fixture");
+    let stopped = tokio::time::Instant::now();
+    sink_process.stop();
+    let _ = tokio::time::timeout(Duration::from_secs(30), sink_served)
+        .await
+        .expect("the sink left");
+    // The lease's grace (1 s), a second for velo, and up to five for
+    // leaving the hub.
+    assert!(
+        stopped.elapsed() < Duration::from_secs(10),
+        "a lost lease held the retirement for {:?}",
+        stopped.elapsed()
+    );
+}
+
 /// A serving segment whose hub is gone drains and stops with the lease's
 /// error: its body sees its context cancelled and is left to finish.
 #[tokio::test]

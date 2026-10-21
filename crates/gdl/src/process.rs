@@ -683,7 +683,11 @@ impl Launch {
                 process.health.set(Phase::Draining);
                 let stopped = Error::new(ErrorKind::Cancelled, "stopped while starting");
                 let deadline = tokio::time::Instant::now() + self.drain;
-                self.retire(deadline).await;
+                tokio::select! {
+                    biased;
+                    () = process.stops(2) => return Err(second()),
+                    () = self.retire(deadline) => {}
+                }
                 (Err(stopped), Ok(()), deadline)
             }
             Some(Ok(())) => {
@@ -692,7 +696,14 @@ impl Launch {
                 #[cfg(feature = "hub")]
                 if let Peers::Hub(session) = &mut self.peers {
                     let deadline = tokio::time::Instant::now() + self.wait;
-                    if let Err(error) = session.announce_ready(deadline).await {
+                    // A stop meanwhile goes straight on to the drain below;
+                    // a lost lease ends the announcement itself.
+                    let announced = tokio::select! {
+                        biased;
+                        () = process.stops(1) => Ok(()),
+                        announced = session.announce_ready(deadline) => announced,
+                    };
+                    if let Err(error) = announced {
                         eprintln!(
                             "{}: the hub did not take `ready`, so instances already serving will not route here: {error}",
                             self.segment

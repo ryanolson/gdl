@@ -34,15 +34,17 @@ async fn a_finished_stream_holds_its_share_until_its_output_is_read() {
     // The engine's node has produced everything. What it holds now is the
     // output nobody has read; a release here is what this test refuses.
     // Absence is shown by a bounded wait: no signal marks it.
+    // Both must hold: the share is what a drain waits for, the permit what
+    // bounds the instance's streams.
     let released = tokio::time::timeout(ms(500), async {
-        while engine.admitted() > 0 || engine.egress_in_use() > 0 {
+        while engine.admitted() > 0 && engine.egress_in_use() > 0 {
             tokio::time::sleep(ms(5)).await;
         }
     })
     .await;
     assert!(
         released.is_err(),
-        "the engine let its share go while its output was unread"
+        "the engine let its share or its permit go while its output was unread"
     );
     assert_eq!(collect(out).await, expected(0..400));
     assert!(
