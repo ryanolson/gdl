@@ -92,5 +92,5 @@ A laptop run gates nothing smaller than 5%. It may block a change that is plainl
 
 ## Needed from the owner
 
-- **Gates:** whether the thresholds above are right; in particular the 1% per request for admission and routing.
+- **Gates:** whether the thresholds above are right. Answered for admission and routing (the owner, 2026-10-21): the 1% per request stays, and it "can be relaxed a little". A result slightly over 1% goes to the owner with its numbers; it does not block on its own. A built-in routing policy's row (`round_robin`, `random`) that moves beyond its spread is still reported (plan ruling 165).
 - **Order:** once a machine exists: velo#141's costs first (merged into velo `main` 2026-10-21, before any release), then milestone 21's metrics.
