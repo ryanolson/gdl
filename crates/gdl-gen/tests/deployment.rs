@@ -52,6 +52,18 @@ fn compose_starts_segments_only_after_hub_health() {
         files[Path::new("front/Cargo.toml")].contains("git = \"https://github.com/ryanolson/gdl\"")
     );
     assert!(files.contains_key(Path::new("deployment.json")));
+    // Instances join and retire while the others serve, and the README
+    // says when Compose can add them.
+    let readme = &files[Path::new("README.md")];
+    assert!(
+        readme.contains("docker compose up --scale <segment>=N"),
+        "{readme}"
+    );
+    assert!(
+        readme.contains("Scaling works only for a segment that publishes no host port"),
+        "{readme}"
+    );
+    assert!(!readme.contains("not routed to"), "{readme}");
 }
 
 #[test]
