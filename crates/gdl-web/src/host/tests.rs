@@ -229,10 +229,13 @@ fn placing_a_deployment_replaces_only_one_the_server_placed() {
             std::fs::write(dir.join("compose.yaml"), text).map_err(|e| e.to_string())
         }
     };
-    let first = place(&deployments, "gdl-api", write("first")).expect("placed");
+    let applying = Applying::default();
+    let held = || applying.start().expect("no apply runs");
+    let (first, _) = place(&deployments, "gdl-api", held(), write("first")).expect("placed");
     assert_eq!(first, deployments.join("gdl-api"));
     std::fs::write(first.join("stale"), "").expect("file");
-    let second = place(&deployments, "gdl-api", write("second")).expect("placed again");
+    let (second, _) =
+        place(&deployments, "gdl-api", held(), write("second")).expect("placed again");
     assert_eq!(second, first);
     assert_eq!(
         std::fs::read_to_string(second.join("compose.yaml")).expect("file"),
@@ -244,18 +247,56 @@ fn placing_a_deployment_replaces_only_one_the_server_placed() {
     let foreign = deployments.join("gdl-other");
     std::fs::create_dir_all(&foreign).expect("dir");
     std::fs::write(foreign.join("keep"), "").expect("file");
-    let error = place(&deployments, "gdl-other", write("x")).expect_err("refused");
+    let error = place(&deployments, "gdl-other", held(), write("x")).expect_err("refused");
     assert!(error.contains("was not placed by this server"), "{error}");
     assert!(foreign.join("keep").exists());
 
     // A failed write leaves the last deployment in place.
-    let error =
-        place(&deployments, "gdl-api", |_: &Path| Err("no".to_string())).expect_err("failed");
+    let error = place(&deployments, "gdl-api", held(), |_: &Path| {
+        Err("no".to_string())
+    })
+    .expect_err("failed");
     assert_eq!(error, "no");
     assert_eq!(
         std::fs::read_to_string(first.join("compose.yaml")).expect("file"),
         "second"
     );
+}
+
+/// Generation runs on a blocking thread, which outlives a request whose
+/// page leaves: the apply stays running until that thread has placed the
+/// deployment and handed it on, so a second apply cannot write the same
+/// place meanwhile.
+#[test]
+fn placing_holds_the_apply_until_it_hands_it_on() {
+    let temp = scratch("place-held");
+    let deployments = temp.path().join("deployments");
+    let applying = Applying::default();
+    let running = applying.start().expect("first");
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let (entered, writing) = std::sync::mpsc::channel::<()>();
+    let placing = std::thread::spawn(move || {
+        place(&deployments, "gdl-api", running, |dir: &Path| {
+            entered.send(()).expect("entered");
+            wait.recv().expect("released");
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())
+        })
+    });
+    writing
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the write starts");
+    assert!(
+        applying.start().is_none(),
+        "held while the files are written"
+    );
+    release.send(()).expect("release");
+    let (_, running) = placing.join().expect("thread").expect("placed");
+    assert!(
+        applying.start().is_none(),
+        "held by whoever runs compose next"
+    );
+    drop(running);
+    assert!(applying.start().is_some());
 }
 
 #[test]

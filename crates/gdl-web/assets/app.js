@@ -2140,6 +2140,9 @@ function renderTargets() {
     :!compose.available?`Docker Compose is not available here: ${compose.problem}. Download the bundle instead.`
     :compose.apply?`Docker Compose ${compose.version} with daemon ${compose.daemon}. Build and apply starts this preview on the server's host.`
     :`Docker Compose ${compose.version} is available here. Start gdl-web with --docker to build and apply from this page.`;
+  // The primary button is the one that can act on this host.
+  $('apply-deployment').classList.toggle('primary',!!compose?.apply);
+  $('download-deployment').classList.toggle('primary',!compose?.apply);
   $('deploy-kubernetes').title=!kube?'Not available yet'
     :`Not available yet. Found: ${kube.kubectl?'kubectl':'no kubectl'}, ${kube.kubeconfig?`kubeconfig ${kube.kubeconfig}`:'no kubeconfig'}${kube.context?`, context ${kube.context}`:''}.`;
   updateApply();

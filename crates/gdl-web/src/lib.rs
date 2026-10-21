@@ -13,7 +13,8 @@
 //!
 //! The page offers only ports of one message to join, but decides nothing:
 //! every verdict is the server's, from the same rules `cargo gdl` applies.
-//! Nothing is compiled, so a crate that needs CUDA composes like any other.
+//! A check or an export compiles nothing, so a crate that needs CUDA
+//! composes like any other; only an apply (`--docker`) builds images.
 
 mod draft;
 mod host;
@@ -375,15 +376,15 @@ async fn apply(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
         move || {
             let (_, spec) = prepare(&composer, &draft).map_err(|(_, problems)| problems)?;
             let target = &composer.config.target;
-            host::place(&target.join("deployments"), &project, |dir| {
+            host::place(&target.join("deployments"), &project, running, |dir| {
                 gdl_gen::compose(&spec, dir, target).map_err(|e| e.to_string())
             })
             .map_err(|error| error.lines().map(str::to_string).collect::<Vec<_>>())
         }
     })
     .await;
-    let dir = match placed {
-        Ok(Ok(dir)) => dir,
+    let (dir, running) = match placed {
+        Ok(Ok(placed)) => placed,
         Ok(Err(found)) => return problems(StatusCode::UNPROCESSABLE_ENTITY, found),
         Err(error) => {
             return problems(StatusCode::INTERNAL_SERVER_ERROR, vec![error.to_string()]);

@@ -50,12 +50,12 @@
     <div class="deploy-preview"><nav id="deploy-files" aria-label="Generated deployment files"></nav><div class="deploy-file"><h4 id="deploy-filename">Generated files</h4><pre><code id="deploy-code"></code></pre></div></div>
     <h3>Run on this host</h3>
     <p id="host-status" class="muted" role="status">Checking this host for Docker Compose and Kubernetes…</p>
-    <button id="apply-deployment" class="primary" disabled>Build and apply</button>
+    <button id="apply-deployment" disabled>Build and apply</button>
     <pre id="apply-log" aria-label="Apply output" hidden></pre>
     <h3>Run elsewhere</h3>
     <p class="muted">Single replica per segment. Copy the bundle to your Docker host, extract it, then run:</p><pre>cd deployment
 docker compose up --build</pre>
-    <button id="download-deployment" disabled>Download Compose bundle</button><p id="deploy-status" role="status"></p>
+    <button id="download-deployment" class="primary" disabled>Download Compose bundle</button><p id="deploy-status" role="status"></p>
   </section>
   <details class="validation"><summary>Validation &amp; generated files <span id="validation-status"></span></summary><div id="result" aria-live="polite"></div></details>
 </main>

@@ -185,7 +185,7 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### The composer's server cannot build crates that need CUDA
 
-- **What happens:** a graph spec compiles nothing, so composing works for any crate. A contract spec that names such a crate's messages, however, cannot be built on a server without CUDA.
+- **What happens:** a graph spec compiles nothing, so composing works for any crate. A contract spec that names such a crate's messages, however, cannot be built on a server without CUDA. With `--docker`, **Build and apply** builds every segment in the one build image of the deployment (`build_image`). A segment whose crates need CUDA builds only if that image has the CUDA toolkit.
 - **See:** rulings 61 and 88.
 
 ### The source reader counts a build dependency's features for the library

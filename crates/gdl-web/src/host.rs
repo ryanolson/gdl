@@ -199,11 +199,16 @@ const PLACED: &str = ".gdl-deployment";
 /// Write a deployment with `write` beside `deployments/<project>`, then put
 /// it in that place, replacing the one there only if this server placed
 /// it. Compose needs the files later (`logs`, `down`), so they stay.
+///
+/// `running` is taken and handed back so that the apply stays running for
+/// as long as the files are written, on whatever thread writes them: a
+/// request whose page leaves is dropped, but its blocking thread goes on.
 pub(crate) fn place(
     deployments: &Path,
     project: &str,
+    running: Running,
     write: impl FnOnce(&Path) -> Result<(), String>,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Running), String> {
     let io = |what: &Path, e: std::io::Error| format!("{}: {e}", what.display());
     std::fs::create_dir_all(deployments).map_err(|e| io(deployments, e))?;
     let deployments = deployments.canonicalize().map_err(|e| io(deployments, e))?;
@@ -224,7 +229,7 @@ pub(crate) fn place(
         std::fs::remove_dir_all(&place).map_err(|e| io(&place, e))?;
     }
     std::fs::rename(&next, &place).map_err(|e| io(&place, e))?;
-    Ok(place)
+    Ok((place, running))
 }
 
 /// Whether an apply is running. One at a time: two builds of one project
@@ -239,6 +244,7 @@ impl Applying {
 }
 
 /// Held for as long as an apply runs.
+#[derive(Debug)]
 pub(crate) struct Running(Arc<AtomicBool>);
 
 impl Drop for Running {
