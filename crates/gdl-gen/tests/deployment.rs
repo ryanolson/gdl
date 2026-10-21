@@ -132,8 +132,8 @@ fn deployment_rejects_local_node_and_message_crates() {
 }
 
 fn portable_text(text: &str) -> String {
-    text.replace("crates = [\".\"]", "crates = [{ package = \"api-frontend\", git = \"https://github.com/ryanolson/gdl\", rev = \"a294742d5990b55b1f64d471c2e79a1069b30795\" }]")
-        .replace("path = \"../../crates/gdl\"", "git = \"https://github.com/ryanolson/gdl\"\nrev = \"a294742d5990b55b1f64d471c2e79a1069b30795\"")
+    text.replace("crates = [\".\"]", "crates = [{ package = \"api-frontend\", git = \"https://github.com/ryanolson/gdl\", rev = \"87d3cf7e4c4c594995cdc917a6f690b3a771d2d9\" }]")
+        .replace("path = \"../../crates/gdl\"", "git = \"https://github.com/ryanolson/gdl\"\nrev = \"87d3cf7e4c4c594995cdc917a6f690b3a771d2d9\"")
 }
 fn portable_spec(root: &Path) -> Result<gdl_gen::Spec, gdl_gen::Error> {
     let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
