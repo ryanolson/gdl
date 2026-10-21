@@ -111,9 +111,12 @@ pub async fn run_segment<B: SegmentBinary>(
     // process is live while it starts.
     let process = Process::start(&config).await?;
     let (config, settings) = config.into_hosted();
-    let builder = Builder::new(B::GRAPH_CONFIG, prometheus::Registry::new())?;
-    let hosts = B::build(settings, &builder).await?;
+    // The deployment before the build: every metric a node registers
+    // carries the deployment's identity.
     let deployment = B::deployment()?;
+    let registry = process.registry(&deployment, B::SEGMENT)?;
+    let builder = Builder::new(B::GRAPH_CONFIG, registry)?;
+    let hosts = B::build(settings, &builder).await?;
     let launch = config
         .launch(
             &process,

@@ -98,11 +98,13 @@ async fn a_launch_holds_its_roster_until_it_serves() {
     let config: ProcessConfig<Nothing> =
         ProcessConfig::from_figment(figment::Figment::from(Toml::string(&settings)))
             .expect("settings");
-    let process = gdl::Process::start(&config).await.expect("process");
+    // A process per instance: each has its own velo node.
+    let front_process = gdl::Process::start(&config).await.expect("process");
+    let side_process = gdl::Process::start(&config).await.expect("process");
     let segments: &[&str] = &["front", "side"];
     let (front, side) = tokio::join!(
-        config.launch(&process, "front", segments, &spec, async { Ok(()) }),
-        config.launch(&process, "side", segments, &spec, async { Ok(()) })
+        config.launch(&front_process, "front", segments, &spec, async { Ok(()) }),
+        config.launch(&side_process, "side", segments, &spec, async { Ok(()) })
     );
     let (front, side) = (front.expect("front meets"), side.expect("side meets"));
     let events = Events::new();

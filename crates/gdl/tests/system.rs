@@ -222,6 +222,16 @@ fn the_system_paths_are_checked() {
         ),
         ("live_path = \"live\"\n", "not a path"),
         ("port = 70000\n", "not a port"),
+        (
+            "live_path = \"/metrics\"\n",
+            "`/metrics` is the metrics path",
+        ),
+        (
+            "health_path = \"/metrics\"\n",
+            "`/metrics` is the metrics path",
+        ),
+        ("metrics_prefix = \"9gdl\"\n", "not a metric name prefix"),
+        ("metrics_prefix = \"gdl-x\"\n", "not a metric name prefix"),
     ] {
         let settings = format!(
             "listen = \"127.0.0.1:0\"\nroster = {:?}\n[system]\n{system}",
@@ -233,5 +243,105 @@ fn the_system_paths_are_checked() {
             panic!("{system} was accepted");
         };
         assert!(error.to_string().contains(wrong), "{system}: {error}");
+    }
+}
+
+/// The labels of the first series named `name` in a scrape, by label name:
+/// the registry adds its common labels in a hash map's order, so a line is
+/// parsed, not compared.
+fn series(scrape: &str, name: &str) -> Option<(std::collections::BTreeMap<String, String>, f64)> {
+    let line = scrape
+        .lines()
+        .find(|line| line.starts_with(&format!("{name}{{")))?;
+    let (labels, value) = line[name.len() + 1..].split_once("} ")?;
+    let labels = labels
+        .split(',')
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').expect("a label");
+            (key.to_string(), value.trim_matches('"').to_string())
+        })
+        .collect();
+    Some((labels, value.parse().expect("a value")))
+}
+
+/// `/metrics` answers from the start, empty until the process's registry
+/// exists; then every series carries the instance's identity, under the
+/// prefix, and `uptime_seconds` counts from the process's start.
+#[tokio::test]
+async fn metrics_carry_the_identity_of_the_instance() {
+    let dir = roster();
+    let config = config(dir.path(), "host = \"127.0.0.1\"\nport = 0\n");
+    let process = Process::start(&config).await.expect("process");
+    let address = process.system_address().expect("a listener");
+
+    let answer = send(address, b"GET /metrics HTTP/1.1\r\nHost: probe\r\n\r\n").await;
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    assert!(
+        answer.contains("Content-Type: text/plain; version=0.0.4"),
+        "{answer}"
+    );
+    assert!(
+        answer.ends_with("\r\n\r\n"),
+        "empty before the registry: {answer}"
+    );
+
+    let deployment = deployment();
+    let registry = process.registry(&deployment, "only").expect("a registry");
+    let counter = gdl::prometheus::IntCounter::new("tokens_total", "Tokens.").expect("counter");
+    registry
+        .register(Box::new(counter.clone()))
+        .expect("registered");
+    counter.inc();
+    let (code, scrape) = get(address, "/metrics").await;
+    assert_eq!(code, 200);
+    let hash = gdl::layout(&deployment.graph, &deployment.placement)
+        .expect("layout")
+        .placement_hash();
+    let worker = format!("{:032x}", process.node().instance_id().as_u128());
+    let (labels, value) = series(&scrape, "dynamo_component_tokens_total").expect(&scrape);
+    assert_eq!(value, 1.0);
+    assert_eq!(
+        labels,
+        [
+            ("dynamo_component", "only".to_string()),
+            ("dynamo_namespace", format!("one-{:08x}", hash >> 32)),
+            ("worker_id", worker.clone()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    );
+    let (labels, first) = series(&scrape, "dynamo_component_uptime_seconds").expect(&scrape);
+    assert_eq!(labels["worker_id"], worker);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let (_, scrape) = get(address, "/metrics").await;
+    let (_, later) = series(&scrape, "dynamo_component_uptime_seconds").expect(&scrape);
+    assert!(later > first, "{first} then {later}");
+
+    let error = process
+        .registry(&deployment, "only")
+        .expect_err("one registry per process");
+    assert!(error.to_string().contains("once"), "{error}");
+}
+
+/// `metrics_prefix` names the prefix; empty, there is none.
+#[tokio::test]
+async fn the_metrics_prefix_is_a_setting() {
+    let dir = roster();
+    for (prefix, name) in [
+        ("\"gdl\"", "gdl_uptime_seconds"),
+        ("\"\"", "uptime_seconds"),
+    ] {
+        let config = config(
+            dir.path(),
+            &format!("host = \"127.0.0.1\"\nport = 0\nmetrics_prefix = {prefix}\n"),
+        );
+        let process = Process::start(&config).await.expect("process");
+        process.registry(&deployment(), "only").expect("a registry");
+        let (_, scrape) = get(process.system_address().expect("a listener"), "/metrics").await;
+        assert!(
+            series(&scrape, name).is_some(),
+            "{name} missing from:\n{scrape}"
+        );
     }
 }

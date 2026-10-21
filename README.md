@@ -195,7 +195,7 @@ For each segment, the generator writes a crate with:
 
 A segment binary takes its settings from TOML files, each overriding the ones before it, then from `GDL_` environment variables, with `__` between nested keys: `GDL_RUNTIME__ADMISSION_LIMIT=64`, or `GDL_NODE__TRUNCATE__MAX=3` for `[node.Truncate] max = 3`. A key set in the environment is matched without regard to case (a file's keys are as spelled), and only the settings' own keys are read, so the build scripts' `GDL_PROFILE` and `GDL_IMAGE_PREFIX` do not stop a segment from starting. A misspelled key is an error. The settings name `listen` (under a hub, an unspecified address such as `0.0.0.0:9000` advertises the address the container's `HOSTNAME` resolves to, and a concrete one is bound as given), and exactly one of `roster` (a directory every instance shares, fresh for each deployment, where `[instances]` says how many of each segment to wait for) or a `[hub]` table with the discovery hub's `host` (and, optionally, its `public_port`, `control_port`, and the lease's `heartbeat_ms`), where `[min_replicas]` says how many loaded instances of each segment to wait for. Every node's `Build::ready` is awaited before the segment announces itself; a node that loads a model after construction resolves it then. The binary stops on SIGINT or SIGTERM, and a frontend drains the requests it holds first; a second signal ends the drain. It takes the signals from its start, so a stop while its nodes load ends the launch rather than killing the process.
 
-A `[system]` table turns on the system listener, which answers dynamo's probes: `GET /live` answers 200 from the start, and `GET /health` answers 200 only while the instance serves (after the barrier, before a stop or a lost lease) and 503 otherwise. Both bodies are dynamo's JSON, `{"status": "ready" | "notready", "uptime": ...}`, with gdl's `"phase": "starting" | "ready" | "draining"` added. It is off unless `port` is set; dynamo's variables `DYN_SYSTEM_HOST`, `DYN_SYSTEM_PORT` (negative is off, 0 an ephemeral port), `DYN_SYSTEM_LIVE_PATH`, and `DYN_SYSTEM_HEALTH_PATH` set it too, so the dynamo operator's probes find it, and `GDL_SYSTEM__*` variables override them. `<binary> --healthcheck <config.toml> ...` asks a running instance's health path, dialling loopback for an unspecified host, so an image needs no HTTP client. Under a hub the lease is kept by a heartbeat every `heartbeat_ms` (5 s by default) and lost after five misses: a segment whose lease is lost drains and stops, and the deployment starts it again. A segment name is lowercase and at most 58 characters, so that a count set in the environment names it and a hub can name its readiness services.
+A `[system]` table turns on the system listener, which answers dynamo's probes: `GET /live` answers 200 from the start, and `GET /health` answers 200 only while the instance serves (after the barrier, before a stop or a lost lease) and 503 otherwise. Both bodies are dynamo's JSON, `{"status": "ready" | "notready", "uptime": ...}`, with gdl's `"phase": "starting" | "ready" | "draining"` added. `GET /metrics` serves the process's metrics in Prometheus's text format (see [Node metrics](#node-metrics)). It is off unless `port` is set; dynamo's variables `DYN_SYSTEM_HOST`, `DYN_SYSTEM_PORT` (negative is off, 0 an ephemeral port), `DYN_SYSTEM_LIVE_PATH`, and `DYN_SYSTEM_HEALTH_PATH` set it too, so the dynamo operator's probes find it, and `GDL_SYSTEM__*` variables override them. `<binary> --healthcheck <config.toml> ...` asks a running instance's health path, dialling loopback for an unspecified host, so an image needs no HTTP client. Under a hub the lease is kept by a heartbeat every `heartbeat_ms` (5 s by default) and lost after five misses: a segment whose lease is lost drains and stops, and the deployment starts it again. A segment name is lowercase and at most 58 characters, so that a count set in the environment names it and a hub can name its readiness services.
 
 The generator owns the directory of each segment crate. Each generated file starts with a do-not-edit marker. `cargo gdl generate --check` writes nothing. It fails if a generated file is missing, changed, or stale, or if a segment crate holds a file that the generator did not write.
 
@@ -332,7 +332,7 @@ A frontend with several public contracts implements `gdl::Service`. Its client b
 
 Use `#[derive(gdl::Config)]` on an implementation's deserializable configuration type. The derive is the only way to implement `gdl::ConfigSchema`: the source reader takes the fields from its attributes, so a hand-written impl does not build. Mark builder-visible fields with `#[gdl(graph, default = ...)]`, and add `#[gdl(config = Settings)]` to the node. Unmarked fields stay runtime-only. Graph controls support `bool`, `i64`, and `String` with literal defaults. Optional `label` and `subtext` annotations name each setting in the UI. Doc comments supply expandable help in settings dialogs. Generated graph specs retain resolved values under `[config.NodeName]`.
 
-`gdl::build_node` extracts `Build::Config` from a Figment and checks its graph-affecting values against the built graph. Application code can use any Figment provider and explicit `merge`/`join` order. Generated binaries merge their TOML arguments in order, then apply `GDL_` environment overrides with `__` between nested keys. A conflicting graph value prevents startup.
+`gdl::build_node` extracts `Build::Config` from a Figment, checks its graph-affecting values against the built graph, and passes the node's metrics to `Build::build`. Application code can use any Figment provider and explicit `merge`/`join` order. Generated binaries merge their TOML arguments in order, then apply `GDL_` environment overrides with `__` between nested keys. A conflicting graph value prevents startup.
 
 The [three-entry Axum example](examples/api/README.md) includes typed adapters, endpoint flags, and a shared pipeline placed across two segments. Entry adapters declared in service specs execute locally. The composer emits its adapters as ordinary graph nodes, which can span segments. Each named pipeline can span segments. Several pipelines can reference one sink node; the deployment builds that sink once per hosting segment instance. Composer endpoint nodes support independent placement. See the [design and implementation record](agent-docs/frontends.md).
 
@@ -383,6 +383,37 @@ Place `Chat` and `Responses` in `s1`, `ProcessingOne` in `processing-1`, `Proces
 A response-only identity is declared as `identity ResponsePass: response Chunk;` and placed after the inner node in the topology. A request identity can also carry `stream Chunk` or `Header + stream Chunk`. The runtime supplies `IdentityNode<T>` and `IdentityOperator<Req, Item>`; the graph macro constructs these nodes automatically.
 
 A scissors cut moves the selected node and its downstream nodes to the destination segment. Traversal stops at existing segment boundaries and does not move an upstream hop owner. Shared sinks keep one placement. Undo and redo restore the whole cut.
+
+## Node metrics
+
+A node's metrics are declared as its configuration is, and handed to it at construction. `#[derive(gdl::Metrics)]` turns a struct of prometheus metric fields into the node's metrics: the field's name is the metric's name, its doc comment the help, `#[gdl(buckets = [...])]` a histogram's buckets, and `#[gdl(labels = [...])]` a vector's label names. Name the types through `gdl::prometheus`, the version the runtime registers and serves.
+
+```rust
+#[derive(gdl::Metrics)]
+pub struct EngineMetrics {
+    /// Tokens generated.
+    tokens_total: gdl::prometheus::IntCounter,
+    /// Time to the first token.
+    #[gdl(buckets = [0.005, 0.05, 0.5, 5.0])]
+    time_to_first_token_seconds: gdl::prometheus::Histogram,
+}
+
+#[derive(gdl::Node)]
+#[gdl(metrics = EngineMetrics)]
+pub struct Engine { metrics: EngineMetrics }
+
+impl gdl::Build for Engine {
+    type Config = Settings;
+    type Metrics = EngineMetrics;
+    async fn build(config: Settings, metrics: EngineMetrics) -> gdl::Result<Self> {
+        Ok(Self { metrics })
+    }
+}
+```
+
+A node without metrics writes `type Metrics = ();` and takes `(): ()`. The derive follows dynamo's naming rules: a counter's name ends in `_total` and no other does, a duration or latency is in `_seconds`, and the unit is not `counter`, `gauge`, `size`, or `time`, nor `sum`, `count`, or `bucket`, which a histogram's own series use. It refuses the names the runtime records and the labels it adds. The derive is the only way to implement `gdl::Metrics`, so the source reader, which reads the definitions from the derive's attributes, sees what the build registers; `#[gdl(metrics = T)]` on `derive(gdl::Node)` names the type for the catalogue, and must be the node's `Build::Metrics`.
+
+A segment binary keeps one registry, serves it on the system listener's `GET /metrics`, and registers each node's metrics there before `build`, with the node's name as `dynamo_endpoint`. Every series also carries dynamo's identity labels: `dynamo_namespace` (the graph's name and the first eight hex digits of the placement hash), `dynamo_component` (the segment), and `worker_id` (the instance's velo id), under the prefix `[system] metrics_prefix`, `dynamo_component` by default, so dynamo's scrape configuration and dashboards take them as they are. The registry holds `uptime_seconds` as well. Two nodes of one segment may define a metric of the same name only if they agree on its kind, help, labels, and buckets.
 
 ## Draw a graph
 

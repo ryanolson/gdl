@@ -340,27 +340,20 @@ impl<H> ProcessConfig<H> {
         let (node, roster, peers) = match discovery {
             Discovery::Files(dir) => {
                 ready.await?;
-                let node = bind_node(self.listen).await?;
+                let node = process.node();
                 let roster = Roster::rendezvous(dir, segment, &node, expect, wait).await?;
                 (node, roster, Peers::Files(dir.to_path_buf()))
             }
             #[cfg(feature = "hub")]
             Discovery::Hub(hub) => {
-                use crate::dist::{HubSession, bind_container_node};
+                use crate::dist::HubSession;
                 let HubAddress {
                     host,
                     public_port,
                     control_port,
                     heartbeat_ms,
                 } = hub;
-                // A container binds and advertises the address its hostname
-                // resolves to; a concrete address is bound and advertised as
-                // given.
-                let node = if self.listen.ip().is_unspecified() {
-                    bind_container_node(self.listen.port()).await?
-                } else {
-                    bind_node(self.listen).await?
-                };
+                let node = process.node();
                 let mut session = HubSession::register(
                     host,
                     *public_port,
@@ -414,6 +407,20 @@ impl<H> ProcessConfig<H> {
             process: process.clone(),
             _leaving: leaving,
         })
+    }
+
+    /// Bind this instance's velo node. Under a hub, a container binds and
+    /// advertises the address its hostname resolves to; any other address
+    /// is bound and advertised as given. Nothing is announced: peers learn
+    /// the address only when the instance launches.
+    async fn bind(&self) -> Result<Velo> {
+        match self.discovery()? {
+            #[cfg(feature = "hub")]
+            Discovery::Hub(_) if self.listen.ip().is_unspecified() => {
+                crate::dist::bind_container_node(self.listen.port()).await
+            }
+            _ => bind_node(self.listen).await,
+        }
     }
 
     /// Ask the system listener of a process run with these settings
@@ -734,12 +741,12 @@ impl Launch {
 /// How often a draining instance looks again.
 const DRAIN_POLL: Duration = Duration::from_millis(50);
 
-/// A segment process before and beyond its graph: the signals that stop it
-/// and the system listener that reports on it. Started first, before the
-/// nodes are built: a signal while they load would otherwise end the
-/// process the default way, with nothing announced, and a deployment could
-/// not tell that the process is live while it starts. A clone shares the
-/// same process.
+/// A segment process before and beyond its graph: the signals that stop it,
+/// the system listener that reports on it, its velo node, and its metrics.
+/// Started first, before the nodes are built: a signal while they load
+/// would otherwise end the process the default way, with nothing
+/// announced, and a deployment could not tell that the process is live
+/// while it starts. A clone shares the same process.
 #[derive(Clone)]
 pub struct Process {
     /// How many stop signals have come.
@@ -747,11 +754,17 @@ pub struct Process {
     count: Arc<tokio::sync::watch::Sender<u32>>,
     health: Arc<Health>,
     system: Option<SocketAddr>,
+    /// Bound at the start, so that the instance id, which every metric
+    /// carries as `worker_id`, is known before the nodes build and
+    /// register their metrics.
+    node: Velo,
+    metrics_prefix: Option<String>,
 }
 
 impl Process {
-    /// Take the stop signals, and bind the system listener if `config`
-    /// asks for one.
+    /// Take the stop signals, bind the system listener if `config` asks
+    /// for one, then bind the instance's velo node: the listener first,
+    /// so that the process is live whatever velo does.
     pub async fn start<H>(config: &ProcessConfig<H>) -> Result<Self> {
         let mut signals = Signals::new()?;
         let (count, stops) = tokio::sync::watch::channel(0u32);
@@ -771,12 +784,69 @@ impl Process {
         if let Some(address) = system {
             eprintln!("system listener at {address}");
         }
+        let node = config.bind().await?;
         Ok(Self {
             stops,
             count,
             health,
             system,
+            node,
+            metrics_prefix: config.system.metrics_prefix(),
         })
+    }
+
+    /// The instance's velo node.
+    pub fn node(&self) -> Velo {
+        self.node.clone()
+    }
+
+    /// Make the process's one metrics registry, for segment `segment` of
+    /// `deployment`, and serve it on `/metrics`. Every series it serves
+    /// carries the prefix and dynamo's identity labels: `dynamo_namespace`
+    /// (the graph's name and the first eight hex digits of the placement
+    /// hash), `dynamo_component` (the segment), and `worker_id` (the
+    /// instance id). It holds `uptime_seconds` from the start.
+    pub fn registry(
+        &self,
+        deployment: &gdl_model::DeploymentSpec,
+        segment: &str,
+    ) -> Result<prometheus::Registry> {
+        let registration = deployment.registration(segment)?;
+        let labels = [
+            (
+                gdl_model::NAMESPACE_LABEL,
+                format!(
+                    "{}-{:08x}",
+                    deployment.graph.name,
+                    registration.placement >> 32
+                ),
+            ),
+            (gdl_model::COMPONENT_LABEL, segment.to_string()),
+            (
+                gdl_model::WORKER_LABEL,
+                format!("{:032x}", self.node.instance_id().as_u128()),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+        let registry = prometheus::Registry::new_custom(self.metrics_prefix.clone(), Some(labels))
+            .map_err(metrics_error)?;
+        let health = Arc::clone(&self.health);
+        let uptime = prometheus::PullingGauge::new(
+            "uptime_seconds",
+            "Seconds since the segment process started.",
+            Box::new(move || health.uptime()),
+        )
+        .map_err(metrics_error)?;
+        registry.register(Box::new(uptime)).map_err(metrics_error)?;
+        if !self.health.serve_metrics(registry.clone()) {
+            return Err(Error::new(
+                ErrorKind::Placement,
+                "the process's metrics registry is made once",
+            ));
+        }
+        Ok(registry)
     }
 
     /// Stop the process as a signal does: the first stop drains, the
@@ -883,4 +953,11 @@ fn canonical<H: Hosted>(key: &str) -> String {
 
 fn placement(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::Placement, message)
+}
+
+fn metrics_error(error: prometheus::Error) -> Error {
+    Error::new(
+        ErrorKind::Placement,
+        format!("the metrics registry: {error}"),
+    )
 }

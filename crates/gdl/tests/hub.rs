@@ -228,15 +228,25 @@ async fn segment_processes_meet_through_a_hub() {
         figment::providers::Toml::string(&settings),
     ))
     .expect("settings");
-    let process = gdl::Process::start(&config).await.expect("process");
+    // A process per instance: each has its own velo node.
+    let front_process = gdl::Process::start(&config).await.expect("process");
+    let sink_process = gdl::Process::start(&config).await.expect("process");
     let deployment = spec();
     let (front, sink) = tokio::join!(
-        config.launch(&process, "front", &["front", "sink"], &deployment, async {
-            Ok(())
-        }),
-        config.launch(&process, "sink", &["front", "sink"], &deployment, async {
-            Ok(())
-        }),
+        config.launch(
+            &front_process,
+            "front",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+        config.launch(
+            &sink_process,
+            "sink",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
     );
     let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
     assert_eq!(front.roster().instances("sink").len(), 1);
@@ -288,15 +298,25 @@ async fn a_segment_drains_and_stops_when_its_hub_is_gone() {
         figment::providers::Toml::string(&settings),
     ))
     .expect("settings");
-    let process = gdl::Process::start(&config).await.expect("process");
+    // A process per instance: each has its own velo node.
+    let front_process = gdl::Process::start(&config).await.expect("process");
+    let sink_process = gdl::Process::start(&config).await.expect("process");
     let deployment = spec();
     let (front, sink) = tokio::join!(
-        config.launch(&process, "front", &["front", "sink"], &deployment, async {
-            Ok(())
-        }),
-        config.launch(&process, "sink", &["front", "sink"], &deployment, async {
-            Ok(())
-        }),
+        config.launch(
+            &front_process,
+            "front",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+        config.launch(
+            &sink_process,
+            "sink",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
     );
     let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
     let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -750,15 +770,25 @@ fn settings_for(public: u16, control: u16, drain_ms: u64) -> ProcessConfig<Nothi
 async fn under_a_hub_the_sink_leaves_after_the_source_drains() {
     let hub = hub(Duration::from_secs(30)).await;
     let config = hub_settings(&hub, 20_000);
-    let process = gdl::Process::start(&config).await.expect("process");
+    // A process per instance: each has its own velo node.
+    let front_process = gdl::Process::start(&config).await.expect("process");
+    let sink_process = gdl::Process::start(&config).await.expect("process");
     let deployment = spec();
     let (front, sink) = tokio::join!(
-        config.launch(&process, "front", &["front", "sink"], &deployment, async {
-            Ok(())
-        }),
-        config.launch(&process, "sink", &["front", "sink"], &deployment, async {
-            Ok(())
-        }),
+        config.launch(
+            &front_process,
+            "front",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
+        config.launch(
+            &sink_process,
+            "sink",
+            &["front", "sink"],
+            &deployment,
+            async { Ok(()) }
+        ),
     );
     let (front, sink) = (front.expect("front launched"), sink.expect("sink launched"));
     let (front_running, front_runs) = tokio::sync::oneshot::channel();
@@ -787,7 +817,8 @@ async fn under_a_hub_the_sink_leaves_after_the_source_drains() {
             .expect("the body ran");
     }
     let stopped = tokio::time::Instant::now();
-    process.stop();
+    front_process.stop();
+    sink_process.stop();
     let (sink_served, sink_left) = tokio::time::timeout(WAIT, sink_served)
         .await
         .expect("the sink left in time")

@@ -1,12 +1,12 @@
 //! The system listener: the live and health probes a deployment asks a
-//! segment process, on dynamo's paths and port, so that the dynamo
-//! operator's probes find it. HTTP is read by hand: a request line and
-//! headers, one request per connection. Three fixed paths do not justify a
-//! server dependency in every segment binary.
+//! segment process, and its metrics, on dynamo's paths and port, so that
+//! the dynamo operator's probes and scrapes find it. HTTP is read by hand:
+//! a request line and headers, one request per connection. Three fixed
+//! paths do not justify a server dependency in every segment binary.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -15,11 +15,12 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::error::{Error, ErrorKind, Result};
 
-/// `[system]`: where the listener is. Also read from dynamo's variables,
-/// `DYN_SYSTEM_HOST`, `DYN_SYSTEM_PORT`, `DYN_SYSTEM_LIVE_PATH`, and
-/// `DYN_SYSTEM_HEALTH_PATH`, with dynamo's meaning: a negative port is no
-/// listener, 0 an ephemeral one. Off unless a port is set: instances that
-/// share a host would collide on any default.
+/// `[system]`: where the listener is, and the prefix of the metrics it
+/// serves. Also read from dynamo's variables, `DYN_SYSTEM_HOST`,
+/// `DYN_SYSTEM_PORT`, `DYN_SYSTEM_LIVE_PATH`, and `DYN_SYSTEM_HEALTH_PATH`,
+/// with dynamo's meaning: a negative port is no listener, 0 an ephemeral
+/// one. Off unless a port is set: instances that share a host would
+/// collide on any default.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SystemSettings {
@@ -31,6 +32,11 @@ pub(crate) struct SystemSettings {
     live_path: String,
     #[serde(default = "default_health_path")]
     health_path: String,
+    /// The prefix of every metric's name, dynamo's by default, so that
+    /// dynamo's scrape configuration and dashboards take gdl's metrics as
+    /// they are; empty for none.
+    #[serde(default = "default_metrics_prefix")]
+    metrics_prefix: String,
 }
 
 impl Default for SystemSettings {
@@ -40,6 +46,7 @@ impl Default for SystemSettings {
             port: default_port(),
             live_path: default_live_path(),
             health_path: default_health_path(),
+            metrics_prefix: default_metrics_prefix(),
         }
     }
 }
@@ -59,6 +66,14 @@ fn default_live_path() -> String {
 fn default_health_path() -> String {
     "/health".into()
 }
+
+fn default_metrics_prefix() -> String {
+    "dynamo_component".into()
+}
+
+/// Where the metrics are served: dynamo's path, which its scrape
+/// configuration expects.
+const METRICS_PATH: &str = "/metrics";
 
 impl SystemSettings {
     pub(crate) fn validate(&self) -> Result<()> {
@@ -83,7 +98,29 @@ impl SystemSettings {
                 "`system.live_path` and `system.health_path` are the same path",
             ));
         }
+        if self.live_path == METRICS_PATH || self.health_path == METRICS_PATH {
+            return Err(invalid(
+                "a probe path cannot be `/metrics`: `/metrics` is the metrics path",
+            ));
+        }
+        let prefix = &self.metrics_prefix;
+        let valid = prefix.is_empty()
+            || (prefix.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == ':')
+                && prefix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'));
+        if !valid {
+            return Err(invalid(format!(
+                "`system.metrics_prefix` {prefix:?} is not a metric name prefix: letters, digits, `_`, and `:`, not starting with a digit"
+            )));
+        }
         Ok(())
+    }
+
+    /// The prefix of every metric's name, if any.
+    pub(crate) fn metrics_prefix(&self) -> Option<String> {
+        // prometheus refuses an empty prefix: no prefix is `None`.
+        (!self.metrics_prefix.is_empty()).then(|| self.metrics_prefix.clone())
     }
 
     /// The address to bind, if a listener is asked for.
@@ -116,10 +153,15 @@ impl Phase {
     }
 }
 
-/// The phase, shared between the process and its listener.
+/// What the listener reports, shared between the process and its
+/// listener: the phase, and the process's metrics once they exist.
 pub(crate) struct Health {
     phase: AtomicU8,
     started: Instant,
+    /// The process's registry, made once the deployment is known; until
+    /// then `/metrics` answers with no metrics, not an error, which a
+    /// scrape would take for a target that is down.
+    registry: OnceLock<prometheus::Registry>,
 }
 
 impl Health {
@@ -127,7 +169,29 @@ impl Health {
         Self {
             phase: AtomicU8::new(Phase::Starting as u8),
             started: Instant::now(),
+            registry: OnceLock::new(),
         }
+    }
+
+    /// Seconds since the process started.
+    pub(crate) fn uptime(&self) -> f64 {
+        self.started.elapsed().as_secs_f64()
+    }
+
+    /// Serve `registry` on `/metrics`; `false` if a registry is served
+    /// already.
+    pub(crate) fn serve_metrics(&self, registry: prometheus::Registry) -> bool {
+        self.registry.set(registry).is_ok()
+    }
+
+    /// The metrics in Prometheus's text format, or why they cannot be
+    /// encoded.
+    fn metrics(&self) -> std::result::Result<String, prometheus::Error> {
+        let mut text = String::new();
+        if let Some(registry) = self.registry.get() {
+            prometheus::TextEncoder::new().encode_utf8(&registry.gather(), &mut text)?;
+        }
+        Ok(text)
     }
 
     pub(crate) fn phase(&self) -> Phase {
@@ -155,7 +219,7 @@ impl Health {
         let body = format!(
             "{{\"status\":\"{}\",\"uptime\":{:.3},\"phase\":\"{}\"}}",
             if ready { "ready" } else { "notready" },
-            self.started.elapsed().as_secs_f64(),
+            self.uptime(),
             phase.name()
         );
         (ready, body)
@@ -235,7 +299,7 @@ async fn answer(
     let head = match tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream)).await {
         Ok(Ok(Some(head))) => head,
         Ok(Ok(None)) => {
-            respond(&mut stream, 431, "{}").await?;
+            respond(&mut stream, 431, JSON, "{}").await?;
             // Closing with the rest of the request unread resets the
             // connection, which may destroy the refusal before the client
             // reads it. What is left is read and dropped, within bounds.
@@ -253,22 +317,29 @@ async fn answer(
             return Ok(());
         }
         Ok(Err(e)) => return Err(e),
-        Err(_) => return respond(&mut stream, 408, "{}").await,
+        Err(_) => return respond(&mut stream, 408, JSON, "{}").await,
     };
     let mut words = head.split(' ');
     let (method, target) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
     let path = target.split('?').next().unwrap_or("");
-    let (code, body) = match (method, path) {
-        ("GET", path) if path == live_path => (200, health.body().1),
+    let (code, kind, body) = match (method, path) {
+        ("GET", path) if path == live_path => (200, JSON, health.body().1),
         ("GET", path) if path == health_path => {
             let (ready, body) = health.body();
-            (if ready { 200 } else { 503 }, body)
+            (if ready { 200 } else { 503 }, JSON, body)
         }
-        ("GET", _) => (404, "{}".into()),
-        _ => (405, "{}".into()),
+        ("GET", METRICS_PATH) => match health.metrics() {
+            Ok(text) => (200, prometheus::TEXT_FORMAT, text),
+            Err(error) => (500, prometheus::TEXT_FORMAT, error.to_string()),
+        },
+        ("GET", _) => (404, JSON, "{}".into()),
+        _ => (405, JSON, "{}".into()),
     };
-    respond(&mut stream, code, &body).await
+    respond(&mut stream, code, kind, &body).await
 }
+
+/// The probes' content type.
+const JSON: &str = "application/json";
 
 /// The request line, once the whole head has arrived; `None` past
 /// `HEAD_LIMIT`.
@@ -296,9 +367,10 @@ async fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<String>> {
     }
 }
 
-async fn respond(stream: &mut TcpStream, code: u16, body: &str) -> std::io::Result<()> {
+async fn respond(stream: &mut TcpStream, code: u16, kind: &str, body: &str) -> std::io::Result<()> {
     let reason = match code {
         200 => "OK",
+        500 => "Internal Server Error",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
@@ -306,7 +378,7 @@ async fn respond(stream: &mut TcpStream, code: u16, body: &str) -> std::io::Resu
         _ => "Service Unavailable",
     };
     let response = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(response.as_bytes()).await?;
