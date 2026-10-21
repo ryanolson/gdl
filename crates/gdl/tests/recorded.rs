@@ -253,6 +253,13 @@ fn handing_on() -> Placement {
         .segment("engine", ["D"])
 }
 
+/// The source alone: its own hop crosses to the engine.
+fn alone() -> Placement {
+    Placement::new()
+        .segment("front", ["A"])
+        .segment("engine", ["B", "C", "D", "E", "F", "G"])
+}
+
 /// An entry, and whether its visits have a request path.
 type Entry = (&'static str, bool);
 
@@ -576,52 +583,57 @@ async fn a_deadline_is_counted_where_its_clock_ended_the_stream() {
 }
 
 /// A visit is in flight until its segment has nothing left to do for it.
-/// The engine, streaming slowly, holds its request until its stream ends,
-/// and so does the front, which relays the stream to the caller. A segment
-/// that only hands the request on lets it go at the hand-off, while the
-/// stream still flows elsewhere.
+/// The engine, whose stream stays open after its items, holds its request
+/// until its stream ends, and so does the front, which relays the stream to
+/// the caller. A segment that only hands the request on lets it go at the
+/// hand-off, while the stream still flows elsewhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_request_is_in_flight_until_its_segment_is_done_with_it() {
     let d = deployed(handing_on(), &|_| RuntimeConfig::default()).await;
-    let slow = Plan {
-        item_delay_ms: 100,
-        ..plan(3)
+    let held = Plan {
+        hold_at_end: true,
+        ..plan(2)
     };
-    let mut out = d.call(Cx::new(), slow).await.expect("call");
-    next(&mut out).await.expect("not an error");
-    // The two items left are 100 ms apart: the engine is still streaming.
+    let cx = Cx::new();
+    let mut out = d.call(cx.clone(), held).await.expect("call");
+    for _ in 0..2 {
+        next(&mut out).await.expect("not an error");
+    }
+    // D holds its stream open until a stop: the engine is still streaming.
     assert_eq!(d.value("inflight_requests", "D", &[]), 1.0, "the engine");
     assert_eq!(d.value("inflight_requests", "A", &[]), 1.0, "the front");
     assert_eq!(d.value("requests_total", "C", &[]), 1.0);
     assert_eq!(d.value("inflight_requests", "C", &[]), 0.0, "handed on");
     assert_eq!(d.get("responses_total", "C", &[]), None, "no response");
-    assert_eq!(collect(out).await, expected(1..3));
+    cx.request_stop();
+    let rest = collect(out).await;
+    assert!(rest.iter().all(Result::is_ok), "{rest:?}");
     d.idle().await;
 }
 
 /// A segment that runs only part of the backward path counts its visit
 /// from the `gdl.open` that prepares the run: while the run waits for the
-/// engine's stream to exist, while it streams, and until its stream ends.
+/// engine's stream to exist, and until its stream ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_backward_run_is_in_flight_from_its_open() {
     let d = deployed(three(), &|_| RuntimeConfig::default()).await;
-    let slow = Plan {
-        slow_attempt: Some((0, 300)),
-        item_delay_ms: 100,
-        ..plan(3)
+    // D's `generate` returns only after a stop: until then F's run waits
+    // for activation.
+    let waiting = Plan {
+        stop_aware_start: true,
+        ..plan(1)
     };
-    let (out, ()) = tokio::join!(d.call(Cx::new(), slow), async {
+    let cx = Cx::new();
+    let (out, ()) = tokio::join!(d.call(cx.clone(), waiting), async {
         d.reaches("F", 1.0).await;
-        // D sleeps 300 ms before its stream exists: F's run is waiting for
-        // activation.
         assert_eq!(d.count("request_path_duration_seconds", "D"), 0.0);
         assert_eq!(d.count("response_time_to_first_item_seconds", "F"), 0.0);
+        cx.request_stop();
     });
-    let mut out = out.expect("call");
-    next(&mut out).await.expect("not an error");
-    assert_eq!(d.value("inflight_requests", "F", &[]), 1.0, "streaming");
-    assert_eq!(collect(out).await, expected(1..3));
+    let rest = collect(out.expect("call")).await;
+    assert!(rest.iter().all(Result::is_ok), "{rest:?}");
     d.idle().await;
+    assert_eq!(d.count("response_time_to_first_item_seconds", "F"), 1.0);
 }
 
 /// A cancel brings every segment back to zero. Every segment but the
@@ -651,10 +663,37 @@ async fn a_cancel_ends_every_visit() {
     }
 }
 
+/// Where the source's own hop crosses to another segment, the source's
+/// visit ends at a cancel, or at its deadline, though its caller holds the
+/// stream unread: the task that watches the crossing for the cancel ends
+/// it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_ends_a_crossing_sources_visit_though_its_caller_does_not_read() {
+    let d = deployed(alone(), &|_| RuntimeConfig::default()).await;
+    let cx = Cx::new();
+    let mut out = d.call(cx.clone(), endless()).await.expect("call");
+    next(&mut out).await.expect("not an error");
+    cx.cancel();
+    d.idle().await;
+    assert_eq!(d.value("end_to_end_cancellation_total", "A", &[]), 1.0);
+    drop(out);
+
+    let mut out = d
+        .call(Cx::new().with_timeout(ms(200)), endless())
+        .await
+        .expect("call");
+    next(&mut out).await.expect("not an error");
+    d.idle().await;
+    let with = [("error_type", "deadline_exceeded")];
+    assert_eq!(d.value("end_to_end_errors_total", "A", &with), 1.0);
+    drop(out);
+}
+
 /// The source's visit ends at a cancel though its caller holds the stream
 /// unread, as the owner's rule says a cancelled request does.
-#[ignore = "LIMITATIONS.md, the source's count after a cancel: the source's visit ends when its \
-            caller reads the cancel or drops the stream; nothing runs for it before then"]
+#[ignore = "LIMITATIONS.md, the source's count after a cancel: where the source's own hop stays \
+            in its segment, the source's visit ends when its caller reads the cancel or drops \
+            the stream; nothing runs for it before then"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cancel_ends_the_sources_visit_though_its_caller_does_not_read() {
     for placement in [one(), two()] {
@@ -754,10 +793,7 @@ async fn a_refused_request_is_counted_by_its_sender() {
 /// request path ends when the sink below it starts its stream.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_default_deadline_classifies_a_dropped_request() {
-    let alone = Placement::new()
-        .segment("front", ["A"])
-        .segment("engine", ["B", "C", "D", "E", "F", "G"]);
-    let d = deployed(alone, &|_| RuntimeConfig {
+    let d = deployed(alone(), &|_| RuntimeConfig {
         default_deadline: ms(200),
         ..RuntimeConfig::default()
     })

@@ -109,12 +109,12 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Would lift it:** an adapter that translates gdl's kinds to dynamo's values. gdl keeps its own errors (the owner, 2026-10-20).
 - **See:** rulings 134 and 136.
 
-### After a cancel, the source counts a request until its caller reads the stream
+### After a cancel, the source can count a request until its caller reads the stream
 
-- **What happens:** a caller cancels its request through its context, or the request's deadline passes, while the caller holds the response stream and does not read it. Every other segment lets the request go at once. The source's segment counts it in `inflight_requests` until the caller reads the stream, which then ends with the error, or drops it.
-- **Why:** nothing runs for the source's visit between the caller's reads. The response stream ends the visit, and the stream runs only when the caller reads it.
-- **Would lift it:** a task for each request that waits for the cancel or the deadline and ends the visit. It costs every request a task while metrics are on, and is not measured.
-- **See:** the addendum on one in-flight gauge (plan, 2026-10-21); `a_cancel_ends_the_sources_visit_though_its_caller_does_not_read` in `crates/gdl/tests/recorded.rs`, ignored.
+- **What happens:** a caller cancels its request through its context, or the request's deadline passes, while the caller holds the response stream and does not read it. Every other segment lets the request go at once. When the source's own hop stays in the source's segment, as it does when the source shares a segment with the node it calls, the source's segment counts the request in `inflight_requests` until the caller reads the stream, which then ends with the error, or drops it. When the source's hop crosses to another segment, the task that watches the crossing ends the count at once.
+- **Why:** where the hop stays in the segment, nothing runs for the source's visit between the caller's reads. The response stream ends the visit, and the stream runs only when the caller reads it.
+- **Would lift it:** a task for each request that waits for the cancel or the deadline and ends the visit. It costs every such request a task while metrics are on, and is not measured.
+- **See:** the addendum on one in-flight gauge (plan, 2026-10-21); in `crates/gdl/tests/recorded.rs`, `a_cancel_ends_the_sources_visit_though_its_caller_does_not_read` (ignored) and `a_cancel_ends_a_crossing_sources_visit_though_its_caller_does_not_read`.
 
 ### A deadline can be counted in more than one segment
 

@@ -436,6 +436,12 @@ where
         // response stream cancels when it ends.
         let (mut inbound, retire) = inbound.share();
         let watched = attempt.clone();
+        // The source's visit, when this hop's outer end is the source: a
+        // cancel or the deadline ends it here, though the caller may hold the
+        // response unread. Only the source's own hop may: an operator's
+        // attempt carries its visit too, and one attempt's end is not the
+        // visit's. Whichever ends the visit first records it, once.
+        let root = self.figures.source.and(attempt.visit().cloned());
         tokio::spawn(async move {
             let mut stopped = false;
             let reason = loop {
@@ -448,6 +454,9 @@ where
                     }
                 }
             };
+            if let Some(root) = root {
+                root.end(Ending::Failed(&reason));
+            }
             retire.retire(reason);
             // The rest of the attempt here (the outer end's backward nodes,
             // anything they started) ends with it, read or not. A deadline
