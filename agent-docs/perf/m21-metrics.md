@@ -54,3 +54,53 @@ Read against the gate: nothing over 5%. One segment of seven trivial nodes, the 
 3. **A stream wrapper per node** to see each response's end cost an allocation per sink, operator, and backward node. The reading now rides the node boundary every such stream already passes (`fuse`, and `bound` for the source), which also makes the recorded outcome the one the boundary reports: a clean end after a cancel counts as a cancellation.
 
 To confirm on machine 1 (`benchmarking.md`): the "on against off" column and the concurrent row, by `perf stat` and at higher core counts, where a shared counter would contend more and a shard per thread costs more memory (64 shards at most, 256 bytes each per node).
+
+## 2026-10-21: per segment, not per node (rulings 131 to 139)
+
+The runtime's figures moved from each node to each segment's visits (rulings 131 to 137). Ruling 138 restates the gate as a budget: with metrics on, at most 2,000 instructions per visit; with metrics off, nothing beyond the spread against the base; per item, nothing measurable. The reference rows have 1, 2, and 3 visits per request for one, two, and three segments. **Provisional: Apple M5, macOS, loopback, shared machine** (`benchmarking.md`). The tables above are kept as the history of the per-node build.
+
+"Base" is `25fa36d`, the per-node build: base-off has metrics off, base-on records per node. "Off" and "on" are the per-segment build. Both were built in turn in the same checkout and target directory, with `git checkout 25fa36d`, then `main`, and the binaries copied aside. rustc 1.93.1.
+
+### Instructions per request
+
+Same method as above: (count at 20,000 − count at 10,000) / 10,000, under `/usr/bin/time -l`, the four binaries interleaved in each round, seven rounds. Medians, at `6b43a49` (load average 5.1 falling to 3.3):
+
+| Setup | Base-off | Base-on (per node) | Off | On | On − off | Per visit |
+|---|---|---|---|---|---|---|
+| one segment (1 visit) | 128,540 | 132,286 (+3,746) | 128,302 | 129,878 | +1,575 (+1.2%) | 1,575 |
+| two segments (2 visits) | 628,061 | 633,917 (+5,856) | 631,250 | 634,061 | +2,811 (+0.4%) | 1,406 |
+| three segments (3 visits) | 1,200,822 | 1,208,748 (+7,926) | 1,202,678 | 1,216,461 | +13,783 (+1.1%) | 4,594 |
+
+The spread of "off" across rounds: 126.7k to 128.6k (one segment), 625.7k to 635.6k (two), 1,197.9k to 1,221.2k (three). An earlier set of seven rounds, at `6d8ad84` (the same hot path; load average 7.3 falling to 3.4), gave one segment 128,015 off and 130,184 on (+2,169 per visit), two segments +5,836 (2,918 per visit), and three +8,641 (2,880 per visit).
+
+Read against the budget: one segment, the only row whose spread is smaller than the effect, costs 1,575 and 2,169 instructions per visit in the two sets, about half of the per-node build's 3,746 for the same request. The budget of 2,000 sits inside that range, so the laptop cannot settle it; machine 1 does. Two and three segments are within their spread. With metrics off, the change is within the spread of the base in every row (−0.2%, +0.5%, +0.2%).
+
+Where the cost goes, read from the code, not profiled: one `Arc` allocation per visit, four or five clock reads, about six compare-exchanges, the sharded counters and histograms, and an increment and a decrement of the visit's count for each `Cx::clone` and `Cx::child` while it lives. A profile on machine 1 decides what to cut if the budget fails there.
+
+### Wall time
+
+`remote`'s criterion rows, off then on in the same run, base and change interleaved, three runs each (at `6d8ad84`; load average 2.6 to 3.4). The concurrent and per-item rows were run again with `--output-format bencher`, three runs each, interleaved:
+
+| Row | Base, off → on | Change, off → on |
+|---|---|---|
+| `request/reference-1-segment` | 8.63 → 8.77, 8.79 → 8.92, 8.78 → 9.04 µs | 9.03 → 8.89, 8.60 → 8.61, 8.76 → 8.67 µs |
+| `request/reference-2-segments` | 57.7 → 57.7, 57.8 → 57.7, 57.6 → 57.9 µs | 57.6 → 58.1, 57.5 → 57.9, 57.7 → 58.7 µs |
+| `request/reference-3-segments` | 120.6 → 120.4, 119.7 → 117.3, 120.4 → 118.5 µs | 120.8 → 119.2, 120.4 → 118.6, 121.3 → 119.0 µs |
+| `concurrent-32x1-reference/1-segment` | 69.7 → 74.0, 69.5 → 73.9, 70.4 → 74.4 µs (+5.7 to +6.3%) | 69.7 → 72.9, 67.4 → 70.8, 66.6 → 69.8 µs (+4.6 to +5.0%) |
+| `reference-items/2-segments` (1,000 items) | 129.0 → 128.2, 119.5 → 121.0, 121.3 → 117.6 ms | 126.5 → 122.8, 119.6 → 120.5, 120.7 → 119.9 ms |
+
+- **Per item:** `reference-items/2-segments` does not move with metrics on, in either build: nothing measurable, as the gate asks. The per-item work is one branch where the root's boundary, each pump, and each response anchor's reader test whether the first item has passed. The fallback of ruling 138 (time to first item only at the source and the sink) is not needed.
+- **One request at a time:** the one-, two-, and three-segment rows stay within their spread.
+- **32 requests at once:** recording costs 4.6 to 5.0% in the change, against 5.7 to 6.3% for the per-node build in the same runs (2 to 5% in the per-node build's own measurement above). It is about 100 ns per request of 2.2 µs. Sharding per thread stays: no figure is shared between threads; the rest is the visit's allocation and its count, which machine 1 measures at higher core counts.
+
+### Commands
+
+```bash
+git checkout 25fa36d && cargo bench -p gdl --bench requests --bench remote --no-run   # copy both binaries aside as base
+git checkout main && cargo bench -p gdl --bench requests --bench remote --no-run      # and the change
+/usr/bin/time -l requests-<base|change> <one|two|three>[-metrics] <10000|20000>      # interleaved, seven rounds
+remote-<base|change> --bench --warm-up-time 2 --measurement-time 5 \
+  '^(request/reference-[123]-segments?(-metrics)?|concurrent-32x1-reference/.*|reference-items/2-segments(-metrics)?)$'
+remote-<base|change> --bench --warm-up-time 2 --measurement-time 5 --output-format bencher \
+  '^(concurrent-32x1-reference/.*|reference-items/2-segments(-metrics)?)$'
+```

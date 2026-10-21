@@ -45,7 +45,7 @@ Every performance number gdl and velo have recorded so far came from one Apple M
 ### gdl
 
 - **`cargo bench -p gdl --bench hop --bench remote`:** per-request and per-item cost locally and across one crossing, including the renewal cost recorded in `m19-renewal.md`.
-- **Milestone 21's runtime metrics (rulings 118, 128, 129):** the per-node figures, against the same benches with metrics off, including `concurrent-32x1-reference`. The laptop showed the shared atomics' contention (+27%), so the figures are sharded per thread as built; machine 1 confirms the sharded cost and how it scales with cores.
+- **Milestone 21's runtime metrics (rulings 131 to 138):** the per-segment figures, against the same benches with metrics off and against the per-node build they replaced, including `concurrent-32x1-reference` and `reference-items/2-segments`. The figures are sharded per thread; machine 1 confirms the cost per visit, how it scales with cores, and the cost of the visit's count on each `Cx::clone` and `Cx::child` in an operator that clones its context often and in a streamed relay.
 - **End to end:** a three-segment graph across machine 2, streaming token-sized items at a realistic request rate. Measure:
   - time to first item;
   - inter-item p50 and p99;
@@ -61,7 +61,8 @@ Every performance number gdl and velo have recorded so far came from one Apple M
 | Path | A change may cost |
 |---|---|
 | Per item (velo send and receive, gdl stage hand-off) | nothing measurable on machine 1: within the spread of repeated runs |
-| Per request (admission, routing, the runtime's per-node metrics) | at most 1% instructions on the `hop` and `remote` benches, unless the owner accepts more for the feature |
+| Per request (admission, routing) | at most 1% instructions on the `hop` and `remote` benches, unless the owner accepts more for the feature |
+| Per request, the runtime's metrics (ruling 138) | with metrics on, at most 2,000 instructions per visit (one request's pass through one segment), measured as (on − off) / visits per request on the `requests` bench; with metrics off, nothing beyond the spread against the base |
 | Tail latency across machine 2 | p99 no worse beyond the spread |
 | Setup and teardown paths | reported; a gate only where a ruling names one |
 
@@ -76,7 +77,7 @@ A laptop run gates nothing smaller than 5%. It may block a change that is plainl
 | velo#141: the gRPC size check costs nothing | pending | velo#141 |
 | gdl: reply renewal | criterion medians | `m19-renewal.md` |
 | gdl: the reader is linear | release runs | `reader-cost.md` |
-| gdl: milestone 21's runtime metrics cost under 1% per request across a crossing, and nothing per item | one segment +2.0% instructions, two +0.3%, three within spread; 32 requests at once +2 to 5% (sharded; shared atomics were +27%) | `m21-metrics.md` |
+| gdl: the runtime's per-segment metrics cost at most 2,000 instructions per visit, nothing with metrics off, and nothing per item | one segment 1,575 and 2,169 per visit in two sets of rounds (the per-node build: 3,746); two and three segments within spread; off within spread of the base; per item nothing; 32 requests at once +4.6 to 5.0% (per node: +5.7 to 6.3%) | `m21-metrics.md`, 2026-10-21 |
 
 ## Automation
 
