@@ -7,11 +7,36 @@ use serde::{Deserialize, Serialize};
 /// It is serializable so that a failure raised in one segment reaches the
 /// consumer in another segment with its kind intact. An `Err` item in a
 /// response stream is terminal: the runtime ends the stream after it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(Clone, Serialize, Deserialize, thiserror::Error)]
 #[error("{kind}: {message}")]
 pub struct Error {
     kind: ErrorKind,
     message: String,
+    /// Whether this segment received the error from another one, as a
+    /// failure on a response stream, rather than raising it: the runtime
+    /// counts an error once, where it was raised. It is not sent: the
+    /// receiving segment sets it again.
+    #[serde(skip)]
+    relayed: bool,
+}
+
+/// Two errors are equal when their kind and message are: whether one was
+/// relayed is the runtime's bookkeeping, not part of the error.
+impl PartialEq for Error {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.message == other.message
+    }
+}
+
+impl Eq for Error {}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Error")
+            .field("kind", &self.kind)
+            .field("message", &self.message)
+            .finish()
+    }
 }
 
 impl Error {
@@ -20,6 +45,7 @@ impl Error {
         Self {
             kind,
             message: message.into(),
+            relayed: false,
         }
     }
 
@@ -54,6 +80,18 @@ impl Error {
     /// The human-readable message.
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// The error, marked as received from another segment.
+    pub(crate) fn relayed(mut self) -> Self {
+        self.relayed = true;
+        self
+    }
+
+    /// Whether the error was received from another segment, not raised in
+    /// this one.
+    pub(crate) fn is_relayed(&self) -> bool {
+        self.relayed
     }
 }
 
@@ -109,5 +147,25 @@ impl From<gdl_model::Error> for Error {
 impl From<gdl_model::PlacementErrors> for Error {
     fn from(errors: gdl_model::PlacementErrors) -> Self {
         Self::new(ErrorKind::Placement, errors.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The flag stays in the segment that set it, and two errors that
+    /// differ only in it are equal.
+    #[test]
+    fn whether_an_error_was_relayed_is_not_sent_or_compared() {
+        let error = Error::node("x").relayed();
+        assert!(error.is_relayed());
+        assert!(error.clone().is_relayed());
+        assert_eq!(error, Error::node("x"));
+        assert_eq!(format!("{error:?}"), format!("{:?}", Error::node("x")));
+        let bytes = rmp_serde::to_vec(&error).expect("encode");
+        let received: Error = rmp_serde::from_slice(&bytes).expect("decode");
+        assert!(!received.is_relayed());
+        assert_eq!(received, error);
     }
 }

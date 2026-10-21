@@ -57,9 +57,9 @@ pub struct RuntimeConfig {
     /// request. `None` is `default_deadline`, since no request admitted
     /// before the stop outlives it unless it set a longer deadline itself.
     pub drain: Option<Duration>,
-    /// Where the runtime records each hosted node's requests, errors,
-    /// cancellations, requests in flight, and durations; `None` records
-    /// nothing. Not a setting: a segment binary gives its process's
+    /// Where the runtime records what each request does in this segment:
+    /// its request path, the response streams it sends on, and, at the
+    /// source, the request end to end; `None` records nothing. Not a setting: a segment binary gives its process's
     /// registry when its system listener can serve it.
     pub metrics: Option<prometheus::Registry>,
     /// Test-only delays and drops.
@@ -458,7 +458,8 @@ pub(crate) struct Runtime {
     pub(crate) served: Served,
     /// Filled once at start; read by local short-circuits.
     entries: std::sync::OnceLock<std::sync::Weak<Entries>>,
-    /// The figures of each hosted node, when the instance records them.
+    /// The figures of each entry the segment hosts, when the instance
+    /// records them.
     pub(crate) meters: Option<Meters>,
 }
 

@@ -10,6 +10,7 @@ use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::error::{Error, Result};
+use crate::meter::Visit;
 
 /// The per-request context every node receives.
 ///
@@ -23,6 +24,10 @@ pub struct Cx {
     deadline: Option<Deadline>,
     scope: Scope,
     ext: Extensions,
+    /// The request's visit to this segment, when the runtime records one:
+    /// the hops a node calls under this context end its request path and
+    /// stamp its response. Like the extensions, it stays in the segment.
+    visit: Option<Arc<Visit>>,
 }
 
 impl Cx {
@@ -34,6 +39,7 @@ impl Cx {
             deadline: None,
             scope: Scope::root(),
             ext: Extensions::default(),
+            visit: None,
         }
     }
 
@@ -90,6 +96,7 @@ impl Cx {
             deadline: self.deadline,
             scope: self.scope.child(),
             ext: self.ext.clone(),
+            visit: self.visit.clone(),
         }
     }
 
@@ -184,7 +191,20 @@ impl Cx {
             deadline,
             scope: Scope::root(),
             ext: Extensions::default(),
+            visit: None,
         }
+    }
+
+    /// This context with `visit` as the visit the work under it belongs
+    /// to; `None` for work that must not touch its parent's.
+    pub(crate) fn with_visit(mut self, visit: Option<Arc<Visit>>) -> Self {
+        self.visit = visit;
+        self
+    }
+
+    /// The visit the work under this context belongs to, if recorded.
+    pub(crate) fn visit(&self) -> Option<&Arc<Visit>> {
+        self.visit.as_ref()
     }
 
     /// A guard that cancels this context when dropped. The runtime holds one

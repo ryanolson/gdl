@@ -460,7 +460,7 @@ pub async fn reference_front(
 
 /// The reference graph over one, two, or three segments. One segment runs
 /// every node through the distributed stages with no crossing: what the
-/// runtime adds per node, which a crossing's cost would hide.
+/// runtime adds per request, which a crossing's cost would hide.
 pub fn reference_placement(segments: usize) -> Placement {
     match segments {
         1 => Placement::new().segment("front", ["A", "B", "C", "D", "F", "E", "G"]),

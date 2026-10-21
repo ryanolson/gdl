@@ -15,9 +15,10 @@ use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use crate::cx::{Cx, Deadline};
 use crate::error::{Error, ErrorKind, Result};
 use crate::items::{CHECK_INTERVAL, Items, bound_measured, items};
-use crate::meter::{Meter, Outcome};
+use crate::meter::{self, END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit};
 use crate::role::Next;
 use gdl_model::HopLayout;
+use tokio::time::Instant;
 
 /// Registers the entries a hop, and every hop nested under it, hosts in this
 /// segment.
@@ -54,11 +55,83 @@ struct HopCore<F, I, B> {
     inner: I,
     bwd: B,
     plan: HopPlan,
-    /// The source's figures, on the hop whose outer end is the graph's
-    /// source in this segment. Another hop's outer end is an operator,
-    /// metered where it is called as an inner end: its calls to `next`
-    /// are attempts, not requests.
-    source: Option<&'static Meter>,
+    /// The figures of the entries this hop has in this segment, when the
+    /// segment records them.
+    figures: HopFigures,
+}
+
+/// The figures of a hop's entries in one segment: where a visit to the
+/// segment begins (`agent-docs/plan.md`, rulings 131 to 137).
+#[derive(Default)]
+struct HopFigures {
+    /// The root's, on the hop whose outer end is the graph's source.
+    /// Another hop's outer end is an operator: its calls to `next` are
+    /// attempts within the visit that called it.
+    source: Option<&'static Figures>,
+    /// A `gdl.fwd` arriving at each forward position, where a run starts
+    /// here.
+    forward: Vec<Option<&'static Figures>>,
+    /// The inner end run the outer end spawns, when the forward path stays
+    /// in its segment and the response crosses.
+    inner: Option<&'static Figures>,
+    /// A backward run that starts here, by its first position.
+    backward: Vec<Option<&'static Figures>>,
+}
+
+impl HopFigures {
+    fn new(
+        meters: &Meters,
+        here: &str,
+        forward: &[(String, String)],
+        backward: &[(String, String)],
+        plan: &HopPlan,
+        source: bool,
+    ) -> Self {
+        fn hosted<'a>(path: &'a [(String, String)], pos: usize, here: &str) -> Option<&'a str> {
+            path.get(pos)
+                .filter(|(segment, _)| segment == here)
+                .map(|(_, node)| node.as_str())
+        }
+        let outer = hosted(forward, 0, here);
+        HopFigures {
+            source: outer
+                .filter(|_| source)
+                .map(|node| meters.entry(node, REQUEST | RESPONSE | END_TO_END)),
+            // A hand-off arrives where a run starts: the walk that sends it
+            // leaves at the first position outside its own segment.
+            forward: (0..forward.len())
+                .map(|pos| {
+                    let node = hosted(forward, pos, here)?;
+                    (pos > 0 && forward[pos - 1].0 != here).then(|| {
+                        let parts = if plan.reaches_inner(pos) {
+                            REQUEST | RESPONSE
+                        } else {
+                            REQUEST
+                        };
+                        meters.entry(node, parts)
+                    })
+                })
+                .collect(),
+            inner: (outer.is_some() && !plan.local && plan.reaches_inner(0))
+                .then(|| hosted(forward, forward.len() - 1, here))
+                .flatten()
+                .map(|node| meters.entry(node, RESPONSE)),
+            backward: (0..backward.len())
+                .map(|pos| {
+                    let opened = plan
+                        .provisioning
+                        .iter()
+                        .any(|(start, segment)| *start == pos && segment == here);
+                    let node = hosted(backward, pos, here).filter(|_| opened)?;
+                    Some(meters.entry(node, RESPONSE))
+                })
+                .collect(),
+        }
+    }
+
+    fn at(figures: &[Option<&'static Figures>], pos: usize) -> Option<&'static Figures> {
+        figures.get(pos).copied().flatten()
+    }
 }
 
 /// The parts of the layout one hop needs at run time, by path position.
@@ -143,13 +216,7 @@ fn run_end(segments: &[String], pos: usize) -> usize {
 }
 
 impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
-    pub(crate) fn new(
-        rt: Arc<Runtime>,
-        index: u16,
-        mut fwd: F,
-        mut inner: I,
-        mut bwd: B,
-    ) -> Result<Self> {
+    pub(crate) fn new(rt: Arc<Runtime>, index: u16, fwd: F, inner: I, bwd: B) -> Result<Self> {
         let hop = rt.layout.hops().get(usize::from(index)).ok_or_else(|| {
             Error::new(
                 ErrorKind::Placement,
@@ -206,25 +273,19 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
                 ),
             ));
         }
-        // Each node this segment hosts gets its figures by its position.
-        let meter_at = |path: &[(String, String)], pos: usize| {
-            let (segment, node) = path.get(pos)?;
-            (*segment == rt.segment).then_some(())?;
-            rt.meters.as_ref()?.get(node)
-        };
-        fwd.meter(1, &|pos| meter_at(&forward, pos));
-        inner.meter(meter_at(&forward, forward.len() - 1));
-        bwd.meter(1, &|pos| meter_at(&backward, pos));
+        let plan = HopPlan::new(hop);
         // The source is the one outer end that is no hop's inner end.
         let outer = &forward[0].1;
-        let source = rt
-            .layout
-            .hops()
-            .iter()
-            .all(|hop| hop.forward_runs.last().and_then(|run| run.stages.last()) != Some(outer))
-            .then(|| meter_at(&forward, 0))
-            .flatten();
-        let plan = HopPlan::new(hop);
+        let source =
+            rt.layout.hops().iter().all(|hop| {
+                hop.forward_runs.last().and_then(|run| run.stages.last()) != Some(outer)
+            });
+        let figures = match &rt.meters {
+            Some(meters) => {
+                HopFigures::new(meters, &rt.segment, &forward, &backward, &plan, source)
+            }
+            None => HopFigures::default(),
+        };
         Ok(Self(Arc::new(HopCore {
             rt,
             index,
@@ -232,7 +293,7 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
             inner,
             bwd,
             plan,
-            source,
+            figures,
         })))
     }
 }
@@ -244,45 +305,55 @@ where
     B: DBackward<In = I::Item>,
 {
     async fn generate(&self, cx: Cx, req: F::In) -> Result<Items<B::Out>> {
-        // The source's request, when this hop's outer end is the source,
-        // noted at each exit of this one function. A wrapping function
-        // would put this future inside another, and moving it whole cost
-        // a request 8,000 instructions (`agent-docs/perf/m21-metrics.md`).
-        let mut source = Outcome::start(self.0.source, &cx);
+        let core = &self.0;
+        // The root's visit, when this hop's outer end is the source, noted
+        // at each exit of this one function. A wrapping function would put
+        // this future inside another, and moving it whole cost a request
+        // 8,000 instructions (`agent-docs/perf/m21-metrics.md`).
+        let called = core.figures.source.map(|figures| (figures, Instant::now()));
         // As in local composition: every attempt spends cooperative budget.
         tokio::task::coop::consume_budget().await;
-        source.note(cx.check())?;
         let attempt = cx.child();
-        // Dropping this future before it returns cancels the attempt; after
-        // it returns, the response stream owns the guard.
-        let guard = attempt.cancel_on_drop();
-        let core = &self.0;
-        if core.plan.local {
-            let items = tokio::select! {
-                biased;
-                reason = attempt.done() => return source.note(Err(reason)),
-                result = core.run_local(&attempt, req) => source.note(result)?,
-            };
-            source.note(attempt.check())?;
-            return Ok(bound_measured(&attempt, guard, items, source.reading()));
-        }
         // Remote work that no cancel can reach ends only by its deadline, so
         // no attempt crosses segments without one.
         let attempt = match attempt.deadline() {
-            Some(_) => attempt,
-            None => attempt.with_deadline(Deadline::after(core.rt.config.default_deadline)),
+            None if !core.plan.local => {
+                attempt.with_deadline(Deadline::after(core.rt.config.default_deadline))
+            }
+            _ => attempt,
         };
-        source.deadline(&attempt);
-        let slot = source.note(core.rt.admission.attempt(attempt.id().as_u128()))?;
+        let root =
+            called.map(|(figures, at)| Visit::request(figures, at, attempt.deadline(), true));
+        let attempt = match &root {
+            Some(root) => attempt.with_visit(Some(Arc::clone(root.visit()))),
+            None => attempt,
+        };
+        meter::note(root.as_ref(), attempt.check())?;
+        // Dropping this future before it returns cancels the attempt; after
+        // it returns, the response stream owns the guard.
+        let guard = attempt.cancel_on_drop();
+        if core.plan.local {
+            let items = tokio::select! {
+                biased;
+                reason = attempt.done() => return meter::note(root.as_ref(), Err(reason)),
+                result = core.run_local(&attempt, req) => meter::note(root.as_ref(), result)?,
+            };
+            meter::note(root.as_ref(), attempt.check())?;
+            return Ok(bound_measured(&attempt, guard, items, root));
+        }
+        let slot = meter::note(
+            root.as_ref(),
+            core.rt.admission.attempt(attempt.id().as_u128()),
+        )?;
         let items = tokio::select! {
             biased;
-            reason = attempt.done() => return source.note(Err(reason)),
-            result = core.run_remote(&attempt, req) => source.note(result)?,
+            reason = attempt.done() => return meter::note(root.as_ref(), Err(reason)),
+            result = core.run_remote(&attempt, req) => meter::note(root.as_ref(), result)?,
         };
-        source.note(attempt.check())?;
+        meter::note(root.as_ref(), attempt.check())?;
         // The attempt slot is held for as long as the response stream lives.
         let items = items_holding(items, slot);
-        Ok(bound_measured(&attempt, guard, items, source.reading()))
+        Ok(bound_measured(&attempt, guard, items, root))
     }
 }
 
@@ -425,10 +496,20 @@ where
                 )
                 .await?;
                 let hop = Arc::clone(self);
+                // The inner end's stream is one this segment sends on, with
+                // a visit of its own; its sink's start ends the request
+                // path of the visit the attempt belongs to.
+                let owner = self.figures.inner.map(|figures| {
+                    Visit::response(figures, attempt.deadline(), attempt.visit().cloned())
+                });
                 // A child scope: the inner end's task cancels its scope when
                 // it ends, which must not end the attempt reading its output.
-                let cx = attempt.child();
-                tokio::spawn(async move { hop.run_inner(cx, value, reply, None, egress).await });
+                let cx = attempt
+                    .child()
+                    .with_visit(owner.as_ref().map(|owner| Arc::clone(owner.visit())));
+                tokio::spawn(async move {
+                    hop.run_inner(cx, value, reply, None, egress, owner).await;
+                });
             }
             FwdExit::Leave { at, head, input } => {
                 // An input pump is a producer. It takes its permit before the
@@ -455,9 +536,15 @@ where
                     reply,
                     payload: head,
                 };
+                let sent = attempt.visit().map(|_| Instant::now());
                 let accepted = rt
                     .send_forward(&self.plan.fwd_segments[at], envelope)
                     .await?;
+                // Handed on: the visit's request path ends where the
+                // hand-off left, and its response begins.
+                if let (Some(visit), Some(sent)) = (attempt.visit(), sent) {
+                    visit.handed_on(true, sent);
+                }
                 match (input, accepted, egress) {
                     (None, None, _) => {}
                     // Started before waiting for the open signal: a sink may
@@ -493,7 +580,9 @@ where
         };
         match first {
             Some(Frame::Open) => {}
-            Some(Frame::Fail(error) | Frame::Broken(error)) => return Err(error),
+            // Raised in the segment that sent it, and counted there.
+            Some(Frame::Fail(error)) => return Err(error.relayed()),
+            Some(Frame::Broken(error)) => return Err(error),
             Some(Frame::End) | None => {
                 return Err(truncated("the producer ended before opening"));
             }
@@ -501,7 +590,7 @@ where
                 return Err(internal("an item arrived before the open signal"));
             }
         }
-        let bytes = inbound_items(inbound);
+        let bytes = response_items(inbound, attempt.visit().cloned());
         match self
             .bwd
             .enter(1, self.plan.outer_start, usize::MAX, attempt, bytes)?
@@ -517,6 +606,11 @@ where
     /// acknowledgement names the input anchor this stage minted.
     async fn accept_forward(self: &Arc<Self>, envelope: Forward) -> Result<Accepted> {
         let rt = &self.rt;
+        let pos = usize::from(envelope.pos);
+        // The request's visit to this segment begins at its arrival, but
+        // only a request this segment admits is one.
+        let arrived =
+            HopFigures::at(&self.figures.forward, pos).map(|figures| (figures, Instant::now()));
         #[cfg(feature = "fault-injection")]
         if let Some(delay) = rt.config.faults.delay_forward_arrival {
             tokio::time::sleep(delay).await;
@@ -533,7 +627,6 @@ where
             rt.admission.admit(root),
         )
         .await?;
-        let pos = usize::from(envelope.pos);
         // A run that will produce a stream (the inner end's output, or a
         // relay's onward input) takes its egress permit before
         // acknowledging, so a full instance refuses instead of stalling.
@@ -551,7 +644,7 @@ where
                 .inputs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             (
-                Some(inbound_items(shared)),
+                Some(input_items(shared)),
                 Some(InputGuard(retirer)),
                 Some(reply),
             )
@@ -561,6 +654,8 @@ where
         rt.served
             .forwards
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let owner = arrived.map(|(figures, at)| Visit::request(figures, at, cx.deadline(), false));
+        let cx = cx.with_visit(owner.as_ref().map(|owner| Arc::clone(owner.visit())));
         let Forward { payload, reply, .. } = envelope;
         let held_reply = rt.fabric.hold_reply(&reply);
         let hop = Arc::clone(self);
@@ -605,10 +700,12 @@ where
             match walked {
                 Ok(FwdExit::Here(value)) => match egress {
                     Some(egress) => {
-                        hop.run_inner(cx, value, reply, Some(share), egress).await;
+                        hop.run_inner(cx, value, reply, Some(share), egress, owner)
+                            .await;
                     }
                     None => {
                         let error = internal("a run reached an inner end it did not expect");
+                        meter::ended(owner.as_ref(), Ending::Failed(&error));
                         hop.fail(&cx, &reply, error).await;
                     }
                 },
@@ -622,28 +719,48 @@ where
                         reply: reply.clone(),
                         payload: head,
                     };
+                    let sent_at = owner.as_ref().map(|_| Instant::now());
                     let sent =
                         bounded(&cx, hop.rt.send_forward(&hop.plan.fwd_segments[at], onward)).await;
+                    // Handed on, the visit ends here: the response flows
+                    // past this segment.
+                    let handed = || {
+                        if let (Some(owner), Some(sent_at)) = (&owner, sent_at) {
+                            owner.visit().handed_on(false, sent_at);
+                        }
+                    };
                     match (sent, input, egress) {
                         // The next stage owns the reply now.
-                        (Ok(None), None, _) => drop(share),
+                        (Ok(None), None, _) => {
+                            handed();
+                            drop(share);
+                        }
                         // A relay. The next stage owns the reply; this one keeps
                         // its admission share and its permit until it has sent
                         // the items on.
                         (Ok(Some(next)), Some(input), Some(egress)) => {
+                            handed();
                             Box::pin(send_input(&hop.rt, &cx, next, input, upstream, None)).await;
                             drop((share, egress));
                         }
-                        (Ok(_), _, _) => hop.fail(&cx, &reply, disagree()).await,
+                        (Ok(_), _, _) => {
+                            let error = disagree();
+                            meter::ended(owner.as_ref(), Ending::Failed(&error));
+                            hop.fail(&cx, &reply, error).await;
+                        }
                         // This stage still owns the reply until the failure is
                         // delivered, and counts against admission until then.
                         (Err(error), _, _) => {
+                            meter::ended(owner.as_ref(), Ending::Failed(&error));
                             hop.fail(&cx, &reply, error).await;
                             drop(share);
                         }
                     }
                 }
-                Err(error) => hop.fail(&cx, &reply, error).await,
+                Err(error) => {
+                    meter::ended(owner.as_ref(), Ending::Failed(&error));
+                    hop.fail(&cx, &reply, error).await;
+                }
             }
             // Dropping the guard retires the input anchor.
             drop(guard);
@@ -701,11 +818,17 @@ where
             .runs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (inbound, input) = rt.fabric.mint();
+        // The run's stream is one this segment sends on, with a visit of
+        // its own; one the outer end opens itself must not report to the
+        // attempt's.
+        let owner = HopFigures::at(&self.figures.backward, pos)
+            .map(|figures| Visit::response(figures, cx.deadline(), None));
+        let cx = cx.with_visit(owner.as_ref().map(|owner| Arc::clone(owner.visit())));
         let hop = Arc::clone(self);
         let end = self.plan.bwd_end(pos);
         tokio::spawn(async move {
             let _end = cx.cancel_on_drop();
-            hop.run_prepared(cx, pos, end, inbound, out).await;
+            hop.run_prepared(cx, pos, end, inbound, out, owner).await;
             drop(share);
             drop(egress);
         });
@@ -719,19 +842,21 @@ where
         end: usize,
         mut inbound: Inbound,
         out: Outbound,
+        owner: Option<Owner>,
     ) {
+        let held = owner.as_ref();
         let cancel = out.cancel_token();
         let stop = out.stop_token();
         let mut stopped = false;
         let first = loop {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => return,
+                () = cancel.cancelled() => return meter::ended(held, Ending::Gone),
                 () = stop.cancelled(), if !stopped => {
                     stopped = true;
                     inbound.request_stop();
                 }
-                reason = cx.done() => return finish_failed(out, reason).await,
+                reason = cx.done() => return failed(out, reason, held).await,
                 frame = inbound.next() => break frame,
             }
         };
@@ -739,6 +864,9 @@ where
             // The open signal travels on: the next run, or the outer end,
             // activates only once the inner end's stream exists.
             Some(Frame::Open) => {
+                if let Some(owner) = held {
+                    owner.visit().producing();
+                }
                 let upstream = Upstream {
                     cx: &cx,
                     anchor: Some(inbound.canceller()),
@@ -753,30 +881,36 @@ where
                 };
                 match deliver(&out, WireItem::Open, watch, &upstream).await {
                     Delivery::Sent => {}
-                    Delivery::Gone => return upstream.cancel(),
-                    Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
+                    Delivery::Gone => {
+                        meter::ended(held, Ending::Gone);
+                        return upstream.cancel();
+                    }
+                    Delivery::Interrupted(reason) => return failed(out, reason, held).await,
                 }
             }
-            Some(Frame::Fail(error) | Frame::Broken(error)) => {
-                return finish_failed(out, error).await;
-            }
+            // Raised in the segment that sent it, and counted there.
+            Some(Frame::Fail(error)) => return failed(out, error.relayed(), held).await,
+            Some(Frame::Broken(error)) => return failed(out, error, held).await,
             Some(Frame::End) | None => {
-                return finish_failed(out, truncated("the run's producer ended before opening"))
-                    .await;
+                let error = truncated("the run's producer ended before opening");
+                return failed(out, error, held).await;
             }
             Some(Frame::Item(_)) => {
-                return finish_failed(out, internal("an item arrived before the open signal"))
-                    .await;
+                let error = internal("an item arrived before the open signal");
+                return failed(out, error, held).await;
             }
         }
         let upstream = inbound.canceller();
-        let bytes = inbound_items(inbound);
+        let bytes = response_items(inbound, held.map(|owner| Arc::clone(owner.visit())));
         match self.bwd.enter(1, pos, end, &cx, bytes) {
-            Ok(BwdExit::Leave { bytes, .. }) => pump(bytes, out, &cx, Some(upstream), None).await,
-            Ok(BwdExit::Here(_)) => {
-                finish_failed(out, internal("a prepared run reached the outer end")).await;
+            Ok(BwdExit::Leave { bytes, .. }) => {
+                pump(bytes, out, &cx, Some(upstream), None, owner).await;
             }
-            Err(error) => finish_failed(out, error).await,
+            Ok(BwdExit::Here(_)) => {
+                let error = internal("a prepared run reached the outer end");
+                failed(out, error, held).await;
+            }
+            Err(error) => failed(out, error, held).await,
         }
     }
 
@@ -789,6 +923,7 @@ where
         reply: ReplyTo,
         share: Option<Share>,
         egress: EgressPermit,
+        owner: Option<Owner>,
     ) {
         // However this task ends, the request's work here ends with it,
         // including anything the inner end started under its context.
@@ -807,14 +942,15 @@ where
         );
         // Losing the attach means another stage already owns the reply (or it
         // is gone); this stage exits and its work ends with it.
-        let Ok(out) = attach.await else {
-            return;
+        let out = match attach.await {
+            Ok(out) => out,
+            Err(error) => return meter::ended(owner.as_ref(), Ending::Failed(&error)),
         };
-        self.produce_inner(&cx, value, out).await;
+        self.produce_inner(&cx, value, out, owner).await;
         drop(egress);
     }
 
-    async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound) {
+    async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound, owner: Option<Owner>) {
         let cancel = out.cancel_token();
         let stop = out.stop_token();
         let scope = cx.child();
@@ -827,14 +963,14 @@ where
         let produced = loop {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => return,
+                () = cancel.cancelled() => return meter::ended(owner.as_ref(), Ending::Gone),
                 // A stop while the node is still setting up its stream is
                 // passed on, and the node is left to finish gracefully.
                 () = stop.cancelled(), if !stopped => {
                     stopped = true;
                     cx.request_stop();
                 }
-                reason = cx.done() => return finish_failed(out, reason).await,
+                reason = cx.done() => return failed(out, reason, owner.as_ref()).await,
                 produced = &mut call => break produced,
             }
         };
@@ -843,7 +979,7 @@ where
                 armed.disarm();
                 items
             }
-            Err(error) => return finish_failed(out, error).await,
+            Err(error) => return failed(out, error, owner.as_ref()).await,
         };
         // The inner end's stream exists: downstream runs may activate.
         let upstream = Upstream {
@@ -860,13 +996,19 @@ where
         };
         match deliver(&out, WireItem::Open, watch, &upstream).await {
             Delivery::Sent => {}
-            Delivery::Gone => return upstream.cancel(),
-            Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
+            Delivery::Gone => {
+                meter::ended(owner.as_ref(), Ending::Gone);
+                return upstream.cancel();
+            }
+            Delivery::Interrupted(reason) => {
+                return failed(out, reason, owner.as_ref()).await;
+            }
         }
         match self.bwd.walk(1, self.plan.inner_end, cx, items) {
-            BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None, None).await,
+            BwdExit::Leave { bytes, .. } => pump(bytes, out, cx, None, None, owner).await,
             BwdExit::Here(_) => {
-                finish_failed(out, internal("the inner end's run reached the outer end")).await;
+                let error = internal("the inner end's run reached the outer end");
+                failed(out, error, owner.as_ref()).await;
             }
         }
     }
@@ -914,7 +1056,7 @@ async fn send_input(
         }
         return;
     };
-    pump(input, out, cx, upstream, stops).await;
+    pump(input, out, cx, upstream, stops, None).await;
 }
 
 /// Retires a run's input anchor when the run ends, however it ends. Nothing
@@ -938,7 +1080,9 @@ impl Drop for InputGuard {
 /// Send items to a consumer until the stream ends, the consumer cancels, or
 /// the request's deadline passes. A stop or cancel from the consumer is
 /// passed upstream: to `cx`, which the stages feeding this pump run under,
-/// and to `upstream`, the anchor this run reads from.
+/// and to `upstream`, the anchor this run reads from. `response` is the
+/// visit whose response this is, when the segment records it; an input
+/// pump has none.
 ///
 /// Not an `async fn` itself: a second frame around `pump_watching` would
 /// enlarge the future of every stream that crosses a segment.
@@ -948,6 +1092,7 @@ fn pump<'a>(
     cx: &'a Cx,
     upstream: Option<Canceller>,
     stops: Option<&'a Cx>,
+    response: Option<Owner>,
 ) -> impl Future<Output = ()> + Send + 'a {
     // Built once per stream: a fresh future registers again when polled,
     // the deadline with the runtime's shared timer and the tokens in their
@@ -957,7 +1102,7 @@ fn pump<'a>(
         cancel: out.cancel_token(),
         stop: out.stop_token(),
     };
-    pump_watching(bytes, out, cx, upstream, stops, consumer)
+    pump_watching(bytes, out, cx, upstream, stops, consumer, response)
 }
 
 /// Where a pump learns that its consumer cancelled or asked to stop. A
@@ -991,7 +1136,12 @@ async fn pump_watching(
     upstream: Option<Canceller>,
     stops: Option<&Cx>,
     consumer: impl Consumer,
+    response: Option<Owner>,
 ) {
+    let response = response.as_ref();
+    // One flag per item, no counter: whether the response's first item is
+    // still to be sent.
+    let mut first_pending = response.is_some();
     let upstream = Upstream {
         cx,
         anchor: upstream,
@@ -1027,16 +1177,20 @@ async fn pump_watching(
                 ready_run = 0;
                 tokio::select! {
                     biased;
-                    () = &mut cancelled => return upstream.cancel(),
+                    () = &mut cancelled => {
+                        meter::ended(response, Ending::Gone);
+                        return upstream.cancel();
+                    }
                     () = &mut stop, if !stopped => {
                         if left(&cancel) {
+                            meter::ended(response, Ending::Gone);
                             return upstream.cancel();
                         }
                         stopped = true;
                         upstream.request_stop();
                         continue;
                     }
-                    reason = &mut done => return finish_failed(out, reason).await,
+                    reason = &mut done => return failed(out, reason, response).await,
                     item = bytes.next() => item,
                 }
             }
@@ -1049,13 +1203,26 @@ async fn pump_watching(
                     done: done.as_mut(),
                 };
                 match deliver(&out, WireItem::Item(item), watch, &upstream).await {
-                    Delivery::Sent => {}
-                    Delivery::Gone => return upstream.cancel(),
-                    Delivery::Interrupted(reason) => return finish_failed(out, reason).await,
+                    Delivery::Sent => {
+                        if first_pending {
+                            first_pending = false;
+                            if let Some(response) = response {
+                                response.visit().first_out();
+                            }
+                        }
+                    }
+                    Delivery::Gone => {
+                        meter::ended(response, Ending::Gone);
+                        return upstream.cancel();
+                    }
+                    Delivery::Interrupted(reason) => return failed(out, reason, response).await,
                 }
             }
-            Some(Err(error)) => return finish_failed(out, error).await,
-            None => return out.finalize(),
+            Some(Err(error)) => return failed(out, error, response).await,
+            None => {
+                meter::ended(response, Ending::Finished);
+                return out.finalize();
+            }
         }
     }
 }
@@ -1172,26 +1339,66 @@ async fn finish_failed(out: Outbound, error: Error) {
     }
 }
 
-/// An inbound anchor as a stream of encoded items. A stop does not pass
-/// through here: the watcher or the pump that holds the anchor forwards it.
-fn inbound_items<S>(inbound: S) -> Items<Vec<u8>>
+/// End the visit `owner` holds with `error`, then deliver the error.
+async fn failed(out: Outbound, error: Error, owner: Option<&Owner>) {
+    meter::ended(owner, Ending::Failed(&error));
+    finish_failed(out, error).await;
+}
+
+/// A streamed request's input anchor as a stream of encoded items. A stop
+/// does not pass through here: the pump that holds the anchor forwards it.
+fn input_items<S>(inbound: S) -> Items<Vec<u8>>
 where
     S: Stream<Item = Frame> + Unpin + Send + 'static,
 {
-    items(InboundItems(inbound))
+    items(InboundItems {
+        inbound,
+        visit: None,
+        relays: false,
+    })
 }
 
-struct InboundItems<S>(S);
+/// A response anchor as a stream of encoded items: its first item is the
+/// first to reach `visit` from another segment, and a failure on it was
+/// raised in the segment that sent it, so it is relayed here.
+fn response_items<S>(inbound: S, visit: Option<Arc<Visit>>) -> Items<Vec<u8>>
+where
+    S: Stream<Item = Frame> + Unpin + Send + 'static,
+{
+    items(InboundItems {
+        inbound,
+        visit,
+        relays: true,
+    })
+}
+
+struct InboundItems<S> {
+    inbound: S,
+    /// The visit to stamp with the first item, until it arrives.
+    visit: Option<Arc<Visit>>,
+    relays: bool,
+}
 
 impl<S: Stream<Item = Frame> + Unpin> Stream for InboundItems<S> {
     type Item = Result<Vec<u8>>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
         loop {
-            return match Pin::new(&mut self.0).poll_next(cx) {
+            return match Pin::new(&mut this.inbound).poll_next(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Some(Frame::Open)) => continue,
-                Poll::Ready(Some(Frame::Item(bytes))) => Poll::Ready(Some(Ok(bytes))),
+                Poll::Ready(Some(Frame::Item(bytes))) => {
+                    // A load and a branch per item; the stamp, once.
+                    if let Some(visit) = &this.visit {
+                        visit.first_in();
+                        this.visit = None;
+                    }
+                    Poll::Ready(Some(Ok(bytes)))
+                }
+                Poll::Ready(Some(Frame::Fail(error))) if this.relays => {
+                    Poll::Ready(Some(Err(error.relayed())))
+                }
                 Poll::Ready(Some(Frame::Fail(error) | Frame::Broken(error))) => {
                     Poll::Ready(Some(Err(error)))
                 }
@@ -1296,7 +1503,7 @@ mod tests {
         let input = items(futures::stream::pending::<Result<Vec<u8>>>());
         // Bounded: a pump that took the cancel for a stop goes on waiting
         // for its input.
-        let pumped = pump_watching(input, out, &scope, None, Some(&attempt), Racy);
+        let pumped = pump_watching(input, out, &scope, None, Some(&attempt), Racy, None);
         let ended = tokio::time::timeout(Duration::from_secs(5), pumped).await;
         assert!(
             ended.is_ok(),
@@ -1325,7 +1532,7 @@ mod tests {
         let scope = attempt.child();
         // A stop does not end the input: the pump goes on waiting for it.
         let input = items(futures::stream::pending::<Result<Vec<u8>>>());
-        let pumped = pump_watching(input, out, &scope, None, Some(&attempt), Racy);
+        let pumped = pump_watching(input, out, &scope, None, Some(&attempt), Racy, None);
         let ended = tokio::time::timeout(Duration::from_millis(200), pumped).await;
         assert!(ended.is_err(), "a stop ended the pump");
         assert!(attempt.is_stopping(), "the stop did not reach the attempt");

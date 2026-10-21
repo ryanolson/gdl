@@ -126,7 +126,7 @@ pub async fn run_segment<B: SegmentBinary>(
             B::ready(&hosts),
         )
         .await?;
-    // The runtime records each node's requests only where a system
+    // The runtime records the segment's figures only where a system
     // listener can serve them: with none, nobody could read them.
     let mut runtime = config.runtime;
     runtime.metrics = process.system_address().map(|_| registry);

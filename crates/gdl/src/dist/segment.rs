@@ -44,21 +44,9 @@ impl Deployment {
                 format!("the placement has no segment `{segment}`"),
             ));
         }
-        // Every node the segment hosts, the source included, gets its
-        // figures before the hops that call them are assembled.
-        let meters = match &config.metrics {
-            Some(registry) => {
-                let hosted = placement
-                    .segments()
-                    .find(|(name, _)| *name == segment)
-                    .map_or(&[][..], |(_, nodes)| nodes);
-                Some(Meters::register(
-                    registry,
-                    hosted.iter().map(String::as_str),
-                )?)
-            }
-            None => None,
-        };
+        // The runtime's figures, registered before the hops are assembled;
+        // each hop adds the entries it has here.
+        let meters = config.metrics.as_ref().map(Meters::register).transpose()?;
         let fabric = Fabric::new(
             velo,
             config.anchor_timeout,

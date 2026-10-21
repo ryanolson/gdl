@@ -105,9 +105,34 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### The runtime's `error_type` values are gdl's error kinds
 
-- **What happens:** `errors_total{error_type}` counts by gdl's error kinds (`node`, `deadline_exceeded`, `truncated`, `not_hosted`, `overloaded`, `transport`, `codec`, `placement`). dynamo's work handler counts by its own steps (`deserialization`, `generate`, `publish_response`, ...), so a dashboard keyed on those values sees none.
+- **What happens:** `errors_total{error_type}`, and the response and end-to-end error counters, count by gdl's error kinds (`node`, `deadline_exceeded`, `truncated`, `not_hosted`, `overloaded`, `transport`, `codec`, `placement`). dynamo's work handler counts by its own steps (`deserialization`, `generate`, `publish_response`, ...), so a dashboard keyed on those values sees none.
 - **Would lift it:** an adapter that translates gdl's kinds to dynamo's values. gdl keeps its own errors (the owner, 2026-10-20).
-- **See:** ruling 128.
+- **See:** rulings 134 and 136.
+
+### `inflight_requests` counts only the request path
+
+- **What happens:** gdl's `inflight_requests` counts a request until the segment has sent it on or a sink here has started its stream. dynamo's work handler counts a request until its response stream ends. A dynamo dashboard that reads `inflight_requests` as a worker's load sees gdl's engine near zero while it streams. `inflight_responses` counts the streams the segment is sending.
+- **Why:** the owner decoupled the request path from the response path (2026-10-20), and the request-path counters keep dynamo's names so that dynamo's dashboards keep working.
+- **Would lift it:** a dashboard that adds `inflight_requests` and `inflight_responses`, or an owner ruling that renames one of them.
+- **See:** rulings 132 and 136.
+
+### A deadline can be counted in more than one segment
+
+- **What happens:** each segment stops at the deadline on its own clock. A segment whose own clock ends its stream counts `deadline_exceeded`; a segment that receives the error from another passes it on and does not count it. When two segments' clocks pass at the same moment, both can count the same request's deadline. The end-to-end figure counts it once.
+- **Why:** the deadline is enforced in every segment, so that work no cancel can reach still ends. The clock skew allowance makes a receiving segment's clock run ahead of its sender's, so the segment nearest the sink usually counts it first.
+- **See:** ruling 134.
+
+### An error an operator recovers from inside one segment is not counted
+
+- **What happens:** the runtime counts the outcome of a segment's request path and of each stream the segment sends on. An error that an operator recovers from (by retrying) inside one segment is the outcome of neither, so no segment counts it. When the failed attempt runs in another segment, that segment's visit ends with the error, and it counts it.
+- **Why:** the figures are per segment, not per node (the owner, 2026-10-20). To count an error inside a segment, the runtime needs a figure per attempt.
+- **See:** the addendum to rulings 131 to 139 (review `m21b-plan-r1`, M6).
+
+### An error in a streamed request's input is counted where it enters a response
+
+- **What happens:** an error that a streamed request's input carries is counted by the segment whose sink, or relay, passes it into a response, not by the segment that sent the input.
+- **Why:** the input pumps carry the request, and the runtime records responses; the sending segment has handed the request on by then.
+- **See:** ruling 134.
 
 ### Two nodes of one segment must agree on a metric they share
 
@@ -117,9 +142,9 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### Without a system listener, the runtime records nothing
 
-- **What happens:** a segment binary records the runtime's per-node figures only when `[system] port` (or `DYN_SYSTEM_PORT`) turns its listener on. A node's own metrics are still built and counted, in a registry nobody serves.
+- **What happens:** a segment binary records the runtime's per-segment figures only when `[system] port` (or `DYN_SYSTEM_PORT`) turns its listener on. A node's own metrics are still built and counted, in a registry nobody serves.
 - **Why:** with no listener nothing can read the figures, so recording them would only cost.
-- **See:** ruling 128.
+- **See:** ruling 131.
 
 ## Tooling
 

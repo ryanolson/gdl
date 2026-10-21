@@ -74,15 +74,29 @@ impl MetricKind {
     }
 }
 
-/// The metrics the runtime records for every node it hosts. A node's own
-/// metrics may not take these names: they would collide in the registry.
-pub const RUNTIME_METRICS: [&str; 6] = [
+/// The metrics the runtime records for each segment, and dynamo's
+/// `request_duration_seconds`, which it reserves. A node's own metrics may
+/// not take these names: they would collide in the registry, or, for the
+/// reserved one, a dashboard would read a node's figure as a handler's.
+pub const RUNTIME_METRICS: [&str; 18] = [
     "requests_total",
     "errors_total",
-    "inflight_requests",
-    "request_duration_seconds",
     "cancellation_total",
+    "inflight_requests",
+    "request_path_duration_seconds",
+    "responses_total",
+    "response_errors_total",
+    "response_cancellation_total",
+    "inflight_responses",
+    "response_time_to_first_item_seconds",
+    "response_time_after_first_item_seconds",
+    "end_to_end_requests_total",
+    "end_to_end_errors_total",
+    "end_to_end_cancellation_total",
+    "end_to_end_time_to_first_item_seconds",
+    "end_to_end_duration_seconds",
     "uptime_seconds",
+    "request_duration_seconds",
 ];
 
 /// The deployment a series comes from: the graph's name and the first eight

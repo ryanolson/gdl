@@ -225,8 +225,9 @@ fn a_signal_does_not_cut_an_answer_short() {
 }
 
 /// A running engine serves its metrics on its system listener: the
-/// engine's own, which its node defines, and the runtime's for every node
-/// it hosts, each with dynamo's prefix and identity labels.
+/// engine's own, which its node defines, and the runtime's for the
+/// segment, by the node a request enters at, each with dynamo's prefix and
+/// identity labels.
 #[test]
 fn a_running_engine_serves_its_metrics() {
     let chat = Chat::new("gdl-life-metrics-");
@@ -243,7 +244,7 @@ fn a_running_engine_serves_its_metrics() {
 
     let (code, scrape) = get(address, "/metrics");
     assert_eq!(code, 200);
-    // The engine's request ends when its stream does, which the front has
+    // The engine's response ends when its stream does, which the front has
     // read by now; the runtime records it there.
     let series = |name: &str| -> Vec<&str> {
         scrape
@@ -262,11 +263,35 @@ fn a_running_engine_serves_its_metrics() {
         assert!(words[0].contains(label), "{label} missing: {}", words[0]);
     }
     assert!(words[0].ends_with(" 3"), "{}", words[0]);
-    let requests = series("dynamo_component_requests_total");
+    for name in [
+        "dynamo_component_requests_total",
+        "dynamo_component_request_path_duration_seconds_count",
+        "dynamo_component_responses_total",
+        "dynamo_component_response_time_to_first_item_seconds_count",
+    ] {
+        let found = series(name);
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains("dynamo_endpoint=\"Engine\"") && line.ends_with(" 1")),
+            "{name}: {scrape}"
+        );
+    }
+    // Ended before the engine finished its stream, which the front has
+    // read to its end.
+    let inflight = series("dynamo_component_inflight_responses");
     assert!(
-        requests
-            .iter()
-            .any(|line| line.contains("dynamo_endpoint=\"Engine\"") && line.ends_with(" 1")),
+        !inflight.is_empty() && inflight.iter().all(|line| line.ends_with(" 0")),
+        "{scrape}"
+    );
+    // The figures are the segment's, not each node's: no handler-wide
+    // duration, and the end to end is the source's, in the front.
+    assert!(
+        series("dynamo_component_request_duration_seconds_count").is_empty(),
+        "{scrape}"
+    );
+    assert!(
+        series("dynamo_component_end_to_end_requests_total").is_empty(),
         "{scrape}"
     );
     assert_eq!(

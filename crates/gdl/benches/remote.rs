@@ -15,8 +15,8 @@
 //! - **Reference graph:** the test suites' graph (with its event log off)
 //!   local, in one segment (the distributed stages without a crossing),
 //!   over two segments, and over three.
-//! - **Metrics:** the reference rows again with the runtime's per-node
-//!   metrics recorded (`-metrics`), and 32 reference requests at once, each
+//! - **Metrics:** the reference rows again with the runtime's per-segment
+//!   figures recorded (`-metrics`), and 32 reference requests at once, each
 //!   a task of its own (`concurrent-32x1-reference`), where a figure every
 //!   thread touches would contend (`agent-docs/perf/m21-metrics.md`).
 //! - **Upload:** a streamed request (`S => D`, `n` blobs of `size` bytes in,

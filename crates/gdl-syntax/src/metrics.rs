@@ -131,7 +131,7 @@ fn name_problem(name: &str, kind: MetricKind) -> Option<String> {
         );
     }
     if RUNTIME_METRICS.contains(&name) {
-        return Some("the runtime records a metric of this name for every node".into());
+        return Some("the runtime records or reserves a metric of this name".into());
     }
     let counter = kind == MetricKind::Counter;
     let total = words.last() == Some(&"total");

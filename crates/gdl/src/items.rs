@@ -9,7 +9,7 @@ use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOw
 
 use crate::cx::Cx;
 use crate::error::{Error, Result};
-use crate::meter::{Reading, ended};
+use crate::meter::{Ending, Owner, ended};
 
 /// A stream of items: a response, or a streamed request's items. Every
 /// response in gdl is a stream; a unary response is a stream of one item. An
@@ -91,24 +91,12 @@ impl<T> Stream for UntilError<T> {
 /// an attempt boundary: whether a backward node follows must not change the
 /// outcome.
 pub(crate) fn fuse<T: Send + 'static>(inner: Items<T>, scope: &Cx) -> Items<T> {
-    fuse_measured(inner, scope, None)
-}
-
-/// [`fuse`], ending `reading` with the outcome the boundary reports: its
-/// first error, an interruption it reports for a clean end, or its end.
-/// Measured here, a node's request costs no allocation of its own.
-pub(crate) fn fuse_measured<T: Send + 'static>(
-    inner: Items<T>,
-    scope: &Cx,
-    reading: Option<Reading>,
-) -> Items<T> {
     Box::pin(Fuse {
         inner: Some(inner),
         guard: Some(scope.cancel_on_drop()),
         token: scope.cancel_token(),
         deadline_at: scope.deadline().map(|deadline| deadline.instant()),
         ready_run: 0,
-        reading,
     })
 }
 
@@ -121,9 +109,6 @@ struct Fuse<T> {
     token: CancellationToken,
     deadline_at: Option<Instant>,
     ready_run: u16,
-    /// The producing node's request, when the runtime records it; dropped
-    /// with the stream, it ends as given up.
-    reading: Option<Reading>,
 }
 
 impl<T> Stream for Fuse<T> {
@@ -145,14 +130,10 @@ impl<T> Stream for Fuse<T> {
         let polled = inner.as_mut().poll_next(cx);
         match &polled {
             Poll::Ready(Some(Ok(_))) => this.ready_run += 1,
-            Poll::Ready(Some(Err(error))) => {
-                ended(&mut this.reading, Some(error));
-                end(&mut this.inner, &mut this.guard);
-            }
+            Poll::Ready(Some(Err(_))) => end(&mut this.inner, &mut this.guard),
             Poll::Ready(None) => {
                 // Checked before ending: ending cancels the scope itself.
                 let interruption = interrupted(&this.token, this.deadline_at);
-                ended(&mut this.reading, interruption.as_ref());
                 end(&mut this.inner, &mut this.guard);
                 return Poll::Ready(interruption.map(Err));
             }
@@ -174,13 +155,13 @@ pub(crate) fn bound<T: Send + 'static>(cx: &Cx, guard: DropGuard, inner: Items<T
     bound_measured(cx, guard, inner, None)
 }
 
-/// [`bound`], ending `reading` with the outcome the boundary reports, as
-/// [`fuse_measured`] does.
+/// [`bound`] for the root's attempt, ending the visit `response` owns with
+/// the outcome the boundary reports, and noting its first item out.
 pub(crate) fn bound_measured<T: Send + 'static>(
     cx: &Cx,
     guard: DropGuard,
     inner: Items<T>,
-    reading: Option<Reading>,
+    response: Option<Owner>,
 ) -> Items<T> {
     let token = cx.cancel_token();
     let deadline_at = cx.deadline().map(|deadline| deadline.instant());
@@ -193,7 +174,8 @@ pub(crate) fn bound_measured<T: Send + 'static>(
         deadline_at,
         since_check: 0,
         ready_run: 0,
-        reading,
+        first_pending: response.is_some(),
+        response,
     })
 }
 
@@ -225,8 +207,12 @@ pin_project! {
         // `YIELD_INTERVAL` so a consumer draining an always-ready attempt
         // cannot starve the task that would cancel it.
         ready_run: u16,
-        // The source's request, when the runtime records it.
-        reading: Option<Reading>,
+        // Whether the first item is still to come, for the visit
+        // `response` owns: one flag per item, no counter.
+        first_pending: bool,
+        // The root's visit, when the runtime records it; dropped with the
+        // stream, it ends as given up.
+        response: Option<Owner>,
     }
 }
 
@@ -248,7 +234,7 @@ impl<T> Stream for Bounded<T> {
         if *this.since_check >= CHECK_INTERVAL {
             *this.since_check = 0;
             if let Some(error) = interrupted(this.token, *this.deadline_at) {
-                ended(this.reading, Some(&error));
+                ended(this.response.as_ref(), Ending::Failed(&error));
                 end(this.inner, this.guard);
                 return Poll::Ready(Some(Err(error)));
             }
@@ -257,10 +243,16 @@ impl<T> Stream for Bounded<T> {
         match inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(item))) => {
                 *this.ready_run += 1;
+                if *this.first_pending {
+                    *this.first_pending = false;
+                    if let Some(response) = this.response.as_ref() {
+                        response.visit().first_out();
+                    }
+                }
                 return Poll::Ready(Some(Ok(item)));
             }
             Poll::Ready(Some(Err(error))) => {
-                ended(this.reading, Some(&error));
+                ended(this.response.as_ref(), Ending::Failed(&error));
                 end(this.inner, this.guard);
                 return Poll::Ready(Some(Err(error)));
             }
@@ -270,7 +262,10 @@ impl<T> Stream for Bounded<T> {
                 // it was, not as success. One check per stream, off the
                 // per-item path.
                 let interruption = interrupted(this.token, *this.deadline_at);
-                ended(this.reading, interruption.as_ref());
+                let ending = interruption
+                    .as_ref()
+                    .map_or(Ending::Finished, Ending::Failed);
+                ended(this.response.as_ref(), ending);
                 end(this.inner, this.guard);
                 return Poll::Ready(interruption.map(Err));
             }
@@ -283,7 +278,7 @@ impl<T> Stream for Bounded<T> {
             && deadline.poll(cx).is_ready()
         {
             let error = Error::deadline_exceeded();
-            ended(this.reading, Some(&error));
+            ended(this.response.as_ref(), Ending::Failed(&error));
             end(this.inner, this.guard);
             return Poll::Ready(Some(Err(error)));
         }
@@ -293,7 +288,7 @@ impl<T> Stream for Bounded<T> {
             // has passed is the cause to report even if its timer has not
             // fired yet.
             let error = interrupted(this.token, *this.deadline_at).unwrap_or_else(Error::cancelled);
-            ended(this.reading, Some(&error));
+            ended(this.response.as_ref(), Ending::Failed(&error));
             end(this.inner, this.guard);
             return Poll::Ready(Some(Err(error)));
         }
