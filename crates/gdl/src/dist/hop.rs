@@ -10,12 +10,12 @@ use futures::{Future, Stream, StreamExt};
 use super::admission::{EgressPermit, Share};
 use super::envelope::{Accepted, Forward, Open, VERSION, WireCx, WireItem};
 use super::fabric::{Canceller, Frame, Inbound, Outbound, ReplyTo, Retirer};
-use super::meter::{Meter, Outcome};
 use super::runtime::{Entries, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use crate::cx::{Cx, Deadline};
 use crate::error::{Error, ErrorKind, Result};
 use crate::items::{CHECK_INTERVAL, Items, bound_measured, items};
+use crate::meter::{Meter, Outcome};
 use crate::role::Next;
 use gdl_model::HopLayout;
 
@@ -272,6 +272,7 @@ where
             Some(_) => attempt,
             None => attempt.with_deadline(Deadline::after(core.rt.config.default_deadline)),
         };
+        source.deadline(&attempt);
         let slot = source.note(core.rt.admission.attempt(attempt.id().as_u128()))?;
         let items = tokio::select! {
             biased;

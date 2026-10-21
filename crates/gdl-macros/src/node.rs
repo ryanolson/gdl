@@ -51,15 +51,21 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
     } else {
         quote!(::std::vec::Vec::new)
     };
-    let metrics = if let Some(path) = &types.metrics {
-        quote! { || {
+    // The type the derive names must be the build's, for the source
+    // reader; the definitions registered are the build's, named or not,
+    // so `extract --verify` sees a node that leaves them unnamed.
+    let named = types.metrics.as_ref().map(|path| {
+        quote! {
             fn check<T: ::gdl::Build<Metrics = #path>>() {}
             check::<#ident>();
-            <#path as ::gdl::Metrics>::definitions()
-        } }
-    } else {
-        quote!(::std::vec::Vec::new)
-    };
+        }
+    });
+    let metrics = quote! { || {
+        #named
+        #[allow(unused_imports)]
+        use #root::{MetricsNo as _, MetricsYes as _};
+        (&#root::RoleProbe::<#ident>::new()).__gdl_metrics()
+    } };
     Ok(quote! {
         const _: () = {
             #root_check

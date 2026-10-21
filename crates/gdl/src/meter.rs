@@ -28,18 +28,35 @@ const DURATION_BUCKETS: [f64; 17] = [
     600.0,
 ];
 
-/// The kinds `errors_total` counts, by its `error_type` label. A
-/// cancellation is counted apart, in `cancellation_total`.
-const ERROR_KINDS: [(ErrorKind, &str); 8] = [
-    (ErrorKind::Node, "node"),
-    (ErrorKind::DeadlineExceeded, "deadline_exceeded"),
-    (ErrorKind::Truncated, "truncated"),
-    (ErrorKind::NotHosted, "not_hosted"),
-    (ErrorKind::Overloaded, "overloaded"),
-    (ErrorKind::Transport, "transport"),
-    (ErrorKind::Codec, "codec"),
-    (ErrorKind::Placement, "placement"),
+/// The `error_type` label of each slot of `errors_total`, as
+/// [`error_slot`] numbers them.
+const ERROR_KINDS: [&str; 8] = [
+    "node",
+    "deadline_exceeded",
+    "truncated",
+    "not_hosted",
+    "overloaded",
+    "transport",
+    "codec",
+    "placement",
 ];
+
+/// The slot of `errors_total` that counts `kind`, or `None` for a
+/// cancellation, which `cancellation_total` counts. Exhaustive, so that a
+/// new kind cannot go uncounted.
+fn error_slot(kind: ErrorKind) -> Option<usize> {
+    match kind {
+        ErrorKind::Cancelled => None,
+        ErrorKind::Node => Some(0),
+        ErrorKind::DeadlineExceeded => Some(1),
+        ErrorKind::Truncated => Some(2),
+        ErrorKind::NotHosted => Some(3),
+        ErrorKind::Overloaded => Some(4),
+        ErrorKind::Transport => Some(5),
+        ErrorKind::Codec => Some(6),
+        ErrorKind::Placement => Some(7),
+    }
+}
 
 /// The most shards a node's figures are split into.
 const SHARD_LIMIT: usize = 64;
@@ -142,15 +159,9 @@ pub(crate) fn start(meter: Option<&'static Meter>, cx: &Cx) -> Option<Reading> {
     })
 }
 
-/// End `reading` with the outcome of a call that returned no stream.
-pub(crate) fn finish<T>(reading: Option<Reading>, outcome: &Result<T>) {
-    if let Some(reading) = reading {
-        reading.end(outcome.as_ref().err());
-    }
-}
-
 /// End the request `reading` holds, if it has not ended, with `error` if
-/// it failed: what a node boundary calls as it ends its stream.
+/// it failed: what a node boundary calls as it ends its stream, and what a
+/// call that returns no stream calls with its result.
 pub(crate) fn ended(reading: &mut Option<Reading>, error: Option<&Error>) {
     if let Some(reading) = reading.take() {
         reading.end(error);
@@ -179,9 +190,18 @@ impl Outcome {
         result
     }
 
+    /// Take `cx`'s deadline as the request's: the one the runtime gives a
+    /// request that crosses segments without one of its own, so that a
+    /// drop after it reads as the deadline, as at every node it reached.
+    pub(crate) fn deadline(&mut self, cx: &Cx) {
+        if let Some(reading) = &mut self.0 {
+            reading.deadline = cx.deadline().map(|deadline| deadline.instant());
+        }
+    }
+
     /// The request, for the boundary of the stream that ends it.
-    pub(crate) fn reading(mut self) -> Option<Reading> {
-        self.0.take()
+    pub(crate) fn reading(self) -> Option<Reading> {
+        self.0
     }
 }
 
@@ -198,12 +218,12 @@ pub(crate) struct Reading {
 impl Reading {
     /// The request ended, with `error` if it failed.
     fn end(mut self, error: Option<&Error>) {
-        self.record(error.map(Error::kind));
+        self.record(Instant::now(), error.map(Error::kind));
     }
 
-    fn record(&mut self, kind: Option<ErrorKind>) {
+    fn record(&mut self, now: Instant, kind: Option<ErrorKind>) {
         self.ended = true;
-        let elapsed = self.started.elapsed();
+        let elapsed = now.saturating_duration_since(self.started);
         let shard = self.meter.shard();
         shard.inflight.fetch_sub(1, Relaxed);
         let seconds = elapsed.as_secs_f64();
@@ -216,15 +236,13 @@ impl Reading {
             u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
             Relaxed,
         );
-        match kind {
+        match kind.map(error_slot) {
             None => {}
-            Some(ErrorKind::Cancelled) => {
+            Some(None) => {
                 shard.cancelled.fetch_add(1, Relaxed);
             }
-            Some(kind) => {
-                if let Some(index) = ERROR_KINDS.iter().position(|(k, _)| *k == kind) {
-                    shard.errors[index].fetch_add(1, Relaxed);
-                }
+            Some(Some(slot)) => {
+                shard.errors[slot].fetch_add(1, Relaxed);
             }
         }
     }
@@ -237,14 +255,16 @@ impl Drop for Reading {
         if self.ended {
             return;
         }
-        let expired = self
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline);
-        self.record(Some(if expired {
-            ErrorKind::DeadlineExceeded
-        } else {
-            ErrorKind::Cancelled
-        }));
+        let now = Instant::now();
+        let expired = self.deadline.is_some_and(|deadline| now >= deadline);
+        self.record(
+            now,
+            Some(if expired {
+                ErrorKind::DeadlineExceeded
+            } else {
+                ErrorKind::Cancelled
+            }),
+        );
     }
 }
 
@@ -343,7 +363,7 @@ impl Collector for Scrape {
                 None,
                 sum(shards, |s| s.requests.load(Relaxed)),
             ));
-            for (index, (_, kind)) in ERROR_KINDS.iter().enumerate() {
+            for (index, kind) in ERROR_KINDS.iter().enumerate() {
                 let errors = sum(shards, |s| s.errors[index].load(Relaxed));
                 families[1].push(counter(node, Some(kind), errors));
             }
@@ -392,5 +412,28 @@ impl Collector for Scrape {
                 family
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each kind's slot carries the kind's own label.
+    #[test]
+    fn each_error_kind_counts_under_its_name() {
+        for (kind, label) in [
+            (ErrorKind::Node, "node"),
+            (ErrorKind::DeadlineExceeded, "deadline_exceeded"),
+            (ErrorKind::Truncated, "truncated"),
+            (ErrorKind::NotHosted, "not_hosted"),
+            (ErrorKind::Overloaded, "overloaded"),
+            (ErrorKind::Transport, "transport"),
+            (ErrorKind::Codec, "codec"),
+            (ErrorKind::Placement, "placement"),
+        ] {
+            assert_eq!(error_slot(kind).map(|slot| ERROR_KINDS[slot]), Some(label));
+        }
+        assert_eq!(error_slot(ErrorKind::Cancelled), None);
     }
 }

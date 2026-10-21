@@ -312,6 +312,7 @@ impl<H> ProcessConfig<H> {
     ) -> Result<Launch> {
         // The instances this one waits for before it serves: those of the
         // segments it sends to.
+        let node = process.take_node()?;
         let layout = gdl_model::layout(&deployment.graph, &deployment.placement)?;
         let inner: Vec<String> = layout.sends_to(segment).into_iter().collect();
         let (source, reaching) = sources(&layout, &deployment.graph, segment);
@@ -340,7 +341,6 @@ impl<H> ProcessConfig<H> {
         let (node, roster, peers) = match discovery {
             Discovery::Files(dir) => {
                 ready.await?;
-                let node = process.node();
                 let roster = Roster::rendezvous(dir, segment, &node, expect, wait).await?;
                 (node, roster, Peers::Files(dir.to_path_buf()))
             }
@@ -353,7 +353,6 @@ impl<H> ProcessConfig<H> {
                     control_port,
                     heartbeat_ms,
                 } = hub;
-                let node = process.node();
                 let mut session = HubSession::register(
                     host,
                     *public_port,
@@ -756,8 +755,11 @@ pub struct Process {
     system: Option<SocketAddr>,
     /// Bound at the start, so that the instance id, which every metric
     /// carries as `worker_id`, is known before the nodes build and
-    /// register their metrics.
-    node: Velo,
+    /// register their metrics; taken by the one launch. A process is one
+    /// instance: a second launch would share the node, and its handlers
+    /// would replace the first's without a word.
+    node: Arc<std::sync::Mutex<Option<Velo>>>,
+    instance: velo::InstanceId,
     metrics_prefix: Option<String>,
 }
 
@@ -784,20 +786,40 @@ impl Process {
         if let Some(address) = system {
             eprintln!("system listener at {address}");
         }
-        let node = config.bind().await?;
+        // Under a stop, as the rest of the start is: a container's bind
+        // resolves its hostname, which may wait on DNS.
+        let node = tokio::select! {
+            biased;
+            () = stopped(&stops, 1) => {
+                return Err(Error::new(ErrorKind::Cancelled, "stopped while starting"));
+            }
+            node = config.bind() => node?,
+        };
         Ok(Self {
             stops,
             count,
             health,
             system,
-            node,
+            instance: node.instance_id(),
+            node: Arc::new(std::sync::Mutex::new(Some(node))),
             metrics_prefix: config.system.metrics_prefix(),
         })
     }
 
-    /// The instance's velo node.
-    pub fn node(&self) -> Velo {
-        self.node.clone()
+    /// The instance's velo id, which its metrics carry as `worker_id`.
+    pub fn instance_id(&self) -> velo::InstanceId {
+        self.instance
+    }
+
+    /// The instance's velo node, for its one launch.
+    fn take_node(&self) -> Result<Velo> {
+        self.node
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or_else(|| {
+                placement("a process launches once: it is one instance, with one velo node")
+            })
     }
 
     /// Make the process's one metrics registry, for segment `segment` of
@@ -824,7 +846,7 @@ impl Process {
             (gdl_model::COMPONENT_LABEL, segment.to_string()),
             (
                 gdl_model::WORKER_LABEL,
-                format!("{:032x}", self.node.instance_id().as_u128()),
+                format!("{:032x}", self.instance.as_u128()),
             ),
         ]
         .into_iter()
@@ -877,11 +899,16 @@ impl Process {
 
     /// Resolves once `n` stop signals have come.
     async fn stops(&self, n: u32) {
-        let mut stops = self.stops.clone();
-        if stops.wait_for(|stops| *stops >= n).await.is_err() {
-            // The signal task is gone only with the runtime.
-            std::future::pending::<()>().await;
-        }
+        stopped(&self.stops, n).await;
+    }
+}
+
+/// Resolves once `n` stop signals have come, as `stops` counts them.
+async fn stopped(stops: &tokio::sync::watch::Receiver<u32>, n: u32) {
+    let mut stops = stops.clone();
+    if stops.wait_for(|stops| *stops >= n).await.is_err() {
+        // The signal task is gone only with the runtime.
+        std::future::pending::<()>().await;
     }
 }
 

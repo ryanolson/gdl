@@ -87,9 +87,7 @@ impl<H: gdl::Next<Prompt, Chunk>> Deployed<H> {
                     (k.to_string(), v.trim_matches('"').to_string())
                 })
                 .collect();
-            if want.iter().all(|(k, v)| labels.get(k) == Some(v))
-                && labels.len() == want.len() + usize::from(metric.ends_with("_bucket"))
-            {
+            if want.iter().all(|(k, v)| labels.get(k) == Some(v)) && labels.len() == want.len() {
                 return value.parse().expect("a value");
             }
         }
@@ -114,6 +112,26 @@ impl<H: gdl::Next<Prompt, Chunk>> Deployed<H> {
 
     fn durations(&self, node: &str) -> f64 {
         self.value("request_duration_seconds_count", node, &[])
+    }
+
+    /// A node's duration histogram: each bucket's bound and cumulative
+    /// count, `+Inf` last, then the sum.
+    fn histogram(&self, node: &str) -> (Vec<(String, f64)>, f64) {
+        let bounds = [
+            "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "20",
+            "30", "60", "120", "300", "600", "+Inf",
+        ];
+        let buckets = bounds
+            .iter()
+            .map(|le| {
+                let count = self.value("request_duration_seconds_bucket", node, &[("le", le)]);
+                (le.to_string(), count)
+            })
+            .collect();
+        (
+            buckets,
+            self.value("request_duration_seconds_sum", node, &[]),
+        )
     }
 
     /// Wait until no node has a request in flight.
@@ -160,6 +178,13 @@ async fn a_request_is_one_request_of_every_node() {
         for node in NODES {
             assert_eq!(d.requests(node), 1.0, "{node}");
             assert_eq!(d.durations(node), 1.0, "{node}");
+            let (buckets, sum) = d.histogram(node);
+            assert!(
+                buckets.windows(2).all(|pair| pair[0].1 <= pair[1].1),
+                "{node}: not cumulative: {buckets:?}"
+            );
+            assert_eq!(buckets.last().map(|b| b.1), Some(1.0), "{node}: +Inf");
+            assert!(sum > 0.0 && sum < 5.0, "{node}: sum {sum}");
             assert_eq!(d.errors(node, "node"), 0.0, "{node}");
             assert_eq!(d.cancellations(node), 0.0, "{node}");
         }
@@ -291,7 +316,15 @@ async fn an_operators_attempts_are_requests_of_the_nodes_below() {
         let out = d.call(Cx::new(), retried).await.expect("call");
         assert_eq!(collect(out).await, expected(0..2));
         d.idle().await;
-        for (node, requests) in [("A", 1.0), ("B", 1.0), ("G", 1.0), ("C", 2.0), ("D", 2.0)] {
+        for (node, requests) in [
+            ("A", 1.0),
+            ("B", 1.0),
+            ("G", 1.0),
+            ("C", 2.0),
+            ("D", 2.0),
+            ("F", 2.0),
+            ("E", 2.0),
+        ] {
             assert_eq!(d.requests(node), requests, "{node}");
         }
         assert_eq!(d.errors("D", "node"), 1.0, "the first attempt failed");
@@ -332,4 +365,50 @@ async fn a_refused_request_records_nothing_where_it_was_refused() {
     assert_eq!(d.requests("D"), 1.0, "the refused request reached no sink");
     drop(held);
     d.idle().await;
+    assert_eq!(
+        d.errors("A", "overloaded"),
+        1.0,
+        "the source saw the refusal"
+    );
+}
+
+/// A request with no deadline of its own gets the runtime's default when
+/// it crosses: held unread past it and then dropped, it is
+/// `deadline_exceeded` at the source, whose own hop crosses here, as at
+/// the sink, not a cancellation. (Where the source's hop stays in its
+/// segment, the source's request has no deadline, and a drop is a
+/// cancellation.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_default_deadline_classifies_a_dropped_request() {
+    let alone = Placement::new()
+        .segment("front", ["A"])
+        .segment("engine", ["B", "C", "D", "E", "F", "G"]);
+    let d = deployed(alone, &|_| RuntimeConfig {
+        default_deadline: ms(200),
+        ..RuntimeConfig::default()
+    })
+    .await;
+    let endless = Plan {
+        endless: true,
+        item_delay_ms: 1,
+        ..plan(0)
+    };
+    let called = tokio::time::Instant::now();
+    let out = d.call(Cx::new(), endless).await.expect("call");
+    // Held unread until the sink has ended at the deadline, which it sees
+    // early by the clock skew allowance, and until the source's own has
+    // passed: the attempt took it after `called`, within milliseconds.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while d.errors("D", "deadline_exceeded") == 0.0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sink never ended"
+        );
+        tokio::time::sleep(ms(5)).await;
+    }
+    tokio::time::sleep_until(called + ms(300)).await;
+    drop(out);
+    d.idle().await;
+    assert_eq!(d.errors("A", "deadline_exceeded"), 1.0);
+    assert_eq!(d.cancellations("A"), 0.0);
 }

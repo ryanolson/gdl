@@ -20,6 +20,7 @@ mod identity;
 mod items;
 #[cfg(feature = "json-lines")]
 mod json;
+mod meter;
 mod metrics;
 mod process;
 mod role;
@@ -212,6 +213,28 @@ pub mod __private {
                 }
             }
         };
+    }
+
+    /// The metrics a node's build registers: `Build::Metrics`'s
+    /// definitions when the type implements `Build`, and none otherwise,
+    /// probed as the roles are. Registered whether or not the derive names
+    /// a metrics type, so that `extract --verify` sees a build register
+    /// metrics the source reader cannot.
+    pub trait MetricsYes {
+        fn __gdl_metrics(&self) -> Vec<gdl_model::MetricField>;
+    }
+    impl<T: crate::Build> MetricsYes for RoleProbe<T> {
+        fn __gdl_metrics(&self) -> Vec<gdl_model::MetricField> {
+            <T::Metrics as crate::Metrics>::definitions()
+        }
+    }
+    pub trait MetricsNo {
+        fn __gdl_metrics(&self) -> Vec<gdl_model::MetricField>;
+    }
+    impl<T> MetricsNo for &RoleProbe<T> {
+        fn __gdl_metrics(&self) -> Vec<gdl_model::MetricField> {
+            Vec::new()
+        }
     }
 
     pub trait ServiceYes {

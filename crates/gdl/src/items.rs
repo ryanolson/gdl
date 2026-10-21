@@ -8,8 +8,8 @@ use tokio::time::{Instant, Sleep};
 use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOwned};
 
 use crate::cx::Cx;
-use crate::dist::{Reading, ended};
 use crate::error::{Error, Result};
+use crate::meter::{Reading, ended};
 
 /// A stream of items: a response, or a streamed request's items. Every
 /// response in gdl is a stream; a unary response is a stream of one item. An

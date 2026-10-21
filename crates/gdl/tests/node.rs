@@ -131,6 +131,39 @@ impl Sink for Nested {
     }
 }
 
+/// A node whose build registers metrics, though its derive does not name
+/// them: the catalogue still shows what the build registers, so
+/// `extract --verify` sees the source reader miss them.
+#[derive(gdl::Node)]
+pub struct Measured;
+
+/// What `Measured` reports.
+#[derive(gdl::Metrics)]
+#[expect(
+    dead_code,
+    reason = "registered, never counted: only the catalogue is read"
+)]
+pub struct MeasuredMetrics {
+    /// Words passed.
+    passed_total: gdl::prometheus::IntCounter,
+}
+
+impl gdl::Build for Measured {
+    type Config = ();
+    type Metrics = MeasuredMetrics;
+    async fn build((): (), _metrics: MeasuredMetrics) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+impl Sink for Measured {
+    type Req = Words;
+    type Item = Token;
+    async fn generate(&self, _cx: Cx, _req: Words) -> Result<Items<Token>> {
+        Err(Error::node("unused"))
+    }
+}
+
 fn summary(catalogue: &Catalogue) -> Vec<String> {
     // The type's last path segment, `()` for none.
     let short = |path: Option<&str>| {
@@ -185,6 +218,7 @@ fn a_node_registers_its_roles_and_ports() {
             "Detokenize node::Detokenize: backward(In=Token, Out=Piece)",
             "Engine node::Engine: sink(Req=Words, Item=Token)",
             "Gate node::Gate: operator(UpReq=Words, UpItem=Piece, DownReq=Words, DownItem=Token)",
+            "Measured node::Measured: sink(Req=Words, Item=Token)",
             "Nested node::Nested: sink(Req=Words + stream Token nested, Item=Token)",
             "Plain node::Plain: ",
             "Resample node::Resample: forward(In=Words + stream Token, Out=() + stream Token)",
@@ -200,6 +234,25 @@ fn a_node_registers_its_roles_and_ports() {
         (words.package.as_str(), words.path.as_str()),
         ("gdl", "node::Words")
     );
+}
+
+/// A node's metrics are registered from its `Build`, named or not.
+#[test]
+fn a_node_registers_the_metrics_its_build_registers() {
+    let catalogue = Catalogue::linked();
+    let metrics = |name: &str| -> Vec<String> {
+        catalogue
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .expect(name)
+            .metrics
+            .iter()
+            .map(|m| m.name.clone())
+            .collect()
+    };
+    assert_eq!(metrics("Measured"), ["passed_total"]);
+    assert!(metrics("Engine").is_empty(), "no Build, no metrics");
 }
 
 /// `gdl::Message` registers through gdl: this crate names no other.

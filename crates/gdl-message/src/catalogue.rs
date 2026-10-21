@@ -98,9 +98,6 @@ pub struct NodeInfo {
     /// Graph-affecting configuration fields.
     #[serde(default)]
     pub config: Vec<gdl_model::ConfigField>,
-    /// The metrics it reports; left out when it reports none.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub metrics: Vec<gdl_model::MetricField>,
     /// The package that defines it.
     pub package: String,
     /// That package's version.
@@ -115,6 +112,10 @@ pub struct NodeInfo {
     /// node has exactly one; the reader and `--verify` report any other
     /// count.
     pub roles: Vec<RoleInfo>,
+    /// The metrics its build registers; left out when it registers none.
+    /// Last, so that nodes sort by name before what they report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<gdl_model::MetricField>,
 }
 
 /// One role a node type implements.

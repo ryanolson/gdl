@@ -297,7 +297,7 @@ async fn metrics_carry_the_identity_of_the_instance() {
     let hash = gdl::layout(&deployment.graph, &deployment.placement)
         .expect("layout")
         .placement_hash();
-    let worker = format!("{:032x}", process.node().instance_id().as_u128());
+    let worker = format!("{:032x}", process.instance_id().as_u128());
     let (labels, value) = series(&scrape, "dynamo_component_tokens_total").expect(&scrape);
     assert_eq!(value, 1.0);
     assert_eq!(
@@ -344,4 +344,25 @@ async fn the_metrics_prefix_is_a_setting() {
             "{name} missing from:\n{scrape}"
         );
     }
+}
+
+/// A process is one instance with one velo node: a second launch on it is
+/// refused, where it would have shared the node and replaced the first
+/// launch's handlers without a word.
+#[tokio::test]
+async fn a_process_launches_once() {
+    let dir = roster();
+    let config = config(dir.path(), "");
+    let process = Process::start(&config).await.expect("process");
+    let _first = config
+        .launch(&process, "only", &["only"], &deployment(), async { Ok(()) })
+        .await
+        .expect("the first launch");
+    let Err(error) = config
+        .launch(&process, "only", &["only"], &deployment(), async { Ok(()) })
+        .await
+    else {
+        panic!("a second launch on one process")
+    };
+    assert!(error.to_string().contains("launches once"), "{error}");
 }

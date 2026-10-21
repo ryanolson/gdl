@@ -18,7 +18,7 @@ use crate::items::{Items, fuse_measured, items, until_error};
 use crate::role::{Backward, Forward, Next, Operator, Sink};
 use crate::wire::{Codec, RequestCodec};
 
-use super::meter::{self, Meter};
+use crate::meter::{self, Meter};
 
 /// Where a forward walk ended.
 #[doc(hidden)]
@@ -158,9 +158,9 @@ where
         // As in local composition: no forward stage starts for an
         // interrupted request.
         cx.check()?;
-        let reading = meter::start(self.meter, cx);
+        let mut reading = meter::start(self.meter, cx);
         let out = self.node.forward(cx, value).await;
-        meter::finish(reading, &out);
+        meter::ended(&mut reading, out.as_ref().err());
         self.rest.walk(pos + 1, end, cx, out?).await
     }
 
@@ -439,12 +439,12 @@ impl<S: Sink> DInner for DSink<S> {
     }
 
     async fn call(&self, scope: &Cx, req: S::Req) -> Result<Items<S::Item>> {
-        let reading = meter::start(self.meter, scope);
+        let mut reading = meter::start(self.meter, scope);
         match self.sink.generate(scope.clone(), req).await {
             Ok(items) => Ok(fuse_measured(items, scope, reading)),
-            failed => {
-                meter::finish(reading, &failed);
-                failed
+            Err(error) => {
+                meter::ended(&mut reading, Some(&error));
+                Err(error)
             }
         }
     }
@@ -489,16 +489,16 @@ where
     }
 
     async fn call(&self, scope: &Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
-        let reading = meter::start(self.meter, scope);
+        let mut reading = meter::start(self.meter, scope);
         match self
             .op
             .generate(scope.clone(), req, self.next.clone())
             .await
         {
             Ok(items) => Ok(fuse_measured(items, scope, reading)),
-            failed => {
-                meter::finish(reading, &failed);
-                failed
+            Err(error) => {
+                meter::ended(&mut reading, Some(&error));
+                Err(error)
             }
         }
     }

@@ -14,8 +14,8 @@ use velo::{InstanceId, PeerInfo};
 use super::admission::{Admission, Egress};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
-use super::meter::Meters;
 use crate::error::{Error, ErrorKind, Result};
+use crate::meter::Meters;
 use gdl_model::{Layout, RequestRouter};
 
 /// Runtime settings for one segment instance.
