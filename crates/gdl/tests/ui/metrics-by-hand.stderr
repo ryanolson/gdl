@@ -1,0 +1,22 @@
+error[E0277]: `EngineMetrics` implements `Metrics` by hand
+ --> tests/ui/metrics-by-hand.rs:6:23
+  |
+6 | impl gdl::Metrics for EngineMetrics {
+  |                       ^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `MetricsDerived` is not implemented for `EngineMetrics`
+ --> tests/ui/metrics-by-hand.rs:4:1
+  |
+4 | struct EngineMetrics;
+  | ^^^^^^^^^^^^^^^^^^^^
+  = note: derive it with `#[derive(gdl::Metrics)]`: the source reader reads only the derive
+help: the trait `MetricsDerived` is implemented for `()`
+ --> src/metrics.rs
+  |
+  | impl MetricsDerived for () {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `Metrics`
+ --> src/metrics.rs
+  |
+  | pub trait Metrics: MetricsDerived + Sized + Send + Sync + 'static {
+  |                    ^^^^^^^^^^^^^^ required by this bound in `Metrics`

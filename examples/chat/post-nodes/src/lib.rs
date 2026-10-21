@@ -66,14 +66,16 @@ pub struct NoSettings {}
 
 impl Build for Detokenize {
     type Config = NoSettings;
-    async fn build(_: NoSettings) -> Result<Self> {
+    type Metrics = ();
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
         Ok(Self)
     }
 }
 
 impl Build for Format {
     type Config = FormatSettings;
-    async fn build(settings: FormatSettings) -> Result<Self> {
+    type Metrics = ();
+    async fn build(settings: FormatSettings, (): ()) -> Result<Self> {
         Ok(Self {
             open: settings.open,
             close: settings.close,

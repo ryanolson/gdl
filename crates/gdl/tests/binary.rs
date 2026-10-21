@@ -34,6 +34,36 @@ const GRAPH_CONFIG: &str = "[Add]\noffset = 10\n";
 /// Adds `amount`, from its table, and `offset`, from the graph.
 struct Add {
     by: u32,
+    metrics: AddMetrics,
+}
+
+/// What `Add` reports.
+#[derive(gdl::Metrics)]
+struct AddMetrics {
+    /// Numbers added.
+    added_total: gdl::prometheus::IntCounter,
+}
+
+/// A node whose metric of the same name says something else. Its build
+/// is refused, so it never counts.
+struct Subtract {
+    _metrics: SubtractMetrics,
+}
+
+/// What `Subtract` reports, under `Add`'s name.
+#[derive(gdl::Metrics)]
+#[expect(dead_code, reason = "a node that is never built never counts")]
+struct SubtractMetrics {
+    /// Numbers subtracted.
+    added_total: gdl::prometheus::IntCounter,
+}
+
+impl gdl::Build for Subtract {
+    type Config = toml::Table;
+    type Metrics = SubtractMetrics;
+    async fn build(_config: toml::Table, metrics: SubtractMetrics) -> gdl::Result<Self> {
+        Ok(Self { _metrics: metrics })
+    }
 }
 
 #[derive(Deserialize)]
@@ -44,9 +74,11 @@ struct AddConfig {
 
 impl gdl::Build for Add {
     type Config = AddConfig;
-    async fn build(config: AddConfig) -> gdl::Result<Self> {
+    type Metrics = AddMetrics;
+    async fn build(config: AddConfig, metrics: AddMetrics) -> gdl::Result<Self> {
         Ok(Self {
             by: config.amount + config.offset,
+            metrics,
         })
     }
 }
@@ -55,6 +87,7 @@ impl gdl::Sink for Add {
     type Req = u32;
     type Item = u32;
     async fn generate(&self, _cx: Cx, req: u32) -> gdl::Result<gdl::Items<u32>> {
+        self.metrics.added_total.inc();
         Ok(gdl::items(futures::stream::iter([Ok(req + self.by)])))
     }
 }
@@ -183,6 +216,38 @@ impl gdl::SegmentBinary for Stopping {
     }
 }
 
+/// A segment binary that builds `Add`, then `Subtract`, whose metric of
+/// the same name disagrees with `Add`'s.
+struct Conflicting;
+
+impl gdl::SegmentBinary for Conflicting {
+    const PACKAGE: &'static str = "adder-conflicting";
+    const SEGMENT: &'static str = "only";
+    const SEGMENTS: &'static [&'static str] = &["only"];
+    const GRAPH_CONFIG: &'static str = GRAPH_CONFIG;
+    type Settings = Settings;
+    type Hosts = Add;
+
+    async fn build(settings: Settings, builder: &Builder) -> Result<Add, Failure> {
+        let add = builder.build::<Add>("Add", settings.node.add).await?;
+        builder.build::<Subtract>("Subtract", None).await?;
+        Ok(add)
+    }
+
+    fn deployment() -> gdl::Result<DeploymentSpec> {
+        deployment()
+    }
+
+    fn start(
+        _add: Add,
+        _node: gdl::velo::Velo,
+        _roster: &Roster,
+        _runtime: RuntimeConfig,
+    ) -> gdl::Result<Serving> {
+        unreachable!("a failed build starts nothing")
+    }
+}
+
 /// A directory with a roster directory in it and `settings.toml`, which
 /// names it, then `extra`.
 fn settings(extra: &str) -> (tempfile::TempDir, OsString) {
@@ -217,6 +282,7 @@ async fn a_segment_binary_runs_its_lifecycle() {
     usage_is_named_by_the_package().await;
     a_health_check_reads_the_settings_after_its_flag().await;
     a_conflicting_table_fails_before_the_instance_meets_its_peers().await;
+    nodes_that_define_one_metric_differently_fail_to_build().await;
     a_built_segment_serves_and_drains().await;
 }
 
@@ -266,6 +332,17 @@ async fn a_conflicting_table_fails_before_the_instance_meets_its_peers() {
         .expect("roster directory")
         .collect();
     assert!(announced.is_empty(), "{announced:?}");
+}
+
+/// Two nodes may share a metric's name only if they agree on what it is:
+/// the build says which two disagree, where prometheus would name neither.
+async fn nodes_that_define_one_metric_differently_fail_to_build() {
+    let (_dir, file) = settings("[node.Add]\namount = 5\n");
+    let error = run::<Conflicting>(&[file]).await.expect_err("a conflict");
+    assert_eq!(
+        error,
+        "building Subtract: its metric `added_total` differs from node Add's: metrics of one name in a segment share their kind, help, labels, and buckets"
+    );
 }
 
 /// The table and the graph's values reach the node, the node is ready

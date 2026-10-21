@@ -28,6 +28,7 @@ gdl-message = { path = "../gdl-message" }
 gdl-model = { path = "../gdl-model" }
 futures = { workspace = true }
 pin-project-lite = { workspace = true }
+prometheus = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
@@ -43,7 +44,6 @@ gdl-hub = { path = "../gdl-hub" }
 gdl = { path = ".", features = ["fault-injection", "hub", "json-lines"] }
 figment = { workspace = true, features = ["test"] }
 criterion = { workspace = true }
-prometheus = { workspace = true }
 velo = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

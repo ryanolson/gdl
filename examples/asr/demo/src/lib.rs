@@ -66,8 +66,10 @@ pub async fn start(
     })
 }
 
-async fn build<T: gdl::Build>(config: T::Config) -> Result<T> {
-    T::build(config).await
+/// The demo's nodes report no metrics: it runs in one process, with no
+/// registry to serve them from.
+async fn build<T: gdl::Build<Metrics = ()>>(config: T::Config) -> Result<T> {
+    T::build(config, ()).await
 }
 
 impl<F: Next<Streamed<Session, Audio>, Transcript>> Demo<F> {

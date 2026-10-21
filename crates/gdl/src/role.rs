@@ -136,15 +136,27 @@ pub trait Operator: Send + Sync + 'static {
 }
 
 /// How a generated segment binary constructs a node implementation from that
-/// node's section of the segment configuration.
+/// node's section of the segment configuration, and the metrics it reports.
+///
+/// A node without metrics writes `type Metrics = ();` and takes `(): ()`:
+/// associated type defaults are not stable Rust, and a second trait for
+/// nodes with metrics would be a second way to build a node.
 pub trait Build: Sized + Send + Sync + 'static {
     /// The configuration section.
     type Config: DeserializeOwned + Send;
+    /// The node's own metrics, a type that derives [`Metrics`](crate::Metrics),
+    /// or `()`.
+    type Metrics: crate::Metrics;
 
-    /// Construct the implementation. Return quickly: the segment registers
-    /// with its deployment once every node is built, so that the deployment
-    /// knows the process is live while the nodes get ready.
-    fn build(config: Self::Config) -> impl Future<Output = Result<Self>> + Send;
+    /// Construct the implementation from its configuration and its metrics,
+    /// already registered with the segment process's registry. Return
+    /// quickly: the segment registers with its deployment once every node
+    /// is built, so that the deployment knows the process is live while the
+    /// nodes get ready.
+    fn build(
+        config: Self::Config,
+        metrics: Self::Metrics,
+    ) -> impl Future<Output = Result<Self>> + Send;
 
     /// Resolve once the implementation can take work: a model is loaded, a
     /// connection is open. The segment announces itself as loaded, and takes

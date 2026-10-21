@@ -7,11 +7,13 @@
 mod config;
 mod endpoint;
 mod manifest;
+mod metrics;
 mod model;
 mod parse;
 
-pub use config::{graph_fields, node_config};
+pub use config::{NodeTypes, graph_fields, node_types};
 pub use endpoint::{Endpoint, endpoints};
 pub use gdl_model::Role;
+pub use metrics::metric_fields;
 pub use model::{Edge, Graph, Hop, Node, identifier, message_name};
 pub use parse::{Request, Sig};

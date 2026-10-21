@@ -23,8 +23,9 @@ pub struct Settings {
 
 impl Build for Gateway {
     type Config = Settings;
+    type Metrics = ();
 
-    async fn build(settings: Settings) -> Result<Self> {
+    async fn build(settings: Settings, (): ()) -> Result<Self> {
         Ok(Self {
             languages: settings.languages,
         })

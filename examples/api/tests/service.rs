@@ -26,12 +26,15 @@ async fn enabled_endpoints_use_distinct_adapters_and_disabled_endpoints_are_abse
     assert_eq!(source.roles[0].entries.len(), 3);
     assert!(source.config.iter().all(|f| f.name.starts_with("enabled_")));
     for all in [true, false] {
-        let frontend = ApiFrontend::build(ApiConfig {
-            enabled_chat: true,
-            enabled_responses: all,
-            enabled_anthropic: all,
-            listen: "127.0.0.1:0".parse().unwrap(),
-        })
+        let frontend = ApiFrontend::build(
+            ApiConfig {
+                enabled_chat: true,
+                enabled_responses: all,
+                enabled_anthropic: all,
+                listen: "127.0.0.1:0".parse().unwrap(),
+            },
+            (),
+        )
         .await
         .unwrap();
         let address = frontend.local_addr().unwrap();

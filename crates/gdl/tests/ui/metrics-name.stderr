@@ -1,0 +1,5 @@
+error: metric `tokens`: a counter's name ends in `_total`
+ --> tests/ui/metrics-name.rs:5:5
+  |
+5 |     tokens: gdl::prometheus::IntCounter,
+  |     ^^^^^^

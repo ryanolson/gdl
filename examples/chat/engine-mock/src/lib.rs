@@ -37,8 +37,9 @@ pub struct Settings {
 
 impl Build for Engine {
     type Config = Settings;
+    type Metrics = ();
 
-    async fn build(settings: Settings) -> Result<Self> {
+    async fn build(settings: Settings, (): ()) -> Result<Self> {
         Ok(Self {
             model: chat_sentinel::model(),
             uppercase: settings.uppercase,

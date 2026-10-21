@@ -15,7 +15,8 @@ struct Settings {
 struct Node(Settings);
 impl Build for Node {
     type Config = Settings;
-    async fn build(config: Settings) -> gdl::Result<Self> {
+    type Metrics = ();
+    async fn build(config: Settings, (): ()) -> gdl::Result<Self> {
         Ok(Self(config))
     }
 }
@@ -28,7 +29,7 @@ async fn node_build_extracts_ordered_figment_layers_and_checks_graph_contract() 
         .join(Serialized::default("listen", "fallback"))
         .merge(Serialized::default("listen", "override"));
     let graph = gdl::GraphConfig::from([("enabled_chat".into(), gdl::ConfigValue::Bool(true))]);
-    let node = gdl::build_node::<Node>(&config, &graph)
+    let node = gdl::build_node::<Node>(&config, &graph, ())
         .await
         .expect("test result");
     assert!(node.0.enabled_chat);
@@ -36,7 +37,8 @@ async fn node_build_extracts_ordered_figment_layers_and_checks_graph_contract() 
     assert!(
         gdl::build_node::<Node>(
             &config.merge(Serialized::default("enabled_chat", false)),
-            &graph
+            &graph,
+            ()
         )
         .await
         .is_err()

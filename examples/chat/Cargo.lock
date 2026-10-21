@@ -435,6 +435,7 @@ dependencies = [
  "gdl-message",
  "gdl-model",
  "pin-project-lite",
+ "prometheus",
  "rmp-serde",
  "serde",
  "serde_bytes",

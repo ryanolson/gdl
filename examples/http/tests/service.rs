@@ -19,14 +19,17 @@ async fn a_frontend_serves_streams_and_collected_responses_and_shuts_down() {
             .collect::<Vec<_>>(),
         ["Req", "Item"]
     );
-    let frontend = HttpFrontend::build(Config {
-        listen: "127.0.0.1:0".parse().expect("address"),
-    })
+    let frontend = HttpFrontend::build(
+        Config {
+            listen: "127.0.0.1:0".parse().expect("address"),
+        },
+        (),
+    )
     .await
     .expect("frontend");
     let address = frontend.local_addr().expect("bound address");
     assert!(
-        HttpFrontend::build(Config { listen: address })
+        HttpFrontend::build(Config { listen: address }, ())
             .await
             .is_err(),
         "bind errors must reach the caller"

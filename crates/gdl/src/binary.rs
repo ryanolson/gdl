@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use figment::Figment;
 use figment::providers::Serialized;
@@ -18,9 +18,10 @@ use crate::config::build_node;
 use crate::cx::Cx;
 use crate::dist::{Roster, RuntimeConfig};
 use crate::error::Result;
+use crate::metrics::Metrics;
 use crate::process::{Drains, Hosted, Launch, Process, ProcessConfig};
 use crate::role::Build;
-use gdl_model::{DeploymentSpec, GraphConfig};
+use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
 
 /// What one segment's binary hosts and serves: the parts that differ
 /// between segments. [`run_segment`] runs the rest, the same for every
@@ -110,7 +111,8 @@ pub async fn run_segment<B: SegmentBinary>(
     // process is live while it starts.
     let process = Process::start(&config).await?;
     let (config, settings) = config.into_hosted();
-    let hosts = B::build(settings, &Builder::new(B::GRAPH_CONFIG)?).await?;
+    let builder = Builder::new(B::GRAPH_CONFIG, prometheus::Registry::new())?;
+    let hosts = B::build(settings, &builder).await?;
     let deployment = B::deployment()?;
     let launch = config
         .launch(
@@ -157,33 +159,71 @@ pub fn segment_main<B: SegmentBinary>() -> std::process::ExitCode {
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 /// Builds each implementation a segment hosts from its settings table,
-/// with the graph's own config values filled in and checked. Every hosted
-/// implementation is built through one, so what the runtime hands a node
-/// at construction is added here, not to every generated crate.
+/// with the graph's own config values filled in and checked, and its
+/// metrics registered. Every hosted implementation is built through one,
+/// so what the runtime hands a node at construction is added here, not to
+/// every generated crate.
 pub struct Builder {
     graph: BTreeMap<String, GraphConfig>,
+    registry: prometheus::Registry,
+    /// Each metric registered so far, by name, with the node that defined
+    /// it first.
+    defined: Mutex<BTreeMap<String, (String, MetricField)>>,
 }
 
 impl Builder {
-    fn new(graph: &str) -> std::result::Result<Self, Failure> {
+    fn new(graph: &str, registry: prometheus::Registry) -> std::result::Result<Self, Failure> {
         Ok(Self {
             graph: toml::from_str(graph)?,
+            registry,
+            defined: Mutex::new(BTreeMap::new()),
         })
     }
 
     /// Build `T`, the implementation of node `node` (as the graph spells
-    /// it), from its settings table.
+    /// it), from its settings table, with its metrics registered.
     pub async fn build<T: Build>(
         &self,
         node: &str,
         table: Option<toml::Table>,
     ) -> std::result::Result<T, Failure> {
+        self.define(node, <T::Metrics as Metrics>::definitions())?;
+        let metrics = T::Metrics::register(&self.registry, node)
+            .map_err(|e| format!("building {node}: registering its metrics: {e}"))?;
         let none = GraphConfig::new();
         let graph = self.graph.get(node).unwrap_or(&none);
         let providers = Figment::from(Serialized::defaults(table.unwrap_or_default()));
-        build_node::<T>(&providers, graph)
+        build_node::<T>(&providers, graph, metrics)
             .await
             .map_err(|e| format!("building {node}: {e}").into())
+    }
+
+    /// Refuse a metric that another node defined differently. Prometheus
+    /// refuses a second help text or label set with a message that names
+    /// neither node, and takes a second kind without a word, which breaks
+    /// the scrape.
+    fn define(
+        &self,
+        node: &str,
+        definitions: Vec<MetricField>,
+    ) -> std::result::Result<(), Failure> {
+        let mut defined = self.defined.lock().unwrap_or_else(|e| e.into_inner());
+        for definition in definitions {
+            match defined.get(&definition.name) {
+                Some((first, earlier)) if *earlier != definition => {
+                    return Err(format!(
+                        "building {node}: its metric `{}` differs from node {first}'s: metrics of one name in a segment share their kind, help, labels, and buckets",
+                        definition.name
+                    )
+                    .into());
+                }
+                Some(_) => {}
+                None => {
+                    defined.insert(definition.name.clone(), (node.to_string(), definition));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

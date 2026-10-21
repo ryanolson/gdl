@@ -13,6 +13,7 @@ mod endpoint;
 mod expand;
 mod export;
 mod message;
+mod metrics;
 mod node;
 
 /// The expansion behind `gdl::graph!`, which calls it as
@@ -105,6 +106,13 @@ fn split_crate(input: Tokens) -> Option<(Tokens, Tokens)> {
 pub fn config(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     result(config::expand(&input))
+}
+
+/// A node's metrics, from a struct of prometheus metric fields.
+#[proc_macro_derive(Metrics, attributes(gdl))]
+pub fn metrics(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    result(metrics::expand(&input))
 }
 
 /// Describe the typed entry clients of a hosted service.

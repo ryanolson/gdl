@@ -271,9 +271,9 @@ fn node(
         .iter()
         .map(|meta| syn::parse_quote!(#[#meta]))
         .collect();
-    let config_path = gdl_syntax::node_config(&attrs).map_err(|e| format!("{at}: {e}"))?;
-    let config = if let Some(path) = config_path {
-        let (path, absolute) = segments(&path);
+    let types = gdl_syntax::node_types(&attrs).map_err(|e| format!("{at}: {e}"))?;
+    let config = if let Some(path) = &types.config {
+        let (path, absolute) = segments(path);
         let Some(Def::Type(c, m, i)) = resolver.resolve(krate, module, &path, absolute) else {
             return Err(format!("{at}: config type cannot be resolved"));
         };

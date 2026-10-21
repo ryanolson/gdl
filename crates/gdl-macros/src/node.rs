@@ -41,7 +41,8 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
             node
         }
     };
-    let config = if let Some(path) = gdl_syntax::node_config(&input.attrs)? {
+    let types = gdl_syntax::node_types(&input.attrs)?;
+    let config = if let Some(path) = &types.config {
         quote! { || {
             fn check<T: ::gdl::Build<Config = #path>>() {}
             check::<#ident>();

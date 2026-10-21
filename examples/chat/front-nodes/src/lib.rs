@@ -70,21 +70,24 @@ pub struct NoSettings {}
 
 impl Build for Preprocess {
     type Config = NoSettings;
-    async fn build(_: NoSettings) -> Result<Self> {
+    type Metrics = ();
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
         Ok(Self)
     }
 }
 
 impl Build for Truncate {
     type Config = NoSettings;
-    async fn build(_: NoSettings) -> Result<Self> {
+    type Metrics = ();
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
         Ok(Self)
     }
 }
 
 impl Build for Number {
     type Config = NoSettings;
-    async fn build(_: NoSettings) -> Result<Self> {
+    type Metrics = ();
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
         Ok(Self)
     }
 }

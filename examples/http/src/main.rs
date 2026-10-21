@@ -7,7 +7,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:8081".into())
         .parse()?;
-    let frontend = HttpFrontend::build(Config { listen }).await?;
+    let frontend = HttpFrontend::build(Config { listen }, ()).await?;
     println!("HTTP frontend: http://{}/generate", frontend.local_addr()?);
     let next = graph::local(graph::Bindings::new().engine(Echo));
     let shutdown = gdl::Cx::new();

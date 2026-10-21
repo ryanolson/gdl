@@ -20,6 +20,7 @@ mod identity;
 mod items;
 #[cfg(feature = "json-lines")]
 mod json;
+mod metrics;
 mod process;
 mod role;
 mod service;
@@ -41,18 +42,23 @@ pub use dist::{Faults, Gate};
 pub use dist::{HubSession, bind_container_node};
 pub use error::{Error, ErrorKind, Result};
 pub use figment;
-pub use gdl_macros::{Config, Endpoints};
+pub use gdl_macros::{Config, Endpoints, Metrics};
 pub use gdl_model::{
     ConfigField, ConfigSchema, ConfigValue, CrossingReport, DeploymentSpec, GraphConfig,
-    HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo,
-    Placement, PlacementError, PlacementErrors, RequestRouter, Role, Run, SegmentRegistration,
-    TypeInfo, WireReason, layout, resolve_config,
+    HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, MetricField,
+    MetricKind, NodeInfo, Placement, PlacementError, PlacementErrors, RequestRouter, Role, Run,
+    SegmentRegistration, TypeInfo, WireReason, layout, resolve_config,
 };
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 #[cfg(feature = "json-lines")]
 pub use json::serve_json_lines;
+pub use metrics::Metrics;
 pub use process::{Drains, Hosted, Launch, Process, ProcessConfig};
+/// The prometheus version node metrics are built with: a node crate names
+/// its metric types through here, so they are the types the runtime
+/// registers and serves.
+pub use prometheus;
 pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
 pub use service::{Client, Endpoints, Join, Service};
 pub use streamed::Streamed;
@@ -150,6 +156,7 @@ pub use gdl_macros::Node;
 /// Support for macro expansions. Not a stable interface.
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::metrics::{Construct, MetricsDerived, metric};
     pub use crate::wire::probe::{Probe, ViaLocal, ViaWire};
     pub use gdl_macros::graph;
     pub use gdl_message::__private::*;

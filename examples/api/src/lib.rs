@@ -56,7 +56,8 @@ impl ApiFrontend {
 }
 impl Build for ApiFrontend {
     type Config = ApiConfig;
-    async fn build(config: ApiConfig) -> gdl::Result<Self> {
+    type Metrics = ();
+    async fn build(config: ApiConfig, (): ()) -> gdl::Result<Self> {
         let listener = tokio::net::TcpListener::bind(config.listen)
             .await
             .map_err(|e| gdl::Error::node(e.to_string()))?;
@@ -205,7 +206,8 @@ pub struct AnthropicReply {
 pub struct ChatAdapter;
 impl Build for ChatAdapter {
     type Config = std::collections::BTreeMap<String, String>;
-    async fn build(_: Self::Config) -> gdl::Result<Self> {
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
         Ok(Self)
     }
 }
@@ -237,7 +239,8 @@ impl gdl::Operator for ChatAdapter {
 pub struct ResponsesAdapter;
 impl Build for ResponsesAdapter {
     type Config = std::collections::BTreeMap<String, String>;
-    async fn build(_: Self::Config) -> gdl::Result<Self> {
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
         Ok(Self)
     }
 }
@@ -268,7 +271,8 @@ impl gdl::Operator for ResponsesAdapter {
 pub struct AnthropicAdapter;
 impl Build for AnthropicAdapter {
     type Config = std::collections::BTreeMap<String, String>;
-    async fn build(_: Self::Config) -> gdl::Result<Self> {
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
         Ok(Self)
     }
 }
@@ -301,7 +305,8 @@ impl gdl::Operator for AnthropicAdapter {
 pub struct Echo;
 impl Build for Echo {
     type Config = std::collections::BTreeMap<String, String>;
-    async fn build(_: Self::Config) -> gdl::Result<Self> {
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
         Ok(Self)
     }
 }
@@ -323,7 +328,8 @@ impl gdl::Sink for Echo {
 pub struct ExtractChat;
 impl Build for ExtractChat {
     type Config = std::collections::BTreeMap<String, String>;
-    async fn build(_: Self::Config) -> gdl::Result<Self> {
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
         Ok(Self)
     }
 }
@@ -342,7 +348,8 @@ impl gdl::Forward for ExtractChat {
 pub struct FormatChat;
 impl Build for FormatChat {
     type Config = std::collections::BTreeMap<String, String>;
-    async fn build(_: Self::Config) -> gdl::Result<Self> {
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
         Ok(Self)
     }
 }

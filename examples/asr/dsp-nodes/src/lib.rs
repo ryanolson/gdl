@@ -16,8 +16,9 @@ pub struct Resample;
 
 impl Build for Resample {
     type Config = NoSettings;
+    type Metrics = ();
 
-    async fn build(_: NoSettings) -> Result<Self> {
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
         Ok(Self)
     }
 }

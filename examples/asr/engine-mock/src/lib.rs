@@ -23,8 +23,9 @@ pub struct Settings {
 
 impl Build for Recognizer {
     type Config = Settings;
+    type Metrics = ();
 
-    async fn build(settings: Settings) -> Result<Self> {
+    async fn build(settings: Settings, (): ()) -> Result<Self> {
         Ok(Self {
             language: settings.language,
         })
@@ -83,8 +84,9 @@ pub struct Punctuate;
 
 impl Build for Punctuate {
     type Config = NoSettings;
+    type Metrics = ();
 
-    async fn build(_: NoSettings) -> Result<Self> {
+    async fn build(_: NoSettings, (): ()) -> Result<Self> {
         Ok(Self)
     }
 }

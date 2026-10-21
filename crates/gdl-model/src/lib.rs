@@ -12,6 +12,7 @@ mod deployment;
 mod diagram;
 mod hash;
 mod manifest;
+mod metrics;
 mod placement;
 
 use std::fmt;
@@ -24,6 +25,10 @@ pub use deployment::{
     SegmentRegistration, segment_name_problem,
 };
 pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
+pub use metrics::{
+    COMPONENT_LABEL, ENDPOINT_LABEL, MetricField, MetricKind, NAMESPACE_LABEL, RUNTIME_LABELS,
+    RUNTIME_METRICS, WORKER_LABEL,
+};
 pub use placement::{
     CrossingReport, HopLayout, Layout, Placement, PlacementError, PlacementErrors, RequestRouter,
     Run, WireReason, layout,

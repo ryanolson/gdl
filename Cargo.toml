@@ -19,7 +19,8 @@ figment = { version = "0.10.19", features = ["toml", "env", "json"] }
 futures = "0.3"
 linkme = "0.3"
 pin-project-lite = "0.2"
-prometheus = "0.14"
+# The version dynamo pins; without protobuf, which the text format does not need.
+prometheus = { version = "0.14", default-features = false }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"

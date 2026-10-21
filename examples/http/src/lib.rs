@@ -29,8 +29,9 @@ impl HttpFrontend {
 
 impl Build for HttpFrontend {
     type Config = Config;
+    type Metrics = ();
 
-    async fn build(config: Config) -> gdl::Result<Self> {
+    async fn build(config: Config, (): ()) -> gdl::Result<Self> {
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(|e| gdl::Error::node(e.to_string()))?;
@@ -93,7 +94,8 @@ pub struct Echo;
 
 impl Build for Echo {
     type Config = std::collections::BTreeMap<String, String>;
-    async fn build(_: Self::Config) -> gdl::Result<Self> {
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
         Ok(Self)
     }
 }

@@ -91,23 +91,36 @@ pub fn graph_fields(fields: &syn::Fields) -> syn::Result<Vec<ConfigField>> {
     Ok(result)
 }
 
-/// Read the configuration type a node exposes to catalog discovery.
-pub fn node_config(attrs: &[syn::Attribute]) -> syn::Result<Option<syn::Path>> {
-    let mut config = None;
+/// The types a node's `derive(Node)` names in `#[gdl(...)]`: its
+/// configuration and its metrics, each checked against its `Build` impl.
+#[derive(Default)]
+pub struct NodeTypes {
+    /// `config = T`: the configuration type, which derives `Config`.
+    pub config: Option<syn::Path>,
+    /// `metrics = T`: the metrics type, which derives `Metrics`.
+    pub metrics: Option<syn::Path>,
+}
+
+/// Read the types a node exposes to catalogue discovery.
+pub fn node_types(attrs: &[syn::Attribute]) -> syn::Result<NodeTypes> {
+    let mut types = NodeTypes::default();
     for attr in attrs.iter().filter(|a| a.path().is_ident("gdl")) {
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("config") {
-                if config.is_some() {
-                    return Err(meta.error("configuration type declared twice"));
-                }
-                config = Some(meta.value()?.parse()?);
-                Ok(())
+            let (slot, what) = if meta.path.is_ident("config") {
+                (&mut types.config, "configuration")
+            } else if meta.path.is_ident("metrics") {
+                (&mut types.metrics, "metrics")
             } else {
-                Err(meta.error("expected config"))
+                return Err(meta.error("expected config or metrics"));
+            };
+            if slot.is_some() {
+                return Err(meta.error(format!("{what} type declared twice")));
             }
+            *slot = Some(meta.value()?.parse()?);
+            Ok(())
         })?;
     }
-    Ok(config)
+    Ok(types)
 }
 
 #[cfg(test)]
