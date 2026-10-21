@@ -78,7 +78,7 @@ A laptop run gates nothing smaller than 5%. It may block a change that is plainl
 | gdl: reply renewal | criterion medians | `m19-renewal.md` |
 | gdl: the reader is linear | release runs | `reader-cost.md` |
 | gdl: the runtime's per-segment metrics cost at most 2,000 instructions per visit, nothing with metrics off, and nothing per item | one segment 1,575 and 2,169 per visit in two sets of rounds (the per-node build: 3,746); two and three segments within spread; off within spread of the base; per item nothing; 32 requests at once +4.6 to 5.0% (per node: +5.7 to 6.3%) | `m21-metrics.md`, 2026-10-21 |
-| gdl: live rosters (milestone 22) cost per request no more than the 1% gate: the `retired()` wait per stream sent and the `arc-swap` load per pick | one segment +0.5% (no stream), two +0.9%, three +1.5% in instructions, each within the spread of the runs; about 6k instructions per stream sent; criterion rows and the per-item row within their spread | `m22-rosters.md`, 2026-10-21 |
+| gdl: live rosters (milestone 22): the `retired()` wait per stream sent and the `arc-swap` load per pick. The owner accepted the three-segment +1.5% over the 1% gate for now (2026-10-21); machine 1 confirms it | one segment +0.5% (no stream), two +0.9%, three +1.5% in instructions, each within the spread of the runs; about 6k instructions per stream sent; criterion rows and the per-item row within their spread | `m22-rosters.md`, 2026-10-21 |
 
 ## Automation
 
