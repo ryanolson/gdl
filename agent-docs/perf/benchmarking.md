@@ -87,9 +87,9 @@ A laptop run gates nothing smaller than 5%. It may block a change that is plainl
 
 ## Status
 
-**2026-10-21 (the owner):** no dedicated benchmark machine is available for now. Laptop numbers stay labelled provisional, and the claims below stay open. A laptop run still blocks a change that is plainly too expensive (over 5%), as the gates say.
+**2026-10-21 (the owner):** no dedicated benchmark machine is available for now. Laptop numbers stay labelled provisional, and the claims to confirm stay open. A laptop run still blocks a change that is plainly too expensive (over 5%), as the gates say.
 
 ## Needed from the owner
 
-- **Gates:** whether the thresholds above are right; in particular the 1% per request.
-- **Order:** confirm that velo#141's costs go first, since a velo release (ruling 121) waits on them; then milestone 21's metrics before they ship.
+- **Gates:** whether the thresholds above are right; in particular the 1% per request for admission and routing.
+- **Order:** once a machine exists: velo#141's costs first (merged into velo `main` 2026-10-21, before any release), then milestone 21's metrics.
