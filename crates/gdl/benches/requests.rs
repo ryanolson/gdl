@@ -12,8 +12,9 @@
 //! The setups are `remote`'s: `local`, `one` (one segment), `two`, and
 //! `three`, and the last three again with the runtime's metrics recorded
 //! (`one-metrics`, ...). `two-random` is `two` with the engine's crossing
-//! routed by `random` rather than `round_robin`. Only the setup named is
-//! built. `requests sizes 0` prints the size of the front's call future
+//! routed by `random` rather than `round_robin`; `two-least_loaded` and
+//! `two-affinity` route it through those selectors. Only the setup named
+//! is built. `requests sizes 0` prints the size of the front's call future
 //! over one, two, and three segments: a larger future is moved whole on
 //! every request. See `agent-docs/perf/benchmarking.md` for the method.
 
@@ -34,7 +35,7 @@ fn produced() {}
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: requests <local | one | two | three>[-metrics] <count> | two-random <count> | sizes 0";
+    let usage = "usage: requests <local | one | two | three>[-metrics] <count> | two-<random | least_loaded | affinity> <count> | sizes 0";
     let which = args.next().expect(usage);
     let count: u32 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -82,6 +83,12 @@ fn main() {
             }
             "two-random" if !metrics => {
                 let placement = reference_placement(2).route("D", RequestRouter::Random);
+                reference_front(&events, &placement, 2, false).await
+            }
+            "two-least_loaded" | "two-affinity" if !metrics => {
+                let name = shape.trim_start_matches("two-");
+                let placement =
+                    reference_placement(2).route("D", RequestRouter::Selector(name.into()));
                 reference_front(&events, &placement, 2, false).await
             }
             "one" | "two" | "three" => {
