@@ -7,7 +7,9 @@
 mod hub;
 mod renewal;
 #[cfg(feature = "hub")]
-pub use hub::{HubSession, bind_container_node};
+pub use hub::HubSession;
+#[cfg(feature = "hub")]
+pub(crate) use hub::bind_under_hub;
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -31,6 +33,18 @@ use crate::error::{Error, ErrorKind, Result};
 /// streams alike. Port zero picks a free port; the node's address carries
 /// the bound one.
 pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Velo> {
+    build_node(listen, None).await
+}
+
+/// [`bind_node`], resolving a peer it has not registered through
+/// `discovery` when a message is addressed to that peer's worker (an attach
+/// to an anchor it minted, a ticket open, a stream batch, a reservation
+/// renewal): a peer may mint an anchor that this node is asked to attach to
+/// before this node has heard of the peer.
+pub(crate) async fn build_node(
+    listen: std::net::SocketAddr,
+    discovery: Option<Arc<dyn velo::PeerDiscovery>>,
+) -> Result<Velo> {
     let transport = |e: &dyn std::fmt::Display| Error::new(ErrorKind::Transport, e.to_string());
     let listener = std::net::TcpListener::bind(listen).map_err(|e| transport(&e))?;
     let tcp = velo::transports::tcp::TcpTransportBuilder::new()
@@ -42,12 +56,25 @@ pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Velo> {
     // listener. gdl talks only to gdl, so the per-stream listener velo keeps
     // for older peers would be a second port per segment, and a path whose
     // retirement signal means less.
-    Velo::builder()
-        .add_transport(Arc::new(tcp))
-        .mux_only()
-        .build()
-        .await
-        .map_err(|e| transport(&e))
+    let builder = Velo::builder().add_transport(Arc::new(tcp)).mux_only();
+    let builder = match discovery {
+        Some(discovery) => builder.discovery(discovery),
+        None => builder,
+    };
+    builder.build().await.map_err(|e| transport(&e))
+}
+
+/// Make `peer` reachable from `node` by its instance id: an instance that
+/// joined after the launch, before anything is routed to it.
+#[cfg(feature = "hub")]
+pub(crate) fn register_peer(node: &Velo, peer: PeerInfo) -> Result<()> {
+    node.register_peer(peer).map_err(transport)
+}
+
+/// Forget `instance`, which has left. Only once nothing is in flight to
+/// it: velo fails what is.
+pub(crate) fn unregister_peer(node: &Velo, instance: InstanceId) {
+    node.unregister_peer(instance);
 }
 
 /// Stop `node` taking requests, let the handlers it is running finish

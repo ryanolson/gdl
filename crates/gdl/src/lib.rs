@@ -33,14 +33,14 @@ pub use compose::{BackwardChain, ForwardChain, Hop, Inner, OperatorStage, SinkSt
 pub use config::build_node;
 pub use cx::{Cx, Deadline, RequestId};
 pub use decl::{Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDecl, SourceDecl};
+#[cfg(feature = "hub")]
+pub use dist::HubSession;
 pub use dist::{
     BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment, Entries,
     FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, Served, bind_node,
 };
 #[cfg(feature = "fault-injection")]
 pub use dist::{Faults, Gate};
-#[cfg(feature = "hub")]
-pub use dist::{HubSession, bind_container_node};
 pub use error::{Error, ErrorKind, Result};
 pub use figment;
 pub use gdl_macros::{Config, Endpoints, Metrics};

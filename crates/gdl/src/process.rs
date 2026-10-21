@@ -21,7 +21,9 @@ use serde::de::DeserializeOwned;
 use velo::Velo;
 
 use crate::cx::Cx;
-use crate::dist::{Roster, RuntimeConfig, Segment, announce, announced, bind_node, shut_down};
+use crate::dist::{
+    Roster, RuntimeConfig, Segment, announce, announced, bind_node, follow_directory, shut_down,
+};
 use crate::error::{Error, ErrorKind, Result};
 use system::{Health, Phase, SystemSettings};
 
@@ -283,8 +285,11 @@ impl<H> ProcessConfig<H> {
     /// admits the instance only if `registration` names the deployment it
     /// serves, the instance registers before it is ready, so the hub knows
     /// it is live, then waits for at least `[min_replicas]` loaded
-    /// instances of each segment and takes those as its roster. How many
-    /// instances a segment has under a hub is not fixed.
+    /// instances of each segment that have not retired, and takes those as
+    /// its roster. How many instances a segment has under a hub is not
+    /// fixed: from just before it announces `loaded`, the instance follows
+    /// membership, so that an instance that joins later is routed to once
+    /// it is ready, and one that retires or leaves is not.
     ///
     /// A stop that `process` takes before the launch is done, while the
     /// nodes load or the instances meet, ends it with `Cancelled`.
@@ -315,6 +320,13 @@ impl<H> ProcessConfig<H> {
         let node = process.take_node()?;
         let layout = gdl_model::layout(&deployment.graph, &deployment.placement)?;
         let inner: Vec<String> = layout.sends_to(segment).into_iter().collect();
+        // The segments that send to this one: their instances are the ones
+        // that must stop routing here before a retirement may end.
+        let senders: Vec<String> = segments
+            .iter()
+            .filter(|from| layout.sends_to(from).contains(segment))
+            .map(ToString::to_string)
+            .collect();
         let (source, reaching) = sources(&layout, &deployment.graph, segment);
         let discovery = self.discovery()?;
         let counts = match discovery {
@@ -338,11 +350,25 @@ impl<H> ProcessConfig<H> {
             .map(|s| (*s, counts.get(*s).copied().unwrap_or(1)))
             .collect();
         let wait = Duration::from_millis(self.rendezvous_ms);
-        let (node, roster, peers) = match discovery {
+        let drain = self.runtime.drain_bound();
+        let (node, roster, peers, follower) = match discovery {
             Discovery::Files(dir) => {
                 ready.await?;
                 let roster = Roster::rendezvous(dir, segment, &node, expect, wait).await?;
-                (node, roster, Peers::Files(dir.to_path_buf()))
+                let follower = tokio::spawn(follow_directory(
+                    dir.to_path_buf(),
+                    roster.clone(),
+                    segment,
+                    node.clone(),
+                    inner.clone(),
+                    drain,
+                ));
+                (
+                    node,
+                    roster,
+                    Peers::Files(dir.to_path_buf()),
+                    Some(Abort(follower)),
+                )
             }
             #[cfg(feature = "hub")]
             Discovery::Hub(hub) => {
@@ -369,8 +395,23 @@ impl<H> ProcessConfig<H> {
                     result = ready => result?,
                     lost = session.maintain() => lost?,
                 }
-                let roster = session.roster(&expect, wait).await?;
-                (node, roster, Peers::Hub(session))
+                // Membership is followed from just before `loaded`, into the
+                // roster this instance will route with, so that a retirement
+                // is acknowledged even while the rendezvous waits (ruling
+                // 143); the roster read is merged into it, keeping what the
+                // follower learned.
+                let mut roster = Roster::new();
+                roster.hold();
+                let all: Vec<&str> = segments.to_vec();
+                let sends: Vec<&str> = inner.iter().map(String::as_str).collect();
+                session.follow(Arc::clone(roster.live()), node.clone(), &all, &sends, drain);
+                let met = session.roster(&expect, wait).await?;
+                for (segment, peers) in met.segments() {
+                    for peer in peers {
+                        roster.add(segment, peer.clone());
+                    }
+                }
+                (node, roster, Peers::Hub(Box::new(session)), None)
             }
             #[cfg(not(feature = "hub"))]
             Discovery::Hub(hub) => {
@@ -399,11 +440,14 @@ impl<H> ProcessConfig<H> {
             peers,
             segment,
             inner,
+            senders,
             source,
             reaching,
             wait,
-            drain: self.runtime.drain_bound(),
+            drain,
+            setup: self.runtime.setup_timeout,
             process: process.clone(),
+            _follower: follower,
             _leaving: leaving,
         })
     }
@@ -415,8 +459,14 @@ impl<H> ProcessConfig<H> {
     async fn bind(&self) -> Result<Velo> {
         match self.discovery()? {
             #[cfg(feature = "hub")]
-            Discovery::Hub(_) if self.listen.ip().is_unspecified() => {
-                crate::dist::bind_container_node(self.listen.port()).await
+            Discovery::Hub(hub) => {
+                crate::dist::bind_under_hub(
+                    self.listen,
+                    &hub.host,
+                    hub.public_port,
+                    hub.control_port,
+                )
+                .await
             }
             _ => bind_node(self.listen).await,
         }
@@ -444,6 +494,8 @@ pub struct Launch {
     segment: &'static str,
     /// The segments this one sends to.
     inner: Vec<String>,
+    /// The segments that send to this one.
+    senders: Vec<String>,
     /// Whether this segment hosts a source.
     source: bool,
     /// The segments hosting a source whose requests can reach this one.
@@ -451,9 +503,24 @@ pub struct Launch {
     wait: Duration,
     /// How long a stop may take to drain.
     drain: Duration,
+    /// The longest a hand-off sent before a peer stopped routing here may
+    /// take to arrive.
+    setup: Duration,
     process: Process,
+    /// The roster directory's membership follower; the hub session owns
+    /// its own.
+    _follower: Option<Abort>,
     /// Dropped last, on every way out: says the instance has left.
     _leaving: Leaving,
+}
+
+/// Ends a task when dropped.
+struct Abort(tokio::task::JoinHandle<()>);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Announces, when dropped, that the instance has left, so that no peer's
@@ -499,22 +566,31 @@ fn sources(
 }
 
 /// What a launch keeps serving while it drains: the started segment, whose
-/// admitted requests the drain waits to see at zero.
+/// admitted requests the drain waits to see at zero, and whose entries it
+/// closes before that wait.
 pub trait Drains: Send + Sync + 'static {
     /// Requests the instance holds now.
     fn admitted(&self) -> usize;
+
+    /// Refuse the requests that arrive from now on. Nothing by default,
+    /// for a launch that serves no segment.
+    fn close(&self) {}
 }
 
 impl<H: Send + Sync + 'static> Drains for Segment<H> {
     fn admitted(&self) -> usize {
         Segment::admitted(self)
     }
+
+    fn close(&self) {
+        Segment::close(self);
+    }
 }
 
 enum Peers {
     Files(PathBuf),
     #[cfg(feature = "hub")]
-    Hub(crate::dist::HubSession),
+    Hub(Box<crate::dist::HubSession>),
 }
 
 impl Launch {
@@ -534,18 +610,28 @@ impl Launch {
     /// finishes. A request that reaches this instance before the barrier
     /// waits at the held roster.
     ///
-    /// A stop (SIGINT or SIGTERM, or [`Process::stop`]) makes the instance
-    /// not ready and cancels the context `serve` gets; `serve` then finishes
-    /// on its own terms, so a frontend drains the requests it holds. The
-    /// instance keeps `segment` serving after that: a request admitted
-    /// before the stop may still cross it. It waits until every instance of
-    /// the source segments whose requests can reach it has drained (its
-    /// `serve` returned) or left, then until it holds no request, then
-    /// stops velo and leaves. A source's instance announces that it has
-    /// drained before it waits, so source segments that route to each other
-    /// never wait for each other. The drain is bounded by the runtime's
-    /// `drain` (by default the request deadline), and a second stop ends it
-    /// at once.
+    /// Under a hub, once the roster is released the instance announces
+    /// that it is ready, and instances already serving add it then.
+    ///
+    /// A stop (SIGINT or SIGTERM, or [`Process::stop`]) retires the
+    /// instance: it says so, so that its peers stop routing to it, makes
+    /// itself not ready, and cancels the context `serve` gets; `serve` then
+    /// finishes on its own terms, so a frontend drains the requests it
+    /// holds. The instance keeps `segment` serving after that: a request
+    /// admitted before the stop, or routed here before a peer heard of the
+    /// retirement, may still cross it. It waits for whichever comes first:
+    /// every instance that sends to its segment has promised to avoid it or
+    /// left, and the runtime's setup timeout has passed since; or every
+    /// instance of the source segments whose requests can reach it has
+    /// drained (its `serve` returned) or left. A source's instance
+    /// announces that it has drained before it waits, so source segments
+    /// that route to each other never wait for each other. Then it refuses
+    /// what arrives, waits until it holds no request (a stream holds its
+    /// request until velo has handed its output on), stops velo, and
+    /// leaves. A peer avoids a retired instance only while its segment has
+    /// another, so stopping every instance drains as one deployment-wide
+    /// stop. The drain is bounded by the runtime's `drain` (by default the
+    /// request deadline), and a second stop ends it at once.
     ///
     /// A lost hub lease stops the instance the same way, skips the wait,
     /// since the hub that would answer it is gone, and gives the lease's
@@ -597,10 +683,22 @@ impl Launch {
                 process.health.set(Phase::Draining);
                 let stopped = Error::new(ErrorKind::Cancelled, "stopped while starting");
                 let deadline = tokio::time::Instant::now() + self.drain;
+                self.retire(deadline).await;
                 (Err(stopped), Ok(()), deadline)
             }
             Some(Ok(())) => {
                 self.roster.release();
+                // The instances already serving add this one now.
+                #[cfg(feature = "hub")]
+                if let Peers::Hub(session) = &mut self.peers {
+                    let deadline = tokio::time::Instant::now() + self.wait;
+                    if let Err(error) = session.announce_ready(deadline).await {
+                        eprintln!(
+                            "{}: the hub did not take `ready`, so instances already serving will not route here: {error}",
+                            self.segment
+                        );
+                    }
+                }
                 process.health.set(Phase::Ready);
                 eprintln!("{}: ready", self.segment);
                 let shutdown = Cx::new();
@@ -622,17 +720,32 @@ impl Launch {
                 process.health.set(Phase::Draining);
                 shutdown.cancel();
                 // The bound ends every wait, the body's too: a request with
-                // a longer deadline of its own is cut off at it.
-                let result = match ended {
-                    Some(result) => result,
-                    None => tokio::select! {
-                        result = &mut body => result,
-                        () = process.stops(2) => return Err(second()),
-                        () = tokio::time::sleep_until(deadline) => Err(Error::new(
-                            ErrorKind::Cancelled,
-                            "the drain's bound passed before the serving body finished",
-                        )),
-                    },
+                // a longer deadline of its own is cut off at it. A body that
+                // has finished is taken first, whenever its end is seen.
+                let finished = async {
+                    match ended {
+                        Some(result) => result,
+                        None => tokio::select! {
+                            biased;
+                            result = &mut body => result,
+                            () = tokio::time::sleep_until(deadline) => Err(Error::new(
+                                ErrorKind::Cancelled,
+                                "the drain's bound passed before the serving body finished",
+                            )),
+                        },
+                    }
+                };
+                // Peers hear of the retirement while the body finishes; a
+                // lost lease took the hub that would hear it.
+                let retiring = async {
+                    if stop.is_ok() {
+                        self.retire(deadline).await;
+                    }
+                };
+                let (result, ()) = tokio::select! {
+                    biased;
+                    () = process.stops(2) => return Err(second()),
+                    both = async { tokio::join!(finished, retiring) } => both,
                 };
                 (result, stop, deadline)
             }
@@ -654,11 +767,38 @@ impl Launch {
         stop.and(result)
     }
 
-    /// Announce that this instance has drained if it is a source's, then
-    /// wait until every instance of the source segments that can reach it
-    /// has drained or left, then until it holds no request: each until
-    /// `deadline`. With `hub` false (its lease is lost), the hub is not
-    /// asked. Polls; nothing is added to a request's path.
+    /// Say that this instance has retired, so that its peers stop routing
+    /// to it (ruling 141): at the hub, `retired`, then `ready` and `loaded`
+    /// withdrawn; in a roster directory, a file in `retired/`. Bounded by
+    /// `deadline`; what does not get through leaves the drain to (B) or its
+    /// bound.
+    async fn retire(&mut self, deadline: tokio::time::Instant) {
+        let retired = match &mut self.peers {
+            Peers::Files(dir) => announce(dir, "retired", self.segment, &self.node),
+            #[cfg(feature = "hub")]
+            Peers::Hub(session) => session.retire(deadline).await,
+        };
+        if let Err(error) = retired {
+            eprintln!(
+                "{}: could not announce the retirement, so peers may keep routing here: {error}",
+                self.segment
+            );
+        }
+        #[cfg(not(feature = "hub"))]
+        let _ = deadline;
+    }
+
+    /// The drain after the serving body has returned (ruling 140). A
+    /// source's instance announces that it has drained, then the instance
+    /// waits for the first of: (A) every instance of the segments that send
+    /// to this one has promised to avoid it, or left, and `setup` has
+    /// passed since, so that a hand-off sent before the promise has
+    /// arrived; or (B) every instance of the source segments that can reach
+    /// this one has drained or left. Then it closes its entries (ruling
+    /// 150) and waits until it holds no request; a stream holds its share
+    /// until velo has handed its output on. Each wait ends at `deadline`.
+    /// With `hub` false (its lease is lost), the hub is not asked. Polls;
+    /// nothing is added to a request's path.
     async fn drain(
         &mut self,
         segment: &dyn Drains,
@@ -667,12 +807,21 @@ impl Launch {
         #[cfg_attr(not(feature = "hub"), allow(unused_variables))] hub: bool,
     ) {
         let reaching: Vec<&str> = self.reaching.iter().map(String::as_str).collect();
+        let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
+        let me = self.node.instance_id();
         let pause = |every: Duration| async move {
             if tokio::time::Instant::now() + every > deadline {
                 return false;
             }
             tokio::time::sleep(every).await;
             true
+        };
+        // When (A) first held. With no sender, nothing routes here, and
+        // (A) holds at once.
+        let mut avoided: Option<tokio::time::Instant> = None;
+        let (setup, unsent) = (self.setup, senders.is_empty());
+        let settled = move |avoided: Option<tokio::time::Instant>| {
+            unsent || avoided.is_some_and(|at| tokio::time::Instant::now() >= at + setup)
         };
         match &mut self.peers {
             Peers::Files(dir) => {
@@ -683,21 +832,30 @@ impl Launch {
                 // this one names every instance to wait for. Reading a
                 // local directory every 50 ms blocks the runtime for
                 // microseconds; a roster directory is for local runs.
-                let want: std::collections::BTreeSet<String> = self
-                    .roster
-                    .segments()
-                    .filter(|(segment, _)| reaching.contains(segment))
-                    .flat_map(|(_, peers)| peers)
-                    .map(|peer| peer.instance_id().to_string())
-                    .collect();
+                let ids = |segments: &[&str]| -> std::collections::BTreeSet<String> {
+                    self.roster
+                        .segments()
+                        .filter(|(segment, _)| segments.contains(segment))
+                        .flat_map(|(_, peers)| peers)
+                        .map(|peer| peer.instance_id().to_string())
+                        .filter(|id| *id != me.to_string())
+                        .collect()
+                };
+                let (sources, sending) = (ids(&reaching), ids(&senders));
+                let avoiding = format!("avoids/{me}");
                 loop {
-                    let done = announced(dir, "drained")
-                        .and_then(|mut done| {
-                            done.extend(announced(dir, "left")?);
-                            Ok(done)
+                    let left = announced(dir, "left").unwrap_or_default();
+                    let done = |phase: &str, want: &std::collections::BTreeSet<String>| {
+                        announced(dir, phase).is_ok_and(|mut done| {
+                            done.extend(left.iter().cloned());
+                            want.is_subset(&done)
                         })
-                        .is_ok_and(|done| want.is_subset(&done));
-                    if done || !pause(DRAIN_POLL).await {
+                    };
+                    let drained = done("drained", &sources);
+                    if avoided.is_none() && done(&avoiding, &sending) {
+                        avoided = Some(tokio::time::Instant::now());
+                    }
+                    if drained || settled(avoided) || !pause(DRAIN_POLL).await {
                         break;
                     }
                 }
@@ -712,23 +870,29 @@ impl Launch {
                 // may route here too. Each question is bounded by the
                 // deadline, since a hub can stop answering without closing
                 // its connections; a lease lost meanwhile ends the wait.
-                if !reaching.is_empty() {
-                    loop {
-                        let done = session.is_lost()
-                            || matches!(
-                                tokio::time::timeout_at(deadline, session.all_drained(&reaching))
-                                    .await,
-                                Ok(Ok(true))
-                            );
-                        if done || !pause(crate::dist::HubSession::poll()).await {
-                            break;
-                        }
+                loop {
+                    let ask = async {
+                        let drained = reaching.is_empty() || session.all_drained(&reaching).await?;
+                        let avoiding = avoided.is_some() || session.all_avoid(me, &senders).await?;
+                        Ok::<_, Error>((drained, avoiding))
+                    };
+                    let (drained, avoiding) = match tokio::time::timeout_at(deadline, ask).await {
+                        Ok(Ok(answer)) => answer,
+                        _ => (false, false),
+                    };
+                    if avoided.is_none() && avoiding {
+                        avoided = Some(tokio::time::Instant::now());
+                    }
+                    let done = session.is_lost() || drained || settled(avoided);
+                    if done || !pause(crate::dist::HubSession::poll()).await {
+                        break;
                     }
                 }
             }
             #[cfg(feature = "hub")]
             Peers::Hub(_) => {}
         }
+        segment.close();
         while segment.admitted() > 0 {
             if !pause(DRAIN_POLL).await {
                 break;

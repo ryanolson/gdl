@@ -21,11 +21,30 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ## Bring-up, shutdown, and membership
 
-### Instances cannot join or leave a running deployment
+### Only a hub lets an instance join
 
-- **What happens:** each instance takes its roster when it launches. An instance that starts later is not routed to by the instances already running. Retiring one instance while the others keep serving is also unsupported. Every stop is treated as part of a deployment-wide stop.
-- **Workaround:** scale before the segments start, or restart the deployment.
-- **Would lift it:** milestone 22 (rulings 110 to 115). It needs velo's retirement signal (velo#141), which velo `main` now carries and gdl tracks.
+- **What happens:** in a roster directory, `[instances]` gives exact counts, and an extra instance of a segment fails its launch. Retiring one instance works there; adding one does not.
+- **Workaround:** use a hub (`[hub]`), where an instance that starts while the others serve joins once it is ready.
+- **See:** rulings 98 and 111.
+
+### A retirement takes at least the setup timeout
+
+- **What happens:** an instance stopped while others of its segment serve leaves no sooner than `[runtime] setup_timeout_ms` (10 s by default) after its peers promised to avoid it, even with nothing in flight.
+- **Why:** a hand-off a peer sent just before its promise may still be on its way; the setup timeout is the longest it may take.
+- **Workaround:** a shorter `setup_timeout_ms`, which also bounds every other setup step.
+- **See:** rulings 112 and 140.
+
+### The last instance of a segment is not avoided
+
+- **What happens:** when every instance of a segment is stopped, or the only one is, its peers keep routing to it, since nothing else serves. It drains only once the sources that can reach it have drained, or at the drain's bound.
+- **Workaround:** start a new instance first: once it is ready, the peers avoid the retired one, which then leaves.
+- **See:** rulings 112 and 140.
+
+### A hand-off that reaches a retired instance after it closed is refused
+
+- **What happens:** a request whose hand-off was sent to an instance before a peer heard of its retirement, and that arrives only after the instance has stopped taking work, fails with `Overloaded`. It is not routed again.
+- **When:** the hand-off takes longer than the setup timeout to arrive (a slow network, a sender with a longer `setup_timeout` than the retired instance, a sending thread held between its pick and its send).
+- **See:** ruling 150.
 
 ### A segment does not outlive a hub restart
 

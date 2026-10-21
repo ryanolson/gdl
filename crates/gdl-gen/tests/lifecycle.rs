@@ -107,6 +107,51 @@ fn every_process_stopped_mid_answer_finishes_it() {
     }
 }
 
+/// One of two engine processes is stopped while an answer streams: the
+/// front stops routing to it, the answer arrives in full, and the engine
+/// exits cleanly long before its drain's bound (the request deadline, ten
+/// minutes), while the others serve on: the next answer comes from the
+/// engine that stayed.
+#[test]
+fn one_of_two_engines_stopped_mid_answer_retires_alone() {
+    let chat = Chat::new("gdl-life-retire-");
+    let counts = "[instances]\nengine = 2\n[runtime]\nsetup_timeout_ms = 500\n";
+    let engine = format!("{counts}[node.Engine]\ndelay_ms = 300\n");
+    let mut first = chat.spawn("engine", &chat.config("engine-1", &engine), false);
+    let mut second = chat.spawn("engine", &chat.config("engine-2", &engine), false);
+    let mut post = chat.spawn("post", &chat.config("post", counts), false);
+    let mut front = chat.spawn("front", &chat.config("front", counts), true);
+    let errors = front.stderr();
+    errors.find("front: ready", WAIT);
+    ask(&mut front, REQUEST);
+    let out = front.stdout();
+    let answer = out.next(WAIT);
+    assert!(answer.starts_with(r#"{"item":"#), "{answer}");
+    first.signal("-TERM");
+    let rest: Vec<String> = (0..3).map(|_| out.next(WAIT)).collect();
+    assert!(
+        rest[..2].iter().all(|line| line.starts_with(r#"{"item":"#)),
+        "the answer was cut short: {answer} {rest:?}"
+    );
+    assert_eq!(rest[2], r#"{"done":null}"#);
+    let status = first.exits_within(EXIT);
+    assert!(status.success(), "{status}");
+    ask(&mut front, REQUEST);
+    let next: Vec<String> = (0..4).map(|_| out.next(WAIT)).collect();
+    assert_eq!(next[3], r#"{"done":null}"#, "{next:?}");
+    for process in [&front, &second, &post] {
+        process.signal("-TERM");
+    }
+    for (name, process) in [
+        ("front", &mut front),
+        ("engine", &mut second),
+        ("post", &mut post),
+    ] {
+        let status = process.exits_within(EXIT);
+        assert!(status.success(), "{name}: {status}");
+    }
+}
+
 /// An engine is live from its start and healthy only while it serves:
 /// `starting` while its node loads, `ready` once every instance serves, and
 /// `draining` once stopped, while it waits for the front to drain.

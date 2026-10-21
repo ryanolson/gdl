@@ -627,6 +627,11 @@ where
         if let Some(delay) = rt.config.faults.delay_forward_arrival {
             tokio::time::sleep(delay).await;
         }
+        #[cfg(feature = "fault-injection")]
+        if let Some(gate) = &rt.config.faults.forward_gate {
+            gate.arrived.notify_one();
+            gate.release.notified().await;
+        }
         rt.check_identity(envelope.version, envelope.identity)?;
         // The context first: an expired request is refused before it takes
         // anything, and every wait below ends at its deadline.
@@ -639,6 +644,9 @@ where
             rt.admission.admit(root),
         )
         .await?;
+        // A retiring instance that has closed refuses, releasing the share
+        // it just took.
+        rt.check_open()?;
         // A run that will produce a stream (the inner end's output, or a
         // relay's onward input) takes its egress permit before
         // acknowledging, so a full instance refuses instead of stalling.
@@ -800,6 +808,7 @@ where
             rt.admission.admit(root),
         )
         .await?;
+        rt.check_open()?;
         let input = self
             .open_run(cx, usize::from(open.pos), open.reply, Some(share))
             .await?;

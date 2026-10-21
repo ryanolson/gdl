@@ -14,6 +14,7 @@ publish = false
 
 [workspace.dependencies]
 criterion = { version = "0.7", default-features = false, features = ["async_tokio"] }
+arc-swap = "1.9"
 dashmap = "6"
 figment = { version = "0.10.19", features = ["toml", "env", "json"] }
 futures = "0.3"

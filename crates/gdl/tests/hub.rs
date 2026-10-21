@@ -171,9 +171,10 @@ async fn a_live_but_unloaded_instance_is_not_in_the_roster() {
     hub.shutdown().await.expect("valid test fixture");
 }
 
-/// A loaded instance that leaves before it serves would hold every peer
-/// that took it into its roster for the whole wait, which would then fail
-/// anyway; the peer fails at once instead, naming it.
+/// A loaded instance that leaves before it serves, the only one of its
+/// segment, would hold every peer that took it into its roster for the
+/// whole wait, which would then fail anyway; the peer fails at once
+/// instead, naming it.
 #[tokio::test]
 async fn a_roster_peer_that_leaves_fails_the_readiness_wait_at_once() {
     let hub = hub(Duration::from_secs(1)).await;
@@ -200,6 +201,41 @@ async fn a_roster_peer_that_leaves_fails_the_readiness_wait_at_once() {
         started.elapsed() < Duration::from_secs(10),
         "waited the whole timeout"
     );
+    hub.shutdown().await.expect("valid test fixture");
+}
+
+/// The barrier follows membership: a roster peer that leaves before it
+/// serves is dropped from the roster, and the wait goes on for the peers
+/// left, passing once they serve. Only a segment with none left fails it.
+#[tokio::test]
+async fn a_roster_peer_that_leaves_is_dropped_while_another_remains() {
+    let hub = hub(Duration::from_secs(1)).await;
+    let (front, staying, leaving) = (node().await, node().await, node().await);
+    let mut a = session(&hub, "front", &front)
+        .await
+        .expect("front registers");
+    let mut b = session(&hub, "sink", &staying)
+        .await
+        .expect("sink registers");
+    let mut c = session(&hub, "sink", &leaving)
+        .await
+        .expect("second sink registers");
+    let two = [("front", 1), ("sink", 2)];
+    let (ra, rb, rc) = tokio::join!(
+        a.roster(&two, WAIT),
+        b.roster(&two, WAIT),
+        c.roster(&two, WAIT)
+    );
+    let roster = ra.expect("front's roster");
+    let other = rb.expect("sink's roster");
+    rc.expect("second sink's roster");
+    assert_eq!(roster.instances("sink").len(), 2);
+    // One sink crashes before it serves; the other serves.
+    drop(c);
+    b.ready(&other, &[], WAIT).await.expect("the sink serves");
+    a.ready(&roster, &["sink"], WAIT)
+        .await
+        .expect("the barrier passes on the sink that stayed");
     hub.shutdown().await.expect("valid test fixture");
 }
 

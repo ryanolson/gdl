@@ -1,25 +1,36 @@
+use crate::dist::roster::Live;
 use crate::{Error, ErrorKind, Result, Roster};
+use futures::StreamExt;
+use futures::stream::{BoxStream, SelectAll};
 use gdl_model::SegmentRegistration;
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use velo::{InstanceId, PeerInfo, Velo, discovery::ServiceDiscovery};
+use velo::discovery::{ServiceDiscovery, ServiceEvent, ServiceRegistrationGuard};
+use velo::{InstanceId, PeerInfo, Velo};
 use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
 
 /// A segment's hub registration, kept alive from the moment it is made,
-/// and the two readiness services it announces: `loaded`, once its nodes
-/// are ready to work, and `serving`, once its handlers are installed.
-/// Peers route only to loaded instances, and send only once those are
-/// serving.
+/// and the phases it announces: `loaded`, once its nodes are ready to work;
+/// `serving`, once its handlers are installed; `ready`, once it routes;
+/// `drained`, once a source has finished its requests; and `retired`, once
+/// it has been stopped. Peers take loaded instances into their rosters,
+/// send only once those are serving, add a joiner when it is ready, and
+/// stop routing to one that retired.
 pub struct HubSession {
     client: HubClient,
     registration: SegmentRegistration,
     loaded: Option<HubServiceRegistration>,
     serving: Option<HubServiceRegistration>,
+    ready: Option<HubServiceRegistration>,
     drained: Option<HubServiceRegistration>,
+    retired: Option<HubServiceRegistration>,
     lease: tokio::task::JoinHandle<()>,
     lost: watch::Receiver<Option<String>>,
+    /// Follows membership into the roster, from just before `loaded`.
+    follower: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl HubSession {
@@ -55,9 +66,12 @@ impl HubSession {
             registration,
             loaded: None,
             serving: None,
+            ready: None,
             drained: None,
+            retired: None,
             lease,
             lost,
+            follower: None,
         })
     }
 
@@ -120,14 +134,16 @@ impl HubSession {
     /// send to each other, and each would otherwise wait for the other. A
     /// request that reaches this instance before its wait is over waits at
     /// its held roster, so a peer's announcement is enough to route to it.
-    /// An instance that left the hub meanwhile will never announce, and
-    /// the requests routed to it would fail, so that is an error at once
-    /// rather than a wait that ends the same way.
+    /// The wait follows membership: an instance that left the hub will
+    /// never announce, so it is dropped from the roster and from the wait,
+    /// and the wait fails at once only when a segment this one sends to has
+    /// no instance left.
     pub async fn ready(&mut self, roster: &Roster, inner: &[&str], wait: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + wait;
         if self.serving.is_none() {
             self.serving = Some(self.announce(Phase::Serving, deadline).await?);
         }
+        let live = roster.live();
         let mut last = String::new();
         loop {
             self.lost()?;
@@ -140,26 +156,27 @@ impl HubSession {
                     }
                 }
                 Ok(Ok((members, serving))) => {
-                    let mut gone = Vec::new();
                     let mut missing = Vec::new();
-                    for (segment, peers) in roster.segments() {
-                        if !inner.contains(&segment) {
-                            continue;
-                        }
-                        for peer in peers {
-                            let id = peer.instance_id();
+                    for segment in inner {
+                        let mut gone = Vec::new();
+                        for id in live.members(segment) {
                             if !members.contains(&id) {
+                                live.leave(segment, id);
                                 gone.push(format!("{segment}/{id}"));
                             } else if !serving.contains(&id) {
                                 missing.push(format!("{segment}/{id}"));
                             }
                         }
-                    }
-                    if !gone.is_empty() {
-                        return Err(failure(format!(
-                            "instances left the hub before serving: {}; this roster cannot serve",
-                            gone.join(", ")
-                        )));
+                        if live.members(segment).is_empty() {
+                            return Err(failure(format!(
+                                "segment `{segment}` has no instance left to route to: {} left the hub before serving",
+                                if gone.is_empty() {
+                                    "every instance".to_string()
+                                } else {
+                                    gone.join(", ")
+                                }
+                            )));
+                        }
                     }
                     if missing.is_empty() {
                         return Ok(());
@@ -175,23 +192,123 @@ impl HubSession {
         }
     }
 
+    /// Announce that this instance routes: the instances already serving
+    /// add it now. Retried until `deadline`.
+    pub(crate) async fn announce_ready(&mut self, deadline: tokio::time::Instant) -> Result<()> {
+        if self.ready.is_none() {
+            self.ready = Some(self.persist(Phase::Ready, deadline).await?);
+        }
+        Ok(())
+    }
+
+    /// Announce that this instance retired, then withdraw `ready` and
+    /// `loaded`, each answered by the hub before the next (ruling 141): a
+    /// roster read afterwards leaves it out, and a peer that follows
+    /// membership afterwards never adds it. Bounded by `deadline`; what the
+    /// hub did not answer is left to the drain's bound.
+    pub(crate) async fn retire(&mut self, deadline: tokio::time::Instant) -> Result<()> {
+        if self.retired.is_none() {
+            self.retired = Some(self.persist(Phase::Retired, deadline).await?);
+        }
+        for mut guard in [self.ready.take(), self.loaded.take()]
+            .into_iter()
+            .flatten()
+        {
+            tokio::time::timeout_at(deadline, guard.unregister())
+                .await
+                .map_err(|_| failure("the hub did not answer in time"))?
+                .map_err(failure)?;
+        }
+        Ok(())
+    }
+
+    /// Whether every member of `senders` that announced `loaded` or
+    /// `retired` avoids `me`: it has promised never to route to it again.
+    /// A member that left is no longer one. A member that announced neither
+    /// reads its roster, and follows membership, only after this instance's
+    /// retirement, so it never routes here.
+    pub(crate) async fn all_avoid(&self, me: InstanceId, senders: &[&str]) -> Result<bool> {
+        let members = self.members().await?;
+        let mut routing = HashSet::new();
+        for segment in senders {
+            routing.extend(self.instances(segment, Phase::Loaded).await?);
+            routing.extend(self.instances(segment, Phase::Retired).await?);
+        }
+        let avoiding: HashSet<InstanceId> = self
+            .client
+            .services()
+            .get_instances(&avoids(me))
+            .await
+            .map_err(failure)?
+            .into_iter()
+            .collect();
+        Ok(members
+            .iter()
+            .filter(|m| senders.contains(&m.registration.segment.as_str()))
+            .map(|m| m.peer.instance_id())
+            .filter(|id| *id != me && routing.contains(id))
+            .all(|id| avoiding.contains(&id)))
+    }
+
+    /// Follow membership into `live`, the state of the roster this instance
+    /// routes with, until the session ends: one task for the instance, not
+    /// one per request or per peer (ruling 151). `segments` are every
+    /// segment of the deployment, `inner` those this instance sends to.
+    /// See [`follow`].
+    pub(crate) fn follow(
+        &mut self,
+        live: Arc<Live>,
+        node: Velo,
+        segments: &[&str],
+        inner: &[&str],
+        drain: Duration,
+    ) {
+        let follower = Follower {
+            client: self.client.clone(),
+            registration: self.registration.clone(),
+            me: node.instance_id(),
+            live,
+            node,
+            segments: segments.iter().map(ToString::to_string).collect(),
+            inner: inner.iter().map(ToString::to_string).collect(),
+            drain,
+            acknowledged: HashMap::new(),
+            unsent: Vec::new(),
+            forget: Vec::new(),
+        };
+        if let Some(earlier) = self.follower.replace(tokio::spawn(follower.run())) {
+            earlier.abort();
+        }
+    }
+
     /// Announce that this instance, a source's, has drained the requests it
-    /// held, retried until `deadline`: an announcement the hub refused is
-    /// gone with its registration guard, and peers would wait for it until
-    /// their bound. Each attempt is bounded, since a hub can stop answering
-    /// without closing its connections.
+    /// held, retried until `deadline`.
     pub(crate) async fn drained(&mut self, deadline: tokio::time::Instant) -> Result<()> {
-        while self.drained.is_none() {
+        if self.drained.is_none() {
+            self.drained = Some(self.persist(Phase::Drained, deadline).await?);
+        }
+        Ok(())
+    }
+
+    /// Announce `phase`, retried until `deadline`: an announcement the hub
+    /// refused is gone with its registration guard, and peers would wait
+    /// for it until their bound. Each attempt is bounded, since a hub can
+    /// stop answering without closing its connections.
+    async fn persist(
+        &self,
+        phase: Phase,
+        deadline: tokio::time::Instant,
+    ) -> Result<HubServiceRegistration> {
+        loop {
             let attempt = (tokio::time::Instant::now() + POLL * 10).min(deadline);
-            match self.announce(Phase::Drained, attempt).await {
-                Ok(registration) => self.drained = Some(registration),
+            match self.announce(phase, attempt).await {
+                Ok(registration) => return Ok(registration),
                 Err(error) if tokio::time::Instant::now() + POLL >= deadline => {
                     return Err(error);
                 }
                 Err(_) => tokio::time::sleep(POLL).await,
             }
         }
-        Ok(())
     }
 
     /// Whether every current member of `segments` has announced `drained`.
@@ -259,20 +376,7 @@ impl HubSession {
 
     /// The members of this deployment, from the hub.
     async fn members(&self) -> Result<Vec<Member>> {
-        let members: Vec<Member> = self
-            .client
-            .ext("gdl")
-            .get("/members")
-            .await
-            .map_err(failure)?;
-        for member in &members {
-            if member.registration.contract != self.registration.contract
-                || member.registration.placement != self.registration.placement
-            {
-                return Err(failure("hub returned a different deployment"));
-            }
-        }
-        Ok(members)
+        members(&self.client, &self.registration).await
     }
 
     /// The instances of `segment` in `phase`.
@@ -287,8 +391,11 @@ impl HubSession {
             .collect())
     }
 
-    /// The members that have announced `loaded`, as a roster. One query
-    /// per segment: the hub answers for a segment, not for an instance.
+    /// The members that have announced `loaded` and not `retired`, as a
+    /// roster. `loaded` is read first: an instance that retires between
+    /// the two reads is left out, and one that retired before them has
+    /// withdrawn `loaded` or is in `retired`. One query per segment and
+    /// phase: the hub answers for a segment, not for an instance.
     async fn loaded_members(&self) -> Result<Roster> {
         let members = self.members().await?;
         let segments: BTreeSet<String> = members
@@ -296,13 +403,18 @@ impl HubSession {
             .map(|m| m.registration.segment.clone())
             .collect();
         let mut loaded = BTreeMap::new();
-        for segment in segments {
-            let instances = self.instances(&segment, Phase::Loaded).await?;
-            loaded.insert(segment, instances);
+        for segment in &segments {
+            let instances = self.instances(segment, Phase::Loaded).await?;
+            loaded.insert(segment.clone(), instances);
+        }
+        let mut retired = HashSet::new();
+        for segment in &segments {
+            retired.extend(self.instances(segment, Phase::Retired).await?);
         }
         let mut roster = Roster::new();
         for member in members {
-            if loaded[&member.registration.segment].contains(&member.peer.instance_id()) {
+            let id = member.peer.instance_id();
+            if loaded[&member.registration.segment].contains(&id) && !retired.contains(&id) {
                 roster.add(member.registration.segment, member.peer);
             }
         }
@@ -328,6 +440,239 @@ impl HubSession {
 impl Drop for HubSession {
     fn drop(&mut self) {
         self.lease.abort();
+        if let Some(follower) = &self.follower {
+            follower.abort();
+        }
+    }
+}
+
+/// The members of the deployment `registration` belongs to, from the hub.
+async fn members(client: &HubClient, registration: &SegmentRegistration) -> Result<Vec<Member>> {
+    let members: Vec<Member> = client.ext("gdl").get("/members").await.map_err(failure)?;
+    for member in &members {
+        if member.registration.contract != registration.contract
+            || member.registration.placement != registration.placement
+        {
+            return Err(failure("hub returned a different deployment"));
+        }
+    }
+    Ok(members)
+}
+
+/// Applies the hub's membership to the roster an instance routes with
+/// (ruling 143). It watches, for each segment this instance sends to, the
+/// instances that retired (marked retired, never made routable by it), and
+/// for every segment the instances that are ready (registered with velo and
+/// added to routing) and those that serve (one removed has left: dropped at
+/// once, and unregistered from velo after the drain's bound, since one
+/// whose lease was lost may still be draining). After each change it
+/// acknowledges each retired instance it no longer routes to.
+struct Follower {
+    client: HubClient,
+    registration: SegmentRegistration,
+    me: InstanceId,
+    live: Arc<Live>,
+    node: Velo,
+    segments: Vec<String>,
+    inner: Vec<String>,
+    drain: Duration,
+    /// The promise to avoid each retired instance, served while it lives.
+    acknowledged: HashMap<InstanceId, HubServiceRegistration>,
+    /// Acknowledgements the hub has not taken yet: retried each tick.
+    unsent: Vec<InstanceId>,
+    /// Instances that left, to unregister from velo once their time comes.
+    forget: Vec<(tokio::time::Instant, InstanceId)>,
+}
+
+/// Which service a watch follows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Watched {
+    Retired,
+    Ready,
+    Serving,
+}
+
+type Watch = BoxStream<'static, (Watched, String, ServiceEvent)>;
+
+impl Follower {
+    async fn run(mut self) {
+        let mut tick = tokio::time::interval(POLL * 10);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            // Watched again from scratch after any stream ends: marks are
+            // kept for good, so seeing everything again changes nothing.
+            if let Some(mut watches) = self.watch().await {
+                loop {
+                    tokio::select! {
+                        event = watches.next() => match event {
+                            Some((_, _, ServiceEvent::Disconnected)) | None => break,
+                            Some((watched, segment, event)) => {
+                                self.apply(watched, &segment, event).await;
+                                self.acknowledge().await;
+                            }
+                        },
+                        _ = tick.tick() => self.tick().await,
+                    }
+                }
+            }
+            tokio::select! {
+                () = tokio::time::sleep(POLL) => {}
+                _ = tick.tick() => self.tick().await,
+            }
+        }
+    }
+
+    /// Open every watch, applying their first sets: the retirements before
+    /// any readiness, so that an instance retired before this instance
+    /// looked is never routed to first. Then drop the instances that left
+    /// before the watches began. `None` if the hub did not answer.
+    async fn watch(&mut self) -> Option<SelectAll<Watch>> {
+        let mut watches = SelectAll::new();
+        let retired = self.inner.iter().map(|s| (Watched::Retired, s.clone()));
+        let rest = self
+            .segments
+            .iter()
+            .flat_map(|s| [(Watched::Ready, s.clone()), (Watched::Serving, s.clone())]);
+        let wanted: Vec<(Watched, String)> = retired.chain(rest).collect();
+        for (watched, segment) in wanted {
+            let phase = match watched {
+                Watched::Retired => Phase::Retired,
+                Watched::Ready => Phase::Ready,
+                Watched::Serving => Phase::Serving,
+            };
+            let services = self.client.services();
+            let opened = tokio::time::timeout(
+                POLL * 50,
+                services.watch_instances(&service(&segment, phase)),
+            );
+            let mut stream = match opened.await {
+                Ok(Ok(stream)) => stream,
+                _ => return None,
+            };
+            // The first event is the set as it is now.
+            match tokio::time::timeout(POLL * 50, stream.next()).await {
+                Ok(Some(first @ ServiceEvent::Initial(_))) => {
+                    self.apply(watched, &segment, first).await;
+                }
+                _ => return None,
+            }
+            let tagged = segment.clone();
+            watches.push(
+                stream
+                    .map(move |event| (watched, tagged.clone(), event))
+                    .boxed(),
+            );
+        }
+        if let Ok(members) = members(&self.client, &self.registration).await {
+            let present: HashSet<InstanceId> =
+                members.iter().map(|m| m.peer.instance_id()).collect();
+            let gone: Vec<(String, InstanceId)> = self
+                .segments
+                .iter()
+                .flat_map(|segment| {
+                    self.live
+                        .members(segment)
+                        .into_iter()
+                        .map(move |id| (segment.clone(), id))
+                })
+                .filter(|(_, id)| *id != self.me && !present.contains(id))
+                .collect();
+            for (segment, id) in gone {
+                self.left(&segment, id);
+            }
+        }
+        self.acknowledge().await;
+        Some(watches)
+    }
+
+    async fn apply(&mut self, watched: Watched, segment: &str, event: ServiceEvent) {
+        let (added, removed) = match event {
+            ServiceEvent::Initial(ids) => (ids, Vec::new()),
+            ServiceEvent::Added(id) => (vec![id], Vec::new()),
+            ServiceEvent::Removed(id) => (Vec::new(), vec![id]),
+            ServiceEvent::Disconnected => return,
+        };
+        match watched {
+            Watched::Retired => {
+                for id in added.into_iter().filter(|id| *id != self.me) {
+                    self.live.retire(segment, id);
+                }
+            }
+            Watched::Ready => {
+                let new: Vec<InstanceId> = added
+                    .into_iter()
+                    .filter(|id| *id != self.me && !self.live.routes_to(*id))
+                    .collect();
+                if new.is_empty() {
+                    return;
+                }
+                let Ok(members) = members(&self.client, &self.registration).await else {
+                    return;
+                };
+                for member in members {
+                    let id = member.peer.instance_id();
+                    if !new.contains(&id) || member.registration.segment != segment {
+                        continue;
+                    }
+                    // Registered before it is routable: a call addressed
+                    // by instance finds no peer it was not told of.
+                    if super::register_peer(&self.node, member.peer).is_ok() {
+                        self.live.join(segment, id);
+                    }
+                }
+            }
+            Watched::Serving => {
+                let me = self.me;
+                for id in removed.into_iter().filter(|id| *id != me) {
+                    self.left(segment, id);
+                }
+            }
+        }
+    }
+
+    fn left(&mut self, segment: &str, id: InstanceId) {
+        self.live.leave(segment, id);
+        // Dropping the promise ends it at the hub, in the background.
+        self.acknowledged.remove(&id);
+        self.unsent.retain(|unsent| *unsent != id);
+        if !self.forget.iter().any(|(_, known)| *known == id) {
+            self.forget
+                .push((tokio::time::Instant::now() + self.drain, id));
+        }
+    }
+
+    /// Promise to avoid each retired instance this instance no longer
+    /// routes to: marked first (ruling 142), then served.
+    async fn acknowledge(&mut self) {
+        self.unsent.extend(self.live.take_acknowledgements());
+        let mut unsent = Vec::new();
+        for id in std::mem::take(&mut self.unsent) {
+            let name = avoids(id);
+            let promised = tokio::time::timeout(POLL * 10, self.client.register_service(&name));
+            match promised.await {
+                Ok(Ok(registration)) => {
+                    self.acknowledged.insert(id, registration);
+                }
+                Ok(Err(ClientError::AlreadyServing(_))) => {}
+                _ => unsent.push(id),
+            }
+        }
+        self.unsent = unsent;
+    }
+
+    async fn tick(&mut self) {
+        let now = tokio::time::Instant::now();
+        let node = &self.node;
+        self.forget.retain(|(at, id)| {
+            if *at > now {
+                return true;
+            }
+            super::unregister_peer(node, *id);
+            false
+        });
+        if !self.unsent.is_empty() {
+            self.acknowledge().await;
+        }
     }
 }
 
@@ -380,20 +725,25 @@ fn is_final(error: &ClientError) -> bool {
 
 const POLL: Duration = Duration::from_millis(100);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Loaded,
     Serving,
+    Ready,
     Drained,
+    Retired,
 }
 
 /// The hub service that announces a segment's instances in `phase`. The
 /// segment's name is hex, because a service name has a narrower alphabet.
+/// A phase has at most seven letters, so that `SEGMENT_NAME_LIMIT` holds.
 fn service(segment: &str, phase: Phase) -> String {
     let phase = match phase {
         Phase::Loaded => "loaded",
         Phase::Serving => "serving",
+        Phase::Ready => "ready",
         Phase::Drained => "drained",
+        Phase::Retired => "retired",
     };
     format!(
         "gdl-{phase}-{}",
@@ -404,29 +754,59 @@ fn service(segment: &str, phase: Phase) -> String {
     )
 }
 
+/// The hub service an instance serves to promise that it never routes to
+/// `retired` again.
+fn avoids(retired: InstanceId) -> String {
+    format!("gdl-avoids-{:032x}", retired.as_u128())
+}
+
 fn failure(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorKind::Transport, error.to_string())
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Member {
     registration: SegmentRegistration,
     peer: PeerInfo,
 }
 
-/// Bind a TCP node to this container's routable address: the address its
-/// `HOSTNAME` resolves to, on `port`. Binding to an unspecified address
-/// would advertise `0.0.0.0` to peers.
-pub async fn bind_container_node(port: u16) -> Result<Velo> {
+/// Bind this instance's velo node under the hub at `host`: at `listen`,
+/// or, for an unspecified address, at the address the container's
+/// `HOSTNAME` resolves to, on `listen`'s port (binding to an unspecified
+/// address would advertise `0.0.0.0` to peers). The node resolves a peer it
+/// has not registered through the hub (ruling 143); the client that does
+/// so holds no registration.
+pub(crate) async fn bind_under_hub(
+    listen: std::net::SocketAddr,
+    host: &str,
+    public_port: u16,
+    control_port: u16,
+) -> Result<Velo> {
+    let client = HubClient::builder()
+        .host(host)
+        .public_port(public_port)
+        .control_port(control_port)
+        .build()
+        .map_err(failure)?;
+    let address = if listen.ip().is_unspecified() {
+        container_address(listen.port()).await?
+    } else {
+        listen
+    };
+    super::build_node(address, Some(Arc::new(client.discovery()))).await
+}
+
+/// This container's routable address: the one its `HOSTNAME` resolves to,
+/// on `port`.
+async fn container_address(port: u16) -> Result<std::net::SocketAddr> {
     let host = std::env::var("HOSTNAME").map_err(|_| {
         failure("HOSTNAME is not set; under a hub a segment binds the address its container's hostname resolves to")
     })?;
-    let address = tokio::net::lookup_host((host.as_str(), port))
+    tokio::net::lookup_host((host.as_str(), port))
         .await
         .map_err(|e| failure(format!("resolving HOSTNAME {host:?}: {e}")))?
         .find(|address| address.is_ipv4())
-        .ok_or_else(|| failure(format!("HOSTNAME {host:?} has no IPv4 address")))?;
-    super::bind_node(address).await
+        .ok_or_else(|| failure(format!("HOSTNAME {host:?} has no IPv4 address")))
 }
 
 #[cfg(test)]

@@ -1,19 +1,18 @@
 //! What every distributed hop of one segment instance shares.
 
 use std::collections::BTreeMap;
-use std::hash::{BuildHasher, RandomState};
+use std::hash::RandomState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde::Deserialize;
-use tokio::sync::Notify;
-use velo::{InstanceId, PeerInfo};
 
 use super::admission::{Admission, Egress};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
+use super::roster::{Live, Picker, Roster};
 use crate::error::{Error, ErrorKind, Result};
 use crate::meter::Meters;
 use gdl_model::{Layout, RequestRouter};
@@ -75,6 +74,9 @@ pub struct Faults {
     /// Hold an arriving forward hand-off this long before checking it, as a
     /// slow network would.
     pub delay_forward_arrival: Option<Duration>,
+    /// Hold each arriving forward hand-off at this gate before checking it;
+    /// the test observes the arrival and lets it go.
+    pub forward_gate: Option<Arc<Gate>>,
     /// Hold the acknowledgement of an accepted forward hand-off this long, as
     /// a lost reply would.
     pub delay_forward_ack: Option<Duration>,
@@ -248,153 +250,6 @@ impl RuntimeConfig {
     }
 }
 
-/// The instances of every segment, as velo peers, and whether this
-/// instance may route to them yet.
-#[derive(Debug, Clone)]
-pub struct Roster {
-    segments: BTreeMap<String, Vec<PeerInfo>>,
-    /// Shared by every clone, so that the launch that holds a roster can
-    /// release the runtime that routes with it.
-    gate: Arc<Hold>,
-}
-
-impl Default for Roster {
-    fn default() -> Self {
-        Self {
-            segments: BTreeMap::new(),
-            gate: Arc::new(Hold::new(true)),
-        }
-    }
-}
-
-impl Roster {
-    /// An empty roster, released.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Keep every request this instance would send until `release`. A
-    /// launched segment holds its roster until every instance it can
-    /// route to is serving: a request that arrives before then waits here,
-    /// bounded by the runtime's setup timeout, rather than failing at a
-    /// peer whose handlers do not exist yet.
-    pub fn hold(&self) {
-        self.gate.close();
-    }
-
-    /// Let requests through.
-    pub fn release(&self) {
-        self.gate.open();
-    }
-
-    /// Add one instance of `segment`.
-    pub fn add(&mut self, segment: impl Into<String>, peer: PeerInfo) {
-        self.segments.entry(segment.into()).or_default().push(peer);
-    }
-
-    /// The instances of `segment`.
-    pub fn instances(&self, segment: &str) -> &[PeerInfo] {
-        self.segments.get(segment).map_or(&[], Vec::as_slice)
-    }
-
-    /// Each segment with its instances.
-    pub fn segments(&self) -> impl Iterator<Item = (&str, &[PeerInfo])> {
-        self.segments
-            .iter()
-            .map(|(segment, peers)| (segment.as_str(), peers.as_slice()))
-    }
-
-    pub(crate) fn peers(&self) -> impl Iterator<Item = &PeerInfo> {
-        self.segments.values().flatten()
-    }
-}
-
-/// Open or closed, read without a lock on the dispatch path.
-#[derive(Debug)]
-struct Hold {
-    open: AtomicBool,
-    opened: Notify,
-}
-
-impl Hold {
-    fn new(open: bool) -> Self {
-        Self {
-            open: AtomicBool::new(open),
-            opened: Notify::new(),
-        }
-    }
-
-    fn close(&self) {
-        self.open.store(false, Ordering::Release);
-    }
-
-    fn is_open(&self) -> bool {
-        self.open.load(Ordering::Acquire)
-    }
-
-    fn open(&self) {
-        self.open.store(true, Ordering::Release);
-        self.opened.notify_waiters();
-    }
-
-    async fn opened(&self) {
-        // Registering before the second read means an open between the two
-        // is seen by one or the other.
-        while !self.is_open() {
-            let notified = self.opened.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.is_open() {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
-/// Selects a replica without a shared lock on the dispatch path.
-struct Picker {
-    instances: BTreeMap<String, (Vec<InstanceId>, AtomicUsize)>,
-    random: RandomState,
-}
-
-impl Picker {
-    fn new(roster: &Roster) -> Self {
-        Self {
-            random: RandomState::new(),
-            instances: roster
-                .segments
-                .iter()
-                .map(|(segment, peers)| {
-                    let ids = peers.iter().map(PeerInfo::instance_id).collect();
-                    (segment.clone(), (ids, AtomicUsize::new(0)))
-                })
-                .collect(),
-        }
-    }
-
-    fn pick(&self, segment: &str, router: RequestRouter) -> Result<InstanceId> {
-        let (ids, next) = self.instances.get(segment).ok_or_else(|| {
-            Error::new(
-                ErrorKind::Placement,
-                format!("no instance of segment `{segment}` in the roster"),
-            )
-        })?;
-        if ids.is_empty() {
-            return Err(Error::new(
-                ErrorKind::Placement,
-                format!("segment `{segment}` has no instances"),
-            ));
-        }
-        let sequence = next.fetch_add(1, Ordering::Relaxed);
-        let index = match router {
-            RequestRouter::RoundRobin => sequence % ids.len(),
-            RequestRouter::Random => (self.random.hash_one(sequence) % ids.len() as u64) as usize,
-        };
-        Ok(ids[index])
-    }
-}
-
 /// A forward hand-off arriving at this instance.
 pub(crate) type ForwardEntry =
     Arc<dyn Fn(Forward) -> BoxFuture<'static, Result<Accepted>> + Send + Sync>;
@@ -449,9 +304,12 @@ pub(crate) struct Runtime {
     pub(crate) admission: Admission,
     pub(crate) egress: Egress,
     pub(crate) identity: Identity,
-    picker: Picker,
-    open_picker: Picker,
-    gate: Arc<Hold>,
+    /// Whom to route to, shared with the roster the instance launched
+    /// with, which follows membership.
+    routes: Arc<Live>,
+    random: RandomState,
+    /// Set once a retiring instance stops taking hand-offs and openings.
+    closed: AtomicBool,
     names: Names,
     /// Forward hand-offs, backward runs, and request streams this instance
     /// has taken on.
@@ -495,9 +353,9 @@ impl Runtime {
                 config.attempt_limit,
             ),
             egress: Egress::new(config.egress_limit, config.admission_wait),
-            picker: Picker::new(roster),
-            open_picker: Picker::new(roster),
-            gate: Arc::clone(&roster.gate),
+            routes: Arc::clone(roster.live()),
+            random: RandomState::new(),
+            closed: AtomicBool::new(false),
             names: Names {
                 forward: format!("gdl-fwd-{tag}"),
                 open: format!("gdl-open-{tag}"),
@@ -513,6 +371,30 @@ impl Runtime {
         })
     }
 
+    /// Refuse every hand-off and opening admitted from now on. Stored
+    /// before the drain reads the ledger, and read by an entry after its
+    /// share is in the ledger, both `SeqCst`: an entry is either in the
+    /// ledger the drain waits for, or refused.
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuse an entry the instance has admitted once it has closed. One
+    /// atomic load per entry.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn check_open(&self) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::new(
+                ErrorKind::Overloaded,
+                "the instance has retired and takes no new work",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn names(&self) -> &Names {
         &self.names
     }
@@ -522,10 +404,10 @@ impl Runtime {
     /// built only for a held roster, since building one touches the
     /// runtime's shared handle.
     async fn released(&self) -> Result<()> {
-        if self.gate.is_open() {
+        if self.routes.is_released() {
             return Ok(());
         }
-        tokio::time::timeout(self.config.setup_timeout, self.gate.opened())
+        tokio::time::timeout(self.config.setup_timeout, self.routes.released())
             .await
             .map_err(|_| {
                 Error::new(
@@ -566,7 +448,9 @@ impl Runtime {
         let router = self
             .layout
             .request_router(envelope.hop as usize, envelope.pos as usize);
-        let instance = self.picker.pick(segment, router)?;
+        let instance = self
+            .routes
+            .pick(segment, Picker::Request, router, &self.random)?;
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
             let entry = Arc::clone(entries.forward(envelope.hop, envelope.pos)?);
@@ -591,7 +475,12 @@ impl Runtime {
     /// Ask an instance of `segment` to open a backward run.
     pub(crate) async fn send_open(&self, segment: &str, open: Open) -> Result<ReplyTo> {
         self.released().await?;
-        let instance = self.open_picker.pick(segment, RequestRouter::RoundRobin)?;
+        let instance = self.routes.pick(
+            segment,
+            Picker::Open,
+            RequestRouter::RoundRobin,
+            &self.random,
+        )?;
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
             let entry = Arc::clone(entries.open(open.hop, open.pos)?);
@@ -658,38 +547,6 @@ mod tests {
             Duration::from_millis(25)
         );
         assert!(toml::from_str::<RuntimeConfig>("reservation_renew_interval_ms = 0").is_err());
-    }
-
-    #[test]
-    fn request_picker_uses_the_selected_policy_and_rejects_missing_replicas() {
-        let ids: Vec<_> = (0..3).map(|_| InstanceId::new_v4()).collect();
-        let picker = Picker {
-            random: RandomState::new(),
-            instances: BTreeMap::from([("worker".into(), (ids.clone(), AtomicUsize::new(0)))]),
-        };
-        for index in 0..9 {
-            assert_eq!(
-                picker
-                    .pick("worker", RequestRouter::RoundRobin)
-                    .expect("replica"),
-                ids[index % 3]
-            );
-        }
-        for index in 9usize..41 {
-            let expected = ids[(picker.random.hash_one(index) % 3) as usize];
-            assert_eq!(
-                picker
-                    .pick("worker", RequestRouter::Random)
-                    .expect("replica"),
-                expected
-            );
-        }
-        assert!(picker.pick("missing", RequestRouter::Random).is_err());
-        let empty = Picker {
-            random: RandomState::new(),
-            instances: BTreeMap::from([("empty".into(), (vec![], AtomicUsize::new(0)))]),
-        };
-        assert!(empty.pick("empty", RequestRouter::RoundRobin).is_err());
     }
 
     #[test]

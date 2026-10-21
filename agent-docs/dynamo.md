@@ -128,7 +128,7 @@ pub enum Retirement { Sent, Discarded }
 - **The hazard, shown.** A producer that shut down right after `finalize` lost the end of 10 of 10 streams; one that shut down after `retired()` resolved `Sent` lost none of 150.
 - **The alternative**, a consumer acknowledgement in gdl's own protocol, cost 31% more instructions per short stream, resolved 4 to 8 times later, and needs a per-stream table on the producer, which gdl's rule against correlation maps forbids.
 - **A second velo change** is needed with it: a graceful shutdown that writes frames already admitted to a TCP or UDS writer before closing it. Today they are failed (`transports/tcp/transport.rs:719-739`), so "sent" would not survive a shutdown in the microseconds after it.
-- **In gdl**: hold the egress permit and the run's admission share until `retired()` resolves. A retired instance's empty ledger then means its output is sent, and it may call velo's graceful shutdown and exit.
+- **In gdl**: hold the egress permit and the run's admission share until `retired()` resolves. A retired instance's empty ledger then means its output is sent, and it may call velo's graceful shutdown and exit. Built in milestone 22 (ruling 145), with velo#141 as merged: the pump awaits `retired()` in the work it already does, raced against the request's end.
 
 ## One velo
 

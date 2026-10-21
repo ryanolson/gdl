@@ -1,14 +1,14 @@
 //! How the instances of a deployment find each other before they deploy,
 //! and wait until each is serving.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use velo::{PeerInfo, Velo};
+use velo::{InstanceId, PeerInfo, Velo};
 
-use super::fabric::peer;
-use super::runtime::Roster;
+use super::fabric::{peer, unregister_peer};
+use super::roster::Roster;
 use crate::error::{Error, ErrorKind, Result};
 
 impl Roster {
@@ -132,6 +132,73 @@ impl Roster {
 }
 
 const POLL: Duration = Duration::from_millis(50);
+
+/// Apply a roster directory's membership to `roster`, the roster this
+/// instance routes with, until the task is dropped: one task for the
+/// instance (ruling 151). Every 50 ms it reads `retired/` and `left/`.
+/// A retired instance of a segment in `inner` (those this instance sends
+/// to) is marked retired; one that left is dropped from routing at once,
+/// and unregistered from velo after `drain`, since it may have left
+/// without its requests finishing. Each retired instance this instance no
+/// longer routes to is then acknowledged, with a file in
+/// `avoids/<its id>/`. The directory's rosters are exact, so every
+/// instance is known from the start.
+pub(crate) async fn follow(
+    dir: PathBuf,
+    roster: Roster,
+    segment: &'static str,
+    node: Velo,
+    inner: Vec<String>,
+    drain: Duration,
+) {
+    let me = node.instance_id();
+    let me_peer = peer(&node);
+    let known: HashMap<String, (String, InstanceId)> = roster
+        .segments()
+        .flat_map(|(segment, peers)| {
+            peers.iter().map(move |peer| {
+                let id = peer.instance_id();
+                (id.to_string(), (segment.to_string(), id))
+            })
+        })
+        .filter(|(_, (_, id))| *id != me)
+        .collect();
+    let live = roster.live();
+    let mut gone = HashSet::new();
+    let mut forget: Vec<(tokio::time::Instant, InstanceId)> = Vec::new();
+    let mut unsent: Vec<InstanceId> = Vec::new();
+    loop {
+        for id in announced(&dir, "retired").unwrap_or_default() {
+            if let Some((segment, id)) = known.get(&id)
+                && inner.contains(segment)
+            {
+                live.retire(segment, *id);
+            }
+        }
+        for id in announced(&dir, "left").unwrap_or_default() {
+            if let Some((segment, id)) = known.get(&id)
+                && gone.insert(*id)
+            {
+                live.leave(segment, *id);
+                forget.push((tokio::time::Instant::now() + drain, *id));
+            }
+        }
+        unsent.extend(live.take_acknowledgements());
+        unsent.retain(|id| {
+            let avoids = dir.join("avoids").join(id.to_string());
+            publish(&avoids, segment, &me_peer).is_err()
+        });
+        let now = tokio::time::Instant::now();
+        forget.retain(|(at, id)| {
+            if *at > now {
+                return true;
+            }
+            unregister_peer(&node, *id);
+            false
+        });
+        tokio::time::sleep(POLL).await;
+    }
+}
 
 /// Announce in the roster directory `dir` that `node`, an instance of
 /// `segment`, has reached `phase`: a file in `dir/<phase>`, as `serving`

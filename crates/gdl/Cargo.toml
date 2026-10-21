@@ -22,6 +22,7 @@ json-lines = ["dep:serde_json", "tokio/io-util"]
 tracing = "0.1"
 velo-hub = { workspace = true, features = ["client"], optional = true }
 figment.workspace = true
+arc-swap = { workspace = true }
 dashmap = { workspace = true }
 gdl-macros = { path = "../gdl-macros" }
 gdl-message = { path = "../gdl-message" }
@@ -71,4 +72,8 @@ harness = false
 
 [[test]]
 name = "hub"
+required-features = ["hub"]
+
+[[test]]
+name = "rosters"
 required-features = ["hub"]

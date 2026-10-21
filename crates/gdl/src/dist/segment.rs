@@ -7,7 +7,8 @@ use velo::Velo;
 use super::envelope::{Forward, Open, decode, encode};
 use super::fabric::Fabric;
 use super::hop::{DHop, Register};
-use super::runtime::{Entries, Roster, Runtime, RuntimeConfig};
+use super::roster::Roster;
+use super::runtime::{Entries, Runtime, RuntimeConfig};
 use super::stages::{DBackward, DForward, DInner};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
@@ -189,6 +190,18 @@ impl<H> Segment<H> {
     /// every request it served has finished.
     pub fn admitted(&self) -> usize {
         self.rt.admission.admitted()
+    }
+
+    /// Refuse every forward hand-off and backward-run opening that arrives
+    /// from now on: a retiring instance closes once nothing should route
+    /// to it any more, then waits for what it admitted.
+    pub fn close(&self) {
+        self.rt.close();
+    }
+
+    /// Whether the instance has closed its entries.
+    pub fn is_closed(&self) -> bool {
+        self.rt.is_closed()
     }
 
     /// Root requests with outstanding remote attempts started here.
