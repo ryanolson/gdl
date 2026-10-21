@@ -11,8 +11,11 @@
 //!
 //! The setups are `remote`'s: `local`, `one` (one segment), `two`, and
 //! `three`, and the last three again with the runtime's metrics recorded
-//! (`one-metrics`, ...). Only the setup named is built. See
-//! `agent-docs/perf/benchmarking.md` for the method.
+//! (`one-metrics`, ...). `two-random` is `two` with the engine's crossing
+//! routed by `random` rather than `round_robin`. Only the setup named is
+//! built. `requests sizes 0` prints the size of the front's call future
+//! over one, two, and three segments: a larger future is moved whole on
+//! every request. See `agent-docs/perf/benchmarking.md` for the method.
 
 #![allow(missing_docs)]
 
@@ -21,7 +24,8 @@ mod common;
 #[path = "remote/setup.rs"]
 mod setup;
 
-use common::{Events, local_graph};
+use common::{Events, deploy, local_graph, prompt, velo_node};
+use gdl::{Cx, RequestRouter, RuntimeConfig};
 use setup::*;
 
 /// Nothing is counted but instructions.
@@ -30,7 +34,7 @@ fn produced() {}
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: requests <local | one | two | three>[-metrics] <count>";
+    let usage = "usage: requests <local | one | two | three>[-metrics] <count> | two-random <count> | sizes 0";
     let which = args.next().expect(usage);
     let count: u32 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -54,6 +58,31 @@ fn main() {
                     let local = local.clone();
                     Box::pin(async move { local.call(cx, req).await })
                 })
+            }
+            "sizes" if !metrics => {
+                for segments in 1..=3 {
+                    let placement = reference_placement(segments);
+                    let mut nodes = Vec::new();
+                    for _ in 0..segments {
+                        nodes.push(velo_node().await);
+                    }
+                    let cluster = deploy(&nodes, &placement, &events, RuntimeConfig::default());
+                    let call = cluster
+                        .segment("front")
+                        .call(Cx::new(), prompt("size", Default::default()));
+                    println!(
+                        "{segments} segments: {} bytes",
+                        std::mem::size_of_val(&call)
+                    );
+                    drop(call);
+                    std::mem::forget(cluster);
+                    std::mem::forget(nodes);
+                }
+                std::process::exit(0);
+            }
+            "two-random" if !metrics => {
+                let placement = reference_placement(2).route("D", RequestRouter::Random);
+                reference_front(&events, &placement, 2, false).await
             }
             "one" | "two" | "three" => {
                 let segments = ["one", "two", "three"]
