@@ -104,3 +104,22 @@ remote-<base|change> --bench --warm-up-time 2 --measurement-time 5 \
 remote-<base|change> --bench --warm-up-time 2 --measurement-time 5 --output-format bencher \
   '^(concurrent-32x1-reference/.*|reference-items/2-segments(-metrics)?)$'
 ```
+
+## 2026-10-21: one in-flight gauge
+
+`inflight_requests` now counts each visit until the segment is done with it, and `inflight_responses` is gone (the owner's addendum of 2026-10-21 in `plan.md`). Each shard keeps one count of visits in flight in place of the request part's and the response part's. Only the one-segment `requests` row was measured again. **Provisional: Apple M5, macOS, shared machine; load average 5.7 falling to 5.5.**
+
+"Base" is `e55e692`, "change" is `751af01`, built in turn in the same checkout and target directory, binaries copied aside. Instructions per request, (count at 20,000 − count at 10,000) / 10,000 under `/usr/bin/time -l`, the four runs interleaved in each of seven rounds. Medians:
+
+| Setup | Off | On | On − off |
+|---|---|---|---|
+| base, one segment (1 visit) | 128,514 | 130,258 | +1,744 |
+| change, one segment (1 visit) | 127,734 | 129,491 | +1,757 |
+
+The spread of "off" across rounds: 126.8k to 129.5k (base) and 126.7k to 128.4k (change). The change costs the same as the base with metrics on, and with metrics off it is within the spread of the base. Ruling 138's budget of 2,000 instructions per visit holds on the laptop in this set, still inside the spread.
+
+```bash
+git checkout e55e692 && cargo bench -p gdl --bench requests --no-run   # copy the binary aside as base
+git checkout main && cargo bench -p gdl --bench requests --no-run      # and the change
+/usr/bin/time -l requests-<base|change> one[-metrics] <10000|20000>     # interleaved, seven rounds
+```
