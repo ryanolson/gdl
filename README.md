@@ -495,7 +495,9 @@ In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `m
    echo '{"text": "hello big wide world", "max_words": 3}' | examples/chat/target/debug/chat-front front.toml
    ```
 
-`crates/gdl-gen/tests/chat.rs` does these steps as a test.
+To see a segment's metrics, add a `[system]` table with a `port` to its config file and read `GET /metrics` there. The engine reports `dynamo_component_words_total`, which its node defines, beside the runtime's figures for each node.
+
+`crates/gdl-gen/tests/chat.rs` does these steps as a test, and `crates/gdl-gen/tests/lifecycle.rs` reads a running engine's metrics.
 
 ### A graph with a streamed request
 

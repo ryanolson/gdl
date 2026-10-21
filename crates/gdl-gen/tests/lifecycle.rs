@@ -223,3 +223,63 @@ fn a_signal_does_not_cut_an_answer_short() {
     assert_eq!(rest[2], r#"{"done":null}"#);
     assert!(front.exits_within(EXIT).success());
 }
+
+/// A running engine serves its metrics on its system listener: the
+/// engine's own, which its node defines, and the runtime's for every node
+/// it hosts, each with dynamo's prefix and identity labels.
+#[test]
+fn a_running_engine_serves_its_metrics() {
+    let chat = Chat::new("gdl-life-metrics-");
+    let settings = "[system]\nhost = \"127.0.0.1\"\nport = 0\n";
+    let mut engine = chat.spawn("engine", &chat.config("engine", settings), false);
+    let errors = engine.stderr();
+    let address = listener(&errors.find("system listener at", WAIT));
+    let mut post = chat.spawn("post", &chat.config("post", ""), false);
+    let mut front = chat.spawn("front", &chat.config("front", ""), true);
+    ask(&mut front, REQUEST);
+    let out = front.stdout();
+    let answer: Vec<String> = (0..4).map(|_| out.next(WAIT)).collect();
+    assert_eq!(answer[3], r#"{"done":null}"#, "{answer:?}");
+
+    let (code, scrape) = get(address, "/metrics");
+    assert_eq!(code, 200);
+    // The engine's request ends when its stream does, which the front has
+    // read by now; the runtime records it there.
+    let series = |name: &str| -> Vec<&str> {
+        scrape
+            .lines()
+            .filter(|line| line.starts_with(&format!("{name}{{")))
+            .collect()
+    };
+    let words = series("dynamo_component_words_total");
+    assert_eq!(words.len(), 1, "{scrape}");
+    for label in [
+        "dynamo_endpoint=\"Engine\"",
+        "dynamo_component=\"engine\"",
+        "dynamo_namespace=\"chat-",
+        "worker_id=\"",
+    ] {
+        assert!(words[0].contains(label), "{label} missing: {}", words[0]);
+    }
+    assert!(words[0].ends_with(" 3"), "{}", words[0]);
+    let requests = series("dynamo_component_requests_total");
+    assert!(
+        requests
+            .iter()
+            .any(|line| line.contains("dynamo_endpoint=\"Engine\"") && line.ends_with(" 1")),
+        "{scrape}"
+    );
+    assert_eq!(
+        series("dynamo_component_uptime_seconds").len(),
+        1,
+        "{scrape}"
+    );
+
+    drop(front.0.stdin.take());
+    assert!(front.exits_within(EXIT).success());
+    for process in [&engine, &post] {
+        process.signal("-TERM");
+    }
+    assert!(engine.exits_within(EXIT).success());
+    assert!(post.exits_within(EXIT).success());
+}

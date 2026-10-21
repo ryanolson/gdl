@@ -91,9 +91,39 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### Configuration and metrics come only from their derives
 
-- **What happens:** `gdl::ConfigSchema` is implemented only by `derive(gdl::Config)`. A hand-written implementation does not build.
-- **Why:** the source reader takes a config type's fields from the derive's attributes, without building the crate.
-- **See:** ruling 102. Node metrics (ruling 116) will follow the same rule.
+- **What happens:** `gdl::ConfigSchema` is implemented only by `derive(gdl::Config)`, and `gdl::Metrics` only by `derive(gdl::Metrics)`. A hand-written implementation does not build.
+- **Why:** the source reader takes a config type's fields, and a metrics type's definitions, from the derive's attributes, without building the crate.
+- **Also:** the reader recognizes the derive by its last path segment (`gdl::Metrics`, or `Metrics` imported under that name). A derive imported under another name (`use gdl::Metrics as Measure`) builds, and the reader then refuses the node: "metrics type must derive Metrics".
+- **See:** rulings 102 and 125.
+
+## Metrics
+
+### Metric names follow dynamo's rules, and are stricter about durations
+
+- **What happens:** `derive(gdl::Metrics)` refuses a duration or latency whose unit is not seconds, where dynamo also has names in milliseconds (`tokenizer_latency_ms`). It also refuses `_sum`, `_count`, and `_bucket` as a name's unit, which a histogram's own series use.
+- **See:** rulings 116 and 125.
+
+### The runtime's `error_type` values are gdl's error kinds
+
+- **What happens:** `errors_total{error_type}` counts by gdl's error kinds (`node`, `deadline_exceeded`, `truncated`, `not_hosted`, `overloaded`, `transport`, `codec`, `placement`). dynamo's work handler counts by its own steps (`deserialization`, `generate`, `publish_response`, ...), so a dashboard keyed on those values sees none.
+- **See:** ruling 128.
+
+### Metrics use dynamo's prefix by default
+
+- **What happens:** every series is named `dynamo_component_...` unless `[system] metrics_prefix` says otherwise. Whether gdl keeps dynamo's prefix once it replaces dynamo's runtime is the owner's open question.
+- **See:** ruling 117.
+
+### Two nodes of one segment must agree on a metric they share
+
+- **What happens:** a segment fails to build when two of its nodes define a metric of the same name with a different kind, help, label set, or buckets. The error names both nodes.
+- **Why:** a registry holds one definition per name; Prometheus refuses a second help or label set, and a second kind would break the scrape.
+- **See:** ruling 127.
+
+### Without a system listener, the runtime records nothing
+
+- **What happens:** a segment binary records the runtime's per-node figures only when `[system] port` (or `DYN_SYSTEM_PORT`) turns its listener on. A node's own metrics are still built and counted, in a registry nobody serves.
+- **Why:** with no listener nothing can read the figures, so recording them would only cost.
+- **See:** ruling 128.
 
 ## Tooling
 

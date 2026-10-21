@@ -13,11 +13,21 @@ use serde::Deserialize;
 
 /// The engine.
 #[derive(gdl::Node)]
+#[gdl(metrics = EngineMetrics)]
 pub struct Engine {
     model: &'static str,
     uppercase: bool,
     delay: Duration,
     load: Duration,
+    metrics: EngineMetrics,
+}
+
+/// What the engine reports, besides what the runtime records for every
+/// node: registered by the segment binary and handed to `build`.
+#[derive(gdl::Metrics)]
+pub struct EngineMetrics {
+    /// Words answered.
+    words_total: gdl::prometheus::IntCounter,
 }
 
 /// The engine's settings: the `[node.Engine]` table of its segment's config.
@@ -37,14 +47,15 @@ pub struct Settings {
 
 impl Build for Engine {
     type Config = Settings;
-    type Metrics = ();
+    type Metrics = EngineMetrics;
 
-    async fn build(settings: Settings, (): ()) -> Result<Self> {
+    async fn build(settings: Settings, metrics: EngineMetrics) -> Result<Self> {
         Ok(Self {
             model: chat_sentinel::model(),
             uppercase: settings.uppercase,
             delay: Duration::from_millis(settings.delay_ms),
             load: Duration::from_millis(settings.load_ms),
+            metrics,
         })
     }
 
@@ -67,18 +78,19 @@ impl Sink for Engine {
         }
         let uppercase = self.uppercase;
         let delay = self.delay;
-        let words = req.words.into_iter().rev().map(move |word| {
-            if uppercase {
-                word.to_uppercase()
-            } else {
-                word
-            }
-        });
-        Ok(items(futures::stream::iter(words).then(move |word| async move {
+        let answered = self.metrics.words_total.clone();
+        let words =
+            req.words.into_iter().rev().map(
+                move |word| {
+                    if uppercase { word.to_uppercase() } else { word }
+                },
+            );
+        let words = futures::stream::iter(words).then(move |word| async move {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
             Ok(Token { word })
-        })))
+        });
+        Ok(items(words.inspect(move |_| answered.inc())))
     }
 }
