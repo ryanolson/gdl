@@ -425,6 +425,11 @@ pub struct NodeEntry {
     /// Only configuration fields explicitly exposed to the graph builder.
     #[serde(default)]
     pub config: Vec<gdl_model::ConfigField>,
+    /// The metrics it reports, from its `derive(Node)`'s `metrics` type;
+    /// left out when it reports none, so a catalogue written before nodes
+    /// had metrics reads and writes the same.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<gdl_model::MetricField>,
     /// The node's name: its type's name.
     pub name: String,
     /// Its role: a sink, a forward or backward node, or an operator.

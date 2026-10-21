@@ -51,6 +51,15 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
     } else {
         quote!(::std::vec::Vec::new)
     };
+    let metrics = if let Some(path) = &types.metrics {
+        quote! { || {
+            fn check<T: ::gdl::Build<Metrics = #path>>() {}
+            check::<#ident>();
+            <#path as ::gdl::Metrics>::definitions()
+        } }
+    } else {
+        quote!(::std::vec::Vec::new)
+    };
     Ok(quote! {
         const _: () = {
             #root_check
@@ -59,6 +68,7 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
             #[linkme(crate = #root::linkme)]
             static __GDL_NODE: #root::Node = #root::Node {
                 config: #config,
+                metrics: #metrics,
                 package: ::core::env!("CARGO_PKG_NAME"),
                 version: ::core::env!("CARGO_PKG_VERSION"),
                 dir: ::core::env!("CARGO_MANIFEST_DIR"),

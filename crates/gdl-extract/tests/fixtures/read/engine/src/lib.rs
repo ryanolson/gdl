@@ -43,6 +43,19 @@ mod shy {
 }
 use shy::Shy;
 
+/// A node whose metrics type does not derive `Metrics`.
+#[derive(gdl::Node)]
+#[gdl(metrics = Plain)]
+pub struct Unmeasured;
+
+/// Not a metrics type.
+pub struct Plain;
+
+impl gdl::Sink for Unmeasured {
+    type Req = Words;
+    type Item = Token;
+}
+
 /// A node with two roles.
 #[derive(gdl::Node)]
 pub struct Twice;

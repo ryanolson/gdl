@@ -289,6 +289,23 @@ fn node(
     } else {
         Vec::new()
     };
+    let metrics = if let Some(path) = &types.metrics {
+        let (path, absolute) = segments(path);
+        let Some(Def::Type(c, m, i)) = resolver.resolve(krate, module, &path, absolute) else {
+            return Err(format!("{at}: metrics type cannot be resolved"));
+        };
+        let definition = &resolver.crates[c].modules[m].types[i];
+        if !derives(definition, "Metrics") {
+            return Err(format!("{at}: metrics type must derive Metrics"));
+        }
+        let fields = definition
+            .fields
+            .as_ref()
+            .ok_or_else(|| format!("{at}: metrics must be a struct"))?;
+        gdl_syntax::metric_fields(fields).map_err(|e| format!("{at}: {e}"))?
+    } else {
+        Vec::new()
+    };
     // The generated segments name the type at the crate root.
     if resolver.public_member(krate, 0, &name) != Some(def) {
         return Err(format!(
@@ -425,6 +442,7 @@ fn node(
         clients,
         entries: service_entries,
         config,
+        metrics,
         name,
         role,
         ty,

@@ -296,3 +296,39 @@ impl Stage for Renamed {
         Ok(Actual)
     }
 }
+
+// Metrics with a raw field name and a doc comment over two lines: the
+// build registers what the reader reads.
+#[derive(gdl::Node)]
+#[gdl(metrics = MeasuredMetrics)]
+pub struct Measured;
+
+/// What `Measured` reports.
+#[derive(gdl::Metrics)]
+pub struct MeasuredMetrics {
+    /// Items passed,
+    /// by kind.
+    #[gdl(labels = ["kind"])]
+    r#passed_total: gdl::prometheus::IntCounterVec,
+    /// Time in the stage.
+    #[gdl(buckets = [0.5, 1, 2.5])]
+    stage_seconds: gdl::prometheus::Histogram,
+}
+
+impl gdl::Build for Measured {
+    type Config = ();
+    type Metrics = MeasuredMetrics;
+
+    async fn build((): (), _metrics: MeasuredMetrics) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+impl gdl::Forward for Measured {
+    type In = Actual;
+    type Out = Actual;
+
+    async fn forward(&self, _cx: &Cx, req: Self::In) -> Result<Self::Out> {
+        Ok(req)
+    }
+}

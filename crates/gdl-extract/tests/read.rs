@@ -147,13 +147,38 @@ fn a_node_crate_offers_its_nodes_by_message_origin() {
         "node `Shy`: the crate root does not reach it publicly as `read_engine::Shy`",
         "node `Twice` implements more than one role trait: sink, backward",
         "node `Idle`: the crate implements no role trait for it",
+        "metrics type must derive Metrics",
     ] {
         assert!(
             problems.contains(expected),
             "{expected:?} missing from:\n{problems}"
         );
     }
-    assert_eq!(extraction.problems.len(), 5, "{problems}");
+    assert_eq!(extraction.problems.len(), 6, "{problems}");
+    // The engine's metrics, read from its metrics type's derive.
+    let engine = extraction
+        .offer
+        .nodes
+        .iter()
+        .find(|n| n.name == "Engine")
+        .expect("Engine");
+    let metrics: Vec<(&str, gdl_model::MetricKind, &[f64])> = engine
+        .metrics
+        .iter()
+        .map(|m| (m.name.as_str(), m.kind, m.buckets.as_slice()))
+        .collect();
+    assert_eq!(
+        metrics,
+        [
+            ("tokens_total", gdl_model::MetricKind::Counter, &[][..]),
+            (
+                "time_to_first_token_seconds",
+                gdl_model::MetricKind::Histogram,
+                &[0.01, 1.0][..]
+            ),
+        ]
+    );
+    assert_eq!(engine.metrics[0].help, "Tokens generated.");
     assert!(problems.contains("engine/src/lib.rs:"), "{problems}");
 }
 
@@ -341,10 +366,16 @@ fn rust_is_read_as_the_compiler_reads_it() {
     assert_eq!(
         nodes,
         [
+            "forward Measured: In=read_quirks::Actual, Out=read_quirks::Actual",
             "forward Renamed: In=read_quirks::Actual + stream read_quirks::Actual, Out=read_quirks::Actual",
             "forward Selected: In=read_quirks::Actual, Out=read_quirks::Actual",
         ]
     );
+    let measured = &offer.nodes[0].metrics;
+    assert_eq!(measured[0].name, "passed_total");
+    assert_eq!(measured[0].labels, ["kind"]);
+    assert_eq!(measured[0].help, "Items passed, by kind.");
+    assert_eq!(measured[1].buckets, [0.5, 1.0, 2.5]);
 }
 
 /// A definition path is public when the type and every module above it

@@ -98,6 +98,9 @@ pub struct NodeInfo {
     /// Graph-affecting configuration fields.
     #[serde(default)]
     pub config: Vec<gdl_model::ConfigField>,
+    /// The metrics it reports; left out when it reports none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<gdl_model::MetricField>,
     /// The package that defines it.
     pub package: String,
     /// That package's version.
@@ -270,6 +273,7 @@ pub mod registry {
 
     pub struct Node {
         pub config: fn() -> Vec<gdl_model::ConfigField>,
+        pub metrics: fn() -> Vec<gdl_model::MetricField>,
         pub package: &'static str,
         pub version: &'static str,
         pub dir: &'static str,
@@ -358,6 +362,7 @@ pub mod registry {
             roles.sort();
             NodeInfo {
                 config: (self.config)(),
+                metrics: (self.metrics)(),
                 package: self.package.to_string(),
                 version: self.version.to_string(),
                 dir: self.dir.to_string(),

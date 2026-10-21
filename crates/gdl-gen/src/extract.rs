@@ -341,11 +341,12 @@ fn differences(
                 })
                 .collect();
             format!(
-                "node `{}` at `{}`: {} config {:?}",
+                "node `{}` at `{}`: {} config {:?} metrics {:?}",
                 n.name,
                 n.path,
                 roles.join(" "),
-                n.config
+                n.config,
+                n.metrics
             )
         }))
         .collect();
@@ -406,13 +407,14 @@ fn differences(
                 })
                 .collect();
             format!(
-                "node `{}` at `{}`: {}({}) entries {:?} config {:?}",
+                "node `{}` at `{}`: {}({}) entries {:?} config {:?} metrics {:?}",
                 n.name,
                 n.ty,
                 n.role,
                 ports.join(", "),
                 entries,
-                n.config
+                n.config,
+                n.metrics
             )
         }))
         .collect();
@@ -555,6 +557,7 @@ mod tests {
             }],
             nodes: vec![NodeInfo {
                 config: Vec::new(),
+                metrics: Vec::new(),
                 package: "facade".into(),
                 version: "0.1.0".into(),
                 dir: FACADE.into(),
@@ -602,6 +605,7 @@ mod tests {
                 entries: Vec::new(),
                 clients: None,
                 config: Vec::new(),
+                metrics: Vec::new(),
                 name: "Stage".into(),
                 role: gdl_model::Role::Forward,
                 ty: "facade::Stage".into(),
@@ -661,6 +665,24 @@ mod tests {
                 "read from source, not registered by the build: export `Words` at `facade::Words`, of `protocols::Words` (protocols 0.1.0), wire",
             ]
         );
+    }
+
+    /// A metric the build registers that the source does not show, as
+    /// a hand-written impl would, differs.
+    #[test]
+    fn metrics_are_compared() {
+        let mut measured = registered(true, false);
+        measured.nodes[0].metrics.push(gdl_model::MetricField {
+            name: "passed_total".into(),
+            help: "Items passed.".into(),
+            kind: gdl_model::MetricKind::Counter,
+            labels: Vec::new(),
+            buckets: Vec::new(),
+        });
+        let problems = differences(&measured, &facade, &read());
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("passed_total"), "{problems:?}");
+        assert!(differences(&registered(true, false), &facade, &read()).is_empty());
     }
 
     /// A port the build finds nested, where the source shows a flat
