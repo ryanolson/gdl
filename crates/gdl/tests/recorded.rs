@@ -61,10 +61,13 @@ async fn deployed(
 
 impl<H: gdl::Next<Prompt, Chunk>> Deployed<H> {
     async fn call(&self, cx: Cx, plan: Plan) -> gdl::Result<gdl::Items<Chunk>> {
-        self.cluster
+        let call = self
+            .cluster
             .segment(&source_segment(&self.placement))
-            .call(cx, prompt("m", plan))
+            .call(cx, prompt("m", plan));
+        tokio::time::timeout(WAIT, call)
             .await
+            .expect("the call did not return in time")
     }
 
     /// Call, and read the response to its end, or to its first error.
@@ -177,6 +180,14 @@ impl<H: gdl::Next<Prompt, Chunk>> Deployed<H> {
             tokio::time::sleep(ms(5)).await;
         }
     }
+}
+
+/// The next item of `out`, bounded.
+async fn next(out: &mut gdl::Items<Chunk>) -> gdl::Result<Chunk> {
+    tokio::time::timeout(WAIT, out.next())
+        .await
+        .expect("no item in time")
+        .expect("an item")
 }
 
 fn one() -> Placement {
@@ -457,7 +468,7 @@ async fn a_dropped_stream_is_a_cancellation_of_every_response() {
             ..plan(0)
         };
         let mut out = d.call(Cx::new(), endless).await.expect("call");
-        out.next().await.expect("an item").expect("not an error");
+        next(&mut out).await.expect("not an error");
         drop(out);
         d.idle().await;
         for entry in entries(&d.placement) {
@@ -478,7 +489,7 @@ async fn a_dropped_stream_is_a_cancellation_of_every_response() {
             ..plan(3)
         };
         let mut out = d.call(Cx::new(), failing).await.expect("call");
-        assert!(out.next().await.expect("an item").is_err());
+        assert!(next(&mut out).await.is_err());
         drop(out);
         d.idle().await;
         let with = [("error_type", "node")];
@@ -578,7 +589,7 @@ async fn a_refused_request_is_counted_by_its_sender() {
         ..plan(0)
     };
     let mut held = d.call(Cx::new(), endless.clone()).await.expect("held");
-    held.next().await.expect("an item").expect("not an error");
+    next(&mut held).await.expect("not an error");
     let refused = d.run(Cx::new(), plan(1)).await;
     assert!(
         refused
@@ -641,4 +652,60 @@ async fn the_default_deadline_classifies_a_dropped_request() {
     d.idle().await;
     assert_eq!(d.value("end_to_end_errors_total", "A", &with), 1.0);
     assert_eq!(d.value("end_to_end_cancellation_total", "A", &[]), 0.0);
+}
+
+/// A request that waits for a held roster before its hand-off waits in the
+/// front: the wait is on the front's request path, which ends when the
+/// hand-off leaves, not when the request reaches the code that sends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wait_for_the_roster_is_on_the_request_path() {
+    let placement = two();
+    let (front_node, engine_node) = (velo_node().await, velo_node().await);
+    let mut roster = gdl::Roster::new();
+    roster.add("front", front_node.peer_info());
+    roster.add("engine", engine_node.peer_info());
+    roster.hold();
+    let events = Events::quiet();
+    let manifest = reference_manifest(|_| true);
+    let registry = Registry::new();
+    let start = |name: &str, node: &velo::Velo, metrics: Option<Registry>| {
+        let config = RuntimeConfig {
+            metrics,
+            ..RuntimeConfig::default()
+        };
+        let deployment =
+            gdl::Deployment::new(node.clone(), &manifest, &placement, name, &roster, config)
+                .expect("deployment");
+        let root = reference_graph(&deployment, &events).expect("graph");
+        deployment.start(root).expect("start")
+    };
+    let front = start("front", &front_node, Some(registry.clone()));
+    let _engine = start("engine", &engine_node, None);
+    let (out, ()) = tokio::join!(
+        tokio::time::timeout(WAIT, front.call(Cx::new(), prompt("held", plan(1)))),
+        async {
+            tokio::time::sleep(ms(150)).await;
+            roster.release();
+        }
+    );
+    let out = out.expect("the call did not return in time").expect("call");
+    assert_eq!(collect(out).await, expected(0..1));
+    let mut text = Vec::new();
+    TextEncoder::new()
+        .encode(&registry.gather(), &mut text)
+        .expect("text");
+    let text = String::from_utf8(text).expect("utf-8");
+    let held = text
+        .lines()
+        .find(|line| {
+            line.starts_with("request_path_duration_seconds_sum{")
+                && line.contains("dynamo_endpoint=\"A\"")
+        })
+        .and_then(|line| line.rsplit(' ').next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("no request path for A in:\n{text}"));
+    assert!(
+        held >= 0.15,
+        "the front's request path left out the wait: {held} s"
+    );
 }

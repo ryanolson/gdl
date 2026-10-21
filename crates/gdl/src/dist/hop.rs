@@ -61,7 +61,7 @@ struct HopCore<F, I, B> {
 }
 
 /// The figures of a hop's entries in one segment: where a visit to the
-/// segment begins (`agent-docs/plan.md`, rulings 131 to 137).
+/// segment begins.
 #[derive(Default)]
 struct HopFigures {
     /// The root's, on the hop whose outer end is the graph's source.
@@ -536,9 +536,12 @@ where
                     reply,
                     payload: head,
                 };
-                let sent = attempt.visit().map(|_| Instant::now());
-                let accepted = rt
-                    .send_forward(&self.plan.fwd_segments[at], envelope)
+                let (accepted, sent) = rt
+                    .send_forward(
+                        &self.plan.fwd_segments[at],
+                        envelope,
+                        attempt.visit().is_some(),
+                    )
                     .await?;
                 // Handed on: the visit's request path ends where the
                 // hand-off left, and its response begins.
@@ -719,9 +722,12 @@ where
                         reply: reply.clone(),
                         payload: head,
                     };
-                    let sent_at = owner.as_ref().map(|_| Instant::now());
-                    let sent =
-                        bounded(&cx, hop.rt.send_forward(&hop.plan.fwd_segments[at], onward)).await;
+                    let segment = &hop.plan.fwd_segments[at];
+                    let sending = hop.rt.send_forward(segment, onward, owner.is_some());
+                    let (sent, sent_at) = match bounded(&cx, sending).await {
+                        Ok((accepted, sent_at)) => (Ok(accepted), sent_at),
+                        Err(error) => (Err(error), None),
+                    };
                     // Handed on, the visit ends here: the response flows
                     // past this segment.
                     let handed = || {

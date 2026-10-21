@@ -9,7 +9,7 @@
 //! add: each segment's request time and the time it adds to the first
 //! item sum to the time to the first item end to end, less the wire.
 //! Recorded per node, they nest, since a node's request lasts until its
-//! response stream ends (`agent-docs/plan.md`, rulings 131 to 137).
+//! response stream ends.
 //!
 //! Each entry's figures are sharded by thread and summed when the registry
 //! is scraped. A prometheus metric is one atomic that every thread
@@ -18,7 +18,10 @@
 //! time (`agent-docs/perf/m21-metrics.md`). Nothing is counted per item.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicI64, AtomicU8, AtomicU64, AtomicUsize,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -333,14 +336,19 @@ impl Visit {
     /// response part begins.
     pub(crate) fn handed_on(&self, responds: bool, sent: Instant) {
         let next = if responds { RESPONDING } else { DONE };
+        // Stamped before the state changes: a first item out that sees the
+        // response must also see when it began.
+        if responds {
+            let _ = stamp(&self.begun, self.since(sent));
+        }
         if self
             .state
-            .compare_exchange(REQUESTING, next, Relaxed, Relaxed)
+            .compare_exchange(REQUESTING, next, Release, Relaxed)
             .is_ok()
         {
             self.end_request(sent, Ending::Finished);
             if responds {
-                self.begin(sent);
+                self.begin();
             } else {
                 self.end_whole(sent, Ending::Finished);
             }
@@ -355,14 +363,17 @@ impl Visit {
     /// they have not already.
     pub(crate) fn producing(&self) {
         let now = Instant::now();
-        let _ = stamp(&self.producing, self.since(now));
+        let at = self.since(now);
+        let _ = stamp(&self.producing, at);
+        // Stamped before the state changes, as in `handed_on`.
+        let _ = stamp(&self.begun, at);
         if self
             .state
-            .compare_exchange(REQUESTING, RESPONDING, Relaxed, Relaxed)
+            .compare_exchange(REQUESTING, RESPONDING, Release, Relaxed)
             .is_ok()
         {
             self.end_request(now, Ending::Finished);
-            self.begin(now);
+            self.begin();
         }
         if let Some(parent) = &self.parent {
             parent.handed_on(true, now);
@@ -384,7 +395,8 @@ impl Visit {
         if !stamp(&self.first_out, at) {
             return;
         }
-        if self.state.load(Relaxed) == RESPONDING {
+        // Acquire: the transition to the response published its stamps.
+        if self.state.load(Acquire) == RESPONDING {
             // The clock starts at the first item in, if one came: the time
             // before it was spent in other segments. Otherwise at the
             // stream's start here.
@@ -439,8 +451,7 @@ impl Visit {
             .observe(now.saturating_duration_since(self.started));
     }
 
-    fn begin(&self, now: Instant) {
-        let _ = stamp(&self.begun, self.since(now));
+    fn begin(&self) {
         self.figures.shard().response.start();
     }
 
@@ -915,6 +926,21 @@ mod tests {
         assert_eq!(shard.request.started.load(Relaxed), 2);
         assert_eq!(shard.request.inflight.load(Relaxed), 0);
         assert_eq!(shard.request.cancelled.load(Relaxed), 0);
+    }
+
+    /// A response begun by a hand-off, whose first item goes out before
+    /// any comes in (an operator's own), measures from the hand-off: the
+    /// stamp is set before the state that makes it visible.
+    #[tokio::test(start_paused = true)]
+    async fn a_response_begun_by_a_hand_off_measures_from_it() {
+        let figures = figures();
+        let owner = Visit::request(figures, Instant::now(), None, false);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        owner.visit().handed_on(true, Instant::now());
+        tokio::time::advance(Duration::from_millis(20)).await;
+        owner.visit().first_out();
+        let shard = &figures.shards[0];
+        assert!((seconds(&shard.first_item) - 0.020).abs() < 1e-6);
     }
 
     /// An inner end run the outer end spawns ends its parent's request

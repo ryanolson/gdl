@@ -552,7 +552,16 @@ impl Runtime {
     ///
     /// When the chosen instance is this one, the entry runs by a direct
     /// call: velo is not relied on to deliver a message to its own sender.
-    pub(crate) async fn send_forward(&self, segment: &str, envelope: Forward) -> Result<Accepted> {
+    ///
+    /// With `timed`, it also returns when the hand-off left: after the
+    /// wait for the roster, the routing, and the encoding, which are the
+    /// sender's work, and before anything the receiver does.
+    pub(crate) async fn send_forward(
+        &self,
+        segment: &str,
+        envelope: Forward,
+        timed: bool,
+    ) -> Result<(Accepted, Option<tokio::time::Instant>)> {
         self.released().await?;
         let router = self
             .layout
@@ -561,18 +570,22 @@ impl Runtime {
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
             let entry = Arc::clone(entries.forward(envelope.hop, envelope.pos)?);
-            return entry(envelope).await;
+            let sent = timed.then(tokio::time::Instant::now);
+            return Ok((entry(envelope).await?, sent));
         }
+        let bytes = super::envelope::encode(&envelope)?;
+        let sent = timed.then(tokio::time::Instant::now);
         let reply = self
             .fabric
             .call(
                 instance,
                 &self.names.forward,
-                super::envelope::encode(&envelope)?,
+                bytes,
                 self.config.setup_timeout,
             )
             .await?;
-        super::envelope::decode::<Result<Accepted, Error>>(&reply)?
+        let accepted = super::envelope::decode::<Result<Accepted, Error>>(&reply)??;
+        Ok((accepted, sent))
     }
 
     /// Ask an instance of `segment` to open a backward run.
