@@ -222,10 +222,16 @@ impl HubSession {
             .into_iter()
             .flatten()
         {
-            tokio::time::timeout_at(deadline, guard.unregister())
-                .await
-                .map_err(|_| failure("the hub did not answer in time"))?
-                .map_err(failure)?;
+            // A lost lease took the registration these belong to: there is
+            // nothing left to withdraw, and nobody to wait for.
+            let withdrawn = tokio::time::timeout_at(deadline, guard.unregister());
+            tokio::select! {
+                biased;
+                lost = self.maintain() => return lost,
+                withdrawn = withdrawn => withdrawn
+                    .map_err(|_| failure("the hub did not answer in time"))?
+                    .map_err(failure)?,
+            }
         }
         Ok(())
     }
@@ -271,7 +277,22 @@ impl HubSession {
         inner: &[&str],
         drain: Duration,
     ) {
-        let follower = Follower {
+        let follower = self.follower(live, node, segments, inner, drain);
+        if let Some(earlier) = self.follower.replace(tokio::spawn(follower.run())) {
+            earlier.abort();
+        }
+    }
+
+    /// The follower [`follow`](Self::follow) runs.
+    fn follower(
+        &self,
+        live: Arc<Live>,
+        node: Velo,
+        segments: &[&str],
+        inner: &[&str],
+        drain: Duration,
+    ) -> Follower {
+        Follower {
             client: self.client.clone(),
             registration: self.registration.clone(),
             me: node.instance_id(),
@@ -284,9 +305,8 @@ impl HubSession {
             unsent: Vec::new(),
             forget: Vec::new(),
             unresolved: Vec::new(),
-        };
-        if let Some(earlier) = self.follower.replace(tokio::spawn(follower.run())) {
-            earlier.abort();
+            #[cfg(test)]
+            members_gate: None,
         }
     }
 
@@ -497,6 +517,18 @@ struct Follower {
     /// say who they are: retried each tick, so that one failed question
     /// does not leave a joiner out for good.
     unresolved: Vec<(String, InstanceId)>,
+    /// Holds the follower once the hub has said who the members are, so a
+    /// test can change membership in between.
+    #[cfg(test)]
+    members_gate: Option<Arc<Gate>>,
+}
+
+/// A point the follower stops at until a test lets it go.
+#[cfg(test)]
+#[derive(Default)]
+struct Gate {
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 /// Which service a watch follows.
@@ -578,25 +610,36 @@ impl Follower {
                     .boxed(),
             );
         }
+        // Who to judge is fixed before the hub is asked: an instance added
+        // to routing meanwhile (the launch merging a newer roster) is
+        // missing from the answer, and must not be taken for one that left.
+        let candidates: Vec<(String, InstanceId)> = self
+            .segments
+            .iter()
+            .flat_map(|segment| {
+                self.live
+                    .members(segment)
+                    .into_iter()
+                    .map(move |id| (segment.clone(), id))
+            })
+            .filter(|(_, id)| *id != self.me)
+            .collect();
         // Without the members, an instance that left while nothing watched
         // would stay routable: start again rather than go on without them.
         let Ok(members) = members(&self.client, &self.registration).await else {
             return None;
         };
+        #[cfg(test)]
+        if let Some(gate) = &self.members_gate {
+            gate.arrived.notify_one();
+            gate.release.notified().await;
+        }
         {
             let present: HashSet<InstanceId> =
                 members.iter().map(|m| m.peer.instance_id()).collect();
-            let gone: Vec<(String, InstanceId)> = self
-                .segments
-                .iter()
-                .flat_map(|segment| {
-                    self.live
-                        .members(segment)
-                        .into_iter()
-                        .map(move |id| (segment.clone(), id))
-                })
-                .filter(|(_, id)| *id != self.me && !present.contains(id))
-                .collect();
+            let gone = candidates
+                .into_iter()
+                .filter(|(_, id)| !present.contains(id));
             for (segment, id) in gone {
                 self.left(&segment, id);
             }
@@ -704,10 +747,10 @@ impl Follower {
             super::unregister_peer(node, *id);
             false
         });
-        if !self.unresolved.is_empty() {
+        // An instance added here can displace a retired one, which is then
+        // owed its promise, as after an event.
+        if !self.unresolved.is_empty() || !self.unsent.is_empty() {
             self.resolve().await;
-        }
-        if !self.unsent.is_empty() {
             self.acknowledge().await;
         }
     }
@@ -849,6 +892,149 @@ async fn container_address(port: u16) -> Result<std::net::SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::{Phase, service};
+
+    mod following {
+        use super::super::{Gate, HubSession};
+        use crate::Roster;
+        use gdl_model::{DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        fn spec() -> DeploymentSpec {
+            let graph = Manifest {
+                name: "follow-test".into(),
+                schema: 1,
+                nodes: vec![
+                    NodeInfo {
+                        name: "Source".into(),
+                        role: Role::Source,
+                        binding: None,
+                    },
+                    NodeInfo {
+                        name: "Echo".into(),
+                        role: Role::Sink,
+                        binding: Some("echo".into()),
+                    },
+                ],
+                hops: vec![HopInfo {
+                    outer: "Source".into(),
+                    inner: "Echo".into(),
+                    forward: vec![],
+                    backward: vec![],
+                    forward_types: vec![TypeInfo::new("Request", true)],
+                    backward_types: vec![TypeInfo::new("Reply", true)],
+                }],
+            };
+            let placement = Placement::new()
+                .segment("front", ["Source"])
+                .segment("sink", ["Echo"]);
+            DeploymentSpec::new(graph, placement).expect("valid test fixture")
+        }
+
+        async fn hub() -> velo_hub::Hub {
+            let mut config = velo_hub::HubConfig::default();
+            config.server.public_port = 0;
+            config.server.control_port = 0;
+            velo_hub::Hub::builder(config)
+                .extension(gdl_hub::GraphAdmission::new(spec()))
+                .serve()
+                .await
+                .expect("valid test fixture")
+        }
+
+        async fn node() -> velo::Velo {
+            crate::dist::bind_node("127.0.0.1:0".parse().expect("valid test fixture"))
+                .await
+                .expect("node")
+        }
+
+        async fn session(hub: &velo_hub::Hub, segment: &str, node: &velo::Velo) -> HubSession {
+            HubSession::register(
+                "127.0.0.1",
+                hub.public_addr().port(),
+                hub.control_addr().port(),
+                node,
+                spec().registration(segment).expect("valid test fixture"),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("registered")
+        }
+
+        /// The follower compares the hub's members with the instances it
+        /// routes to. An instance added to routing after the hub answered
+        /// (the launch merging a newer roster) is not in that answer, and
+        /// must not be taken for one that left.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_instance_added_after_the_members_were_read_has_not_left() {
+            let hub = hub().await;
+            let front = node().await;
+            let front_session = session(&hub, "front", &front).await;
+            let live = Arc::clone(Roster::new().live());
+            let mut follower = front_session.follower(
+                Arc::clone(&live),
+                front.clone(),
+                &["front", "sink"],
+                &["sink"],
+                Duration::from_secs(30),
+            );
+            let gate = Arc::new(Gate::default());
+            follower.members_gate = Some(Arc::clone(&gate));
+            let watching = tokio::spawn(async move { follower.watch().await.is_some() });
+            tokio::time::timeout(Duration::from_secs(5), gate.arrived.notified())
+                .await
+                .expect("the follower read the members");
+            // A sink joins the hub, and the launch's roster takes it, after
+            // the follower's answer.
+            let sink = node().await;
+            let _sink_session = session(&hub, "sink", &sink).await;
+            live.join("sink", sink.instance_id());
+            gate.release.notify_one();
+            assert!(
+                watching.await.expect("the follower's task"),
+                "the watches opened"
+            );
+            assert_eq!(
+                live.members("sink"),
+                [sink.instance_id()],
+                "a sink that joined after the answer was taken for one that left"
+            );
+            hub.shutdown().await.expect("valid test fixture");
+        }
+
+        /// A tick that adds a ready instance the hub could not name before
+        /// can make a retired one ineligible: the follower then promises to
+        /// avoid it, as it does after an event.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_tick_that_adds_an_instance_acknowledges_what_it_displaces() {
+            let hub = hub().await;
+            let front = node().await;
+            let front_session = session(&hub, "front", &front).await;
+            let live = Arc::clone(Roster::new().live());
+            let mut follower = front_session.follower(
+                Arc::clone(&live),
+                front.clone(),
+                &["front", "sink"],
+                &["sink"],
+                Duration::from_secs(30),
+            );
+            // The only sink routed to has retired; a second is ready, but
+            // the hub could not say who it was when its event came.
+            let (retired, joiner) = (node().await, node().await);
+            live.join("sink", retired.instance_id());
+            live.retire("sink", retired.instance_id());
+            let _joiner_session = session(&hub, "sink", &joiner).await;
+            follower
+                .unresolved
+                .push(("sink".to_string(), joiner.instance_id()));
+            follower.tick().await;
+            assert_eq!(live.members("sink").len(), 2, "the joiner was added");
+            let promised = follower.acknowledged.contains_key(&retired.instance_id())
+                || follower.unsent.contains(&retired.instance_id());
+            assert!(promised, "the retired sink was displaced without a promise");
+            hub.shutdown().await.expect("valid test fixture");
+        }
+    }
 
     /// A node bound under a hub streams to an anchor minted by a peer it was
     /// never told of, as an engine does to a joiner's anchor before its

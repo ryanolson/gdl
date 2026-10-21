@@ -111,14 +111,24 @@ fn every_process_stopped_mid_answer_finishes_it() {
 /// front stops routing to it, the answer arrives in full, and the engine
 /// exits cleanly long before its drain's bound (the request deadline, ten
 /// minutes), while the others serve on: the next answer comes from the
-/// engine that stayed.
+/// engine that stayed. The engine stopped is the one answering, as its
+/// metrics show: the roster's order, and so the front's first pick, is not
+/// known ahead.
 #[test]
 fn one_of_two_engines_stopped_mid_answer_retires_alone() {
     let chat = Chat::new("gdl-life-retire-");
     let counts = "[instances]\nengine = 2\n[runtime]\nsetup_timeout_ms = 500\n";
-    let engine = format!("{counts}[node.Engine]\ndelay_ms = 300\n");
-    let mut first = chat.spawn("engine", &chat.config("engine-1", &engine), false);
-    let mut second = chat.spawn("engine", &chat.config("engine-2", &engine), false);
+    let engine = format!(
+        "{counts}[node.Engine]\ndelay_ms = 300\n[system]\nhost = \"127.0.0.1\"\nport = 0\n"
+    );
+    let mut engines = [
+        chat.spawn("engine", &chat.config("engine-1", &engine), false),
+        chat.spawn("engine", &chat.config("engine-2", &engine), false),
+    ];
+    // Kept for the test's length: a reader that goes away would leave the
+    // engine's stderr unread.
+    let logs = engines.each_mut().map(|engine| engine.stderr());
+    let addresses = [0, 1].map(|n| listener(&logs[n].find("system listener at", WAIT)));
     let mut post = chat.spawn("post", &chat.config("post", counts), false);
     let mut front = chat.spawn("front", &chat.config("front", counts), true);
     let errors = front.stderr();
@@ -127,24 +137,39 @@ fn one_of_two_engines_stopped_mid_answer_retires_alone() {
     let out = front.stdout();
     let answer = out.next(WAIT);
     assert!(answer.starts_with(r#"{"item":"#), "{answer}");
-    first.signal("-TERM");
+    // The engine with a request in flight is the one answering.
+    let answering = |address| {
+        let (code, scrape) = get(address, "/metrics");
+        assert_eq!(code, 200);
+        scrape.lines().any(|line| {
+            line.starts_with("dynamo_component_inflight_requests{")
+                && line.contains("dynamo_endpoint=\"Engine\"")
+                && line.ends_with(" 1")
+        })
+    };
+    let busy: Vec<usize> = (0..2).filter(|&n| answering(addresses[n])).collect();
+    assert_eq!(busy.len(), 1, "one engine answers: {busy:?}");
+    let (stopped, stayed) = (busy[0], 1 - busy[0]);
+    engines[stopped].signal("-TERM");
     let rest: Vec<String> = (0..3).map(|_| out.next(WAIT)).collect();
     assert!(
         rest[..2].iter().all(|line| line.starts_with(r#"{"item":"#)),
         "the answer was cut short: {answer} {rest:?}"
     );
     assert_eq!(rest[2], r#"{"done":null}"#);
-    let status = first.exits_within(EXIT);
+    let status = engines[stopped].exits_within(EXIT);
     assert!(status.success(), "{status}");
     ask(&mut front, REQUEST);
     let next: Vec<String> = (0..4).map(|_| out.next(WAIT)).collect();
     assert_eq!(next[3], r#"{"done":null}"#, "{next:?}");
-    for process in [&front, &second, &post] {
+    for process in [&front, &engines[stayed], &post] {
         process.signal("-TERM");
     }
+    let [first, second] = &mut engines;
+    let remaining = if stayed == 0 { first } else { second };
     for (name, process) in [
         ("front", &mut front),
-        ("engine", &mut second),
+        ("engine", remaining),
         ("post", &mut post),
     ] {
         let status = process.exits_within(EXIT);

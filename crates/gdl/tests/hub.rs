@@ -1065,13 +1065,17 @@ enum Mode {
     Silent,
     /// Close at once: a hub that is briefly gone.
     Refuse,
+    /// Forward until a client sends a `DELETE`, then fall silent before
+    /// passing it on: a hub that answers an announcement and then stops
+    /// answering at the withdrawal that follows it.
+    SilentAtDelete,
 }
 
 /// A TCP proxy in front of one of a hub's ports, so that a test can make
 /// the hub fall silent or go away for a while under running instances.
 struct Proxy {
     port: u16,
-    mode: tokio::sync::watch::Sender<Mode>,
+    mode: Arc<tokio::sync::watch::Sender<Mode>>,
 }
 
 impl Proxy {
@@ -1081,9 +1085,11 @@ impl Proxy {
             .expect("valid test fixture");
         let port = listener.local_addr().expect("valid test fixture").port();
         let (mode, modes) = tokio::sync::watch::channel(Mode::Forward);
+        let mode = Arc::new(mode);
+        let setter = Arc::clone(&mode);
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
-                tokio::spawn(relay(client, target, modes.clone()));
+                tokio::spawn(relay(client, target, modes.clone(), Arc::clone(&setter)));
             }
         });
         Self { port, mode }
@@ -1100,6 +1106,7 @@ async fn relay(
     mut client: tokio::net::TcpStream,
     target: std::net::SocketAddr,
     mut mode: tokio::sync::watch::Receiver<Mode>,
+    set: Arc<tokio::sync::watch::Sender<Mode>>,
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     // Settle the mode first: hold while silent, return when refusing.
@@ -1112,7 +1119,7 @@ async fn relay(
                     return;
                 }
             }
-            Mode::Forward => break,
+            Mode::Forward | Mode::SilentAtDelete => break,
         }
     }
     let Ok(mut server) = tokio::net::TcpStream::connect(target).await else {
@@ -1131,11 +1138,20 @@ async fn relay(
                 }
                 continue;
             }
-            Mode::Forward => {}
+            Mode::Forward | Mode::SilentAtDelete => {}
         }
         tokio::select! {
             read = from_client.read(&mut up) => match read {
                 Ok(n) if n > 0 => {
+                    if now == Mode::SilentAtDelete && up[..n].starts_with(b"DELETE ") {
+                        // Held here, unsent, with every other connection.
+                        let _ = set.send(Mode::Silent);
+                        // Until the test changes the mode again, not at
+                        // this change, which is the proxy's own.
+                        mode.borrow_and_update();
+                        let _ = mode.changed().await;
+                        return;
+                    }
                     if to_server.write_all(&up[..n]).await.is_err() {
                         return;
                     }
@@ -1242,6 +1258,33 @@ async fn a_silent_hub_does_not_hold_a_drain_past_its_bound() {
     assert!(
         stopped.elapsed() < Duration::from_secs(10),
         "a 2 s drain took {:?}",
+        stopped.elapsed()
+    );
+}
+
+/// The hub takes the retirement, then stops answering at the withdrawal of
+/// `ready` that follows. The lease is lost meanwhile, and the instance
+/// stops waiting for the withdrawal then, rather than at its 20 s bound.
+#[tokio::test]
+async fn a_lease_lost_while_withdrawing_a_retirement_ends_the_wait() {
+    let hub = hub(Duration::from_secs(30)).await;
+    let (public, control) = (
+        Proxy::new(hub.public_addr()).await,
+        Proxy::new(hub.control_addr()).await,
+    );
+    let (_front, sink, _front_served, sink_served) =
+        proxied_pair(&hub, &public, &control, 20_000).await;
+    control.set(Mode::SilentAtDelete);
+    let stopped = tokio::time::Instant::now();
+    sink.stop();
+    let _ = tokio::time::timeout(Duration::from_secs(30), sink_served)
+        .await
+        .expect("the sink left");
+    // The lease's grace (1 s), a second for velo, and up to five for
+    // leaving the hub.
+    assert!(
+        stopped.elapsed() < Duration::from_secs(10),
+        "a silent withdrawal held the retirement for {:?}",
         stopped.elapsed()
     );
 }
