@@ -132,18 +132,18 @@ impl Admission {
 
 /// The egress quota of one instance: how many streams it may be producing
 /// at once. Each producing stream holds a permit from before it attaches
-/// until it ends, so a full instance refuses new work instead of buffering
-/// for it.
+/// until velo has handed its output on, so a full instance refuses new work
+/// instead of buffering for it.
 ///
-/// What this does not bound: velo keeps a finished stream's unsent output
-/// (up to its slot byte budget plus its credit window) until the consumer
-/// reads it or cancels, and offers no signal for when that output is gone.
-/// The consumer always ends: every gdl consumer holds the request's
-/// deadline. A grace period after the end was tried and removed; it capped
-/// an instance at `limit / grace` requests per second (measured: 1,024
-/// permits and 5 s refused traffic within seconds at benchmark rates) and
-/// still bounded nothing for a consumer that stalls longer than the grace.
-/// See `agent-docs/plan.md`, ruling 15.
+/// A finished stream's unsent output (up to its slot byte budget plus its
+/// credit window) stays in velo until the consumer reads it or leaves; the
+/// permit is held until velo says so (`StreamSender::retired`), and no
+/// longer than the request's deadline, which every gdl consumer holds. A
+/// grace period after the end was tried before velo had that signal, and
+/// removed: it capped an instance at `limit / grace` requests per second
+/// (measured: 1,024 permits and 5 s refused traffic within seconds at
+/// benchmark rates) and still bounded nothing for a consumer that stalls
+/// longer than the grace. See `agent-docs/plan.md`, rulings 15 and 145.
 pub(crate) struct Egress {
     permits: Arc<Semaphore>,
     limit: usize,

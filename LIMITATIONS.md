@@ -55,12 +55,13 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Workaround:** set the bound in the deployment's settings, and generate the bundle again.
 - **See:** ruling 107.
 
-### Output velo still holds can be cut when an instance exits early
+### Output velo still holds can be cut when a drain is cut short
 
-- **What happens:** when an instance exits before its consumers have read its finished streams, velo may still hold that output and lose it. A stream counts as finished once its producer calls `finalize`.
-- **When:** an instance ends on its drain bound, on a lost lease, or on a second stop. A deployment-wide stop that drains in full does not hit this: once every source has drained, every answer has been read.
-- **Why:** gdl does not yet hold a stream's egress permit and admission share until velo reports the stream retired.
-- **Would lift it:** rulings 113 and 120 in gdl (milestone 22), built on velo's `StreamSender::retired()`, which velo `main` now carries (velo#141). Note that even then, an item larger than velo's eager budget (256 KiB by default) may still be staged when velo reports it sent. velo records this in its own `LIMITATIONS.md`.
+- **What happens:** an instance that exits before velo has handed on its finished streams loses that output, and the consumer reads a broken stream.
+- **When:** the drain ends on its bound or on a second stop. A drain that waits for its ledger does not cut output: each stream holds its request's admission share and egress permit until velo reports it retired (`StreamSender::retired()`), so an empty ledger means the output has left the node. A lost lease still waits for the ledger.
+- **Large items:** an item larger than velo's eager budget (256 KiB by default) leaves the node as a handle, and its bytes stay staged until the consumer pulls them. velo reports such a stream `Sent` before the pull, so a drain can end, and the shutdown cut the item, while it is still staged. velo records this in its own known limitations.
+- **Would lift it:** for large items, velo waiting for staged payloads at shutdown; the fix set aside is `agent-docs/velo/retired/staged-drain.patch`.
+- **See:** rulings 113 and 145.
 
 ### A stop while a segment starts exits with code 1
 

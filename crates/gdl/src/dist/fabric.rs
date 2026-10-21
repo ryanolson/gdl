@@ -52,8 +52,10 @@ pub async fn bind_node(listen: std::net::SocketAddr) -> Result<Velo> {
 
 /// Stop `node` taking requests, let the handlers it is running finish
 /// within `within`, and close its transports. Called once the instance
-/// holds no request. A stream that velo still holds for a slow consumer is
-/// ended by the close; velo gives no signal for when such output is gone.
+/// holds no request; a stream holds its request's share until velo has
+/// handed its output on ([`Outbound::finish`]), and the shutdown writes
+/// what its TCP writers took. An item larger than velo's eager budget may
+/// still be staged here when velo says it was sent, and the close cuts it.
 pub(crate) async fn shut_down(node: &Velo, within: std::time::Duration) {
     node.begin_drain();
     node.graceful_shutdown(velo::ShutdownPolicy::Timeout(within))
@@ -437,10 +439,21 @@ impl Outbound {
         self.sender.cancellation_token()
     }
 
-    /// Finish the stream normally.
-    pub(crate) fn finalize(self) {
+    /// Finish the stream normally. The future resolves once velo on this
+    /// node has handed on all of the stream's output, or thrown it away
+    /// because its consumer left: `finalize` only queues the end, and a
+    /// consumer that does not read keeps the rest here. What the stream
+    /// holds (its admission share, its egress permit) is held until then,
+    /// so that an instance whose ledger is empty has no output left to cut.
+    pub(crate) fn finish(self) -> impl Future<Output = ()> + Send + 'static {
+        // Asked for before `finalize`, which consumes the sender.
+        let retired = self.sender.retired();
         // An error here means the consumer is already gone; there is no one
-        // left to tell.
+        // left to tell, and `retired` says so.
         let _ = self.sender.finalize();
+        async move {
+            // `Sent` or `Discarded`: either way velo holds none of it now.
+            let _ = retired.await;
+        }
     }
 }

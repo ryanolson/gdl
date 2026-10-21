@@ -1093,7 +1093,10 @@ impl Drop for InputGuard {
 }
 
 /// Send items to a consumer until the stream ends, the consumer cancels, or
-/// the request's deadline passes. A stop or cancel from the consumer is
+/// the request's deadline passes. After a clean end it returns only once
+/// velo has handed the output on (or the request ends), so that what its
+/// caller holds for the stream, the admission share and the egress permit,
+/// covers the output too. A stop or cancel from the consumer is
 /// passed upstream: to `cx`, which the stages feeding this pump run under,
 /// and to `upstream`, the anchor this run reads from. `response` is the
 /// visit whose response this is, when the segment records it; an input
@@ -1236,7 +1239,18 @@ async fn pump_watching(
             Some(Err(error)) => return failed(out, error, response).await,
             None => {
                 meter::ended(response, Ending::Finished);
-                return out.finalize();
+                // The caller holds the stream's share and permit until this
+                // returns: until velo has handed the output on, which a
+                // consumer that does not read can hold off until the
+                // request's end. `done` is the future built above, so the
+                // wait registers no new timer.
+                let handed = out.finish();
+                tokio::select! {
+                    biased;
+                    () = handed => {}
+                    _ = &mut done => {}
+                }
+                return;
             }
         }
     }
@@ -1349,9 +1363,14 @@ struct Watch<'a, S, D> {
 const FAIL_DELIVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 async fn finish_failed(out: Outbound, error: Error) {
-    if let Ok(Ok(())) = tokio::time::timeout(FAIL_DELIVERY, out.send(WireItem::Fail(error))).await {
-        out.finalize();
-    }
+    // One bound for the frame and its hand-off: a consumer that is not
+    // reading holds neither longer than this.
+    let _ = tokio::time::timeout(FAIL_DELIVERY, async {
+        if out.send(WireItem::Fail(error)).await.is_ok() {
+            out.finish().await;
+        }
+    })
+    .await;
 }
 
 /// End the visit `owner` holds with `error`, then deliver the error.
