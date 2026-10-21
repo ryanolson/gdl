@@ -45,7 +45,7 @@ Every performance number gdl and velo have recorded so far came from one Apple M
 ### gdl
 
 - **`cargo bench -p gdl --bench hop --bench remote`:** per-request and per-item cost locally and across one crossing, including the renewal cost recorded in `m19-renewal.md`.
-- **Milestone 21's runtime metrics (ruling 118):** the per-request counters and histograms at segment entry, against the same benches with metrics off. A shared atomic is accepted only if machine 1 cannot tell the difference; otherwise use the sharded fallback.
+- **Milestone 21's runtime metrics (rulings 118, 128, 129):** the per-node figures, against the same benches with metrics off, including `concurrent-32x1-reference`. The laptop showed the shared atomics' contention (+27%), so the figures are sharded per thread as built; machine 1 confirms the sharded cost and how it scales with cores.
 - **End to end:** a three-segment graph across machine 2, streaming token-sized items at a realistic request rate. Measure:
   - time to first item;
   - inter-item p50 and p99;
@@ -61,7 +61,7 @@ Every performance number gdl and velo have recorded so far came from one Apple M
 | Path | A change may cost |
 |---|---|
 | Per item (velo send and receive, gdl stage hand-off) | nothing measurable on machine 1: within the spread of repeated runs |
-| Per request (admission, routing, metrics at segment entry) | at most 1% instructions on the `hop` and `remote` benches, unless the owner accepts more for the feature |
+| Per request (admission, routing, the runtime's per-node metrics) | at most 1% instructions on the `hop` and `remote` benches, unless the owner accepts more for the feature |
 | Tail latency across machine 2 | p99 no worse beyond the spread |
 | Setup and teardown paths | reported; a gate only where a ruling names one |
 
@@ -76,7 +76,7 @@ A laptop run gates nothing smaller than 5%. It may block a change that is plainl
 | velo#141: the gRPC size check costs nothing | pending | velo#141 |
 | gdl: reply renewal | criterion medians | `m19-renewal.md` |
 | gdl: the reader is linear | release runs | `reader-cost.md` |
-| gdl: milestone 21's runtime metrics | to be measured | milestone 21's perf record |
+| gdl: milestone 21's runtime metrics cost under 1% per request across a crossing, and nothing per item | one segment +2.0% instructions, two +0.3%, three within spread; 32 requests at once +2 to 5% (sharded; shared atomics were +27%) | `m21-metrics.md` |
 
 ## Automation
 

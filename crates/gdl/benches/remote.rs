@@ -15,6 +15,10 @@
 //! - **Reference graph:** the test suites' graph (with its event log off)
 //!   local, in one segment (the distributed stages without a crossing),
 //!   over two segments, and over three.
+//! - **Metrics:** the reference rows again with the runtime's per-node
+//!   metrics recorded (`-metrics`), and 32 reference requests at once, each
+//!   a task of its own (`concurrent-32x1-reference`), where a figure every
+//!   thread touches would contend (`agent-docs/perf/m21-metrics.md`).
 //! - **Upload:** a streamed request (`S => D`, `n` blobs of `size` bytes in,
 //!   one count back) over two segments, against the same exchange on velo
 //!   alone: the server mints the input anchor and answers with its ticket.
@@ -125,7 +129,8 @@ fn bench(c: &mut Criterion) {
         .enable_all()
         .build()
         .expect("runtime");
-    let setups = rt.block_on(setups());
+    // Shared, so that concurrent requests can run as tasks of their own.
+    let setups = std::sync::Arc::new(rt.block_on(setups()));
     cpu_per_item(&rt, &setups);
 
     let one = Ask { items: 1, size: 16 };
@@ -138,13 +143,25 @@ fn bench(c: &mut Criterion) {
         b.to_async(&rt)
             .iter(|| reference(&setups.one, black_box(1)))
     });
+    latency.bench_function("reference-1-segment-metrics", |b| {
+        b.to_async(&rt)
+            .iter(|| reference(&setups.one_metrics, black_box(1)))
+    });
     latency.bench_function("reference-2-segments", |b| {
         b.to_async(&rt)
             .iter(|| reference(&setups.two, black_box(1)))
     });
+    latency.bench_function("reference-2-segments-metrics", |b| {
+        b.to_async(&rt)
+            .iter(|| reference(&setups.two_metrics, black_box(1)))
+    });
     latency.bench_function("reference-3-segments", |b| {
         b.to_async(&rt)
             .iter(|| reference(&setups.three, black_box(1)))
+    });
+    latency.bench_function("reference-3-segments-metrics", |b| {
+        b.to_async(&rt)
+            .iter(|| reference(&setups.three_metrics, black_box(1)))
     });
     latency.bench_function("lean-2-segments", |b| {
         b.to_async(&rt).iter(|| setups.lean(black_box(one)))
@@ -220,6 +237,31 @@ fn bench(c: &mut Criterion) {
     });
     concurrent.finish();
 
+    // Many requests at once, each a task of its own on the four workers:
+    // what a shared counter's contention costs a request, which one
+    // request at a time cannot show.
+    let mut requests = c.benchmark_group("concurrent-32x1-reference");
+    requests.throughput(Throughput::Elements(u64::from(STREAMS)));
+    requests.sample_size(20);
+    for (name, metrics) in [("1-segment", false), ("1-segment-metrics", true)] {
+        requests.bench_function(name, |b| {
+            b.to_async(&rt).iter(|| {
+                futures::future::join_all((0..STREAMS).map(|_| {
+                    let setups = std::sync::Arc::clone(&setups);
+                    tokio::spawn(async move {
+                        let caller = if metrics {
+                            &setups.one_metrics
+                        } else {
+                            &setups.one
+                        };
+                        reference(caller, black_box(1)).await
+                    })
+                }))
+            })
+        });
+    }
+    requests.finish();
+
     let mut reference_items = c.benchmark_group("reference-items");
     reference_items.throughput(Throughput::Elements(u64::from(ITEMS)));
     reference_items.sample_size(20);
@@ -231,6 +273,10 @@ fn bench(c: &mut Criterion) {
     reference_items.bench_function("2-segments", |b| {
         b.to_async(&rt)
             .iter(|| reference(&setups.two, black_box(ITEMS)))
+    });
+    reference_items.bench_function("2-segments-metrics", |b| {
+        b.to_async(&rt)
+            .iter(|| reference(&setups.two_metrics, black_box(ITEMS)))
     });
     reference_items.bench_function("3-segments", |b| {
         b.to_async(&rt)

@@ -115,7 +115,7 @@ pub async fn run_segment<B: SegmentBinary>(
     // carries the deployment's identity.
     let deployment = B::deployment()?;
     let registry = process.registry(&deployment, B::SEGMENT)?;
-    let builder = Builder::new(B::GRAPH_CONFIG, registry)?;
+    let builder = Builder::new(B::GRAPH_CONFIG, registry.clone())?;
     let hosts = B::build(settings, &builder).await?;
     let launch = config
         .launch(
@@ -126,7 +126,11 @@ pub async fn run_segment<B: SegmentBinary>(
             B::ready(&hosts),
         )
         .await?;
-    let serving = B::start(hosts, launch.node(), launch.roster(), config.runtime)?;
+    // The runtime records each node's requests only where a system
+    // listener can serve them: with none, nobody could read them.
+    let mut runtime = config.runtime;
+    runtime.metrics = process.system_address().map(|_| registry);
+    let serving = B::start(hosts, launch.node(), launch.roster(), runtime)?;
     (serving.serve)(launch).await?;
     Ok(())
 }

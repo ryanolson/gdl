@@ -14,6 +14,7 @@ use velo::{InstanceId, PeerInfo};
 use super::admission::{Admission, Egress};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
+use super::meter::Meters;
 use crate::error::{Error, ErrorKind, Result};
 use gdl_model::{Layout, RequestRouter};
 
@@ -56,6 +57,11 @@ pub struct RuntimeConfig {
     /// request. `None` is `default_deadline`, since no request admitted
     /// before the stop outlives it unless it set a longer deadline itself.
     pub drain: Option<Duration>,
+    /// Where the runtime records each hosted node's requests, errors,
+    /// cancellations, requests in flight, and durations; `None` records
+    /// nothing. Not a setting: a segment binary gives its process's
+    /// registry when its system listener can serve it.
+    pub metrics: Option<prometheus::Registry>,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -119,6 +125,7 @@ impl Default for RuntimeConfig {
             egress_limit: 1024,
             heartbeat_interval: None,
             drain: None,
+            metrics: None,
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -178,6 +185,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             egress_limit: s.egress_limit,
             heartbeat_interval: s.heartbeat_interval_ms.map(Duration::from_millis),
             drain: s.drain_ms.map(Duration::from_millis),
+            metrics: None,
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };
@@ -450,6 +458,8 @@ pub(crate) struct Runtime {
     pub(crate) served: Served,
     /// Filled once at start; read by local short-circuits.
     entries: std::sync::OnceLock<std::sync::Weak<Entries>>,
+    /// The figures of each hosted node, when the instance records them.
+    pub(crate) meters: Option<Meters>,
 }
 
 /// Velo handler names for one deployment.
@@ -465,6 +475,7 @@ impl Runtime {
         segment: String,
         roster: &Roster,
         config: RuntimeConfig,
+        meters: Option<Meters>,
     ) -> Result<Self> {
         for peer in roster.peers() {
             if peer.instance_id() != fabric.instance() {
@@ -497,6 +508,7 @@ impl Runtime {
             identity,
             served: Served::default(),
             entries: std::sync::OnceLock::new(),
+            meters,
         })
     }
 

@@ -421,12 +421,28 @@ pub async fn reference(source: &Caller, items: u32) {
     drain(out, items, |_| {}).await;
 }
 
-pub async fn reference_front(events: &Arc<Events>, placement: &Placement, nodes: usize) -> Caller {
+/// The reference graph over `placement`, called at its front; with
+/// `metrics`, each segment records into a registry of its own, as a
+/// segment binary with a system listener does.
+pub async fn reference_front(
+    events: &Arc<Events>,
+    placement: &Placement,
+    nodes: usize,
+    metrics: bool,
+) -> Caller {
     let mut velo_nodes = Vec::new();
     for _ in 0..nodes {
         velo_nodes.push(velo_node().await);
     }
-    let mut cluster = deploy(&velo_nodes, placement, events, RuntimeConfig::default());
+    let instances: Vec<(String, velo::Velo)> = placement
+        .segments()
+        .map(|(name, _)| name.to_string())
+        .zip(velo_nodes.iter().cloned())
+        .collect();
+    let mut cluster = deploy_configured(&instances, placement, events, &|_| RuntimeConfig {
+        metrics: metrics.then(gdl::prometheus::Registry::new),
+        ..RuntimeConfig::default()
+    });
     let index = cluster
         .segments
         .iter()
@@ -442,10 +458,30 @@ pub async fn reference_front(events: &Arc<Events>, placement: &Placement, nodes:
     })
 }
 
+/// The reference graph over one, two, or three segments. One segment runs
+/// every node through the distributed stages with no crossing: what the
+/// runtime adds per node, which a crossing's cost would hide.
+pub fn reference_placement(segments: usize) -> Placement {
+    match segments {
+        1 => Placement::new().segment("front", ["A", "B", "C", "D", "F", "E", "G"]),
+        2 => Placement::new()
+            .segment("front", ["A", "B", "C", "F", "E", "G"])
+            .segment("engine", ["D"]),
+        3 => Placement::new()
+            .segment("front", ["A", "B", "C", "G"])
+            .segment("engine", ["D"])
+            .segment("post", ["F", "E"]),
+        _ => panic!("the reference graph is placed over one to three segments"),
+    }
+}
+
 pub struct Setups {
     pub local: Caller,
     pub one: Caller,
+    pub one_metrics: Caller,
     pub two: Caller,
+    pub two_metrics: Caller,
+    pub three_metrics: Caller,
     pub three: Caller,
     pub lean: LeanCaller,
     pub direct: (velo::Velo, velo::InstanceId),
@@ -460,22 +496,20 @@ pub async fn setups() -> Setups {
         let local = local.clone();
         Box::pin(async move { local.call(cx, req).await })
     });
-    // Every node through the distributed stages with no crossing: what the
-    // runtime adds per node, which a crossing's cost would hide.
-    let one = Placement::new().segment("front", ["A", "B", "C", "D", "F", "E", "G"]);
-    let two = Placement::new()
-        .segment("front", ["A", "B", "C", "F", "E", "G"])
-        .segment("engine", ["D"]);
-    let three = Placement::new()
-        .segment("front", ["A", "B", "C", "G"])
-        .segment("engine", ["D"])
-        .segment("post", ["F", "E"]);
+    let (one, two, three) = (
+        reference_placement(1),
+        reference_placement(2),
+        reference_placement(3),
+    );
     let lean = lean_front().await;
     Setups {
         local,
-        one: reference_front(&events, &one, 1).await,
-        two: reference_front(&events, &two, 2).await,
-        three: reference_front(&events, &three, 3).await,
+        one: reference_front(&events, &one, 1, false).await,
+        one_metrics: reference_front(&events, &one, 1, true).await,
+        two: reference_front(&events, &two, 2, false).await,
+        two_metrics: reference_front(&events, &two, 2, true).await,
+        three: reference_front(&events, &three, 3, false).await,
+        three_metrics: reference_front(&events, &three, 3, true).await,
         lean,
         direct: direct_pair().await,
         upload: upload_front().await,

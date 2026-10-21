@@ -75,6 +75,8 @@ pub struct Plan {
     pub forward_delay_ms: u64,
     /// C cancels its context, then passes the request on.
     pub cancel_in_forward: bool,
+    /// C fails instead of passing the request on.
+    pub fail_forward: bool,
     /// D's `generate` fails instead of returning a stream.
     pub fail_generate: bool,
     /// D spawns a helper that waits for D's context to be cancelled, then
@@ -373,6 +375,9 @@ impl Forward for NodeC {
         self.events.record(format!("C:{}", req.text));
         if req.plan.cancel_in_forward {
             cx.cancel();
+        }
+        if req.plan.fail_forward {
+            return Err(Error::node("forward failed"));
         }
         if req.plan.forward_delay_ms > 0 {
             let abandoned = OnDrop::new(

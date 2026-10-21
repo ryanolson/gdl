@@ -10,11 +10,12 @@ use futures::{Future, Stream, StreamExt};
 use super::admission::{EgressPermit, Share};
 use super::envelope::{Accepted, Forward, Open, VERSION, WireCx, WireItem};
 use super::fabric::{Canceller, Frame, Inbound, Outbound, ReplyTo, Retirer};
+use super::meter::{Meter, Outcome};
 use super::runtime::{Entries, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use crate::cx::{Cx, Deadline};
 use crate::error::{Error, ErrorKind, Result};
-use crate::items::{CHECK_INTERVAL, Items, bound, fuse, items};
+use crate::items::{CHECK_INTERVAL, Items, bound_measured, items};
 use crate::role::Next;
 use gdl_model::HopLayout;
 
@@ -53,6 +54,11 @@ struct HopCore<F, I, B> {
     inner: I,
     bwd: B,
     plan: HopPlan,
+    /// The source's figures, on the hop whose outer end is the graph's
+    /// source in this segment. Another hop's outer end is an operator,
+    /// metered where it is called as an inner end: its calls to `next`
+    /// are attempts, not requests.
+    source: Option<&'static Meter>,
 }
 
 /// The parts of the layout one hop needs at run time, by path position.
@@ -137,7 +143,13 @@ fn run_end(segments: &[String], pos: usize) -> usize {
 }
 
 impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
-    pub(crate) fn new(rt: Arc<Runtime>, index: u16, fwd: F, inner: I, bwd: B) -> Result<Self> {
+    pub(crate) fn new(
+        rt: Arc<Runtime>,
+        index: u16,
+        mut fwd: F,
+        mut inner: I,
+        mut bwd: B,
+    ) -> Result<Self> {
         let hop = rt.layout.hops().get(usize::from(index)).ok_or_else(|| {
             Error::new(
                 ErrorKind::Placement,
@@ -194,6 +206,24 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
                 ),
             ));
         }
+        // Each node this segment hosts gets its figures by its position.
+        let meter_at = |path: &[(String, String)], pos: usize| {
+            let (segment, node) = path.get(pos)?;
+            (*segment == rt.segment).then_some(())?;
+            rt.meters.as_ref()?.get(node)
+        };
+        fwd.meter(1, &|pos| meter_at(&forward, pos));
+        inner.meter(meter_at(&forward, forward.len() - 1));
+        bwd.meter(1, &|pos| meter_at(&backward, pos));
+        // The source is the one outer end that is no hop's inner end.
+        let outer = &forward[0].1;
+        let source = rt
+            .layout
+            .hops()
+            .iter()
+            .all(|hop| hop.forward_runs.last().and_then(|run| run.stages.last()) != Some(outer))
+            .then(|| meter_at(&forward, 0))
+            .flatten();
         let plan = HopPlan::new(hop);
         Ok(Self(Arc::new(HopCore {
             rt,
@@ -202,6 +232,7 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
             inner,
             bwd,
             plan,
+            source,
         })))
     }
 }
@@ -213,9 +244,14 @@ where
     B: DBackward<In = I::Item>,
 {
     async fn generate(&self, cx: Cx, req: F::In) -> Result<Items<B::Out>> {
+        // The source's request, when this hop's outer end is the source,
+        // noted at each exit of this one function. A wrapping function
+        // would put this future inside another, and moving it whole cost
+        // a request 8,000 instructions (`agent-docs/perf/m21-metrics.md`).
+        let mut source = Outcome::start(self.0.source, &cx);
         // As in local composition: every attempt spends cooperative budget.
         tokio::task::coop::consume_budget().await;
-        cx.check()?;
+        source.note(cx.check())?;
         let attempt = cx.child();
         // Dropping this future before it returns cancels the attempt; after
         // it returns, the response stream owns the guard.
@@ -224,11 +260,11 @@ where
         if core.plan.local {
             let items = tokio::select! {
                 biased;
-                reason = attempt.done() => return Err(reason),
-                result = core.run_local(&attempt, req) => result?,
+                reason = attempt.done() => return source.note(Err(reason)),
+                result = core.run_local(&attempt, req) => source.note(result)?,
             };
-            attempt.check()?;
-            return Ok(bound(&attempt, guard, items));
+            source.note(attempt.check())?;
+            return Ok(bound_measured(&attempt, guard, items, source.reading()));
         }
         // Remote work that no cancel can reach ends only by its deadline, so
         // no attempt crosses segments without one.
@@ -236,16 +272,16 @@ where
             Some(_) => attempt,
             None => attempt.with_deadline(Deadline::after(core.rt.config.default_deadline)),
         };
-        let slot = core.rt.admission.attempt(attempt.id().as_u128())?;
+        let slot = source.note(core.rt.admission.attempt(attempt.id().as_u128()))?;
         let items = tokio::select! {
             biased;
-            reason = attempt.done() => return Err(reason),
-            result = core.run_remote(&attempt, req) => result?,
+            reason = attempt.done() => return source.note(Err(reason)),
+            result = core.run_remote(&attempt, req) => source.note(result)?,
         };
-        attempt.check()?;
+        source.note(attempt.check())?;
         // The attempt slot is held for as long as the response stream lives.
         let items = items_holding(items, slot);
-        Ok(bound(&attempt, guard, items))
+        Ok(bound_measured(&attempt, guard, items, source.reading()))
     }
 }
 
@@ -306,8 +342,7 @@ where
         };
         attempt.check()?;
         let scope = attempt.child();
-        let items = self.inner.call(scope.clone(), value).await?;
-        let items = fuse(items, &scope);
+        let items = self.inner.call(&scope, value).await?;
         attempt.check()?;
         match self.bwd.walk(1, usize::MAX, attempt, items) {
             BwdExit::Here(items) => Ok(items),
@@ -785,7 +820,7 @@ where
         // Armed before the node runs: an early exit (failure, interruption)
         // cancels whatever the node started under its context.
         let armed = scope.cancel_on_drop();
-        let call = self.inner.call(scope.clone(), value);
+        let call = self.inner.call(&scope, value);
         tokio::pin!(call);
         let mut stopped = false;
         let produced = loop {
@@ -805,7 +840,7 @@ where
         let items = match produced {
             Ok(items) => {
                 armed.disarm();
-                fuse(items, &scope)
+                items
             }
             Err(error) => return finish_failed(out, error).await,
         };

@@ -10,7 +10,9 @@
 //! ```
 //!
 //! The setups are `remote`'s: `local`, `one` (one segment), `two`, and
-//! `three`. See `agent-docs/perf/benchmarking.md` for the method.
+//! `three`, and the last three again with the runtime's metrics recorded
+//! (`one-metrics`, ...). Only the setup named is built. See
+//! `agent-docs/perf/benchmarking.md` for the method.
 
 #![allow(missing_docs)]
 
@@ -19,6 +21,7 @@ mod common;
 #[path = "remote/setup.rs"]
 mod setup;
 
+use common::{Events, local_graph};
 use setup::*;
 
 /// Nothing is counted but instructions.
@@ -27,7 +30,7 @@ fn produced() {}
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: requests <local | one | two | three> <count>";
+    let usage = "usage: requests <local | one | two | three>[-metrics] <count>";
     let which = args.next().expect(usage);
     let count: u32 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -36,19 +39,37 @@ fn main() {
         .build()
         .expect("runtime");
     rt.block_on(async {
-        let setups = setups().await;
-        let caller = match which.as_str() {
-            "local" => &setups.local,
-            "one" => &setups.one,
-            "two" => &setups.two,
-            "three" => &setups.three,
+        // Only the setup measured: every velo node running in the process
+        // does work of its own while the requests run, which a count per
+        // request would take for theirs.
+        let events = Events::quiet();
+        let (shape, metrics) = match which.strip_suffix("-metrics") {
+            Some(shape) => (shape, true),
+            None => (which.as_str(), false),
+        };
+        let caller: Caller = match shape {
+            "local" if !metrics => {
+                let local = local_graph(&events);
+                Box::new(move |cx, req| {
+                    let local = local.clone();
+                    Box::pin(async move { local.call(cx, req).await })
+                })
+            }
+            "one" | "two" | "three" => {
+                let segments = ["one", "two", "three"]
+                    .iter()
+                    .position(|s| *s == shape)
+                    .expect("a shape")
+                    + 1;
+                reference_front(&events, &reference_placement(segments), segments, metrics).await
+            }
             _ => panic!("{usage}"),
         };
         for _ in 0..count {
-            reference(caller, 1).await;
+            reference(&caller, 1).await;
         }
     });
-    // The setups' velo nodes are leaked on purpose; leave without waiting
+    // The setup's velo nodes are leaked on purpose; leave without waiting
     // for their tasks.
     std::process::exit(0);
 }

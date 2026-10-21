@@ -14,9 +14,11 @@ use futures::StreamExt;
 
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
-use crate::items::{Items, fuse, items, until_error};
+use crate::items::{Items, fuse_measured, items, until_error};
 use crate::role::{Backward, Forward, Next, Operator, Sink};
 use crate::wire::{Codec, RequestCodec};
+
+use super::meter::{self, Meter};
 
 /// Where a forward walk ended.
 #[doc(hidden)]
@@ -59,6 +61,11 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
     #[doc(hidden)]
     fn streamed(&self, out: &mut Vec<bool>);
 
+    /// Give each node from position `pos` on the figures `meters` holds
+    /// for its position.
+    #[doc(hidden)]
+    fn meter(&mut self, pos: usize, meters: &dyn Fn(usize) -> Option<&'static Meter>);
+
     #[doc(hidden)]
     fn walk(
         &self,
@@ -86,6 +93,7 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
 pub struct FwdStep<F, R, C> {
     node: Arc<F>,
     codec: Option<C>,
+    meter: Option<&'static Meter>,
     rest: R,
 }
 
@@ -96,7 +104,12 @@ where
 {
     /// A forward node, the codec of the edge entering it, and the rest.
     pub fn new(node: Arc<F>, codec: Option<C>, rest: R) -> Self {
-        Self { node, codec, rest }
+        Self {
+            node,
+            codec,
+            meter: None,
+            rest,
+        }
     }
 }
 
@@ -133,6 +146,11 @@ where
         self.rest.streamed(out);
     }
 
+    fn meter(&mut self, pos: usize, meters: &dyn Fn(usize) -> Option<&'static Meter>) {
+        self.meter = meters(pos);
+        self.rest.meter(pos + 1, meters);
+    }
+
     async fn walk(&self, pos: usize, end: usize, cx: &Cx, value: F::In) -> Result<FwdExit<R::Out>> {
         if pos >= end {
             return leave(self.codec, pos, value);
@@ -140,8 +158,10 @@ where
         // As in local composition: no forward stage starts for an
         // interrupted request.
         cx.check()?;
-        let out = self.node.forward(cx, value).await?;
-        self.rest.walk(pos + 1, end, cx, out).await
+        let reading = meter::start(self.meter, cx);
+        let out = self.node.forward(cx, value).await;
+        meter::finish(reading, &out);
+        self.rest.walk(pos + 1, end, cx, out?).await
     }
 
     async fn enter(
@@ -170,6 +190,8 @@ impl<C: RequestCodec> DForward for FwdEnd<C> {
     fn streamed(&self, out: &mut Vec<bool>) {
         out.push(C::STREAMED);
     }
+
+    fn meter(&mut self, _pos: usize, _meters: &dyn Fn(usize) -> Option<&'static Meter>) {}
 
     async fn walk(
         &self,
@@ -213,6 +235,11 @@ pub trait DBackward: sealed::Sealed + Send + Sync + 'static {
     #[doc(hidden)]
     fn absent(&self, pos: usize, out: &mut Vec<usize>);
 
+    /// Give each node from position `pos` on the figures `meters` holds
+    /// for its position.
+    #[doc(hidden)]
+    fn meter(&mut self, pos: usize, meters: &dyn Fn(usize) -> Option<&'static Meter>);
+
     #[doc(hidden)]
     fn walk(
         &self,
@@ -237,13 +264,19 @@ pub trait DBackward: sealed::Sealed + Send + Sync + 'static {
 pub struct BwdStep<B: Backward, R> {
     node: Arc<B>,
     codec: Option<Codec<B::In>>,
+    meter: Option<&'static Meter>,
     rest: R,
 }
 
 impl<B: Backward, R> BwdStep<B, R> {
     /// A backward node, the codec of the edge entering it, and the rest.
     pub fn new(node: Arc<B>, codec: Option<Codec<B::In>>, rest: R) -> Self {
-        Self { node, codec, rest }
+        Self {
+            node,
+            codec,
+            meter: None,
+            rest,
+        }
     }
 }
 
@@ -274,6 +307,11 @@ where
         self.rest.absent(pos + 1, out);
     }
 
+    fn meter(&mut self, pos: usize, meters: &dyn Fn(usize) -> Option<&'static Meter>) {
+        self.meter = meters(pos);
+        self.rest.meter(pos + 1, meters);
+    }
+
     fn walk(&self, pos: usize, end: usize, attempt: &Cx, items: Items<B::In>) -> BwdExit<R::Out> {
         if pos >= end {
             return BwdExit::Leave {
@@ -291,8 +329,10 @@ where
         // Each node runs in its own scope, ended by the fuse after it, as in
         // local composition.
         let scope = attempt.child();
+        let reading = meter::start(self.meter, &scope);
         let out = self.node.backward(&scope, items);
-        self.rest.walk(pos + 1, end, attempt, fuse(out, &scope))
+        self.rest
+            .walk(pos + 1, end, attempt, fuse_measured(out, &scope, reading))
     }
 
     fn enter(
@@ -316,6 +356,8 @@ impl<T: Send + 'static> DBackward for BwdEnd<T> {
     type Out = T;
 
     fn absent(&self, _pos: usize, _out: &mut Vec<usize>) {}
+
+    fn meter(&mut self, _pos: usize, _meters: &dyn Fn(usize) -> Option<&'static Meter>) {}
 
     fn walk(&self, pos: usize, end: usize, _attempt: &Cx, items: Items<T>) -> BwdExit<T> {
         if pos >= end {
@@ -354,10 +396,16 @@ pub trait DInner: sealed::Sealed + Send + Sync + 'static {
     #[doc(hidden)]
     fn absent(&self) -> bool;
 
+    /// Give the inner end its figures.
+    #[doc(hidden)]
+    fn meter(&mut self, meter: Option<&'static Meter>);
+
+    /// Call the inner end under `scope`, its own scope, and return its
+    /// stream behind a node boundary, ended with the scope.
     #[doc(hidden)]
     fn call(
         &self,
-        cx: Cx,
+        scope: &Cx,
         req: Self::Req,
     ) -> impl Future<Output = Result<Items<Self::Item>>> + Send;
 
@@ -366,12 +414,15 @@ pub trait DInner: sealed::Sealed + Send + Sync + 'static {
 }
 
 /// A sink as the inner end of a distributed hop.
-pub struct DSink<S>(Arc<S>);
+pub struct DSink<S> {
+    sink: Arc<S>,
+    meter: Option<&'static Meter>,
+}
 
 impl<S> DSink<S> {
     /// Wrap a sink (or an `Absent` sink slot).
     pub fn new(sink: Arc<S>) -> Self {
-        Self(sink)
+        Self { sink, meter: None }
     }
 }
 
@@ -383,8 +434,19 @@ impl<S: Sink> DInner for DSink<S> {
         S::ABSENT
     }
 
-    async fn call(&self, cx: Cx, req: S::Req) -> Result<Items<S::Item>> {
-        self.0.generate(cx, req).await
+    fn meter(&mut self, meter: Option<&'static Meter>) {
+        self.meter = meter;
+    }
+
+    async fn call(&self, scope: &Cx, req: S::Req) -> Result<Items<S::Item>> {
+        let reading = meter::start(self.meter, scope);
+        match self.sink.generate(scope.clone(), req).await {
+            Ok(items) => Ok(fuse_measured(items, scope, reading)),
+            failed => {
+                meter::finish(reading, &failed);
+                failed
+            }
+        }
     }
 
     fn register(&self, _entries: &mut super::runtime::Entries) {}
@@ -394,12 +456,17 @@ impl<S: Sink> DInner for DSink<S> {
 pub struct DOperator<O, H> {
     op: Arc<O>,
     next: H,
+    meter: Option<&'static Meter>,
 }
 
 impl<O, H> DOperator<O, H> {
     /// Wrap an operator (or an `Absent` operator slot) and its downstream hop.
     pub fn new(op: Arc<O>, next: H) -> Self {
-        Self { op, next }
+        Self {
+            op,
+            next,
+            meter: None,
+        }
     }
 }
 
@@ -416,8 +483,24 @@ where
         O::ABSENT
     }
 
-    async fn call(&self, cx: Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
-        self.op.generate(cx, req, self.next.clone()).await
+    /// The operator only: its downstream hop meters its own nodes.
+    fn meter(&mut self, meter: Option<&'static Meter>) {
+        self.meter = meter;
+    }
+
+    async fn call(&self, scope: &Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
+        let reading = meter::start(self.meter, scope);
+        match self
+            .op
+            .generate(scope.clone(), req, self.next.clone())
+            .await
+        {
+            Ok(items) => Ok(fuse_measured(items, scope, reading)),
+            failed => {
+                meter::finish(reading, &failed);
+                failed
+            }
+        }
     }
 
     fn register(&self, entries: &mut super::runtime::Entries) {

@@ -7,6 +7,7 @@ use velo::Velo;
 use super::envelope::{Forward, Open, decode, encode};
 use super::fabric::Fabric;
 use super::hop::{DHop, Register};
+use super::meter::Meters;
 use super::runtime::{Entries, Roster, Runtime, RuntimeConfig};
 use super::stages::{DBackward, DForward, DInner};
 use crate::cx::Cx;
@@ -43,13 +44,28 @@ impl Deployment {
                 format!("the placement has no segment `{segment}`"),
             ));
         }
+        // Every node the segment hosts, the source included, gets its
+        // figures before the hops that call them are assembled.
+        let meters = match &config.metrics {
+            Some(registry) => {
+                let hosted = placement
+                    .segments()
+                    .find(|(name, _)| *name == segment)
+                    .map_or(&[][..], |(_, nodes)| nodes);
+                Some(Meters::register(
+                    registry,
+                    hosted.iter().map(String::as_str),
+                )?)
+            }
+            None => None,
+        };
         let fabric = Fabric::new(
             velo,
             config.anchor_timeout,
             config.heartbeat_interval,
             config.reservation_renew_interval,
         );
-        let rt = Runtime::new(fabric, layout, segment.to_string(), roster, config)?;
+        let rt = Runtime::new(fabric, layout, segment.to_string(), roster, config, meters)?;
         Ok(Self { rt: Arc::new(rt) })
     }
 
