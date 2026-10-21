@@ -106,12 +106,8 @@ These are the limits a user of gdl can run into today. Each section says what ha
 ### The runtime's `error_type` values are gdl's error kinds
 
 - **What happens:** `errors_total{error_type}` counts by gdl's error kinds (`node`, `deadline_exceeded`, `truncated`, `not_hosted`, `overloaded`, `transport`, `codec`, `placement`). dynamo's work handler counts by its own steps (`deserialization`, `generate`, `publish_response`, ...), so a dashboard keyed on those values sees none.
+- **Would lift it:** an adapter that translates gdl's kinds to dynamo's values. gdl keeps its own errors (the owner, 2026-10-20).
 - **See:** ruling 128.
-
-### Metrics use dynamo's prefix by default
-
-- **What happens:** every series is named `dynamo_component_...` unless `[system] metrics_prefix` says otherwise. Whether gdl keeps dynamo's prefix once it replaces dynamo's runtime is the owner's open question.
-- **See:** ruling 117.
 
 ### Two nodes of one segment must agree on a metric they share
 
