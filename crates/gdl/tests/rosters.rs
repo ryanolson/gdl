@@ -139,18 +139,25 @@ fn start(
 /// Serve `segment` on `launch` until its process is stopped. The segment
 /// comes back as soon as the body runs, that is once the instance is
 /// ready; the task ends when the instance has left.
-fn serve<S: Drains>(
-    launch: Launch,
-    segment: S,
-) -> (oneshot::Receiver<Arc<S>>, JoinHandle<gdl::Result<()>>) {
+fn serve<S: Drains>(launch: Launch, segment: S) -> (oneshot::Receiver<Arc<S>>, Serving) {
     let (tx, rx) = oneshot::channel();
-    let served = tokio::spawn(launch.serve(segment, |segment, shutdown| async move {
-        let _ = tx.send(segment);
-        shutdown.cancelled().await;
-        Ok(())
-    }));
+    let served = tokio::spawn(async move {
+        let served = launch
+            .serve(segment, |segment, shutdown| async move {
+                let _ = tx.send(segment);
+                shutdown.cancelled().await;
+                Ok(())
+            })
+            .await;
+        // Taken here, as the instance leaves, not when a test gets round to
+        // looking: an order the test asserts is the instance's own.
+        (served, Instant::now())
+    });
     (rx, served)
 }
+
+/// An instance's serving task: how it ended, and when.
+type Serving = JoinHandle<(gdl::Result<()>, Instant)>;
 
 async fn ready<S>(rx: oneshot::Receiver<Arc<S>>) -> Arc<S> {
     tokio::time::timeout(WAIT, rx)
@@ -159,13 +166,14 @@ async fn ready<S>(rx: oneshot::Receiver<Arc<S>>) -> Arc<S> {
         .expect("the body ran")
 }
 
-async fn left(served: JoinHandle<gdl::Result<()>>) -> Instant {
-    tokio::time::timeout(WAIT * 2, served)
+/// When the instance left, once it has.
+async fn left(served: Serving) -> Instant {
+    let (served, at) = tokio::time::timeout(WAIT * 2, served)
         .await
         .expect("left in time")
-        .expect("the serving task")
-        .expect("served and drained");
-    Instant::now()
+        .expect("the serving task");
+    served.expect("served and drained");
+    at
 }
 
 /// Requests sent back to back by `lanes` callers, each checked whole,
@@ -424,9 +432,26 @@ async fn the_last_instance_serves_until_its_bound() {
     let front_segment = ready(front_rx).await;
     let engine_segment = ready(engine_rx).await;
 
+    let engine_id = engine_process.instance_id();
     let stopped = Instant::now();
     engine_process.stop();
-    // Retired, and still the front's only engine: it takes this request.
+    // Retired at the hub, and still the front's only engine: it takes
+    // this request.
+    let services = client(&hub).services();
+    let retired = format!("gdl-retired-{}", hex("engine"));
+    let deadline = Instant::now() + WAIT;
+    while !services
+        .get_instances(&retired)
+        .await
+        .unwrap_or_default()
+        .contains(&engine_id)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the retirement never reached the hub"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let before = engine_segment.served().forwards;
     ask(&front_segment, "after the stop")
         .await
@@ -710,10 +735,15 @@ async fn a_request_waits_at_a_joiners_held_roster() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    // The joiner ran its forward node, and holds the hand-off onward.
+    // The joiner ran its forward node for one of them, and holds that
+    // request's hand-off onward at its roster.
+    let reached = seen.snapshot();
+    let held = (0..2)
+        .find(|n| reached.contains(&format!("C:held{n}")))
+        .unwrap_or_else(|| panic!("neither request reached the joiner: {reached:?}"));
     assert!(
-        asked.iter().any(|request| !request.is_finished()),
-        "nothing waited at the held roster"
+        !asked[held].is_finished(),
+        "the request the joiner took did not wait at its held roster"
     );
     let (late_tail_rx, late_tail_served) = serve(late_tail, late_tail_segment);
     let _ = (ready(late_tail_rx).await, ready(joiner_rx).await);

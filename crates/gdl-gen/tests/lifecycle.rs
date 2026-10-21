@@ -113,13 +113,15 @@ fn every_process_stopped_mid_answer_finishes_it() {
 /// minutes), while the others serve on: the next answer comes from the
 /// engine that stayed. The engine stopped is the one answering, as its
 /// metrics show: the roster's order, and so the front's first pick, is not
-/// known ahead.
+/// known ahead. After the signal its health says `draining` while the
+/// request is still in flight there, so the stop came mid-answer: words
+/// come a second apart, far longer than the probes take.
 #[test]
 fn one_of_two_engines_stopped_mid_answer_retires_alone() {
     let chat = Chat::new("gdl-life-retire-");
     let counts = "[instances]\nengine = 2\n[runtime]\nsetup_timeout_ms = 500\n";
     let engine = format!(
-        "{counts}[node.Engine]\ndelay_ms = 300\n[system]\nhost = \"127.0.0.1\"\nport = 0\n"
+        "{counts}[node.Engine]\ndelay_ms = 1000\n[system]\nhost = \"127.0.0.1\"\nport = 0\n"
     );
     let mut engines = [
         chat.spawn("engine", &chat.config("engine-1", &engine), false),
@@ -151,6 +153,22 @@ fn one_of_two_engines_stopped_mid_answer_retires_alone() {
     assert_eq!(busy.len(), 1, "one engine answers: {busy:?}");
     let (stopped, stayed) = (busy[0], 1 - busy[0]);
     engines[stopped].signal("-TERM");
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let (code, body) = get(addresses[stopped], "/health");
+        if code == 503 && body.contains("\"phase\":\"draining\"") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never draining: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        answering(addresses[stopped]),
+        "the answer had ended when the engine was stopped"
+    );
     let rest: Vec<String> = (0..3).map(|_| out.next(WAIT)).collect();
     assert!(
         rest[..2].iter().all(|line| line.starts_with(r#"{"item":"#)),

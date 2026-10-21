@@ -882,19 +882,29 @@ impl Launch {
                 // deadline, since a hub can stop answering without closing
                 // its connections; a lease lost meanwhile ends the wait.
                 loop {
+                    // A lost lease is looked at first, and ends a question
+                    // in flight: the hub that would answer it is gone.
+                    if session.is_lost() || settled(avoided) {
+                        break;
+                    }
                     let ask = async {
                         let drained = reaching.is_empty() || session.all_drained(&reaching).await?;
                         let avoiding = avoided.is_some() || session.all_avoid(me, &senders).await?;
                         Ok::<_, Error>((drained, avoiding))
                     };
-                    let (drained, avoiding) = match tokio::time::timeout_at(deadline, ask).await {
+                    let asked = tokio::select! {
+                        biased;
+                        _ = session.maintain() => break,
+                        asked = tokio::time::timeout_at(deadline, ask) => asked,
+                    };
+                    let (drained, avoiding) = match asked {
                         Ok(Ok(answer)) => answer,
                         _ => (false, false),
                     };
                     if avoided.is_none() && avoiding {
                         avoided = Some(tokio::time::Instant::now());
                     }
-                    let done = session.is_lost() || drained || settled(avoided);
+                    let done = drained || settled(avoided);
                     if done || !pause(crate::dist::HubSession::poll()).await {
                         break;
                     }

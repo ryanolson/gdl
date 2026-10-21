@@ -365,9 +365,11 @@ async fn a_lease_lost_while_announcing_a_retirement_ends_the_wait() {
     hub.shutdown().await.expect("valid test fixture");
     let stopped = tokio::time::Instant::now();
     sink_process.stop();
-    let _ = tokio::time::timeout(Duration::from_secs(30), sink_served)
+    tokio::time::timeout(Duration::from_secs(30), sink_served)
         .await
-        .expect("the sink left");
+        .expect("the sink left")
+        .expect("the sink's task")
+        .expect("the sink served and drained");
     // The lease's grace (1 s), a second for velo, and up to five for
     // leaving the hub.
     assert!(
@@ -1076,6 +1078,8 @@ enum Mode {
 struct Proxy {
     port: u16,
     mode: Arc<tokio::sync::watch::Sender<Mode>>,
+    /// Signalled when `SilentAtDelete` held a `DELETE`.
+    intercepted: Arc<tokio::sync::Notify>,
 }
 
 impl Proxy {
@@ -1086,18 +1090,34 @@ impl Proxy {
         let port = listener.local_addr().expect("valid test fixture").port();
         let (mode, modes) = tokio::sync::watch::channel(Mode::Forward);
         let mode = Arc::new(mode);
-        let setter = Arc::clone(&mode);
+        let intercepted = Arc::new(tokio::sync::Notify::new());
+        let (setter, seen) = (Arc::clone(&mode), Arc::clone(&intercepted));
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
-                tokio::spawn(relay(client, target, modes.clone(), Arc::clone(&setter)));
+                let held = Held {
+                    set: Arc::clone(&setter),
+                    seen: Arc::clone(&seen),
+                };
+                tokio::spawn(relay(client, target, modes.clone(), held));
             }
         });
-        Self { port, mode }
+        Self {
+            port,
+            mode,
+            intercepted,
+        }
     }
 
     fn set(&self, mode: Mode) {
         let _ = self.mode.send(mode);
     }
+}
+
+/// What a relay needs to hold a `DELETE`: the proxy's mode, which it
+/// turns silent, and the signal that it did.
+struct Held {
+    set: Arc<tokio::sync::watch::Sender<Mode>>,
+    seen: Arc<tokio::sync::Notify>,
 }
 
 /// Relay one connection while the mode forwards; hold it while silent;
@@ -1106,7 +1126,7 @@ async fn relay(
     mut client: tokio::net::TcpStream,
     target: std::net::SocketAddr,
     mut mode: tokio::sync::watch::Receiver<Mode>,
-    set: Arc<tokio::sync::watch::Sender<Mode>>,
+    held: Held,
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     // Settle the mode first: hold while silent, return when refusing.
@@ -1128,6 +1148,9 @@ async fn relay(
     let (mut from_client, mut to_client) = client.split();
     let (mut from_server, mut to_server) = server.split();
     let (mut up, mut down) = ([0u8; 8192], [0u8; 8192]);
+    // The last bytes sent upstream, so that a request line split across
+    // two reads is still recognized.
+    let mut tail: Vec<u8> = Vec::new();
     loop {
         let now = *mode.borrow_and_update();
         match now {
@@ -1143,9 +1166,18 @@ async fn relay(
         tokio::select! {
             read = from_client.read(&mut up) => match read {
                 Ok(n) if n > 0 => {
-                    if now == Mode::SilentAtDelete && up[..n].starts_with(b"DELETE ") {
-                        // Held here, unsent, with every other connection.
-                        let _ = set.send(Mode::Silent);
+                    let mut seen = tail.clone();
+                    seen.extend_from_slice(&up[..n]);
+                    let found = (now == Mode::SilentAtDelete)
+                        .then(|| seen.windows(7).position(|w| w == b"DELETE "))
+                        .flatten();
+                    if let Some(at) = found {
+                        // What came before the request goes on; the request
+                        // is held here, with every other connection.
+                        let before = at.saturating_sub(tail.len());
+                        let _ = to_server.write_all(&up[..before]).await;
+                        let _ = held.set.send(Mode::Silent);
+                        held.seen.notify_one();
                         // Until the test changes the mode again, not at
                         // this change, which is the proxy's own.
                         mode.borrow_and_update();
@@ -1155,6 +1187,8 @@ async fn relay(
                     if to_server.write_all(&up[..n]).await.is_err() {
                         return;
                     }
+                    let keep = seen.len().saturating_sub(6);
+                    tail = seen[keep..].to_vec();
                 }
                 _ => return,
             },
@@ -1263,8 +1297,9 @@ async fn a_silent_hub_does_not_hold_a_drain_past_its_bound() {
 }
 
 /// The hub takes the retirement, then stops answering at the withdrawal of
-/// `ready` that follows. The lease is lost meanwhile, and the instance
-/// stops waiting for the withdrawal then, rather than at its 20 s bound.
+/// `ready` that follows, on both its ports. The lease is lost meanwhile,
+/// and the instance stops waiting for the hub then, in the withdrawal and
+/// in the drain after it, rather than at its 20 s bound.
 #[tokio::test]
 async fn a_lease_lost_while_withdrawing_a_retirement_ends_the_wait() {
     let hub = hub(Duration::from_secs(30)).await;
@@ -1277,9 +1312,15 @@ async fn a_lease_lost_while_withdrawing_a_retirement_ends_the_wait() {
     control.set(Mode::SilentAtDelete);
     let stopped = tokio::time::Instant::now();
     sink.stop();
-    let _ = tokio::time::timeout(Duration::from_secs(30), sink_served)
+    tokio::time::timeout(WAIT, control.intercepted.notified())
         .await
-        .expect("the sink left");
+        .expect("the withdrawal was held");
+    public.set(Mode::Silent);
+    tokio::time::timeout(Duration::from_secs(30), sink_served)
+        .await
+        .expect("the sink left")
+        .expect("the sink's task")
+        .expect("the sink served and drained");
     // The lease's grace (1 s), a second for velo, and up to five for
     // leaving the hub.
     assert!(
