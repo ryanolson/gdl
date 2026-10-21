@@ -30,7 +30,7 @@ These are the limits a user of gdl can run into today. Each section says what ha
 ### A selector from another crate needs code that registers it
 
 - **What happens:** a generated segment binary routes only with gdl's own selectors (`affinity`, `least_loaded`). A placement that names another one fails that segment's start.
-- **Workaround:** register it in `RuntimeConfig::selectors`, in an in-process deployment or in a hand-written `SegmentBinary`'s `start`.
+- **Workaround:** register it with `builder.selector::<S>("<name>")` in a hand-written `SegmentBinary`'s `build`, or in `RuntimeConfig::selectors` in an in-process deployment.
 - **Would lift it:** the generator binding selector crates, planned with dynamo's KV router.
 - **See:** ruling 162.
 

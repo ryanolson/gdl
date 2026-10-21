@@ -284,6 +284,9 @@ async fn a_segment_binary_runs_its_lifecycle() {
     a_conflicting_table_fails_before_the_instance_meets_its_peers().await;
     nodes_that_define_one_metric_differently_fail_to_build().await;
     a_built_segment_serves_and_drains().await;
+    gdls_own_selector_is_built_from_its_table().await;
+    a_selector_table_nothing_registers_is_refused().await;
+    a_registered_selector_is_built_with_its_settings_and_metrics().await;
 }
 
 /// The signals are taken before any node is built: a stop then ends the
@@ -352,4 +355,180 @@ async fn a_built_segment_serves_and_drains() {
     let (_dir, file) = settings("[node.Add]\namount = 5\n");
     run::<Adder>(&[file]).await.expect("served");
     assert!(READY.load(Ordering::SeqCst));
+}
+
+/// Set by `Tagged::ready`; the binary's `start` checks that it ran.
+static TAGGED_READY: AtomicBool = AtomicBool::new(false);
+
+/// A selector the binary registers: its tag from `[selector.tagged]`, and
+/// a metric of its own.
+struct Tagged {
+    tag: String,
+    _metrics: TaggedMetrics,
+}
+
+/// What `Tagged` reports.
+#[derive(gdl::Metrics)]
+#[expect(dead_code, reason = "registered to be found, never counted")]
+struct TaggedMetrics {
+    /// Requests routed.
+    routed_total: gdl::prometheus::IntCounter,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaggedConfig {
+    tag: String,
+}
+
+impl gdl::Build for Tagged {
+    type Config = TaggedConfig;
+    type Metrics = TaggedMetrics;
+
+    async fn build(config: TaggedConfig, metrics: TaggedMetrics) -> gdl::Result<Self> {
+        Ok(Self {
+            tag: config.tag,
+            _metrics: metrics,
+        })
+    }
+
+    async fn ready(&self) -> gdl::Result<()> {
+        assert_eq!(self.tag, "blue", "the selector's table reached it");
+        TAGGED_READY.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl gdl::Selector for Tagged {
+    type Head = gdl::Encoded;
+
+    async fn select<'a>(
+        &'a self,
+        _: gdl::Request<'a, gdl::Encoded>,
+        instances: gdl::Instances<'a>,
+    ) -> gdl::Result<gdl::Choice<'a>> {
+        Ok(gdl::Choice::new(instances.get(0).expect("never empty")))
+    }
+}
+
+/// A segment binary that registers `Tagged` beside `Add`, and checks in
+/// `start` what reached its runtime.
+struct Selecting;
+
+impl gdl::SegmentBinary for Selecting {
+    const PACKAGE: &'static str = "adder-selecting";
+    const SEGMENT: &'static str = "only";
+    const SEGMENTS: &'static [&'static str] = &["only"];
+    const GRAPH_CONFIG: &'static str = GRAPH_CONFIG;
+    type Settings = Settings;
+    type Hosts = Add;
+
+    async fn build(settings: Settings, builder: &Builder) -> Result<Add, Failure> {
+        builder.selector::<Tagged>("tagged").await?;
+        builder.build::<Add>("Add", settings.node.add).await
+    }
+
+    fn deployment() -> gdl::Result<DeploymentSpec> {
+        deployment()
+    }
+
+    fn start(
+        add: Add,
+        node: gdl::velo::Velo,
+        roster: &Roster,
+        runtime: RuntimeConfig,
+    ) -> gdl::Result<Serving> {
+        assert!(runtime.selectors.contains("tagged"));
+        assert!(
+            TAGGED_READY.load(Ordering::SeqCst),
+            "started before the selector was ready"
+        );
+        let registry = runtime.metrics.clone().expect("a system listener");
+        let routed = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name().ends_with("routed_total"))
+            .expect("the selector's metric");
+        let labels = routed.get_metric()[0].get_label();
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.name() == "dynamo_endpoint" && l.value() == "tagged"),
+            "{labels:?}"
+        );
+        let segment = start_adder(add, node, roster, runtime)?;
+        Ok(Serving::new(segment, |_, _| async { Ok(()) }))
+    }
+}
+
+/// A binary that registers nothing, and checks which of gdl's selectors
+/// its settings built.
+struct Plain;
+
+impl gdl::SegmentBinary for Plain {
+    const PACKAGE: &'static str = "adder-plain";
+    const SEGMENT: &'static str = "only";
+    const SEGMENTS: &'static [&'static str] = &["only"];
+    const GRAPH_CONFIG: &'static str = GRAPH_CONFIG;
+    type Settings = Settings;
+    type Hosts = Add;
+
+    async fn build(settings: Settings, builder: &Builder) -> Result<Add, Failure> {
+        builder.build::<Add>("Add", settings.node.add).await
+    }
+
+    fn deployment() -> gdl::Result<DeploymentSpec> {
+        deployment()
+    }
+
+    fn start(
+        add: Add,
+        node: gdl::velo::Velo,
+        roster: &Roster,
+        runtime: RuntimeConfig,
+    ) -> gdl::Result<Serving> {
+        assert!(
+            runtime.selectors.contains("affinity"),
+            "{:?}",
+            runtime.selectors
+        );
+        assert!(!runtime.selectors.contains("least_loaded"));
+        let segment = start_adder(add, node, roster, runtime)?;
+        Ok(Serving::new(segment, |_, _| async { Ok(()) }))
+    }
+}
+
+/// `[selector.affinity]` builds gdl's `affinity` with that table; a key it
+/// does not take fails the build, named.
+async fn gdls_own_selector_is_built_from_its_table() {
+    let (_dir, file) = settings("[node.Add]\namount = 5\n[selector.affinity]\nkey = \"session\"\n");
+    run::<Plain>(&[file]).await.expect("served");
+    let (_dir, file) = settings("[node.Add]\namount = 5\n[selector.affinity]\nkye = \"session\"\n");
+    let error = run::<Plain>(&[file]).await.expect_err("a misspelled key");
+    assert!(error.starts_with("building selector affinity:"), "{error}");
+    assert!(error.contains("kye"), "{error}");
+}
+
+/// A table for a selector that the binary does not register and gdl does
+/// not have is a mistake, not something to ignore.
+async fn a_selector_table_nothing_registers_is_refused() {
+    let (_dir, file) = settings("[node.Add]\namount = 5\n[selector.kv]\nblock = 16\n");
+    let error = run::<Plain>(&[file])
+        .await
+        .expect_err("an unknown selector");
+    assert!(
+        error.contains("`[selector.kv]`") && error.contains("registers no selector"),
+        "{error}"
+    );
+}
+
+/// A selector the binary registers is built through the `Builder` as a
+/// node is: from its table, with its metrics under its name, and ready
+/// before the segment starts.
+async fn a_registered_selector_is_built_with_its_settings_and_metrics() {
+    let (_dir, file) = settings(
+        "[node.Add]\namount = 5\n[selector.tagged]\ntag = \"blue\"\n[system]\nhost = \"127.0.0.1\"\nport = 0\n",
+    );
+    run::<Selecting>(&[file]).await.expect("served");
+    assert!(TAGGED_READY.load(Ordering::SeqCst));
 }

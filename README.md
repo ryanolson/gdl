@@ -310,7 +310,7 @@ A boundary can also name a selector: `Engine = { selector = "least_loaded" }`. A
 - `affinity`: requests with the same key go to the same replica, from every sender. The key is the value of the metadata entry `[selector.affinity] key` names, or else the request's head.
 - `least_loaded`: each request goes to the replica where this sender holds the fewest leases.
 
-Another selector is registered by name in `RuntimeConfig::selectors`. A selector name is lowercase letters, digits, and `_`, and is part of the placement's identity. A selector costs a load of the routing table, a decode of the head when it reads a type, and its own work; `round_robin` and `random` do not go through it.
+A selector is built as a node is, through `gdl::Build`: its settings are the segment's `[selector.<name>]` table, its metrics carry its name as `dynamo_endpoint`, and the instance announces that it is loaded only after the selector is ready. A segment binary builds gdl's own selectors from their tables, `[selector.affinity] key = "session"` for example; a table for a selector that the binary does not register is refused. A hand-written `SegmentBinary` registers another selector with `builder.selector::<S>("<name>")` in its `build`, and an in-process deployment adds it to `RuntimeConfig::selectors`. A selector name is lowercase letters, digits, and `_`, and is part of the placement's identity. A selector costs a load of the routing table, a decode of the head when it reads a type, and its own work; `round_robin` and `random` do not go through it.
 
 
 Generated crates take gdl from `--gdl-path`, or from `--gdl-git <url> --gdl-rev <rev>`. The editor uses the dashboard's dark surfaces and green accents. On narrow screens, the catalog appears above the canvas.

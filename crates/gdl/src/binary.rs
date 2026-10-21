@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use figment::Figment;
 use figment::providers::Serialized;
-use futures::future::LocalBoxFuture;
+use futures::future::{BoxFuture, LocalBoxFuture};
 use velo::Velo;
 
 use crate::config::build_node;
@@ -21,6 +21,7 @@ use crate::error::Result;
 use crate::metrics::Metrics;
 use crate::process::{Drains, Hosted, Launch, Process, ProcessConfig};
 use crate::role::Build;
+use crate::select::{Affinity, LeastLoaded, Selector, Selectors};
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
 
 /// What one segment's binary hosts and serves: the parts that differ
@@ -115,21 +116,41 @@ pub async fn run_segment<B: SegmentBinary>(
     // carries the deployment's identity.
     let deployment = B::deployment()?;
     let registry = process.registry(&deployment, B::SEGMENT)?;
-    let builder = Builder::new(B::GRAPH_CONFIG, registry.clone())?;
+    let builder = Builder::new(
+        B::GRAPH_CONFIG,
+        registry.clone(),
+        config.selector_tables().clone(),
+    )?;
     let hosts = B::build(settings, &builder).await?;
+    // gdl's own selectors, configured in the settings and not registered
+    // by the binary; a table for anything else is a mistake.
+    for name in config.selector_tables().keys() {
+        if builder.registered(name) {
+            continue;
+        }
+        match name.as_str() {
+            "affinity" => builder.selector::<Affinity>(name).await?,
+            "least_loaded" => builder.selector::<LeastLoaded>(name).await?,
+            _ => {
+                return Err(format!(
+                    "the settings configure `[selector.{name}]`, but this binary registers no selector `{name}` and gdl has none"
+                )
+                .into());
+            }
+        }
+    }
+    let ready = async {
+        tokio::try_join!(B::ready(&hosts), builder.ready())?;
+        Ok(())
+    };
     let launch = config
-        .launch(
-            &process,
-            B::SEGMENT,
-            B::SEGMENTS,
-            &deployment,
-            B::ready(&hosts),
-        )
+        .launch(&process, B::SEGMENT, B::SEGMENTS, &deployment, ready)
         .await?;
     // The runtime records the segment's figures only where a system
     // listener can serve them: with none, nobody could read them.
     let mut runtime = config.runtime;
     runtime.metrics = process.system_address().map(|_| registry);
+    runtime.selectors = builder.into_selectors();
     let serving = B::start(hosts, launch.node(), launch.roster(), runtime)?;
     (serving.serve)(launch).await?;
     Ok(())
@@ -176,15 +197,86 @@ pub struct Builder {
     /// Each metric registered so far, by name, with the node that defined
     /// it first.
     defined: Mutex<BTreeMap<String, (String, MetricField)>>,
+    /// `[selector.<name>]` tables, by name.
+    tables: BTreeMap<String, toml::Table>,
+    /// The routing selectors built so far, and how to wait for each to be
+    /// ready.
+    selectors: Mutex<(Selectors, Vec<Readiness>)>,
 }
 
+/// One built selector's [`Build::ready`].
+type Readiness = Box<dyn Fn() -> BoxFuture<'static, Result<()>> + Send>;
+
 impl Builder {
-    fn new(graph: &str, registry: prometheus::Registry) -> std::result::Result<Self, Failure> {
+    fn new(
+        graph: &str,
+        registry: prometheus::Registry,
+        tables: BTreeMap<String, toml::Table>,
+    ) -> std::result::Result<Self, Failure> {
         Ok(Self {
             graph: toml::from_str(graph)?,
             registry,
             defined: Mutex::new(BTreeMap::new()),
+            tables,
+            selectors: Mutex::new((Selectors::new(), Vec::new())),
         })
+    }
+
+    /// Build `S`, the routing selector named `name` in the placement, from
+    /// its settings table `[selector.<name>]`, with its metrics registered
+    /// under `name`, and route the crossings that name it through it. The
+    /// instance announces itself as loaded only once `S` is ready, as for a
+    /// node.
+    pub async fn selector<S: Build + Selector>(
+        &self,
+        name: &str,
+    ) -> std::result::Result<(), Failure> {
+        gdl_model::check_selector_name(name)
+            .map_err(|why| format!("building selector {name}: {why}"))?;
+        self.define(name, <S::Metrics as Metrics>::definitions())?;
+        let metrics = S::Metrics::register(&self.registry, name)
+            .map_err(|e| format!("building selector {name}: registering its metrics: {e}"))?;
+        let table = self.tables.get(name).cloned().unwrap_or_default();
+        let providers = Figment::from(Serialized::defaults(table));
+        let built = build_node::<S>(&providers, &GraphConfig::new(), metrics)
+            .await
+            .map_err(|e| format!("building selector {name}: {e}"))?;
+        let built = Arc::new(built);
+        let mut selectors = self.selectors.lock().unwrap_or_else(|e| e.into_inner());
+        selectors
+            .0
+            .add_shared(name, Arc::clone(&built))
+            .map_err(|e| format!("building selector {name}: {e}"))?;
+        selectors.1.push(Box::new(move || {
+            let built = Arc::clone(&built);
+            Box::pin(async move { built.ready().await })
+        }));
+        Ok(())
+    }
+
+    /// Whether a selector named `name` is registered.
+    fn registered(&self, name: &str) -> bool {
+        let selectors = self.selectors.lock().unwrap_or_else(|e| e.into_inner());
+        selectors.0.contains(name)
+    }
+
+    /// Resolve once every registered selector is ready.
+    async fn ready(&self) -> Result<()> {
+        let waits: Vec<_> = {
+            let selectors = self.selectors.lock().unwrap_or_else(|e| e.into_inner());
+            selectors.1.iter().map(|ready| ready()).collect()
+        };
+        futures::future::try_join_all(waits).await?;
+        Ok(())
+    }
+
+    /// The registered selectors, for the runtime.
+    fn into_selectors(self) -> Selectors {
+        let selectors = self
+            .selectors
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
+        selectors.0
     }
 
     /// Build `T`, the implementation of node `node` (as the graph spells

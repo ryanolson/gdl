@@ -42,6 +42,7 @@ use system::{Health, Phase, SystemSettings};
 /// [instances]             # optional, with a roster: instances per segment, 1 by default
 /// [min_replicas]          # optional, with a hub: loaded instances to wait for, 1 by default
 /// [runtime]               # optional: the runtime's own settings
+/// [selector.<name>]       # optional: a routing selector's settings, by its name
 /// [system]                # optional: the live and health probes; off unless `port` is set
 /// port = 9090             # also DYN_SYSTEM_PORT; dynamo's meaning: negative is off, 0 ephemeral
 /// host = "0.0.0.0"        # also DYN_SYSTEM_HOST
@@ -56,6 +57,8 @@ pub struct ProcessConfig<H> {
     instances: BTreeMap<String, usize>,
     min_replicas: BTreeMap<String, usize>,
     system: SystemSettings,
+    /// Each routing selector's table, by the selector's name.
+    selector: BTreeMap<String, toml::Table>,
     /// The runtime's own settings.
     pub runtime: RuntimeConfig,
     /// The tables of the hosted implementations.
@@ -81,6 +84,8 @@ struct Settings {
     runtime: RuntimeConfig,
     #[serde(default)]
     system: SystemSettings,
+    #[serde(default)]
+    selector: BTreeMap<String, toml::Table>,
 }
 
 /// What a segment hosts, as its binary declares it: the settings type's
@@ -97,7 +102,7 @@ pub trait Hosted: DeserializeOwned {
 /// `GDL_` variables read: the build scripts use the same prefix
 /// (`GDL_PROFILE`, `GDL_IMAGE_PREFIX`), and a variable meant for them must
 /// not stop a segment from starting.
-const KEYS: [&str; 8] = [
+const KEYS: [&str; 9] = [
     "listen",
     "roster",
     "hub",
@@ -106,6 +111,7 @@ const KEYS: [&str; 8] = [
     "min_replicas",
     "runtime",
     "system",
+    "selector",
 ];
 
 fn default_rendezvous_ms() -> u64 {
@@ -210,6 +216,7 @@ impl<H: Hosted> ProcessConfig<H> {
             instances: settings.instances,
             min_replicas: settings.min_replicas,
             system: settings.system,
+            selector: settings.selector,
             runtime: settings.runtime,
             hosted,
         };
@@ -246,6 +253,7 @@ impl<H: Hosted> ProcessConfig<H> {
             instances,
             min_replicas,
             system,
+            selector,
             runtime,
             hosted,
         } = self;
@@ -257,6 +265,7 @@ impl<H: Hosted> ProcessConfig<H> {
             instances,
             min_replicas,
             system,
+            selector,
             runtime,
             hosted: (),
         };
@@ -265,6 +274,11 @@ impl<H: Hosted> ProcessConfig<H> {
 }
 
 impl<H> ProcessConfig<H> {
+    /// Each routing selector's table, by the selector's name.
+    pub(crate) fn selector_tables(&self) -> &BTreeMap<String, toml::Table> {
+        &self.selector
+    }
+
     fn discovery(&self) -> Result<Discovery<'_>> {
         match (&self.roster, &self.hub) {
             (Some(dir), None) => Ok(Discovery::Files(dir)),
