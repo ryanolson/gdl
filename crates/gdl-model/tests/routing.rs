@@ -257,6 +257,8 @@ fn a_selector_name_must_be_one_a_placement_can_use() {
         "Affinity",
         "9lives",
         "kv-router",
+        "kv__router",
+        "kv_",
         "round_robin",
         "random",
         &"x".repeat(65),

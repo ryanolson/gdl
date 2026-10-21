@@ -20,9 +20,13 @@ use crate::role::Build;
 /// zero and it takes turns as round robin does.
 #[derive(Debug, Default)]
 pub struct LeastLoaded {
-    /// One count per instance seen, sorted by id. Replaced whole, and only
-    /// when an instance not seen before appears: a pick reads it without a
-    /// lock.
+    /// One count per instance ever seen, sorted by id. Replaced whole, and
+    /// only when an instance not seen before appears: a pick reads it
+    /// without a lock. A count is never dropped or replaced: one selector
+    /// serves every crossing that names it, into any segment, so a view of
+    /// one segment cannot tell that another's idle count is unused, and a
+    /// pick that loaded a count may be about to add to it. An entry is a
+    /// few dozen bytes per instance this sender has ever routed to.
     counts: ArcSwap<Vec<(InstanceId, Arc<AtomicUsize>)>>,
     /// Where the next scan starts, so that equal counts take turns.
     turn: AtomicUsize,
@@ -34,28 +38,21 @@ impl LeastLoaded {
         Self::default()
     }
 
-    /// The counts, with one for every instance in `instances`. An instance
-    /// not seen before adds one; counts of instances that are gone and
-    /// hold no lease are dropped then.
+    /// The counts, with one for every instance in `instances`: an
+    /// instance not seen before adds one. Counts are only ever added, so
+    /// the table loaded after the update holds every instance asked for.
     fn counts(&self, instances: &Instances<'_>) -> Arc<Vec<(InstanceId, Arc<AtomicUsize>)>> {
         let counts = self.counts.load_full();
         if instances.iter().all(|i| find(&counts, i.id()).is_some()) {
             return counts;
         }
         self.counts.rcu(|counts| {
-            let mut next: Vec<(InstanceId, Arc<AtomicUsize>)> = counts
-                .iter()
-                .filter(|(id, count)| {
-                    count.load(Ordering::Relaxed) > 0 || instances.iter().any(|i| i.id() == *id)
-                })
-                .cloned()
-                .collect();
+            let mut next = Vec::clone(counts);
             for instance in instances.iter() {
-                if find(&next, instance.id()).is_none() {
-                    next.push((instance.id(), Arc::new(AtomicUsize::new(0))));
+                if let Err(at) = next.binary_search_by_key(&instance.id(), |(id, _)| *id) {
+                    next.insert(at, (instance.id(), Arc::new(AtomicUsize::new(0))));
                 }
             }
-            next.sort_by_key(|(id, _)| *id);
             next
         });
         self.counts.load_full()
@@ -190,26 +187,46 @@ mod tests {
         assert_eq!(counts, [10; 4]);
     }
 
+    /// One selector routes every crossing that names it, into any segment:
+    /// a view of one segment must never drop or replace the count of an
+    /// instance of another, even an idle one, since a pick that loaded it
+    /// may be about to add to it.
     #[tokio::test]
-    async fn a_joiner_gets_a_count_and_an_instance_gone_is_forgotten_once_free() {
+    async fn a_view_of_one_segment_keeps_every_count_of_another() {
+        let selector = Typed(Arc::new(LeastLoaded::new()));
+        let (one, other) = (ids(1), ids(1));
+        let (_, idle) = pick(&selector, &one).await;
+        drop(idle);
+        let counted = |id: velo::InstanceId| {
+            selector
+                .0
+                .counts
+                .load()
+                .iter()
+                .find(|(known, _)| known.as_u128() == id.as_u128())
+                .map(|(_, count)| Arc::as_ptr(count))
+        };
+        let before = counted(one[0]).expect("a count");
+        let _ = pick(&selector, &other).await;
+        assert_eq!(counted(one[0]), Some(before), "an idle count was replaced");
+    }
+
+    /// An instance already counted, seen with a new one that sorts before
+    /// it, keeps its one count.
+    #[tokio::test]
+    async fn a_new_instance_never_doubles_the_count_of_a_known_one() {
         let selector = Typed(Arc::new(LeastLoaded::new()));
         let mut ids = ids(2);
-        let (gone, lease) = pick(&selector, &ids).await;
-        let gone = ids.remove(gone);
-        let joiner = velo::InstanceId::new_v4();
-        ids.push(joiner);
-        let (_, _held) = pick(&selector, &ids).await;
-        assert_eq!(
-            selector.0.held(InstanceId(gone.as_u128())),
-            1,
-            "a held count was dropped"
-        );
-        drop(lease);
-        ids.push(velo::InstanceId::new_v4());
-        let _ = pick(&selector, &ids).await;
-        assert!(
-            find(&selector.0.counts.load(), InstanceId(gone.as_u128())).is_none(),
-            "a free count of an instance gone was kept"
-        );
+        ids.sort_by_key(|id| id.as_u128());
+        let (low, high) = (ids[0], ids[1]);
+        let (_, held) = pick(&selector, &[high]).await;
+        let _ = pick(&selector, &[low, high]).await;
+        let entries = selector.0.counts.load();
+        let highs = entries
+            .iter()
+            .filter(|(id, _)| id.as_u128() == high.as_u128())
+            .count();
+        assert_eq!(highs, 1, "{} counts for one instance", highs);
+        drop(held);
     }
 }

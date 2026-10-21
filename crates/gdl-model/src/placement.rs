@@ -69,16 +69,18 @@ const SELECTOR_NAME_LIMIT: usize = 64;
 
 /// Whether `name` can name a selector. A name is also the selector's
 /// settings key (`[selector.<name>]`, reachable from the environment, where
-/// case is lost) and its metrics' endpoint label, so it is lowercase ASCII
-/// letters, digits, and `_`, starting with a letter, and it is never a
-/// built-in policy's name.
+/// case is lost and `__` separates keys) and its metrics' endpoint label,
+/// so it is lowercase ASCII letters and digits in words joined by single
+/// `_`s, starting with a letter, and it is never a built-in policy's name.
 pub fn check_selector_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let shaped = chars.next().is_some_and(|c| c.is_ascii_lowercase())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !name.contains("__")
+        && !name.ends_with('_');
     if !shaped || name.len() > SELECTOR_NAME_LIMIT {
         return Err(format!(
-            "selector name `{name}` must be lowercase letters, digits, and `_`, start with a letter, and be at most {SELECTOR_NAME_LIMIT} characters"
+            "selector name `{name}` must be lowercase letters and digits in words joined by single `_`s, start with a letter, and be at most {SELECTOR_NAME_LIMIT} characters"
         ));
     }
     if matches!(name, "round_robin" | "random") {

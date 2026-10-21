@@ -545,3 +545,57 @@ async fn gdls_own_selectors_need_no_registration() {
         assert!(settles(&cluster).await);
     }
 }
+
+/// Cancels the request it chooses for, then chooses, with a lease.
+#[derive(Clone, Default)]
+struct Cancelling(Counting);
+
+impl Selector for Cancelling {
+    type Head = Encoded;
+
+    async fn select<'a>(
+        &'a self,
+        request: Request<'a, Encoded>,
+        instances: Instances<'a>,
+    ) -> gdl::Result<Choice<'a>> {
+        let cx = request.cx();
+        let choice = self.0.select(request, instances).await;
+        cx.cancel();
+        choice
+    }
+}
+
+/// A request cancelled while its selector chose is not handed on, and the
+/// choice's lease is given back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_cancelled_while_its_selector_chose_is_not_handed_on() {
+    let (instances, _) = two_engines().await;
+    let events = Events::new();
+    let cancelling = Cancelling::default();
+    let cluster = deploy_configured(
+        &instances,
+        &routed(selector("cancelling")),
+        &events,
+        &|_| with("cancelling", &cancelling),
+    );
+    let result = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("cancelled", Plan::default()))
+        .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(out) => match collect(out).await.pop() {
+            Some(Err(error)) => error,
+            other => panic!("the request was not cancelled: {other:?}"),
+        },
+    };
+    assert_eq!(error.kind(), ErrorKind::Cancelled, "{error}");
+    assert_eq!(cancelling.0.taken(), 1);
+    until("the lease is given back", || cancelling.0.live() == 0).await;
+    assert_eq!(
+        engine_forwards(&cluster),
+        [0, 0],
+        "a cancelled request was handed on"
+    );
+    assert!(settles(&cluster).await);
+}
