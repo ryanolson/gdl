@@ -85,8 +85,11 @@ A laptop run gates nothing smaller than 5%. It may block a change that is plainl
 - **Results** go into `agent-docs/perf/` (gdl) and velo's benchmarking docs, each with the command that produced it, as AGENTS.md requires.
 - **Later:** a benchmark host in CI, running the gates on every change to a hot path, with results kept per SHA.
 
+## Status
+
+**2026-10-21 (the owner):** no dedicated benchmark machine is available for now. Laptop numbers stay labelled provisional, and the claims below stay open. A laptop run still blocks a change that is plainly too expensive (over 5%), as the gates say.
+
 ## Needed from the owner
 
-- **Machines:** which are available (a lab, or cloud instance types), and whether machine 2's NIC, machine 3, and machine 4 exist.
 - **Gates:** whether the thresholds above are right; in particular the 1% per request.
 - **Order:** confirm that velo#141's costs go first, since a velo release (ruling 121) waits on them; then milestone 21's metrics before they ship.
