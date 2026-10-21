@@ -235,6 +235,7 @@ async fn entries(State(composer): Shared) -> Response {
         "entries": entries,
         "local_enabled": composer.config.local_root.is_some(),
         "example": example,
+        "selectors": gdl_model::SELECTORS,
     }))
     .into_response()
 }

@@ -1240,11 +1240,57 @@ async fn request_router_policy_is_checked_and_embedded_in_exported_segments() {
         std::fs::read_to_string(root.join("engine/src/lib.rs")).expect("router export fixture");
     assert!(segment.contains("random"));
     cut["routing"] = json!({"A":"random"});
-    let (_, body) = json_call(&app, "POST", "/api/check", Some(cut)).await;
+    let (_, body) = json_call(&app, "POST", "/api/check", Some(cut.clone())).await;
     assert_ne!(
         body["ok"], true,
         "source cannot be a request routing destination"
     );
+
+    // A selector, gdl's own or another, exports as a table; a name no
+    // selector can have is refused.
+    cut["routing"] = json!({"Engine":{"selector":"least_loaded"}});
+    let (_, body) = json_call(&app, "POST", "/api/check", Some(cut.clone())).await;
+    assert_eq!(body["ok"], true, "{body}");
+    let (status, bytes) = call(&app, "POST", "/api/export", Some(cut.clone())).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let unpacked = dir.join("selected");
+    tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()))
+        .unpack(&unpacked)
+        .expect("selector export fixture");
+    let spec = std::fs::read_to_string(unpacked.join("composed/gdl.toml"))
+        .expect("selector export fixture");
+    let placement = gdl_model::Placement::from_toml(&spec).expect("selector export fixture");
+    let routed = gdl_model::Placement::new()
+        .segment("front", ["A"])
+        .segment("engine", ["Engine"])
+        .route(
+            "Engine",
+            gdl_model::RequestRouter::Selector("least_loaded".into()),
+        );
+    assert_eq!(placement.hash(), routed.hash(), "{spec}");
+    cut["routing"] = json!({"Engine":{"selector":"Least-Loaded"}});
+    let (_, body) = json_call(&app, "POST", "/api/check", Some(cut)).await;
+    assert_ne!(body["ok"], true, "a bad selector name was accepted");
+}
+
+#[tokio::test]
+async fn the_catalogue_lists_gdls_own_selectors() {
+    let temp = scratch("selectors");
+    let app = router(temp.path(), fixture_catalog());
+    let (_, catalog) = json_call(&app, "GET", "/api/catalog", None).await;
+    let names: Vec<&str> = catalog["selectors"]
+        .as_array()
+        .expect("a list of selectors")
+        .iter()
+        .map(|s| s["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, ["affinity", "least_loaded"]);
+    assert!(catalog["selectors"][0]["summary"].is_string());
 }
 
 #[tokio::test]

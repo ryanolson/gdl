@@ -58,12 +58,17 @@ const port = (node, name) => node.ports.find((p) => p.port === name) || {};
 const portOf = (p) => ({ head: p.head || null, item: p.item || null });
 
 let exampleSource=null;
+// gdl's own routing selectors, as the server lists them: a boundary can
+// name one beside the two built-in policies.
+let selectorTypes=[];
+const ROUTER_POLICIES=[['round_robin','Round robin','Distribute requests across destination replicas in turn.'],['random','Random','Choose a destination replica randomly for each request.']];
 async function load() {
   const response = await fetch("/api/catalog");
   if (!response.ok) throw new Error(`Catalog could not be loaded (${response.status}).`);
   const catalog = await response.json();
   state.entries = catalog.entries;
   exampleSource=catalog.example;
+  selectorTypes=catalog.selectors || [];
   $("clear-catalog").disabled=state.entries.length===0;
   $("load-examples").hidden=state.entries.length!==0 || !exampleSource;
   $("add-local").hidden = !catalog.local_enabled;
@@ -474,7 +479,8 @@ function renderCatalog() {
   $('catalog-title').textContent=routerMode?'Routers':'Catalog';
   if(routerMode) {
     container.replaceChildren();
-    for(const [policy,label,description] of [['round_robin','Round robin','Distribute requests across destination replicas in turn.'],['random','Random','Choose a destination replica randomly for each request.']]) {
+    const routers=[...ROUTER_POLICIES,...selectorTypes.map(s=>[s.name,s.name,s.summary])];
+    for(const [policy,label,description] of routers) {
       const button=textElement('button','','router-type');button.append(textElement('strong',label),textElement('small',description,'muted'));
       button.onclick=()=>{
         const list=$('router-targets');list.replaceChildren();
@@ -487,7 +493,7 @@ function renderCatalog() {
       };
       container.append(button);
     }
-    $('package-count').textContent='2';return;
+    $('package-count').textContent=String(routers.length);return;
   }
   const expanded = new Set([...container.querySelectorAll(".package[open]")].map(el => el.dataset.package));
   container.replaceChildren();
@@ -773,17 +779,32 @@ function boundaryProblem(node,destination,onlyNode=false) {
 
 function activeRouting() {
   const placement=Object.fromEntries(Object.entries(segments(instances())).flatMap(([group,members])=>members.map(member=>[member,group])));
-  return Object.fromEntries(networkEdges().filter(edge=>edge.request && placement[edge.from]!==placement[edge.to]).map(edge=>[edge.to,state.routing[edge.to] || 'round_robin']));
+  return Object.fromEntries(networkEdges().filter(edge=>edge.request && placement[edge.from]!==placement[edge.to]).map(edge=>[edge.to,routerOf(state.routing[edge.to] || 'round_robin')]));
+}
+
+// A policy is written as its name; a selector as a table naming it.
+function routerOf(choice) {
+  return ROUTER_POLICIES.some(([policy])=>policy===choice)?choice:{selector:choice};
+}
+
+function routerLabel(choice) {
+  const policy=ROUTER_POLICIES.find(([name])=>name===choice);
+  return policy?policy[1]:choice;
 }
 
 function routerButton(node) {
   const policy=state.routing[node] || 'round_robin';
-  const button=textElement('button',policy==='random'?'Random':'Round robin','request-router');
+  const button=textElement('button',routerLabel(policy),'request-router');
   button.setAttribute('aria-label',`Request router for ${node}`);
   button.title='Select the destination replica for each request. Responses return through their stream anchor.';
   button.onclick=()=>{
     $('router-title').textContent=`Request router → ${node}`;
-    $('router-policy').value=state.routing[node] || 'round_robin';
+    const select=$('router-policy');
+    if(select.add) {
+      select.replaceChildren();
+      for(const [policy,label] of [...ROUTER_POLICIES,...selectorTypes.map(s=>[s.name,s.name])]) select.add(new Option(label,policy));
+    }
+    select.value=state.routing[node] || 'round_robin';
     $('router-form').onsubmit=event=>{event.preventDefault();state.routing[node]=$('router-policy').value;$('router-dialog').close();render();};
     $('router-dialog').showModal();
   };

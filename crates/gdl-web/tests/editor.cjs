@@ -538,6 +538,24 @@ test('Segments catalog presents router policies instead of graph resources', () 
   assert.equal(run('cards[1].children[0].textContent'),'Random');
 });
 
+test('Segments catalog offers the selectors the server lists, and a selector exports as a table', () => {
+  const run=editor();installDom(run);
+  run(`selectorTypes=[{name:'affinity',summary:'Same key, same replica.'},{name:'least_loaded',summary:'Fewest in flight.'}];
+    const cards=[];$('entries').append=(...items)=>cards.push(...items);$('entries').replaceChildren=()=>{};
+    $('search').parentElement={};state.mode='segments';renderCatalog();`);
+  assert.equal(run('cards.length'),4);
+  assert.equal(run('cards[2].children[0].textContent'),'affinity');
+  assert.equal(run('cards[3].children[1].textContent'),'Fewest in flight.');
+  run(`$('source-name').value='Source'; state.hop.inner={node:{name:'Engine',role:'sink',ports:[]}};
+    render=()=>{}; placeNode('Engine','remote',instances());
+    state.routing.Engine='least_loaded';`);
+  assert.equal(run('JSON.stringify(activeRouting().Engine)'),'{"selector":"least_loaded"}');
+  assert.equal(run("routerLabel('least_loaded')"),'least_loaded');
+  assert.equal(run("routerLabel('random')"),'Random');
+  run(`state.routing.Engine='random';`);
+  assert.equal(run('activeRouting().Engine'),'random');
+});
+
 test('explicitly connecting an existing sink exports one node and survives undo snapshots', () => {
   const run=editor();
   run(`$('source-name').value='Source';state.frontend={entry:'p@1',node:{name:'Api',entries:[{}]}};
