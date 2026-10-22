@@ -27,18 +27,15 @@ fn a_pinned_frontend_or_service_segment_builds() {
             "{example}: {}",
             String::from_utf8_lossy(&generate.stderr)
         );
-        // The example's lock, so the build resolves the versions the
-        // example is tested with.
+        // The root workspace's lock, which locks the runtime's whole tree
+        // (velo among it): an example's own lock covers only what its
+        // crate depends on, and the api example's has no runtime.
         std::fs::write(
             temp.path().join("Cargo.toml"),
             "[workspace]\nresolver = \"3\"\nmembers = [\"segments/*\"]\n",
         )
         .expect("workspace");
-        std::fs::copy(
-            root().join("examples").join(example).join("Cargo.lock"),
-            temp.path().join("Cargo.lock"),
-        )
-        .expect("lock");
+        std::fs::copy(root().join("Cargo.lock"), temp.path().join("Cargo.lock")).expect("lock");
         let build = cargo()
             .arg("check")
             .arg("--offline")
@@ -52,5 +49,18 @@ fn a_pinned_frontend_or_service_segment_builds() {
             "{example}: {}",
             String::from_utf8_lossy(&build.stderr)
         );
+        let locked = std::fs::read_to_string(temp.path().join("Cargo.lock")).expect("lock");
+        assert_eq!(
+            velo_source(&locked),
+            velo_source(&std::fs::read_to_string(root().join("Cargo.lock")).expect("lock")),
+            "{example}: the segments built against another velo"
+        );
     }
+}
+
+/// The source line of the `velo` package in a lock file.
+fn velo_source(lock: &str) -> Option<&str> {
+    let mut lines = lock.lines();
+    lines.find(|line| *line == "name = \"velo\"")?;
+    lines.find(|line| line.starts_with("source = "))
 }
