@@ -450,20 +450,29 @@ A global hub watches every `model_x` record in the directory (one small record p
 
 **Eligibility changes; following is slow to change.** A change of policy never tears anything down. When a near cell leaves the near set, loses its slot under `max_near`, or stops being usable, the global hub only marks it **not offered** for its instances: the cell policy stops offering new requests to it, and nothing else changes. Marking it offered again undoes that at once. It is not a retirement: no instance is marked retired, no `gdl-avoids` promise is made, and the instances' routing tables are untouched (a retirement promise is permanent, `crates/gdl/src/dist/roster.rs:127`, `:387`, so it cannot express "not for now"). While the follow link stays open, G keeps acknowledging M's retirements and drains as section 5 says, so those protocols never see G come and go with policy.
 
-The follow link itself closes only when the cell is `draining` and has finished, its record is withdrawn or expired, or it has been not offered for longer than the longest request deadline G admits (`[runtime] deadline`), so that every request G offered to it has ended. Then, in this order:
+The follow link itself closes only when nothing G's instances offered to M can still be running, and that is established by acknowledgement, not by a timer: gdl enforces no maximum request lifetime (`default_deadline` applies only to a request that crosses without a deadline of its own, `crates/gdl/src/dist/hop.rs:352`), so no wait of fixed length is safe.
+
+- **An offer holds a lease.** When a chooser offers a request to cell M in follow generation `g`, it takes a lease on `(M, g)`, held while the chooser holds the request: until the response stream ends or is dropped, as a selector's lease is (ruling 157). The count is one atomic per `(M, g)` in each chooser instance, touched only when an offer is made and when it ends, like the admission ledger: no map keyed by request, and nothing added to a placement without classes.
+- **Exclusion is acknowledged, per generation.** When G's hub marks `(M, g)` not offered, each of G's instances stops offering to it (a selection already in flight is checked again after it returns, ruling 154, so it cannot complete an offer to an excluded cell), then, once its lease count for `(M, g)` is zero, serves `gdl-unoffered-<M>-<g>`. Marking `(M, g)` offered again before the link closes withdraws the mark, and each instance withdraws its acknowledgement: nothing is permanent. An instance that starts after the mark is never shown `(M, g)` as offered; one that leaves counts as acknowledged.
+- **The link closes** once every instance of G has acknowledged `(M, g)`. However long a request runs, its lease keeps the link open, which costs one watch. A directory record that expires or is withdrawn does not close a live follow whose epoch matches (4.1): the follow link, not the directory, says whether M is there.
 
 ```
-global hub G (per cell M, follow generation g)        G's instances                         M's hub
-  M not offered for longer than the deadline,
-  or M finished draining, or M's record is gone
-  publish: drop (M, g) ------------------------------> drop every table of generation g;
-                                                       unregister M's instances from velo
-                                                       unless a newer generation holds them
-  tell M: G no longer sends to you --------------------------------------------------------> M stops counting G among
-  close the follow link                                                                        its following globals
+global hub G (per cell M, generation g)              G's instances                          M's hub
+  M not offered (policy, cap, not usable),
+  or M is draining
+  publish: (M, g) not offered ------------------------> stop offering to (M, g);
+                                                        leases on (M, g) reach zero
+  <---------------------------------------------------- gdl-unoffered-<M>-<g>
+  every instance acknowledged or left
+  publish: drop (M, g) -------------------------------> drop the tables of generation g;
+                                                        unregister M's instances from velo
+                                                        unless a newer generation holds them
+  tell M: G no longer sends to you ----------------------------------------------------------> M stops counting G among
+  close the follow link                                                                          its following globals
 ```
 
-- **Transport lifetime is not routing eligibility.** velo registrations of M's instances are kept until the link closes, not for `drain_ms` (which bounds a stopped instance, `crates/gdl/src/dist/runtime.rs:56`): unregistering a peer fails what is in flight to it (`crates/gdl/src/dist/fabric.rs:74`), and by the time the link closes nothing G offered to M can still be running.
+- **Transport lifetime is not routing eligibility.** velo registrations of M's instances are kept until the link closes: unregistering a peer fails what is in flight to it (`crates/gdl/src/dist/fabric.rs:74`), and by then no lease on `(M, g)` is held anywhere in G.
+- **If the follow link itself is lost** (M's hub is gone, or the path between the hubs), G marks `(M, g)` not offered at once and keeps the registrations until the leases reach zero as above: M's instances, if they are alive, finish what they hold, and if they are not, their streams fail on velo's own detection or their deadlines.
 - **Generations fence a refollow.** Each follow of a cell is a new generation with new per-cell tables, so instance ids seen in an earlier generation carry nothing over (no stale `left` or `retired` marks), and an unregister issued for generation `g` is skipped for a peer that generation `g + 1` already holds.
 - **A new follow** installs M's current state before it exposes any entry instance to G's instances: the snapshot's retired instances first, then the ready ones (ruling 143's order), and nothing at all if M is `draining` or `unavailable`. A global that starts following a cell that is already draining acknowledges its drain at once, since it never offered to it.
 
@@ -550,7 +559,7 @@ Also needed in gdl: the runtime's choice of transport (its builder installs TCP 
 
 | Tier | Where | Infrastructure | What it proves |
 |---|---|---|---|
-| 1. The default suite | one process, OS-assigned ports, under the repository's rules | several gdl hubs and cells in one test; a delay proxy in front of hub HTTP, and between "regions" for velo traffic (needs V3); the existing fault hooks (`delay_forward_ack`) | quorum and hold; joining from seeds: seed turnover, and the join race with both reads before either report (12.3); the one-hop relay without loops or resurrection; the follow set and its damping, and spill coverage with home cells saturated (12.2); not offered and offered again with unchanged entry instances, a long stream that outlives a change of policy under a short `drain_ms`, and a refollow that fences an earlier unregister (12.2); failover only on a refusal; a lost acknowledgement as an unknown outcome with exactly one invocation (4.3); drain order (section 5); an epoch change; a directory outage |
+| 1. The default suite | one process, OS-assigned ports, under the repository's rules | several gdl hubs and cells in one test; a delay proxy in front of hub HTTP, and between "regions" for velo traffic (needs V3); the existing fault hooks (`delay_forward_ack`) | quorum and hold; joining from seeds: seed turnover, and the join race with both reads before either report (12.3); the one-hop relay without loops or resurrection; the follow set and its damping, and spill coverage with home cells saturated (12.2); not offered and offered again with unchanged entry instances, a long stream that outlives a change of policy under a short `drain_ms`, one whose explicit deadline is longer than `default_deadline`, and one that outlives a directory expiry over a healthy follow; a request offered through an old view while the exclusion's delivery is held, which keeps the link open until it ends; a refollow that fences an earlier unregister (12.2); failover only on a refusal; a lost acknowledgement as an unknown outcome with exactly one invocation (4.3); drain order (section 5); an epoch change; a directory outage |
 | 2. One host, real binaries | nightly or by hand, not in the suite | Docker Compose with three networks as regions and `tc netem` between them (35 ms one way, some loss), MTU 8500; real hubs and segment binaries, QUIC, mock engines (no GPUs); one bundle per class from `cargo gdl compose`; load from `aiperf-rs` | real transports and handshakes: time to first token added, warm and cold; with V1 and the CA, traffic from an unauthenticated or unauthorized peer refused before dispatch, with response-first and mux-first connections from authorized peers as the controls; an enrollment or hub report without a certificate for its cell refused; failover and drain under load; killing a hub, a cell, a region; adding and removing cells and regions live; hub RTT against instance RTT |
 | 3. A test fleet on AWS | three regions | one VPC per region with peering, three or four CPU instances per region (EC2 or EKS) with mock engines, a DynamoDB global table, Route 53 latency records with health checks, from Terraform or CDK | real RTTs against the hubs' estimates, which sets `spill_rtt_ms`; DynamoDB replication lag; how fast DNS withdraws a cell; a partition (a NACL on the peering); a directory outage (DynamoDB access revoked); bytes on the wire per request |
 
