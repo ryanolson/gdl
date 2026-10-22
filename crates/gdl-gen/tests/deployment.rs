@@ -162,7 +162,9 @@ fn portable_text(text: &str) -> String {
 /// The pinned commit carries what generated crates depend on, and the
 /// example package comes from the same commit. A pin that predates
 /// `gdl-runtime` compiles here, where only text is compared, and fails
-/// when cargo resolves the generated manifests in the image build.
+/// when cargo resolves the generated manifests in the image build. This
+/// reads the local repository. A pin that was never pushed to the mirror
+/// fails the tests above, which fetch the example package at the pin.
 #[test]
 fn the_deployment_pin_carries_the_runtime() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

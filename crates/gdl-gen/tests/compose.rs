@@ -560,3 +560,35 @@ fn compose_refuses_a_source_without_a_frontend() {
     };
     assert!(error.to_string().contains("frontend"), "{error}");
 }
+
+/// Generation, a check, and an export each write the `[gdl]` path into
+/// manifests that name `gdl-runtime`, so each refuses a path to the
+/// definitions crate. Resolving and drawing write nothing, and read the
+/// path as text.
+#[test]
+fn every_step_that_writes_a_manifest_refuses_a_gdl_path_to_the_definitions() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/http");
+    let text = std::fs::read_to_string(example.join("gdl.toml")).expect("spec");
+    let graph = std::fs::read_to_string(example.join("http.gdl")).expect("graph");
+    let text = text.replace("../../crates/gdl-runtime", "../../crates/gdl");
+    let spec = gdl_gen::Spec::from_text(&text, &graph, &example).expect("loads as text");
+    let target = target();
+    let refused = |result: Result<(), gdl_gen::Error>, step: &str| {
+        let error = result.expect_err(step).to_string();
+        assert!(error.contains("must name `gdl-runtime`"), "{step}: {error}");
+    };
+    refused(
+        gdl_gen::render(&spec, &target.join("out"), &target).map(drop),
+        "render",
+    );
+    refused(
+        gdl_gen::check(&spec, &target, gdl_gen::Offers::Read).map(drop),
+        "check",
+    );
+    refused(
+        gdl_gen::export(&spec, &target, gdl_gen::Offers::Read).map(drop),
+        "export",
+    );
+    gdl_gen::resolve(&spec, &target).expect("resolve");
+    gdl_gen::diagram(&spec, &target, gdl_gen::Format::Dot).expect("diagram");
+}

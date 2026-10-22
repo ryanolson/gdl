@@ -16,6 +16,6 @@ Drafts found while building the gdl runtime on velo 0.19.0. Not filed: each need
 
 ## 2. Single-stream throughput in one process
 
-**Observed.** With default settings, two velo 0.19 nodes in one process over loopback TCP move one stream of small items (about 12 bytes each, `Vec<u8>` items, the server sending in a loop and finalizing) at about 12 K items/s, about 83 us per item. A one-item request (unary request carrying an anchor handle, then attach and stream) takes about 330 us. Setup: `crates/gdl/benches/remote.rs` in dynamo-gdl, `velo-direct` cases; 4 tokio worker threads.
+**Observed.** With default settings, two velo 0.19 nodes in one process over loopback TCP move one stream of small items (about 12 bytes each, `Vec<u8>` items, the server sending in a loop and finalizing) at about 12 K items/s, about 83 us per item. A one-item request (unary request carrying an anchor handle, then attach and stream) takes about 330 us. Setup: `crates/gdl-runtime/benches/remote.rs` in dynamo-gdl, `velo-direct` cases; 4 tokio worker threads.
 
 **Ask.** Is this the expected single-stream rate with the default mux settings (initial credit 32, auto flush on admission, no linger)? If not, which setting is the intended lever?

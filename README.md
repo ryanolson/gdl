@@ -201,7 +201,7 @@ A `[system]` table turns on the system listener, which answers dynamo's probes: 
 
 The generator owns the directory of each segment crate. Each generated file starts with a do-not-edit marker. `cargo gdl generate --check` writes nothing. It fails if a generated file is missing, changed, or stale, or if a segment crate holds a file that the generator did not write.
 
-`[gdl]` names the runtime that the generated crates build on, `gdl-runtime`, by `path`, by `version`, or by `git` with `rev`. Generation refuses a `path` whose package is not `gdl-runtime`, such as the definitions crate `gdl` beside it. Resolving, drawing, and exporting read the path as text.
+`[gdl]` names the runtime that the generated crates build on, `gdl-runtime`, by `path`, by `version`, or by `git` with `rev`. Generation refuses a `path` whose package is not `gdl-runtime`, such as the definitions crate `gdl` beside it. Resolving and drawing read the path as text.
 
 ### Export the segments
 
