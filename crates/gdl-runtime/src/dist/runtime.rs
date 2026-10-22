@@ -508,6 +508,11 @@ impl Runtime {
                     .routes
                     .choose(segment, &**selector, cx, &envelope.payload)
                     .await?;
+                // A request that ended while its selector chose is not
+                // handed on; its lease goes with `picked`. The caller's
+                // select sees the end only at its next await, and the
+                // send can leave before that.
+                cx.check()?;
                 envelope.cx.add_meta(picked.meta);
                 (instance, picked.lease)
             }
