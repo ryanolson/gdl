@@ -12,6 +12,7 @@
 | `agent-docs/plan.md` | The design and milestone plan, including design rulings |
 | `agent-docs/reviews/` | Review records for each milestone |
 | `agent-docs/perf/` | Measurements, with the command that produced them |
+| `agent-docs/cells.md` | Proposal: one graph across several deployments (cells) and regions, each with its own hub; how they discover each other and route |
 | `agent-docs/dynamo.md` | How gdl relates to dynamo's runtime: the compatibility surface, node metrics, and what both need from velo |
 | `agent-docs/velo/` | Changes proposed to velo, with their prototypes and measurements; `agent-docs/velo-issues.md` lists the issues |
 | `crates/` | `gdl` (what a node crate depends on: role traits, request context, local composition, selectors, metrics, and the derives; never links velo), `gdl-runtime` (runtime: segments, crossings over velo, discovery, the segment binary, `graph!`), `gdl-model` (manifest, placement, layout, and diagrams, without the runtime; builds for wasm), `gdl-syntax` (graph parser shared by the macro and the generator), `gdl-message` (`derive(Message)` and the message catalogue, without the runtime), `gdl-extract` (reads what a crate offers from its source, without building it, and the working catalogue), `gdl-macros` (`graph!`, `derive(Message)`, `derive(Node)`, `#[export]`), `gdl-web` (the composer's page and server, on axum), `gdl-gen` (the `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `diagram`, `export`, `compose`) |
