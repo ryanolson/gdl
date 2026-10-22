@@ -2,11 +2,68 @@
 
 Date: 2026-10-22. GDL baseline: `6ded81ff52cd41df2af927d4694083ff09d2bbf6` (`6ded81f`).
 
-This dossier records source evidence for the video plan. Its references include implementation code and existing test cases. The recording rehearsal remains pending.
+This dossier records source evidence for the video plan. Its references include implementation code, regression tests, generated artifacts, and captured footage. The dated rehearsal addendum below records the completed native proof. Docker execution and the full film remain pending.
 
 ## Historical material addendum — 2026-10-22
 
 The owner supplied a Slack research summary after this baseline audit. Selected excerpts and supplied permalinks are in the [history ledger](history.md). The links were not opened. The revised opening uses a narrated space crawl and a six-person cartoon dramatization. Its character dialogue is invented. The supplied excerpts establish working pipelines and existing type constraints, alongside the assembly difficulties.
+
+## Node configuration and metrics addendum — 2026-10-22
+
+The owner requested a central demonstration of configuration and metrics that belong to nodes. The revised script uses one ACME node before and after a placement change. The source supports the contracts below. The rehearsal addendum records the completed packages and native before/after proof; the film still needs the corresponding terminal footage.
+
+| Claim | Source evidence | Recording boundary |
+| --- | --- | --- |
+| A node declares configuration and metrics with its implementation. | `Build` associates both types and receives both at construction. [`crates/gdl/src/role.rs:144`](../../crates/gdl/src/role.rs). | The film demo crates now implement these contracts; see the rehearsal addendum. |
+| Source inspection reads declared graph options and metric definitions. | The reader resolves the node's configuration and metric types, then reads their derive attributes. [`crates/gdl-extract/src/markers.rs:274`](../../crates/gdl-extract/src/markers.rs). | This is metadata from supported source shapes, not arbitrary runtime introspection. |
+| The composer exposes node graph options as controls. | Controls use declared defaults, labels, subtext, and descriptions. [`crates/gdl-web/assets/app.js:99`](../../crates/gdl-web/assets/app.js). | Only marked graph fields appear. Runtime-only fields remain private. [`crates/gdl-model/src/config.rs:44`](../../crates/gdl-model/src/config.rs). |
+| Checked graph values remain keyed by node in generated code. | The generator emits resolved values through `Binary::GRAPH_CONFIG`. [`crates/gdl-gen/src/emit/binary.rs:226`](../../crates/gdl-gen/src/emit/binary.rs). | These values do not automatically become entries in runtime `config.toml`. |
+| Runtime configuration cannot contradict the checked graph. | `build_node` fills missing graph fields and rejects conflicting explicit values before construction. [`crates/gdl-runtime/src/config.rs:10`](../../crates/gdl-runtime/src/config.rs). | Existing coverage exercises layered providers and a rejected conflict. [`crates/gdl-runtime/tests/config.rs:23`](../../crates/gdl-runtime/tests/config.rs). |
+| Compose carries per-segment runtime TOML. | Deploy provides a TOML textarea for each segment. The generator writes its supplied values to `<segment>/config.toml`. [`crates/gdl-web/assets/app.js:2047`](../../crates/gdl-web/assets/app.js), [`crates/gdl-gen/src/deployment.rs:180`](../../crates/gdl-gen/src/deployment.rs). | The UI does not automatically move runtime-only TOML when node placement changes. The take must supply destination values explicitly. |
+| The generated image contains that runtime configuration. | Its Dockerfile copies the configuration to `/etc/gdl/config` and passes that file to the binary. [`crates/gdl-gen/src/deployment.rs:253`](../../crates/gdl-gen/src/deployment.rs). | This is the present Compose artifact path. It is not a Kubernetes ConfigMap. |
+| A node's metric definition and node label belong to that node. | The builder registers the declared metrics under the graph's node name. [`crates/gdl-runtime/src/binary.rs:284`](../../crates/gdl-runtime/src/binary.rs). The metric constructor adds `dynamo_endpoint`. [`crates/gdl/src/metrics.rs:68`](../../crates/gdl/src/metrics.rs). | Existing coverage asserts the node label and actual increments. [`crates/gdl-runtime/tests/metrics.rs:50`](../../crates/gdl-runtime/tests/metrics.rs). The composer currently has no metrics panel. |
+| Deployment identities show where the metric runs. | The registry adds `dynamo_namespace`, `dynamo_component`, and `worker_id`. The namespace includes the placement hash. [`crates/gdl-runtime/src/process.rs:1030`](../../crates/gdl-runtime/src/process.rs). | A placement change produces new process identities and fresh counters. A real generated-segment test asserts these labels on a scrape. [`crates/gdl-gen/tests/lifecycle.rs:320`](../../crates/gdl-gen/tests/lifecycle.rs). |
+| DGD and ConfigMap rendering are future targets. | Current generation supplies Docker Compose. Kubernetes output and apply are absent. [`LIMITATIONS.md:233`](../../LIMITATIONS.md). | Label these proposed outputs as future integration targets throughout the film. |
+
+The before/after take must preserve the node name, graph value, and metric definition. It must show the actual destination TOML and actual scrape identities. It must not imply automatic TOML migration or counter continuity across process restarts.
+
+The owner authorized publication of two example crates and delegated the destination choice. The separate public repository, [`ryanolson/gdl-demo`](https://github.com/ryanolson/gdl-demo/tree/d0d911b4424aa6b6d33b73b164017ba20f304293), now contains the node crates, deployment specs, and accounting receiver companion. Its GDL dependency pins public core revision `deefaa92f37ef3f6e4372c7c4c16eb1eccc1ac94` in `ryanolson/gdl`. The deployment specs deliberately import the node packages at `a6c607ba48b4edea33f684699c8701bbdd543207`. Local development sources remain under `examples/film`. Film assets and Slack history stay outside the public snapshot. This is Git publication; there are no crates.io releases.
+
+## Film timing and capture addendum — 2026-10-22
+
+The revised script contains ten scenes and 39 spoken turns across 505s. The interruption occupies 24–80s. Each first cast introduction reserves a first-name label and a face hold of at least one second. Ryan asks about Ishan's slang exactly once, in the opening. His later lines remain technical and assured.
+
+The current silent `tools/video/work/opening.mp4` covers film time 0–80s, including the extended introductions. Its metadata reports 1920×1080, H.264 High, `yuv420p`, and 24 fps without an audio stream. It supersedes the earlier 12-second capture proof.
+
+The actual film composer tour, `tools/video/work/media/demo-composer.mp4`, is 33.52 seconds at 1920×1080 and 25 fps, with H.264 video and no audio stream. It captures the real catalog, Graph, Segments, and Deploy views. It is a UI tour; it does not establish a Docker build or running deployment.
+
+Renderer preflight also rejected a missing catalog clip without `--animatic`. The same range passed with an explicit placeholder warning under `--animatic`. Recorded proof clips and the mixed soundtrack remain required for the final film.
+
+## Rehearsal and Git publication addendum — 2026-10-22
+
+The public implementation and Compose companion are available for review in [draft PR 1](https://github.com/ryanolson/gdl-demo/pull/1). The published Git revisions remain directly importable.
+
+The two demo packages are implemented and published on `codex/demo-nodes`. The public workspace passed eight tests, formatting, and Clippy with Rust 1.93.1. The local generator target passed four tests in 7.01 seconds, including real generated binaries in both the distributed and compact placements. [`crates/gdl-gen/tests/film.rs:38`](../../crates/gdl-gen/tests/film.rs).
+
+Both native placements accept `{"text":"hello graph"}` at `/generate`, return `HELLO` and `GRAPH` chunks plus the same terminal usage, and send one accounting event for tenant `acme-film`. The engine's compiled settings remain `model = "film-engine"` and `uppercase = true`; the tap's remain `tenant = "acme-film"` and `enabled = true`. Actual scrapes show `mock_requests_total = 1`, `mock_chunks_total = 3`, `accounting_events_total = 1`, and `accounting_errors_total = 0`. `dynamo_endpoint` remains `Engine` or `UsageTap`; `dynamo_component` changes from `engine`/`accounting` to `all`. Each placement uses fresh processes and counters. [`crates/gdl-gen/tests/film.rs:193`](../../crates/gdl-gen/tests/film.rs).
+
+The actual `cargo-gdl compose` run fetched the pinned Git node packages from the public `deploy.toml` and wrote `tools/video/work/deployment`. Its 22 files comprise four Dockerfiles, four Cargo manifests, three runtime configurations, seven Rust sources, and four root artifacts. The root artifacts are `compose.yaml`, `deployment.json`, `crossings.txt`, and `README.md`. The generated services are `front`, `engine`, `accounting`, and `hub`.
+
+| Generated value | Observed result |
+| --- | --- |
+| Node package revision | `a6c607ba48b4edea33f684699c8701bbdd543207` in generated Cargo manifests. |
+| Runtime and hub revision | `deefaa92f37ef3f6e4372c7c4c16eb1eccc1ac94`. |
+| Compiled graph configuration | Every generated segment retains the resolved engine and tap settings above in `GRAPH_CONFIG`. |
+| Frontend runtime configuration | `[frontend] listen = "0.0.0.0:8082"`. |
+| Engine runtime configuration | `[node.Engine] delay_ms = 0`. |
+| Tap runtime configuration | `[node.UsageTap] accounting_url = "http://ledger:8091/usage"`. |
+| Published host ports | Frontend `127.0.0.1:8082`; metrics `127.0.0.1:9090`, `9091`, and `9092` for front, engine, and accounting. |
+
+The public repository's [`accounting.compose.yaml`](https://github.com/ryanolson/gdl-demo/blob/d0d911b4424aa6b6d33b73b164017ba20f304293/accounting.compose.yaml) adds the fifth service, `ledger`, through a companion Dockerfile. Apply the generated Compose file first and this overlay second. The receiver's bind message and the three segment health endpoints provide separate readiness signals. Docker image build and apply have not been exercised here.
+
+The composer currently omits marked message exports from its controls. The reference package defines its canonical messages at the crate root so its source type selectors work. The ACME re-export identity is proved through source extraction, resolution, and generation, rather than a fabricated UI interaction. [`LIMITATIONS.md`](../../LIMITATIONS.md), [`crates/gdl-gen/tests/film.rs:39`](../../crates/gdl-gen/tests/film.rs).
+
+Production status: the 80-second opening and 33.52-second real-composer tour are ready. All six neutral portrait masters exist. Voice takes: zero. Mouth and blink variants, recorded native proof, Docker rehearsal, replication, the edge/backend take, and the mixed full movie remain pending.
 
 ## Capability ledger
 
@@ -54,7 +111,9 @@ If the response or context supplies all required usage and attribution data, the
 
 The mock accounting receipt demonstrates the programmed demo behavior. It establishes no production guarantee for durable delivery, exactly-once billing, token accounting, or accounting after cancellation. The footage must label the engine, usage schema, and accounting service as demo components.
 
-## Recording preflight
+## Recording preflight from the API baseline
+
+These checks describe the earlier API-only preparation. The dated rehearsal addendum above records the current film packages, pins, generated bundle, and completed native proof. Docker build, readiness, and replication still need recording.
 
 1. Pin the recording checkout and every remote demo crate. The current API deployment spec pins the package and runtime to `589a0bf475fa9a2728f4a6fadec3da5b3b883fb8`. [`examples/api/deploy.toml:4`](../../examples/api/deploy.toml), [`examples/api/deploy.toml:24`](../../examples/api/deploy.toml).
 2. Check that the public runtime revision supports the current generated API. A stale runtime pin can generate successfully and fail during compilation. [`LIMITATIONS.md:221`](../../LIMITATIONS.md).
