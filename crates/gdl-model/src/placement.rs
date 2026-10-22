@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +6,17 @@ use crate::Error;
 use crate::Role;
 use crate::hash::Fnv;
 use crate::manifest::{HopInfo, Manifest, TypeInfo};
+
+mod boundary;
+mod classes;
+mod errors;
+mod report;
+
+use boundary::bound;
+use classes::classify;
+pub use errors::{PlacementError, PlacementErrors, WireReason};
+pub use report::CrossingReport;
+use report::hop_lines;
 
 /// Which nodes live in which segment.
 ///
@@ -251,8 +261,21 @@ pub struct Layout {
     placement_hash: u64,
     segment_of: BTreeMap<String, String>,
     class_of: BTreeMap<String, String>,
+    boundaries: Vec<ClassBoundary>,
     hops: Vec<HopLayout>,
     routing: BTreeMap<(usize, usize), RequestRouter>,
+}
+
+/// A hop that crosses from one class into another. Under the boundary rule
+/// its inner end is its only stage in the other class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassBoundary {
+    /// The hop's index in [`Layout::hops`].
+    pub hop: usize,
+    /// The class of the hop's outer end.
+    pub from: String,
+    /// The class of the hop's inner end.
+    pub into: String,
 }
 
 /// How one hop executes under a placement.
@@ -401,240 +424,60 @@ impl Layout {
         self.routing.get(&(hop, position)).unwrap_or(&DEFAULT)
     }
 
-    /// Crossings and anchors for one request through each root.
+    /// The hops that cross from one class into another, in hop order:
+    /// empty when the placement has no classes.
+    pub fn boundaries(&self) -> &[ClassBoundary] {
+        &self.boundaries
+    }
+
+    /// Crossings and anchors for one request through each root and, when
+    /// the placement has classes, the WAN round trips each class boundary
+    /// adds when the request spills to a cell in another region.
     pub fn report(&self) -> CrossingReport {
         CrossingReport {
             roots: self.roots,
-            hops: self
-                .hops
-                .iter()
-                .map(|hop| (hop.crossings(), hop.anchors()))
-                .collect(),
+            hops: hop_lines(&self.hops, &self.boundaries),
+            classed: !self.class_of.is_empty(),
         }
-    }
-}
-
-/// Aggregate segment crossings and anchors for one request through each root.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CrossingReport {
-    roots: usize,
-    hops: Vec<(usize, usize)>,
-}
-
-impl CrossingReport {
-    /// Crossings for one request through each root, over all hops.
-    pub fn crossings(&self) -> usize {
-        self.hops.iter().map(|(c, _)| c).sum()
-    }
-
-    /// Anchors for one request through each root, over all hops.
-    pub fn anchors(&self) -> usize {
-        self.hops.iter().map(|(_, a)| a).sum()
-    }
-}
-
-impl fmt::Display for CrossingReport {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, (crossings, anchors)) in self.hops.iter().enumerate() {
-            writeln!(f, "hop {index}: {crossings} crossings, {anchors} anchors")?;
-        }
-        write!(
-            f,
-            "{}: {} crossings, {} anchors",
-            if self.roots == 1 {
-                "per request"
-            } else {
-                "one request per root"
-            },
-            self.crossings(),
-            self.anchors()
-        )
-    }
-}
-
-/// Why a placement was rejected.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PlacementError {
-    /// A router targets a node that does not start a remote request run.
-    InvalidRouter(String),
-    /// A router names a selector by a name no selector can have.
-    InvalidSelector {
-        /// The node whose boundary it routes.
-        node: String,
-        /// Why the name is refused.
-        reason: String,
-    },
-    /// The manifest itself is inconsistent.
-    InvalidManifest(String),
-    /// A segment lists a node the graph does not have.
-    UnknownNode {
-        /// The segment.
-        segment: String,
-        /// The unknown name.
-        node: String,
-    },
-    /// A node is in no segment.
-    Unplaced {
-        /// The node.
-        node: String,
-    },
-    /// A node is in more than one segment.
-    PlacedTwice {
-        /// The node.
-        node: String,
-        /// Every segment that lists it.
-        segments: Vec<String>,
-    },
-    /// A segment lists no nodes.
-    EmptySegment {
-        /// The segment.
-        segment: String,
-    },
-    /// A class's name is not one a class can have.
-    InvalidClassName {
-        /// The class.
-        class: String,
-        /// Why the name is refused.
-        reason: String,
-    },
-    /// A class lists a segment the placement does not have.
-    UnknownSegment {
-        /// The class.
-        class: String,
-        /// The unknown name.
-        segment: String,
-    },
-    /// A class lists no segments.
-    EmptyClass {
-        /// The class.
-        class: String,
-    },
-    /// A class lists one segment more than once.
-    SegmentRepeated {
-        /// The class.
-        class: String,
-        /// The segment.
-        segment: String,
-    },
-    /// The placement has classes, and a segment is in none of them.
-    Unclassed {
-        /// The segment.
-        segment: String,
-    },
-    /// A segment is in more than one class.
-    ClassedTwice {
-        /// The segment.
-        segment: String,
-        /// Every class that lists it.
-        classes: Vec<String>,
-    },
-    /// An edge that must be encoded carries a type with no codec.
-    NotWire {
-        /// The edge's upstream node.
-        from: String,
-        /// The edge's downstream node.
-        to: String,
-        /// The type on the edge.
-        ty: String,
-        /// Why the edge must be encoded.
-        reason: WireReason,
-    },
-}
-
-/// Why an edge must be encoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WireReason {
-    /// Its two ends are in different segments.
-    Crossing,
-    /// Its ends share a segment, but its items reach the outer end through an
-    /// anchor because the hop's forward path leaves that segment and comes
-    /// back.
-    AnchorCarried,
-}
-
-impl fmt::Display for PlacementError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidRouter(node) => {
-                write!(f, "request router `{node}` must target a request boundary")
-            }
-            Self::InvalidSelector { node, reason } => {
-                write!(f, "request router `{node}`: {reason}")
-            }
-            Self::InvalidManifest(why) => write!(f, "invalid manifest: {why}"),
-            Self::UnknownNode { segment, node } => {
-                write!(f, "segment `{segment}` lists unknown node `{node}`")
-            }
-            Self::Unplaced { node } => write!(f, "node `{node}` is in no segment"),
-            Self::PlacedTwice { node, segments } => {
-                write!(f, "node `{node}` is in several segments: {segments:?}")
-            }
-            Self::EmptySegment { segment } => write!(f, "segment `{segment}` has no nodes"),
-            Self::InvalidClassName { class, reason } => write!(f, "class `{class}`: {reason}"),
-            Self::UnknownSegment { class, segment } => {
-                write!(f, "class `{class}` lists unknown segment `{segment}`")
-            }
-            Self::EmptyClass { class } => write!(f, "class `{class}` has no segments"),
-            Self::SegmentRepeated { class, segment } => {
-                write!(f, "class `{class}` lists segment `{segment}` twice")
-            }
-            Self::Unclassed { segment } => write!(f, "segment `{segment}` is in no class"),
-            Self::ClassedTwice { segment, classes } => {
-                write!(f, "segment `{segment}` is in several classes: {classes:?}")
-            }
-            Self::NotWire {
-                from,
-                to,
-                ty,
-                reason,
-            } => {
-                let why = match reason {
-                    WireReason::Crossing => "crosses a segment boundary",
-                    WireReason::AnchorCarried => "is carried by a reply anchor",
-                };
-                write!(
-                    f,
-                    "edge `{from}` -> `{to}` {why}, but its type `{ty}` is not serializable"
-                )
-            }
-        }
-    }
-}
-
-/// Every reason a placement was rejected; validation reports all of them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementErrors(pub Vec<PlacementError>);
-
-impl fmt::Display for PlacementErrors {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, error) in self.0.iter().enumerate() {
-            if index > 0 {
-                f.write_str("; ")?;
-            }
-            write!(f, "{error}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for PlacementErrors {}
-
-impl From<PlacementErrors> for Error {
-    fn from(errors: PlacementErrors) -> Self {
-        Error::new(errors.to_string())
     }
 }
 
 /// Check `placement` against `manifest` and split every hop into runs.
+///
+/// When the placement has classes, every hop that crosses from one class
+/// into another must cross only at its inner end: every other stage of the
+/// hop is in its outer end's segment, and every hop nested under the inner
+/// end stays in the inner end's class. The class boundaries must not make
+/// a cycle.
 pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, PlacementErrors> {
     // A class groups segments and decides nowhere a node runs, so a class
-    // problem stops none of the other checks: it is reported with whatever
-    // they find.
+    // or boundary problem stops none of the other checks: it is reported
+    // with whatever they find.
     let mut class_errors = Vec::new();
     let class_of = classify(placement, &mut class_errors);
-    match place(manifest, placement) {
-        Ok(layout) if class_errors.is_empty() => Ok(Layout { class_of, ..layout }),
+    let mut errors = check_manifest(manifest);
+    if !errors.is_empty() {
+        errors.append(&mut class_errors);
+        return Err(PlacementErrors(errors));
+    }
+    // A node in no segment, or in several, is judged nowhere, but the
+    // boundary rule still judges every hop of the nodes that are placed.
+    let segment_of = assign(manifest, placement, &mut errors);
+    let boundaries = if placement.classes.is_empty() {
+        Vec::new()
+    } else {
+        bound(manifest, &segment_of, &class_of, &mut class_errors)
+    };
+    if !errors.is_empty() {
+        errors.append(&mut class_errors);
+        return Err(PlacementErrors(errors));
+    }
+    match place(manifest, placement, segment_of) {
+        Ok(layout) if class_errors.is_empty() => Ok(Layout {
+            class_of,
+            boundaries,
+            ..layout
+        }),
         Ok(_) => Err(PlacementErrors(class_errors)),
         Err(PlacementErrors(mut errors)) => {
             errors.append(&mut class_errors);
@@ -643,13 +486,13 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     }
 }
 
-/// Every check but the classes', and the layout without them.
-fn place(manifest: &Manifest, placement: &Placement) -> Result<Layout, PlacementErrors> {
-    let mut errors = check_manifest(manifest);
-    if !errors.is_empty() {
-        return Err(PlacementErrors(errors));
-    }
-
+/// The segment of each node that is in exactly one, checking that every
+/// node of a sound manifest is.
+fn assign(
+    manifest: &Manifest,
+    placement: &Placement,
+    errors: &mut Vec<PlacementError>,
+) -> BTreeMap<String, String> {
     let mut where_placed: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (segment, nodes) in placement.segments() {
         if nodes.is_empty() {
@@ -683,10 +526,17 @@ fn place(manifest: &Manifest, placement: &Placement) -> Result<Layout, Placement
             }),
         }
     }
-    if !errors.is_empty() {
-        return Err(PlacementErrors(errors));
-    }
+    segment_of
+}
 
+/// Every check that needs the nodes' segments but not their classes, and
+/// the layout without classes.
+fn place(
+    manifest: &Manifest,
+    placement: &Placement,
+    segment_of: BTreeMap<String, String>,
+) -> Result<Layout, PlacementErrors> {
+    let mut errors = Vec::new();
     let hops: Vec<HopLayout> = manifest
         .hops
         .iter()
@@ -733,64 +583,9 @@ fn place(manifest: &Manifest, placement: &Placement) -> Result<Layout, Placement
         placement_hash: placement.hash(),
         segment_of,
         class_of: BTreeMap::new(),
+        boundaries: Vec::new(),
         hops,
     })
-}
-
-/// Each segment's class, checking that a placement with classes puts every
-/// segment in exactly one. A placement without classes has none to check.
-fn classify(placement: &Placement, errors: &mut Vec<PlacementError>) -> BTreeMap<String, String> {
-    let mut class_of = BTreeMap::new();
-    if placement.classes.is_empty() {
-        return class_of;
-    }
-    let mut where_classed: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (class, segments) in placement.classes() {
-        // A misnamed class still classifies its segments, so that each of
-        // them is not also reported as in no class.
-        if let Err(reason) = check_class_name(class) {
-            errors.push(PlacementError::InvalidClassName {
-                class: class.to_string(),
-                reason,
-            });
-        }
-        if segments.is_empty() {
-            errors.push(PlacementError::EmptyClass {
-                class: class.to_string(),
-            });
-        }
-        let mut listed = BTreeSet::new();
-        for segment in segments {
-            if !listed.insert(segment.as_str()) {
-                errors.push(PlacementError::SegmentRepeated {
-                    class: class.to_string(),
-                    segment: segment.clone(),
-                });
-            } else if !placement.segments.contains_key(segment) {
-                errors.push(PlacementError::UnknownSegment {
-                    class: class.to_string(),
-                    segment: segment.clone(),
-                });
-            } else {
-                where_classed.entry(segment).or_default().push(class);
-            }
-        }
-    }
-    for (segment, _) in placement.segments() {
-        match where_classed.get(segment).map(Vec::as_slice) {
-            None | Some([]) => errors.push(PlacementError::Unclassed {
-                segment: segment.to_string(),
-            }),
-            Some([class]) => {
-                class_of.insert(segment.to_string(), class.to_string());
-            }
-            Some(classes) => errors.push(PlacementError::ClassedTwice {
-                segment: segment.to_string(),
-                classes: classes.iter().map(ToString::to_string).collect(),
-            }),
-        }
-    }
-    class_of
 }
 
 fn hop_layout(
