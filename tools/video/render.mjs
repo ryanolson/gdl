@@ -48,7 +48,7 @@ export function parseArgs(args) {
   return options;
 }
 
-export function renderPlan(options, duration, missingFootage) {
+export function renderPlan(options, duration, missingFootage, archiveCues) {
   positive(duration, 'Film duration');
   const from = options.from;
   const to = options.to ?? duration;
@@ -62,6 +62,12 @@ export function renderPlan(options, duration, missingFootage) {
     return from < clip.end && to > clip.start;
   });
   if (missing.length && !options.animatic) throw new Error(`Recorded footage is missing for: ${missing.map((clip) => clip.id ?? `${clip.start}–${clip.end}s`).join(', ')}. Attach clips or use --animatic for an explicitly incomplete preview.`);
+  if (!Array.isArray(archiveCues)) throw new Error('gdlFilm.getState().archiveCues must be an array.');
+  const archive = archiveCues.filter((cue) => {
+    if (!cue || typeof cue.id !== 'string' || !cue.id.trim() || !Number.isFinite(cue.start) || !Number.isFinite(cue.end) || cue.start < 0 || cue.end <= cue.start || cue.end > duration) throw new Error('Each archiveCues item must have an id and finite start/end seconds within the film, with start < end.');
+    return from < cue.end && to > cue.start;
+  });
+  if (archive.length && !options.audio && !options.animatic) throw new Error(`Archive speech intersects this range: ${archive.map((cue) => cue.id).join(', ')}. Supply --audio with a full-film mix aligned to time zero, or use --animatic for a silent preview. Manifest voice takes are not embedded automatically.`);
   const frames = Math.max(1, Math.ceil((to - from) * options.fps - 1e-9));
   if (!Number.isSafeInteger(frames)) throw new Error('Capture range and frame rate produce too many frames.');
   return { from, to, fps: options.fps, frames, encodedDuration: frames / options.fps, missing };
@@ -120,7 +126,7 @@ async function run(options) {
       await document.fonts.ready;
       return { duration: film.duration, state: film.getState() };
     }), 30000, 'Waiting for gdlFilm.ready', controller.signal);
-    const plan = renderPlan(options, setup.duration, setup.state?.missingFootage);
+    const plan = renderPlan(options, setup.duration, setup.state?.missingFootage, setup.state?.archiveCues);
     const stage = page.locator('#film-stage');
     await stage.waitFor({ state: 'visible', timeout: 15000 });
     const box = await stage.boundingBox();
@@ -247,7 +253,7 @@ Usage: node tools/video/render.mjs [options]
   --audio PATH       Full-film audio track aligned to time zero; clip offset is applied
   --ffmpeg PATH      ffmpeg executable override (also FFMPEG_PATH)
   --playwright PATH  Absolute Playwright module path (also PLAYWRIGHT_MODULE_PATH)
-  --animatic         Allow missing recorded demo clips as visible placeholders
+  --animatic         Allow missing demo clips and silent archive speech
   --preflight        Check dependencies, local stage and clip coverage without rendering
   --help             Show this help
 
@@ -257,6 +263,7 @@ frame seeks, H.264/yuv420p and MP4 faststart. Existing output is replaced only
 after a complete encode. The audio track is trimmed to the same film range,
 padded with silence if short, and encoded as AAC; it is not an audio generator.
 Live composer iframes are never exported. Attach demo clips before final export.
+Archive speech requires --audio; manifest voice takes support browser preview.
 
 Example:
   node tools/video/render.mjs --from 0 --to 55 --fps 30 --out tools/video/work/opening.mp4

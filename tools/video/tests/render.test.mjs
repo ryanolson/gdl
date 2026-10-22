@@ -44,25 +44,54 @@ test('renderer rejects unsafe URLs and invalid capture options', () => {
 });
 
 test('render preflight calculates exclusive-end frame samples', () => {
-  const plan = renderPlan({ from: 2, to: 3, fps: 30 }, 480, []);
+  const plan = renderPlan({ from: 2, to: 3, fps: 30 }, 480, [], []);
   assert.deepEqual(plan, { from: 2, to: 3, fps: 30, frames: 30, encodedDuration: 1, missing: [] });
-  assert.equal(renderPlan({ from: 479, fps: 30 }, 480, []).to, 480);
-  assert.equal(renderPlan({ from: 0, to: 0.11, fps: 30 }, 480, []).frames, 4);
-  assert.throws(() => renderPlan({ from: 480, fps: 30 }, 480, []), /range/);
-  assert.throws(() => renderPlan({ from: 0, to: 481, fps: 30 }, 480, []), /range/);
+  assert.equal(renderPlan({ from: 479, fps: 30 }, 480, [], []).to, 480);
+  assert.equal(renderPlan({ from: 0, to: 0.11, fps: 30 }, 480, [], []).frames, 4);
+  assert.throws(() => renderPlan({ from: 480, fps: 30 }, 480, [], []), /range/);
+  assert.throws(() => renderPlan({ from: 0, to: 481, fps: 30 }, 480, [], []), /range/);
 });
 
 test('recorded demo coverage fails closed and uses half-open intervals', () => {
   const missing = [{ id: 'catalog', start: 60, end: 90 }];
-  assert.equal(renderPlan({ from: 0, to: 60, fps: 30 }, 480, missing).missing.length, 0);
-  assert.equal(renderPlan({ from: 90, to: 100, fps: 30 }, 480, missing).missing.length, 0);
-  assert.throws(() => renderPlan({ from: 55, to: 65, fps: 30 }, 480, missing), /catalog.*--animatic/);
-  assert.equal(renderPlan({ from: 55, to: 65, fps: 30, animatic: true }, 480, missing).missing.length, 1);
-  assert.throws(() => renderPlan({ from: 0, to: 55, fps: 30 }, 480, [{ id: 'bad' }]), /missingFootage/);
+  assert.equal(renderPlan({ from: 0, to: 60, fps: 30 }, 480, missing, []).missing.length, 0);
+  assert.equal(renderPlan({ from: 90, to: 100, fps: 30 }, 480, missing, []).missing.length, 0);
+  assert.throws(() => renderPlan({ from: 55, to: 65, fps: 30 }, 480, missing, []), /catalog.*--animatic/);
+  assert.equal(renderPlan({ from: 55, to: 65, fps: 30, animatic: true }, 480, missing, []).missing.length, 1);
+  assert.throws(() => renderPlan({ from: 0, to: 55, fps: 30 }, 480, [{ id: 'bad' }], []), /missingFootage/);
+});
+
+test('archive speech requires an explicit full-film audio mix for intersecting exports', () => {
+  const archive = [
+    { id: 'hardfork-casey', start: 506, end: 507.5 },
+    { id: 'hardfork-kevin', start: 508, end: 509.5 },
+  ];
+  assert.throws(() => renderPlan({ from: 505, to: 512, fps: 30 }, 512, [], archive), /hardfork-casey.*hardfork-kevin.*--audio.*--animatic/);
+  assert.throws(() => renderPlan({ from: 508.1, to: 508.2, fps: 30 }, 512, [], archive), error => {
+    assert.match(error.message, /hardfork-kevin/);
+    assert.doesNotMatch(error.message, /hardfork-casey/);
+    return true;
+  });
+  assert.equal(renderPlan({ from: 505, to: 512, fps: 30, audio: '/audio/full-film.wav' }, 512, [], archive).frames, 210);
+  assert.equal(renderPlan({ from: 505, to: 512, fps: 30, animatic: true }, 512, [], archive).frames, 210);
+});
+
+test('silent previews remain valid outside half-open archive cue intervals', () => {
+  const archive = [{ id: 'hardfork-casey', start: 506, end: 507.5 }];
+  assert.equal(renderPlan({ from: 0, to: 505, fps: 30 }, 505, [], []).to, 505);
+  assert.equal(renderPlan({ from: 0, to: 506, fps: 30 }, 512, [], archive).to, 506);
+  assert.equal(renderPlan({ from: 507.5, to: 512, fps: 30 }, 512, [], archive).from, 507.5);
+});
+
+test('malformed archive cue metadata cannot bypass the audio guard', () => {
+  const options = { from: 505, to: 512, fps: 30, animatic: true };
+  for (const archive of [undefined, null, {}, [{ id: 'bad' }], [{ start: 506, end: 507 }], [{ id: 'bad', start: NaN, end: 507 }], [{ id: 'bad', start: 508, end: 507 }], [{ id: 'bad', start: -1, end: 507 }], [{ id: 'bad', start: 506, end: 513 }]]) {
+    assert.throws(() => renderPlan(options, 512, [], archive), /archiveCues/);
+  }
 });
 
 test('ffmpeg receives video-only encoding and full-film audio offset without a shell', () => {
-  const plan = renderPlan({ from: 12, to: 14, fps: 30 }, 480, []);
+  const plan = renderPlan({ from: 12, to: 14, fps: 30 }, 480, [], []);
   const silent = ffmpegArgs({}, plan, '/output/partial.mp4');
   assert.equal(silent[silent.indexOf('-framerate') + 1], '30');
   assert.deepEqual(silent.slice(silent.indexOf('-map'), silent.indexOf('-map') + 2), ['-map', '0:v:0']);

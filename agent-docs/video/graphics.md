@@ -4,6 +4,8 @@ Creative brief, 2026-10-22. The owner selected cartoon portraits based on refere
 
 Implementation status, 2026-10-22: the HTML stage and all six neutral masters exist. Current head motion uses deterministic bob and rotation. Mouth states, blink assets, and phoneme alignment remain pending. The silent 80-second opening exports at 1920×1080 and 24fps. Actual composer recordings include the API rehearsal and a 33.52-second tour of the two film packages, configuration controls, graph, segments, and Deploy. Accepted voices and final ACME proof clips remain production inputs.
 
+Ending addendum, 2026-10-22: the owner requested a Hard Fork tribute with Casey Newton and Kevin Roose bobbleheads. Their transparent neutral heads are in `assets/casey/` and `assets/kevin/`. Each directory records the exact prompt and official photo sources. The optional HTML tag uses staggered spring entrances and a hard cut to black. Open `?ending=hardfork&t=505` to rehearse it. Original archive takes remain separate inputs. The [source ledger](hardfork.md) records their status.
+
 ## Portrait inputs
 
 All six labeled reference photos are supplied. Preserve glasses, facial hair, hair shape, and other identifying features present in each reference.

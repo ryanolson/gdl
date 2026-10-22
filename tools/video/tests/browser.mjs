@@ -156,3 +156,34 @@ test('paused capture keeps an exact seek position across browser frames', { time
     assert.deepEqual(await page.locator('#film-stage').boundingBox(), { x: 0, y: 0, width: 1920, height: 1080 });
   } finally { await page.close(); }
 });
+
+test('the optional tribute loads only on request and seeks reproducible guest and black frames', { timeout: 15000 }, async () => {
+  const plain = await openStage();
+  try {
+    assert.equal(await plain.locator('.film-tribute').count(), 0);
+    assert.equal((await plain.evaluate(() => window.gdlFilm.getState())).archiveCues.length, 0);
+    assert.equal(await plain.locator('img[src*="/assets/casey/"]').count(), 0);
+  } finally { await plain.close(); }
+  const page = await openStage('?ending=hardfork&t=507');
+  try {
+    const state = await page.evaluate(() => window.gdlFilm.getState());
+    assert.equal(state.duration, 512);
+    assert.equal(state.totalVoices, 41);
+    assert.deepEqual(state.archiveCues.map(turn => turn.id), ['hardfork-casey', 'hardfork-kevin']);
+    assert.equal(await page.locator('.film-tribute').isVisible(), true);
+    assert.equal(await page.locator('.film-root').isVisible(), false);
+    assert.equal(await page.locator('.film-tribute').getAttribute('data-black'), 'false');
+    assert.equal(await page.locator('.film-guest-speaking .film-guest-name').textContent(), 'Casey Newton');
+    const transform = await page.locator('[data-guest="casey"] .film-guest-head').getAttribute('style');
+    await page.evaluate(() => window.gdlFilm.seek(508.3));
+    assert.equal(await page.locator('.film-guest-speaking .film-guest-name').textContent(), 'Kevin Roose');
+    await page.evaluate(() => window.gdlFilm.seek(507));
+    assert.equal(await page.locator('[data-guest="casey"] .film-guest-head').getAttribute('style'), transform);
+    await page.evaluate(() => window.gdlFilm.seek(510));
+    assert.equal(await page.locator('.film-tribute').getAttribute('data-black'), 'true');
+    assert.equal(await page.locator('#caption-layer').textContent(), '');
+    await page.evaluate(() => window.gdlFilm.seek(500));
+    assert.equal(await page.locator('.film-tribute').isVisible(), false);
+    assert.equal(await page.locator('.film-root').isVisible(), true);
+  } finally { await page.close(); }
+});

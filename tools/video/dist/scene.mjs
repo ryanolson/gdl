@@ -66,6 +66,8 @@ export function createRenderer(stageElement, { assetBase = '../../../agent-docs/
     if (disposed) return;
     const time = Number.isFinite(frame.time) ? frame.time : 0;
     const scene = frame.scene || { id: 'opening', start: 0, end: 24 };
+    root.hidden = !Object.hasOwn(LABELS, scene.id);
+    if (root.hidden) return;
     const elapsed = Math.max(0, time - scene.start);
     const progress = clamp(elapsed / Math.max(1, scene.end - scene.start));
     const speaker = speakerKey(frame.turn?.speaker);

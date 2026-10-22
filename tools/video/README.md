@@ -6,6 +6,10 @@ With the empty media manifest, the stage is a silent animatic. Missing demo clip
 
 Each first cast introduction has a first-name label and a face hold of at least one second. Ishan uses light slang. Ryan asks for a translation exactly once, in the opening. Kyle interrupts with friendly impatience. Stock cast and narrator voices are planned. Ryan can supply a custom ElevenLabs voice for himself.
 
+An optional seven-second Hard Fork tribute follows the main ending. Open [the tribute rehearsal](http://127.0.0.1:8088/?ending=hardfork&t=505). Casey Newton and Kevin Roose appear as cartoon bobbleheads, then the picture cuts to black. This cut ends at 8:32. The default cut stays at 8:25.
+
+The archive cue IDs are `hardfork-casey` and `hardfork-kevin`. Supply original audio through the manifest's `voices` map for browser playback. These cues have no TTS text and `model_id: null`. See the [source ledger](../../agent-docs/video/hardfork.md) for clip status. The final MP4 needs a full-film audio mix through `--audio`; manifest audio is for preview. An export that intersects the tribute's archive cues requires `--audio` or the explicit `--animatic` flag.
+
 ## Install local dependencies
 
 Run commands from the repository root unless a step states another directory.

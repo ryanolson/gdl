@@ -74,3 +74,15 @@
 .film-reveal-copy { position: absolute; left: 220px; right: 220px; top: 458px; text-align: center; font-size: 30px; color: #4d6357; }
 .film-delivery { position: absolute; top: 545px; left: 300px; right: 300px; display: flex; justify-content: center; gap: 42px; font-size: 16px; font-weight: 700; letter-spacing: 1px; color: #54675a; }
 .film-delivery span:last-child { color: #8d6d32; }
+.film-tribute { position: absolute; inset: 0; z-index: 20; overflow: hidden; background: #e9e7de; color: #172e2c; font-family: Arial, Helvetica, sans-serif; }
+.film-tribute[hidden], .film-guest[hidden] { display: none; }
+.film-tribute-label { position: absolute; top: 125px; width: 100%; text-align: center; font-size: 24px; font-weight: 800; letter-spacing: 8px; }
+.film-guest { position: absolute; top: 285px; width: 530px; height: 800px; }
+.film-guest-casey { left: 340px; }
+.film-guest-kevin { left: 1050px; }
+.film-guest-head { position: absolute; inset: 0 0 auto; width: 100%; transform-origin: 50% 88%; }
+.film-guest-body { position: absolute; top: 450px; left: 80px; right: 80px; height: 400px; border: 3px solid #243d37; border-radius: 35% 35% 0 0; background: var(--guest-shirt); }
+.film-guest-name { position: absolute; top: 635px; left: 50%; transform: translateX(-50%) rotate(-2deg); white-space: nowrap; padding: 15px 28px; border: 2px solid #243d37; background: #faf8ed; font-size: 30px; font-weight: 800; box-shadow: 5px 6px 0 #243d3722; }
+.film-guest-speaking .film-guest-name { background: #e6bf4c; }
+.film-tribute[data-black="true"] { background: #000; }
+.film-tribute[data-black="true"] > * { visibility: hidden; }

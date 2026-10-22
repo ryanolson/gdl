@@ -200,6 +200,21 @@ Tags such as `[curious]` and `[short pause]` appear in official examples. Longer
 
 *GDL title. The request reaches the client. One receipt prints. All six heads return for a brief final tableau. Music resolves. Hold the final frame for three seconds.*
 
+## Optional post-credits tag — A nod to Hard Fork
+
+*Added 2026-10-22 at the owner's request. The main cut still ends at 08:25. Enable `?ending=hardfork` for a seven-second tag and an 08:32 end. The time slots below remain provisional until the archive takes pass the listening check. Sources and clip status are in the [Hard Fork ledger](hardfork.md).*
+
+| Film time | Picture | Sound |
+| --- | --- | --- |
+| 08:25.00–08:25.35 | Black after the resolved GDL tableau. | Silence. |
+| 08:25.35–08:26.90 | Casey Newton springs up, followed by Kevin Roose. Their heads bob on simple paper bodies. Small card: A NOD TO HARD FORK. | Leave room for the visual recognition. |
+| 08:26.90–08:27.90 | Casey's name card catches the light. | Original Casey excerpt: “Stop generating.” |
+| 08:28.10–08:29.20 | Kevin's name card catches the light. | Original Kevin excerpt: “Stop generating.” |
+| 08:29.20–08:29.40 | One last tiny head wobble. | Brief silence. |
+| 08:29.40–08:32.00 | Hard cut to black. Remain black. | Silence. |
+
+*These two cues use original recordings. Do not send them to ElevenLabs. Keep their archive source metadata in the cue sheet. Retain the clean GDL ending before the tag. The full soundtrack must contain the selected excerpts at the cue times; browser preview audio is not embedded by the frame renderer.*
+
 ## Source and edit notes
 
 - The opening draws on the supplied Slack research and the owner's account. The [history ledger](history.md) separates supplied quotations from inferences. The Slack links were not opened.

@@ -4,11 +4,12 @@ import { createRenderer } from './scene.mjs';
 import { VoiceScheduler } from './audio.mjs';
 import { FootageDeck, validateManifest } from './media.mjs';
 import { captionAt } from './captions.mjs';
+import { appendTribute, createTributeRenderer } from './tribute.mjs';
 
 const element = id => document.getElementById(id);
 const stage = element('film-stage');
 const query = new URLSearchParams(location.search);
-let clock, scenes, renderer, voices, footage, manifest;
+let clock, scenes, renderer, tribute, voices, footage, manifest;
 let capture = false;
 let footageMode = 'none';
 let animationFrame = 0;
@@ -34,6 +35,7 @@ window.gdlFilm = {
       missingFootage: footage?.missing() ?? [],
       configuredVoices: Object.keys(manifest?.voices ?? {}).length,
       totalVoices: scenes?.reduce((sum, scene) => sum + scene.turns.length, 0) ?? 0,
+      archiveCues: scenes?.flatMap(scene => scene.turns.filter(turn => turn.source === 'archive').map(({ id, start, end }) => ({ id, start, end }))) ?? [],
     };
   },
 };
@@ -45,7 +47,7 @@ async function initialize() {
   const [scriptResponse, mediaResponse] = await Promise.all([fetch('/script.md'), fetch(manifestUrl)]);
   if (!scriptResponse.ok) throw new Error(`Script request failed: HTTP ${scriptResponse.status}`);
   if (!mediaResponse.ok) throw new Error(`Media manifest request failed: HTTP ${mediaResponse.status}`);
-  scenes = parseScript(await scriptResponse.text());
+  scenes = appendTribute(parseScript(await scriptResponse.text()), query.get('ending'));
   manifest = validateManifest(await mediaResponse.json(), scenes);
   manifest.composerUrl = new URL(manifest.composerUrl, manifestUrl).href;
   element('composer-link').href = manifest.composerUrl;
@@ -57,6 +59,7 @@ async function initialize() {
   element('timeline').disabled = false;
   element('film-duration').textContent = timecode(clock.snapshot().duration);
   renderer = createRenderer(stage, { assetBase: '/assets/' });
+  if (query.get('ending') === 'hardfork') tribute = createTributeRenderer(stage);
   voices = new VoiceScheduler({ scenes, onError: ({ turnId, error }) => status(`${turnId}: ${error.message}`, true) });
   footage = new FootageDeck({ stage, scenes, manifest, onError: ({ sceneId, error }) => status(`${sceneId}: ${error.message}`, true) });
   for (const [id, url] of Object.entries(manifest.voices)) {
@@ -64,7 +67,7 @@ async function initialize() {
   }
   buildSceneList();
   bindControls();
-  await Promise.all([renderer.ready, document.fonts.ready]);
+  await Promise.all([renderer.ready, tribute?.ready, document.fonts.ready]);
   const initial = Number(query.get('t') ?? 0);
   if (!Number.isFinite(initial)) throw new Error('The t query parameter must be a finite number of seconds.');
   if (query.get('mode')) footageMode = query.get('mode');
@@ -90,6 +93,7 @@ function draw() {
   const snapshot = clock.snapshot();
   const frame = { ...frameAt(scenes, snapshot.time), capture };
   renderer.render(frame);
+  tribute?.render(frame);
   stage.dataset.footageActive = String(frame.scene.captureKind === 'live-composer' && (footageMode === 'live' || footageMode === 'recorded' && Boolean(manifest.footage[frame.scene.id])));
   updateCaption(frame);
   element('timeline').value = snapshot.time;
@@ -163,7 +167,7 @@ function buildCueList(scene) {
     const speaker = document.createElement('strong'); speaker.textContent = `${timecode(turn.start)} · ${turn.speaker}`;
     const copy = document.createElement('span'); copy.textContent = turn.caption;
     const id = document.createElement('small'); id.textContent = turn.id;
-    button.append(speaker, copy, id); button.title = turn.text;
+    button.append(speaker, copy, id); button.title = turn.text ?? 'Original archive audio. Do not synthesize this cue.';
     button.addEventListener('click', () => act(() => seek(turn.start))); element('cue-list').append(button);
   }
 }
@@ -212,7 +216,7 @@ function exportCues() {
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
   const link = document.createElement('a'); link.href = url; link.download = 'cut-here-cues.json'; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  status('Cue sheet exported. It includes tagged speech and clean captions; voice IDs still need assignment.');
+  status('Cue sheet exported. Archive cues have no TTS text. Stock voice IDs still need assignment.');
 }
 
 function timecode(time, precise = false) {

@@ -1,5 +1,7 @@
 # ElevenLabs voice production
 
+The optional [Hard Fork tribute](script.md#optional-post-credits-tag--a-nod-to-hard-fork) uses original archive clips for Casey Newton and Kevin Roose. Exclude `source: "archive"` cues from ElevenLabs. Those cues have no TTS text and `model_id: null`. Their [source ledger](hardfork.md) records clip status.
+
 Production note, 2026-10-22. The [script](script.md) is the source of spoken words and delivery cues. Its 39 spoken turns cover the narrator and six cartoon characters across 8:25. The annotations are prepared for audition. No voice takes have been generated.
 
 ## Model and speaker assignment
