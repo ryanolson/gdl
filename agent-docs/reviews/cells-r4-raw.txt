@@ -1,0 +1,43 @@
+Reviewed `a0afa34` against the round-three approval. No edits, builds, or tests ran.
+
+**Critical:** none.
+
+**Major findings**
+
+1. **§12.3 — Mesh bootstrap and record-export rules disagree.** [cells.md:454–455](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:454) says a seed reveals every global, but restricts exports to its own record and direct reports, excluding records learned from another global.
+
+   Under that literal rule:
+
+   `B and C join through A → A leaves → N joins through B → N cannot discover C`
+
+   B knows C through its watches, but cannot export that knowledge. C discovering N and watching it does not establish N’s reverse watch. N consequently misses model cells reported only to C.
+
+   If receiving C’s own record over a direct watch is intended to qualify as receiving it from its writer, that exception needs to override the blanket prohibition.
+
+   **Change:** separate global-peer discovery from model-record relay. Bootstrap should expose all known global addresses; model records can retain the one-hop restriction. Alternatively, explicitly define direct peer self-record propagation and reciprocal introductions. Validate seed turnover followed by another join.
+
+2. **§§12.2, 5 — Computed unfollow lacks the withdrawal barrier required by retirement.** [cells.md:446–448](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:446) introduces routine follow removal, while [cells.md:268–269](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:268) bases retirement and drain acknowledgements on following globals. It does not define when an unfollowing global ceases to count as a sender.
+
+   Closing G’s follow before its instances have withdrawn M permits this ordering:
+
+   `G closes follow → M stops waiting for G → D retires → G’s stale chooser still sends to D`
+
+   Current retirement retains live senders until their promise or departure ([hub.rs:239](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/fabric/hub.rs:239)) and publishes exclusion before acknowledging ([roster.rs:159](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/roster.rs:159)).
+
+   **Change:** specify ordered unfollow: withdraw eligibility from local chooser instances, collect their acknowledgements, retain sender responsibility through the setup grace, then release follow membership. Retain transport registrations needed by admitted streams; unregistering a peer fails active work ([fabric.rs:74](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/fabric.rs:74)). A new follow must install current state before exposing any entry.
+
+3. **§12.2 — Nearest-first truncation can permanently disable spill.** With 32 home cells, the default [follow cap](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:448) allocates every slot locally. When all home cells saturate, §4.5 calls for spill, but no remote cell has an entry table or load summary—even when a ready remote cell is within budget and has capacity. Refusals do not change this distance-based follow set.
+
+   Routing cannot select an instance outside its supplied view ([select.rs:134](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/select.rs:134)). The same issue affects nearby unavailable cells unless follow selection prioritizes usability.
+
+   **Change:** retain the cap, but reserve spill coverage and specify replacement of unusable candidates and handling of excess home cells. Validate home saturation with spare capacity beyond the nearest-first cutoff.
+
+**Minor finding**
+
+4. **§12.2; Q10 — Define the measurement before treating HTTP duration as network RTT.** [cells.md:445](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:445) applies an 80 ms threshold to an unspecified HTTP-health measurement. A reconnecting probe can include TCP establishment plus the request exchange: a 70 ms network path can appear closer to 140 ms. Server or proxy delay also affects the result. The proposal already distinguishes connection establishment from request latency in [§6.2](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:338).
+
+   **Change:** define warmed sampling that excludes connection setup, account for processing delay, and validate the proxy against representative worker paths. Hub latency is a reasonable proximity hint; the asserted small difference from worker latency needs measurement before Q10’s recommendation becomes a hard selection rule.
+
+Existing request deadlines still provide bounded failure outcomes. The issues above concern discovery availability, spill coverage, and graceful membership changes.
+
+**Verdict: REJECT.**

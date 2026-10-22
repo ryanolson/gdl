@@ -440,21 +440,40 @@ Unchanged: **identity.** A global follows a cell only when the cell record's con
 
 ### 12.2 The follow set, computed
 
-A global hub watches every `model_x` record in the directory (one small record per cell, so this is cheap at any fleet size) and follows the cells that are, for it, either **home** (in its region) or **near**: in a region whose RTT to it is within a budget (`[cells.model_x] spill_rtt_ms`, 80 ms by default).
+A global hub watches every `model_x` record in the directory (one small record per cell, so this is cheap at any fleet size). Records carry each cell's state, so a global knows which cells are usable without following them. It follows two kinds of cell:
 
-- **Measured, not configured.** A global hub measures RTT to each candidate cell's hub with the HTTP health request it already makes (`GET /v1/health`), every 60 s, keeping the median of the last five. Hub-to-hub RTT stands in for instance-to-instance RTT between two regions; within a region the two differ by far less than the budget.
-- **Damped.** A region becomes near after three medians in a row under the budget, and stops being near after three in a row over 1.25 times the budget, so a noisy link does not open and close follow links.
-- **Following is not choosing.** A followed cell is only a candidate; the cell policy (4.5) still prefers home and spills on room. Following a near cell costs one watch and one summary every 10 to 15 s.
-- **Bounded.** A global follows at most `max_follow` cells (32 by default), nearest first, so a large fleet does not make every global follow everything.
+- **Home:** every cell in its own region that is `ready` or `degraded`. Home cells are not capped: their number is the region's cell count, and each costs one watch and one summary every 10 to 15 s.
+- **Near:** cells in other regions within an RTT budget (`[cells.model_x] spill_rtt_ms`, 80 ms by default), up to `max_near` of them (16 by default). Slots go to usable cells first (`ready`, then `degraded`), then to the nearest; a `draining` or `unavailable` cell takes no slot. When a followed near cell stops being usable, its slot passes to the next usable candidate within budget, through the ordered unfollow below. So spill coverage cannot be crowded out by home cells, and a slot is never spent on a cell that cannot take work.
+- **Following is not choosing.** A followed cell is only a candidate; the cell policy (4.5) still prefers home and spills on room.
+
+**Measuring the RTT** (Q10, ruled: measured latency). A global hub keeps one persistent connection to each candidate cell's hub and sends a small probe (`GET /v1/gdl/cell/ping`) every 60 s over it, so a sample never includes connection setup. The probed hub returns its own handling time in the response, and the sample is the round trip minus that time. The estimate is the minimum of the last five samples (queueing only adds delay, so the minimum is the best estimate of the path; the median is kept for jitter). A region becomes near after three estimates in a row under the budget and stops being near after three in a row over 1.25 times the budget. Hub-to-hub RTT is a proximity hint for instance-to-instance RTT, not a measurement of it: tiers 2 and 3 of the test plan (section 14) compare the two, and the budget is set from that comparison.
+
+**Ordered unfollow.** A global hub stops following a cell only in this order, whether the cell left the near set, stopped being usable, or the global is draining:
+
+```
+global hub G                                   G's instances                         M's hub
+  mark M unfollowing; publish M's entry
+  instances to G's instances as retired ------> stop choosing them; publish a table
+                                                without them; acknowledge (gdl-avoids,
+  <-------------------------------------------- as for an in-cell retirement)
+  all acknowledged or left, then setup_timeout
+  tell M: G no longer sends to you ----------------------------------------------------> M stops counting G among its
+  close the follow link                                                                    following globals (section 5)
+                                                keep velo registrations of M's instances
+                                                until drain_ms after the unfollow, as for
+                                                a peer that left (ruling 143): unregistering
+                                                fails what is in flight (fabric.rs:74)
+```
+
+Until the last step, G still counts as one of M's following globals, so a retirement or drain in M waits for G's acknowledgement exactly as section 5 says. **A new follow** installs M's current state before it exposes any entry instance to G's instances: the snapshot's retired instances first, then the ready ones (ruling 143's order), and nothing at all if M is `draining` or `unavailable`. A global that starts following a cell that is already draining acknowledges its drain at once, since it never offered to it.
 
 ### 12.3 The relay mesh, from seeds
 
-For the `relay` backend (4.2), with no list of globals anywhere:
+For the `relay` backend (4.2), with no list of globals anywhere. Two things travel separately: **who the globals are** (peer discovery) and **cell records** (the relay).
 
-- **Join.** A new global hub starts with one or more seeds (`GDL_CELL__SEEDS`: hub addresses of existing globals). It reports its own record to a seed through the report endpoint (`PUT /v1/gdl/cells/{cell}`), and follows the seed's cell list over the typed watch. From that list it learns every other global and follows each one's cell list too: the mesh is full, so every global follows every other directly.
-- **Relay one hop, never further.** A global relays to its watchers only the records it received from their writers (its own, and those of cells that report to it), never a record it learned from another global. Because the mesh is full, one hop reaches everyone, and no record loops. A reader that receives the same cell's record by more than one path keeps the one with the higher `(epoch, seq)`.
+- **Peer discovery.** Every global hub serves the addresses of all the globals it currently follows directly, with their epochs (`GET /v1/gdl/peers`). A new global starts with one or more seeds (`GDL_CELL__SEEDS`), reads a seed's peer list, follows every global on it, and reports its own record to each of them (`PUT /v1/gdl/cells/{cell}`). Reporting is what introduces it: every global that receives a global's report follows that global back, so introductions are reciprocal and the mesh stays full. A peer list is only a hint: an address is a peer once a direct follow to it succeeds with the epoch it claims, and an address that cannot be followed is dropped after the report lease. So the mesh does not depend on any one seed staying: if B and C joined through A and A has left, N joining through B reads C from B's list and follows it, and C follows N back once N reports to it. A test holds this: a seed leaves, then another global joins through a later member.
+- **Relay one hop, never further.** A global relays to its watchers only the cell records it received from their writers: its own, and those of model cells that report to it. It never relays a model cell's record that it learned from another global. Because the mesh is full, one hop reaches every global, and no record loops. A reader that receives the same cell's record by more than one path keeps the one with the higher `(epoch, seq)`, and a withdrawn or expired record is not brought back by a late copy, since the copy carries the old `(epoch, seq)`.
 - **Model cells report to every global in their region**, each with its own lease: if the home global is down, the cell stays discoverable through its region's other globals. A region with a single global still depends on it, which is the relay's remaining weak point (4.2); the DynamoDB backend has none.
-- **Seeds are a bootstrap, not a dependency.** Once joined, a global holds every peer's address; a seed that later goes away removes only itself.
 
 ### 12.4 Adding a model cell to a region
 
@@ -497,8 +516,34 @@ Under the relay backend the global must come up before the region's model cells,
 - **A new class** (another model kind) changes the placement, so it is a rollout too.
 - **The network** between regions is infrastructure (12.5, step 1).
 
-### 12.8 Open question for the owner
+### 12.8 Question for the owner, answered
 
 | # | Question | Options | Recommendation |
 |---|---|---|---|
-| Q10 | Where a global's spill regions come from | (a) measured hub-to-hub RTT within a budget, damped (12.2); (b) a region-distance table in configuration; (c) an explicit list per global | (a): it needs nothing edited when a region is added |
+| Q10 | Where a global's spill regions come from | (a) measured hub-to-hub RTT within a budget, damped (12.2); (b) a region-distance table in configuration; (c) an explicit list per global | (a): it needs nothing edited when a region is added. **Ruled by the owner, 2026-10-22: measured latency.** The budget is set once tiers 2 and 3 have compared hub RTT with instance RTT (12.2) |
+
+## 13. What velo needs
+
+Checked against velo at `ba103c6`. Most of the new work is in gdl and gdl-hub; these are the parts that belong to velo.
+
+| # | Change | Why | Status |
+|---|---|---|---|
+| V1 | Mutual authentication for the QUIC transport. Today the listener is pinned by its fingerprint and the dialer is not authenticated (`lib/velo/src/transports/quic/tls.rs`, `with_no_client_auth`) | A model instance must refuse connections from anything that is not a trusted global | needed (Q4) |
+| V2 | TLS, server and client, on velo-hub's HTTP listeners; there is none today (`lib/velo-hub/Cargo.toml:77`) | hub-to-hub links cross regions and carry peer addresses, readiness, and load | needed, or a TLS proxy in front of each hub |
+| V3 | An override for the address a TCP or QUIC transport advertises; today it advertises its interfaces' addresses (`lib/velo/src/transports/tcp/transport/builder.rs:207`) | the in-process delay proxy of section 14 needs instances to advertise the proxy's address; NAT and some overlays need the same. VPC CNI pod addresses do not | needed for testing |
+| V4 | A read-only view of velo-hub's service directory for extensions (today `pub(crate)`) | counting the quorum in process; watching its own hub over loopback works without it | optional |
+| V5 | Opening a connection to a peer before it is used | the cold-connection cost of a cell's first request (6.2) | after measurement |
+
+V1 has a design choice (Q11): (a) pin at `_hello`: the dialer's certificate fingerprint must equal the fingerprint in the `PeerInfo` its `_hello` carries, and that `PeerInfo` must belong to a cell this instance trusts (its own hub, or one learned through the hubs), which makes the hubs the root of trust and so depends on V2; or (b) a private CA (ACM Private CA, SPIRE, or cert-manager), with velo verifying against a root certificate instead of a fingerprint.
+
+Not velo, but needed in gdl: an instance that survives a hub restart (velo-hub's client reports `recovered()`; gdl today ends the instance when its lease is lost, so a hub restart takes the cell down); authentication of a hub's report to another hub (the reporting hub is not a registrant there, so it has no credential); and the runtime's choice of transport (its builder installs TCP only, `crates/gdl/src/dist/fabric.rs:44`).
+
+## 14. How it is tested
+
+| Tier | Where | Infrastructure | What it proves |
+|---|---|---|---|
+| 1. The default suite | one process, OS-assigned ports, under the repository's rules | several gdl hubs and cells in one test; a delay proxy in front of hub HTTP, and between "regions" for velo traffic (needs V3); the existing fault hooks (`delay_forward_ack`) | quorum and hold; joining from seeds, including after a seed leaves (12.3); the one-hop relay without loops or resurrection; the follow set and its damping, and spill coverage with home cells saturated (12.2); ordered unfollow during a retirement and a drain; failover only on a refusal; a lost acknowledgement as an unknown outcome with exactly one invocation (4.3); drain order (section 5); an epoch change; a directory outage |
+| 2. One host, real binaries | nightly or by hand, not in the suite | Docker Compose with three networks as regions and `tc netem` between them (35 ms one way, some loss), MTU 8500; real hubs and segment binaries, QUIC, mock engines (no GPUs); one bundle per class from `cargo gdl compose`; load from `aiperf-rs` | real transports and handshakes: time to first token added, warm and cold; failover and drain under load; killing a hub, a cell, a region; adding and removing cells and regions live; hub RTT against instance RTT |
+| 3. A test fleet on AWS | three regions | one VPC per region with peering, three or four CPU instances per region (EC2 or EKS) with mock engines, a DynamoDB global table, Route 53 latency records with health checks, from Terraform or CDK | real RTTs against the hubs' estimates, which sets `spill_rtt_ms`; DynamoDB replication lag; how fast DNS withdraws a cell; a partition (a NACL on the peering); a directory outage (DynamoDB access revoked); bytes on the wire per request |
+
+The DynamoDB backend also runs the directory conformance suite against DynamoDB Local, outside the default suite (section 10, milestone 4). Tier 1 grows with each milestone; tier 2 follows the runtime milestone and needs V1 and V3; tier 3 follows the DynamoDB backend and V2.
