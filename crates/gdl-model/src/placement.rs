@@ -516,9 +516,8 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     } else {
         bound(manifest, &segment_of, &class_of, &mut class_errors)
     };
-    let complete = segment_of.len() == manifest.nodes.len()
-        && segment_of.values().all(|s| class_of.contains_key(s));
-    let cell_policies = cells::entered(placement, &boundaries, complete, &mut class_errors);
+    let undecided = cells::Undecided::new(manifest, &segment_of, &class_of);
+    let cell_policies = cells::entered(placement, &boundaries, &undecided, &mut class_errors);
     if !errors.is_empty() {
         errors.append(&mut class_errors);
         return Err(PlacementErrors(errors));

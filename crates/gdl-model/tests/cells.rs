@@ -410,3 +410,50 @@ fn an_unplaced_node_does_not_make_a_class_unentered() {
         "{errors:?}"
     );
 }
+
+/// Only a hop with an unplaced end could enter a class the boundaries do
+/// not: `D` unplaced leaves `F`'s hop undecided, but its outer end is in
+/// `global`, so wherever `D` goes, nothing enters `global`.
+#[test]
+fn an_unplaced_node_does_not_hide_a_class_it_cannot_enter() {
+    let text = "[segment.a]\nnodes = ['S']\n[segment.b]\nnodes = ['F']\n[segment.d]\nnodes = []\n\
+                [class.global]\nsegments = ['a', 'b']\n[class.model_x]\nsegments = ['d']\n\
+                [cells.global]\nmax_near = 0\n";
+    let built = segments()
+        .segment("d", Vec::<String>::new())
+        .class("global", ["a", "b"])
+        .class("model_x", ["d"])
+        .cell_policy("global", policy("home_first", 80, 0));
+    let parsed = Placement::from_toml(text).expect("a placement");
+    assert_eq!(parsed, built);
+    for placement in [parsed, built] {
+        let errors = refusals(&placement);
+        for expected in [
+            "node `D` is in no segment",
+            "cell policy `[cells.global]`: no class boundary enters class `global`",
+        ] {
+            assert!(
+                errors.iter().any(|e| e.starts_with(expected)),
+                "{expected} in: {errors:?}"
+            );
+        }
+    }
+}
+
+/// A hop whose inner end is placed in a class and whose outer end is not
+/// could enter that class, so it is not judged unentered.
+#[test]
+fn an_unplaced_outer_end_leaves_its_inner_class_undecided() {
+    let placement = Placement::from_toml(
+        "[segment.a]\nnodes = []\n[segment.b]\nnodes = ['F']\n[segment.d]\nnodes = ['D']\n\
+         [class.global]\nsegments = ['a']\n[class.model_x]\nsegments = ['b', 'd']\n\
+         [cells.model_x]\nmax_near = 0\n",
+    )
+    .expect("a placement");
+    let errors = refusals(&placement);
+    assert!(
+        errors.iter().any(|e| e == "node `S` is in no segment"),
+        "{errors:?}"
+    );
+    assert!(!errors.iter().any(|e| e.contains("[cells.")), "{errors:?}");
+}
