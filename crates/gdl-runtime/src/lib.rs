@@ -31,7 +31,9 @@ pub use dist::{Faults, Gate};
 pub use figment;
 /// The definitions this runtime runs: generated segment crates and the
 /// `graph!` expansion name node traits through here, so they cannot pick a
-/// different `gdl`.
+/// different `gdl`. The derives (`Node`, `Message`, `Config`, `Metrics`,
+/// `Endpoints`, and `export`) expand to `::gdl::...`, so a crate that uses
+/// one depends on `gdl` itself, as node crates do.
 pub use gdl;
 pub use gdl_model::{
     CrossingReport, DeploymentSpec, GraphConfig, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo,
@@ -67,7 +69,7 @@ pub use wire::{Codec, RequestCodec, StreamCodec};
 /// A request position (a source's, a sink's, either request of an operator,
 /// and both sides of a forward node) also takes a streamed request: `Head +
 /// stream Item`, or `stream Item` for a head of `()`. Its port type is
-/// [`Streamed<Head, Item>`](Streamed). Both ends of a forward edge must agree on
+/// [`Streamed<Head, Item>`](gdl::Streamed). Both ends of a forward edge must agree on
 /// whether it is streamed, and response types are never streamed.
 ///
 /// In the topology, each hop lists its forward nodes, then its inner end (a
@@ -89,8 +91,8 @@ pub use wire::{Codec, RequestCodec, StreamCodec};
 ///
 /// Bump `schema` whenever a message type's wire form changes.
 ///
-/// The expansion reaches gdl through `$crate`, so a contract crate can
-/// depend on gdl under another name. Names starting with `__gdl` or `__Gdl`
+/// The expansion reaches the runtime through `$crate`, so a contract crate
+/// can depend on gdl-runtime under another name. Names starting with `__gdl` or `__Gdl`
 /// are reserved for the expansion.
 #[macro_export]
 macro_rules! graph {

@@ -96,8 +96,7 @@ impl Error {
 
     /// Whether the error was received from another segment, not raised in
     /// this one.
-    #[doc(hidden)]
-    pub fn is_relayed(&self) -> bool {
+    pub(crate) fn is_relayed(&self) -> bool {
         self.relayed
     }
 }

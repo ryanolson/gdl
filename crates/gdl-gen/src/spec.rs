@@ -452,7 +452,17 @@ impl Spec {
             }
         };
         let gdl = match (raw.gdl.path, raw.gdl.version, raw.gdl.git, raw.gdl.rev) {
-            (Some(path), None, None, None) => GdlDep::Path(dir.join(path)),
+            (Some(path), None, None, None) => {
+                let path = dir.join(path);
+                let CrateNames { package, .. } = crate_names(&path)?;
+                if package != "gdl-runtime" {
+                    return Err(Error::new(format!(
+                        "[gdl] path {} is the package `{package}`; it must name `gdl-runtime`",
+                        path.display()
+                    )));
+                }
+                GdlDep::Path(path)
+            }
             (None, Some(version), None, None) => GdlDep::Version(version),
             (None, None, Some(url), Some(rev)) => GdlDep::Git { url, rev },
             _ => {
@@ -618,6 +628,12 @@ mod tests {
             "[package]\nname = \"chat-contract\"\n",
         )
         .expect("write");
+        std::fs::create_dir_all(dir.join("runtime")).expect("dir");
+        std::fs::write(
+            dir.join("runtime/Cargo.toml"),
+            "[package]\nname = \"gdl-runtime\"\n",
+        )
+        .expect("write");
         temp
     }
 
@@ -629,7 +645,7 @@ mod tests {
             [contract]
             path = "contract"
             [gdl]
-            path = "../gdl"
+            path = "runtime"
             [segment.front]
             nodes = ["A", "B"]
             [bind.B]
@@ -642,7 +658,7 @@ mod tests {
         assert_eq!(contract.package, "chat-contract");
         assert_eq!(contract.module, "chat_contract");
         assert_eq!(contract.path, dir.join("contract"));
-        assert_eq!(spec.gdl, GdlDep::Path(dir.join("../gdl")));
+        assert_eq!(spec.gdl, GdlDep::Path(dir.join("runtime")));
         assert_eq!(spec.bind["B"].source, CrateSource::Path(dir.join("front")));
         assert_eq!(
             spec.placement,
@@ -678,6 +694,50 @@ mod tests {
                 "[gdl] needs exactly one of `path`, `version`, and `git` with `rev`"
             );
         }
+    }
+
+    /// Generated crates depend on `gdl-runtime`, so a `[gdl] path` that
+    /// names another crate, such as the definitions crate `gdl` beside it,
+    /// is refused here rather than when cargo resolves the generated
+    /// manifests.
+    #[test]
+    fn a_gdl_path_names_the_runtime_crate() {
+        let temp = contract_dir("runtime");
+        let dir = temp.path();
+        let parse = |path: &str| {
+            let text = format!(
+                "[contract]\npath = \"contract\"\n[gdl]\npath = \"{path}\"\n[segment.front]\nnodes = [\"A\"]\n"
+            );
+            Spec::parse(&text, &dir.join("gdl.toml"), dir).map(|spec| spec.gdl)
+        };
+        std::fs::create_dir_all(dir.join("definitions")).expect("dir");
+        std::fs::write(
+            dir.join("definitions/Cargo.toml"),
+            "[package]\nname = \"gdl\"\n",
+        )
+        .expect("write");
+        assert_eq!(
+            parse("runtime").expect("the runtime"),
+            GdlDep::Path(dir.join("runtime"))
+        );
+        assert_eq!(
+            parse("definitions")
+                .expect_err("the definitions")
+                .to_string(),
+            format!(
+                "[gdl] path {} is the package `gdl`; it must name `gdl-runtime`",
+                dir.join("definitions").display()
+            )
+        );
+        assert!(
+            parse("missing")
+                .expect_err("no crate")
+                .to_string()
+                .starts_with(&format!(
+                    "reading {}",
+                    dir.join("missing/Cargo.toml").display()
+                ))
+        );
     }
 
     /// A listed crate is a directory, or `name@version` that is not one.

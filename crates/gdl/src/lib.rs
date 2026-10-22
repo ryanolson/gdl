@@ -19,7 +19,9 @@ mod compose;
 mod cx;
 mod error;
 mod identity;
+#[doc(hidden)]
 mod items;
+#[doc(hidden)]
 mod meter;
 mod metrics;
 mod role;
@@ -89,7 +91,7 @@ pub use gdl_macros::Node;
 #[doc(hidden)]
 pub mod __runtime {
     pub use crate::cx::wall_now_nanos;
-    pub use crate::items::{CHECK_INTERVAL, bound, bound_measured, failed, fuse, until_error};
+    pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
     pub use crate::meter::{
         END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit, ended, note,
     };

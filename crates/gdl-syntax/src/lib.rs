@@ -1,4 +1,4 @@
-//! The gdl graph syntax: the body of `gdl::graph!`, and of a graph file.
+//! The gdl graph syntax: the body of `gdl_runtime::graph!`, and of a graph file.
 //!
 //! `graph!` expands a checked [`Graph`] into Rust; `gdl-gen` reads a graph
 //! file into the same [`Graph`] and resolves its message names. One parser

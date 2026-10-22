@@ -25,7 +25,6 @@ where
 }
 
 /// A stream of one terminal error.
-#[doc(hidden)]
 pub fn failed<T: Send + 'static>(error: Error) -> Items<T> {
     Box::pin(futures::stream::once(async move { Err(error) }))
 }
@@ -39,7 +38,6 @@ pub fn failed<T: Send + 'static>(error: Error) -> Items<T> {
 /// producing (a filter) loops over its input inside one poll; over remote
 /// input that stays ready, that loop would never return to the pump that
 /// forwards a cancel or a stop.
-#[doc(hidden)]
 pub fn until_error<T: Send + 'static>(inner: Items<T>) -> Items<T> {
     Box::pin(UntilError {
         inner: Some(inner),
@@ -79,7 +77,7 @@ impl<T> Stream for UntilError<T> {
 /// (or dropping the stream) cancels the producing node's own scope through
 /// `guard`. Cancelling at the producer, not the attempt, matters: the next
 /// node may still be holding the error, and must be able to deliver it.
-/// Cancel and deadline are enforced once per attempt by [`bound`], not here.
+/// Cancel and deadline are enforced once per attempt by `bound`, not here.
 ///
 /// It also yields every `YIELD_INTERVAL` consecutive ready items. A node
 /// that consumes items without producing any (a filter, a batcher) polls its
@@ -92,7 +90,6 @@ impl<T> Stream for UntilError<T> {
 /// after the deadline is reported as interrupted, not as success, just as at
 /// an attempt boundary: whether a backward node follows must not change the
 /// outcome.
-#[doc(hidden)]
 pub fn fuse<T: Send + 'static>(inner: Items<T>, scope: &Cx) -> Items<T> {
     Box::pin(Fuse {
         inner: Some(inner),
@@ -154,14 +151,12 @@ impl<T> Stream for Fuse<T> {
 /// a producer still running after its stream has ended (for example, a sink
 /// waiting after it reported an error) must stop even while the consumer
 /// keeps the ended stream. Dropping the stream drops `guard` too.
-#[doc(hidden)]
-pub fn bound<T: Send + 'static>(cx: &Cx, guard: DropGuard, inner: Items<T>) -> Items<T> {
+pub(crate) fn bound<T: Send + 'static>(cx: &Cx, guard: DropGuard, inner: Items<T>) -> Items<T> {
     bound_measured(cx, guard, inner, None)
 }
 
-/// [`bound`] for the root's attempt, ending the visit `response` owns with
+/// `bound` for the root's attempt, ending the visit `response` owns with
 /// the outcome the boundary reports, and noting its first item out.
-#[doc(hidden)]
 pub fn bound_measured<T: Send + 'static>(
     cx: &Cx,
     guard: DropGuard,
@@ -192,7 +187,6 @@ pub fn bound_measured<T: Send + 'static>(
 /// ready path checks every this many items: a ready producer can overrun a
 /// cancel or a deadline by at most this many items, and a pending producer
 /// is woken by the futures at once.
-#[doc(hidden)]
 pub const CHECK_INTERVAL: u8 = 64;
 
 pin_project! {

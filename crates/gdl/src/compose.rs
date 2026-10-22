@@ -5,10 +5,10 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::__runtime::{bound, fuse};
 use crate::Cx;
 use crate::Items;
 use crate::Result;
+use crate::items::{bound, fuse};
 use crate::{Backward, Forward, Next, Operator, Sink};
 
 /// A hop: a forward chain, an inner end, and a backward chain. As the `next`
@@ -216,7 +216,7 @@ where
         // A backward node's constructor may have side effects; an interrupted
         // attempt skips every remaining node and carries the reason through.
         if let Err(reason) = attempt.check() {
-            return self.1.apply(attempt, crate::__runtime::failed(reason));
+            return self.1.apply(attempt, crate::items::failed(reason));
         }
         if R::EMPTY {
             return self.1.apply(attempt, self.0.backward(attempt, items));

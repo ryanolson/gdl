@@ -1,7 +1,7 @@
 //! What `graph!` generates:
 //!
 //! - `nodes`: one marker type per node, implementing the node's declaration
-//!   traits, so `gdl::Absent<nodes::X>` has exactly node X's port types;
+//!   traits, so `gdl_runtime::Absent<nodes::X>` has exactly node X's port types;
 //! - `Bindings`: a typestate struct with one slot per node that needs an implementation,
 //!   `Absent` until bound; each setter states the node's role and types, so
 //!   a mismatched implementation fails to compile at the setter named for

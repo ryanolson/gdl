@@ -26,10 +26,8 @@ arc-swap = { workspace = true }
 dashmap = { workspace = true }
 gdl = { path = "../gdl" }
 gdl-macros = { path = "../gdl-macros" }
-gdl-message = { path = "../gdl-message" }
 gdl-model = { path = "../gdl-model" }
 futures = { workspace = true }
-pin-project-lite = { workspace = true }
 prometheus = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }

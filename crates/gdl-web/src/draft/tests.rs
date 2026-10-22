@@ -447,8 +447,9 @@ fn a_message_exported_only_by_a_facade_is_composed() {
             vec!["A".to_string(), "Engine".to_string()],
         )]),
     };
+    let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime");
     let rendered = draft
-        .render(&catalog, &Gdl::Path("/gdl".into()))
+        .render(&catalog, &Gdl::Path(runtime))
         .expect("rendered");
     assert!(
         rendered

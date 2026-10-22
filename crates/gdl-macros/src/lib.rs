@@ -1,6 +1,6 @@
 //! The `graph!` macro: one declaration of a graph's nodes, message types,
 //! and topology, expanded into everything the runtime and the generator need
-//! from it. Reached through `gdl::graph!`; see that macro for the syntax.
+//! from it. Reached through `gdl_runtime::graph!`; see that macro for the syntax.
 //! Also the markers that offer a crate's messages and nodes to graphs:
 //! `derive(Message)` and `#[export]`, each reached through `gdl_message` or
 //! through `gdl`, and `derive(Node)`, reached through `gdl`.
@@ -16,9 +16,9 @@ mod message;
 mod metrics;
 mod node;
 
-/// The expansion behind `gdl::graph!`, which calls it as
+/// The expansion behind `gdl_runtime::graph!`, which calls it as
 /// `graph! { $crate; <graph> }`. The leading path is how the expansion names
-/// the runtime crate: a contract crate may depend on gdl under another name,
+/// the runtime crate: a contract crate may depend on gdl-runtime under another name,
 /// and `$crate` resolves to it whatever the name is.
 #[doc(hidden)]
 #[proc_macro]
@@ -26,7 +26,7 @@ pub fn graph(input: TokenStream) -> TokenStream {
     let Some((krate, body)) = split_crate(input.into()) else {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "expected `<path to gdl>;` before the graph; use `gdl::graph!`",
+            "expected `<path to gdl>;` before the graph; use `gdl_runtime::graph!`",
         )
         .to_compile_error()
         .into();

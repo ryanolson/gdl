@@ -413,8 +413,10 @@ struct Table {
 #[derive(Debug)]
 struct Route {
     eligible: Box<[InstanceId]>,
-    /// `eligible` as a selector sees it, made when the table is, so that a
-    /// selection borrows it rather than converting each id per request.
+    /// `eligible` as a selector sees it, index for index: a selector's
+    /// `Picked::index` into this slice names `eligible[index]`. Made when the
+    /// table is, so that a selection borrows it rather than converting each
+    /// id per request.
     offered: Box<[gdl::InstanceId]>,
     next: Arc<Turns>,
 }

@@ -371,7 +371,6 @@ impl Deadline {
 }
 
 /// Nanoseconds since the Unix epoch on this machine's wall clock.
-#[doc(hidden)]
 pub fn wall_now_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

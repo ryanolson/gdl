@@ -4,7 +4,7 @@ gdl is a graph definition language and runtime for request/response streaming pi
 
 You define the graph once, with its message types. A placement puts each node in a segment. The generator, `cargo gdl generate`, writes one crate per segment. Each segment crate depends only on the implementations of the nodes that it hosts.
 
-gdl is two crates. A crate that implements nodes depends on `gdl`: the node roles, the request context, the selector trait, the derives, and local composition, so that it can run its nodes in one process. It does not link velo. The runtime, `gdl-runtime`, runs those nodes: segments, crossings over velo, discovery, and the segment binaries. Contract crates, generated segment crates, and programs that run a graph depend on `gdl-runtime`, which re-exports the `gdl` it was built with as `gdl_runtime::gdl`.
+gdl is two crates. A crate that implements nodes depends on `gdl`: the node roles, the request context, the selector trait, the derives, and local composition, so that it can run its nodes in one process. It does not link velo. The runtime, `gdl-runtime`, runs those nodes: segments, crossings over velo, discovery, and the segment binaries. Contract crates, generated segment crates, and programs that run a graph depend on `gdl-runtime`, which re-exports the `gdl` it was built with as `gdl_runtime::gdl`. The derives expand to `::gdl::...`, so a crate that uses one depends on `gdl` itself, also when it depends on `gdl-runtime`.
 
 
 Known limitations, with what lifts each, are in [LIMITATIONS.md](LIMITATIONS.md).

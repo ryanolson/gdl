@@ -44,7 +44,7 @@ fn router(dir: &Path, catalog: PathBuf) -> axum::Router {
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
         deploy: gdl_web::Deploy::default(),
         target: dir.join("target"),
-        gdl: gdl_web::Gdl::Path(crates().join("gdl")),
+        gdl: gdl_web::Gdl::Path(crates().join("gdl-runtime")),
     })
     .expect("router")
 }
@@ -758,7 +758,7 @@ fn local_router(dir: &Path, root: &Path) -> axum::Router {
     gdl_web::router(gdl_web::Config {
         catalog: dir.join("catalogue"),
         target: dir.join("target"),
-        gdl: gdl_web::Gdl::Path(crates().join("gdl")),
+        gdl: gdl_web::Gdl::Path(crates().join("gdl-runtime")),
         local_root: Some(root.to_path_buf()),
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
@@ -1417,7 +1417,7 @@ fn deploying_router(dir: &Path, apply: bool) -> axum::Router {
             apply,
         },
         target: dir.join("target"),
-        gdl: gdl_web::Gdl::Path(crates().join("gdl")),
+        gdl: gdl_web::Gdl::Path(crates().join("gdl-runtime")),
     })
     .expect("router")
 }
@@ -1596,7 +1596,7 @@ async fn a_request_from_another_origin_cannot_change_the_catalogue() {
             extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
             deploy: gdl_web::Deploy::default(),
             target: dir.join("target"),
-            gdl: gdl_web::Gdl::Path(crates().join("gdl")),
+            gdl: gdl_web::Gdl::Path(crates().join("gdl-runtime")),
         })
         .expect("router");
         let status = named.oneshot(request).await.expect("response").status();
