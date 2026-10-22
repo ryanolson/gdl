@@ -66,8 +66,8 @@ impl Fleet {
 
     /// Check the fleet against the layout of the placement it deploys,
     /// reporting every problem. A cell whose class the placement does not
-    /// have is reported once: its quorum and home are not judged against
-    /// it.
+    /// have is reported once: its quorum, and whether its home is of a
+    /// parent class, are not judged against it.
     pub fn check(&self, layout: &Layout) -> Result<(), FleetErrors> {
         let segments = layout.class_segments();
         let mut sends: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -117,17 +117,20 @@ impl Fleet {
                     reason,
                 });
             }
-            let Some(members) = segments.get(cell.class.as_str()) else {
-                errors.push(FleetError::UnknownClass {
+            let members = segments.get(cell.class.as_str());
+            match members {
+                Some(members) => check_ready(table, &cell.class, members, &cell.ready, &mut errors),
+                None => errors.push(FleetError::UnknownClass {
                     table: table(),
                     class: cell.class.clone(),
-                });
-                continue;
-            };
-            check_ready(table, &cell.class, members, &cell.ready, &mut errors);
+                }),
+            }
             let Some(home) = &cell.home else {
                 continue;
             };
+            // Whether the home is a cell of the fleet needs no class; whether
+            // it is a parent needs both classes, and an unknown one is
+            // reported as its own cell's problem.
             let Some(parent) = self.cells.get(home) else {
                 errors.push(FleetError::UnknownHome {
                     cell: name.clone(),
@@ -135,12 +138,10 @@ impl Fleet {
                 });
                 continue;
             };
-            // A home of an unknown class is reported as the home's own
-            // problem.
             let sends_here = sends
                 .get(parent.class.as_str())
                 .is_some_and(|into| into.contains(cell.class.as_str()));
-            if segments.contains_key(parent.class.as_str()) && !sends_here {
+            if members.is_some() && segments.contains_key(parent.class.as_str()) && !sends_here {
                 errors.push(FleetError::HomeNotParent {
                     cell: name.clone(),
                     home: home.clone(),

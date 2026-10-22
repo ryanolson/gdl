@@ -380,3 +380,21 @@ fn cell_and_region_names_are_dns_labels() {
         );
     }
 }
+
+/// Whether a home names a cell of the fleet does not depend on the cell's
+/// class, so an unknown class does not hide a missing home.
+#[test]
+fn an_unknown_class_does_not_hide_a_missing_home() {
+    assert_eq!(
+        problems("[cell.m]\nclass = 'absent'\nregion = 'r'\nhome = 'missing'\n"),
+        [
+            "[cell.m] class: the placement has no class `absent`",
+            "[cell.m] home: the fleet has no cell `missing`",
+        ]
+    );
+    // The control: with a known class, the missing home alone.
+    assert_eq!(
+        problems("[cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'missing'\n"),
+        ["[cell.m] home: the fleet has no cell `missing`"]
+    );
+}
