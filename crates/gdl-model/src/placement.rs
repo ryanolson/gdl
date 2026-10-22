@@ -397,6 +397,16 @@ impl Layout {
         self.class_of.get(segment).map(String::as_str)
     }
 
+    /// Each class and its segments: empty when the placement has no
+    /// classes.
+    pub(crate) fn class_segments(&self) -> BTreeMap<&str, BTreeSet<&str>> {
+        let mut classes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (segment, class) in &self.class_of {
+            classes.entry(class).or_default().insert(segment);
+        }
+        classes
+    }
+
     /// The segments `segment` sends to: the next run of each forward path
     /// it holds a run of, and the backward runs it opens as an outer end.
     /// Replies ride stream anchors back and are not sends. A forward path

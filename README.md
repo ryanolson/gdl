@@ -218,6 +218,29 @@ max_near = 16           # at most this many near cells are offered; 16 by defaul
 
 Each key is optional, and no other key is accepted. A policy name has a selector name's shape and is not checked against a list. A value equal to its default is not recorded: a spec that spells out the defaults has the same placement and hash as one that leaves them unsaid. Any other value changes the placement hash. A `[cells.<class>]` table must name a class of the spec that a class boundary enters. Nothing acts on a cell policy yet (see `LIMITATIONS.md`).
 
+The cells themselves are not part of the spec: cells are runtime topology, like replicas, and do not change the placement hash. A fleet file, `fleet.toml`, lists them, with each class's default quorum (the usable instances of each segment a cell needs to be ready) and what its cells' health requires of the classes it sends to:
+
+```toml
+[class.global]
+ready = { front = 2 }             # default quorum of a cell of this class, per segment
+requires = { model_x = 1 }        # the cell's health needs this many ready cells of each class it sends to
+
+[class.model_x]
+ready = { engine = 4 }
+
+[cell.global-us-east-1]
+class = "global"
+region = "us-east-1"
+
+[cell.model-x-01-us-east-1]
+class = "model_x"
+region = "us-east-1"
+home = "global-us-east-1"         # optional: a cell of a class that sends to this one
+ready = { engine = 8 }            # optional: overrides the class's default
+```
+
+`gdl_model::Fleet` reads the file and checks it against the spec's layout, reporting every problem: a class the spec does not have, a `ready` key that is not a segment of the class, a `requires` key that is not a class it sends to, a count of 0, a `home` that names no cell of a parent class, and an unknown key. A cell or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters. `Fleet::cell` gives a cell's own settings (`gdl_model::CellSettings`), with its quorum resolved from its overrides and its class's defaults. Nothing generates bundles from the fleet file yet (see `LIMITATIONS.md`).
+
 For a graph spec, the generator compiles nothing: it builds the contract's manifest from the graph file and what the source reader found, including which messages are wire types. For a contract spec, it compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`. If the reader takes a type for a wire type that is not one, the segment's build or its deployment, which checks the placement against the compiled contract, fails. If it misses a wire type's serde impls (for example, impls that a macro writes), the generator refuses a cut that would work. `cargo gdl extract --verify` finds both.
 
 For each segment, the generator writes a crate with:

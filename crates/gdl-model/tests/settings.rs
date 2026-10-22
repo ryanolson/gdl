@@ -1,0 +1,185 @@
+//! A cell's own settings: which cell a process belongs to, how it finds
+//! the other cells, and its quorum, checked against the deployment it
+//! serves.
+
+use std::collections::BTreeMap;
+
+use gdl_model::{
+    CellSettings, DirectoryBackend, HopInfo, Layout, Manifest, NodeInfo, Placement, Role, TypeInfo,
+    layout,
+};
+
+/// `S => F { D }`: F's own hop crosses from `global` into `model_x`.
+fn manifest() -> Manifest {
+    let node = |name: &str, role| NodeInfo {
+        name: name.into(),
+        role,
+        binding: (role != Role::Source).then(|| name.to_lowercase()),
+    };
+    let hop = |outer: &str, inner: &str| HopInfo {
+        outer: outer.into(),
+        forward: vec![],
+        inner: inner.into(),
+        backward: vec![],
+        forward_types: vec![TypeInfo::new("T", true)],
+        backward_types: vec![TypeInfo::new("T", true)],
+    };
+    Manifest {
+        name: "classed".into(),
+        schema: 1,
+        nodes: vec![
+            node("S", Role::Source),
+            node("F", Role::Operator),
+            node("D", Role::Sink),
+        ],
+        hops: vec![hop("S", "F"), hop("F", "D")],
+    }
+}
+
+const SEGMENTS: &str =
+    "[segment.a]\nnodes = ['S']\n[segment.b]\nnodes = ['F']\n[segment.d]\nnodes = ['D']\n";
+
+const CLASSES: &str = "[class.global]\nsegments = ['a', 'b']\n[class.model_x]\nsegments = ['d']\n";
+
+fn laid(text: &str) -> Layout {
+    layout(
+        &manifest(),
+        &Placement::from_toml(text).expect("a placement"),
+    )
+    .expect("a layout")
+}
+
+fn classed() -> Layout {
+    laid(&format!("{SEGMENTS}{CLASSES}"))
+}
+
+fn settings(text: &str) -> CellSettings {
+    toml::from_str(text).expect("a cell's settings")
+}
+
+const MODEL: &str = r#"
+name = "model-x-01-us-east-1"
+class = "model_x"
+region = "us-east-1"
+home = "global-us-east-1"
+directory = "static"
+seeds = ["hub-a:1337", "hub-b:1337"]
+[ready]
+d = 4
+"#;
+
+#[test]
+fn a_cells_settings_are_read_whole() {
+    assert_eq!(
+        settings(MODEL),
+        CellSettings {
+            name: "model-x-01-us-east-1".into(),
+            class: "model_x".into(),
+            region: "us-east-1".into(),
+            home: Some("global-us-east-1".into()),
+            directory: DirectoryBackend::Static,
+            seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
+            ready: BTreeMap::from([("d".into(), 4)]),
+        }
+    );
+    let text = toml::to_string(&settings(MODEL)).expect("toml");
+    assert_eq!(settings(&text), settings(MODEL), "{text}");
+}
+
+#[test]
+fn only_name_class_and_region_are_required() {
+    let least = settings("name = 'g'\nclass = 'global'\nregion = 'r'\n");
+    assert_eq!(least.home, None);
+    assert_eq!(least.directory, DirectoryBackend::Relay);
+    assert!(least.seeds.is_empty());
+    assert!(least.ready.is_empty());
+    for missing in [
+        "class = 'global'\nregion = 'r'\n",
+        "name = 'g'\nregion = 'r'\n",
+        "name = 'g'\nclass = 'global'\n",
+    ] {
+        assert!(
+            toml::from_str::<CellSettings>(missing).is_err(),
+            "{missing}"
+        );
+    }
+}
+
+#[test]
+fn a_misspelled_key_or_an_unknown_backend_is_refused() {
+    for bad in [
+        "name = 'g'\nclass = 'global'\nregion = 'r'\nhone = 'h'\n",
+        "name = 'g'\nclass = 'global'\nregion = 'r'\ndirectory = 'store'\n",
+        "name = 'g'\nclass = 'global'\nregion = 'r'\nseeds = 'hub-a:1337'\n",
+        "name = 'g'\nclass = 'global'\nregion = 'r'\nready = { a = -1 }\n",
+    ] {
+        assert!(toml::from_str::<CellSettings>(bad).is_err(), "{bad}");
+    }
+}
+
+/// A segment the settings give no quorum needs one usable instance.
+#[test]
+fn a_quorum_falls_back_to_one() {
+    let cell = settings(MODEL);
+    assert_eq!(cell.quorum("d"), 4);
+    assert_eq!(cell.quorum("e"), 1);
+}
+
+#[test]
+fn settings_that_fit_the_deployment_pass() {
+    settings(MODEL)
+        .check(&classed(), "d")
+        .expect("a model cell");
+    settings("name = 'g'\nclass = 'global'\nregion = 'r'\nready = { a = 2, b = 1 }\n")
+        .check(&classed(), "b")
+        .expect("a global cell");
+}
+
+#[test]
+fn settings_that_do_not_fit_the_deployment_are_refused() {
+    let cases = [
+        (
+            laid(SEGMENTS),
+            MODEL,
+            "d",
+            "[cell] class = \"model_x\", but the placement has no classes",
+        ),
+        (
+            classed(),
+            "name = 'm'\nclass = 'model_y'\nregion = 'r'\n",
+            "d",
+            "[cell] class: the placement has no class `model_y`",
+        ),
+        (
+            classed(),
+            MODEL,
+            "a",
+            "[cell] class: this instance's segment `a` is in class `global`, not `model_x`",
+        ),
+        (
+            classed(),
+            "name = 'm'\nclass = 'model_x'\nregion = 'r'\nready = { d = 1, a = 2 }\n",
+            "d",
+            "[cell] ready: `a` is not a segment of class `model_x`",
+        ),
+    ];
+    for (layout, text, segment, expected) in cases {
+        let Err(error) = settings(text).check(&layout, segment) else {
+            panic!("accepted {text} for `{segment}`");
+        };
+        assert_eq!(error.to_string(), expected, "{text}");
+    }
+    // Every problem at once.
+    let Err(error) =
+        settings("name = 'm'\nclass = 'model_x'\nregion = 'r'\nready = { a = 2, b = 1 }\n")
+            .check(&classed(), "a")
+    else {
+        panic!("accepted");
+    };
+    assert_eq!(
+        error.to_string(),
+        "[cell] class: this instance's segment `a` is in class `global`, not `model_x`; \
+         [cell] ready: `a` is not a segment of class `model_x`; \
+         [cell] ready: `b` is not a segment of class `model_x`"
+    );
+}

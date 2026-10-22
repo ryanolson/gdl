@@ -1,15 +1,19 @@
 //! The gdl graph model without the runtime: a graph's [`Manifest`], a
 //! [`Placement`] of its nodes in segments, the [`Layout`] that checks one
-//! against the other, and diagrams of both.
+//! against the other, diagrams of both, and the cells that deploy a
+//! placement's classes: the [`Fleet`] file and a cell's own
+//! [`CellSettings`].
 //!
 //! The generator and the runtime check placements with these rules, and
 //! the composer runs the same rules in a browser while a user draws, so
 //! this crate builds for `wasm32-unknown-unknown`. `gdl` re-exports
 //! everything here under the same names.
 
+mod cell;
 mod config;
 mod deployment;
 mod diagram;
+mod fleet;
 mod hash;
 mod manifest;
 mod metrics;
@@ -19,11 +23,13 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub use cell::{CellSettings, DirectoryBackend};
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{
     DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
     SegmentRegistration, segment_name_problem,
 };
+pub use fleet::{Fleet, FleetError, FleetErrors, FleetTable};
 pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
 pub use metrics::{
     COMPONENT_LABEL, ENDPOINT_LABEL, MetricField, MetricKind, NAMESPACE_LABEL, RUNTIME_LABELS,
