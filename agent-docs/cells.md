@@ -111,7 +111,7 @@ Engine = { selector = "least_loaded" }
 
 ### 3.3 The fleet: cells, homes, quorums
 
-Not hashed. It is the input to the deployment generator (Compose today; Helm, CDK, or Terraform later). At runtime the cell directory is the source of truth, so no cell needs the whole file: a cell's hub gets its own entry through settings (`GDL_CELL__NAME`, `__CLASS`, `__REGION`, `__HOME`, `__DIRECTORY`).
+Not hashed. It is the input to the deployment generator (Compose today; Helm, CDK, or Terraform later). At runtime the cell directory is the source of truth, so no cell needs the whole file: a cell's hub gets its own entry through settings (`GDL_CELL__NAME`, `__CLASS`, `__REGION`, `__HOME`, `__DIRECTORY`, and its quorum, `__READY__<SEGMENT>`, which falls back to its class's default). Cells come and go at runtime; section 12 has the processes.
 
 ```toml
 [class.global]
@@ -410,7 +410,7 @@ The owner answered section 8. Where a ruling changes the text above, the text wa
 | Q2 | `static` and `relay` first, then DynamoDB global tables (MREC) |
 | Q3 | Lockstep for a change of graph or placement, blue and green per region; builds of the same contract and placement roll per cell; the envelope is designed so that a boundary hash can be added later |
 | Q4 | velo QUIC with mutual pinning across regions (a velo change, and the runtime's transport configuration) |
-| Q5 | A global hub follows its home cells and its spill regions |
+| Q5 | A global hub follows its home cells and its spill regions. Amended in section 12 (proposed, Q10): the spill regions are computed, not listed |
 | Q6 | The owner: "If the parent cell issuing work to child cell is an offer where the child cell is allowed to refuse the request, then one way in is ok." Work enters a child cell one way, from its parent class, and every hand-off into a child cell is an **offer**: the child may refuse it, and the chooser takes the refusal as a reason to choose another cell (4.3). No path enters a global class from a model cell; validation refuses a class cycle |
 | Q6, load | The owner: "We do need to feed some kind of state out to the globals - like a representation of how loaded a cell is - this is a small every 10-15s update." The load summary is published every 10 to 15 s (10 s by default) on the follow link, in place of the 1 Hz of the first draft (4.1, 4.5). A summary steers coarsely at that rate, so the cell's refusal of an offer is what corrects a stale view; the policy's staleness cutoff is three periods |
 | Q7 | No failover in the runtime after acceptance; the operator may retry from its own copy |
@@ -422,3 +422,83 @@ What "an offer" asks of the design, beyond what 4.3 already has:
 - **Refusal is a first-class answer.** An entry refuses with `Overloaded` (no room), or with a cell-level reason (draining, not ready, or its own policy), before it acknowledges. Admission already refuses before the acknowledgement (plan 7.5), so the mechanism exists; the new part is that a cell may refuse by policy, not only by a full ledger, and that the refusal names whether the chooser should damp only this cell or treat it as gone.
 - **A refusal costs one WAN round trip and nothing else**: nothing was admitted and no input was sent (4.3). Only an explicit refusal counts: a missing answer is an unknown outcome and is not retried (4.3). At a 10 to 15 s summary, a burst of offers to a cell that filled since its last summary is refused at once, and the chooser's damping (4.5, item 5) moves the rest of the burst.
 - **Whether a refusal also pushes an early summary** (a cell that starts refusing publishes at once, rather than at its next period) is a detail for the hub milestone; it costs one extra message per change of state, not per request.
+
+## 12. Dynamic cells and regions (proposed 2026-10-22, after the rulings)
+
+The owner asked whether cells can be dynamic rather than fixed, and what adding a region or a cell takes. Cells are runtime topology already: nothing about a cell is hashed, the directory is the source of truth, and `fleet.toml` only drives the deployment generator. Four parts of sections 3 to 5 were still static. This section makes them dynamic and gives the processes. It amends 3.3, 4.1, 4.2, and Q5; where it and those sections differ, this section holds.
+
+### 12.1 What changes
+
+| Was static | Becomes | Amends |
+|---|---|---|
+| A cell's quorum in `fleet.toml` | the cell's own setting (`GDL_CELL__READY__<SEGMENT>`), falling back to the class's default; `fleet.toml` only fills it in when it generates a bundle | 3.3 |
+| A global's spill regions, a list | computed from the directory and measured RTT (12.2) | Q5 |
+| The relay mesh of globals, known from configuration | seeds only (12.3) | 4.2 |
+| A model cell reports to one home | it reports to every global cell in its own region; `home` is a preference of the policy, not a dependency of discovery (12.3) | 4.2 |
+
+Unchanged: **identity.** A global follows a cell only when the cell record's contract and placement hashes equal its own; a cell with other hashes is ignored, not an error. This is what makes the lockstep rollout of Q3 work without coordination: the new version's cells and globals see each other, the old ones see each other, and DNS moves traffic between the two sets.
+
+### 12.2 The follow set, computed
+
+A global hub watches every `model_x` record in the directory (one small record per cell, so this is cheap at any fleet size) and follows the cells that are, for it, either **home** (in its region) or **near**: in a region whose RTT to it is within a budget (`[cells.model_x] spill_rtt_ms`, 80 ms by default).
+
+- **Measured, not configured.** A global hub measures RTT to each candidate cell's hub with the HTTP health request it already makes (`GET /v1/health`), every 60 s, keeping the median of the last five. Hub-to-hub RTT stands in for instance-to-instance RTT between two regions; within a region the two differ by far less than the budget.
+- **Damped.** A region becomes near after three medians in a row under the budget, and stops being near after three in a row over 1.25 times the budget, so a noisy link does not open and close follow links.
+- **Following is not choosing.** A followed cell is only a candidate; the cell policy (4.5) still prefers home and spills on room. Following a near cell costs one watch and one summary every 10 to 15 s.
+- **Bounded.** A global follows at most `max_follow` cells (32 by default), nearest first, so a large fleet does not make every global follow everything.
+
+### 12.3 The relay mesh, from seeds
+
+For the `relay` backend (4.2), with no list of globals anywhere:
+
+- **Join.** A new global hub starts with one or more seeds (`GDL_CELL__SEEDS`: hub addresses of existing globals). It reports its own record to a seed through the report endpoint (`PUT /v1/gdl/cells/{cell}`), and follows the seed's cell list over the typed watch. From that list it learns every other global and follows each one's cell list too: the mesh is full, so every global follows every other directly.
+- **Relay one hop, never further.** A global relays to its watchers only the records it received from their writers (its own, and those of cells that report to it), never a record it learned from another global. Because the mesh is full, one hop reaches everyone, and no record loops. A reader that receives the same cell's record by more than one path keeps the one with the higher `(epoch, seq)`.
+- **Model cells report to every global in their region**, each with its own lease: if the home global is down, the cell stays discoverable through its region's other globals. A region with a single global still depends on it, which is the relay's remaining weak point (4.2); the DynamoDB backend has none.
+- **Seeds are a bootstrap, not a dependency.** Once joined, a global holds every peer's address; a seed that later goes away removes only itself.
+
+### 12.4 Adding a model cell to a region
+
+```
+new model cell M3 (us-east-1)            M3's hub                 directory / region's globals   global hubs              global instances
+  start with GDL_CELL__* settings
+  instances register, load, serve -->  admission (same hashes)
+                                       quorum over ready-not-retired
+                                       holds for 2 s
+                                       publish record: ready ---> M3 visible
+                                                                  (relay: one hop to all globals)
+                                       <------------------------------------------------------ home or near, same hashes:
+                                                                                                open follow link to M3
+                                       D instances, load (10 s) ------------------------------> relay D@M3 ----------->  table (D, M3);
+                                                                                                                         policy offers to M3
+```
+
+No global, ingress record, or configuration file changes. **Removing** a model cell is the drain of section 5: the record goes `draining`, every following global acknowledges and stops offering, the entry instances drain, then the interior ones, then the record is withdrawn.
+
+### 12.5 Adding a region
+
+1. **Network, outside gdl:** a VPC with a unique CIDR, peering to the existing regions, MTU 8500, CIDR security rules (6.2). The only step that is not dynamic.
+2. **Directory:** for DynamoDB, add a replica region to the global table; for the relay, nothing beyond the seeds in step 3.
+3. **The global cell**, same build: it publishes its record (relay: through a seed) and joins the mesh. It has no model cell yet, so its cell health is not ready (`requires`, 4.3).
+4. **Model cells** in the region report to it. When one reaches quorum and the global follows it, the global's cell health turns ready.
+5. **Ingress:** a Route 53 latency record for the new global, with its health check on the cell health endpoint. It can be created before step 3 and stays unhealthy until step 4.
+6. **Other regions** find it on their own: their globals measure RTT to the new region's model cells, and the ones within budget start following them (12.2). Nothing is edited elsewhere.
+
+Under the relay backend the global must come up before the region's model cells, since they report to it; under DynamoDB the order does not matter.
+
+### 12.6 Removing a region
+
+1. Drain the region's model cells (12.4). Other regions' globals stop offering to them as their records go `draining`.
+2. Mark the global cell `draining`: its cell health turns not ready and DNS withdraws it. DNS withdrawal is a hint (4.3): clients with cached answers keep arriving for the record's TTL and beyond, so the global keeps serving what it can, offering its requests to near cells in other regions, until a bound (the record's TTL plus the request deadline), then drains as milestone 20 does.
+3. Withdraw its record; the mesh drops it. Remove the ingress record and, last, the network.
+
+### 12.7 What stays fixed
+
+- **A change of graph or placement** is a lockstep rollout of new cells (Q3), not a new cell.
+- **A new class** (another model kind) changes the placement, so it is a rollout too.
+- **The network** between regions is infrastructure (12.5, step 1).
+
+### 12.8 Open question for the owner
+
+| # | Question | Options | Recommendation |
+|---|---|---|---|
+| Q10 | Where a global's spill regions come from | (a) measured hub-to-hub RTT within a budget, damped (12.2); (b) a region-distance table in configuration; (c) an explicit list per global | (a): it needs nothing edited when a region is added |
