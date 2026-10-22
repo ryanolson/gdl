@@ -628,6 +628,23 @@ impl From<PlacementErrors> for Error {
 
 /// Check `placement` against `manifest` and split every hop into runs.
 pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, PlacementErrors> {
+    // A class groups segments and decides nowhere a node runs, so a class
+    // problem stops none of the other checks: it is reported with whatever
+    // they find.
+    let mut class_errors = Vec::new();
+    let class_of = classify(placement, &mut class_errors);
+    match place(manifest, placement) {
+        Ok(layout) if class_errors.is_empty() => Ok(Layout { class_of, ..layout }),
+        Ok(_) => Err(PlacementErrors(class_errors)),
+        Err(PlacementErrors(mut errors)) => {
+            errors.append(&mut class_errors);
+            Err(PlacementErrors(errors))
+        }
+    }
+}
+
+/// Every check but the classes', and the layout without them.
+fn place(manifest: &Manifest, placement: &Placement) -> Result<Layout, PlacementErrors> {
     let mut errors = check_manifest(manifest);
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
@@ -666,7 +683,6 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
             }),
         }
     }
-    let class_of = classify(placement, &mut errors);
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
     }
@@ -716,7 +732,7 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
         contract_hash: manifest.contract_hash(),
         placement_hash: placement.hash(),
         segment_of,
-        class_of,
+        class_of: BTreeMap::new(),
         hops,
     })
 }

@@ -291,3 +291,41 @@ fn every_problem_is_reported_together() {
         assert!(errors.contains(expected), "{expected} in: {errors}");
     }
 }
+
+const UNKNOWN_SEGMENT: &str =
+    "[class.global]\nsegments = ['a', 'b', 'zz']\n[class.model_x]\nsegments = ['d']\n";
+
+/// A class problem does not stop the routing check: with every node
+/// placed, it runs, and its problems are reported with the class's.
+#[test]
+fn a_class_problem_does_not_hide_a_routing_problem() {
+    // `S` is the source: no request boundary enters it.
+    let routed = Placement::from_toml(&format!(
+        "{SEGMENTS}{UNKNOWN_SEGMENT}[routing]\nS = 'random'\n"
+    ))
+    .expect("a placement");
+    let errors = refused(&routed).to_string();
+    for expected in [
+        "class `global` lists unknown segment `zz`",
+        "request router `S` must target a request boundary",
+    ] {
+        assert!(errors.contains(expected), "{expected} in: {errors}");
+    }
+}
+
+/// Nor the crossing check.
+#[test]
+fn a_class_problem_does_not_hide_a_crossing_problem() {
+    let mut opaque = manifest();
+    opaque.hops[0].forward_types[0] = TypeInfo::new("Request", false);
+    let errors = match layout(&opaque, &parsed(UNKNOWN_SEGMENT)) {
+        Ok(_) => panic!("laid out a crossing without a codec"),
+        Err(errors) => errors.to_string(),
+    };
+    for expected in [
+        "class `global` lists unknown segment `zz`",
+        "edge `S` -> `F` crosses a segment boundary, but its type `Request` is not serializable",
+    ] {
+        assert!(errors.contains(expected), "{expected} in: {errors}");
+    }
+}
