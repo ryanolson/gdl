@@ -30,8 +30,8 @@ pub use metrics::{
     RUNTIME_METRICS, WORKER_LABEL,
 };
 pub use placement::{
-    CrossingReport, HopLayout, Layout, Placement, PlacementError, PlacementErrors, RequestRouter,
-    Run, SELECTORS, SelectorInfo, WireReason, check_selector_name, layout,
+    ClassBoundary, CrossingReport, HopLayout, Layout, Placement, PlacementError, PlacementErrors,
+    RequestRouter, Run, SELECTORS, SelectorInfo, WireReason, check_selector_name, layout,
 };
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.

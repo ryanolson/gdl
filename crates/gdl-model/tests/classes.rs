@@ -6,7 +6,9 @@ use gdl_model::{
     DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, PlacementErrors, Role, TypeInfo, layout,
 };
 
-/// `S -> F -> D`: a source, a forward node, and a sink.
+/// `S => F { D }`: a source, an operator, and a sink. F's own hop is the
+/// one class boundary of [`CLASSES`], and it crosses at its inner end, as
+/// the boundary rule requires (`tests/boundaries.rs`).
 fn manifest() -> Manifest {
     let node = |name: &str, role| NodeInfo {
         name: name.into(),
@@ -18,20 +20,27 @@ fn manifest() -> Manifest {
         schema: 1,
         nodes: vec![
             node("S", Role::Source),
-            node("F", Role::Forward),
+            node("F", Role::Operator),
             node("D", Role::Sink),
         ],
-        hops: vec![HopInfo {
-            outer: "S".into(),
-            forward: vec!["F".into()],
-            inner: "D".into(),
-            backward: vec![],
-            forward_types: vec![
-                TypeInfo::new("Request", true),
-                TypeInfo::new("Tokens", true),
-            ],
-            backward_types: vec![TypeInfo::new("Reply", true)],
-        }],
+        hops: vec![
+            HopInfo {
+                outer: "S".into(),
+                forward: vec![],
+                inner: "F".into(),
+                backward: vec![],
+                forward_types: vec![TypeInfo::new("Request", true)],
+                backward_types: vec![TypeInfo::new("Reply", true)],
+            },
+            HopInfo {
+                outer: "F".into(),
+                forward: vec![],
+                inner: "D".into(),
+                backward: vec![],
+                forward_types: vec![TypeInfo::new("Tokens", true)],
+                backward_types: vec![TypeInfo::new("Reply", true)],
+            },
+        ],
     }
 }
 

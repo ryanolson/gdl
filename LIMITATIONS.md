@@ -230,12 +230,20 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Workaround:** name a revision at or after the split (`869699d`).
 - **See:** review `split-r2`, finding R2.
 
-### Classes are checked and hashed, and nothing else uses them
+### Classes are checked and reported, but nothing deploys by class
 
-- **What happens:** a placement's `[class.<name>]` tables are checked (each segment is in exactly one class) and change the placement hash, but nothing deploys by class. `cargo gdl compose` and the composer's Deploy tab write one bundle with one hub for the whole placement. A hop may cross between classes anywhere, and nothing chooses a cell.
-- **Why:** the classes come first, so that the placement's identity is settled before the parts that use it.
-- **Would lift it:** the boundary rule between classes, one bundle and hub per class, and cells, as `agent-docs/cells.md` proposes.
-- **See:** `agent-docs/cells.md`, section 3.2.
+- **What happens:** a placement's `[class.<name>]` tables are checked (each segment is in exactly one class, every class boundary obeys the boundary rule, and the boundaries make no cycle), change the placement hash, and add WAN round trips to the crossing report. But nothing deploys by class: `cargo gdl compose` and the composer's Deploy tab write one bundle with one hub for the whole placement, and nothing chooses a cell.
+- **Why:** the model comes first, so that the placement's identity and its valid shapes are settled before the parts that use them.
+- **Would lift it:** one bundle and hub per class, and cells, as `agent-docs/cells.md` proposes.
+- **See:** `agent-docs/cells.md`, sections 3.2 and 10.
+
+### A class boundary falls only at a hop's inner end
+
+- **What happens:** with classes, `cargo gdl generate`, `compose`, and the composer refuse a placement in which a hop crosses from its outer end's class into another anywhere but at its inner end. Every other stage of that hop, forward and backward, must be in the outer end's segment, not only its class, and every hop under the inner end must stay in the inner end's class. The error names the hop, the two classes, and the stage and segment that break the rule. Class boundaries that form a cycle, such as two classes that cross into each other, are refused. Without classes, any cut is accepted, as before.
+- **Why:** the outer end's instance then runs every stage but the inner end, sends the one request into the other class, and minted the anchor the inner end's output goes to, so the other class only ever answers the instance that sent to it. With a backward stage in another segment, the inner end's output would go to an instance that never sent to it; with a forward path that leaves the outer end's segment and returns, the request could return to another instance than the one that chose the cell.
+- **Workaround:** put the boundary at an operator: make the hop's outer end an operator whose inner end is an operator in the other class, as `agent-docs/cells.md` section 3.1 shows.
+- **Would lift it:** option (b) of Q1: every segment selected from outside its class exported to the other class's hub, with their retirement acknowledgements, cell-filtered selection for openings, the cell pin carried in the request context, and peer lookup across hubs.
+- **See:** `agent-docs/cells.md`, section 3.1, section 8 (Q1), and section 11 (rulings Q1 and Q6); review `cells-r2`, finding 1.
 
 ### Only Docker Compose is generated
 

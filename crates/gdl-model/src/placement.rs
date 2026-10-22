@@ -251,8 +251,21 @@ pub struct Layout {
     placement_hash: u64,
     segment_of: BTreeMap<String, String>,
     class_of: BTreeMap<String, String>,
+    boundaries: Vec<ClassBoundary>,
     hops: Vec<HopLayout>,
     routing: BTreeMap<(usize, usize), RequestRouter>,
+}
+
+/// A hop that crosses from one class into another. Under the boundary rule
+/// its inner end is its only stage in the other class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassBoundary {
+    /// The hop's index in [`Layout::hops`].
+    pub hop: usize,
+    /// The class of the hop's outer end.
+    pub from: String,
+    /// The class of the hop's inner end.
+    pub into: String,
 }
 
 /// How one hop executes under a placement.
@@ -401,42 +414,102 @@ impl Layout {
         self.routing.get(&(hop, position)).unwrap_or(&DEFAULT)
     }
 
-    /// Crossings and anchors for one request through each root.
+    /// The hops that cross from one class into another, in hop order:
+    /// empty when the placement has no classes.
+    pub fn boundaries(&self) -> &[ClassBoundary] {
+        &self.boundaries
+    }
+
+    /// Crossings and anchors for one request through each root and, when
+    /// the placement has classes, the WAN round trips each class boundary
+    /// adds when the request spills to a cell in another region.
     pub fn report(&self) -> CrossingReport {
+        let mut hops: Vec<HopCount> = self
+            .hops
+            .iter()
+            .map(|hop| HopCount {
+                crossings: hop.crossings(),
+                anchors: hop.anchors(),
+                wan_round_trips: 0,
+                boundary: None,
+            })
+            .collect();
+        for boundary in &self.boundaries {
+            let count = &mut hops[boundary.hop];
+            count.wan_round_trips = spill_round_trips(&self.hops[boundary.hop]);
+            count.boundary = Some((boundary.from.clone(), boundary.into.clone()));
+        }
         CrossingReport {
             roots: self.roots,
-            hops: self
-                .hops
-                .iter()
-                .map(|hop| (hop.crossings(), hop.anchors()))
-                .collect(),
+            hops,
+            classed: !self.class_of.is_empty(),
         }
     }
 }
 
-/// Aggregate segment crossings and anchors for one request through each root.
+/// The WAN round trips one request adds at a class boundary when the cell
+/// it is offered to is in another region, between warm peers. The
+/// `gdl.fwd` goes out and the inner end's output opens the outer end's
+/// ticket back, with no attach round trip. A streamed request's items wait
+/// for the acknowledgement that brings back the inner end's input anchor,
+/// so it takes a second. The boundary rule makes the edge into the inner
+/// end the hop's only crossing out of the outer end's segment. `_hello` and
+/// a cold connection's handshake are paid once per pair of instances, not
+/// per request, and are not counted.
+fn spill_round_trips(hop: &HopLayout) -> usize {
+    if hop.request_streams.last() == Some(&true) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Aggregate segment crossings and anchors for one request through each
+/// root and, when the placement has classes, the WAN round trips its class
+/// boundaries add to a request that spills to another region.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrossingReport {
     roots: usize,
-    hops: Vec<(usize, usize)>,
+    hops: Vec<HopCount>,
+    // Without classes the report reads as it did before classes existed,
+    // so that the generated `crossings.txt` of every such spec is unchanged.
+    classed: bool,
 }
 
 impl CrossingReport {
     /// Crossings for one request through each root, over all hops.
     pub fn crossings(&self) -> usize {
-        self.hops.iter().map(|(c, _)| c).sum()
+        self.hops.iter().map(|hop| hop.crossings).sum()
     }
 
     /// Anchors for one request through each root, over all hops.
     pub fn anchors(&self) -> usize {
-        self.hops.iter().map(|(_, a)| a).sum()
+        self.hops.iter().map(|hop| hop.anchors).sum()
+    }
+
+    /// WAN round trips for one request through each root, over all hops,
+    /// when every class boundary it crosses spills to another region. In
+    /// one region a boundary adds none. Zero without classes.
+    pub fn wan_round_trips(&self) -> usize {
+        self.hops.iter().map(|hop| hop.wan_round_trips).sum()
     }
 }
 
 impl fmt::Display for CrossingReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, (crossings, anchors)) in self.hops.iter().enumerate() {
-            writeln!(f, "hop {index}: {crossings} crossings, {anchors} anchors")?;
+        for (index, hop) in self.hops.iter().enumerate() {
+            write!(
+                f,
+                "hop {index}: {} crossings, {} anchors",
+                hop.crossings, hop.anchors
+            )?;
+            if self.classed {
+                write!(f, ", {} WAN round trips", hop.wan_round_trips)?;
+                if let Some((from, into)) = &hop.boundary {
+                    write!(f, " ({from} -> {into})")?;
+                }
+            }
+            writeln!(f)?;
         }
         write!(
             f,
@@ -448,8 +521,22 @@ impl fmt::Display for CrossingReport {
             },
             self.crossings(),
             self.anchors()
-        )
+        )?;
+        if self.classed {
+            write!(f, ", {} WAN round trips", self.wan_round_trips())?;
+        }
+        Ok(())
     }
+}
+
+/// One hop's line of a [`CrossingReport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HopCount {
+    crossings: usize,
+    anchors: usize,
+    wan_round_trips: usize,
+    /// The classes a boundary hop crosses from and into.
+    boundary: Option<(String, String)>,
 }
 
 /// Why a placement was rejected.
@@ -529,6 +616,64 @@ pub enum PlacementError {
         /// Every class that lists it.
         classes: Vec<String>,
     },
+    /// A hop reaches another class at a stage before or after its inner
+    /// end, and its inner end is in its outer end's class.
+    InnerEndInOuterClass {
+        /// The hop's outer end.
+        outer: String,
+        /// The hop's inner end.
+        inner: String,
+        /// The class of both ends.
+        from: String,
+        /// The other class the hop reaches.
+        into: String,
+        /// The first stage in that class.
+        stage: String,
+    },
+    /// A hop that crosses into another class has a forward or backward
+    /// stage outside its outer end's segment.
+    StageOffOuterSegment {
+        /// The hop's outer end.
+        outer: String,
+        /// The hop's inner end.
+        inner: String,
+        /// The outer end's class.
+        from: String,
+        /// The class the hop crosses into.
+        into: String,
+        /// The stage.
+        stage: String,
+        /// Whether the stage is forward or backward.
+        role: Role,
+        /// The stage's segment.
+        segment: String,
+        /// The outer end's segment.
+        outer_segment: String,
+    },
+    /// A hop nested under a class boundary's inner end has a stage outside
+    /// the inner end's class.
+    NestedOutsideClass {
+        /// The boundary hop's outer end.
+        outer: String,
+        /// The boundary hop's inner end, which the stage's hop is under.
+        inner: String,
+        /// The boundary hop's outer end's class.
+        from: String,
+        /// The inner end's class.
+        into: String,
+        /// The stage.
+        stage: String,
+        /// The stage's segment.
+        segment: String,
+        /// The stage's class.
+        class: String,
+    },
+    /// The class boundaries make a cycle: work could cross from a class
+    /// into one that crosses back into it.
+    ClassCycle {
+        /// The classes on the cycle, in name order.
+        classes: Vec<String>,
+    },
     /// An edge that must be encoded carries a type with no codec.
     NotWire {
         /// The edge's upstream node.
@@ -583,6 +728,50 @@ impl fmt::Display for PlacementError {
             Self::ClassedTwice { segment, classes } => {
                 write!(f, "segment `{segment}` is in several classes: {classes:?}")
             }
+            Self::InnerEndInOuterClass {
+                outer,
+                inner,
+                from,
+                into,
+                stage,
+            } => write!(
+                f,
+                "hop `{outer}` -> `{inner}` reaches class `{into}` at `{stage}`, but its inner end `{inner}` is in `{outer}`'s class `{from}`; a hop may cross into another class only at its inner end"
+            ),
+            Self::StageOffOuterSegment {
+                outer,
+                inner,
+                from,
+                into,
+                stage,
+                role,
+                segment,
+                outer_segment,
+            } => write!(
+                f,
+                "hop `{outer}` -> `{inner}` crosses from class `{from}` into `{into}`, but its {} stage `{stage}` is in segment `{segment}`; every stage but the inner end must be in `{outer}`'s segment `{outer_segment}`",
+                role.name()
+            ),
+            Self::NestedOutsideClass {
+                outer,
+                inner,
+                from,
+                into,
+                stage,
+                segment,
+                class,
+            } => write!(
+                f,
+                "hop `{outer}` -> `{inner}` crosses from class `{from}` into `{into}`, but `{stage}`, under `{inner}`, is in segment `{segment}` of class `{class}`; every hop under the inner end must stay in `{into}`"
+            ),
+            Self::ClassCycle { classes } => {
+                let classes: Vec<String> = classes.iter().map(|c| format!("`{c}`")).collect();
+                write!(
+                    f,
+                    "the class boundaries make a cycle through {}; work may cross between two classes in one direction only",
+                    classes.join(", ")
+                )
+            }
             Self::NotWire {
                 from,
                 to,
@@ -627,14 +816,36 @@ impl From<PlacementErrors> for Error {
 }
 
 /// Check `placement` against `manifest` and split every hop into runs.
+///
+/// When the placement has classes, every hop that crosses from one class
+/// into another must cross only at its inner end: every other stage of the
+/// hop is in its outer end's segment, and every hop nested under the inner
+/// end stays in the inner end's class. The class boundaries must not make
+/// a cycle.
 pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, PlacementErrors> {
     // A class groups segments and decides nowhere a node runs, so a class
-    // problem stops none of the other checks: it is reported with whatever
-    // they find.
+    // or boundary problem stops none of the other checks: it is reported
+    // with whatever they find.
     let mut class_errors = Vec::new();
     let class_of = classify(placement, &mut class_errors);
-    match place(manifest, placement) {
-        Ok(layout) if class_errors.is_empty() => Ok(Layout { class_of, ..layout }),
+    let segment_of = match assign(manifest, placement) {
+        Ok(segment_of) => segment_of,
+        Err(PlacementErrors(mut errors)) => {
+            errors.append(&mut class_errors);
+            return Err(PlacementErrors(errors));
+        }
+    };
+    let boundaries = if placement.classes.is_empty() {
+        Vec::new()
+    } else {
+        bound(manifest, &segment_of, &class_of, &mut class_errors)
+    };
+    match place(manifest, placement, segment_of) {
+        Ok(layout) if class_errors.is_empty() => Ok(Layout {
+            class_of,
+            boundaries,
+            ..layout
+        }),
         Ok(_) => Err(PlacementErrors(class_errors)),
         Err(PlacementErrors(mut errors)) => {
             errors.append(&mut class_errors);
@@ -643,8 +854,12 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     }
 }
 
-/// Every check but the classes', and the layout without them.
-fn place(manifest: &Manifest, placement: &Placement) -> Result<Layout, PlacementErrors> {
+/// Each node's segment, once the manifest is sound and every node is in
+/// exactly one segment.
+fn assign(
+    manifest: &Manifest,
+    placement: &Placement,
+) -> Result<BTreeMap<String, String>, PlacementErrors> {
     let mut errors = check_manifest(manifest);
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
@@ -686,7 +901,17 @@ fn place(manifest: &Manifest, placement: &Placement) -> Result<Layout, Placement
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
     }
+    Ok(segment_of)
+}
 
+/// Every check that needs the nodes' segments but not their classes, and
+/// the layout without classes.
+fn place(
+    manifest: &Manifest,
+    placement: &Placement,
+    segment_of: BTreeMap<String, String>,
+) -> Result<Layout, PlacementErrors> {
+    let mut errors = Vec::new();
     let hops: Vec<HopLayout> = manifest
         .hops
         .iter()
@@ -733,6 +958,7 @@ fn place(manifest: &Manifest, placement: &Placement) -> Result<Layout, Placement
         placement_hash: placement.hash(),
         segment_of,
         class_of: BTreeMap::new(),
+        boundaries: Vec::new(),
         hops,
     })
 }
@@ -791,6 +1017,156 @@ fn classify(placement: &Placement, errors: &mut Vec<PlacementError>) -> BTreeMap
         }
     }
     class_of
+}
+
+/// The hops that cross from one class into another, checking each against
+/// the boundary rule, and the classes they cross between for a cycle.
+///
+/// The rule keeps every stage of a boundary hop but its inner end on the
+/// outer end's instance: that instance chooses the cell, sends the one
+/// `gdl.fwd` into it, and minted the anchor the inner end's output goes to,
+/// so the only instance the other class must reach is the one that sent to
+/// it. A backward stage in another segment of the outer end's class would
+/// be provisioned first, and the inner end would have to reach its
+/// instance, which never sent to it; a forward path that leaves the outer
+/// end's segment and returns can return to another instance than the one
+/// that chose.
+///
+/// A stage whose segment has no class, because the class tables are
+/// refused, is not judged, so that it is reported once, as unclassed.
+fn bound(
+    manifest: &Manifest,
+    segment_of: &BTreeMap<String, String>,
+    class_of: &BTreeMap<String, String>,
+    errors: &mut Vec<PlacementError>,
+) -> Vec<ClassBoundary> {
+    let class = |node: &str| class_of.get(&segment_of[node]).map(String::as_str);
+    let mut boundaries = Vec::new();
+    let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    // The boundary hop the current hop is nested under, and the classes it
+    // crosses from and into. Each root's chain is walked once, outermost
+    // hop first.
+    let mut under: Option<(&HopInfo, &str, &str)> = None;
+    for (index, hop) in manifest.hops.iter().enumerate() {
+        if index == 0 || manifest.hops[index - 1].inner != hop.outer {
+            under = None;
+        }
+        // The outer end of a nested hop is the inner end of the hop that
+        // owns it, which was judged with that hop.
+        let stages = || {
+            hop.forward
+                .iter()
+                .chain(std::iter::once(&hop.inner))
+                .chain(&hop.backward)
+        };
+        if let Some((boundary, from, into)) = under {
+            for stage in stages() {
+                if let Some(other) = class(stage).filter(|c| *c != into) {
+                    errors.push(PlacementError::NestedOutsideClass {
+                        outer: boundary.outer.clone(),
+                        inner: boundary.inner.clone(),
+                        from: from.to_string(),
+                        into: into.to_string(),
+                        stage: stage.clone(),
+                        segment: segment_of[stage].clone(),
+                        class: other.to_string(),
+                    });
+                }
+            }
+            continue;
+        }
+        let Some(from) = class(&hop.outer) else {
+            continue;
+        };
+        let inner = class(&hop.inner);
+        let into = match inner.filter(|c| *c != from) {
+            Some(into) => into,
+            None => {
+                let Some((stage, into)) = stages()
+                    .filter_map(|stage| Some((stage, class(stage)?)))
+                    .find(|(_, c)| *c != from)
+                else {
+                    continue;
+                };
+                if inner.is_some() {
+                    errors.push(PlacementError::InnerEndInOuterClass {
+                        outer: hop.outer.clone(),
+                        inner: hop.inner.clone(),
+                        from: from.to_string(),
+                        into: into.to_string(),
+                        stage: stage.clone(),
+                    });
+                }
+                into
+            }
+        };
+        let outer_segment = &segment_of[&hop.outer];
+        for (role, stages) in [
+            (Role::Forward, &hop.forward),
+            (Role::Backward, &hop.backward),
+        ] {
+            for stage in stages {
+                if &segment_of[stage] != outer_segment {
+                    errors.push(PlacementError::StageOffOuterSegment {
+                        outer: hop.outer.clone(),
+                        inner: hop.inner.clone(),
+                        from: from.to_string(),
+                        into: into.to_string(),
+                        stage: stage.clone(),
+                        role,
+                        segment: segment_of[stage].clone(),
+                        outer_segment: outer_segment.clone(),
+                    });
+                }
+            }
+        }
+        if inner == Some(into) {
+            edges.entry(from).or_default().insert(into);
+            boundaries.push(ClassBoundary {
+                hop: index,
+                from: from.to_string(),
+                into: into.to_string(),
+            });
+            under = Some((hop, from, into));
+        }
+    }
+    for classes in cycles(&edges) {
+        errors.push(PlacementError::ClassCycle { classes });
+    }
+    boundaries
+}
+
+/// The classes on each cycle of `edges`, one entry per set of classes that
+/// reach each other, in name order. Classes are few, so reaching from each
+/// costs nothing a hop count can grow.
+fn cycles(edges: &BTreeMap<&str, BTreeSet<&str>>) -> Vec<Vec<String>> {
+    let reach = |from: &str| {
+        let mut seen = BTreeSet::new();
+        let mut next: Vec<&str> = edges.get(from).into_iter().flatten().copied().collect();
+        while let Some(at) = next.pop() {
+            if seen.insert(at) {
+                next.extend(edges.get(at).into_iter().flatten().copied());
+            }
+        }
+        seen
+    };
+    let reached: BTreeMap<&str, BTreeSet<&str>> =
+        edges.keys().map(|&class| (class, reach(class))).collect();
+    let mut placed = BTreeSet::new();
+    let mut cycles = Vec::new();
+    for (&class, reaches) in &reached {
+        if placed.contains(class) || !reaches.contains(class) {
+            continue;
+        }
+        let cycle: Vec<&str> = reaches
+            .iter()
+            .copied()
+            .filter(|other| reached.get(other).is_some_and(|back| back.contains(class)))
+            .collect();
+        placed.extend(cycle.iter().copied());
+        cycles.push(cycle.into_iter().map(String::from).collect());
+    }
+    cycles
 }
 
 fn hop_layout(
