@@ -19,6 +19,7 @@
 | `examples/asr` | A separate workspace with a streamed request, generated segments, and a demo that runs them. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments` |
 | `examples/http` | A separate workspace: a hosted `Frontend` on axum, its graph, and a test that drives the generated service over HTTP |
 | `examples/api` | A separate workspace: a `Service` with three typed entry points sharing one engine, and the deployment spec that `cargo gdl compose` and the composer's Deploy tab use |
+| `examples/film` | Two reference/vendor node crates with configuration and metrics, distributed and compact specs, and native proof in `crates/gdl-gen/tests/film.rs` |
 | `crates/gdl-hub` | The discovery hub: velo-hub with admission restricted to one deployment's graph and placement |
 
 ## Build, lint, test

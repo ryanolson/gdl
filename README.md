@@ -577,6 +577,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `catalog`, `resolve`, `generate`, `diagram`, and `export` |
 | `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |
 | `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |
+| [`examples/film`](examples/film/README.md) | Two node crates with graph settings, custom metrics, a mock engine, and a vendor usage tap. Distributed and compact specs use the same graph. |
 | `agent-docs/` | The plan, review records, and measurements |
 
 ## Build and test

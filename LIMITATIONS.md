@@ -191,6 +191,12 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ## Tooling
 
+### The composer does not list marked message re-exports
+
+- **What happens:** the catalog reader and generator resolve marked message re-exports. The composer omits them from its message list. A frontend can have empty message selectors when its canonical messages are private, even with public marked exports.
+- **Why:** the composer populates these controls from public `messages` entries, without adding `exports` entries and their canonical identities.
+- **What lifts it:** include marked exports in the message controls and retain their original message identities. The film's reference package defines its messages at the crate root; its vendor extension still demonstrates marked re-exports through source extraction and generation.
+
 ### The composer's server cannot build crates that need CUDA
 
 - **What happens:** a graph spec compiles nothing, so composing works for any crate. A contract spec that names such a crate's messages, however, cannot be built on a server without CUDA. With `--docker`, **Build and apply** builds every segment in the one build image of the deployment (`build_image`). A segment whose crates need CUDA builds only if that image has the CUDA toolkit.

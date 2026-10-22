@@ -1,0 +1,48 @@
+[graph]
+path = "film.gdl"
+
+[messages]
+crates = [{ package = "gdl-demo-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "a6c607ba48b4edea33f684699c8701bbdd543207" }, { package = "acme-gdl-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "a6c607ba48b4edea33f684699c8701bbdd543207" }]
+
+[nodes]
+crates = [{ package = "gdl-demo-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "a6c607ba48b4edea33f684699c8701bbdd543207" }, { package = "acme-gdl-nodes", git = "https://github.com/ryanolson/gdl-demo", rev = "a6c607ba48b4edea33f684699c8701bbdd543207" }]
+pin = { Http = "gdl_demo_nodes::HttpFrontend", Engine = "gdl_demo_nodes::MockEngine", UsageTap = "acme_gdl_nodes::UsageTap" }
+
+[config.Engine]
+model = "film-engine"
+uppercase = true
+
+[config.UsageTap]
+tenant = "acme-film"
+enabled = true
+
+[gdl]
+git = "https://github.com/ryanolson/gdl"
+rev = "deefaa92f37ef3f6e4372c7c4c16eb1eccc1ac94"
+
+[segment.front]
+nodes = ["Http"]
+
+[segment.engine]
+nodes = ["Engine"]
+
+[segment.accounting]
+nodes = ["UsageTap"]
+
+[deployment.segment.front]
+ports = ["127.0.0.1:8082:8082", "127.0.0.1:9090:9090"]
+
+[deployment.segment.front.config.frontend]
+listen = "0.0.0.0:8082"
+
+[deployment.segment.engine]
+ports = ["127.0.0.1:9091:9090"]
+
+[deployment.segment.engine.config.node.Engine]
+delay_ms = 0
+
+[deployment.segment.accounting]
+ports = ["127.0.0.1:9092:9090"]
+
+[deployment.segment.accounting.config.node.UsageTap]
+accounting_url = "http://ledger:8091/usage"
