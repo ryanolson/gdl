@@ -86,7 +86,7 @@ Use one deterministic stage for the crawl and paper room. The space scene and cu
 
 Support play, pause, replay, and seeking to an exact cue. Keep controls outside the capture area. Scene selection must reset every portrait, prop, and audio cue. Do not time the mouth motion from unrelated page timers.
 
-Use the recorded voice timings for mouth swaps. Speech can alternate neutral and talk states at a restrained rate. Reserve exclaim for emphasis. Keep blinking occasional and deterministic.
+Use the recorded voice timings for mouth swaps. Speech can alternate neutral and talk states at a restrained rate. Reserve exclaim for emphasis. Keep blinking occasional and deterministic. The [script's audio tags](script.md) guide the voice performance. Use the resulting recordings to time expressions. Remove the tags from visible text and captions.
 
 Keep dialogue performances separate from the narrator, music, and effects. Character voices can be original performances. Reference photos supply appearance, not voice recordings.
 

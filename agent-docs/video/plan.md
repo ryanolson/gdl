@@ -124,6 +124,8 @@ Record a scratch narration before producing voices. Read GDL as “G D L” and 
 
 Use a restrained narrator for the technical sections. Save the full trailer delivery for the crawl and closing. Keep character dialogue short. Use six distinct character performances. The dialogue is dramatized and does not imply recordings of the historical exchanges.
 
+Every spoken turn in the [script](script.md) now includes ElevenLabs audio tags. The [voice brief](voices.md) specifies the explicit model, speaker assignment, and relative pause cues. Preserve the dialogue words during generation. Remove delivery tags from the visible crawl and captions. Time the exact holds in the edit after selecting the voice takes.
+
 ElevenLabs supports multi-voice dialogue and timestamped alignment. Generate narration by scene and dialogue by exchange. Keep accepted takes and their timings. The timestamped response can drive mouth cues and captions. See the official [dialogue guide](https://elevenlabs.io/docs/overview/capabilities/text-to-dialogue) and [alignment endpoint](https://elevenlabs.io/docs/api-reference/text-to-dialogue/convert-with-timestamps).
 
 Use broad mouth-open cues rather than phoneme animation. Keep narration, characters, music, and effects on separate tracks. Lower the music under speech. Use a restrained pulse during demos, a short rise before the first successful run, and a quiet ending on the receipt sound.

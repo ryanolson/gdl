@@ -6,11 +6,21 @@ Creative direction addendum, 2026-10-22: open with a narrated space crawl, then 
 
 The timecodes are editorial targets, not measured voice timings. Italic text describes picture or sound. Speaker paragraphs are the proposed spoken script. Leave pauses for the audience to read results.
 
+## ElevenLabs delivery notation
+
+Square-bracket cues inside speech direct the ElevenLabs performance. They stay in the submitted speech text. Speaker labels, quotation marks, headings, and italic stage directions stay outside it. Remove the bracketed cues from the visible crawl and captions.
+
+Production target: `eleven_v4`, selected explicitly in Text to Dialogue. The same audio-tag syntax also works with `eleven_v3`. Assign a selected `voice_id` to each speaker. The [voice brief](voices.md) records the model, tag conventions, and generation procedure, with official sources.
+
+The narrator returns to a clear explanatory delivery during technical proof. The crawl and closing carry the cinematic performance. Character cues supply curiosity, dry sarcasm, surprise, and one theatrical reaction. These are proposed performances for the dramatization.
+
+Tags such as `[curious]` and `[short pause]` appear in official examples. Longer cues such as `[measured, cinematic delivery]` are custom natural-language directions. Audition them with the selected voices. Exact silence and scene timing belong in the edit. No speech has been generated for this draft.
+
 ## 00:00–00:24 — The graph was already there
 
 *Star field. Two seconds of quiet anticipation. Gold text recedes in perspective, with a measured cinematic narrator reading the same words. The crawl heading is THE GRAPH WAS ALREADY THERE. Use original text and score.*
 
-**Narrator:** “In the early days of Dynamo, the plan was a graph. Define the logic. Choose the process boundaries. Build the pieces. Deploy them together. Typed links and working pipelines took shape. The next challenge: make composition, builds, and deployment one workflow.”
+**Narrator:** “[measured, cinematic delivery] In the early days of Dynamo, the plan was a graph. [short pause] Define the logic. Choose the process boundaries. Build the pieces. Deploy them together. [short pause] Typed links and working pipelines took shape. [building resolve] The next challenge: make composition, builds, and deployment one workflow.”
 
 *Use paragraph breaks in the visible crawl: the original plan, the four actions, then the remaining challenge. Keep the last line readable before the interruption.*
 
@@ -18,47 +28,47 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 *The orchestral build stops. Hard cut to a flat paper control room. All six recognizable cartoon heads are visible on simple paper bodies. A small caption reads Dramatized dialogue. Brief name labels identify the cast.*
 
-**Ishan:** “This seems straightforward.”
+**Ishan:** “[cheerfully] This seems straightforward.”
 
 *John T snaps two matching typed ports together.*
 
-**John T:** “The links already check the types.”
+**John T:** “[matter-of-fact delivery] The links already check the types.”
 
 *Kyle draws a process boundary through the graph.*
 
-**Kyle:** “Now choose where it runs.”
+**Kyle:** “[thoughtful] Now choose where it runs.”
 
 *Graham opens a terminal. An exaggerated paper trait error unrolls across the room. This is a theatrical prop, not captured compiler output.*
 
-**Graham:** “The compiler would like a word.”
+**Graham:** “[sarcastic] The compiler would like a word.”
 
 *The paper crosses Alec's desk, covers the coffee, and keeps going. Everyone watches it for one beat.*
 
-**Alec:** “Oh, the humanity.”
+**Alec:** “[appalled] Oh, [drawn out] the humanity.”
 
 *Ryan rolls the paper aside and reveals the graph blueprint. Graham places a matching adapter into it. The joke targets the assembly work, not a person's ability.*
 
-**Ryan:** “Let's make the whole thing composable.”
+**Ryan:** “[warm, assured delivery] Let's make the whole thing composable.”
 
 *Music returns. Match cut from the paper graph to the real composer. Title: CUT HERE. Subtitle: One graph. Many deployments.*
 
-**Narrator:** “The pipelines worked. The graph idea endured. GDL takes it through catalogs, compilation, and coordinated deployment.”
+**Narrator:** “[firm, understated delivery] The pipelines worked. [short pause] The graph idea endured. [building resolve] GDL takes it through catalogs, compilation, and coordinated deployment.”
 
 ## 00:55–01:45 — Crates become composable parts
 
 *Real source: a public node with `derive(gdl::Node)` and its role implementation. Highlight the derive, then the request and response types. Keep the extract small enough to read.*
 
-**John T:** “What can we inspect before we build?”
+**John T:** “[curious] What can we inspect before we build?”
 
-**Narrator:** “GDL is a graph definition library and runtime. A Rust crate exposes its nodes through derive macros and typed role traits. If you know Python decorators, the marker will look familiar. The port contracts come from the Rust implementation.”
+**Narrator:** “[clear, explanatory delivery] GDL is a graph definition library and runtime. A Rust crate exposes its nodes through derive macros and typed role traits. If you know Python decorators, the marker will look familiar. The port contracts come from the Rust implementation.”
 
 *A reference package and a fictional ACME package enter the real catalog. Show package names and pinned source revisions.*
 
-**Narrator:** “The catalog can combine our packages with third-party packages from Git or crates.io. GDL reads supported, marked source without compiling the package first.”
+**Narrator:** “[clear, explanatory delivery] The catalog can combine our packages with third-party packages from Git or crates.io. [short pause] GDL reads supported, marked source without compiling the package first.”
 
 *Show the shared message definition and a marked re-export through a facade crate.*
 
-**Narrator:** “A marked re-export can still name the same underlying message. That lets another package speak the contract without defining a competing copy.”
+**Narrator:** “[clear, explanatory delivery] A marked re-export can still name the same underlying message. That lets another package speak the contract without defining a competing copy.”
 
 *Hold on both packages in one catalog. Short music-only pause.*
 
@@ -66,33 +76,33 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 *Try a prepared incompatible connection. Show the actual rejection and its type details. Then choose the correct node and show a valid graph.*
 
-**Graham:** “They are both called Chunk.”
+**Graham:** “[curious] They are both called Chunk.”
 
-**Kyle:** “The name is not the contract.”
+**Kyle:** “[matter-of-fact delivery] The name is not the contract.”
 
 *The incorrect paper plug gently bounces off the port. No alarm barrage.*
 
-**Narrator:** “Connections need matching roles and message identities. The composer helps us find a valid connection. Source checks catch composition errors early. Rust compilation checks the generated program.”
+**Narrator:** “[clear, explanatory delivery] Connections need matching roles and message identities. The composer helps us find a valid connection. Source checks catch composition errors early. [firm, understated delivery] Rust compilation checks the generated program.”
 
 *Return to a clear view of the reference graph.*
 
-**Narrator:** “This graph is a reference application. We can change it by composing the parts that our application needs.”
+**Narrator:** “[warm, assured delivery] This graph is a reference application. We can change it by composing the parts that our application needs.”
 
 ## 02:25–03:20 — ACME changes the application
 
 *Persistent label: Concept Dynamo nodes · real GDL execution. Trace the request path, then the separate response path. Insert ACME on the response path in the real composer.*
 
-**Alec:** “So ACME brings its own crate?”
+**Alec:** “[curious] So ACME brings its own crate?”
 
-**Narrator:** “ACME wants to inspect responses and send usage information to its accounting service. Its package supplies a response observer. We insert it where the response has the information ACME needs.”
+**Narrator:** “[clear, explanatory delivery] ACME wants to inspect responses and send usage information to its accounting service. Its package supplies a response observer. We insert it where the response has the information ACME needs.”
 
 *Show the meaningful graph change: one node and its response edges. Keep the original request path visible.*
 
-**Narrator:** “For this demonstration, the engine emits known usage fields. The observer forwards the response unchanged and sends a usage event to a small accounting receiver.”
+**Narrator:** “[clear, explanatory delivery] For this demonstration, the engine emits known usage fields. The observer forwards the response unchanged and sends a usage event to a small accounting receiver.”
 
 *The paper ACME crate opens. A tiny receipt printer emerges. Match cut to the real node in the graph.*
 
-**Narrator:** “The graph, runtime, and generated deployment are real. These Dynamo-shaped nodes and the accounting service are demonstration implementations.”
+**Narrator:** “[firm, understated delivery] The graph, runtime, and generated deployment are real. [clear, explanatory delivery] These Dynamo-shaped nodes and the accounting service are demonstration implementations.”
 
 *Hold on the final graph. Leave the next question visible: Where does it run?*
 
@@ -100,23 +110,23 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 *The large scissors appear. Process boundaries move around fixed nodes. Match cut to the composer's Segments view.*
 
-**Narrator:** “Now choose the process boundaries. The logical graph stays the same. Placement groups its nodes into segments.”
+**Narrator:** “[inviting, assured delivery] Now choose the process boundaries. [short pause] The logical graph stays the same. [clear, explanatory delivery] Placement groups its nodes into segments.”
 
 *Show generation, then a short curated file tree. Open one generated manifest, one Dockerfile, and Compose. Keep the same graph and segment labels.*
 
-**Narrator:** “GDL generates a Rust crate for each segment. Each segment links the implementations it hosts. With fetchable dependencies, the tools prepare image builds and a Compose deployment.”
+**Narrator:** “[clear, explanatory delivery] GDL generates a Rust crate for each segment. Each segment links the implementations it hosts. With fetchable dependencies, the tools prepare image builds and a Compose deployment.”
 
 *Start the actual prepared deployment. Shorten the build wait only with a visible elapsed-time caption. Show readiness, not merely container startup.*
 
-**Narrator:** “The hub checks the graph and placement identities. The segments discover their peers and reach readiness. Then we send the request.”
+**Narrator:** “[clear, explanatory delivery] The hub checks the graph and placement identities. The segments discover their peers and reach readiness. [short pause] [quiet anticipation] Then we send the request.”
 
 *Quiet music. Hold on an actual client stream beside the accounting receiver. Let the viewer read the fixture response and usage event.*
 
-**Narrator:** “Here is the response. Here is ACME's usage event. Both came from the application we just composed.”
+**Narrator:** “[excited] Here is the response. [short pause] Here is ACME's usage event. [warm, assured delivery] Both came from the application we just composed.”
 
 *Increase engine replicas. Show actual ready instances and a diagnostic proving requests reach multiple replicas.*
 
-**Narrator:** “The engine can have more replicas without replicating the frontend. The runtime can admit those replicas while the deployment serves. Placement gives us the unit we can scale.”
+**Narrator:** “[clear, explanatory delivery] The engine can have more replicas without replicating the frontend. The runtime can admit those replicas while the deployment serves. [firm, understated delivery] Placement gives us the unit we can scale.”
 
 *Hold the successful output. Do not add a throughput claim.*
 
@@ -124,15 +134,15 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 *Label: NIM packaging concept · mock engine. A silhouette of the distributed deployment becomes a compact package. Show two separate edits.*
 
-**Narrator:** “Now consider a NIM-shaped package. This application does not need our explicit routing stage, so we change the graph. Then we place the remaining nodes in one segment.”
+**Narrator:** “[clear, explanatory delivery] Now consider a NIM-shaped package. This application does not need our explicit routing stage, so we change the graph. [short pause] Then we place the remaining nodes in one segment.”
 
-**Ishan:** “One process?”
+**Ishan:** “[surprised] One process?”
 
-**Ryan:** “One serving process.”
+**Ryan:** “[firm, understated delivery] One serving process.”
 
 *The boundary folds into a neat cardboard box. Match cut to the generated single-segment binary and its running process.*
 
-**Narrator:** “Run that generated binary with a local directory roster. One serving process. No separate discovery hub. The mock engine answers the same fixture request.”
+**Narrator:** “[clear, explanatory delivery] Run that generated binary with a local directory roster. [short pause] One serving process. No separate discovery hub. The mock engine answers the same fixture request.”
 
 *Hold on the process view and response. Avoid claiming that a production NIM integration ships today.*
 
@@ -140,15 +150,15 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 *Label: Stargate / NVCF architecture concept. Show the current public API adapters beside the backend. Move the adapters to the edge. Introduce a concept global router.*
 
-**Narrator:** “For a Stargate and NVCF architecture, move the public API work outward. The edge accepts the public contracts, converts them to an internal representation, and selects a Dynamo-shaped backend.”
+**Narrator:** “[clear, explanatory delivery] For a Stargate and NVCF architecture, move the public API work outward. The edge accepts the public contracts, converts them to an internal representation, and selects a Dynamo-shaped backend.”
 
 *Draw a clear boundary. Label its request and response types. Follow a single request across it, then its response back.*
 
-**Narrator:** “That backend now receives the internal request. Its response returns through the edge adapters. The public API can evolve at the front door while the backend works with an explicit internal contract.”
+**Narrator:** “[clear, explanatory delivery] That backend now receives the internal request. Its response returns through the edge adapters. [short pause] The public API can evolve at the front door while the backend works with an explicit internal contract.”
 
 *Show the executable mock version only after it passes rehearsal. Its label changes to Concept nodes · real GDL execution. Otherwise retain the architecture-concept label and animation.*
 
-**Narrator:** “Our small schemas demonstrate the composition. A production internal representation needs the real protocol types, routing behavior, and engine integration. GDL gives those pieces a place in the graph.”
+**Narrator:** “[clear, explanatory delivery] Our small schemas demonstrate the composition. A production internal representation needs the real protocol types, routing behavior, and engine integration. [warm, assured delivery] GDL gives those pieces a place in the graph.”
 
 *Hold the edge/backend view long enough to trace both directions. Do not imply that one toy request type covers every production API.*
 
@@ -156,11 +166,11 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 *Return to the complete ACME run. Show catalog provenance, graph, placement, generated artifacts, and actual output in a controlled sequence.*
 
-**Narrator:** “We started with packages. We composed a typed application. We changed its response path. We chose its process boundaries. Then we built and ran the result.”
+**Narrator:** “[measured, building resolve] We started with packages. We composed a typed application. We changed its response path. We chose its process boundaries. [short pause] Then we built and ran the result.”
 
 *Replay the response and usage event. Show the engine replicas, then the single-process arrangement.*
 
-**Narrator:** “These are executable demonstrations of the architecture. Porting Dynamo's production components is separate work. The catalog and graph give that work reusable boundaries.”
+**Narrator:** “[clear, explanatory delivery] These are executable demonstrations of the architecture. Porting Dynamo's production components is separate work. [warm, assured delivery] The catalog and graph give that work reusable boundaries.”
 
 *Four short cards, each paired with a real shot: COMPOSABLE CATALOG. CUSTOMIZABLE GRAPH. EXPLICIT SEGMENTS. GENERATED DEPLOYMENT.*
 
@@ -168,11 +178,11 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 *Pull back to three blueprints. Recognizable node shapes repeat across the distributed, compact, and edge/backend arrangements. Scissors rest beside them.*
 
-**Narrator:** “Reference components. Third-party extensions. Applications you can reshape. Deployments you can build.”
+**Narrator:** “[measured, cinematic delivery] Reference components. Third-party extensions. [short pause] Applications you can reshape. Deployments you can build.”
 
 *Small card: Available now — image-build bundles and Docker Compose. Separate card: Future integration target — DGD and Dynamo operator deployment.*
 
-**Narrator:** “Your application is a graph. Your deployment is a choice.”
+**Narrator:** “[warm, assured delivery] Your application is a graph. [short pause] [firm, understated delivery] Your deployment is a choice.”
 
 *GDL title. The request reaches the client. One receipt prints. All six heads return for a brief final tableau. Music resolves. Hold the final frame for three seconds.*
 
