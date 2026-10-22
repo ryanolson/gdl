@@ -49,6 +49,26 @@ fn router(dir: &Path, catalog: PathBuf) -> axum::Router {
     .expect("router")
 }
 
+/// A server started with the definitions crate as its gdl, as a
+/// command line from before the split names it, refuses to start rather
+/// than refuse each export later.
+#[test]
+fn the_server_refuses_a_gdl_path_that_is_not_the_runtime() {
+    let temp = scratch("gdl-path");
+    let config = |gdl: &str| gdl_web::Config {
+        catalog: fixture_catalog(),
+        local_root: None,
+        hosts: Vec::new(),
+        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        deploy: gdl_web::Deploy::default(),
+        target: temp.path().join("target"),
+        gdl: gdl_web::Gdl::Path(crates().join(gdl)),
+    };
+    let error = gdl_web::router(config("gdl")).expect_err("the definitions crate");
+    assert!(error.contains("must name `gdl-runtime`"), "{error}");
+    let _router = gdl_web::router(config("gdl-runtime")).expect("the runtime");
+}
+
 fn fixture_catalog() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/catalog")
 }

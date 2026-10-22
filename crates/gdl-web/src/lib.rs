@@ -68,6 +68,9 @@ struct Composer {
 
 /// The server's routes, over the catalogue `config` names, loaded now.
 pub fn router(mut config: Config) -> Result<Router, String> {
+    if let Gdl::Path(path) = &config.gdl {
+        gdl_gen::runtime_at(path).map_err(|e| e.to_string())?;
+    }
     config.local_root = config
         .local_root
         .map(|root| {

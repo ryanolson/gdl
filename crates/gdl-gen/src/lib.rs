@@ -62,7 +62,7 @@ use offers::offers;
 pub use offers::{CRATES_IO, Offers};
 pub use output::{drift, write};
 pub use resolve::Resolved;
-pub use spec::Spec;
+pub use spec::{Spec, runtime_at};
 use validate::{library_clashes, validate};
 
 /// A generation failure, with everything wrong at once where possible.
@@ -103,6 +103,7 @@ fn render_with(
     deps: emit::Deps,
     from: Offers<'_>,
 ) -> Result<(Files, String), Error> {
+    spec.gdl.check()?;
     let prepared = prepare(spec, Some(out), target, deps, from)?;
     let spec = bound(spec, &prepared, target, from)?;
     let mut files = render_manifest(&spec, &prepared.contract, &prepared.manifest, out, deps)?;
@@ -189,6 +190,7 @@ pub struct Check {
 /// Check `spec` as [`render`] and [`export`] check it, with offers from
 /// `from`, and write nothing. A spec that passes generates.
 pub fn check(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Check, Error> {
+    spec.gdl.check()?;
     let prepared = prepare(spec, None, target, emit::Deps::Relative, from)?;
     let spec = bound(spec, &prepared, target, from)?;
     let layout = validate(&spec, &prepared.contract, &prepared.manifest)?;

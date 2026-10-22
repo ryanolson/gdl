@@ -201,6 +201,16 @@ pub(crate) enum GdlDep {
 }
 
 impl GdlDep {
+    /// Refuse a path whose package is not `gdl-runtime`, which every
+    /// generated manifest names. A version or a revision is not fetched
+    /// here.
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        match self {
+            Self::Path(path) => runtime_at(path),
+            Self::Version(_) | Self::Git { .. } => Ok(()),
+        }
+    }
+
     /// The dependency's source, as the inside of an inline table, with a
     /// path written as `path` writes it.
     pub(crate) fn source(&self, path: &dyn Fn(&Path) -> String) -> String {
@@ -452,17 +462,7 @@ impl Spec {
             }
         };
         let gdl = match (raw.gdl.path, raw.gdl.version, raw.gdl.git, raw.gdl.rev) {
-            (Some(path), None, None, None) => {
-                let path = dir.join(path);
-                let CrateNames { package, .. } = crate_names(&path)?;
-                if package != "gdl-runtime" {
-                    return Err(Error::new(format!(
-                        "[gdl] path {} is the package `{package}`; it must name `gdl-runtime`",
-                        path.display()
-                    )));
-                }
-                GdlDep::Path(path)
-            }
+            (Some(path), None, None, None) => GdlDep::Path(dir.join(path)),
             (None, Some(version), None, None) => GdlDep::Version(version),
             (None, None, Some(url), Some(rev)) => GdlDep::Git { url, rev },
             _ => {
@@ -605,6 +605,18 @@ fn crate_names(dir: &Path) -> Result<CrateNames, Error> {
     Ok(CrateNames { package, lib })
 }
 
+/// Refuse `dir` unless it holds the package `gdl-runtime`.
+pub fn runtime_at(dir: &Path) -> Result<(), Error> {
+    let CrateNames { package, .. } = crate_names(dir)?;
+    if package != "gdl-runtime" {
+        return Err(Error::new(format!(
+            "[gdl] path {} is the package `{package}`; it must name `gdl-runtime`",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
 /// The Rust path of a library's root: its name, or `r#name` when the name
 /// is a keyword (cargo accepts a library named `async` or `gen`, and Rust
 /// reaches it only as `r#async` or `r#gen`).
@@ -696,10 +708,11 @@ mod tests {
         }
     }
 
-    /// Generated crates depend on `gdl-runtime`, so a `[gdl] path` that
-    /// names another crate, such as the definitions crate `gdl` beside it,
-    /// is refused here rather than when cargo resolves the generated
-    /// manifests.
+    /// Generated crates depend on `gdl-runtime`, so generation refuses a
+    /// `[gdl] path` that names another crate, such as the definitions
+    /// crate `gdl` beside it, rather than leave the failure to cargo. A
+    /// spec still loads with any path: resolving, drawing, and exporting
+    /// read it as text.
     #[test]
     fn a_gdl_path_names_the_runtime_crate() {
         let temp = contract_dir("runtime");
@@ -716,12 +729,13 @@ mod tests {
             "[package]\nname = \"gdl\"\n",
         )
         .expect("write");
+        let runtime = parse("runtime").expect("the runtime");
+        assert_eq!(runtime, GdlDep::Path(dir.join("runtime")));
+        runtime.check().expect("the runtime");
+        let definitions = parse("definitions").expect("loads as text");
         assert_eq!(
-            parse("runtime").expect("the runtime"),
-            GdlDep::Path(dir.join("runtime"))
-        );
-        assert_eq!(
-            parse("definitions")
+            definitions
+                .check()
                 .expect_err("the definitions")
                 .to_string(),
             format!(
@@ -729,8 +743,10 @@ mod tests {
                 dir.join("definitions").display()
             )
         );
+        let missing = parse("missing").expect("loads as text");
         assert!(
-            parse("missing")
+            missing
+                .check()
                 .expect_err("no crate")
                 .to_string()
                 .starts_with(&format!(
@@ -738,6 +754,12 @@ mod tests {
                     dir.join("missing/Cargo.toml").display()
                 ))
         );
+        GdlDep::Git {
+            url: "https://example.com/gdl".into(),
+            rev: "abc123".into(),
+        }
+        .check()
+        .expect("a revision is not read");
     }
 
     /// A listed crate is a directory, or `name@version` that is not one.
