@@ -4,15 +4,17 @@ Production proposal, 2026-10-22. Audience: Dynamo engineers and leadership. Tone
 
 **Your application is a graph. Your deployment is a choice.**
 
+Creative direction addendum, 2026-10-22: the owner chose a narrated space crawl followed by a humorous cut-paper interruption. The six talking heads are Ishan, Alec, John T, Kyle, Graham, and Ryan. Use cartoon portraits based on reference photos. The supplied Slack research now informs the opening.
+
 ## The editorial decision
 
 Make a technical featurette with trailer energy. An eight-minute trailer voice will tire the audience. Open with a cinematic problem, establish the idea, then let working software carry the story.
 
-The recurring image is a graph on a paper blueprint. A request travels through it. Large scissors change the process boundaries. The nodes stay recognizable across the whole film.
+The opening starts with gold text that recedes into a star field. A narrator reads the same text. A compiler-paper gag interrupts the cinematic tone. The recurring image after the interruption is a graph on a paper blueprint. A request travels through it. Large scissors change the process boundaries. The nodes stay recognizable across the whole film.
 
 Use one complete ACME demonstration as the spine. Use NIM-shaped and Stargate/NVCF-shaped deployments as shorter extensions. Each scene answers a concrete question from an engineer or a leader.
 
-These are proposed creative choices. The [script](script.md) contains original narration and fictional dialogue. Historical claims, technical claims, and recording limits have separate [evidence](evidence.md).
+These are proposed creative choices. The [script](script.md) contains original narration and fictional dialogue. The [graphics brief](graphics.md) defines the six portraits and opening assets. The [history ledger](history.md) preserves selected supplied excerpts. Technical claims and recording limits have separate [evidence](evidence.md).
 
 ## What works about the idea
 
@@ -47,8 +49,8 @@ The narration must keep these distinctions clear:
 
 | Time | Scene | The audience sees |
 | --- | --- | --- |
-| 00:00–00:25 | A small request | A request for accounting triggers an absurd pile of deployment paperwork. Title: CUT HERE. |
-| 00:25–00:55 | The original promise | Real Dynamo pipeline diagrams become a clean graph. Three cards: DEFINE, BUILD, COORDINATE. |
+| 00:00–00:24 | The graph was already there | A narrated gold perspective crawl establishes the graph, process boundaries, builds, and coordination. |
+| 00:24–00:55 | The compiler would like a word | The six cartoon heads interrupt the epic tone. A paper trait error crosses the room. Alec: “Oh, the humanity.” |
 | 00:55–01:45 | Crates become parts | A real node derive, a role implementation, and catalog entries with package provenance. |
 | 01:45–02:25 | Types earn their keep | One rejected connection, one valid connection, and the resulting graph. |
 | 02:25–03:20 | ACME changes the application | A response observer appears in the reference graph. The request path remains visible. |
@@ -58,7 +60,7 @@ The narration must keep these distinctions clear:
 | 06:45–07:30 | Show the receipts | Return to the real run. Match output, accounting events, segment identity, and replicas to the graph. |
 | 07:30–08:00 | The reveal | Three recognizable graph variants. Four claims. A small future-DGD card. End on a completed request. |
 
-The draft contains about 630 spoken words. At 135–145 words per minute, narration occupies about four and a half minutes. Reserve the remaining time for real actions, readable results, transitions, and pauses. The scene timing is provisional until a scratch narration is recorded. Tighten the full cut if the holds feel slow.
+The script word count and scene timecodes need a check after each edit. Reserve time for real actions, readable results, transitions, and pauses. The scene timing is provisional until a scratch narration is recorded. Tighten the full cut if the holds feel slow.
 
 ## One demonstration, three arrangements
 
@@ -91,21 +93,26 @@ For Stargate, use composer-emitted adapter nodes that permit independent placeme
 
 ## Graphics and animation
 
-Use original cut-paper characters and props: flat paper bodies, hinged arms, two or three mouth shapes, hard shadows, and deliberately limited motion. Borrow the handmade visual language of adult cutout animation. Give the film its own characters, voices, and setting.
+Use original cut-paper characters and props: cartoon portrait heads, flat paper bodies, hinged arms, simple mouth states, hard shadows, and deliberately limited motion. Borrow the handmade visual language of adult cutout animation. Use the team's recognizable likenesses and original dialogue.
 
-Keep the cast small: a calm narrator, an engineer, and a cardboard process boundary wearing a tie. ACME can appear as a delivery crate rather than another speaking character.
+The six talking heads are Ishan, Alec, John T, Kyle, Graham, and Ryan. Keep the narrator off screen. Each person gets a brief opening beat and selected later appearances. Keep faces away from code, error details, and output during proof shots. ACME appears as a delivery crate. Process boundaries remain graphic props.
+
+Portrait production needs one clear, labeled reference photo per person. The current attachment contains text only. Generate the six portraits in one shared cartoon style, then make aligned mouth and blink variants. The [graphics brief](graphics.md) specifies the asset set and photo inputs.
 
 | Asset | Use |
 | --- | --- |
+| Star field and gold crawl | The opening's cinematic setup, with the same text spoken by the narrator. |
+| Six photo-based cartoon portraits | Recognizable talking heads with aligned neutral, speech, and blink states. |
+| Paper control room | The interruption scene and compiler-paper gag. |
 | Blueprint graph | The visual anchor across all scenes. |
 | Request and response markers | Distinct labeled shapes that travel in opposite directions. |
 | Typed ports | Type labels plus stable shapes. Color supports the identity but never supplies it alone. |
 | Deployment scissors | The process-boundary reveal. |
 | ACME crate and receipt | Package provenance, insertion, and accounting payoff. |
-| Process boundary | Three brief comedy appearances. |
+| Compiler-paper prop | One opening joke, linked to the supplied account of fearsome errors. |
 | Three deployment silhouettes | Distributed service, one-process package, edge plus backend. |
 
-Build animation as a separate browser stage with a 1920×1080 composition. Scale it to the capture viewport. Use HTML, CSS, and SVG for these simple assets. Raster generation is optional for backgrounds, not necessary for the characters or graphs.
+Build animation as a separate browser stage with a 1920×1080 composition. Scale it to the capture viewport. Use HTML, CSS, and SVG for the crawl, bodies, props, and graphs. Use generated transparent raster images for the photo-based cartoon portraits. Preserve each person's likeness across expression states.
 
 The stage needs deterministic scene selection, pause, replay, seek, and a clean capture mode. Use an explicit scene clock and cue data. Do not depend on page-load time, network completion, random motion, or live backend latency.
 
@@ -115,7 +122,7 @@ Keep one browser tab for animation and another for the actual composer. Record e
 
 Record a scratch narration before producing voices. Read GDL as “G D L” and NVCF as “N V C F.” Read NIM as “Nim.” Agree on the pronunciation of Stargate and velo during the scratch pass.
 
-Use a restrained narrator for the technical sections. Save the full trailer delivery for the opening and closing. Keep character dialogue short. The script contains three proposed joke beats.
+Use a restrained narrator for the technical sections. Save the full trailer delivery for the crawl and closing. Keep character dialogue short. Use six distinct character performances. The dialogue is dramatized and does not imply recordings of the historical exchanges.
 
 ElevenLabs supports multi-voice dialogue and timestamped alignment. Generate narration by scene and dialogue by exchange. Keep accepted takes and their timings. The timestamped response can drive mouth cues and captions. See the official [dialogue guide](https://elevenlabs.io/docs/overview/capabilities/text-to-dialogue) and [alignment endpoint](https://elevenlabs.io/docs/api-reference/text-to-dialogue/convert-with-timestamps).
 
@@ -192,11 +199,11 @@ Capture each shot with two seconds of stillness before and after the action. Hid
 
 ## Historical anecdotes from Slack
 
-Slack was not connected during this planning pass. No historical message or quotation is in the script. The opening currently uses the owner's account and source-backed pipeline imagery.
+The owner supplied a research summary with transcribed Slack excerpts and permalinks. The links were not opened. The [history ledger](history.md) records selected excerpts and their limits. The opening uses that material and the owner's account.
 
-After the connection is available, search for combinations of `pipeline`, `graph`, `SegmentSource`, `SegmentSink`, `process boundary`, `frontend`, and `deployment`. Start without a date restriction. Use the earliest relevant discussion to narrow the period and participants.
+The excerpts support graph ambitions, typed links, working Rust pipelines, and difficult compiler errors. They also record Graham's eventual success. They do not establish why an approach stopped or why priorities changed.
 
-Read complete threads around promising results. Record the date, author, channel, permalink, and surrounding context. Choose at most one short anecdote and one brief quotation. Replace the matching script line instead of extending the running time. Keep reenacted dialogue visibly fictional.
+Use a dramatization label on the cast exchange. A historical quote card needs its author, date, and supplied permalink in the source ledger. Keep broader causal explanations out of the narration unless fuller evidence establishes them.
 
 ## The recording is ready when
 
@@ -208,8 +215,10 @@ Read complete threads around promising results. Record the date, author, channel
 - The edge/backend take exposes only the intended internal contract across its boundary.
 - Every concept scene carries its status label. DGD appears only as a future target.
 - A scratch-audio cut fits the time budget. Technical text remains readable at the delivery resolution.
+- All six portraits match their labeled reference photos and share one visual style. Mouth and blink variants remain aligned.
+- The crawl's narrator and visible text agree. The interruption lands within the 55-second opening budget.
 - Captions, voice, sound, and picture remain synchronized in the exported file.
 
 ## Short trailer cut
 
-Use the same footage for a 75-second cut. Use ten seconds for the opening and fifteen for the catalog and type checks. Use twenty seconds each for ACME execution and deployment transformations. End with ten seconds of the final title. Preserve the concept labels. Keep the eight-minute featurette as the technical proof.
+Use the same footage for a 75-second cut. Use ten seconds for a shortened crawl and interruption. Use fifteen seconds for the catalog and type checks. Use twenty seconds each for ACME execution and deployment transformations. End with ten seconds of the final title. Preserve the concept and dramatization labels. Keep the eight-minute featurette as the technical proof.

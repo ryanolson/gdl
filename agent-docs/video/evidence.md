@@ -4,6 +4,10 @@ Date: 2026-10-22. GDL baseline: `6ded81ff52cd41df2af927d4694083ff09d2bbf6` (`6de
 
 This dossier records source evidence for the video plan. Its references include implementation code and existing test cases. The recording rehearsal remains pending.
 
+## Historical material addendum — 2026-10-22
+
+The owner supplied a Slack research summary after this baseline audit. Selected excerpts and supplied permalinks are in the [history ledger](history.md). The links were not opened. The revised opening uses a narrated space crawl and a six-person cartoon dramatization. Its character dialogue is invented. The supplied excerpts establish working pipelines and existing type constraints, alongside the assembly difficulties.
+
 ## Capability ledger
 
 | Video claim | Evidence at this baseline | Boundary |

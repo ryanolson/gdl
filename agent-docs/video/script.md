@@ -1,38 +1,54 @@
 # CUT HERE — narration and shot script
 
-Draft, 2026-10-22. Target: eight minutes. Audience: Dynamo engineers and leadership. Creative dialogue is fictional. Technical execution uses concept nodes on the real GDL toolchain.
+Draft, 2026-10-22. Target: eight minutes. Audience: Dynamo engineers and leadership. Cast: Ishan, Alec, John T, Kyle, Graham, and Ryan. Their talking heads are cartoon portraits based on reference photos. Technical execution uses concept nodes on the real GDL toolchain.
+
+Creative direction addendum, 2026-10-22: open with a narrated space crawl, then interrupt it with the six-person cut-paper scene. All character dialogue below is invented dramatization. The supplied Slack excerpts inform the situation, not the exact exchange. See the [history ledger](history.md).
 
 The timecodes are editorial targets, not measured voice timings. Italic text describes picture or sound. Speaker paragraphs are the proposed spoken script. Leave pauses for the audience to read results.
 
-## 00:00–00:25 — A small request
+## 00:00–00:24 — The graph was already there
 
-*Black. One request appears. A paper engineer holds a small crate labeled ACME. A cardboard process boundary blocks the path. Low cinematic pulse.*
+*Star field. Two seconds of quiet anticipation. Gold text recedes in perspective, with a measured cinematic narrator reading the same words. The crawl heading is THE GRAPH WAS ALREADY THERE. Use original text and score.*
 
-**Engineer:** “We need to add usage accounting.”
+**Narrator:** “In the early days of Dynamo, the plan was a graph. Define the logic. Choose the process boundaries. Build the pieces. Deploy them together. Typed links and working pipelines took shape. The next challenge: make composition, builds, and deployment one workflow.”
 
-**Process boundary:** “That sounds like a deployment meeting.”
+*Use paragraph breaks in the visible crawl: the original plan, the four actions, then the remaining challenge. Keep the last line readable before the interruption.*
 
-*A pile of build scripts and deployment forms lands on the desk. Half a beat of silence.*
+## 00:24–00:55 — The compiler would like a word
 
-**Narrator:** “A small change to an application can become a large change to its architecture. What if the application came first—and the process boundaries were a choice?”
+*The orchestral build stops. Hard cut to a flat paper control room. All six recognizable cartoon heads are visible on simple paper bodies. A small caption reads Dramatized dialogue. Brief name labels identify the cast.*
 
-*Title hit: CUT HERE. Subtitle: One graph. Many deployments.*
+**Ishan:** “This seems straightforward.”
 
-## 00:25–00:55 — The original promise
+*John T snaps two matching typed ports together.*
 
-*Real Dynamo source. Hold on the pipeline diagram, then the two-segment diagram. Rebuild their recognizable shapes as a paper blueprint. Do not dwell on an ignored test or present it as a production failure.*
+**John T:** “The links already check the types.”
 
-**Narrator:** “One of Dynamo's early ideas was to define the logic as a graph, cut it into processes, and deploy them together. You can still see that idea in the pipeline code.”
+*Kyle draws a process boundary through the graph.*
 
-*Three cards land: DEFINE. BUILD. COORDINATE.*
+**Kyle:** “Now choose where it runs.”
 
-**Narrator:** “The graph needs a way to describe its parts. A way to build the executables. And a way to coordinate the pieces.”
+*Graham opens a terminal. An exaggerated paper trait error unrolls across the room. This is a theatrical prop, not captured compiler output.*
 
-*Replace the blueprint with the real GDL composer.*
+**Graham:** “The compiler would like a word.”
+
+*The paper crosses Alec's desk, covers the coffee, and keeps going. Everyone watches it for one beat.*
+
+**Alec:** “Oh, the humanity.”
+
+*Ryan rolls the paper aside and reveals the graph blueprint. Graham places a matching adapter into it. The joke targets the assembly work, not a person's ability.*
+
+**Ryan:** “Let's make the whole thing composable.”
+
+*Music returns. Match cut from the paper graph to the real composer. Title: CUT HERE. Subtitle: One graph. Many deployments.*
+
+**Narrator:** “The pipelines worked. The graph idea endured. GDL takes it through catalogs, compilation, and coordinated deployment.”
 
 ## 00:55–01:45 — Crates become composable parts
 
 *Real source: a public node with `derive(gdl::Node)` and its role implementation. Highlight the derive, then the request and response types. Keep the extract small enough to read.*
+
+**John T:** “What can we inspect before we build?”
 
 **Narrator:** “GDL is a graph definition library and runtime. A Rust crate exposes its nodes through derive macros and typed role traits. If you know Python decorators, the marker will look familiar. The port contracts come from the Rust implementation.”
 
@@ -50,9 +66,9 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 *Try a prepared incompatible connection. Show the actual rejection and its type details. Then choose the correct node and show a valid graph.*
 
-**Engineer:** “They are both called Chunk.”
+**Graham:** “They are both called Chunk.”
 
-**Narrator:** “The name is not the contract.”
+**Kyle:** “The name is not the contract.”
 
 *The incorrect paper plug gently bounces off the port. No alarm barrage.*
 
@@ -65,6 +81,8 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 ## 02:25–03:20 — ACME changes the application
 
 *Persistent label: Concept Dynamo nodes · real GDL execution. Trace the request path, then the separate response path. Insert ACME on the response path in the real composer.*
+
+**Alec:** “So ACME brings its own crate?”
 
 **Narrator:** “ACME wants to inspect responses and send usage information to its accounting service. Its package supplies a response observer. We insert it where the response has the information ACME needs.”
 
@@ -108,7 +126,9 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 **Narrator:** “Now consider a NIM-shaped package. This application does not need our explicit routing stage, so we change the graph. Then we place the remaining nodes in one segment.”
 
-**Process boundary:** “My job is getting smaller.”
+**Ishan:** “One process?”
+
+**Ryan:** “One serving process.”
 
 *The boundary folds into a neat cardboard box. Match cut to the generated single-segment binary and its running process.*
 
@@ -154,13 +174,15 @@ The timecodes are editorial targets, not measured voice timings. Italic text des
 
 **Narrator:** “Your application is a graph. Your deployment is a choice.”
 
-*GDL title. The request reaches the client. One receipt prints. Music resolves. Hold the final frame for three seconds.*
+*GDL title. The request reaches the client. One receipt prints. All six heads return for a brief final tableau. Music resolves. Hold the final frame for three seconds.*
 
 ## Source and edit notes
 
-- The early-Dynamo sentence comes from the owner's account. Source footage supports the continued presence of graph and segment concepts. Replace it with a sourced anecdote if Slack supplies one.
-- Use `/Users/ryan/repos/dynamo/lib/runtime/tests/pipeline.rs:166` and `:209` for the opening diagrams. The production chain at `lib/llm/src/entrypoint/input/common.rs:491` establishes that pipelines remain in use.
+- The opening draws on the supplied Slack research and the owner's account. The [history ledger](history.md) separates supplied quotations from inferences. The Slack links were not opened.
+- John T's typed-port beat draws on the supplied nova-init discussion. It does not identify that Python prototype as the Rust pipeline.
+- The compiler gag draws on Graham's supplied December 2024 excerpts. Those excerpts also record his success. The narration states that the pipelines worked.
+- Use `/Users/ryan/repos/dynamo/lib/runtime/tests/pipeline.rs:166` and `:209` for optional archival diagram shots. The production chain at `lib/llm/src/entrypoint/input/common.rs:491` establishes that pipelines remain in use.
 - Do not describe the Dynamo pipeline as untyped. The distinction here is source catalogs, graph composition, generated segment contracts, and deployment coordination.
-- The second joke is optional. Remove it before reducing time available for the type error or successful response.
+- Keep the opening interruption to one compiler-paper gag. The cast lines are proposed performances, not historical quotations or personality claims.
 - If the edge/backend concept cannot run in rehearsal, keep it animated and explicitly conceptual. Keep the real ACME run as the end-to-end proof.
-- If no Slack anecdote is available, retain the source-backed opening. Do not invent a quotation, date, participant, or reenacted historical exchange.
+- Keep exact historical quotations on separate, dated source cards if the edit uses them. Retain the dramatization label on invented exchanges.
