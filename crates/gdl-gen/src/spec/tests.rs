@@ -370,3 +370,18 @@ nodes = ["Source", "Engine"]
         "git = \"https://example.com/repo\", rev = \"0123456789abcdef0123456789abcdef01234567ab\""
     );
 }
+
+/// The examples' placements, as the generator reads them, keep the hash
+/// their generated segments and hubs were built with. Pinned as literals:
+/// two hashes from one build agree even if both changed.
+#[test]
+fn the_examples_keep_their_placement_hash() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    for (spec, hash) in [
+        ("chat/gdl.toml", 0x1e9a_31e5_fbae_0c2c),
+        ("api/gdl.toml", 0x19c0_427a_556d_c30d),
+    ] {
+        let loaded = Spec::load(&examples.join(spec)).expect("an example spec");
+        assert_eq!(loaded.placement.hash(), hash, "{spec}");
+    }
+}
