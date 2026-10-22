@@ -3,7 +3,8 @@
 //! that streams a session's audio to the front segment.
 
 use asr_contract::{Audio, Session, Transcript};
-use gdl::{Cx, Items, Next, Register, Result, Segment, Streamed, items};
+use gdl::{Cx, Items, Next, Result, Streamed, items};
+use gdl_runtime::{Register, Segment};
 
 /// A running deployment of the three segments.
 pub struct Demo<F> {
@@ -19,15 +20,15 @@ pub async fn start(
 ) -> Result<Demo<impl Next<Streamed<Session, Audio>, Transcript> + Register + use<>>> {
     let address = ([127, 0, 0, 1], 0).into();
     let nodes = [
-        gdl::bind_node(address).await?,
-        gdl::bind_node(address).await?,
-        gdl::bind_node(address).await?,
+        gdl_runtime::bind_node(address).await?,
+        gdl_runtime::bind_node(address).await?,
+        gdl_runtime::bind_node(address).await?,
     ];
-    let mut roster = gdl::Roster::new();
+    let mut roster = gdl_runtime::Roster::new();
     for (segment, node) in ["front", "dsp", "engine"].iter().zip(&nodes) {
         roster.add(*segment, node.peer_info());
     }
-    let config = gdl::RuntimeConfig::default;
+    let config = gdl_runtime::RuntimeConfig::default;
     let engine = asr_engine::start(
         nodes[2].clone(),
         &roster,

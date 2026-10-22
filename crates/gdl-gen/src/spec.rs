@@ -20,7 +20,7 @@
 //! pin = { Engine = "chat_engine_mock::Engine" }   # optional
 //!
 //! [gdl]
-//! path = "../../crates/gdl"      # or: version = "0.1"
+//! path = "../../crates/gdl-runtime"   # or: version = "0.1"
 //!
 //! [segment.front]
 //! nodes = ["A", "B", "C", "G"]

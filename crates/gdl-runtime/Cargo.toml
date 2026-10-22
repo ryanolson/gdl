@@ -1,0 +1,80 @@
+[package]
+name = "gdl-runtime"
+description = "The gdl runtime: segments, crossings over velo, and the deployment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Hooks that delay or drop runtime steps, for the fault tests. Never enable
+# in a deployment.
+fault-injection = []
+# Discovery through a hub (`[hub] host = "..."` in a segment's settings),
+# for a deployment whose instances share no directory.
+hub = ["dep:velo-hub", "dep:serde_json", "tokio/net"]
+# `serve_json_lines`: a graph's source served as JSON lines, for the binary
+# of a segment that hosts the source.
+json-lines = ["dep:serde_json", "tokio/io-util"]
+
+[dependencies]
+tracing = "0.1"
+velo-hub = { workspace = true, features = ["client"], optional = true }
+figment.workspace = true
+arc-swap = { workspace = true }
+dashmap = { workspace = true }
+gdl = { path = "../gdl" }
+gdl-macros = { path = "../gdl-macros" }
+gdl-message = { path = "../gdl-message" }
+gdl-model = { path = "../gdl-model" }
+futures = { workspace = true }
+pin-project-lite = { workspace = true }
+prometheus = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+velo = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+gdl-hub = { path = "../gdl-hub" }
+gdl-runtime = { path = ".", features = ["fault-injection", "hub", "json-lines"] }
+figment = { workspace = true, features = ["test"] }
+criterion = { workspace = true }
+velo = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+tempfile.workspace = true
+trybuild = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "hop"
+harness = false
+
+[[bench]]
+name = "remote"
+harness = false
+
+[[bench]]
+name = "footprint"
+harness = false
+
+[[bench]]
+name = "requests"
+harness = false
+
+[[test]]
+name = "hub"
+required-features = ["hub"]
+
+[[test]]
+name = "rosters"
+required-features = ["hub"]

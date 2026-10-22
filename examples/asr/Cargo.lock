@@ -21,7 +21,7 @@ dependencies = [
 name = "asr-contract"
 version = "0.0.0"
 dependencies = [
- "gdl",
+ "gdl-runtime",
  "serde",
 ]
 
@@ -38,6 +38,7 @@ dependencies = [
  "asr-front-nodes",
  "futures",
  "gdl",
+ "gdl-runtime",
  "tokio",
 ]
 
@@ -47,7 +48,7 @@ version = "0.0.0"
 dependencies = [
  "asr-contract",
  "asr-dsp-nodes",
- "gdl",
+ "gdl-runtime",
  "serde",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -69,7 +70,7 @@ version = "0.0.0"
 dependencies = [
  "asr-contract",
  "asr-engine-mock",
- "gdl",
+ "gdl-runtime",
  "serde",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -91,7 +92,7 @@ version = "0.0.0"
 dependencies = [
  "asr-contract",
  "asr-front-nodes",
- "gdl",
+ "gdl-runtime",
  "serde",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -440,8 +441,6 @@ name = "gdl"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "dashmap",
- "figment",
  "futures",
  "gdl-macros",
  "gdl-message",
@@ -450,13 +449,9 @@ dependencies = [
  "prometheus",
  "rmp-serde",
  "serde",
- "serde_bytes",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "velo",
 ]
 
 [[package]]
@@ -487,6 +482,31 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "gdl-runtime"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "dashmap",
+ "figment",
+ "futures",
+ "gdl",
+ "gdl-macros",
+ "gdl-message",
+ "gdl-model",
+ "pin-project-lite",
+ "prometheus",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "velo",
 ]
 
 [[package]]

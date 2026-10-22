@@ -6,6 +6,6 @@ crates = ["."]
 crates = ["."]
 pin = { Http = "http_frontend::HttpFrontend", Engine = "http_frontend::Echo" }
 [gdl]
-path = "../../crates/gdl"
+path = "../../crates/gdl-runtime"
 [segment.main]
 nodes = ["Http", "Engine"]

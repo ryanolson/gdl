@@ -127,11 +127,11 @@ mod tests {
     use crate::cx::Cx;
     use crate::select::{Erased, Picked, Typed};
 
-    fn ids(n: usize) -> Vec<velo::InstanceId> {
-        (0..n).map(|_| velo::InstanceId::new_v4()).collect()
+    fn ids(n: usize) -> Vec<InstanceId> {
+        (0..n).map(|_| crate::select::random_id()).collect()
     }
 
-    async fn pick(selector: &Typed<LeastLoaded>, ids: &[velo::InstanceId]) -> (usize, Picked) {
+    async fn pick(selector: &Typed<LeastLoaded>, ids: &[InstanceId]) -> (usize, Picked) {
         let picked = selector
             .select(&Cx::new(), &[], Instances::new("worker", ids))
             .await
@@ -139,8 +139,8 @@ mod tests {
         (picked.index, picked)
     }
 
-    fn id(ids: &[velo::InstanceId], at: usize) -> InstanceId {
-        InstanceId(ids[at].as_u128())
+    fn id(ids: &[InstanceId], at: usize) -> InstanceId {
+        ids[at]
     }
 
     #[tokio::test]
@@ -197,7 +197,7 @@ mod tests {
         let (one, other) = (ids(1), ids(1));
         let (_, idle) = pick(&selector, &one).await;
         drop(idle);
-        let counted = |id: velo::InstanceId| {
+        let counted = |id: InstanceId| {
             selector
                 .0
                 .counts

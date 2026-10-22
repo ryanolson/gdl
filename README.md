@@ -4,6 +4,8 @@ gdl is a graph definition language and runtime for request/response streaming pi
 
 You define the graph once, with its message types. A placement puts each node in a segment. The generator, `cargo gdl generate`, writes one crate per segment. Each segment crate depends only on the implementations of the nodes that it hosts.
 
+gdl is two crates. A crate that implements nodes depends on `gdl`: the node roles, the request context, the selector trait, the derives, and local composition, so that it can run its nodes in one process. It does not link velo. The runtime, `gdl-runtime`, runs those nodes: segments, crossings over velo, discovery, and the segment binaries. Contract crates, generated segment crates, and programs that run a graph depend on `gdl-runtime`, which re-exports the `gdl` it was built with as `gdl_runtime::gdl`.
+
 
 Known limitations, with what lifts each, are in [LIMITATIONS.md](LIMITATIONS.md).
 ## The model
@@ -22,10 +24,10 @@ A hop is an outer end (the source or an operator), its forward nodes, an inner e
 
 ## Define a graph
 
-A contract crate holds the message types and one `gdl::graph!` invocation:
+A contract crate holds the message types and one `gdl_runtime::graph!` invocation:
 
 ```rust
-gdl::graph! {
+gdl_runtime::graph! {
     name = "chat", schema = 1;
     source   Frontend: Prompt -> stream Chunk;
     operator Preprocess: (Prompt -> stream Chunk) over (Words -> stream Text);
@@ -119,7 +121,7 @@ crates = ["protocols"]
 pin = { Chunk = "chat_protocols::Chunk" }   # optional
 
 [gdl]
-path = "../../crates/gdl"
+path = "../../crates/gdl-runtime"
 ```
 
 `cargo gdl resolve --spec gdl.toml` prints the type that each message name resolves to, and whether it is a wire type. It fetches a crate listed by version into `--target-dir` (`target` beside the spec by default):
@@ -149,7 +151,7 @@ crates = ["protocols"]
 crates = ["front-nodes", "engine-mock", "post-nodes"]
 
 [gdl]
-path = "../../crates/gdl"
+path = "../../crates/gdl-runtime"
 
 [segment.front]
 nodes = ["Frontend", "Preprocess", "Truncate", "Number"]
@@ -189,9 +191,9 @@ For a graph spec, the generator compiles nothing: it builds the contract's manif
 
 For each segment, the generator writes a crate with:
 
-- A library. `start(node, roster, config, nodes)` deploys the segment inside a program. `Binary` implements `gdl::SegmentBinary` with what differs between segments: the settings tables, how the hosted implementations are built, and what the segment serves.
-- A binary. Its `main` is `gdl::segment_main::<Binary>()`: the lifecycle that every segment shares is the runtime's, and it is tested once there. It builds each hosted node through `gdl::Build`, meets the other segments in a shared roster directory, and waits until every instance that it can send to is serving; a request that reaches it earlier waits at its roster. Then it serves until SIGINT or SIGTERM, or until its hub lease is lost. A stop retires the instance: its peers stop routing to it while another instance of its segment serves, and it drains while the others serve on. A source's instance finishes the requests it holds, and every instance keeps serving until the instances that send to it have promised to avoid it (then for the runtime's setup timeout), or until each source instance that can reach it has drained or left, whichever comes first; then it holds no request, and each stream it sent has been handed on by velo, before it exits. All of this is within `[runtime] drain_ms` (the request deadline by default). Stopping every instance at once is the same path: once every instance of a segment is retired, peers route to them until the sources drain.
-- With a pinned `Frontend`, the source binary builds and runs that service using `[frontend]` configuration. Without a source pin, it instead reads one JSON request per line on stdin, writes the items as JSON lines (`gdl::serve_json_lines`), and stops at the end of the input. A stop signal ends reading but lets the answer being written finish; a second signal ends the process at once. It does this only if the source's request type and item type both implement `Serialize` and `Deserialize`, and the request is not streamed. For other source types, the binary serves until it is stopped, and your own program calls the graph through the generated library.
+- A library. `start(node, roster, config, nodes)` deploys the segment inside a program. `Binary` implements `gdl_runtime::SegmentBinary` with what differs between segments: the settings tables, how the hosted implementations are built, and what the segment serves.
+- A binary. Its `main` is `gdl_runtime::segment_main::<Binary>()`: the lifecycle that every segment shares is the runtime's, and it is tested once there. It builds each hosted node through `gdl::Build`, meets the other segments in a shared roster directory, and waits until every instance that it can send to is serving; a request that reaches it earlier waits at its roster. Then it serves until SIGINT or SIGTERM, or until its hub lease is lost. A stop retires the instance: its peers stop routing to it while another instance of its segment serves, and it drains while the others serve on. A source's instance finishes the requests it holds, and every instance keeps serving until the instances that send to it have promised to avoid it (then for the runtime's setup timeout), or until each source instance that can reach it has drained or left, whichever comes first; then it holds no request, and each stream it sent has been handed on by velo, before it exits. All of this is within `[runtime] drain_ms` (the request deadline by default). Stopping every instance at once is the same path: once every instance of a segment is retired, peers route to them until the sources drain.
+- With a pinned `Frontend`, the source binary builds and runs that service using `[frontend]` configuration. Without a source pin, it instead reads one JSON request per line on stdin, writes the items as JSON lines (`gdl_runtime::serve_json_lines`), and stops at the end of the input. A stop signal ends reading but lets the answer being written finish; a second signal ends the process at once. It does this only if the source's request type and item type both implement `Serialize` and `Deserialize`, and the request is not streamed. For other source types, the binary serves until it is stopped, and your own program calls the graph through the generated library.
 
 A segment binary takes its settings from TOML files, each overriding the ones before it, then from `GDL_` environment variables, with `__` between nested keys: `GDL_RUNTIME__ADMISSION_LIMIT=64`, or `GDL_NODE__TRUNCATE__MAX=3` for `[node.Truncate] max = 3`. A key set in the environment is matched without regard to case (a file's keys are as spelled), and only the settings' own keys are read, so the build scripts' `GDL_PROFILE` and `GDL_IMAGE_PREFIX` do not stop a segment from starting. A misspelled key is an error. The settings name `listen` (under a hub, an unspecified address such as `0.0.0.0:9000` advertises the address the container's `HOSTNAME` resolves to, and a concrete one is bound as given), and exactly one of `roster` (a directory every instance shares, fresh for each deployment, where `[instances]` says how many of each segment to wait for) or a `[hub]` table with the discovery hub's `host` (and, optionally, its `public_port`, `control_port`, and the lease's `heartbeat_ms`), where `[min_replicas]` says how many loaded instances of each segment to wait for. Every node's `Build::ready` is awaited before the segment announces itself; a node that loads a model after construction resolves it then. The binary stops on SIGINT or SIGTERM, and a frontend drains the requests it holds first; a second signal ends the drain. It takes the signals from its start, so a stop while its nodes load ends the launch rather than killing the process.
 
@@ -199,7 +201,7 @@ A `[system]` table turns on the system listener, which answers dynamo's probes: 
 
 The generator owns the directory of each segment crate. Each generated file starts with a do-not-edit marker. `cargo gdl generate --check` writes nothing. It fails if a generated file is missing, changed, or stale, or if a segment crate holds a file that the generator did not write.
 
-`[gdl]` names the gdl crate by `path`, by `version`, or by `git` with `rev`.
+`[gdl]` names the runtime that the generated crates build on, `gdl-runtime`, by `path`, by `version`, or by `git` with `rev`.
 
 ### Export the segments
 
@@ -230,7 +232,7 @@ cd /path/to/deployment
 docker compose up --build
 ```
 
-The output contains a Dockerfile and runtime config for each segment, a hub Dockerfile, `deployment.json`, and `compose.yaml`. The output directory must be new. Cargo fetches Git and registry dependencies during the image build. The bundle contains no local dependency source snapshot. The public example in `examples/api/deploy.toml` pins both the example package and GDL to the same Git commit. That commit must carry the runtime the generator emits for (`gdl::ProcessConfig` and `gdl::Hosted`), so bump the pin whenever the generator and the runtime change together; a bundle built against an older gdl does not compile.
+The output contains a Dockerfile and runtime config for each segment, a hub Dockerfile, `deployment.json`, and `compose.yaml`. The output directory must be new. Cargo fetches Git and registry dependencies during the image build. The bundle contains no local dependency source snapshot. The public example in `examples/api/deploy.toml` pins both the example package and GDL to the same Git commit. That commit must carry the runtime the generator emits for (`gdl_runtime::ProcessConfig` and `gdl_runtime::Hosted`), so bump the pin whenever the generator and the runtime change together; a bundle built against an older gdl does not compile.
 
 
 Image settings belong in the graph spec:
@@ -274,7 +276,7 @@ An empty catalog offers **Load examples** to import the public API frontend pack
 `gdl-web` serves the composer: a page that builds a graph from the nodes and messages of a working catalogue.
 
 ```bash
-cargo run -p gdl-web -- --catalog catalogue --gdl-path crates/gdl
+cargo run -p gdl-web -- --catalog catalogue --gdl-path crates/gdl-runtime
 # gdl-web: serving http://127.0.0.1:8080/
 ```
 
@@ -315,7 +317,7 @@ A boundary can also name a selector: `Engine = { selector = "least_loaded" }`. A
 A selector is built as a node is, through `gdl::Build`: its settings are the segment's `[selector.<name>]` table, its metrics carry its name as `dynamo_endpoint`, and the instance announces that it is loaded only after the selector is ready. A segment binary builds gdl's own selectors from their tables, `[selector.affinity] key = "session"` for example; a table for a selector that the binary does not register is refused. A hand-written `SegmentBinary` registers another selector with `builder.selector::<S>("<name>")` in its `build`, and an in-process deployment adds it to `RuntimeConfig::selectors`. A selector name is lowercase letters and digits in words joined by single `_`s, and is part of the placement's identity. A selector costs a load of the routing table, a decode of the head when it reads a type, and its own work; `round_robin` and `random` do not go through it.
 
 
-Generated crates take gdl from `--gdl-path`, or from `--gdl-git <url> --gdl-rev <rev>`. The editor uses the dashboard's dark surfaces and green accents. On narrow screens, the catalog appears above the canvas.
+Generated crates take the gdl runtime from `--gdl-path`, or from `--gdl-git <url> --gdl-rev <rev>`. The editor uses the dashboard's dark surfaces and green accents. On narrow screens, the catalog appears above the canvas.
 
 The binary embeds Mermaid 12.2.0 for local diagram rendering, without a CDN. `crates/gdl-web/assets/vendor/mermaid.js` is `dist/mermaid.min.js` from the npm package `mermaid@12.2.0`. Its license is in the same directory.
 
@@ -341,7 +343,7 @@ A frontend with several public contracts implements `gdl::Service`. Its client b
 
 Use `#[derive(gdl::Config)]` on an implementation's deserializable configuration type. The derive is the only way to implement `gdl::ConfigSchema`: the source reader takes the fields from its attributes, so a hand-written impl does not build. Mark builder-visible fields with `#[gdl(graph, default = ...)]`, and add `#[gdl(config = Settings)]` to the node. Unmarked fields stay runtime-only. Graph controls support `bool`, `i64`, and `String` with literal defaults. Optional `label` and `subtext` annotations name each setting in the UI. Doc comments supply expandable help in settings dialogs. Generated graph specs retain resolved values under `[config.NodeName]`.
 
-`gdl::build_node` extracts `Build::Config` from a Figment, checks its graph-affecting values against the built graph, and passes the node's metrics to `Build::build`. Application code can use any Figment provider and explicit `merge`/`join` order. Generated binaries merge their TOML arguments in order, then apply `GDL_` environment overrides with `__` between nested keys. A conflicting graph value prevents startup.
+`gdl_runtime::build_node` extracts `Build::Config` from a Figment, checks its graph-affecting values against the built graph, and passes the node's metrics to `Build::build`. Application code can use any Figment provider and explicit `merge`/`join` order. Generated binaries merge their TOML arguments in order, then apply `GDL_` environment overrides with `__` between nested keys. A conflicting graph value prevents startup.
 
 The [three-entry Axum example](examples/api/README.md) includes typed adapters, endpoint flags, and a shared pipeline placed across two segments. Entry adapters declared in service specs execute locally. The composer emits its adapters as ordinary graph nodes, which can span segments. Each named pipeline can span segments. Several pipelines can reference one sink node; the deployment builds that sink once per hosting segment instance. Composer endpoint nodes support independent placement. See the [design and implementation record](agent-docs/frontends.md).
 
@@ -480,7 +482,7 @@ flowchart LR
     linkStyle 4,5,7 stroke:#d62728,stroke-width:3px
 ```
 
-In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`. Give them `None` to draw the graph without segments, or a `Layout` from `gdl::layout` to draw it placed. They return an error if the layout was made for another contract.
+In a program, `Manifest::to_dot` and `Manifest::to_mermaid` draw a contract's `manifest()`. Give them `None` to draw the graph without segments, or a `Layout` from `gdl_runtime::layout` to draw it placed. They return an error if the layout was made for another contract.
 
 ## Run the example
 
@@ -548,7 +550,7 @@ Request-only segments hold their reply reservation until downstream acceptance o
 
 ## Cost
 
-A graph that is not cut costs no encoding. A local graph is nested calls, and the nodes of one segment pass values to each other directly. A cut costs one encode and one decode for each message on each edge that crosses segments. There is one more case. If the request of a hop leaves the segment of the hop's outer end, the response items return to the outer end through an anchor. Each item is then encoded and decoded one time, also when no response edge crosses segments. A streamed request's head and each of its items are encoded once on each crossing that they go through. `crates/gdl/tests/crossings.rs` counts these encodes.
+A graph that is not cut costs no encoding. A local graph is nested calls, and the nodes of one segment pass values to each other directly. A cut costs one encode and one decode for each message on each edge that crosses segments. There is one more case. If the request of a hop leaves the segment of the hop's outer end, the response items return to the outer end through an anchor. Each item is then encoded and decoded one time, also when no response edge crosses segments. A streamed request's head and each of its items are encoded once on each crossing that they go through. `crates/gdl-runtime/tests/crossings.rs` counts these encodes.
 
 On one aarch64 workstation, over loopback TCP:
 
@@ -564,7 +566,8 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 
 | Path | Contents |
 |---|---|
-| `crates/gdl` | Request context, node roles, local composition, and the velo runtime; it re-exports the model |
+| `crates/gdl` | What a node crate depends on, without velo: the request context, node roles, local composition, selectors, metrics, and the derives |
+| `crates/gdl-runtime` | The runtime: segments and crossings over velo, discovery, the segment binary, and `graph!`; it re-exports `gdl` and the model |
 | `crates/gdl-model` | The model without the runtime: manifest, placement, layout, and diagrams. It builds for wasm, so the composer can run the same rules in a browser |
 | `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract |
 | `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |

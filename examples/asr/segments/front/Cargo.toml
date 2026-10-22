@@ -15,7 +15,7 @@ name = "asr-front"
 path = "src/main.rs"
 
 [dependencies]
-gdl = { path = "../../../../crates/gdl" }
+gdl-runtime = { path = "../../../../crates/gdl-runtime" }
 asr-contract = { path = "../../contract" }
 asr-front-nodes = { path = "../../front-nodes" }
 serde = { version = "1", features = ["derive"] }

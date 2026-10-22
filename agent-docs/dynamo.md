@@ -135,3 +135,5 @@ pub enum Retirement { Sent, Discarded }
 dynamo `main` pins velo 0.12 (kvbm), PR 9019 pins 0.4.1, PR 15231 pins 0.20, and gdl pins `1bbeb88` on a velo branch (`codex/reservation-renewal`), not on velo's `main`. A process that holds gdl and dynamo code would hold several velo nodes from several versions. Merging `1bbeb88` (reservation renewal, which also lifts the 60 s prebind window PR 15231 documents as a limit) and the `retired()` signal into velo's `main`, and releasing it, is the precondition for one velo node per process.
 
 **Update 2026-10-21.** Reservation renewal (velo#139) and `retired()` (velo#141) are merged into velo's `main` (`e512ba0`), not yet released. Until the release, gdl depends on velo by git at the branch `main` (the owner), with `Cargo.lock` holding the exact commit.
+
+**Update 2026-10-22.** A dynamo crate that defines gdl nodes depends on `gdl` alone, which does not link velo or require velo's tokio version (plan, ruling 171). Only a program that runs a segment depends on `gdl-runtime`, and with it velo, so the one-velo precondition above applies to processes that run gdl segments, not to crates that only define nodes.

@@ -15,7 +15,7 @@ name = "asr-engine"
 path = "src/main.rs"
 
 [dependencies]
-gdl = { path = "../../../../crates/gdl" }
+gdl-runtime = { path = "../../../../crates/gdl-runtime" }
 asr-contract = { path = "../../contract" }
 asr-engine-mock = { path = "../../engine-mock" }
 serde = { version = "1", features = ["derive"] }

@@ -7,4 +7,4 @@ crates = ["chat-protocols", "other-protocols"]
 pin = { Chunk = "chat_protocols::Chunk" }
 
 [gdl]
-path = "../../../../gdl"
+path = "../../../../gdl-runtime"

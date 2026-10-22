@@ -24,7 +24,7 @@ crates on disk --add--> catalogue --compose--> logical graph --cut--> 3 segments
 
 ```bash
 target/release/gdl-web --catalog $DEMO/catalogue --target-dir $DEMO/target \
-  --gdl-path crates/gdl --local-root "$PWD" --listen 127.0.0.1:8080
+  --gdl-path crates/gdl-runtime --local-root "$PWD" --listen 127.0.0.1:8080
 ```
 
 Open `http://127.0.0.1:8080/`. Say that the catalogue is empty, and that the server builds nothing: it reads crates' source.

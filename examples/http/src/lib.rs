@@ -116,7 +116,7 @@ impl gdl::Sink for Echo {
 /// The local version of the same graph described by `http.gdl`.
 pub mod graph {
     use super::{Chunk, Prompt};
-    gdl::graph! {
+    gdl_runtime::graph! {
         name = "http", schema = 1;
         source Http: Prompt -> stream Chunk;
         sink Engine: Prompt -> stream Chunk;

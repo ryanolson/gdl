@@ -4,7 +4,7 @@
 //! The contract of graph `chat`: its graph, with each message named
 //! by the full path of the type it resolved to.
 
-gdl::graph! {
+gdl_runtime::graph! {
     name = "chat", schema = 1;
     source   Frontend: ::chat_protocols::Prompt -> stream ::chat_protocols::Chunk;
     operator Preprocess: (::chat_protocols::Prompt -> stream ::chat_protocols::Chunk) over (::chat_protocols::Words -> stream ::chat_protocols::Text);

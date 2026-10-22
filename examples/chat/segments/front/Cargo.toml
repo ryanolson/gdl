@@ -15,7 +15,7 @@ name = "chat-front"
 path = "src/main.rs"
 
 [dependencies]
-gdl = { path = "../../../../crates/gdl", features = ["json-lines"] }
+gdl-runtime = { path = "../../../../crates/gdl-runtime", features = ["json-lines"] }
 chat-contract = { path = "../contract" }
 chat-front-nodes = { path = "../../front-nodes" }
 serde = { version = "1", features = ["derive"] }

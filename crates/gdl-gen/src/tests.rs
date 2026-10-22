@@ -153,9 +153,9 @@ fn compiled_manifest(spec: &Spec, target: &Path) -> Manifest {
     dump::manifest(&contract, target).expect("compiled")
 }
 
-/// The generated contract depends on gdl and on each message crate by
-/// library name, so a message library may take neither `gdl` nor the
-/// contract's own name.
+/// The generated contract depends on the gdl runtime and on each message
+/// crate by library name, so a message library may take neither
+/// `gdl_runtime` nor the contract's own name.
 #[test]
 fn a_message_library_may_not_take_a_name_the_contract_uses() {
     let crate_ = |lib: &str| spec::ListedCrate {
@@ -168,9 +168,12 @@ fn a_message_library_may_not_take_a_name_the_contract_uses() {
         Vec::<String>::new()
     );
     assert_eq!(
-        library_clashes("chat_contract", &[crate_("gdl"), crate_("chat_contract")]),
+        library_clashes(
+            "chat_contract",
+            &[crate_("gdl_runtime"), crate_("chat_contract")]
+        ),
         [
-            "[messages] crate `gdl-package`: its library `gdl` is the gdl runtime's name in the generated contract",
+            "[messages] crate `gdl_runtime-package`: its library `gdl_runtime` is the gdl runtime's name in the generated contract",
             "[messages] crate `chat_contract-package`: its library `chat_contract` is the generated contract's name",
         ]
     );
@@ -607,10 +610,10 @@ fn only_the_source_segment_serves_json_lines() {
     let files = rendered(&spec, &manifest(), out).expect("render");
     let front = &files[&PathBuf::from("front/src/lib.rs")];
     let engine = &files[&PathBuf::from("engine/src/lib.rs")];
-    assert!(front.contains("gdl::serve_json_lines("));
+    assert!(front.contains("gdl_runtime::serve_json_lines("));
     // The lifecycle is the runtime's: each binary only names its segment.
     let main = &files[&PathBuf::from("engine/src/main.rs")];
-    assert!(main.contains("gdl::segment_main::<"), "{main}");
+    assert!(main.contains("gdl_runtime::segment_main::<"), "{main}");
     assert!(!main.contains("async fn"), "{main}");
     assert!(!engine.contains("serve_json_lines"));
     assert!(files[&PathBuf::from("front/Cargo.toml")].contains("json-lines"));

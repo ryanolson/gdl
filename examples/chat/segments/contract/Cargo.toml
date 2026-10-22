@@ -7,5 +7,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gdl = { path = "../../../../crates/gdl" }
+gdl-runtime = { path = "../../../../crates/gdl-runtime" }
 chat-protocols = { path = "../../protocols" }

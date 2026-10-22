@@ -960,14 +960,18 @@ async fn a_catalog_frontend_sets_the_source_binding_and_exports_its_service() {
                     text.contains(".build::<::http_frontend::HttpFrontend>(\"Http\", frontend)"),
                     "{text}"
                 );
+                // rustfmt wraps the call; compare without whitespace.
+                let flat: String = text.split_whitespace().collect();
                 assert!(
-                    text.contains("gdl::Frontend::serve(frontend, segment,"),
+                    flat.contains(
+                        "gdl_runtime::gdl::Frontend::serve(frontend,segment.client(|root|root.clone()),"
+                    ),
                     "{text}"
                 );
-                assert!(!text.contains("gdl::serve_json_lines"));
+                assert!(!text.contains("serve_json_lines"));
                 frontend_main = true;
             } else {
-                assert!(!text.contains("gdl::Frontend::serve"));
+                assert!(!text.contains("Frontend::serve"));
             }
         }
     }
@@ -1171,10 +1175,12 @@ async fn service_flags_control_required_typed_adapters_and_export_one_shared_pip
         if path.ends_with("front/src/lib.rs") {
             let mut text = String::new();
             file.read_to_string(&mut text).expect("test result");
-            assert!(text.contains("gdl::Service::serve"), "{text}");
+            assert!(text.contains("gdl_runtime::gdl::Service::serve"), "{text}");
+            // rustfmt wraps the calls; compare without whitespace.
+            let flat: String = text.split_whitespace().collect();
             // One segment, shared through the runtime with every entry.
             assert_eq!(
-                text.matches("Serving::new(segment, |segment, shutdown|")
+                flat.matches("Serving::new(segment,|segment,shutdown|")
                     .count(),
                 1,
                 "{text}"
@@ -1182,7 +1188,7 @@ async fn service_flags_control_required_typed_adapters_and_export_one_shared_pip
             assert!(!text.contains("Arc::new(segment)"), "{text}");
             assert!(text.contains("responses: None"));
             assert!(text.contains("anthropic: None"));
-            assert!(text.contains("builder: &gdl::Builder"), "{text}");
+            assert!(text.contains("builder: &gdl_runtime::Builder"), "{text}");
             checked = true;
         }
     }

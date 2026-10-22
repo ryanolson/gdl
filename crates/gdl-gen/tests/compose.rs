@@ -340,7 +340,7 @@ fn a_spec_lists_crates_by_version() {
         dir.join("gdl.toml"),
         format!(
             "[graph]\npath = \"graph.gdl\"\n[messages]\ncrates = [\"regproto@0.1.0\"]\n[nodes]\ncrates = [\"regnodes@0.1.0\"]\n[gdl]\npath = {}\n[segment.all]\nnodes = [\"A\", \"Engine\"]\n",
-            toml_string(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl"))
+            toml_string(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime"))
         ),
     )
     .expect("spec");
@@ -533,7 +533,7 @@ fn an_archive_of_fetchable_crates_builds_images() {
     );
     assert!(
         files["imaged/engine/Cargo.toml"]
-            .contains("gdl = { git = \"https://example.com/gdl\", rev = \"abc123\" }")
+            .contains("gdl-runtime = { git = \"https://example.com/gdl\", rev = \"abc123\" }")
     );
 }
 

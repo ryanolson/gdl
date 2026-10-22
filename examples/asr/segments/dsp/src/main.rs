@@ -17,12 +17,12 @@
 //! rendezvous_ms = 30000   # optional: how long to wait for the other instances
 //! [instances]             # optional, with a roster: instances per segment, 1 by default
 //! [min_replicas]          # optional, with a hub: loaded instances per segment to wait for, 1 by default
-//! [runtime]               # optional: gdl::RuntimeConfig
+//! [runtime]               # optional: gdl_runtime::RuntimeConfig
 //! [system]                # optional: the live and health probes, off unless port is set (DYN_SYSTEM_PORT)
 //! [node.Resample]         # optional: Resample's Build::Config
 //! ```
 //! Graph-affecting values must match the built graph.
 
 fn main() -> std::process::ExitCode {
-    gdl::segment_main::<asr_dsp::Binary>()
+    gdl_runtime::segment_main::<asr_dsp::Binary>()
 }

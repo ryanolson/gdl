@@ -136,11 +136,12 @@ impl<'a, H> Request<'a, H> {
 #[derive(Clone, Copy)]
 pub struct Instances<'a> {
     segment: &'a str,
-    ids: &'a [velo::InstanceId],
+    ids: &'a [InstanceId],
 }
 
 impl<'a> Instances<'a> {
-    pub(crate) fn new(segment: &'a str, ids: &'a [velo::InstanceId]) -> Self {
+    #[doc(hidden)]
+    pub fn new(segment: &'a str, ids: &'a [InstanceId]) -> Self {
         debug_assert!(
             !ids.is_empty(),
             "a selector is never asked to choose from nothing"
@@ -166,18 +167,18 @@ impl<'a> Instances<'a> {
 
     /// The instance at `index`, if there is one.
     pub fn get(&self, index: usize) -> Option<Instance<'a>> {
-        self.ids.get(index).map(|id| Instance {
+        self.ids.get(index).map(|&id| Instance {
             index,
-            id: InstanceId(id.as_u128()),
+            id,
             view: PhantomData,
         })
     }
 
     /// Every instance, in order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = Instance<'a>> + 'a {
-        self.ids.iter().enumerate().map(|(index, id)| Instance {
+        self.ids.iter().enumerate().map(|(index, &id)| Instance {
             index,
-            id: InstanceId(id.as_u128()),
+            id,
             view: PhantomData,
         })
     }
@@ -212,8 +213,8 @@ impl Instance<'_> {
     }
 }
 
-/// An instance's id: its velo instance id, as 128 bits. Shown as 32 hex
-/// digits, as the metrics' `worker_id` is.
+/// An instance's id: the runtime's instance id, as 128 bits. Shown as 32
+/// hex digits, as the metrics' `worker_id` is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InstanceId(u128);
 
@@ -221,6 +222,13 @@ impl InstanceId {
     /// The id as a number.
     pub fn as_u128(self) -> u128 {
         self.0
+    }
+
+    /// The id the runtime gave an instance as a number. Only the runtime
+    /// names instances; a selector receives them.
+    #[doc(hidden)]
+    pub fn from_u128(id: u128) -> Self {
+        Self(id)
     }
 }
 
@@ -278,17 +286,23 @@ impl<'a> Choice<'a> {
 }
 
 /// What a choice keeps until the sending segment lets the request go.
-pub(crate) struct Lease(#[allow(dead_code, reason = "held for its drop")] Box<dyn Any + Send>);
+#[doc(hidden)]
+pub struct Lease(#[allow(dead_code, reason = "held for its drop")] Box<dyn Any + Send>);
 
 /// A choice without its view.
-pub(crate) struct Picked {
-    pub(crate) index: usize,
-    pub(crate) lease: Option<Lease>,
-    pub(crate) meta: Vec<(String, String)>,
+#[doc(hidden)]
+pub struct Picked {
+    #[doc(hidden)]
+    pub index: usize,
+    #[doc(hidden)]
+    pub lease: Option<Lease>,
+    #[doc(hidden)]
+    pub meta: Vec<(String, String)>,
 }
 
 /// A selector as the runtime holds it, whatever its head.
-pub(crate) trait Erased: Send + Sync + 'static {
+#[doc(hidden)]
+pub trait Erased: Send + Sync + 'static {
     fn select<'a>(
         &'a self,
         cx: &'a Cx,
@@ -301,7 +315,8 @@ pub(crate) trait Erased: Send + Sync + 'static {
 }
 
 /// A typed selector behind [`Erased`].
-pub(crate) struct Typed<S>(pub(crate) Arc<S>);
+#[doc(hidden)]
+pub struct Typed<S>(pub Arc<S>);
 
 impl<S: Selector> Erased for Typed<S> {
     fn select<'a>(
@@ -346,7 +361,8 @@ impl Selectors {
         self.add_shared(name, Arc::new(selector))
     }
 
-    pub(crate) fn add_shared<S: Selector>(&mut self, name: &str, selector: Arc<S>) -> Result<()> {
+    #[doc(hidden)]
+    pub fn add_shared<S: Selector>(&mut self, name: &str, selector: Arc<S>) -> Result<()> {
         gdl_model::check_selector_name(name)
             .map_err(|why| Error::new(ErrorKind::Placement, why))?;
         if self.named.contains_key(name) {
@@ -367,7 +383,8 @@ impl Selectors {
 
     /// The selector a crossing that names `name` routes through: the one
     /// registered, or else gdl's own of that name with its defaults.
-    pub(crate) fn resolve(&self, name: &str) -> Option<Arc<dyn Erased>> {
+    #[doc(hidden)]
+    pub fn resolve(&self, name: &str) -> Option<Arc<dyn Erased>> {
         if let Some(selector) = self.named.get(name) {
             return Some(Arc::clone(selector));
         }
@@ -389,4 +406,16 @@ impl fmt::Debug for Selectors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_set().entries(self.named.keys()).finish()
     }
+}
+
+/// A fresh instance id, spread as the runtime's random ids are: the
+/// policies hash ids, so their tests need ids that do not cluster.
+#[cfg(test)]
+fn random_id() -> InstanceId {
+    use std::hash::{BuildHasher, RandomState};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+    let state = RandomState::new();
+    InstanceId(u128::from(state.hash_one(seq)) << 64 | u128::from(state.hash_one(!seq)))
 }

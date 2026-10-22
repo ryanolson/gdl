@@ -6,4 +6,4 @@ path = "chat.gdl"
 crates = ["chat-protocols", "other-protocols"]
 
 [gdl]
-path = "../../../../gdl"
+path = "../../../../gdl-runtime"

@@ -6,4 +6,4 @@ path = "chunk.gdl"
 crates = ["facade-protocols", "other-protocols"]
 
 [gdl]
-path = "../../../../gdl"
+path = "../../../../gdl-runtime"

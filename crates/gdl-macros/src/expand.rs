@@ -86,7 +86,7 @@ fn request(req: &Request, krate: &TokenStream) -> TokenStream {
     let head = &req.head;
     match &req.item {
         None => quote!(#head),
-        Some(item) => quote!(#krate::Streamed<#head, #item>),
+        Some(item) => quote!(#krate::gdl::Streamed<#head, #item>),
     }
 }
 
@@ -199,19 +199,19 @@ fn role_bound(node: &Node, krate: &TokenStream) -> TokenStream {
         } => {
             let (up_req, down_req) = (request(up_req, krate), request(down_req, krate));
             quote! {
-                #krate::Operator<UpReq = #up_req, UpItem = #up_item, DownReq = #down_req, DownItem = #down_item>
+                #krate::gdl::Operator<UpReq = #up_req, UpItem = #up_item, DownReq = #down_req, DownItem = #down_item>
             }
         }
         Sig::Forward { input, output } => {
             let (input, output) = (request(input, krate), request(output, krate));
-            quote! { #krate::Forward<In = #input, Out = #output> }
+            quote! { #krate::gdl::Forward<In = #input, Out = #output> }
         }
         Sig::Sink { req, item } => {
             let req = request(req, krate);
-            quote! { #krate::Sink<Req = #req, Item = #item> }
+            quote! { #krate::gdl::Sink<Req = #req, Item = #item> }
         }
         Sig::Backward { input, output } => {
-            quote! { #krate::Backward<In = #input, Out = #output> }
+            quote! { #krate::gdl::Backward<In = #input, Out = #output> }
         }
         Sig::Source { .. } => unreachable!("the source takes no binding"),
     }
@@ -471,13 +471,13 @@ fn signature(graph: &Graph, krate: &TokenStream) -> Signature {
                     up_req, up_item, ..
                 } => {
                     let req = request(up_req, krate);
-                    quote!(#krate::IdentityOperator::<#req,#up_item>::new())
+                    quote!(#krate::gdl::IdentityOperator::<#req,#up_item>::new())
                 }
                 Sig::Forward { input, .. } => {
                     let req = request(input, krate);
-                    quote!(#krate::IdentityNode::<#req>::new())
+                    quote!(#krate::gdl::IdentityNode::<#req>::new())
                 }
-                Sig::Backward { input, .. } => quote!(#krate::IdentityNode::<#input>::new()),
+                Sig::Backward { input, .. } => quote!(#krate::gdl::IdentityNode::<#input>::new()),
                 _ => return None,
             };
             Some(quote!(let #local=::std::sync::Arc::new(#implementation);))
@@ -519,14 +519,14 @@ fn root_result(
         let (ty, value) = if distributed {
             let name = format_ident!("__gdl_hop_{}", index);
             (
-                quote!(impl #krate::Next<#req, #item> + #krate::Register + use<#(#generics),*>),
+                quote!(impl #krate::gdl::Next<#req, #item> + #krate::Register + use<#(#generics),*>),
                 quote!(#name),
             )
         } else {
             let name = format_ident!("__gdl_local_{}", index);
             (
-                quote!(#krate::Source<impl #krate::Next<#req, #item> + use<#(#generics),*>>),
-                quote!(#krate::Source::new(#name)),
+                quote!(#krate::gdl::Source<impl #krate::gdl::Next<#req, #item> + use<#(#generics),*>>),
+                quote!(#krate::gdl::Source::new(#name)),
             )
         };
         if !multiple {
@@ -570,7 +570,7 @@ fn expand_assemble(graph: &Graph, krate: &TokenStream) -> TokenStream {
         pub fn assemble<#(#generics),*>(
             __gdl_deployment: &#krate::Deployment,
             __gdl_bindings: Bindings<#(#generics),*>,
-        ) -> #krate::Result<#result_type>
+        ) -> #krate::gdl::Result<#result_type>
         where
             #(#bounds,)*
         {
@@ -629,14 +629,16 @@ fn expand_local(graph: &Graph, krate: &TokenStream) -> TokenStream {
         let inner_node = graph.node(&hop.inner);
         let inner_local = local_var(inner_node);
         let inner = match inner_node.role() {
-            Role::Sink => quote! { #krate::SinkStage::new(::std::sync::Arc::clone(&#inner_local)) },
+            Role::Sink => {
+                quote! { #krate::gdl::SinkStage::new(::std::sync::Arc::clone(&#inner_local)) }
+            }
             _ => {
                 let next = format_ident!("__gdl_local_{}", index + 1);
-                quote! { #krate::OperatorStage::new(#inner_local, #next) }
+                quote! { #krate::gdl::OperatorStage::new(#inner_local, #next) }
             }
         };
         quote! {
-            let #name = #krate::Hop::new(#fwd, #inner, #bwd);
+            let #name = #krate::gdl::Hop::new(#fwd, #inner, #bwd);
         }
     });
     quote! {
@@ -659,7 +661,8 @@ mod tests {
     use super::*;
 
     /// Every path the expansion writes to the runtime goes through the path
-    /// it was given, so a contract crate can depend on gdl under any name.
+    /// it was given, so a contract crate can depend on the runtime under any
+    /// name.
     #[test]
     fn the_expansion_names_the_runtime_only_through_the_given_path() {
         let input: TokenStream = quote! {
@@ -676,10 +679,13 @@ mod tests {
         let mut idents = Vec::new();
         collect_idents(expansion, &mut idents);
         assert!(idents.iter().any(|i| i == "pipeline"));
-        assert!(
-            !idents.iter().any(|i| i == "gdl"),
-            "the expansion names `gdl` directly"
-        );
+        // The node traits are the definitions crate's, which the runtime
+        // re-exports as `gdl`: the expansion reaches them as `pipeline::gdl`.
+        let direct = idents
+            .iter()
+            .enumerate()
+            .any(|(at, i)| i == "gdl" && (at == 0 || idents[at - 1] != "pipeline"));
+        assert!(!direct, "the expansion names `gdl` directly");
     }
 
     fn collect_idents(tokens: TokenStream, out: &mut Vec<String>) {

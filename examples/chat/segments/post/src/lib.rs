@@ -36,22 +36,23 @@ pub struct Nodes {
 /// Deploy this segment on `node`. Every segment's instances must be in
 /// `roster`.
 pub fn start(
-    node: gdl::velo::Velo,
-    roster: &gdl::Roster,
-    config: gdl::RuntimeConfig,
+    node: gdl_runtime::velo::Velo,
+    roster: &gdl_runtime::Roster,
+    config: gdl_runtime::RuntimeConfig,
     nodes: Nodes,
-) -> gdl::Result<
-    gdl::Segment<
-        impl gdl::Next<
-            <contract::nodes::Frontend as gdl::SourceDecl>::Req,
-            <contract::nodes::Frontend as gdl::SourceDecl>::Item,
-        > + gdl::Register
+) -> gdl_runtime::gdl::Result<
+    gdl_runtime::Segment<
+        impl gdl_runtime::gdl::Next<
+            <contract::nodes::Frontend as gdl_runtime::SourceDecl>::Req,
+            <contract::nodes::Frontend as gdl_runtime::SourceDecl>::Item,
+        > + gdl_runtime::Register
         + use<>,
     >,
 > {
-    let placement = gdl::Placement::from_toml(PLACEMENT)?;
+    let placement = gdl_runtime::Placement::from_toml(PLACEMENT)?;
     let manifest = contract::manifest();
-    let deployment = gdl::Deployment::new(node, &manifest, &placement, SEGMENT, roster, config)?;
+    let deployment =
+        gdl_runtime::Deployment::new(node, &manifest, &placement, SEGMENT, roster, config)?;
     let root = contract::assemble(
         &deployment,
         contract::Bindings::new()
@@ -69,7 +70,7 @@ pub struct Settings {
     node: NodeSettings,
 }
 
-impl gdl::Hosted for Settings {
+impl gdl_runtime::Hosted for Settings {
     const KEYS: &'static [&'static str] = &["node"];
     const NAMES: &'static [&'static str] = &["Detokenize", "Format"];
 }
@@ -84,10 +85,10 @@ struct NodeSettings {
 }
 
 /// What the `chat-post` binary hosts and serves; its `main` is
-/// `gdl::segment_main::<Binary>()`.
+/// `gdl_runtime::segment_main::<Binary>()`.
 pub struct Binary;
 
-impl gdl::SegmentBinary for Binary {
+impl gdl_runtime::SegmentBinary for Binary {
     const PACKAGE: &'static str = "chat-post";
     const SEGMENT: &'static str = SEGMENT;
     const SEGMENTS: &'static [&'static str] = SEGMENTS;
@@ -96,7 +97,10 @@ impl gdl::SegmentBinary for Binary {
     type Settings = Settings;
     type Hosts = Nodes;
 
-    async fn build(settings: Settings, builder: &gdl::Builder) -> Result<Nodes, gdl::Failure> {
+    async fn build(
+        settings: Settings,
+        builder: &gdl_runtime::Builder,
+    ) -> Result<Nodes, gdl_runtime::Failure> {
         let Settings { node } = settings;
         let nodes = Nodes {
             detokenize: builder
@@ -109,29 +113,29 @@ impl gdl::SegmentBinary for Binary {
         Ok(nodes)
     }
 
-    async fn ready(hosts: &Nodes) -> gdl::Result<()> {
+    async fn ready(hosts: &Nodes) -> gdl_runtime::gdl::Result<()> {
         tokio::try_join!(
-            gdl::Build::ready(&hosts.detokenize),
-            gdl::Build::ready(&hosts.format)
+            gdl_runtime::gdl::Build::ready(&hosts.detokenize),
+            gdl_runtime::gdl::Build::ready(&hosts.format)
         )?;
         Ok(())
     }
 
-    fn deployment() -> gdl::Result<gdl::DeploymentSpec> {
-        Ok(gdl::DeploymentSpec::new(
+    fn deployment() -> gdl_runtime::gdl::Result<gdl_runtime::DeploymentSpec> {
+        Ok(gdl_runtime::DeploymentSpec::new(
             contract::manifest(),
-            gdl::Placement::from_toml(PLACEMENT)?,
+            gdl_runtime::Placement::from_toml(PLACEMENT)?,
         )?)
     }
 
     fn start(
         hosts: Nodes,
-        node: gdl::velo::Velo,
-        roster: &gdl::Roster,
-        runtime: gdl::RuntimeConfig,
-    ) -> gdl::Result<gdl::Serving> {
+        node: gdl_runtime::velo::Velo,
+        roster: &gdl_runtime::Roster,
+        runtime: gdl_runtime::RuntimeConfig,
+    ) -> gdl_runtime::gdl::Result<gdl_runtime::Serving> {
         let segment = crate::start(node, roster, runtime, hosts)?;
-        Ok(gdl::Serving::new(
+        Ok(gdl_runtime::Serving::new(
             segment,
             |_segment, shutdown| async move {
                 shutdown.cancelled().await;

@@ -15,7 +15,7 @@ name = "chat-engine"
 path = "src/main.rs"
 
 [dependencies]
-gdl = { path = "../../../../crates/gdl" }
+gdl-runtime = { path = "../../../../crates/gdl-runtime" }
 chat-contract = { path = "../contract" }
 chat-engine-mock = { path = "../../engine-mock" }
 serde = { version = "1", features = ["derive"] }

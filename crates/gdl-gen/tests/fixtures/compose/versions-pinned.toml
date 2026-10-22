@@ -7,4 +7,4 @@ crates = ["vproto-2", "vbridge"]
 pin = { Chunk = "vproto::Chunk" }
 
 [gdl]
-path = "../../../../gdl"
+path = "../../../../gdl-runtime"

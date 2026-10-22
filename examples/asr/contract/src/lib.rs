@@ -44,7 +44,7 @@ pub struct Transcript {
     pub done: bool,
 }
 
-gdl::graph! {
+gdl_runtime::graph! {
     name = "asr", schema = 1;
     source   Client: Session + stream Audio -> stream Transcript;
     operator Gateway: (Session + stream Audio -> stream Transcript) over (Session + stream Audio -> stream Partial);

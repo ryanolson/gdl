@@ -12,12 +12,12 @@ fn list(names: &[String]) -> String {
 }
 
 /// The message crates whose library takes a name that the generated
-/// contract uses for another crate: `gdl`, or the contract's own.
+/// contract uses for another crate: `gdl_runtime`, or the contract's own.
 pub(crate) fn library_clashes(contract: &str, crates: &[spec::ListedCrate]) -> Vec<String> {
     crates
         .iter()
         .filter_map(|c| {
-            let whose = if c.lib == "gdl" {
+            let whose = if c.lib == "gdl_runtime" {
                 "the gdl runtime's name in the generated contract"
             } else if c.lib == contract {
                 "the generated contract's name"
@@ -195,7 +195,7 @@ pub(crate) fn validate(
             &mut problems,
         );
         see(&contract.lib, "the contract".into(), &mut problems);
-        for fixed in ["gdl", "serde", "tokio", "toml"] {
+        for fixed in ["gdl_runtime", "serde", "tokio", "toml"] {
             see(fixed, format!("the `{fixed}` dependency"), &mut problems);
         }
         // Every crate sees these; a dependency of the same name would
@@ -225,7 +225,7 @@ pub(crate) fn validate(
                 keys.insert(name.to_string(), what);
             }
         };
-        for fixed in ["gdl", "serde", "tokio", "toml"] {
+        for fixed in ["gdl-runtime", "serde", "tokio", "toml"] {
             key(fixed, format!("the `{fixed}` dependency"), &mut problems);
         }
         key(&contract.package, "the contract".into(), &mut problems);

@@ -6,7 +6,7 @@ path = "private.gdl"
 crates = ["exported-protocols"]
 
 [gdl]
-path = "../../../../gdl"
+path = "../../../../gdl-runtime"
 
 [segment.all]
 nodes = ["A", "B"]

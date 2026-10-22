@@ -173,14 +173,16 @@ impl Cx {
     }
 
     /// The cancel token of this context's scope.
-    pub(crate) fn cancel_token(&self) -> CancellationToken {
+    #[doc(hidden)]
+    pub fn cancel_token(&self) -> CancellationToken {
         self.scope.cancel.clone()
     }
 
     /// A context for a request that arrived from another segment: the same
     /// id, metadata, and deadline, with a fresh root scope that the runtime
     /// links to the stream that carries the response back.
-    pub(crate) fn arrived(
+    #[doc(hidden)]
+    pub fn arrived(
         id: RequestId,
         meta: BTreeMap<String, String>,
         deadline: Option<Deadline>,
@@ -197,20 +199,23 @@ impl Cx {
 
     /// This context with `visit` as the visit the work under it belongs
     /// to; `None` for work that must not touch its parent's.
-    pub(crate) fn with_visit(mut self, visit: Option<Arc<Visit>>) -> Self {
+    #[doc(hidden)]
+    pub fn with_visit(mut self, visit: Option<Arc<Visit>>) -> Self {
         self.visit = visit;
         self
     }
 
     /// The visit the work under this context belongs to, if recorded.
-    pub(crate) fn visit(&self) -> Option<&Arc<Visit>> {
+    #[doc(hidden)]
+    pub fn visit(&self) -> Option<&Arc<Visit>> {
         self.visit.as_ref()
     }
 
     /// A guard that cancels this context when dropped. The runtime holds one
     /// inside every attempt's response stream, so dropping the stream cancels
     /// the attempt.
-    pub(crate) fn cancel_on_drop(&self) -> DropGuard {
+    #[doc(hidden)]
+    pub fn cancel_on_drop(&self) -> DropGuard {
         self.scope.cancel.clone().drop_guard()
     }
 }
@@ -340,7 +345,8 @@ impl Deadline {
     /// The monotonic clock is read before the wall clock (`wall_now` reads
     /// it): a delay between the two reads then shortens the budget instead
     /// of extending it.
-    pub(crate) fn from_wall(
+    #[doc(hidden)]
+    pub fn from_wall(
         unix_nanos: u64,
         skew: Duration,
         wall_now: impl FnOnce() -> u64,
@@ -365,7 +371,8 @@ impl Deadline {
 }
 
 /// Nanoseconds since the Unix epoch on this machine's wall clock.
-pub(crate) fn wall_now_nanos() -> u64 {
+#[doc(hidden)]
+pub fn wall_now_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

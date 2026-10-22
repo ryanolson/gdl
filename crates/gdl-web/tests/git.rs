@@ -159,7 +159,7 @@ async fn import_a_branch_and_subdirectory_over_http_pins_the_commit() {
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
         deploy: gdl_web::Deploy::default(),
-        gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl")),
+        gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime")),
     })
     .expect("composer");
     let request = Request::builder()
@@ -232,7 +232,7 @@ async fn served(
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
         deploy: gdl_web::Deploy::default(),
-        gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl")),
+        gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime")),
     })
     .expect("composer");
     (url, server, app)
@@ -512,7 +512,7 @@ async fn a_relative_target_directory_imports() {
         hosts: Vec::new(),
         extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
         deploy: gdl_web::Deploy::default(),
-        gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl")),
+        gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime")),
     })
     .expect("composer");
     let (status, body) = import(app, &url, "protocols").await;

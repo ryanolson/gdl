@@ -1,0 +1,53 @@
+error[E0271]: type mismatch resolving `<DSink<__GdlSlotD> as DInner>::Req == u32`
+  --> tests/ui/graph-operator-mismatch.rs:5:1
+   |
+ 5 | / gdl_runtime::graph! {
+ 6 | |     name = "g", schema = 1;
+ 7 | |     source   A: u32 -> stream u32;
+ 8 | |     operator B: (u32 -> stream u32) over (u32 -> stream u32);
+ 9 | |     sink     D: u64 -> stream u32;
+10 | |     topology: A => B { D };
+11 | | }
+   | | ^
+   | | |
+   | |_expected `u32`, found `u64`
+   |   required by a bound introduced by this call
+   |
+   = note: required for `DHop<FwdEnd<gdl_runtime::Codec<u32>>, DSink<__GdlSlotD>, BwdEnd<u32>>` to implement `Next<u32, u32>`
+   = note: required for `DOperator<__GdlSlotB, DHop<FwdEnd<gdl_runtime::Codec<u32>>, DSink<__GdlSlotD>, BwdEnd<u32>>>` to implement `DInner`
+note: required by a bound in `Deployment::hop`
+  --> src/dist/segment.rs
+   |
+   |     pub fn hop<F, I, B>(&self, index: u16, fwd: F, inner: I, bwd: B) -> Result<DHop<F, I, B>>
+   |            --- required by a bound in this associated function
+...
+   |         I: DInner,
+   |            ^^^^^^ required by this bound in `Deployment::hop`
+   = note: this error originates in the macro `gdl_runtime::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: type mismatch resolving `<__GdlSlotD as Sink>::Req == u32`
+  --> tests/ui/graph-operator-mismatch.rs:5:1
+   |
+ 5 | / gdl_runtime::graph! {
+ 6 | |     name = "g", schema = 1;
+ 7 | |     source   A: u32 -> stream u32;
+ 8 | |     operator B: (u32 -> stream u32) over (u32 -> stream u32);
+ 9 | |     sink     D: u64 -> stream u32;
+10 | |     topology: A => B { D };
+11 | | }
+   | |_^ expected `u32`, found `u64`
+   |
+   = note: required for `Hop<(), SinkStage<__GdlSlotD>, ()>` to implement `Next<u32, u32>`
+   = note: required for `OperatorStage<__GdlSlotB, Hop<(), SinkStage<__GdlSlotD>, ()>>` to implement `Inner<u32>`
+   = note: 1 redundant requirement hidden
+   = note: required for `Hop<(), OperatorStage<__GdlSlotB, Hop<(), SinkStage<__GdlSlotD>, ()>>, ()>` to implement `Next<u32, u32>`
+   = note: this error originates in the macro `gdl_runtime::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+ --> tests/ui/graph-operator-mismatch.rs:9:17
+  |
+9 |     sink     D: u64 -> stream u32;
+  |                 ^^^ expected `PhantomData<u32>`, found `PhantomData<u64>`
+  |
+  = note: expected struct `PhantomData<u32>`
+             found struct `PhantomData<u64>`

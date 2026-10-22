@@ -6,4 +6,4 @@ path = "typo.gdl"
 crates = ["chat-protocols", "empty"]
 
 [gdl]
-path = "../../../../gdl"
+path = "../../../../gdl-runtime"

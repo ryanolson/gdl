@@ -33,12 +33,12 @@ pub(crate) fn lib_rs(graph: &Graph, resolution: &Resolution, file: &Path) -> Str
          //! The contract of graph `{name}`: its graph, with each message named\n\
          //! by the full path of the type it resolved to.\n\
          \n\
-         gdl::graph! {{\n{indented}}}\n",
+         gdl_runtime::graph! {{\n{indented}}}\n",
         name = graph.name.value(),
     )
 }
 
-/// The contract crate's `Cargo.toml`: it depends on gdl and on each message
+/// The contract crate's `Cargo.toml`: it depends on the gdl runtime and on each message
 /// crate, at the paths `path` writes.
 pub(crate) fn cargo_toml(
     package: &str,
@@ -57,7 +57,7 @@ pub(crate) fn cargo_toml(
          publish = false\n\
          \n\
          [dependencies]\n\
-         gdl = {gdl}\n"
+         gdl-runtime = {gdl}\n"
     );
     for krate in crates {
         text.push_str(&format!(

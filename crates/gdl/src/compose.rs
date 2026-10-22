@@ -5,10 +5,11 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::cx::Cx;
-use crate::error::Result;
-use crate::items::{Items, bound, fuse};
-use crate::role::{Backward, Forward, Next, Operator, Sink};
+use crate::__runtime::{bound, fuse};
+use crate::Cx;
+use crate::Items;
+use crate::Result;
+use crate::{Backward, Forward, Next, Operator, Sink};
 
 /// A hop: a forward chain, an inner end, and a backward chain. As the `next`
 /// of its outer end it is where attempts begin.
@@ -215,7 +216,7 @@ where
         // A backward node's constructor may have side effects; an interrupted
         // attempt skips every remaining node and carries the reason through.
         if let Err(reason) = attempt.check() {
-            return self.1.apply(attempt, crate::items::failed(reason));
+            return self.1.apply(attempt, crate::__runtime::failed(reason));
         }
         if R::EMPTY {
             return self.1.apply(attempt, self.0.backward(attempt, items));
@@ -254,5 +255,33 @@ where
 {
     async fn generate(&self, cx: Cx, req: Req) -> Result<Items<Item>> {
         self.call(cx, req).await
+    }
+}
+
+/// A typed join from an entry arm into a shared pipeline.
+///
+/// The pipeline remains concrete here; type erasure is confined to the service client.
+pub struct Join<N, Item> {
+    next: N,
+    item: std::marker::PhantomData<fn() -> Item>,
+}
+impl<N, Item> Join<N, Item> {
+    /// Join an existing pipeline, usually held in an `Arc` shared by the entries.
+    pub fn new(next: N) -> Self {
+        Self {
+            next,
+            item: std::marker::PhantomData,
+        }
+    }
+}
+impl<N: Clone, Item> Clone for Join<N, Item> {
+    fn clone(&self) -> Self {
+        Self::new(self.next.clone())
+    }
+}
+impl<Req: Send + 'static, Item: Send + 'static, N: Next<Req, Item>> Inner<Req> for Join<N, Item> {
+    type Item = Item;
+    async fn call(&self, cx: Cx, request: Req) -> Result<Items<Item>> {
+        self.next.generate(cx, request).await
     }
 }

@@ -15,7 +15,7 @@ name = "asr-dsp"
 path = "src/main.rs"
 
 [dependencies]
-gdl = { path = "../../../../crates/gdl" }
+gdl-runtime = { path = "../../../../crates/gdl-runtime" }
 asr-contract = { path = "../../contract" }
 asr-dsp-nodes = { path = "../../dsp-nodes" }
 serde = { version = "1", features = ["derive"] }

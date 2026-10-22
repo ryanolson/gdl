@@ -67,7 +67,7 @@ Every `Build::Config` remains a deserializable implementation-owned type. `#[der
 
 Graph controls currently support boolean, signed integer, and string fields with explicit literal defaults. The builder validates the overrides and writes resolved values under `[config.NodeName]`. Entry adapter configuration uses the instance name `<Source>_<entry>`. These names cannot collide with pipeline node names.
 
-`gdl::build_node` accepts a Figment and the checked graph values. It fills missing graph values and rejects explicit conflicts before calling `Build::build`. Callers can compose any Figment providers with `merge` and `join`. Generated binaries merge TOML files in argument order, then merge `GDL_` environment variables. A double underscore separates nested keys. Runtime configuration remains under `[node.Name]`, `[frontend]`, or `[adapter.entry]`.
+`gdl_runtime::build_node` accepts a Figment and the checked graph values. It fills missing graph values and rejects explicit conflicts before calling `Build::build`. Callers can compose any Figment providers with `merge` and `join`. Generated binaries merge TOML files in argument order, then merge `GDL_` environment variables. A double underscore separates nested keys. Runtime configuration remains under `[node.Name]`, `[frontend]`, or `[adapter.entry]`.
 
 Endpoint flags determine the graph during composition. Runtime providers cannot silently enable an unwired endpoint or disable a wired endpoint. Change the graph configuration and regenerate to change those flags.
 

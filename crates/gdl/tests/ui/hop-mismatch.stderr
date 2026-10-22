@@ -1,19 +1,19 @@
 error[E0271]: type mismatch resolving `<Numbers as Sink>::Req == String`
-  --> tests/ui/hop-mismatch.rs:36:18
+  --> tests/ui/hop-mismatch.rs:38:18
    |
-36 |     let _ = call(hop);
+38 |     let _ = call(hop);
    |             ---- ^^^ type mismatch resolving `<Numbers as Sink>::Req == String`
    |             |
    |             required by a bound introduced by this call
    |
-note: expected this to be `std::string::String`
-  --> tests/ui/hop-mismatch.rs:22:16
+note: expected this to be `String`
+  --> tests/ui/hop-mismatch.rs:24:16
    |
-22 |     type Req = u32;
+24 |     type Req = u32;
    |                ^^^
    = note: required for `Hop<(Arc<ToText>, ()), SinkStage<Numbers>, ()>` to implement `gdl::Next<u32, u32>`
 note: required by a bound in `call`
-  --> tests/ui/hop-mismatch.rs:30:18
+  --> tests/ui/hop-mismatch.rs:32:18
    |
-30 | async fn call<N: Next<u32, u32>>(next: N) {
+32 | async fn call<N: Next<u32, u32>>(next: N) {
    |                  ^^^^^^^^^^^^^^ required by this bound in `call`

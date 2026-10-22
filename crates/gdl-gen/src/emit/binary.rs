@@ -1,8 +1,8 @@
 //! A segment crate's binary. Its lifecycle is the runtime's
-//! (`gdl::segment_main`); what is emitted is what differs between
+//! (`gdl_runtime::segment_main`); what is emitted is what differs between
 //! segments: `main.rs`, which names the segment's `Binary` and documents
 //! its settings, and the library's `Binary`, which implements
-//! `gdl::SegmentBinary` with the settings tables, how the hosted
+//! `gdl_runtime::SegmentBinary` with the settings tables, how the hosted
 //! implementations are built, and what the segment serves. Each kind of
 //! segment (one that serves JSON lines, one with a frontend, one with a
 //! service of several entries, one that only serves) is one branch in one
@@ -28,7 +28,11 @@ impl Unit<'_> {
         text.push_str(&self.settings_doc(&hosted, frontend, service, self.serves()));
         let _ = writeln!(text);
         let _ = writeln!(text, "fn main() -> std::process::ExitCode {{");
-        let _ = writeln!(text, "    gdl::segment_main::<{}::Binary>()", self.lib());
+        let _ = writeln!(
+            text,
+            "    gdl_runtime::segment_main::<{}::Binary>()",
+            self.lib()
+        );
         let _ = writeln!(text, "}}");
         text
     }
@@ -104,7 +108,7 @@ impl Unit<'_> {
             ),
             (
                 "[runtime]".to_string(),
-                "optional: gdl::RuntimeConfig".to_string(),
+                "optional: gdl_runtime::RuntimeConfig".to_string(),
             ),
             (
                 "[system]".to_string(),
@@ -205,10 +209,10 @@ impl Unit<'_> {
             "/// What the `{}` binary hosts and serves; its `main` is",
             self.package()
         );
-        let _ = writeln!(text, "/// `gdl::segment_main::<Binary>()`.");
+        let _ = writeln!(text, "/// `gdl_runtime::segment_main::<Binary>()`.");
         let _ = writeln!(text, "pub struct Binary;");
         let _ = writeln!(text);
-        let _ = writeln!(text, "impl gdl::SegmentBinary for Binary {{");
+        let _ = writeln!(text, "impl gdl_runtime::SegmentBinary for Binary {{");
         let _ = writeln!(
             text,
             "    const PACKAGE: &'static str = {:?};",
@@ -232,7 +236,7 @@ impl Unit<'_> {
             let _ = writeln!(text);
             let _ = writeln!(
                 text,
-                "    async fn ready(hosts: &{}) -> gdl::Result<()> {{",
+                "    async fn ready(hosts: &{}) -> gdl_runtime::gdl::Result<()> {{",
                 built.ty()
             );
             let _ = writeln!(
@@ -246,11 +250,11 @@ impl Unit<'_> {
         let _ = writeln!(text);
         let _ = writeln!(
             text,
-            "    fn deployment() -> gdl::Result<gdl::DeploymentSpec> {{"
+            "    fn deployment() -> gdl_runtime::gdl::Result<gdl_runtime::DeploymentSpec> {{"
         );
         let _ = writeln!(
             text,
-            "        Ok(gdl::DeploymentSpec::new(contract::manifest(), gdl::Placement::from_toml(PLACEMENT)?)?)"
+            "        Ok(gdl_runtime::DeploymentSpec::new(contract::manifest(), gdl_runtime::Placement::from_toml(PLACEMENT)?)?)"
         );
         let _ = writeln!(text, "    }}");
         let _ = writeln!(text);
@@ -273,7 +277,7 @@ impl Unit<'_> {
         let takes = !hosted.is_empty() || frontend.is_some() || service.is_some();
         let _ = writeln!(
             text,
-            "    async fn build(settings: Settings, {}: &gdl::Builder) -> Result<{}, gdl::Failure> {{",
+            "    async fn build(settings: Settings, {}: &gdl_runtime::Builder) -> Result<{}, gdl_runtime::Failure> {{",
             if takes { "builder" } else { "_builder" },
             built.ty()
         );
@@ -350,7 +354,7 @@ impl Unit<'_> {
         let mut text = String::new();
         let _ = writeln!(
             text,
-            "    fn start(hosts: {}, node: gdl::velo::Velo, roster: &gdl::Roster, runtime: gdl::RuntimeConfig) -> gdl::Result<gdl::Serving> {{",
+            "    fn start(hosts: {}, node: gdl_runtime::velo::Velo, roster: &gdl_runtime::Roster, runtime: gdl_runtime::RuntimeConfig) -> gdl_runtime::gdl::Result<gdl_runtime::Serving> {{",
             built.ty()
         );
         let nodes = if built.extra() {
@@ -378,7 +382,7 @@ impl Unit<'_> {
         };
         let _ = writeln!(
             text,
-            "        Ok(gdl::Serving::new(segment, |{segment}, shutdown| async move {{"
+            "        Ok(gdl_runtime::Serving::new(segment, |{segment}, shutdown| async move {{"
         );
         text.push_str(&self.serve_body(frontend, service, serves));
         let _ = writeln!(text, "        }}))");
@@ -440,7 +444,7 @@ impl Unit<'_> {
                     if let Some(pipeline) = &entry.pipeline {
                         let _ = writeln!(
                             text,
-                            "                {}: Some(gdl::Client::new(gdl::Source::new({}))),",
+                            "                {}: Some(gdl_runtime::gdl::Client::new(gdl_runtime::gdl::Source::new({}))),",
                             entry.field,
                             pipeline.expression()
                         );
@@ -451,12 +455,12 @@ impl Unit<'_> {
                 let _ = writeln!(text, "            }};");
                 let _ = writeln!(
                     text,
-                    "            gdl::Service::serve(frontend, clients, async move {{ shutdown.cancelled().await }}).await"
+                    "            gdl_runtime::gdl::Service::serve(frontend, clients, async move {{ shutdown.cancelled().await }}).await"
                 );
             } else {
                 let _ = writeln!(
                     text,
-                    "            gdl::Frontend::serve(frontend, segment, async move {{ shutdown.cancelled().await }}).await"
+                    "            gdl_runtime::gdl::Frontend::serve(frontend, segment.client(|root| root.clone()), async move {{ shutdown.cancelled().await }}).await"
                 );
             }
         } else if serves {
@@ -466,18 +470,18 @@ impl Unit<'_> {
             );
             let _ = writeln!(
                 text,
-                "            let call = |request: contract::SourceReq| segment.call::<_, contract::SourceItem>(gdl::Cx::new(), request);"
+                "            let call = |request: contract::SourceReq| segment.call::<_, contract::SourceItem>(gdl_runtime::gdl::Cx::new(), request);"
             );
             // The stop ends reading, not the answer being written; a
             // second signal ends the process.
             let _ = writeln!(
                 text,
-                "            gdl::serve_json_lines(input, tokio::io::stdout(), shutdown.cancelled(), call)"
+                "            gdl_runtime::serve_json_lines(input, tokio::io::stdout(), shutdown.cancelled(), call)"
             );
             let _ = writeln!(text, "                .await");
             let _ = writeln!(
                 text,
-                "                .map_err(|e| gdl::Error::new(gdl::ErrorKind::Transport, e.to_string()))"
+                "                .map_err(|e| gdl_runtime::gdl::Error::new(gdl_runtime::gdl::ErrorKind::Transport, e.to_string()))"
             );
         } else {
             let _ = writeln!(text, "            shutdown.cancelled().await;");
@@ -521,17 +525,16 @@ impl Built {
         };
         let mut ready: Vec<String> = hosted
             .iter()
-            .map(|node| format!("gdl::Build::ready(&{nodes}.{})", node.binding))
+            .map(|node| format!("gdl_runtime::gdl::Build::ready(&{nodes}.{})", node.binding))
             .collect();
         if frontend.is_some() {
-            ready.push("gdl::Build::ready(&hosts.frontend)".into());
+            ready.push("gdl_runtime::gdl::Build::ready(&hosts.frontend)".into());
         }
         if let Some(service) = service {
             ready.extend(
-                service
-                    .nodes()
-                    .iter()
-                    .map(|node| format!("gdl::Build::ready(&hosts.{})", node.variable())),
+                service.nodes().iter().map(|node| {
+                    format!("gdl_runtime::gdl::Build::ready(&hosts.{})", node.variable())
+                }),
             );
         }
         Self { fields, ready }
@@ -589,7 +592,7 @@ fn settings_types(
                 .map(|node| node.name.as_str()),
         )
         .collect();
-    let _ = writeln!(text, "impl gdl::Hosted for Settings {{");
+    let _ = writeln!(text, "impl gdl_runtime::Hosted for Settings {{");
     let _ = writeln!(text, "    const KEYS: &'static [&'static str] = &{keys:?};");
     let _ = writeln!(
         text,

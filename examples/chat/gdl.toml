@@ -16,7 +16,7 @@ crates = ["protocols"]
 crates = ["front-nodes", "engine-mock", "post-nodes"]
 
 [gdl]
-path = "../../crates/gdl"
+path = "../../crates/gdl-runtime"
 
 [segment.front]
 nodes = ["Frontend", "Preprocess", "Truncate", "Number"]

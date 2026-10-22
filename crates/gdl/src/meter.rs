@@ -82,16 +82,20 @@ const SHARD_LIMIT: usize = 64;
 
 /// The parts an entry's visits have, as bits: which families its series
 /// appear in.
-pub(crate) const REQUEST: u8 = 1;
-pub(crate) const RESPONSE: u8 = 2;
-pub(crate) const END_TO_END: u8 = 4;
+#[doc(hidden)]
+pub const REQUEST: u8 = 1;
+#[doc(hidden)]
+pub const RESPONSE: u8 = 2;
+#[doc(hidden)]
+pub const END_TO_END: u8 = 4;
 
 /// Entries by their node, shared by a segment's hops, which add them, and
 /// the scrape, which reads them.
 type Entries = Arc<Mutex<BTreeMap<String, &'static Figures>>>;
 
 /// The figures of each entry a segment hosts, by the entry's node.
-pub(crate) struct Meters {
+#[doc(hidden)]
+pub struct Meters {
     entries: Entries,
     shards: usize,
 }
@@ -100,7 +104,8 @@ impl Meters {
     /// Register the runtime's figures in `registry`, where a scrape sums
     /// each entry's shards. Entries are added as the hops that own them
     /// are assembled, before the segment serves.
-    pub(crate) fn register(registry: &Registry) -> Result<Self> {
+    #[doc(hidden)]
+    pub fn register(registry: &Registry) -> Result<Self> {
         let shards = std::thread::available_parallelism()
             .map_or(1, |n| n.get())
             .next_power_of_two()
@@ -118,7 +123,8 @@ impl Meters {
     /// scrapes, lives as long as the process that serves it, and a
     /// `&'static` reference costs a visit nothing, where an `Arc` would be
     /// one more atomic every thread touches.
-    pub(crate) fn entry(&self, entry: &str, parts: u8) -> &'static Figures {
+    #[doc(hidden)]
+    pub fn entry(&self, entry: &str, parts: u8) -> &'static Figures {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let figures = *entries.entry(entry.to_string()).or_insert_with(|| {
             Box::leak(Box::new(Figures {
@@ -139,7 +145,8 @@ fn failed(error: prometheus::Error) -> Error {
 }
 
 /// One entry's figures, one shard per thread up to [`SHARD_LIMIT`].
-pub(crate) struct Figures {
+#[doc(hidden)]
+pub struct Figures {
     shards: Box<[Shard]>,
     /// The parts its visits have ([`REQUEST`], [`RESPONSE`],
     /// [`END_TO_END`]); set before the segment serves.
@@ -231,7 +238,8 @@ impl Spans {
 
 /// How a visit's part ended.
 #[derive(Clone, Copy)]
-pub(crate) enum Ending<'a> {
+#[doc(hidden)]
+pub enum Ending<'a> {
     /// Its stream ended, or the request was handed on, without an error.
     Finished,
     /// With this error, counted where it was raised, not where it was
@@ -256,7 +264,8 @@ const DONE: u8 = 2;
 /// compare-exchange on its state: a part is recorded once, whichever
 /// thread ends it. Instants are kept as nanoseconds after `started`, plus
 /// one, so that zero means "not yet".
-pub(crate) struct Visit {
+#[doc(hidden)]
+pub struct Visit {
     figures: &'static Figures,
     started: Instant,
     /// A visit given up after its deadline ended by it, not by a cancel.
@@ -281,7 +290,8 @@ pub(crate) struct Visit {
 impl Visit {
     /// A visit that begins with its request part, which arrived at
     /// `started`; `end_to_end` for the source's.
-    pub(crate) fn request(
+    #[doc(hidden)]
+    pub fn request(
         figures: &'static Figures,
         started: Instant,
         deadline: Option<Deadline>,
@@ -299,7 +309,8 @@ impl Visit {
 
     /// A visit that is a response only: a backward run, or an inner end
     /// run the outer end spawns for the request `parent` carries.
-    pub(crate) fn response(
+    #[doc(hidden)]
+    pub fn response(
         figures: &'static Figures,
         deadline: Option<Deadline>,
         parent: Option<Arc<Visit>>,
@@ -338,7 +349,8 @@ impl Visit {
     /// part ends there, since the receiver's begins at its arrival. When
     /// `responds`, its response comes back through this segment, and the
     /// response part begins.
-    pub(crate) fn handed_on(&self, responds: bool, sent: Instant) {
+    #[doc(hidden)]
+    pub fn handed_on(&self, responds: bool, sent: Instant) {
         let next = if responds { RESPONDING } else { DONE };
         // Stamped before the state changes: a first item out that sees the
         // response must also see when it began.
@@ -365,7 +377,8 @@ impl Visit {
     /// A sink under the visit returned its stream, or its backward run
     /// activated: the request part ends, and the response part begins, if
     /// they have not already.
-    pub(crate) fn producing(&self) {
+    #[doc(hidden)]
+    pub fn producing(&self) {
         let now = Instant::now();
         let at = self.since(now);
         let _ = stamp(&self.producing, at);
@@ -385,12 +398,14 @@ impl Visit {
     }
 
     /// The first item reached the visit from another segment.
-    pub(crate) fn first_in(&self) {
+    #[doc(hidden)]
+    pub fn first_in(&self) {
         let _ = stamp(&self.first_in, self.since(Instant::now()));
     }
 
     /// The visit's first item left the segment.
-    pub(crate) fn first_out(&self) {
+    #[doc(hidden)]
+    pub fn first_out(&self) {
         if self.state.load(Relaxed) == REQUESTING {
             self.producing();
         }
@@ -419,7 +434,8 @@ impl Visit {
 
     /// The visit ended, however it ends: its request part if it is still
     /// in it, otherwise its response part.
-    pub(crate) fn end(&self, ending: Ending<'_>) {
+    #[doc(hidden)]
+    pub fn end(&self, ending: Ending<'_>) {
         let mut state = self.state.load(Relaxed);
         loop {
             if state == DONE {
@@ -520,15 +536,18 @@ fn nanos(stamp_difference: u64) -> Duration {
 /// the root's attempt boundary). Dropped before the visit ended, the visit
 /// was given up. Contexts hold the visit too, but only to report on it: a
 /// node may keep a clone of its context for as long as it likes.
-pub(crate) struct Owner(Arc<Visit>);
+#[doc(hidden)]
+pub struct Owner(Arc<Visit>);
 
 impl Owner {
     /// The visit, for the contexts of the work it covers.
-    pub(crate) fn visit(&self) -> &Arc<Visit> {
+    #[doc(hidden)]
+    pub fn visit(&self) -> &Arc<Visit> {
         &self.0
     }
 
-    pub(crate) fn end(&self, ending: Ending<'_>) {
+    #[doc(hidden)]
+    pub fn end(&self, ending: Ending<'_>) {
         self.0.end(ending);
     }
 }
@@ -540,7 +559,8 @@ impl Drop for Owner {
 }
 
 /// End the visit `owner` holds, if the segment records it.
-pub(crate) fn ended(owner: Option<&Owner>, ending: Ending<'_>) {
+#[doc(hidden)]
+pub fn ended(owner: Option<&Owner>, ending: Ending<'_>) {
     if let Some(owner) = owner {
         owner.end(ending);
     }
@@ -548,7 +568,8 @@ pub(crate) fn ended(owner: Option<&Owner>, ending: Ending<'_>) {
 
 /// End the visit `owner` holds, if the segment records it, with `result`'s
 /// error if it is one, and pass the result on.
-pub(crate) fn note<T>(owner: Option<&Owner>, result: Result<T>) -> Result<T> {
+#[doc(hidden)]
+pub fn note<T>(owner: Option<&Owner>, result: Result<T>) -> Result<T> {
     if let Err(error) = &result {
         ended(owner, Ending::Failed(error));
     }

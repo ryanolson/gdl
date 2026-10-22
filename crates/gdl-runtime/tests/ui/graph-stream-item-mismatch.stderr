@@ -1,0 +1,40 @@
+error[E0271]: type mismatch resolving `<DSink<__GdlSlotD> as DInner>::Req == Streamed<u32, u32>`
+ --> tests/ui/graph-stream-item-mismatch.rs:4:1
+  |
+4 | / gdl_runtime::graph! {
+5 | |     name = "g", schema = 1;
+6 | |     source A: u32 + stream u32 -> stream u32;
+7 | |     sink   D: u32 + stream u64 -> stream u32;
+8 | |     topology: A => D;
+9 | | }
+  | |_^ expected `Streamed<u32, u32>`, found `Streamed<u32, u64>`
+  |
+  = note: expected struct `Streamed<u32, u32>`
+             found struct `Streamed<u32, u64>`
+  = note: required for `DHop<FwdEnd<StreamCodec<u32, u32>>, DSink<__GdlSlotD>, BwdEnd<u32>>` to implement `Next<Streamed<u32, u32>, u32>`
+  = note: this error originates in the macro `gdl_runtime::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: type mismatch resolving `<__GdlSlotD as Sink>::Req == Streamed<u32, u32>`
+ --> tests/ui/graph-stream-item-mismatch.rs:4:1
+  |
+4 | / gdl_runtime::graph! {
+5 | |     name = "g", schema = 1;
+6 | |     source A: u32 + stream u32 -> stream u32;
+7 | |     sink   D: u32 + stream u64 -> stream u32;
+8 | |     topology: A => D;
+9 | | }
+  | |_^ expected `Streamed<u32, u32>`, found `Streamed<u32, u64>`
+  |
+  = note: expected struct `Streamed<u32, u32>`
+             found struct `Streamed<u32, u64>`
+  = note: required for `Hop<(), SinkStage<__GdlSlotD>, ()>` to implement `Next<Streamed<u32, u32>, u32>`
+  = note: this error originates in the macro `gdl_runtime::graph` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+ --> tests/ui/graph-stream-item-mismatch.rs:7:28
+  |
+7 |     sink   D: u32 + stream u64 -> stream u32;
+  |                            ^^^ expected `PhantomData<u32>`, found `PhantomData<u64>`
+  |
+  = note: expected struct `PhantomData<u32>`
+             found struct `PhantomData<u64>`

@@ -15,4 +15,5 @@ asr-front = { path = "../segments/front" }
 asr-front-nodes = { path = "../front-nodes" }
 futures = { workspace = true }
 gdl = { workspace = true }
+gdl-runtime = { workspace = true }
 tokio = { workspace = true }

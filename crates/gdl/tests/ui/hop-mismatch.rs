@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use gdl::{Cx, Forward, Hop, Items, Next, Result, Sink, SinkStage};
+use gdl::{Cx, Forward, Items, Next, Result, Sink};
+
+use gdl::{Hop, SinkStage};
 
 struct ToText;
 

@@ -107,16 +107,16 @@ mod tests {
     use crate::select::Typed;
     use std::sync::Arc;
 
-    fn ids(n: usize) -> Vec<velo::InstanceId> {
-        (0..n).map(|_| velo::InstanceId::new_v4()).collect()
+    fn ids(n: usize) -> Vec<InstanceId> {
+        (0..n).map(|_| crate::select::random_id()).collect()
     }
 
     async fn choose(
         selector: &Typed<Affinity>,
         cx: &Cx,
         head: &[u8],
-        ids: &[velo::InstanceId],
-    ) -> velo::InstanceId {
+        ids: &[InstanceId],
+    ) -> InstanceId {
         let picked = selector
             .select(cx, head, Instances::new("worker", ids))
             .await
@@ -188,7 +188,7 @@ mod tests {
         for key in 0..200u32 {
             before.push(choose(&selector, &cx, &key.to_be_bytes(), &ids).await);
         }
-        let joiner = velo::InstanceId::new_v4();
+        let joiner = crate::select::random_id();
         ids.insert(2, joiner);
         let mut moved = 0;
         for (key, was) in before.iter().enumerate() {

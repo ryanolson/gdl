@@ -15,7 +15,7 @@ name = "chat-post"
 path = "src/main.rs"
 
 [dependencies]
-gdl = { path = "../../../../crates/gdl" }
+gdl-runtime = { path = "../../../../crates/gdl-runtime" }
 chat-contract = { path = "../contract" }
 chat-post-nodes = { path = "../../post-nodes" }
 serde = { version = "1", features = ["derive"] }

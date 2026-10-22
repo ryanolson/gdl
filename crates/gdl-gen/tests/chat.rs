@@ -360,7 +360,7 @@ fn every_problem_in_a_spec_is_reported_at_once() {
     let dir = temp.path();
     let example = example();
     let path = |p: &str| toml::Value::String(example.join(p).display().to_string());
-    let gdl = toml::Value::String(root().join("crates/gdl").display().to_string());
+    let gdl = toml::Value::String(root().join("crates/gdl-runtime").display().to_string());
     let text = format!(
         "[graph]\npath = {graph}\n[messages]\ncrates = [{protocols}]\n\
          [nodes]\ncrates = [{front}, {engine}]\npin = {{ Engine = \"chat_engine_mock::Engin\" }}\n\
@@ -496,8 +496,8 @@ fn a_segment_cannot_take_the_contract_directory() {
             ),
         )
         .replace(
-            "path = \"../../crates/gdl\"",
-            &format!("path = {:?}", root().join("crates/gdl")),
+            "path = \"../../crates/gdl-runtime\"",
+            &format!("path = {:?}", root().join("crates/gdl-runtime")),
         );
     let spec = spec
         .lines()

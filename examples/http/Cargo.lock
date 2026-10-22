@@ -436,8 +436,6 @@ name = "gdl"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "dashmap",
- "figment",
  "futures",
  "gdl-macros",
  "gdl-message",
@@ -446,13 +444,9 @@ dependencies = [
  "prometheus",
  "rmp-serde",
  "serde",
- "serde_bytes",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "velo",
 ]
 
 [[package]]
@@ -483,6 +477,31 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "gdl-runtime"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "dashmap",
+ "figment",
+ "futures",
+ "gdl",
+ "gdl-macros",
+ "gdl-message",
+ "gdl-model",
+ "pin-project-lite",
+ "prometheus",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "velo",
 ]
 
 [[package]]
@@ -559,6 +578,7 @@ dependencies = [
  "axum",
  "futures",
  "gdl",
+ "gdl-runtime",
  "reqwest",
  "serde",
  "serde_json",

@@ -6,4 +6,4 @@ path = "versions.gdl"
 crates = ["vproto-2", "vbridge"]
 
 [gdl]
-path = "../../../../gdl"
+path = "../../../../gdl-runtime"

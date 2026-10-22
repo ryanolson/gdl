@@ -390,7 +390,7 @@ impl Unit<'_> {
         } else {
             format!("{{ {source}, features = {features:?} }}")
         };
-        let _ = writeln!(text, "gdl = {gdl}");
+        let _ = writeln!(text, "gdl-runtime = {gdl}");
         let _ = writeln!(
             text,
             "{} = {{ path = {} }}",
@@ -502,11 +502,11 @@ impl Unit<'_> {
         );
         let _ = writeln!(text, "/// `roster`.");
         let _ = writeln!(text, "pub fn start(");
-        let _ = writeln!(text, "    node: gdl::velo::Velo,");
-        let _ = writeln!(text, "    roster: &gdl::Roster,");
-        let _ = writeln!(text, "    config: gdl::RuntimeConfig,");
+        let _ = writeln!(text, "    node: gdl_runtime::velo::Velo,");
+        let _ = writeln!(text, "    roster: &gdl_runtime::Roster,");
+        let _ = writeln!(text, "    config: gdl_runtime::RuntimeConfig,");
         let _ = writeln!(text, "    nodes: Nodes,");
-        let _ = writeln!(text, ") -> gdl::Result<");
+        let _ = writeln!(text, ") -> gdl_runtime::gdl::Result<");
         let roots: Vec<_> = self
             .manifest
             .hops
@@ -519,7 +519,7 @@ impl Unit<'_> {
             .collect();
         let root_type = |root: &gdl_model::HopInfo| {
             format!(
-                "impl gdl::Next<<contract::nodes::{} as gdl::SourceDecl>::Req, <contract::nodes::{} as gdl::SourceDecl>::Item> + gdl::Register + use<>",
+                "impl gdl_runtime::gdl::Next<<contract::nodes::{} as gdl_runtime::SourceDecl>::Req, <contract::nodes::{} as gdl_runtime::SourceDecl>::Item> + gdl_runtime::Register + use<>",
                 root.outer, root.outer
             )
         };
@@ -530,16 +530,16 @@ impl Unit<'_> {
                 format!("({}, {tail})", root_type(root))
             })
         };
-        let _ = writeln!(text, "    gdl::Segment<{root}>,");
+        let _ = writeln!(text, "    gdl_runtime::Segment<{root}>,");
         let _ = writeln!(text, "> {{");
         let _ = writeln!(
             text,
-            "    let placement = gdl::Placement::from_toml(PLACEMENT)?;"
+            "    let placement = gdl_runtime::Placement::from_toml(PLACEMENT)?;"
         );
         let _ = writeln!(text, "    let manifest = contract::manifest();");
         let _ = writeln!(
             text,
-            "    let deployment = gdl::Deployment::new(node, &manifest, &placement, SEGMENT, roster, config)?;"
+            "    let deployment = gdl_runtime::Deployment::new(node, &manifest, &placement, SEGMENT, roster, config)?;"
         );
         let mut bindings = String::from("contract::Bindings::new()");
         for node in &hosted {

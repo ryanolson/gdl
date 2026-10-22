@@ -10,6 +10,7 @@ publish = false
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 futures = "0.3"
 gdl = { path = "../../crates/gdl" }
+gdl-runtime = { path = "../../crates/gdl-runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }

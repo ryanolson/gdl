@@ -44,7 +44,7 @@ Every performance number gdl and velo have recorded so far came from one Apple M
 
 ### gdl
 
-- **`cargo bench -p gdl --bench hop --bench remote`:** per-request and per-item cost locally and across one crossing, including the renewal cost recorded in `m19-renewal.md`.
+- **`cargo bench -p gdl-runtime --bench hop --bench remote`:** per-request and per-item cost locally and across one crossing, including the renewal cost recorded in `m19-renewal.md`.
 - **Milestone 21's runtime metrics (rulings 131 to 138):** the per-segment figures, against the same benches with metrics off and against the per-node build they replaced, including `concurrent-32x1-reference` and `reference-items/2-segments`. The figures are sharded per thread; machine 1 confirms the cost per visit, how it scales with cores, and the cost of the visit's count on each `Cx::clone` and `Cx::child` in an operator that clones its context often and in a streamed relay.
 - **End to end:** a three-segment graph across machine 2, streaming token-sized items at a realistic request rate. Measure:
   - time to first item;

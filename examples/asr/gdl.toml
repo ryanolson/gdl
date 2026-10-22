@@ -8,7 +8,7 @@
 path = "contract"
 
 [gdl]
-path = "../../crates/gdl"
+path = "../../crates/gdl-runtime"
 
 [segment.front]
 nodes = ["Client", "Gateway"]

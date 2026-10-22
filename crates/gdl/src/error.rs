@@ -88,14 +88,16 @@ impl Error {
     }
 
     /// The error, marked as received from another segment.
-    pub(crate) fn relayed(mut self) -> Self {
+    #[doc(hidden)]
+    pub fn relayed(mut self) -> Self {
         self.relayed = true;
         self
     }
 
     /// Whether the error was received from another segment, not raised in
     /// this one.
-    pub(crate) fn is_relayed(&self) -> bool {
+    #[doc(hidden)]
+    pub fn is_relayed(&self) -> bool {
         self.relayed
     }
 }

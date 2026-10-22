@@ -89,17 +89,17 @@ impl EntryHop {
         };
         let inner = match (&self.operator, &self.nested) {
             (Some(op), Some(next)) => format!(
-                "gdl::OperatorStage::new(std::sync::Arc::new({}), {})",
+                "gdl_runtime::gdl::OperatorStage::new(std::sync::Arc::new({}), {})",
                 op.variable(),
                 next.expression()
             ),
             _ => format!(
-                "gdl::Join::new({}.clone())",
+                "gdl_runtime::gdl::Join::new({}.clone())",
                 pipeline_variable(self.target.as_deref().expect("bound destination"))
             ),
         };
         format!(
-            "gdl::Hop::new({}, {inner}, {})",
+            "gdl_runtime::gdl::Hop::new({}, {inner}, {})",
             chain(&self.forward),
             chain(&self.backward)
         )

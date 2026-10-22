@@ -42,6 +42,7 @@ fn dependencies(packages: &[&str]) -> Vec<String> {
 fn the_model_and_the_generator_do_not_depend_on_the_runtime() {
     let runtime = [
         "gdl",
+        "gdl-runtime",
         "velo",
         "tokio",
         "tokio-util",
@@ -51,7 +52,7 @@ fn the_model_and_the_generator_do_not_depend_on_the_runtime() {
         "futures",
     ];
     // The control: the runtime's own tree holds what the others must not.
-    let gdl = dependencies(&["gdl"]);
+    let gdl = dependencies(&["gdl-runtime"]);
     assert!(gdl.iter().any(|p| p == "velo") && gdl.iter().any(|p| p == "gdl-model"));
     let portable = dependencies(&["gdl-model", "gdl-syntax"]);
     for name in runtime.iter().chain(&["linkme", "gdl-message"]) {

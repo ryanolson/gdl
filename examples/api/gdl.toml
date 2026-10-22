@@ -20,7 +20,7 @@ enabled_chat = true
 enabled_responses = true
 enabled_anthropic = true
 [gdl]
-path = "../../crates/gdl"
+path = "../../crates/gdl-runtime"
 [segment.front]
 nodes = ["Http"]
 [segment.engine]
