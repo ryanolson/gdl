@@ -1140,36 +1140,90 @@ fn bound(
 }
 
 /// The classes on each cycle of `edges`, one entry per set of classes that
-/// reach each other, in name order. Classes are few, so reaching from each
-/// costs nothing a hop count can grow.
+/// reach each other, in name order. Tarjan's strongly connected
+/// components: each class and each edge is visited once, so the check grows
+/// with the boundaries, where keeping what each class reaches would grow
+/// with their square on a chain of classes.
 fn cycles(edges: &BTreeMap<&str, BTreeSet<&str>>) -> Vec<Vec<String>> {
-    let reach = |from: &str| {
-        let mut seen = BTreeSet::new();
-        let mut next: Vec<&str> = edges.get(from).into_iter().flatten().copied().collect();
-        while let Some(at) = next.pop() {
-            if seen.insert(at) {
-                next.extend(edges.get(at).into_iter().flatten().copied());
-            }
-        }
-        seen
-    };
-    let reached: BTreeMap<&str, BTreeSet<&str>> =
-        edges.keys().map(|&class| (class, reach(class))).collect();
-    let mut placed = BTreeSet::new();
+    let names: Vec<&str> = edges
+        .iter()
+        .flat_map(|(from, into)| std::iter::once(*from).chain(into.iter().copied()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let at = |name: &str| names.binary_search(&name).expect("a class of an edge");
+    let mut next: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
+    for (from, into) in edges {
+        next[at(from)].extend(into.iter().map(|name| at(name)));
+    }
+
+    const UNSEEN: usize = usize::MAX;
+    let mut order = vec![UNSEEN; names.len()];
+    let mut low = vec![0; names.len()];
+    let mut open = vec![false; names.len()];
+    let mut stack = Vec::new();
+    let mut seen = 0;
     let mut cycles = Vec::new();
-    for (&class, reaches) in &reached {
-        if placed.contains(class) || !reaches.contains(class) {
+    for root in 0..names.len() {
+        if order[root] != UNSEEN {
             continue;
         }
-        let cycle: Vec<&str> = reaches
-            .iter()
-            .copied()
-            .filter(|other| reached.get(other).is_some_and(|back| back.contains(class)))
-            .collect();
-        placed.extend(cycle.iter().copied());
-        cycles.push(cycle.into_iter().map(String::from).collect());
+        // Each frame is a class and how many of its edges it has followed:
+        // an explicit stack, so that a long chain of classes cannot
+        // overflow the thread's.
+        let mut frames = vec![(root, 0)];
+        order[root] = seen;
+        low[root] = seen;
+        seen += 1;
+        stack.push(root);
+        open[root] = true;
+        while let Some(frame) = frames.last_mut() {
+            let (class, followed) = *frame;
+            if let Some(&to) = next[class].get(followed) {
+                frame.1 += 1;
+                if order[to] == UNSEEN {
+                    order[to] = seen;
+                    low[to] = seen;
+                    seen += 1;
+                    stack.push(to);
+                    open[to] = true;
+                    frames.push((to, 0));
+                } else if open[to] {
+                    low[class] = low[class].min(order[to]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[class]);
+            }
+            if low[class] == order[class] {
+                let mut component = Vec::new();
+                while let Some(member) = stack.pop() {
+                    open[member] = false;
+                    component.push(member);
+                    if member == class {
+                        break;
+                    }
+                }
+                if component.len() > 1 {
+                    component.sort_unstable();
+                    cycles.push(component);
+                }
+            }
+        }
     }
+    // Indices follow name order, so sorting them sorts by name.
+    cycles.sort_unstable();
     cycles
+        .into_iter()
+        .map(|component| {
+            component
+                .into_iter()
+                .map(|i| names[i].to_string())
+                .collect()
+        })
+        .collect()
 }
 
 fn hop_layout(
