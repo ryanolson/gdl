@@ -183,3 +183,16 @@ fn settings_that_do_not_fit_the_deployment_are_refused() {
          [cell] ready: `b` is not a segment of class `model_x`"
     );
 }
+
+/// A segment the placement does not have is in no class, so not in the
+/// cell's.
+#[test]
+fn a_segment_outside_the_placement_is_not_in_the_cells_class() {
+    let Err(error) = settings(MODEL).check(&classed(), "zz") else {
+        panic!("accepted a segment the placement does not have");
+    };
+    assert_eq!(
+        error.to_string(),
+        "[cell] class: this instance's segment `zz` is not in class `model_x`"
+    );
+}

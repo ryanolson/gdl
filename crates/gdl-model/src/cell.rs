@@ -83,11 +83,15 @@ impl CellSettings {
                 "[cell] class: the placement has no class `{class}`"
             )]
         } else {
-            let own = layout.class_of(segment).filter(|own| *own != class).map(|own| {
-                format!(
+            let own = match layout.class_of(segment) {
+                Some(own) if own == class => None,
+                Some(own) => Some(format!(
                     "[cell] class: this instance's segment `{segment}` is in class `{own}`, not `{class}`"
-                )
-            });
+                )),
+                None => Some(format!(
+                    "[cell] class: this instance's segment `{segment}` is not in class `{class}`"
+                )),
+            };
             let strays = self
                 .ready
                 .keys()
