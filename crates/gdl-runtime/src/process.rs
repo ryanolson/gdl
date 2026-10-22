@@ -25,6 +25,7 @@ use crate::dist::{
 };
 use gdl::Cx;
 use gdl::{Error, ErrorKind, Result};
+use gdl_model::CellSettings;
 use system::{Health, Phase, SystemSettings};
 
 /// The settings of one segment process. `H` is what the segment hosts: the
@@ -48,6 +49,10 @@ use system::{Health, Phase, SystemSettings};
 /// host = "0.0.0.0"        # also DYN_SYSTEM_HOST
 /// live_path = "/live"     # also DYN_SYSTEM_LIVE_PATH
 /// health_path = "/health" # also DYN_SYSTEM_HEALTH_PATH
+/// [cell]                  # optional: the cell this instance belongs to (`CellSettings`)
+/// name = "model-x-01-us-east-1"
+/// class = "model_x"       # the launch refuses a class that is not the segment's
+/// region = "us-east-1"
 /// ```
 pub struct ProcessConfig<H> {
     listen: SocketAddr,
@@ -59,6 +64,7 @@ pub struct ProcessConfig<H> {
     system: SystemSettings,
     /// Each routing selector's table, by the selector's name.
     selector: BTreeMap<String, toml::Table>,
+    cell: Option<CellSettings>,
     /// The runtime's own settings.
     pub runtime: RuntimeConfig,
     /// The tables of the hosted implementations.
@@ -86,6 +92,7 @@ struct Settings {
     system: SystemSettings,
     #[serde(default)]
     selector: BTreeMap<String, toml::Table>,
+    cell: Option<CellSettings>,
 }
 
 /// What a segment hosts, as its binary declares it: the settings type's
@@ -102,7 +109,7 @@ pub trait Hosted: DeserializeOwned {
 /// `GDL_` variables read: the build scripts use the same prefix
 /// (`GDL_PROFILE`, `GDL_IMAGE_PREFIX`), and a variable meant for them must
 /// not stop a segment from starting.
-const KEYS: [&str; 9] = [
+const KEYS: [&str; 10] = [
     "listen",
     "roster",
     "hub",
@@ -112,6 +119,7 @@ const KEYS: [&str; 9] = [
     "runtime",
     "system",
     "selector",
+    "cell",
 ];
 
 fn default_rendezvous_ms() -> u64 {
@@ -217,6 +225,7 @@ impl<H: Hosted> ProcessConfig<H> {
             min_replicas: settings.min_replicas,
             system: settings.system,
             selector: settings.selector,
+            cell: settings.cell,
             runtime: settings.runtime,
             hosted,
         };
@@ -254,6 +263,7 @@ impl<H: Hosted> ProcessConfig<H> {
             min_replicas,
             system,
             selector,
+            cell,
             runtime,
             hosted,
         } = self;
@@ -266,6 +276,7 @@ impl<H: Hosted> ProcessConfig<H> {
             min_replicas,
             system,
             selector,
+            cell,
             runtime,
             hosted: (),
         };
@@ -274,6 +285,11 @@ impl<H: Hosted> ProcessConfig<H> {
 }
 
 impl<H> ProcessConfig<H> {
+    /// The cell this instance belongs to, when its deployment has cells.
+    pub fn cell(&self) -> Option<&CellSettings> {
+        self.cell.as_ref()
+    }
+
     /// Each routing selector's table, by the selector's name.
     pub(crate) fn selector_tables(&self) -> &BTreeMap<String, toml::Table> {
         &self.selector
@@ -333,6 +349,12 @@ impl<H> ProcessConfig<H> {
         // segments it sends to.
         let node = process.take_node()?;
         let layout = gdl_model::layout(&deployment.graph, &deployment.placement)?;
+        // Before anything registers or meets: an instance in the wrong
+        // cell would otherwise be counted toward that cell's quorum.
+        if let Some(cell) = &self.cell {
+            cell.check(&layout, segment)
+                .map_err(|e| placement(e.to_string()))?;
+        }
         let inner: Vec<String> = layout.sends_to(segment).into_iter().collect();
         // The segments that send to this one: their instances are the ones
         // that must stop routing here before a retirement may end.

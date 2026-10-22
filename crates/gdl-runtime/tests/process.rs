@@ -1,10 +1,14 @@
 //! A segment process's settings: files, then the `GDL_` environment, read
 //! as a generated binary reads them.
 
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use figment::Jail;
 use figment::providers::{Format, Toml};
+use gdl::ErrorKind;
+use gdl_runtime::{CellSettings, DirectoryBackend, Hosted, ProcessConfig};
 use gdl_runtime::{DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo};
-use gdl_runtime::{Hosted, ProcessConfig};
 use serde::Deserialize;
 
 /// What a segment hosting one node, `Truncate`, declares.
@@ -295,4 +299,226 @@ fn a_zero_heartbeat_is_refused() {
         panic!("a lease without a cadence")
     };
     assert!(error.to_string().contains("heartbeat_ms"), "{error}");
+}
+
+/// A deployment of two segments in two classes: `front`, in `global`,
+/// sends to `back`, in `model_x`, across the one class boundary.
+fn classed() -> DeploymentSpec {
+    let mut graph = deployment().graph;
+    graph.name = "classed".into();
+    DeploymentSpec::new(
+        graph,
+        Placement::new()
+            .segment("front", ["Source"])
+            .segment("back", ["Echo"])
+            .class("global", ["front"])
+            .class("model_x", ["back"]),
+    )
+    .expect("valid test fixture")
+}
+
+const CELL: &str =
+    "[cell]\nname = \"global-us-east-1\"\nclass = \"global\"\nregion = \"us-east-1\"\n";
+
+#[test]
+fn a_cell_table_is_read_from_a_file() {
+    assert!(load(&[BASE]).expect("no cell").cell().is_none());
+    let config = load(&[
+        BASE,
+        CELL,
+        "[cell]\nhome = \"g\"\nseeds = [\"hub-a:1337\"]\n[cell.ready]\nfront = 3\n",
+    ])
+    .expect("a cell");
+    assert_eq!(
+        config.cell(),
+        Some(&CellSettings {
+            name: "global-us-east-1".into(),
+            class: "global".into(),
+            region: "us-east-1".into(),
+            home: Some("g".into()),
+            directory: DirectoryBackend::Relay,
+            seeds: vec!["hub-a:1337".into()],
+            ready: BTreeMap::from([("front".into(), 3)]),
+        })
+    );
+    let cell = config.cell().expect("a cell");
+    assert_eq!((cell.quorum("front"), cell.quorum("back")), (3, 1));
+}
+
+/// `GDL_CELL__*` reaches `[cell]` as any other setting does, joining the
+/// file's table: a quorum by segment, and a list of seeds.
+#[test]
+fn a_cell_table_is_read_from_the_environment() {
+    Jail::expect_with(|jail| {
+        jail.create_file(
+            "config.toml",
+            &format!("{BASE}{CELL}[cell.ready]\nfront = 3\n"),
+        )?;
+        jail.set_env("GDL_CELL__REGION", "us-west-2");
+        jail.set_env("GDL_CELL__DIRECTORY", "static");
+        jail.set_env("GDL_CELL__READY__BACK", "4");
+        jail.set_env("GDL_CELL__SEEDS", r#"["hub-a:1337", "hub-b:1337"]"#);
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        assert_eq!(
+            config.cell(),
+            Some(&CellSettings {
+                name: "global-us-east-1".into(),
+                class: "global".into(),
+                region: "us-west-2".into(),
+                home: None,
+                directory: DirectoryBackend::Static,
+                seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
+                ready: BTreeMap::from([("back".into(), 4), ("front".into(), 3)]),
+            })
+        );
+        Ok(())
+    });
+    // The whole table from the environment.
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", BASE)?;
+        jail.set_env("GDL_CELL__NAME", "model-x-01-us-east-1");
+        jail.set_env("GDL_CELL__CLASS", "model_x");
+        jail.set_env("GDL_CELL__REGION", "us-east-1");
+        jail.set_env("GDL_CELL__HOME", "global-us-east-1");
+        jail.set_env("GDL_CELL__READY__BACK", "2");
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        let cell = config.cell().expect("a cell");
+        assert_eq!(cell.name, "model-x-01-us-east-1");
+        assert_eq!(cell.home.as_deref(), Some("global-us-east-1"));
+        assert_eq!(cell.directory, DirectoryBackend::Relay);
+        assert_eq!(cell.quorum("back"), 2);
+        Ok(())
+    });
+}
+
+#[test]
+fn a_misspelled_cell_key_is_refused() {
+    let Err(error) = load(&[BASE, CELL, "[cell]\nhone = \"g\"\n"]) else {
+        panic!("a misspelled key under [cell]")
+    };
+    assert!(error.to_string().contains("hone"), "{error}");
+    let Err(error) = load(&[BASE, CELL, "[cell]\ndirectory = \"store\"\n"]) else {
+        panic!("an unknown directory backend")
+    };
+    assert!(error.to_string().contains("store"), "{error}");
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", &format!("{BASE}{CELL}"))?;
+        jail.set_env("GDL_CELL__HONE", "g");
+        let Err(error) = Config::load(["config.toml"]) else {
+            return Err("a misspelled variable under [cell]".into());
+        };
+        assert!(error.to_string().contains("hone"), "{error}");
+        Ok(())
+    });
+}
+
+/// Launch `config` as an instance of `segment` in `deployment`, recording
+/// whether it went on to await its nodes' readiness, which comes after the
+/// cell check and before every registration and rendezvous.
+async fn launch_cell(
+    config: &Config,
+    segment: &'static str,
+    deployment: &DeploymentSpec,
+) -> (gdl::Result<gdl_runtime::Launch>, bool) {
+    let segments: &'static [&'static str] = if deployment.placement.classes().next().is_some() {
+        &["back", "front"]
+    } else {
+        &["front"]
+    };
+    let awaited = AtomicBool::new(false);
+    let process = gdl_runtime::Process::start(config).await.expect("process");
+    let launched = config
+        .launch(&process, segment, segments, deployment, async {
+            awaited.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+    (launched, awaited.load(Ordering::SeqCst))
+}
+
+/// Each way a `[cell]` can misfit the deployment ends the launch with a
+/// `Placement` error, before the instance waits for its nodes, writes to
+/// the roster directory, or reaches for a hub.
+#[tokio::test]
+async fn a_cell_that_does_not_fit_the_deployment_stops_the_launch() {
+    let cases = [
+        (
+            deployment(),
+            "front",
+            CELL.to_string(),
+            "[cell] class = \"global\", but the placement has no classes",
+        ),
+        (
+            classed(),
+            "front",
+            CELL.replace("\"global\"", "\"model_y\""),
+            "[cell] class: the placement has no class `model_y`",
+        ),
+        (
+            classed(),
+            "front",
+            CELL.replace("\"global\"", "\"model_x\""),
+            "[cell] class: this instance's segment `front` is in class `global`, not `model_x`",
+        ),
+        (
+            classed(),
+            "front",
+            format!("{CELL}[cell.ready]\nback = 1\n"),
+            "[cell] ready: `back` is not a segment of class `global`",
+        ),
+    ];
+    for (deployment, segment, cell, expected) in cases {
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-cell-")
+            .tempdir()
+            .expect("roster directory");
+        let roster = format!(
+            "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 200\n",
+            dir.path().display()
+        );
+        let hub = "listen = \"127.0.0.1:0\"\n[hub]\nhost = \"gdl-no-such-hub.invalid\"\n";
+        for discovery in [roster.as_str(), hub] {
+            let config = load(&[discovery, &cell]).expect("parses");
+            let (launched, awaited) = launch_cell(&config, segment, &deployment).await;
+            let Err(error) = launched else {
+                panic!("launched with {cell}")
+            };
+            assert_eq!(error.kind(), ErrorKind::Placement, "{error}");
+            assert_eq!(
+                error.to_string(),
+                format!("placement error: {expected}"),
+                "{cell}"
+            );
+            assert!(!awaited, "awaited the nodes with {cell}");
+        }
+        let written: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("roster directory")
+            .collect();
+        assert!(written.is_empty(), "{written:?}");
+    }
+}
+
+/// The control: a `[cell]` that fits passes the check, and the launch goes
+/// on to wait for the nodes and meet the roster, where it waits for the
+/// other class's instance and says so.
+#[tokio::test]
+async fn a_cell_that_fits_the_deployment_launches() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-cell-")
+        .tempdir()
+        .expect("roster directory");
+    let config = load(&[
+        &format!(
+            "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 200\n",
+            dir.path().display()
+        ),
+        &format!("{CELL}[cell.ready]\nfront = 2\n"),
+    ])
+    .expect("parses");
+    let (launched, awaited) = launch_cell(&config, "front", &classed()).await;
+    let Err(error) = launched else {
+        panic!("met a roster with no `back` instance")
+    };
+    assert!(awaited, "the check stopped a cell that fits");
+    assert!(error.to_string().contains("back (0 of 1)"), "{error}");
 }

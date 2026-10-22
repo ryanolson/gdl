@@ -36,10 +36,10 @@ pub use figment;
 /// one depends on `gdl` itself, as node crates do.
 pub use gdl;
 pub use gdl_model::{
-    CrossingReport, DeploymentSpec, GraphConfig, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo,
-    HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement, PlacementError, PlacementErrors,
-    RequestRouter, Role, Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, WireReason,
-    layout, resolve_config,
+    CellSettings, CrossingReport, DeploymentSpec, DirectoryBackend, GraphConfig, HUB_CONTROL_PORT,
+    HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement,
+    PlacementError, PlacementErrors, RequestRouter, Role, Run, SELECTORS, SegmentRegistration,
+    SelectorInfo, TypeInfo, WireReason, layout, resolve_config,
 };
 #[cfg(feature = "json-lines")]
 pub use json::serve_json_lines;
