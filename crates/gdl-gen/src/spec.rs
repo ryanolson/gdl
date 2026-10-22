@@ -25,6 +25,9 @@
 //! [segment.front]
 //! nodes = ["A", "B", "C", "G"]
 //!
+//! [class.global]                 # optional: segments that deploy together;
+//! segments = ["front"]           # with classes, each segment is in one
+//!
 //! [bind.B]
 //! crate = "front-nodes"          # the implementation's package
 //! path = "front-nodes"           # relative to this file
@@ -58,7 +61,7 @@ pub struct Spec {
     pub(crate) source: Source,
     /// How generated crates depend on gdl.
     pub(crate) gdl: GdlDep,
-    /// Segment placement and request-boundary routing policies.
+    /// Segment placement, request-boundary routing policies, and classes.
     pub(crate) placement: gdl_model::Placement,
     /// Node name to implementation.
     pub(crate) bind: BTreeMap<String, Bind>,
@@ -260,6 +263,8 @@ struct Raw {
     segment: toml::Table,
     #[serde(default)]
     routing: toml::Table,
+    #[serde(default)]
+    class: toml::Table,
     #[serde(default)]
     bind: BTreeMap<String, RawBind>,
 }
@@ -474,8 +479,15 @@ impl Spec {
         let mut placement_table = toml::Table::new();
         placement_table.insert("segment".into(), toml::Value::Table(raw.segment));
         placement_table.insert("routing".into(), toml::Value::Table(raw.routing));
-        let placement = gdl_model::Placement::from_toml(&placement_table.to_string())
+        let mut placement = gdl_model::Placement::from_toml(&placement_table.to_string())
             .map_err(|e| Error::new(format!("{}: [segment]: {e}", file.display())))?;
+        // Parsed again with the classes, once the rest is known to parse,
+        // so that an error is reported as the table it is in.
+        if !raw.class.is_empty() {
+            placement_table.insert("class".into(), toml::Value::Table(raw.class));
+            placement = gdl_model::Placement::from_toml(&placement_table.to_string())
+                .map_err(|e| Error::new(format!("{}: [class]: {e}", file.display())))?;
+        }
         let bind = raw
             .bind
             .into_iter()

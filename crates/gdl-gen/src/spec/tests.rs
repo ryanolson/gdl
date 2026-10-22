@@ -385,3 +385,63 @@ fn the_examples_keep_their_placement_hash() {
         assert_eq!(loaded.placement.hash(), hash, "{spec}");
     }
 }
+
+const CLASSED: &str = r#"
+    [contract]
+    path = "contract"
+    [gdl]
+    path = "runtime"
+    [segment.front]
+    nodes = ["A", "B"]
+    [segment.engine]
+    nodes = ["E"]
+    [class.global]
+    segments = ["front"]
+    [class.model_x]
+    segments = ["engine"]
+"#;
+
+/// A spec's classes are the placement's: the generated segments embed the
+/// placement, so they and the hub agree on its hash.
+#[test]
+fn a_spec_groups_its_segments_into_classes() {
+    let temp = contract_dir("classes");
+    let dir = temp.path();
+    let spec = Spec::parse(CLASSED, &dir.join("gdl.toml"), dir).expect("spec");
+    let direct = gdl_model::Placement::from_toml(
+        "[segment.front]\nnodes = ['A', 'B']\n[segment.engine]\nnodes = ['E']\n\
+         [class.global]\nsegments = ['front']\n[class.model_x]\nsegments = ['engine']\n",
+    )
+    .expect("a placement");
+    assert_eq!(spec.placement, direct);
+    assert_eq!(spec.placement.hash(), direct.hash());
+    let classes: Vec<&str> = spec.placement.classes().map(|(name, _)| name).collect();
+    assert_eq!(classes, ["global", "model_x"]);
+    let embedded = toml::to_string(&spec.placement).expect("toml");
+    let back = gdl_model::Placement::from_toml(&embedded).expect("reads what it wrote");
+    assert_eq!(back.hash(), direct.hash(), "{embedded}");
+}
+
+/// An error in the class table is the class table's, not `[segment]`'s.
+#[test]
+fn a_bad_class_table_is_the_class_tables_error() {
+    let temp = contract_dir("bad-classes");
+    let dir = temp.path();
+    for (bad, expected) in [
+        ("[class.global]", "[class.Global]"),
+        ("segments = [\"front\"]", "segments = 3"),
+        (
+            "segments = [\"front\"]",
+            "segments = [\"front\"]\npolicy = \"home_first\"",
+        ),
+    ] {
+        let text = CLASSED.replacen(bad, expected, 1);
+        assert_ne!(text, CLASSED, "{bad}");
+        let Err(error) = Spec::parse(&text, &dir.join("gdl.toml"), dir) else {
+            panic!("parsed:\n{text}");
+        };
+        let error = error.to_string();
+        assert!(error.contains("[class]: "), "{error}");
+        assert!(!error.contains("[segment]"), "{error}");
+    }
+}

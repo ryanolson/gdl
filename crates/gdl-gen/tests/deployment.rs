@@ -193,3 +193,44 @@ fn portable_spec(root: &Path) -> Result<gdl_gen::Spec, gdl_gen::Error> {
     let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
     gdl_gen::Spec::from_text(&portable_text(&text), &graph, &root.join("examples/api"))
 }
+
+/// A spec's classes reach the hub's `deployment.json` and every segment's
+/// embedded placement, so all of them agree on the classed hash.
+#[test]
+fn a_classed_bundle_agrees_on_the_placement_hash() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
+    let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
+    let classes =
+        "\n[class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n";
+    let spec = gdl_gen::Spec::from_text(
+        &format!("{}{classes}", portable_text(&text)),
+        &graph,
+        &root.join("examples/api"),
+    )
+    .expect("a classed spec");
+    let expected = gdl_model::Placement::from_toml(&format!(
+        "[segment.front]\nnodes = [\"Http\"]\n[segment.engine]\nnodes = [\"Engine\"]\n{classes}"
+    ))
+    .expect("a placement")
+    .hash();
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-classes-")
+        .tempdir()
+        .expect("a directory");
+    let files = gdl_gen::compose_files(&spec, temp.path(), &root.join("target")).expect("a bundle");
+    let deployment: gdl_model::DeploymentSpec =
+        serde_json::from_str(&files[Path::new("deployment.json")]).expect("the hub's spec");
+    assert_eq!(deployment.placement.hash(), expected);
+    let mut embedded = 0;
+    for (path, text) in &files {
+        let Some((_, rest)) = text.split_once("pub const PLACEMENT: &str = r#\"") else {
+            continue;
+        };
+        let (placement, _) = rest.split_once("\"#;").expect("a raw string");
+        let placement = gdl_model::Placement::from_toml(placement).expect("an embedded placement");
+        assert_eq!(placement.hash(), expected, "{}", path.display());
+        embedded += 1;
+    }
+    assert_eq!(embedded, 2, "one embedded placement per segment");
+}

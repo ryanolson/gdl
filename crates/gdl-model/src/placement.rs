@@ -10,19 +10,33 @@ use crate::manifest::{HopInfo, Manifest, TypeInfo};
 
 /// Which nodes live in which segment.
 ///
-/// A placement file contains `[segment.<name>]` tables and optional `[routing]`
-/// policies. Other deployment tables are ignored here.
+/// A placement file contains `[segment.<name>]` tables, optional `[routing]`
+/// policies, and optional `[class.<name>]` tables that group the segments
+/// into classes that deploy together. Other deployment tables are ignored
+/// here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Placement {
     #[serde(rename = "segment", default)]
     segments: BTreeMap<String, SegmentSpec>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     routing: BTreeMap<String, RequestRouter>,
+    // Skipped when empty, so that a placement without classes writes the
+    // text, and the hub reads the JSON, that it did before classes existed.
+    #[serde(rename = "class", default, skip_serializing_if = "BTreeMap::is_empty")]
+    classes: BTreeMap<String, ClassSpec>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct SegmentSpec {
     nodes: Vec<String>,
+}
+
+// Unknown keys are refused: a cell policy written here by mistake would
+// otherwise be dropped without a word.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClassSpec {
+    segments: Vec<String>,
 }
 
 /// Selection of a replica when a request crosses into another segment.
@@ -64,31 +78,47 @@ pub const SELECTORS: &[SelectorInfo] = &[
     },
 ];
 
-/// The longest selector name.
-const SELECTOR_NAME_LIMIT: usize = 64;
+/// The longest selector or class name.
+const NAME_LIMIT: usize = 64;
 
-/// Whether `name` can name a selector. A name is also the selector's
-/// settings key (`[selector.<name>]`, reachable from the environment, where
-/// case is lost and `__` separates keys) and its metrics' endpoint label,
-/// so it is lowercase ASCII letters and digits in words joined by single
-/// `_`s, starting with a letter, and it is never a built-in policy's name.
-pub fn check_selector_name(name: &str) -> Result<(), String> {
+/// Whether `name` has the shape of a selector's or a class's name. Both are
+/// settings keys reachable from the environment, where case is lost and
+/// `__` separates keys, so a name is lowercase ASCII letters and digits in
+/// words joined by single `_`s, starting with a letter. `kind` names what
+/// the name is for in the refusal.
+fn check_name_shape(kind: &str, name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let shaped = chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         && !name.contains("__")
         && !name.ends_with('_');
-    if !shaped || name.len() > SELECTOR_NAME_LIMIT {
+    if !shaped || name.len() > NAME_LIMIT {
         return Err(format!(
-            "selector name `{name}` must be lowercase letters and digits in words joined by single `_`s, start with a letter, and be at most {SELECTOR_NAME_LIMIT} characters"
+            "{kind} name `{name}` must be lowercase letters and digits in words joined by single `_`s, start with a letter, and be at most {NAME_LIMIT} characters"
         ));
     }
+    Ok(())
+}
+
+/// Whether `name` can name a selector. A name is also the selector's
+/// settings key (`[selector.<name>]`) and its metrics' endpoint label, so
+/// it has a settings key's shape, and it is never a built-in policy's name.
+pub fn check_selector_name(name: &str) -> Result<(), String> {
+    check_name_shape("selector", name)?;
     if matches!(name, "round_robin" | "random") {
         return Err(format!(
             "selector name `{name}` is a built-in policy's: write `\"{name}\"`"
         ));
     }
     Ok(())
+}
+
+/// Whether `name` can name a class. A class name is a TOML key in the files
+/// that deploy a class, and a value a setting in the environment carries,
+/// so it has a settings key's shape. It never names a routing policy, so
+/// the policies' names are not reserved.
+fn check_class_name(name: &str) -> Result<(), String> {
+    check_name_shape("class", name)
 }
 
 impl Placement {
@@ -112,6 +142,23 @@ impl Placement {
         self
     }
 
+    /// Add a class: `segments` deploy together. Once a placement has a
+    /// class, every segment must be in exactly one; [`layout`] refuses it
+    /// otherwise.
+    pub fn class<S: Into<String>>(
+        mut self,
+        name: impl Into<String>,
+        segments: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.classes.insert(
+            name.into(),
+            ClassSpec {
+                segments: segments.into_iter().map(Into::into).collect(),
+            },
+        );
+        self
+    }
+
     /// Set the request router for the boundary entering `node`. The default
     /// policy is not recorded: a placement that spells it out is the same
     /// placement, with the same hash, as one that leaves it unsaid.
@@ -125,7 +172,8 @@ impl Placement {
         self
     }
 
-    /// Parse segment placement and request routing from a deployment file.
+    /// Parse segment placement, request routing, and classes from a
+    /// deployment file.
     pub fn from_toml(text: &str) -> Result<Self, Error> {
         let mut placement: Self = toml::from_str(text).map_err(|e| Error::new(e.to_string()))?;
         placement
@@ -137,6 +185,9 @@ impl Placement {
                     .map_err(|why| Error::new(format!("[routing] {node}: {why}")))?;
             }
         }
+        for name in placement.classes.keys() {
+            check_class_name(name).map_err(Error::new)?;
+        }
         Ok(placement)
     }
 
@@ -147,8 +198,16 @@ impl Placement {
             .map(|(name, spec)| (name.as_str(), spec.nodes.as_slice()))
     }
 
-    /// The placement hash changes with node placement, segment names, and
-    /// request routing policies. Node order inside a segment does not matter.
+    /// Class names and their segments, in name order.
+    pub fn classes(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.classes
+            .iter()
+            .map(|(name, spec)| (name.as_str(), spec.segments.as_slice()))
+    }
+
+    /// The placement hash changes with node placement, segment names,
+    /// request routing policies, and classes. Node order inside a segment,
+    /// and segment order inside a class, do not matter.
     pub fn hash(&self) -> u64 {
         let mut h = Fnv::new();
         for (name, spec) in &self.segments {
@@ -166,6 +225,20 @@ impl Placement {
                 RequestRouter::Selector(name) => h.str(&format!("selector:{name}")),
             }
         }
+        // A class lists segments as a segment lists nodes. The marker
+        // starts the classes where a segment's or a router's name would
+        // start, with a value no name's length can have, so no class hashes
+        // as either. A placement without classes writes nothing here and
+        // keeps the hash it had before classes existed.
+        if !self.classes.is_empty() {
+            h.u64(u64::MAX);
+            h.u64(self.classes.len() as u64);
+            for (name, spec) in &self.classes {
+                h.str(name);
+                let segments: BTreeSet<&str> = spec.segments.iter().map(String::as_str).collect();
+                h.strs(&segments.into_iter().collect::<Vec<_>>());
+            }
+        }
         h.finish()
     }
 }
@@ -177,6 +250,7 @@ pub struct Layout {
     contract_hash: u64,
     placement_hash: u64,
     segment_of: BTreeMap<String, String>,
+    class_of: BTreeMap<String, String>,
     hops: Vec<HopLayout>,
     routing: BTreeMap<(usize, usize), RequestRouter>,
 }
@@ -262,6 +336,11 @@ impl Layout {
     /// The segment a node is placed in.
     pub fn segment_of(&self, node: &str) -> Option<&str> {
         self.segment_of.get(node).map(String::as_str)
+    }
+
+    /// The class a segment is in: `None` when the placement has no classes.
+    pub fn class_of(&self, segment: &str) -> Option<&str> {
+        self.class_of.get(segment).map(String::as_str)
     }
 
     /// The segments `segment` sends to: the next run of each forward path
@@ -412,6 +491,44 @@ pub enum PlacementError {
         /// The segment.
         segment: String,
     },
+    /// A class's name is not one a class can have.
+    InvalidClassName {
+        /// The class.
+        class: String,
+        /// Why the name is refused.
+        reason: String,
+    },
+    /// A class lists a segment the placement does not have.
+    UnknownSegment {
+        /// The class.
+        class: String,
+        /// The unknown name.
+        segment: String,
+    },
+    /// A class lists no segments.
+    EmptyClass {
+        /// The class.
+        class: String,
+    },
+    /// A class lists one segment more than once.
+    SegmentRepeated {
+        /// The class.
+        class: String,
+        /// The segment.
+        segment: String,
+    },
+    /// The placement has classes, and a segment is in none of them.
+    Unclassed {
+        /// The segment.
+        segment: String,
+    },
+    /// A segment is in more than one class.
+    ClassedTwice {
+        /// The segment.
+        segment: String,
+        /// Every class that lists it.
+        classes: Vec<String>,
+    },
     /// An edge that must be encoded carries a type with no codec.
     NotWire {
         /// The edge's upstream node.
@@ -454,6 +571,18 @@ impl fmt::Display for PlacementError {
                 write!(f, "node `{node}` is in several segments: {segments:?}")
             }
             Self::EmptySegment { segment } => write!(f, "segment `{segment}` has no nodes"),
+            Self::InvalidClassName { class, reason } => write!(f, "class `{class}`: {reason}"),
+            Self::UnknownSegment { class, segment } => {
+                write!(f, "class `{class}` lists unknown segment `{segment}`")
+            }
+            Self::EmptyClass { class } => write!(f, "class `{class}` has no segments"),
+            Self::SegmentRepeated { class, segment } => {
+                write!(f, "class `{class}` lists segment `{segment}` twice")
+            }
+            Self::Unclassed { segment } => write!(f, "segment `{segment}` is in no class"),
+            Self::ClassedTwice { segment, classes } => {
+                write!(f, "segment `{segment}` is in several classes: {classes:?}")
+            }
             Self::NotWire {
                 from,
                 to,
@@ -537,6 +666,7 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
             }),
         }
     }
+    let class_of = classify(placement, &mut errors);
     if !errors.is_empty() {
         return Err(PlacementErrors(errors));
     }
@@ -586,8 +716,65 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
         contract_hash: manifest.contract_hash(),
         placement_hash: placement.hash(),
         segment_of,
+        class_of,
         hops,
     })
+}
+
+/// Each segment's class, checking that a placement with classes puts every
+/// segment in exactly one. A placement without classes has none to check.
+fn classify(placement: &Placement, errors: &mut Vec<PlacementError>) -> BTreeMap<String, String> {
+    let mut class_of = BTreeMap::new();
+    if placement.classes.is_empty() {
+        return class_of;
+    }
+    let mut where_classed: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (class, segments) in placement.classes() {
+        // A misnamed class still classifies its segments, so that each of
+        // them is not also reported as in no class.
+        if let Err(reason) = check_class_name(class) {
+            errors.push(PlacementError::InvalidClassName {
+                class: class.to_string(),
+                reason,
+            });
+        }
+        if segments.is_empty() {
+            errors.push(PlacementError::EmptyClass {
+                class: class.to_string(),
+            });
+        }
+        let mut listed = BTreeSet::new();
+        for segment in segments {
+            if !listed.insert(segment.as_str()) {
+                errors.push(PlacementError::SegmentRepeated {
+                    class: class.to_string(),
+                    segment: segment.clone(),
+                });
+            } else if !placement.segments.contains_key(segment) {
+                errors.push(PlacementError::UnknownSegment {
+                    class: class.to_string(),
+                    segment: segment.clone(),
+                });
+            } else {
+                where_classed.entry(segment).or_default().push(class);
+            }
+        }
+    }
+    for (segment, _) in placement.segments() {
+        match where_classed.get(segment).map(Vec::as_slice) {
+            None | Some([]) => errors.push(PlacementError::Unclassed {
+                segment: segment.to_string(),
+            }),
+            Some([class]) => {
+                class_of.insert(segment.to_string(), class.to_string());
+            }
+            Some(classes) => errors.push(PlacementError::ClassedTwice {
+                segment: segment.to_string(),
+                classes: classes.iter().map(ToString::to_string).collect(),
+            }),
+        }
+    }
+    class_of
 }
 
 fn hop_layout(

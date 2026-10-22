@@ -230,6 +230,13 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Workaround:** name a revision at or after the split (`869699d`).
 - **See:** review `split-r2`, finding R2.
 
+### Classes are checked and hashed, and nothing else uses them
+
+- **What happens:** a placement's `[class.<name>]` tables are checked (each segment is in exactly one class) and change the placement hash, but nothing deploys by class. `cargo gdl compose` and the composer's Deploy tab write one bundle with one hub for the whole placement. A hop may cross between classes anywhere, and nothing chooses a cell.
+- **Why:** the classes come first, so that the placement's identity is settled before the parts that use it.
+- **Would lift it:** the boundary rule between classes, one bundle and hub per class, and cells, as `agent-docs/cells.md` proposes.
+- **See:** `agent-docs/cells.md`, section 3.2.
+
 ### Only Docker Compose is generated
 
 - **What happens:** `cargo gdl compose` writes a Compose bundle. Kubernetes manifests are not generated. The composer's Deploy tab reports whether the server's host has `kubectl`, a kubeconfig, and a current context, but offers nothing to apply there.

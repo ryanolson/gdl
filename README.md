@@ -187,6 +187,18 @@ path = "engine-mock"
 type = "chat_engine_mock::Engine"
 ```
 
+A spec can also group its segments into classes: sets of segments that deploy together.
+
+```toml
+[class.global]
+segments = ["front", "post"]
+
+[class.model_x]
+segments = ["engine"]
+```
+
+When a spec has a class, each of its segments must be in exactly one class. A class name is lowercase letters and digits in words joined by single `_`s. Classes are part of the placement's identity: adding, renaming, or changing a class changes the placement hash. A spec without classes keeps its hash. Nothing uses classes yet (see `LIMITATIONS.md`).
+
 For a graph spec, the generator compiles nothing: it builds the contract's manifest from the graph file and what the source reader found, including which messages are wire types. For a contract spec, it compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`. If the reader takes a type for a wire type that is not one, the segment's build or its deployment, which checks the placement against the compiled contract, fails. If it misses a wire type's serde impls (for example, impls that a macro writes), the generator refuses a cut that would work. `cargo gdl extract --verify` finds both.
 
 For each segment, the generator writes a crate with:
