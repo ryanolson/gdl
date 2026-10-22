@@ -230,9 +230,9 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Workaround:** name a revision at or after the split (`869699d`).
 - **See:** review `split-r2`, finding R2.
 
-### Classes are checked and reported, but nothing deploys by class
+### Classes and cell policies are checked and reported, but nothing deploys by class
 
-- **What happens:** a placement's `[class.<name>]` tables are checked (each segment is in exactly one class, every class boundary obeys the boundary rule, and the boundaries make no cycle), change the placement hash, and add WAN round trips to the crossing report. But nothing deploys by class: `cargo gdl compose` and the composer's Deploy tab write one bundle with one hub for the whole placement, and nothing chooses a cell.
+- **What happens:** a placement's `[class.<name>]` tables are checked (each segment is in exactly one class, every class boundary obeys the boundary rule, and the boundaries make no cycle), change the placement hash, and add WAN round trips to the crossing report. Its `[cells.<class>]` cell policies are checked (each names a class that a boundary enters, with a well-formed policy name) and change the placement hash. But nothing deploys by class: `cargo gdl compose` and the composer's Deploy tab write one bundle with one hub for the whole placement, nothing chooses a cell, and no cell policy is run.
 - **Why:** the model comes first, so that the placement's identity and its valid shapes are settled before the parts that use them.
 - **Would lift it:** one bundle and hub per class, and cells, as `agent-docs/cells.md` proposes.
 - **See:** `agent-docs/cells.md`, sections 3.2 and 10.

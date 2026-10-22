@@ -8,11 +8,13 @@ use crate::hash::Fnv;
 use crate::manifest::{HopInfo, Manifest, TypeInfo};
 
 mod boundary;
+mod cells;
 mod classes;
 mod errors;
 mod report;
 
 use boundary::bound;
+pub use cells::CellPolicy;
 use classes::classify;
 pub use errors::{PlacementError, PlacementErrors, WireReason};
 pub use report::CrossingReport;
@@ -21,9 +23,10 @@ use report::hop_lines;
 /// Which nodes live in which segment.
 ///
 /// A placement file contains `[segment.<name>]` tables, optional `[routing]`
-/// policies, and optional `[class.<name>]` tables that group the segments
-/// into classes that deploy together. Other deployment tables are ignored
-/// here.
+/// policies, optional `[class.<name>]` tables that group the segments into
+/// classes that deploy together, and optional `[cells.<class>]` tables that
+/// say how a chooser picks a cell of a class it sends to. Other deployment
+/// tables are ignored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Placement {
     #[serde(rename = "segment", default)]
@@ -34,6 +37,14 @@ pub struct Placement {
     // text, and the hub reads the JSON, that it did before classes existed.
     #[serde(rename = "class", default, skip_serializing_if = "BTreeMap::is_empty")]
     classes: BTreeMap<String, ClassSpec>,
+    // Skipped when empty for the same reason; a table of defaults is
+    // dropped as it is read.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "cells::recorded"
+    )]
+    cells: BTreeMap<String, CellPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,8 +52,8 @@ struct SegmentSpec {
     nodes: Vec<String>,
 }
 
-// Unknown keys are refused: a cell policy written here by mistake would
-// otherwise be dropped without a word.
+// Unknown keys are refused: a cell policy written here by mistake, rather
+// than under `[cells.<class>]`, would otherwise be dropped without a word.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClassSpec {
@@ -182,8 +193,22 @@ impl Placement {
         self
     }
 
-    /// Parse segment placement, request routing, and classes from a
-    /// deployment file.
+    /// Set how a chooser picks a cell of `class`. Defaults are not
+    /// recorded, as a default router is not: a value equal to its default
+    /// is the same placement as one that leaves it unsaid, and setting the
+    /// default policy removes the class's.
+    pub fn cell_policy(mut self, class: impl Into<String>, policy: CellPolicy) -> Self {
+        let class = class.into();
+        if policy == CellPolicy::default() {
+            self.cells.remove(&class);
+        } else {
+            self.cells.insert(class, policy);
+        }
+        self
+    }
+
+    /// Parse segment placement, request routing, classes, and cell policies
+    /// from a deployment file.
     pub fn from_toml(text: &str) -> Result<Self, Error> {
         let mut placement: Self = toml::from_str(text).map_err(|e| Error::new(e.to_string()))?;
         placement
@@ -197,6 +222,10 @@ impl Placement {
         }
         for name in placement.classes.keys() {
             check_class_name(name).map_err(Error::new)?;
+        }
+        for (class, policy) in &placement.cells {
+            cells::check_policy_name(policy)
+                .map_err(|why| Error::new(format!("[cells.{class}]: {why}")))?;
         }
         Ok(placement)
     }
@@ -216,8 +245,8 @@ impl Placement {
     }
 
     /// The placement hash changes with node placement, segment names,
-    /// request routing policies, and classes. Node order inside a segment,
-    /// and segment order inside a class, do not matter.
+    /// request routing policies, classes, and cell policies. Node order
+    /// inside a segment, and segment order inside a class, do not matter.
     pub fn hash(&self) -> u64 {
         let mut h = Fnv::new();
         for (name, spec) in &self.segments {
@@ -249,6 +278,7 @@ impl Placement {
                 h.strs(&segments.into_iter().collect::<Vec<_>>());
             }
         }
+        cells::hash(&mut h, &self.cells);
         h.finish()
     }
 }
@@ -262,6 +292,7 @@ pub struct Layout {
     segment_of: BTreeMap<String, String>,
     class_of: BTreeMap<String, String>,
     boundaries: Vec<ClassBoundary>,
+    cell_policies: BTreeMap<String, CellPolicy>,
     hops: Vec<HopLayout>,
     routing: BTreeMap<(usize, usize), RequestRouter>,
 }
@@ -424,6 +455,12 @@ impl Layout {
         self.routing.get(&(hop, position)).unwrap_or(&DEFAULT)
     }
 
+    /// How a chooser picks a cell of `class`, defaults applied: `None`
+    /// unless a class boundary enters `class`.
+    pub fn cell_policy(&self, class: &str) -> Option<&CellPolicy> {
+        self.cell_policies.get(class)
+    }
+
     /// The hops that cross from one class into another, in hop order:
     /// empty when the placement has no classes.
     pub fn boundaries(&self) -> &[ClassBoundary] {
@@ -455,6 +492,7 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     // with whatever they find.
     let mut class_errors = Vec::new();
     let class_of = classify(placement, &mut class_errors);
+    cells::judge(placement, &mut class_errors);
     let mut errors = check_manifest(manifest);
     if !errors.is_empty() {
         errors.append(&mut class_errors);
@@ -468,6 +506,9 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     } else {
         bound(manifest, &segment_of, &class_of, &mut class_errors)
     };
+    let complete = segment_of.len() == manifest.nodes.len()
+        && segment_of.values().all(|s| class_of.contains_key(s));
+    let cell_policies = cells::entered(placement, &boundaries, complete, &mut class_errors);
     if !errors.is_empty() {
         errors.append(&mut class_errors);
         return Err(PlacementErrors(errors));
@@ -476,6 +517,7 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
         Ok(layout) if class_errors.is_empty() => Ok(Layout {
             class_of,
             boundaries,
+            cell_policies,
             ..layout
         }),
         Ok(_) => Err(PlacementErrors(class_errors)),
@@ -584,6 +626,7 @@ fn place(
         segment_of,
         class_of: BTreeMap::new(),
         boundaries: Vec::new(),
+        cell_policies: BTreeMap::new(),
         hops,
     })
 }

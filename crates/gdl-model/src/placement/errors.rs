@@ -138,6 +138,29 @@ pub enum PlacementError {
         /// The classes on the cycle, in name order.
         classes: Vec<String>,
     },
+    /// A cell policy's name is not one a policy can have.
+    InvalidCellPolicy {
+        /// The class the policy is for.
+        class: String,
+        /// Why the name is refused.
+        reason: String,
+    },
+    /// A placement without classes has a cell policy.
+    CellPolicyWithoutClasses {
+        /// The class the policy names.
+        class: String,
+    },
+    /// A cell policy names a class the placement does not have.
+    CellPolicyUnknownClass {
+        /// The class the policy names.
+        class: String,
+    },
+    /// A cell policy is for a class that no class boundary enters, so no
+    /// chooser picks a cell of it.
+    CellPolicyNotEntered {
+        /// The class the policy names.
+        class: String,
+    },
     /// An edge that must be encoded carries a type with no codec.
     NotWire {
         /// The edge's upstream node.
@@ -236,6 +259,21 @@ impl fmt::Display for PlacementError {
                     classes.join(", ")
                 )
             }
+            Self::InvalidCellPolicy { class, reason } => {
+                write!(f, "cell policy `[cells.{class}]`: {reason}")
+            }
+            Self::CellPolicyWithoutClasses { class } => write!(
+                f,
+                "cell policy `[cells.{class}]`: the placement has no classes"
+            ),
+            Self::CellPolicyUnknownClass { class } => write!(
+                f,
+                "cell policy `[cells.{class}]`: the placement has no class `{class}`"
+            ),
+            Self::CellPolicyNotEntered { class } => write!(
+                f,
+                "cell policy `[cells.{class}]`: no class boundary enters class `{class}`; a cell policy picks a cell of a class that another class sends to"
+            ),
             Self::NotWire {
                 from,
                 to,

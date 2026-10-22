@@ -445,3 +445,45 @@ fn a_bad_class_table_is_the_class_tables_error() {
         assert!(!error.contains("[segment]"), "{error}");
     }
 }
+
+/// A spec's cell policies are the placement's, as its classes are.
+#[test]
+fn a_spec_sets_a_cell_policy() {
+    let temp = contract_dir("cells");
+    let dir = temp.path();
+    let text = format!("{CLASSED}    [cells.model_x]\n    max_near = 4\n");
+    let spec = Spec::parse(&text, &dir.join("gdl.toml"), dir).expect("spec");
+    let direct = gdl_model::Placement::from_toml(
+        "[segment.front]\nnodes = ['A', 'B']\n[segment.engine]\nnodes = ['E']\n\
+         [class.global]\nsegments = ['front']\n[class.model_x]\nsegments = ['engine']\n\
+         [cells.model_x]\nmax_near = 4\n",
+    )
+    .expect("a placement");
+    assert_eq!(spec.placement, direct);
+    assert_ne!(
+        spec.placement.hash(),
+        Spec::parse(CLASSED, &dir.join("gdl.toml"), dir)
+            .expect("spec")
+            .placement
+            .hash()
+    );
+}
+
+/// An error in a cells table is the cells table's.
+#[test]
+fn a_bad_cells_table_is_the_cells_tables_error() {
+    let temp = contract_dir("bad-cells");
+    let dir = temp.path();
+    for bad in [
+        "    [cells.model_x]\n    spill = 3\n",
+        "    [cells.model_x]\n    policy = \"Home\"\n",
+    ] {
+        let text = format!("{CLASSED}{bad}");
+        let Err(error) = Spec::parse(&text, &dir.join("gdl.toml"), dir) else {
+            panic!("parsed:\n{text}");
+        };
+        let error = error.to_string();
+        assert!(error.contains("[cells]: "), "{error}");
+        assert!(!error.contains("[class]"), "{error}");
+    }
+}

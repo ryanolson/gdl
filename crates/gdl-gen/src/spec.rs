@@ -266,6 +266,8 @@ struct Raw {
     #[serde(default)]
     class: toml::Table,
     #[serde(default)]
+    cells: toml::Table,
+    #[serde(default)]
     bind: BTreeMap<String, RawBind>,
 }
 
@@ -481,12 +483,16 @@ impl Spec {
         placement_table.insert("routing".into(), toml::Value::Table(raw.routing));
         let mut placement = gdl_model::Placement::from_toml(&placement_table.to_string())
             .map_err(|e| Error::new(format!("{}: [segment]: {e}", file.display())))?;
-        // Parsed again with the classes, once the rest is known to parse,
-        // so that an error is reported as the table it is in.
-        if !raw.class.is_empty() {
-            placement_table.insert("class".into(), toml::Value::Table(raw.class));
+        // Parsed again with the classes, then with the cell policies, once
+        // the rest is known to parse, so that an error is reported as the
+        // table it is in.
+        for (key, table) in [("class", raw.class), ("cells", raw.cells)] {
+            if table.is_empty() {
+                continue;
+            }
+            placement_table.insert(key.into(), toml::Value::Table(table));
             placement = gdl_model::Placement::from_toml(&placement_table.to_string())
-                .map_err(|e| Error::new(format!("{}: [class]: {e}", file.display())))?;
+                .map_err(|e| Error::new(format!("{}: [{key}]: {e}", file.display())))?;
         }
         let bind = raw
             .bind

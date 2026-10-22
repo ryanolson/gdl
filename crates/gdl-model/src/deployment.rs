@@ -99,6 +99,7 @@ pub struct SegmentRegistration {
     pub segment: String,
     /// Hash of the typed graph contract.
     pub contract: u64,
-    /// Hash of node assignments, routing policies, and classes.
+    /// Hash of node assignments, routing policies, classes, and cell
+    /// policies.
     pub placement: u64,
 }

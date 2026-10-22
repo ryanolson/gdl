@@ -207,6 +207,17 @@ When a spec has a class, each of its segments must be in exactly one class. A cl
 
 A hop crosses a class boundary when one of its stages is in a class other than its outer end's. Such a hop may cross only at its inner end: its inner end is in the other class, every other stage of the hop is in the outer end's segment, and every hop nested under the inner end stays in the inner end's class. The boundaries may not form a cycle: no class crosses into a class that crosses back into it. Put the boundary at an operator, as in `Http => Pre { Route { Model { Engine => Detok } } }` with `Route` in one class and `Model`, `Engine`, and `Detok` in another. With classes, the crossing report also counts the WAN round trips each boundary adds when a request spills to a cell in another region: 1 for a request value, 2 for a streamed request, whose items wait for the input anchor. Nothing deploys by class yet (see `LIMITATIONS.md`).
 
+A class that a boundary enters can have a cell policy: how the hop's outer end picks a cell, one running deployment of the class, to send to.
+
+```toml
+[cells.model_x]
+policy = "home_first"   # the policy's name; home_first by default
+spill_rtt_ms = 80       # cells in other regions within this round trip are near; 80 by default
+max_near = 16           # at most this many near cells are offered; 16 by default, 0 for home cells only
+```
+
+Each key is optional, and no other key is accepted. A policy name has a selector name's shape and is not checked against a list. A value equal to its default is not recorded: a spec that spells out the defaults has the same placement and hash as one that leaves them unsaid. Any other value changes the placement hash. A `[cells.<class>]` table must name a class of the spec that a class boundary enters. Nothing acts on a cell policy yet (see `LIMITATIONS.md`).
+
 For a graph spec, the generator compiles nothing: it builds the contract's manifest from the graph file and what the source reader found, including which messages are wire types. For a contract spec, it compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`. If the reader takes a type for a wire type that is not one, the segment's build or its deployment, which checks the placement against the compiled contract, fails. If it misses a wire type's serde impls (for example, impls that a macro writes), the generator refuses a cut that would work. `cargo gdl extract --verify` finds both.
 
 For each segment, the generator writes a crate with:
