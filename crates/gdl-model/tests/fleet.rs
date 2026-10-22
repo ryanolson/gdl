@@ -69,6 +69,9 @@ segments = ["d", "e", "f"]
 
 [cells.model_x]
 policy = "home_first"
+
+[routing]
+Engine = { selector = "least_loaded" }
 "#;
 
 /// The fleet of section 3.3, with its segment names lowercased.
