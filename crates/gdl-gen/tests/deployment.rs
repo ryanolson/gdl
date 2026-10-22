@@ -143,10 +143,49 @@ fn deployment_rejects_local_node_and_message_crates() {
     );
 }
 
-fn portable_text(text: &str) -> String {
-    text.replace("crates = [\".\"]", "crates = [{ package = \"api-frontend\", git = \"https://github.com/ryanolson/gdl\", rev = \"dc1bc3c61630efecb2b493e92aa3d462832329b5\" }]")
-        .replace("path = \"../../crates/gdl-runtime\"", "git = \"https://github.com/ryanolson/gdl\"\nrev = \"dc1bc3c61630efecb2b493e92aa3d462832329b5\"")
+/// The mirror commit that `examples/api/deploy.toml` pins gdl and the
+/// example package to, read from that file so that a pin is moved in one
+/// place.
+fn pinned_rev() -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join("examples/api/deploy.toml")).expect("deploy spec");
+    let spec: toml::Table = toml::from_str(&text).expect("deploy spec");
+    spec["gdl"]["rev"].as_str().expect("[gdl] rev").to_string()
 }
+
+fn portable_text(text: &str) -> String {
+    let rev = pinned_rev();
+    text.replace("crates = [\".\"]", &format!("crates = [{{ package = \"api-frontend\", git = \"https://github.com/ryanolson/gdl\", rev = \"{rev}\" }}]"))
+        .replace("path = \"../../crates/gdl-runtime\"", &format!("git = \"https://github.com/ryanolson/gdl\"\nrev = \"{rev}\""))
+}
+
+/// The pinned commit carries what generated crates depend on, and the
+/// example package comes from the same commit. A pin that predates
+/// `gdl-runtime` compiles here, where only text is compared, and fails
+/// when cargo resolves the generated manifests in the image build.
+#[test]
+fn the_deployment_pin_carries_the_runtime() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let rev = pinned_rev();
+    let text = std::fs::read_to_string(root.join("examples/api/deploy.toml")).expect("deploy spec");
+    assert_eq!(
+        text.matches(&format!("rev = \"{rev}\"")).count(),
+        3,
+        "{text}"
+    );
+    let show = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args([
+            "cat-file",
+            "-e",
+            &format!("{rev}:crates/gdl-runtime/Cargo.toml"),
+        ])
+        .status()
+        .expect("git");
+    assert!(show.success(), "{rev} has no crates/gdl-runtime");
+}
+
 fn portable_spec(root: &Path) -> Result<gdl_gen::Spec, gdl_gen::Error> {
     let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
     let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
