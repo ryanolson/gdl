@@ -162,26 +162,8 @@ async fn import_a_branch_and_subdirectory_over_http_pins_the_commit() {
         gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime")),
     })
     .expect("composer");
-    let request = Request::builder()
-        .method("POST")
-        .uri("/api/catalog")
-        .header("content-type", "application/json")
-        .body(Body::from(
-            json!({"source":"git","url":url,"revision":"demo","path":"protocols"}).to_string(),
-        ))
-        .expect("request");
-    let response = tokio::time::timeout(std::time::Duration::from_secs(15), app.oneshot(request))
-        .await
-        .expect("import deadline")
-        .expect("response");
-    let status = response.status();
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let (status, body) = import(app, &url, "protocols").await;
+    assert_eq!(status, 200, "{body}");
     let catalog = gdl_extract::Catalog::load(&temp.path().join("catalog")).expect("catalog");
     let entry = catalog.entries().next().expect("entry");
     assert_eq!(
@@ -751,25 +733,25 @@ async fn an_abandoned_import_ends_its_child_and_cargo() {
     })
     .await;
     // The server's own fetch of the repository succeeds; the child's cargo
-    // then fetches the dependency and waits on the silent host.
-    let abandoned = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        import(app, &url, "dependent"),
-    )
-    .await;
-    assert!(abandoned.is_err(), "a silent dependency answered");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let streams = loop {
-        let streams = std::mem::take(&mut *held.lock().expect("held"));
-        if !streams.is_empty() || std::time::Instant::now() > deadline {
-            break streams;
+    // then fetches the dependency and waits on the silent host. The import
+    // is abandoned once that connection is held: abandoned earlier, under
+    // load, the child ends before its cargo connects, and nothing is
+    // left to close.
+    let mut pending = Box::pin(import(app, &url, "dependent"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while held.lock().expect("held").is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cargo's git never reached the dependency"
+        );
+        if let Ok(answer) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut pending).await
+        {
+            panic!("a silent dependency answered: {answer:?}");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    };
-    assert!(
-        !streams.is_empty(),
-        "cargo's git never reached the dependency"
-    );
+    }
+    drop(pending);
+    let streams = std::mem::take(&mut *held.lock().expect("held"));
     for mut stream in streams {
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(10)))
