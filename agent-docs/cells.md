@@ -21,7 +21,7 @@ The two planes:
 | Plane | Scope | Holds | Changes | Technology |
 |---|---|---|---|---|
 | Instance plane | one cell | instances, leases, `gdl-ready-*`, `gdl-retired-*`, avoids | per instance, fast, strongly ordered | velo-hub, as built (milestones 19 to 22) |
-| Cell plane | all cells, all regions | one record per cell | per cell, about once a second, eventually consistent | the cell directory |
+| Cell plane | all cells, all regions | one record per cell | per cell, every 10 to 15 s or on a change of state, eventually consistent | the cell directory |
 
 Nothing instance-level crosses a region through the directory. A chooser does need instance addresses in the cell it sends to; those come from that cell's hub over a hub-to-hub follow link, relayed by the chooser's own hub (section 4.1).
 
@@ -166,7 +166,7 @@ A global hub learns about model cells over two links with different jobs:
 | Link | Carries | Rate | If it fails |
 |---|---|---|---|
 | Directory | which cells exist: class, region, hashes, state, hub address, epoch, `expires_at` | on a state change, and a heartbeat every 10 s (lease 30 s) | no new cells are found; a cell followed over a live link with a matching epoch stays eligible |
-| Follow link (G's hub watches M's hub) | M's state and epoch, its load summary at 1 Hz, and its entry instances (D) with their `PeerInfo`, ready and retired | a new typed watch on the gdl hub extension (`GET /v1/gdl/cell/watch`: a snapshot, then events). velo-hub's service watch cannot carry this: its events hold instance ids only (`lib/velo-hub/src/hub/services.rs:193` in velo) | M is dropped from G's choices at once: this is the liveness signal |
+| Follow link (G's hub watches M's hub) | M's state and epoch, its load summary every 10 to 15 s (owner, 2026-10-22; 10 s by default), and its entry instances (D) with their `PeerInfo`, ready and retired | a new typed watch on the gdl hub extension (`GET /v1/gdl/cell/watch`: a snapshot, then events). velo-hub's service watch cannot carry this: its events hold instance ids only (`lib/velo-hub/src/hub/services.rs:193` in velo) | M is dropped from G's choices at once: this is the liveness signal |
 
 Keeping the load summary and liveness on the follow link keeps the directory off the data path, which the prior art insists on (section 7, lessons 10 and 11), and cuts the directory's write rate to one heartbeat per cell every 10 s. A directory outage then stops discovery, not routing.
 
@@ -182,7 +182,7 @@ model instances (cell M)      M's hub                    directory              
                                                                               watch class model_x
                                                               ---------------> sees M ready
                                 <------------------------------------------- follow M's hub:
-                                cell watch: D, load (1 Hz) ----------------->  relay as
+                                cell watch: D, load (10 s) ----------------->  relay as
                                                                                gdl-ready-D@M ------> follower adds a
                                                                                                      table for (D, M)
                                                                                                      cell policy sees M
@@ -244,13 +244,13 @@ Under the boundary rule (3.1), every cross-cell attach is to the instance that j
 
 ### 4.5 The load summary and the cell policy
 
-A cell's load is an aggregate on the follow link, once a second: for the entry segment, roots admitted over the admission limit, summed over its usable instances (`crates/gdl/src/dist/admission.rs`), the number of usable instances, and refusals in the last second. Admission counts roots, not engine work: two cells at equal admission can hold very different queues and prefill costs, so the first policy is an admission heuristic, and says so. A chooser never sees instance-level load in another cell; the in-cell selector does, from its own state. Every system surveyed that routes across regions ships aggregates (SkyLB, Gcore, the carbon and SLO paper; section 7).
+A cell's load is an aggregate on the follow link, every 10 to 15 s (owner, 2026-10-22; 10 s by default): for the entry segment, roots admitted over the admission limit, summed over its usable instances (`crates/gdl/src/dist/admission.rs`), the number of usable instances, and refusals in the last second. Admission counts roots, not engine work: two cells at equal admission can hold very different queues and prefill costs, so the first policy is an admission heuristic, and says so. A chooser never sees instance-level load in another cell; the in-cell selector does, from its own state. Every system surveyed that routes across regions ships aggregates (SkyLB, Gcore, the carbon and SLO paper; section 7).
 
 `home_first`, the proposed default policy, from the research's lessons:
 
-1. **Eligible:** ready, not expired, not excluded for this request, and its summary younger than 2 s (one study measured SLO violations under 10% at 1 to 2 s refresh and 10 to 32% at 5 s).
+1. **Eligible:** ready, not expired, not excluded for this request, and its summary younger than three periods (30 s by default). One study measured SLO violations under 10% at 1 to 2 s refresh and 10 to 32% at 5 s; at 10 to 15 s the summary steers only coarsely, and a cell's refusal of an offer (section 11) is the fast correction.
 2. **Prefer home.** Home cells (the same region) are used until all of them are over a saturation threshold, as SkyLB spills only when every local replica has a queue.
-3. **Spill on room.** A remote cell is a candidate only while its admission is under a spill bound (80% by default) and it refused nothing in the last second. A summary that is missing or older than 2 s makes the cell ineligible. Spilling by estimated time to first token (RTT plus queue plus prefill, as the carbon and SLO paper does) needs engine signals the summary does not have: queue depth and prefill rate from the engine's own metrics, in units the policy can add to an RTT. That is a later policy, not this one.
+3. **Spill on room.** A remote cell is a candidate only while its admission is under a spill bound (80% by default) and this chooser has not been refused by it within its damping window (5). A summary that is missing or older than three periods makes the cell ineligible. Spilling by estimated time to first token (RTT plus queue plus prefill, as the carbon and SLO paper does) needs engine signals the summary does not have: queue depth and prefill rate from the engine's own metrics, in units the policy can add to an RTT. That is a later policy, not this one.
 4. **Pick by two random choices**, not the least loaded: between refreshes a deterministic least-loaded pick herds every chooser onto one cell.
 5. **Damp.** A cell that refused is excluded for the rest of the request and penalized for a short, growing window, as Envoy's outlier ejection does, with a cap so that a bad summary cannot exclude every remote cell.
 6. **Fail over only before acceptance** (4.3). dynamo's global router draws its line at the first output; gdl's is earlier, at the acknowledgement, because nothing before it needs replay.
@@ -350,7 +350,7 @@ From the second research report; the full list of sources is in section 9.
 | Istio multi-primary | every control plane watches every cluster's instances | the cost we avoid by shipping aggregates |
 | Kubernetes MCS | export by opt-in, leases drop unreachable clusters | the cell record as an explicit export with a lease |
 | SkyLB (arXiv 2505.24095) | a regional balancer probes remote ones for free replicas and queue size, and sends remote only when every local replica has a queue | home first; a remote cell only with room |
-| Carbon and SLO scheduling (arXiv 2610.14571) | per-datacenter averages polled every second; violations rise from under 10% at 2 s to 10 to 32% at 5 s; greedy picks herd | a 1 Hz summary, a 2 s staleness cutoff, two random choices |
+| Carbon and SLO scheduling (arXiv 2610.14571) | per-datacenter averages polled every second; violations rise from under 10% at 2 s to 10 to 32% at 5 s; greedy picks herd | two random choices; a summary every 10 to 15 s (the owner's rate) is coarse by this paper's measure, so refusals correct it |
 | dynamo's global router and request rejection | pools chosen by a static grid; retries only before the first output; 529 for overload | a retry boundary with nothing to replay (ours is earlier: acceptance); `Overloaded` distinct from `Routing` |
 | Grove, LeaderWorkerSet, Kueue | gang scheduling by `minAvailable`, start order, requeue on a pods-ready timeout | quorum is a scheduling idea there; advertising it is new here and needs its own tests |
 | Eureka | self-preservation stops expiring instances when renewals collapse | a cap on how many remote cells one bad view can remove |
@@ -359,6 +359,8 @@ Not found by the research: any LLM-serving system that documents hysteresis for 
 
 ## 8. Choices for the owner
 
+Answered on 2026-10-22; the rulings are in section 11.
+
 | # | Question | Options | Recommendation |
 |---|---|---|---|
 | Q1 | Where a class boundary may cut | (a) only under the boundary rule of 3.1 (a hop's inner end is its only stage in the other class); (b) any cut, which needs every externally selected segment exported, their acknowledgements, cell-filtered openings, the pin in `Cx`, and peer lookup across hubs | (a); (b) only for a graph that needs it |
@@ -366,7 +368,7 @@ Not found by the research: any LLM-serving system that documents hysteresis for 
 | Q3 | A change of identity between classes | (a) lockstep for a change of graph or placement: a rollout brings up new cells of both classes, region by region, blue and green; builds of the same contract and placement roll per cell as replicas do; (b) a boundary hash: a cross-class envelope carries the hash of the boundary's types and entry node, so a class changes its insides alone; (c) globals that host two versions | (a) to build, with (b) designed so the envelope can carry it later |
 | Q4 | Transport across regions | (a) velo QUIC with mutual pinning, fingerprints from the hubs (a velo change, and runtime configuration: the runtime's builder installs TCP only, `crates/gdl/src/dist/fabric.rs:44`); (b) TCP over AWS-encrypted peering, with security groups only; (c) a WireGuard overlay under TCP | (a); (b) is acceptable for a first test fleet |
 | Q5 | What a global follows | (a) its home cells and its spill regions; (b) every model cell | (a) |
-| Q6 | A model cell that calls back into a global class | (a) refused by validation; (b) allowed, with the pin in both directions | (a) until there is a graph that needs it |
+| Q6 | A model cell that calls back into a global class | (a) refused by validation; (b) allowed, with the pin in both directions | (a) until there is a graph that needs it. Ruled: work enters a child cell one way, as an offer it may refuse (section 11) |
 | Q7 | Failover after acceptance | (a) none in the runtime: after the acknowledgement a failure is the request's, and the operator retries from its own copy (4.3); (b) the runtime retries until the first item, which needs replay storage for streamed input and retry state that outlives `generate` | (a) |
 | Q8 | How a cell drains | (a) entry instances are the cell's drain sources, and interior instances wait for them (section 5); (b) drain the whole cell only by its deadline | (a) |
 | Q9 | Which cells take new work | (a) `ready` first, `degraded` only when no ready cell fits, `unavailable` never; (b) `degraded` as ready, at a lower weight | (a) |
@@ -393,3 +395,26 @@ Each lands with its tests first, and every multi-hub test runs its hubs and cell
 3. **The runtime.** Per-(segment, cell) tables in the follower, the cell policy trait and `home_first`, failover before acceptance across cells, `Routing` for no cell, entry instances as drain sources, the cost measured against the per-request gate, and the cross-cell retirement and drain acknowledgements of section 5.
 4. **The DynamoDB backend**, in its own crate behind the trait, with the directory conformance suite run against DynamoDB Local outside the default suite.
 5. **Deployment.** One bundle per class with its own hub, and the ingress health check pointed at the cell health endpoint.
+
+## 11. Owner rulings, 2026-10-22
+
+The owner answered section 8. Where a ruling changes the text above, the text was updated in the same commit and says so.
+
+| # | Ruling |
+|---|---|
+| Q1 | A class boundary falls only at a hop's inner end (the boundary rule, 3.1); other cuts are refused |
+| Q2 | `static` and `relay` first, then DynamoDB global tables (MREC) |
+| Q3 | Lockstep for a change of graph or placement, blue and green per region; builds of the same contract and placement roll per cell; the envelope is designed so that a boundary hash can be added later |
+| Q4 | velo QUIC with mutual pinning across regions (a velo change, and the runtime's transport configuration) |
+| Q5 | A global hub follows its home cells and its spill regions |
+| Q6 | The owner: "If the parent cell issuing work to child cell is an offer where the child cell is allowed to refuse the request, then one way in is ok." Work enters a child cell one way, from its parent class, and every hand-off into a child cell is an **offer**: the child may refuse it, and the chooser takes the refusal as a reason to choose another cell (4.3). No path enters a global class from a model cell; validation refuses a class cycle |
+| Q6, load | The owner: "We do need to feed some kind of state out to the globals - like a representation of how loaded a cell is - this is a small every 10-15s update." The load summary is published every 10 to 15 s (10 s by default) on the follow link, in place of the 1 Hz of the first draft (4.1, 4.5). A summary steers coarsely at that rate, so the cell's refusal of an offer is what corrects a stale view; the policy's staleness cutoff is three periods |
+| Q7 | No failover in the runtime after acceptance; the operator may retry from its own copy |
+| Q8 | Entry instances are a model cell's drain sources; interior instances wait for them |
+| Q9 | New work goes to `ready` cells; `degraded` only when no ready cell fits; `unavailable` never |
+
+What "an offer" asks of the design, beyond what 4.3 already has:
+
+- **Refusal is a first-class answer.** An entry refuses with `Overloaded` (no room), or with a cell-level reason (draining, not ready, or its own policy), before it acknowledges. Admission already refuses before the acknowledgement (plan 7.5), so the mechanism exists; the new part is that a cell may refuse by policy, not only by a full ledger, and that the refusal names whether the chooser should damp only this cell or treat it as gone.
+- **A refusal costs one WAN round trip and nothing else**: nothing was admitted and no input was sent (4.3). At a 10 to 15 s summary, a burst of offers to a cell that filled since its last summary is refused at once, and the chooser's damping (4.5, item 5) moves the rest of the burst.
+- **Whether a refusal also pushes an early summary** (a cell that starts refusing publishes at once, rather than at its next period) is a detail for the hub milestone; it costs one extra message per change of state, not per request.
