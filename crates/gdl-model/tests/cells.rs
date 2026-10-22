@@ -457,3 +457,37 @@ fn an_unplaced_outer_end_leaves_its_inner_class_undecided() {
     );
     assert!(!errors.iter().any(|e| e.contains("[cells.")), "{errors:?}");
 }
+
+/// Two ends in one segment share whatever class the segment is given, so a
+/// hop inside an unclassed segment enters no class.
+#[test]
+fn an_unclassed_shared_segment_cannot_make_a_class_entered() {
+    let text = "[segment.a]\nnodes = ['S']\n[segment.m]\nnodes = ['F', 'D']\n\
+                [class.global]\nsegments = ['a']\n\
+                [cells.global]\nmax_near = 0\n";
+    let built = Placement::new()
+        .segment("a", ["S"])
+        .segment("m", ["F", "D"])
+        .class("global", ["a"])
+        .cell_policy("global", policy("home_first", 80, 0));
+    let parsed = Placement::from_toml(text).expect("a placement");
+    assert_eq!(parsed, built);
+    for placement in [parsed, built] {
+        assert_eq!(
+            refusals(&placement),
+            [
+                "segment `m` is in no class",
+                "cell policy `[cells.global]`: no class boundary enters class `global`; a cell policy picks a cell of a class that another class sends to",
+            ]
+        );
+    }
+    // The control: the same segments with `F` and `D` apart, where giving
+    // `m` a class could make `D`'s hop enter `global`.
+    let apart = Placement::from_toml(
+        "[segment.a]\nnodes = ['S']\n[segment.m]\nnodes = ['F']\n[segment.n]\nnodes = ['D']\n\
+         [class.global]\nsegments = ['a']\n[cells.global]\nmax_near = 0\n",
+    )
+    .expect("a placement");
+    let errors = refusals(&apart);
+    assert!(!errors.iter().any(|e| e.contains("[cells.")), "{errors:?}");
+}

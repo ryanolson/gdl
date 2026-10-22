@@ -146,8 +146,9 @@ pub(super) fn entered(
 /// were those ends placed. A hop enters a class when its inner end is in
 /// it and its outer end is not: a hop with only its outer end unresolved
 /// could enter its inner end's class, and one with its inner end
-/// unresolved could enter any class but its outer end's. Counted once per
-/// hop, so that each class is answered without walking the hops again.
+/// unresolved could enter any class but its outer end's, unless both ends
+/// are in one segment, which has one class. Counted once per hop, so that
+/// each class is answered without walking the hops again.
 pub(super) struct Undecided<'a> {
     /// The inner ends' classes of hops whose outer end is unresolved.
     into: BTreeSet<&'a str>,
@@ -175,6 +176,12 @@ impl<'a> Undecided<'a> {
             open_from: BTreeMap::new(),
         };
         for hop in &manifest.hops {
+            // Ends in one segment share whatever class it is given, so the
+            // hop enters none.
+            let segment = |node: &str| segment_of.get(node);
+            if segment(&hop.outer).is_some() && segment(&hop.outer) == segment(&hop.inner) {
+                continue;
+            }
             match (class(&hop.outer), class(&hop.inner)) {
                 (_, None) => {
                     undecided.open += 1;
