@@ -38,8 +38,10 @@ fn manifest(nodes: &[(&str, Role)], hops: &[Hop]) -> Manifest {
 }
 
 /// The graph of `agent-docs/cells.md` section 3.1,
-/// `Http => Pre { Route { Model { Engine => Detok } } }`, with `forward`
-/// and `backward` stages added to Route's hop.
+/// `Http => Pre { Route { Model { Engine => Detok } } }`, with its roles
+/// and types, and with `forward` and `backward` stages added to Route's
+/// hop. `gdl-syntax`'s `tests/classes.rs` parses the same graph from its
+/// text and pins the same report.
 fn cells(forward: &[&str], backward: &[&str]) -> Manifest {
     let mut nodes = vec![
         ("Http", Role::Source),
@@ -65,6 +67,8 @@ fn cells(forward: &[&str], backward: &[&str]) -> Manifest {
     graph.hops[0].backward_types = named(&["ChatChunk"]);
     graph.hops[1].forward_types = named(&["Prompt"]);
     graph.hops[1].backward_types = named(&["Text"]);
+    graph.hops[2].forward_types = named(&vec!["Tokens"; forward.len() + 1]);
+    graph.hops[2].backward_types = named(&vec!["Text"; backward.len() + 1]);
     graph.hops[3].forward_types = named(&["Tokens"]);
     graph.hops[3].backward_types = named(&["Token", "Text"]);
     graph
@@ -434,5 +438,192 @@ fn without_classes_a_hop_may_cut_anywhere() {
                 )
             );
         }
+    }
+}
+
+/// `S -> D` with a backward stage `Post`, under `S`'s class `global`, in
+/// another segment than `S`'s: a rule (b) refusal.
+fn posted() -> Manifest {
+    manifest(
+        &[
+            ("S", Role::Source),
+            ("D", Role::Sink),
+            ("Post", Role::Backward),
+        ],
+        &[("S", &[], "D", &["Post"])],
+    )
+}
+
+const POST_OFF_A: &str = "hop `S` -> `D` crosses from class `global` into `model_x`, but its backward stage `Post` is in segment `b`; every stage but the inner end must be in `S`'s segment `a`";
+
+/// Rule (c) holds for the inner end of a hop under the boundary's inner
+/// end, and for hops nested deeper.
+#[test]
+fn rule_c_reaches_every_hop_under_the_inner_end() {
+    let shallow = manifest(
+        &[
+            ("S", Role::Source),
+            ("Entry", Role::Operator),
+            ("D", Role::Sink),
+        ],
+        &[("S", &[], "Entry", &[]), ("Entry", &[], "D", &[])],
+    );
+    let deep = manifest(
+        &[
+            ("S", Role::Source),
+            ("Entry", Role::Operator),
+            ("Mid", Role::Operator),
+            ("D", Role::Sink),
+        ],
+        &[
+            ("S", &[], "Entry", &[]),
+            ("Entry", &[], "Mid", &[]),
+            ("Mid", &[], "D", &[]),
+        ],
+    );
+    let expected = "hop `S` -> `Entry` crosses from class `global` into `model_x`, but `D`, under `Entry`, is in segment `o` of class `other`; every hop under the inner end must stay in `model_x`";
+    for placement in both(
+        &[("a", &["S"]), ("m", &["Entry"]), ("o", &["D"])],
+        &[("global", &["a"]), ("model_x", &["m"]), ("other", &["o"])],
+        "",
+        |p| p,
+    ) {
+        assert_eq!(refused(&shallow, &placement), expected);
+    }
+    for placement in both(
+        &[("a", &["S"]), ("m", &["Entry", "Mid"]), ("o", &["D"])],
+        &[("global", &["a"]), ("model_x", &["m"]), ("other", &["o"])],
+        "",
+        |p| p,
+    ) {
+        assert_eq!(refused(&deep, &placement), expected);
+    }
+}
+
+/// A class table's problem, here an empty class no segment needs, leaves
+/// the boundary rule judged.
+#[test]
+fn a_class_table_problem_does_not_hide_a_boundary_problem() {
+    let graph = posted();
+    let spare: Segments = &[("global", &["a", "b"]), ("model_x", &["m"]), ("spare", &[])];
+    for placement in both(
+        &[("a", &["S"]), ("b", &["Post"]), ("m", &["D"])],
+        spare,
+        "",
+        |p| p,
+    ) {
+        assert_all(
+            refusals(&graph, &placement),
+            &["class `spare` has no segments", POST_OFF_A],
+        );
+    }
+}
+
+/// A boundary that breaks the rule is still a boundary, so it still closes
+/// a cycle.
+#[test]
+fn a_boundary_problem_does_not_hide_a_cycle() {
+    let graph = manifest(
+        &[
+            ("Sa", Role::Source),
+            ("Da", Role::Sink),
+            ("Pa", Role::Backward),
+            ("Sb", Role::Source),
+            ("Db", Role::Sink),
+        ],
+        &[("Sa", &[], "Da", &["Pa"]), ("Sb", &[], "Db", &[])],
+    );
+    for placement in both(
+        &[
+            ("a", &["Sa"]),
+            ("p", &["Pa"]),
+            ("m", &["Da"]),
+            ("b", &["Sb"]),
+            ("n", &["Db"]),
+        ],
+        &[("global", &["a", "p", "n"]), ("model_x", &["m", "b"])],
+        "",
+        |p| p,
+    ) {
+        assert_all(
+            refusals(&graph, &placement),
+            &[
+                "hop `Sa` -> `Da` crosses from class `global` into `model_x`, but its backward stage `Pa` is in segment `p`; every stage but the inner end must be in `Sa`'s segment `a`",
+                "the class boundaries make a cycle through `global`, `model_x`; work may cross between two classes in one direction only",
+            ],
+        );
+    }
+}
+
+/// With classes, the report counts WAN round trips even where no hop
+/// crosses a class boundary; without, it reads as before classes existed.
+#[test]
+fn a_classed_report_counts_round_trips_without_a_boundary() {
+    let graph = manifest(
+        &[("S", Role::Source), ("D", Role::Sink)],
+        &[("S", &[], "D", &[])],
+    );
+    let segments: Segments = &[("a", &["S"]), ("b", &["D"])];
+    for placement in both(segments, &[("global", &["a", "b"])], "", |p| p) {
+        let laid = layout(&graph, &placement).expect("a layout");
+        assert!(laid.boundaries().is_empty());
+        assert_eq!(
+            laid.report().to_string(),
+            "hop 0: 2 crossings, 1 anchors, 0 WAN round trips\n\
+             per request: 2 crossings, 1 anchors, 0 WAN round trips"
+        );
+    }
+    for placement in both(segments, &[], "", |p| p) {
+        assert_eq!(
+            layout(&graph, &placement)
+                .expect("a layout")
+                .report()
+                .to_string(),
+            "hop 0: 2 crossings, 1 anchors\nper request: 2 crossings, 1 anchors"
+        );
+    }
+}
+
+/// Each cycle is reported once, with its classes in name order, however
+/// long it is.
+#[test]
+fn each_cycle_is_named_once() {
+    let mut nodes = Vec::new();
+    let mut hops = Vec::new();
+    let names: Vec<(String, String)> = (0..5).map(|i| (format!("S{i}"), format!("D{i}"))).collect();
+    for (source, sink) in &names {
+        nodes.push((source.as_str(), Role::Source));
+        nodes.push((sink.as_str(), Role::Sink));
+        hops.push((source.as_str(), &[][..], sink.as_str(), &[][..]));
+    }
+    let graph = manifest(&nodes, &hops);
+    let segments: Segments = &[
+        ("s0", &["S0"]),
+        ("s1", &["S1"]),
+        ("s2", &["S2"]),
+        ("s3", &["S3"]),
+        ("s4", &["S4"]),
+        ("d0", &["D0"]),
+        ("d1", &["D1"]),
+        ("d2", &["D2"]),
+        ("d3", &["D3"]),
+        ("d4", &["D4"]),
+    ];
+    // a -> b -> c -> a, and d -> e -> d.
+    let classes: Segments = &[
+        ("c", &["s2", "d1"]),
+        ("a", &["s0", "d2"]),
+        ("b", &["s1", "d0"]),
+        ("e", &["s4", "d3"]),
+        ("d", &["s3", "d4"]),
+    ];
+    for placement in both(segments, classes, "", |p| p) {
+        assert_eq!(
+            refusals(&graph, &placement),
+            [
+                "the class boundaries make a cycle through `a`, `b`, `c`; work may cross between two classes in one direction only",
+                "the class boundaries make a cycle through `d`, `e`; work may cross between two classes in one direction only",
+            ]
+        );
     }
 }
