@@ -2349,7 +2349,7 @@ dependencies = [
 [[package]]
 name = "velo"
 version = "0.21.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#e512ba0478288867820ecfee27177fdd137224db"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#cee2834e1dac456976a650c49118fd6e4ebe47b6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2379,7 +2379,7 @@ dependencies = [
 [[package]]
 name = "velo-ext"
 version = "0.5.6"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#e512ba0478288867820ecfee27177fdd137224db"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#cee2834e1dac456976a650c49118fd6e4ebe47b6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2399,7 +2399,7 @@ dependencies = [
 [[package]]
 name = "velo-hub"
 version = "0.21.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#e512ba0478288867820ecfee27177fdd137224db"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#cee2834e1dac456976a650c49118fd6e4ebe47b6"
 dependencies = [
  "anyhow",
  "axum",
@@ -2422,7 +2422,7 @@ dependencies = [
 [[package]]
 name = "velo-hub-ext"
 version = "0.21.0"
-source = "git+https://github.com/ai-dynamo/velo?branch=main#e512ba0478288867820ecfee27177fdd137224db"
+source = "git+https://github.com/ai-dynamo/velo?branch=main#cee2834e1dac456976a650c49118fd6e4ebe47b6"
 dependencies = [
  "http",
  "serde",
