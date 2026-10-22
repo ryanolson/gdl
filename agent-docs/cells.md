@@ -64,11 +64,11 @@ topology: Http => Pre { Route { Model { Engine => Detok } } };
 Why this shape:
 
 - **One WAN round trip between warm peers.** Route's hop has no remote backward run, so it opens nothing remotely: it mints its anchor, sends one `gdl.fwd` with a ticket to Model, and Model's output opens the ticket (7.3), with no attach round trip. The first time a pair of instances meets, velo's `_hello` handshake adds one round trip (`lib/velo/src/messenger/client/mod.rs:393` in velo), once per pair. Every `gdl.open` and attach for E and F happens inside the model cell, over its local network.
-- **Failover stays in one process.** Route owns the attempt. If the chosen cell never accepts the request (a refusal, a closed entry, a setup timeout with no acknowledgement), the runtime picks another cell inside the same `next.generate` (4.3). Once a cell has accepted, retries, hedging, and migration stay the operator's job (ruling 27).
+- **Failover stays in one process.** Route owns the attempt. If the chosen cell refuses the offer, or the send fails before it leaves, the runtime picks another cell inside the same `next.generate` (4.3). A missing answer is an unknown outcome, not a refusal (4.3). Once a cell has accepted, retries, hedging, and migration stay the operator's job (ruling 27).
 - **No pin on the wire.** The whole cross-class decision is one attempt in one process. The pin of section 2.2 is a local value.
 - **The model cell decides inside itself.** Model is the outer end of the in-cell hop, so in-cell routing (round robin, `least_loaded`, dynamo's KV router later) is the model cell's business, with the instance-plane membership it already has.
 
-**The boundary rule.** For every hop whose outer end O is in one class and that reaches another, the hop's inner end is its only stage in the other class, every hop nested under that inner end lies in the inner end's class, and the forward stage that hands on to the inner end runs in O's segment. Validation refuses any other cut at first. Accepting one would take more than a pin in `Cx`: O would select and open backward runs in the other cell (`crates/gdl/src/dist/hop.rs:510`), and an inner end reached through another cell's forward run would attach to an anchor in an instance that never sent to it. So the follow link would have to export every segment selected from outside the class (forward targets and provisioning targets, derived from `Layout`, `crates/gdl-model/src/placement.rs:267`), with their retirement acknowledgements and cell-filtered selection for openings, and peer lookup across hubs. That is Q1. The crossing report gains a column: WAN round trips per request for each class boundary.
+**The boundary rule.** For every hop whose outer end O is in one class and that reaches another: the hop's inner end is in the other class; every other stage of the hop, forward and backward, is in O's segment, so the hop leaves O's segment only to reach its inner end and never revisits it; and every hop nested under the inner end lies in the inner end's class. Then O's own instance runs every stage but the inner end (plan 7.2: a run in O's segment is created on O's instance), sends the one `gdl.fwd`, and minted the anchor the inner end's output goes to, so the instance the inner end must reach is the instance that sent to it. A weaker rule fails: with a backward stage in another global segment (Route in C, Model in D, Post in B), Route provisions Post first and Model's output must reach Post's instance, which never sent to Model (`crates/gdl/src/dist/hop.rs:510`, `:580`); with a forward path that leaves C and returns to C, the returning run can be another C instance (`crates/gdl/src/dist/runtime.rs:499`), apart from the one that minted the anchor and holds the cell choice. Validation refuses any other cut at first. Accepting one would take more than a pin in `Cx`: O would select and open backward runs in the other cell (`crates/gdl/src/dist/hop.rs:510`), and an inner end reached through another cell's forward run would attach to an anchor in an instance that never sent to it. So the follow link would have to export every segment selected from outside the class (forward targets and provisioning targets, derived from `Layout`, `crates/gdl-model/src/placement.rs:267`), with their retirement acknowledgements and cell-filtered selection for openings, and peer lookup across hubs. That is Q1. The crossing report gains a column: WAN round trips per request for each class boundary.
 
 ### 3.2 The placement: classes and cell policy
 
@@ -217,12 +217,14 @@ Route (global G, us-east-1)                    cell policy          Model (cell 
     mint anchor; gdl.fwd + ticket ---------------------------------------> Model in M1 admits,
                                                                             runs its in-cell hop,
     <---------------------------------------------- opens the ticket,       streams to Route
-  M1 never accepted (refused, entry closed, or no acknowledgement before the setup timeout):
+  M1 refused the offer (an explicit refusal before admission), or the send failed before it left:
   the runtime picks again inside the same next.generate, M1 excluded; same steps for M2 or W1
+  no answer before the setup timeout, or a transport error after the send:
+  outcome unknown; the request's error, marked as such; a retry is Route's own
   M1 accepted, then failed: the request's error; a retry is Route's own
 ```
 
-- **Failover only before acceptance.** The runtime chooses another cell, up to a bound (two other cells by default), only when the chosen cell never accepted the request: a selection or admission refusal (`Overloaded`), an entry closed by retirement or drain, or a setup timeout with no acknowledgement. Nothing was admitted there and no input was sent (a streamed request's input pump starts only after acceptance, `crates/gdl/src/dist/hop.rs:608`), so nothing needs replay, and a streamed request fails over as safely as a value. Once the entry acknowledged, a failure is the request's, including one between the open signal and the first item, when `generate` has already returned (`crates/gdl/src/dist/hop.rs:636`); a retry is the operator's (ruling 27), from its own copy of any streamed input. A lost acknowledgement can leave M1 running while M2 starts: M1's producer then fails to attach to the anchor the first try dropped and cancels its work (plan 7.2's ownership rule), so the cost is bounded duplicate setup, never two responses.
+- **Failover only on a proven refusal.** The runtime chooses another cell, up to a bound (two other cells by default), only when it knows the chosen cell did not take the request: the entry answered with a refusal before admitting it (`Overloaded`, an entry closed by retirement or drain, a refusal by the cell's policy; section 11), or the send failed before the envelope left this process (no instance to choose, no route to the peer). Nothing was admitted there and no input was sent (a streamed request's input pump starts only after acceptance, `crates/gdl/src/dist/hop.rs:608`), so nothing needs replay. **A missing acknowledgement is not a refusal.** An entry admits the request and spawns its work before it answers (`crates/gdl/src/dist/hop.rs:688`, `:730`, `:851`), so when the answer is late or lost Model may already have run user code; failing over then would run the request twice, and a dropped anchor stops a second response but not a second execution. A setup timeout, or a transport error after the send, is therefore an unknown outcome: the request's error, of a kind that says the outcome is unknown, left to the operator (Q7). Once the entry acknowledged, a failure is the request's too, including one between the open signal and the first item, when `generate` has already returned (`crates/gdl/src/dist/hop.rs:636`); a retry is the operator's (ruling 27), from its own copy of any streamed input. A test holds this with the delayed-acknowledgement fault hook (`crates/gdl/src/dist/hop.rs:847`) and a node that records each invocation: a delayed acknowledgement past the setup timeout yields the unknown-outcome error and exactly one invocation, never a second cell.
 - **Where "excluded" is kept.** The set of cells excluded for a request is a crate-private local of that `next.generate` call in the chooser's process. Failover happens before the call returns, so the set never needs to outlive it. It is never on the wire and never in a map keyed by request.
 - **Cost.** A placement with no `[class]` table routes exactly as ruling 156 does: the cell step is not on its path. With classes, the cell choice runs once per attempt and only in a chooser; every other crossing keeps ruling 156's cost. The runtime milestone is measured against the per-request gate of `agent-docs/perf/benchmarking.md`.
 
@@ -232,7 +234,7 @@ Routes this allows, for `global-us-east-1`:
 |---|---|---|
 | Home cell | G east to M east | 0 (in-region) |
 | Sibling cell, same region | G east to M2 east | 0 |
-| Spill to another region | G east to M west (`model-x-01-us-west-2`) | 1 between warm peers (the `gdl.fwd`; the ticket opens with no attach round trip); 1 more the first time a pair of instances meets (`_hello`) |
+| Spill to another region | G east to M west (`model-x-01-us-west-2`) | 1 between warm peers (the `gdl.fwd`; the ticket opens with no attach round trip); 1 more for the first message between a pair over an established connection (`_hello`); a cold connection adds its transport handshake before that (6.2) |
 | Spill, hop cut mid-way | G east opens F in M west, then forwards to D | refused by the boundary rule (3.1); it would be 2 warm with tickets (the open, then the forward), 3 with an attach |
 | Through a remote global | G east to G west to M west | not expressible: a request cannot enter C twice, and nothing gains from it |
 
@@ -240,7 +242,7 @@ Ingress is outside gdl, and section 6.3 picks its mechanism. The global cell's h
 
 ### 4.4 Resolving a peer in another cell
 
-Under the boundary rule (3.1), every cross-cell attach is to the instance that just sent to the attacher (Route sends `gdl.fwd` to Model; Model's output opens Route's ticket), and velo's `_hello` has registered it. No lookup across hubs is needed. A cut through a hop would need one, and peer lookup alone would not be enough (3.1).
+Under the boundary rule (3.1), every cross-cell attach is to the instance that just sent to the attacher (Route sends `gdl.fwd` to Model; Model's output opens Route's ticket), and velo's `_hello` has registered it: `_hello` registers its sender and no one else (`lib/velo/src/messenger/server/system_handlers.rs:28` in velo), which is why the rule keeps every non-inner stage on O's instance. No lookup across hubs is needed. A cut through a hop would need one, and peer lookup alone would not be enough (3.1).
 
 ### 4.5 The load summary and the cell policy
 
@@ -327,11 +329,13 @@ gdl requires any instance to open a stream to any other, in both directions (sec
 
 What a spill costs, from published RTTs (CloudPing; approximate):
 
-| Pair | RTT | Added to time to first token, warm peers | First request between a pair (`_hello`) |
+| Pair | RTT | Added to time to first token, warm peers | First request between a pair, connection established (`_hello`) |
 |---|---|---|---|
 | us-east-1 to us-west-2 | 62 to 73 ms | about 1 RTT, 70 ms | about 2 RTT, 140 ms |
 | us-east-1 to eu-west-1 | about 69 ms | about 1 RTT, 70 ms | about 2 RTT, 140 ms |
 | us-west-2 to eu-west-1 | 118 to 128 ms | about 1 RTT, 125 ms | about 2 RTT, 250 ms |
+
+A cold connection costs more than the last column: velo waits for the connection before it writes a frame (TCP, `lib/velo/src/transports/tcp/transport.rs:743`; QUIC, which also completes its TLS 1.3 handshake, `lib/velo/src/transports/quic/transport.rs:753` in velo), registering a peer does not open a connection, and the producer's connection back to the chooser may be a second cold one. Figures for cold connections are to be measured in the runtime milestone, not estimated here; a chooser can keep connections to the cells it follows warm, which is a later choice.
 
 Bytes are cheap by comparison: an 8 KB request and 1,000 tokens back is about $0.37 per million requests over peering when velo coalesces frames, and up to about $2.40 when every token is its own TLS record and TCP segment. Coalescing matters more than the choice of network.
 
@@ -416,5 +420,5 @@ The owner answered section 8. Where a ruling changes the text above, the text wa
 What "an offer" asks of the design, beyond what 4.3 already has:
 
 - **Refusal is a first-class answer.** An entry refuses with `Overloaded` (no room), or with a cell-level reason (draining, not ready, or its own policy), before it acknowledges. Admission already refuses before the acknowledgement (plan 7.5), so the mechanism exists; the new part is that a cell may refuse by policy, not only by a full ledger, and that the refusal names whether the chooser should damp only this cell or treat it as gone.
-- **A refusal costs one WAN round trip and nothing else**: nothing was admitted and no input was sent (4.3). At a 10 to 15 s summary, a burst of offers to a cell that filled since its last summary is refused at once, and the chooser's damping (4.5, item 5) moves the rest of the burst.
+- **A refusal costs one WAN round trip and nothing else**: nothing was admitted and no input was sent (4.3). Only an explicit refusal counts: a missing answer is an unknown outcome and is not retried (4.3). At a 10 to 15 s summary, a burst of offers to a cell that filled since its last summary is refused at once, and the chooser's damping (4.5, item 5) moves the rest of the burst.
 - **Whether a refusal also pushes an early summary** (a cell that starts refusing publishes at once, rather than at its next period) is a detail for the hub milestone; it costs one extra message per change of state, not per request.

@@ -1,0 +1,35 @@
+Reviewed `f025d21` and the round-one resolution ledger. No files changed; no builds or tests ran. The revised drain ordering, quorum definition, directory-expiry authority, and admission heuristic resolve their original findings. Three findings remain.
+
+**Critical:** none.
+
+**Major findings**
+
+1. **§§3.1, 4.4 — The boundary rule still permits response anchors the child cannot resolve.** [cells.md:71](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:71) constrains the final forward stage’s segment, but does not ensure that its instance minted the response anchor.
+
+   This accepted shape is a counterexample:
+
+   `Route(C, global) → Model(D, model_x) → Post(B, global) → Route`
+
+   Model is the hop’s only stage in the other class, and Route forwards directly to it. However, Route first provisions Post and replaces its reply with Post’s anchor: [hop.rs:510](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/hop.rs:510), [hop.rs:580](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/hop.rs:580). Model learns Route through `_hello`, which registers only its sender ([system_handlers.rs:28](/home/ryan/repos/velo/lib/velo/src/messenger/server/system_handlers.rs:28)); it needs Post’s address instead. The claim at [cells.md:243](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:243) therefore fails.
+
+   A forward path that leaves C and returns to C also passes the rule, but routing can select another C instance ([runtime.rs:499](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/runtime.rs:499)), separating the final sender from the anchor minter and local cell pin.
+
+   **Change:** for the initial implementation, require every non-inner stage of a cross-class hop to remain in O’s segment, without leaving and revisiting it. Reject both counterexamples. This preserves the settled inner-end boundary ruling and makes the direct-sender shortcut hold.
+
+2. **§4.3; §11 Q7 — A missing acknowledgement does not establish nonacceptance.** [cells.md:225](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:225) allows automatic failover after an acknowledgement timeout and limits the consequence to duplicate setup.
+
+   Current gdl admits and starts the receiver task before returning its acknowledgement: [hop.rs:688](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/hop.rs:688), [hop.rs:730](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/hop.rs:730), [hop.rs:851](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/hop.rs:851). With that acknowledgement delayed or lost:
+
+   `M1 admits → attaches → executes Model → acknowledgement times out → runtime executes M2`
+
+   Model can already have performed user work ([hop.rs:1040](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/hop.rs:1040)). Dropping its anchor afterward cannot undo execution or make an already completed attach fail. Separate anchors prevent two visible responses; they do not prevent duplicate execution or side effects.
+
+   **Change:** respecting Q7, automatically fail over only after a definitive preacceptance refusal or a failure proven to precede sending. Treat a missing acknowledgement after possible delivery as an unknown outcome returned to the operator. Validate using the existing [delayed-ack hook](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/crates/gdl/src/dist/hop.rs:847) and an observable node invocation.
+
+**Minor finding**
+
+3. **§§3.1, 4.3, 6.2 — The first-contact latency figure still excludes transport establishment.** The “first request between a pair” column at [cells.md:330](/home/ryan/.bb-machines/127.0.0.1-38900/plugins/environment-git-worktree/host-data/worktrees/thr_gk6gxne88j-1/dynamo-gdl/agent-docs/cells.md:330) gives two RTTs: `_hello`, then the request/output exchange. QUIC first awaits its connection handshake before writing application frames ([quic/transport.rs:753](/home/ryan/repos/velo/lib/velo/src/transports/quic/transport.rs:753)); TCP likewise waits for connection establishment ([tcp/transport.rs:743](/home/ryan/repos/velo/lib/velo/src/transports/tcp/transport.rs:743)). Registration does not prewarm those connections.
+
+   **Change:** label two RTTs as established transport with uncached handlers. Account for fully cold transport establishment separately, preferably through measurement; reverse connections can add further cost.
+
+**Verdict: REJECT.**
