@@ -454,7 +454,66 @@ fn posted() -> Manifest {
     )
 }
 
+const POSTED_CLASSES: Segments = &[("global", &["a", "b"]), ("model_x", &["m"])];
+
 const POST_OFF_A: &str = "hop `S` -> `D` crosses from class `global` into `model_x`, but its backward stage `Post` is in segment `b`; every stage but the inner end must be in `S`'s segment `a`";
+
+/// A node a segment lists by mistake, or a segment with no nodes, leaves
+/// every node of the graph in one segment, so the boundary rule can still
+/// be judged, and is.
+#[test]
+fn an_assignment_problem_does_not_hide_a_boundary_problem() {
+    let graph = posted();
+    for (segments, expected) in [
+        (
+            &[("a", &["S", "Nope"][..]), ("b", &["Post"]), ("m", &["D"])][..],
+            "segment `a` lists unknown node `Nope`",
+        ),
+        (
+            &[
+                ("a", &["S"][..]),
+                ("b", &["Post"]),
+                ("m", &["D"]),
+                ("e", &[]),
+            ][..],
+            "segment `e` has no nodes",
+        ),
+    ] {
+        let classes: Vec<(&str, &[&str])> = if segments.len() == 4 {
+            vec![("global", &["a", "b", "e"]), ("model_x", &["m"])]
+        } else {
+            POSTED_CLASSES.to_vec()
+        };
+        for placement in both(segments, &classes, "", |p| p) {
+            assert_all(refusals(&graph, &placement), &[expected, POST_OFF_A]);
+        }
+    }
+    // A node in no segment is judged nowhere, and the rest still are.
+    let mut two = posted();
+    two.nodes.push(NodeInfo {
+        name: "T".into(),
+        role: Role::Source,
+        binding: None,
+    });
+    two.nodes.push(NodeInfo {
+        name: "U".into(),
+        role: Role::Sink,
+        binding: Some("u".into()),
+    });
+    two.hops
+        .push(manifest(&[], &[("T", &[], "U", &[])]).hops.remove(0));
+    for placement in both(
+        &[("a", &["S", "T"]), ("b", &["Post"]), ("m", &["D"])],
+        POSTED_CLASSES,
+        "",
+        |p| p,
+    ) {
+        assert_all(
+            refusals(&two, &placement),
+            &["node `U` is in no segment", POST_OFF_A],
+        );
+    }
+}
 
 /// Rule (c) holds for the inner end of a hop under the boundary's inner
 /// end, and for hops nested deeper.

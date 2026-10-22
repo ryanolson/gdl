@@ -828,18 +828,23 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     // with whatever they find.
     let mut class_errors = Vec::new();
     let class_of = classify(placement, &mut class_errors);
-    let segment_of = match assign(manifest, placement) {
-        Ok(segment_of) => segment_of,
-        Err(PlacementErrors(mut errors)) => {
-            errors.append(&mut class_errors);
-            return Err(PlacementErrors(errors));
-        }
-    };
+    let mut errors = check_manifest(manifest);
+    if !errors.is_empty() {
+        errors.append(&mut class_errors);
+        return Err(PlacementErrors(errors));
+    }
+    // A node in no segment, or in several, is judged nowhere, but the
+    // boundary rule still judges every hop of the nodes that are placed.
+    let segment_of = assign(manifest, placement, &mut errors);
     let boundaries = if placement.classes.is_empty() {
         Vec::new()
     } else {
         bound(manifest, &segment_of, &class_of, &mut class_errors)
     };
+    if !errors.is_empty() {
+        errors.append(&mut class_errors);
+        return Err(PlacementErrors(errors));
+    }
     match place(manifest, placement, segment_of) {
         Ok(layout) if class_errors.is_empty() => Ok(Layout {
             class_of,
@@ -854,17 +859,13 @@ pub fn layout(manifest: &Manifest, placement: &Placement) -> Result<Layout, Plac
     }
 }
 
-/// Each node's segment, once the manifest is sound and every node is in
-/// exactly one segment.
+/// The segment of each node that is in exactly one, checking that every
+/// node of a sound manifest is.
 fn assign(
     manifest: &Manifest,
     placement: &Placement,
-) -> Result<BTreeMap<String, String>, PlacementErrors> {
-    let mut errors = check_manifest(manifest);
-    if !errors.is_empty() {
-        return Err(PlacementErrors(errors));
-    }
-
+    errors: &mut Vec<PlacementError>,
+) -> BTreeMap<String, String> {
     let mut where_placed: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (segment, nodes) in placement.segments() {
         if nodes.is_empty() {
@@ -898,10 +899,7 @@ fn assign(
             }),
         }
     }
-    if !errors.is_empty() {
-        return Err(PlacementErrors(errors));
-    }
-    Ok(segment_of)
+    segment_of
 }
 
 /// Every check that needs the nodes' segments but not their classes, and
@@ -1032,15 +1030,20 @@ fn classify(placement: &Placement, errors: &mut Vec<PlacementError>) -> BTreeMap
 /// end's segment and returns can return to another instance than the one
 /// that chose.
 ///
-/// A stage whose segment has no class, because the class tables are
-/// refused, is not judged, so that it is reported once, as unclassed.
+/// A stage that is in no one segment, or whose segment has no class, is not
+/// judged, so that it is reported once, as unplaced or unclassed.
 fn bound(
     manifest: &Manifest,
     segment_of: &BTreeMap<String, String>,
     class_of: &BTreeMap<String, String>,
     errors: &mut Vec<PlacementError>,
 ) -> Vec<ClassBoundary> {
-    let class = |node: &str| class_of.get(&segment_of[node]).map(String::as_str);
+    let class = |node: &str| {
+        segment_of
+            .get(node)
+            .and_then(|segment| class_of.get(segment))
+            .map(String::as_str)
+    };
     let mut boundaries = Vec::new();
     let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     // The boundary hop the current hop is nested under, and the classes it
@@ -1106,7 +1109,7 @@ fn bound(
             (Role::Backward, &hop.backward),
         ] {
             for stage in stages {
-                if &segment_of[stage] != outer_segment {
+                if segment_of.get(stage).is_some_and(|s| s != outer_segment) {
                     errors.push(PlacementError::StageOffOuterSegment {
                         outer: hop.outer.clone(),
                         inner: hop.inner.clone(),
