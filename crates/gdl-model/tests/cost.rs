@@ -190,6 +190,9 @@ fn the_boundary_check_grows_with_the_hops() {
     );
 }
 
+/// What the report allocates. A search for each hop's boundary would
+/// allocate nothing; the report's own tests count its reads of the
+/// boundaries.
 #[test]
 fn the_report_grows_with_the_hops() {
     let cost = |n| {

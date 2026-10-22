@@ -1,6 +1,10 @@
+use std::borrow::Borrow;
 use std::fmt;
 
-use super::HopLayout;
+use super::{ClassBoundary, HopLayout};
+
+#[cfg(test)]
+mod tests;
 
 /// Aggregate segment crossings and anchors for one request through each
 /// root and, when the placement has classes, the WAN round trips its class
@@ -77,6 +81,33 @@ pub(super) struct HopCount {
     pub(super) boundary: Option<(String, String)>,
 }
 
+/// Each hop's line: its crossings and anchors and, for a boundary hop, its
+/// WAN round trips and classes. Each boundary is read once, by its hop's
+/// index, so the report grows with the hops. Generic over how a boundary
+/// is held so that a test can count every read: a search for each hop's
+/// boundary allocates nothing, so only a count of reads tells it from this.
+pub(super) fn hop_lines<B: Borrow<ClassBoundary>>(
+    hops: &[HopLayout],
+    boundaries: &[B],
+) -> Vec<HopCount> {
+    let mut lines: Vec<HopCount> = hops
+        .iter()
+        .map(|hop| HopCount {
+            crossings: hop.crossings(),
+            anchors: hop.anchors(),
+            wan_round_trips: 0,
+            boundary: None,
+        })
+        .collect();
+    for boundary in boundaries {
+        let boundary = boundary.borrow();
+        let line = &mut lines[boundary.hop];
+        line.wan_round_trips = spill_round_trips(&hops[boundary.hop]);
+        line.boundary = Some((boundary.from.clone(), boundary.into.clone()));
+    }
+    lines
+}
+
 /// The WAN round trips one request adds at a class boundary when the cell
 /// it is offered to is in another region, between warm peers. The
 /// `gdl.fwd` goes out and the inner end's output opens the outer end's
@@ -86,7 +117,7 @@ pub(super) struct HopCount {
 /// end the hop's only crossing out of the outer end's segment. `_hello` and
 /// a cold connection's handshake are paid once per pair of instances, not
 /// per request, and are not counted.
-pub(super) fn spill_round_trips(hop: &HopLayout) -> usize {
+fn spill_round_trips(hop: &HopLayout) -> usize {
     if hop.request_streams.last() == Some(&true) {
         2
     } else {

@@ -16,7 +16,7 @@ use boundary::bound;
 use classes::classify;
 pub use errors::{PlacementError, PlacementErrors, WireReason};
 pub use report::CrossingReport;
-use report::{HopCount, spill_round_trips};
+use report::hop_lines;
 
 /// Which nodes live in which segment.
 ///
@@ -434,24 +434,9 @@ impl Layout {
     /// the placement has classes, the WAN round trips each class boundary
     /// adds when the request spills to a cell in another region.
     pub fn report(&self) -> CrossingReport {
-        let mut hops: Vec<HopCount> = self
-            .hops
-            .iter()
-            .map(|hop| HopCount {
-                crossings: hop.crossings(),
-                anchors: hop.anchors(),
-                wan_round_trips: 0,
-                boundary: None,
-            })
-            .collect();
-        for boundary in &self.boundaries {
-            let count = &mut hops[boundary.hop];
-            count.wan_round_trips = spill_round_trips(&self.hops[boundary.hop]);
-            count.boundary = Some((boundary.from.clone(), boundary.into.clone()));
-        }
         CrossingReport {
             roots: self.roots,
-            hops,
+            hops: hop_lines(&self.hops, &self.boundaries),
             classed: !self.class_of.is_empty(),
         }
     }
