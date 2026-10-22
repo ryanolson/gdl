@@ -524,3 +524,30 @@ fn a_segment_cannot_take_the_contract_directory() {
         "{error}"
     );
 }
+
+/// The README's class example is a valid classing of the chat spec: its
+/// tables, with any segment tables it shows in place of the spec's, render.
+#[test]
+fn the_readmes_class_example_renders() {
+    let readme = std::fs::read_to_string(root().join("README.md")).expect("readme");
+    let block = readme
+        .split("```toml\n")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("```").map(|(block, _)| block))
+        .find(|block| block.contains("[class."))
+        .expect("a class example");
+    let spec = std::fs::read_to_string(example().join("gdl.toml")).expect("spec");
+    let text = if block.contains("[segment.") {
+        let (head, _) = spec.split_once("[segment.").expect("segments");
+        format!("{head}{block}")
+    } else {
+        format!("{spec}\n{block}")
+    };
+    let graph = std::fs::read_to_string(example().join("chat.gdl")).expect("graph");
+    let spec = gdl_gen::Spec::from_text(&text, &graph, &example()).expect("spec");
+    if let Err(error) =
+        gdl_gen::render(&spec, &example().join("segments"), &target("gdl-gen-tests"))
+    {
+        panic!("{error}\n{text}");
+    }
+}

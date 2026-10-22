@@ -187,11 +187,17 @@ path = "engine-mock"
 type = "chat_engine_mock::Engine"
 ```
 
-A spec can also group its segments into classes: sets of segments that deploy together.
+A spec can also group its segments into classes: sets of segments that deploy together. For the chat graph, with the engine in a class of its own, Preprocess's hop crosses into that class, so its backward stages move into Preprocess's segment (the boundary rule below):
 
 ```toml
+[segment.front]
+nodes = ["Frontend", "Preprocess", "Truncate", "Number", "Detokenize", "Format"]
+
+[segment.engine]
+nodes = ["Engine"]
+
 [class.global]
-segments = ["front", "post"]
+segments = ["front"]
 
 [class.model_x]
 segments = ["engine"]
