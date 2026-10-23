@@ -27,8 +27,9 @@ use gdl_cells::{CellState, LoadSummary};
 use tokio::sync::{broadcast, watch};
 use velo_hub::velo::{InstanceId, PeerInfo};
 
+use crate::CellHealth;
 use crate::fanout::Watchers;
-use crate::{CellHealth, CellWatchEvent, FollowEvent};
+use gdl_watch::{CellWatchEvent, FollowEvent};
 
 /// The followed cells, and the relay's watchers.
 pub(crate) struct Relay {
@@ -468,9 +469,10 @@ impl Stream for FollowsWatch {
 #[cfg(test)]
 mod tests {
     use super::{Installed, Relay};
-    use crate::{CellHealth, CellWatchEvent, FollowEvent, Quorum};
+    use crate::{CellHealth, Quorum};
     use futures::{FutureExt, StreamExt};
     use gdl_cells::CellState;
+    use gdl_watch::{CellWatchEvent, FollowEvent};
     use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
 
     fn peer() -> PeerInfo {

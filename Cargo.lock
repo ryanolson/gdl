@@ -758,6 +758,7 @@ dependencies = [
  "futures",
  "gdl-cells",
  "gdl-model",
+ "gdl-watch",
  "reqwest",
  "serde",
  "serde_json",
@@ -838,6 +839,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "gdl-watch"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "gdl-cells",
+ "gdl-model",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "velo",
 ]
 
 [[package]]

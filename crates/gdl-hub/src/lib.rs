@@ -7,18 +7,19 @@
 //! cell health endpoint (`GET /v1/ext/gdl-cell/health`), publishes the
 //! cell's record through a [`gdl_cells::CellDirectory`], and serves the
 //! cell's watch (`GET /v1/ext/gdl-cell/watch`): the cell's state and epoch
-//! and its entry instances, as [`CellWatchEvent`]s, which a hub that
-//! follows the cell reads with a [`CellWatcher`]. The hub of a cell whose
+//! and its entry instances, as [`gdl_watch::CellWatchEvent`]s, which a hub
+//! that follows the cell reads with a [`gdl_watch::CellWatcher`]. The hub of a cell whose
 //! class sends to other classes is such a follower: it finds their home
 //! cells in the directory, follows each over its watch, and relays what it
 //! follows to its own instances (`GET /v1/ext/gdl-cell/follows`, as
-//! [`FollowEvent`]s, which a [`CellWatcher`] reads too).
+//! [`gdl_watch::FollowEvent`]s, which a [`gdl_watch::CellWatcher`] reads
+//! too). The watches' events and their client are `gdl-watch`'s, so that a
+//! segment instance reads the relay without linking the hub.
 mod cell;
 mod fanout;
 mod follow;
 mod quorum;
 mod setup;
-mod watch;
 
 pub use cell::{
     CellError, CellHealth, CellReadiness, CellTiming, CellWatch, RequiredHealth, SegmentHealth,
@@ -26,7 +27,6 @@ pub use cell::{
 pub use follow::FollowsWatch;
 pub use quorum::Quorum;
 pub use setup::{cell_from_env, hub_builder};
-pub use watch::{CellWatchError, CellWatchEvent, CellWatcher, FollowEvent};
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};
 use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};

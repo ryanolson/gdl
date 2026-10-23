@@ -1,23 +1,30 @@
 //! The watches a cell's hub serves, as typed events: the cell's watch,
 //! what it tells a hub that follows the cell; the relay, what it follows,
 //! for its own instances; and the client that reads both.
+//!
+//! The hub (`gdl-hub`) serves them and a segment instance reads the relay,
+//! so the wire types, the routes, and the client live here, where both
+//! reach them without the runtime linking the hub's server.
 
 use gdl_cells::{CellState, LoadSummary};
 use serde::{Deserialize, Serialize};
-use velo_hub::velo::{InstanceId, PeerInfo};
+use velo::{InstanceId, PeerInfo};
 
 mod client;
-pub(crate) mod follows;
+mod follows;
 
 pub use client::{CellWatchError, CellWatcher};
 pub use follows::FollowEvent;
 
 /// The name the cell's extension mounts its routes under, at
 /// `/v1/ext/{EXTENSION}`.
-pub(crate) const EXTENSION: &str = "gdl-cell";
+pub const EXTENSION: &str = "gdl-cell";
 
-/// The watch's route, under the extension's.
-pub(crate) const ROUTE: &str = "/watch";
+/// The cell watch's route, under the extension's.
+pub const WATCH_ROUTE: &str = "/watch";
+
+/// The relay's route, under the extension's.
+pub const FOLLOWS_ROUTE: &str = "/follows";
 
 /// One event of a cell's watch, `GET /v1/ext/gdl-cell/watch` on the cell
 /// hub's public listener: each server-sent event's data is one of these,

@@ -19,7 +19,7 @@ use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, CellView};
 use tokio::task::{AbortHandle, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::CellWatcher;
+use gdl_watch::CellWatcher;
 
 mod link;
 mod relay;

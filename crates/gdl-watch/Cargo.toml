@@ -1,0 +1,26 @@
+[package]
+name = "gdl-watch"
+description = "The watches a cell's hub serves: the cell watch and the relay of what the hub follows, as typed events, and the client that reads them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The hub serves these watches and a segment instance reads the relay, so
+# both depend on this crate rather than the runtime on the hub: it takes
+# velo for the peer types alone, and never velo-hub's server.
+[dependencies]
+futures = { workspace = true }
+gdl-cells = { path = "../gdl-cells" }
+gdl-model = { path = "../gdl-model" }
+reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+velo = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

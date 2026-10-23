@@ -2,10 +2,7 @@
 
 use gdl_cells::{CellState, LoadSummary};
 use serde::{Deserialize, Serialize};
-use velo_hub::velo::{InstanceId, PeerInfo};
-
-/// The relay's route, under the extension's.
-pub(crate) const ROUTE: &str = "/follows";
+use velo::{InstanceId, PeerInfo};
 
 /// One event of the relay of what a cell's hub follows,
 /// `GET /v1/ext/gdl-cell/follows` on the hub's public listener: each

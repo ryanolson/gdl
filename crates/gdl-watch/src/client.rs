@@ -7,7 +7,7 @@ use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use serde::de::DeserializeOwned;
 
-use super::{CellWatchEvent, EXTENSION, FollowEvent, ROUTE, follows};
+use super::{CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, WATCH_ROUTE};
 
 /// How long a connection to a cell's hub may take to open.
 const CONNECT: Duration = Duration::from_secs(5);
@@ -50,7 +50,7 @@ impl CellWatcher {
         &self,
         hub: &str,
     ) -> Result<BoxStream<'static, CellWatchEvent>, CellWatchError> {
-        self.open(hub, ROUTE).await
+        self.open(hub, WATCH_ROUTE).await
     }
 
     /// Watch what the hub at `hub`, `host:port`, follows: its relay, each
@@ -62,7 +62,7 @@ impl CellWatcher {
         &self,
         hub: &str,
     ) -> Result<BoxStream<'static, FollowEvent>, CellWatchError> {
-        self.open(hub, follows::ROUTE).await
+        self.open(hub, FOLLOWS_ROUTE).await
     }
 
     async fn open<T: DeserializeOwned + Send + 'static>(
@@ -101,7 +101,9 @@ impl CellWatcher {
 pub struct CellWatchError(String);
 
 impl CellWatchError {
-    pub(crate) fn new(message: impl Into<String>) -> Self {
+    /// The error `message`: also the hub's, for a watch it refuses in
+    /// process.
+    pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }
@@ -181,7 +183,7 @@ mod tests {
     use super::{CellWatchEvent, events};
     use futures::StreamExt;
     use gdl_cells::CellState;
-    use velo_hub::velo::InstanceId;
+    use velo::InstanceId;
 
     fn parsed(chunks: &[&str]) -> Vec<CellWatchEvent> {
         let chunks: Vec<Result<Vec<u8>, ()>> = chunks

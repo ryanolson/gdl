@@ -37,7 +37,7 @@ use velo_hub::velo::{InstanceId, PeerInfo};
 
 use super::count::Watched;
 use crate::fanout::Watchers;
-use crate::{CellWatchError, CellWatchEvent};
+use gdl_watch::{CellWatchError, CellWatchEvent};
 
 /// The fan-out of one cell's watch.
 pub(super) struct Feed {
@@ -446,8 +446,8 @@ impl Stream for CellWatch {
 #[cfg(test)]
 mod tests {
     use super::{CellWatch, Feed, Watched};
-    use crate::CellWatchEvent;
     use futures::{FutureExt, StreamExt};
+    use gdl_watch::CellWatchEvent;
     use velo_hub::store::{Incarnation, Removal};
     use velo_hub::velo::discovery::ServiceEvent;
     use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};

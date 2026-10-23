@@ -7,7 +7,7 @@ use futures::StreamExt;
 use gdl_cells::CellRecord;
 
 use super::relay::{Installed, Relay};
-use crate::{CellWatchEvent, CellWatcher};
+use gdl_watch::{CellWatchEvent, CellWatcher};
 
 /// Follow the cell of `record` in `generation` until its watch ends or
 /// fails, then drop it from the relay at once; after `refollow`, return

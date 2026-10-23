@@ -17,8 +17,9 @@ use common::{
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
 use gdl_cells::{CellDirectory, CellRecord, CellState, Withdrawal};
-use gdl_hub::{CellReadiness, CellTiming, CellWatcher, FollowEvent};
+use gdl_hub::{CellReadiness, CellTiming};
 use gdl_model::SegmentPhase;
+use gdl_watch::{CellWatcher, FollowEvent};
 use velo_hub::Hub;
 use velo_hub::velo::{InstanceId, PeerInfo};
 

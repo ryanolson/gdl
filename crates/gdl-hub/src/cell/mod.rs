@@ -15,8 +15,9 @@ use velo_hub::{
 };
 
 use crate::follow::{Follower, FollowsWatch, Relay};
-use crate::{CellWatchError, CellWatcher, GraphAdmission, Quorum};
+use crate::{GraphAdmission, Quorum};
 use feed::Feed;
+use gdl_watch::{CellWatchError, CellWatcher};
 
 /// How long a watch that arrives before the cell's record is first stored
 /// waits for it: a follower finds the cell by its record, so it can ask
@@ -48,7 +49,7 @@ pub use feed::CellWatch;
 /// require cells of, at least that many followed cells of the class have
 /// a complete snapshot and last said they are `ready`, and 503 otherwise,
 /// with a [`CellHealth`] body; and `GET watch`, the cell's watch for the hubs that
-/// follow it: server-sent events, each one [`crate::CellWatchEvent`] as
+/// follow it: server-sent events, each one [`gdl_watch::CellWatchEvent`] as
 /// JSON, with a keep-alive every 10 s. The watch carries the cell's state
 /// and epoch and its entry instances, ready and retired, with their
 /// `PeerInfo` from [`GraphAdmission`]'s members, so the hub must run
@@ -68,7 +69,7 @@ pub use feed::CellWatch;
 /// cell of the class (one of its own region and deployment, whose record
 /// is `ready` or `degraded`) over the cell's watch, one link per cell. It
 /// relays what it follows on `GET follows`, server-sent events, each one
-/// [`crate::FollowEvent`] as JSON, with the same keep-alive and buffer as
+/// [`gdl_watch::FollowEvent`] as JSON, with the same keep-alive and buffer as
 /// the cell's watch: each followed cell's state, then its retired entry
 /// instances, then those it exposes, the ready ones that have not retired
 /// while its state is `ready` or `degraded`. A follow is dropped as soon
@@ -250,7 +251,7 @@ impl<D: CellDirectory> CellReadiness<D> {
 }
 
 impl<D: CellDirectory> Extension for CellReadiness<D> {
-    const NAME: &'static str = crate::watch::EXTENSION;
+    const NAME: &'static str = gdl_watch::EXTENSION;
     type Registration = ();
     type Staged = ();
 
@@ -359,7 +360,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 }),
             )
             .route(
-                crate::watch::ROUTE,
+                gdl_watch::WATCH_ROUTE,
                 get(move || {
                     let feed = Arc::clone(&feed);
                     async move {
@@ -375,7 +376,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 }),
             )
             .route(
-                crate::watch::follows::ROUTE,
+                gdl_watch::FOLLOWS_ROUTE,
                 get(move || {
                     let watch = relay.watch();
                     async move { crate::fanout::serve(watch.into_events()) }
