@@ -4,15 +4,25 @@
 //! watch, keeping the newest record of each cell and enforcing its lease
 //! on the reader's own clock.
 //!
+//! The first backend is here too: [`MemoryDirectory`], one directory
+//! shared by every hub in a process, for tests that run several cells in
+//! one process. Behind the `conformance` feature, [`conformance`] is the
+//! suite every backend must pass; a backend crate enables the feature in
+//! its dev-dependencies and runs [`conformance::run`] from a test.
+//!
 //! A backend crate and the hub both depend on this crate, so it holds no
 //! transport: no velo, no velo-hub, no HTTP. The hub's publishing (its
 //! quorum and the state it derives), the follow link between hubs, and
 //! the cell policy that picks a cell live elsewhere.
 
+#[cfg(feature = "conformance")]
+pub mod conformance;
 mod directory;
+mod memory;
 mod record;
 mod view;
 
 pub use directory::{CellDirectory, CellEvent, DirectoryError, ResumeToken};
+pub use memory::{MemoryDirectory, MemoryLimits, MemoryWatch};
 pub use record::{CellRecord, CellState, LoadSummary, Version, Withdrawal};
 pub use view::CellView;

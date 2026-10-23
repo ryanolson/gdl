@@ -623,7 +623,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl` | What a node crate depends on, without velo: the request context, node roles, local composition, selectors, metrics, and the derives |
 | `crates/gdl-runtime` | The runtime: segments and crossings over velo, discovery, the segment binary, and `graph!`; it re-exports `gdl` and the model |
 | `crates/gdl-model` | The model without the runtime: manifest, placement, layout, and diagrams. It builds for wasm, so the composer can run the same rules in a browser |
-| `crates/gdl-cells` | The cell plane's shared types, without velo: the record each cell's hub publishes, the `CellDirectory` trait its backends implement, and the reader's view, which keeps each cell's newest record and enforces its lease on the reader's clock |
+| `crates/gdl-cells` | The cell plane's shared types, without velo: the record each cell's hub publishes, the `CellDirectory` trait its backends implement, the `memory` backend, the reader's view, which keeps each cell's newest record and enforces its lease on the reader's clock, and the conformance suite every backend runs (the `conformance` feature) |
 | `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract |
 | `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |
 | `crates/gdl-extract` | The source reader: what a crate offers to graphs (messages, exports, and nodes), read from its source without building it; and the working catalogue of such offers |
