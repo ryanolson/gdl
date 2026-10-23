@@ -15,9 +15,12 @@
 //! lock, so that no change between the two is lost or seen twice.
 //!
 //! The `ready` and `retired` watches are two streams that velo-hub does
-//! not order with each other: an instance whose withdrawal from `ready`
-//! the loopback delivers before its retirement, and that leaves before the
-//! retirement arrives, is sent `left` without `retired`.
+//! not order with each other, and its removal hook names no services, so
+//! one interleaving cannot be ordered here: the loopback delivers an
+//! instance's withdrawal from `ready`, the hub removes the instance, and
+//! only then does the retirement it announced first arrive. The instance
+//! is sent `left` without `retired`; it is gone either way. Reading
+//! velo-hub's service directory in process (its V4) would close it.
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
@@ -657,6 +660,42 @@ mod tests {
         feed.removed(removal(id, 1));
         feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
         feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
+        feed.observe(0, Watched::Retired, &ServiceEvent::Removed(id));
+        assert_eq!(
+            pending(&mut watch),
+            [
+                CellWatchEvent::Ready {
+                    segment: "f".into(),
+                    peer: member,
+                },
+                CellWatchEvent::Retired {
+                    segment: "f".into(),
+                    instance: id,
+                },
+                CellWatchEvent::Left {
+                    segment: "f".into(),
+                    instance: id,
+                },
+            ]
+        );
+    }
+
+    /// The interleaving the extension cannot order: the loopback delivers
+    /// an instance's withdrawal from `ready`, then the hub removes it, then
+    /// its earlier retirement arrives. Nothing it holds says a retirement
+    /// is still on its way, so `left` goes without `retired`.
+    #[tokio::test]
+    #[ignore = "B-2 (review round 2): velo-hub's removal hook names no services and its ready and retired watches are not ordered with each other; lifting it needs V4, a read of the service directory in process"]
+    async fn a_retirement_delivered_after_the_withdrawal_and_the_departure_comes_before_left() {
+        let feed = feed();
+        let mut watch = watch(&feed);
+        let member = peer();
+        let id = member.instance_id();
+        feed.joined("f", Incarnation::from_u64(1), member.clone());
+        feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
+        feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
+        feed.removed(removal(id, 1));
+        feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
         feed.observe(0, Watched::Retired, &ServiceEvent::Removed(id));
         assert_eq!(
             pending(&mut watch),
