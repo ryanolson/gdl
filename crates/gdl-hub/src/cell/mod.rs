@@ -73,6 +73,7 @@ impl<D: CellDirectory> CellReadiness<D> {
                 "[cell] hub: a cell's hub publishes the address other cells' hubs reach it at, and none is set",
             )
         })?;
+        gdl_model::check_hub_address(&hub).map_err(CellError::new)?;
         if timing.heartbeat.is_zero() {
             return Err(CellError::new("the cell's heartbeat is zero"));
         }

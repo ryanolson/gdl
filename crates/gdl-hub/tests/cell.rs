@@ -516,8 +516,14 @@ async fn a_hub_without_a_cell_has_no_cell_endpoint() {
 #[test]
 fn settings_a_cells_hub_cannot_publish_are_refused() {
     type Change = fn(&mut CellSettings);
-    let cases: [(&str, Change, CellTiming); 6] = [
+    let cases: [(&str, Change, CellTiming); 7] = [
         ("[cell] hub", |cell| cell.hub = None, timing()),
+        // Settings made in code, not read: the address is checked here too.
+        (
+            "[cell] hub = \"http://hub:1337\"",
+            |cell| cell.hub = Some("http://hub:1337".into()),
+            timing(),
+        ),
         (
             "the placement has no class `model_y`",
             |cell| cell.class = "model_y".into(),

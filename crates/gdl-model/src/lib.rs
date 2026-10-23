@@ -23,7 +23,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub use cell::{CellSettings, DirectoryBackend, check_cell_name, check_region_name};
+pub use cell::{
+    CellSettings, DirectoryBackend, check_cell_name, check_hub_address, check_region_name,
+};
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{
     DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,

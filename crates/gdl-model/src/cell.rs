@@ -137,8 +137,9 @@ fn refuse(problems: Vec<String>) -> Result<(), Error> {
 /// name of letters, digits, `-`, and `.`, an IPv4 address, or a bracketed
 /// IPv6 address, and a port from 1 to 65535. Nothing else, so that a URL
 /// or a stray space is refused where it is written rather than where
-/// another hub dials it.
-fn check_hub_address(address: &str) -> Result<(), String> {
+/// another hub dials it. Reading [`CellSettings`] applies it; a hub
+/// applies it again to settings made in code.
+pub fn check_hub_address(address: &str) -> Result<(), String> {
     let shaped = address.rsplit_once(':').is_some_and(|(host, port)| {
         let port = port.parse::<u16>().is_ok_and(|port| port > 0)
             && port.bytes().all(|b| b.is_ascii_digit());
