@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use velo_hub::axum::response::{IntoResponse, Response};
 use velo_hub::axum::{
     Json, Router,
+    extract::Query,
     http::StatusCode,
     routing::{get, post},
 };
@@ -34,6 +35,7 @@ const SETTLE: Duration = Duration::from_secs(5);
 mod count;
 mod drain;
 mod feed;
+mod followers;
 mod judge;
 mod load;
 mod publish;
@@ -121,7 +123,13 @@ pub use feed::CellWatch;
 /// [`CellReadiness::drain`] in process. From then its state is `draining`
 /// whatever its quorum, so its health endpoint answers 503, its record and
 /// its watch say so, and no chooser chooses it; a drain cannot be
-/// cancelled. A cell whose class no hop enters cannot be drained.
+/// cancelled. A cell whose class no hop enters cannot be drained. A hub
+/// that follows the cell names its own cell in its watch's query,
+/// `?class=<class>&cell=<cell>`, and counts among the cell's followers
+/// while the watch is open ([`CellReadiness::followers`]); once the cell
+/// drains and no cell follows it, its watch says so, once
+/// ([`gdl_watch::CellWatchEvent::Unfollowed`]), and its entry instances
+/// stop taking work from other cells then rather than at their bound.
 ///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,
@@ -292,6 +300,12 @@ impl<D: CellDirectory> CellReadiness<D> {
         self.feed.watchers()
     }
 
+    /// The cells that follow this one, by class and name, as their open
+    /// watches name them, as it changes.
+    pub fn followers(&self) -> watch::Receiver<BTreeSet<(String, String)>> {
+        self.feed.followers()
+    }
+
     /// A watch of what the hub follows, in process: what `GET follows`
     /// serves, as typed events. It ends at once if the hub has stopped.
     pub fn follows(&self) -> FollowsWatch {
@@ -427,6 +441,10 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                         relay: Arc::clone(&self.relay),
                         watcher: watcher.clone(),
                         refollow: self.timing.refollow,
+                        me: gdl_watch::Follower {
+                            class: self.record.class.clone(),
+                            cell: self.record.name.clone(),
+                        },
                         class: class.clone(),
                         region: self.record.region.clone(),
                         contract: self.record.contract,
@@ -475,11 +493,16 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             )
             .route(
                 gdl_watch::WATCH_ROUTE,
-                get(move || {
+                get(move |Query(query): Query<WatchQuery>| {
                     let feed = Arc::clone(&feed);
                     async move {
-                        let watch = tokio::time::timeout(SETTLE, feed.watch())
-                            .await
+                        let watch = match (query.class, query.cell) {
+                            (Some(class), Some(cell)) => {
+                                tokio::time::timeout(SETTLE, feed.follow((class, cell))).await
+                            }
+                            _ => tokio::time::timeout(SETTLE, feed.watch()).await,
+                        };
+                        let watch = watch
                             .unwrap_or_else(|_| {
                                 Err(CellWatchError::new(
                                     "the cell has not published its record yet, so its epoch is not settled",
@@ -615,6 +638,15 @@ fn choosers(layout: &gdl_model::Layout, class: &str) -> Choosers {
             .into_iter()
             .map(|(segment, classes)| (segment, classes.into_iter().collect())),
     )
+}
+
+/// The query of a watch: the follower it names, if it names one
+/// ([`gdl_watch::Follower`]); one that names only a class or only a cell
+/// names none.
+#[derive(Deserialize)]
+struct WatchQuery {
+    class: Option<String>,
+    cell: Option<String>,
 }
 
 /// The watch as server-sent events, each one JSON value; a hub that has

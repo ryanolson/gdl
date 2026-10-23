@@ -8,7 +8,7 @@ use gdl_cells::CellRecord;
 use tokio_util::sync::CancellationToken;
 
 use super::relay::{Installed, Relay};
-use gdl_watch::{CellWatchEvent, CellWatcher};
+use gdl_watch::{CellWatchEvent, CellWatcher, Follower};
 
 /// Follow the cell of `record` in `generation` until its watch ends or
 /// fails, or until the relay closes the follow (`close`), then end it in
@@ -20,13 +20,14 @@ use gdl_watch::{CellWatchEvent, CellWatcher};
 pub(super) async fn run(
     relay: Arc<Relay>,
     watcher: CellWatcher,
+    me: Follower,
     record: CellRecord,
     generation: u64,
     close: CancellationToken,
     refollow: Duration,
 ) -> (String, u64, bool) {
     let closed = tokio::select! {
-        () = follow(&relay, &watcher, &record, generation) => false,
+        () = follow(&relay, &watcher, &me, &record, generation) => false,
         () = close.cancelled() => true,
     };
     relay.end(&record.class, &record.name, generation);
@@ -34,12 +35,18 @@ pub(super) async fn run(
     (record.name, generation, closed)
 }
 
-/// Read the cell's watch: its snapshot, installed in the relay once it is
-/// complete and only if it is the cell of `record` in the record's epoch,
-/// then each change.
-async fn follow(relay: &Relay, watcher: &CellWatcher, record: &CellRecord, generation: u64) {
+/// Read the cell's watch, as `me`: its snapshot, installed in the relay
+/// once it is complete and only if it is the cell of `record` in the
+/// record's epoch, then each change.
+async fn follow(
+    relay: &Relay,
+    watcher: &CellWatcher,
+    me: &Follower,
+    record: &CellRecord,
+    generation: u64,
+) {
     let cell = record.name.as_str();
-    let mut events = match watcher.watch(&record.hub).await {
+    let mut events = match watcher.follow(&record.hub, me).await {
         Ok(events) => events,
         Err(error) => {
             tracing::info!(cell, %error, "a followed cell's watch did not begin");

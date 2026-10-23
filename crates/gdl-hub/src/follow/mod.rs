@@ -50,6 +50,9 @@ pub(crate) struct Follower<D> {
     /// How long a follow that ended waits before the cell may be followed
     /// again.
     pub(crate) refollow: Duration,
+    /// The follower's own cell, which its watches name, so that a
+    /// followed cell knows who follows it.
+    pub(crate) me: gdl_watch::Follower,
     /// The class followed.
     pub(crate) class: String,
     /// The follower's own region: its home cells are those of this region.
@@ -231,6 +234,7 @@ impl<D: CellDirectory> Follows<'_, D> {
         let link = self.links.spawn(link::run(
             Arc::clone(relay),
             self.follower.watcher.clone(),
+            self.follower.me.clone(),
             record,
             generation,
             close,

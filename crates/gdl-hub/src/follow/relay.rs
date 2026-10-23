@@ -634,8 +634,9 @@ impl Installed {
                 }
             }
             // A watch has one snapshot, which the link reads before it
-            // installs the cell.
-            CellWatchEvent::Cell { .. } | CellWatchEvent::Synced => {}
+            // installs the cell; that the cell has no follower left is for
+            // the cell's own instances.
+            CellWatchEvent::Cell { .. } | CellWatchEvent::Synced | CellWatchEvent::Unfollowed => {}
         }
     }
 

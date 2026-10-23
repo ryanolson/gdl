@@ -190,7 +190,8 @@ async fn unregistered(cells: &Cells, instance: InstanceId) {
 /// A model cell that drains is marked not offered, at the follow's next
 /// revision; each chooser of the global cell stops offering to it and
 /// acknowledges, and once both have, the global's hub closes the follow,
-/// and the choosers let go of it.
+/// the choosers let go of it, and the model cell's hub sees its follower
+/// go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_draining_cell_is_let_go_once_every_chooser_acknowledged() {
     let spec = spec_of(placement());
@@ -244,6 +245,11 @@ async fn a_draining_cell_is_let_go_once_every_chooser_acknowledged() {
     .await
     .expect("the global's hub no longer follows the cell in time")
     .expect("the extension runs");
+    let mut followers = m1.readiness.followers();
+    tokio::time::timeout(WAIT, followers.wait_for(|cells| cells.is_empty()))
+        .await
+        .expect("the model cell's hub saw its follower go in time")
+        .expect("the extension runs");
     for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
@@ -360,6 +366,118 @@ async fn a_lost_link_is_not_offered_at_once_and_kept_until_its_leases_end() {
     tokio::time::timeout(DRAIN + WAIT, unregistered(&cells, entry))
         .await
         .expect("let go of within the drain");
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// An entry instance's bound in [`a_drain_ends_early_once_its_followers_let_go`]:
+/// a setup timeout of 10 s and twice the summary period.
+const LONG_BOUND: Duration = Duration::from_secs(12);
+
+/// A long bound's runtime settings: a setup timeout of 10 s.
+const LONG: &str = "[runtime]\nsetup_timeout_ms = 10000\ndrain_ms = 2000\n";
+
+/// Wait, within `within`, until `instance`, an entry instance, declines
+/// offers.
+async fn declining<H>(instance: &Running<H>, within: Duration) {
+    tokio::time::timeout(within, async {
+        while !instance.segment.declines_offers() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the entry instance declined offers in time");
+}
+
+/// A draining cell whose only follower, the global cell, lets go of it
+/// once its chooser holds no offer to it ends its entry instance's bound
+/// early: the entry declines offers from then, long before its bound would
+/// have run out, and the cell's hub sees no follower.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_ends_early_once_its_followers_let_go() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, _global) = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let m1 = common::boundary::model_summarized(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        LONG,
+        &|runtime| runtime,
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    let cells = tables(&chooser);
+    offered(&cells).await;
+    ask(&chooser.segment).await.expect("answered");
+    let mut followers = m1.readiness.followers();
+    tokio::time::timeout(WAIT, followers.wait_for(|cells| cells.len() == 1))
+        .await
+        .expect("the global follows the cell in time")
+        .expect("the extension runs");
+
+    let started = std::time::Instant::now();
+    m1.readiness.drain().await.expect("the cell drains");
+    declining(&m1.entries[0], LONG_BOUND / 2).await;
+    assert!(
+        started.elapsed() < LONG_BOUND / 2,
+        "the bound was not ended early: {:?}",
+        started.elapsed()
+    );
+    assert!(m1.readiness.followers().borrow().is_empty());
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// How long an entry instance of [`RUNTIME`]'s cells takes new work after
+/// its cell's drain reaches it: the setup timeout and twice the summary
+/// period.
+const BOUND: Duration = Duration::from_secs(3);
+
+/// A follower that does not let go, since its chooser holds an offer to
+/// the cell, leaves the bound to end the entry instance's intake: it
+/// declines offers only once the bound has passed, while the global still
+/// follows the cell. Once the response ends, the global lets go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_bound_ends_a_drain_whose_follower_holds_an_offer() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, _global) = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let m1 = cell(&spec, &directory, &events).await;
+    let cells = tables(&chooser);
+    offered(&cells).await;
+    let held = gated(&chooser, &events, "held").await;
+
+    let started = std::time::Instant::now();
+    m1.readiness.drain().await.expect("the cell drains");
+    declining(&m1.entries[0], BOUND + WAIT).await;
+    assert!(
+        started.elapsed() >= BOUND,
+        "declined {:?} after the drain began, within its bound",
+        started.elapsed()
+    );
+    assert_eq!(
+        m1.readiness.followers().borrow().len(),
+        1,
+        "the global let go while its chooser holds an offer"
+    );
+    release(&events, "held");
+    tokio::time::timeout(WAIT, held)
+        .await
+        .expect("the held request answered in time")
+        .expect("the request's task")
+        .expect("the held request answered");
+    let mut followers = m1.readiness.followers();
+    tokio::time::timeout(WAIT, followers.wait_for(|cells| cells.is_empty()))
+        .await
+        .expect("the global let go in time")
+        .expect("the extension runs");
     for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }

@@ -25,8 +25,22 @@ pub use follows::FollowEvent;
 /// `/v1/ext/{EXTENSION}`.
 pub const EXTENSION: &str = "gdl-cell";
 
-/// The cell watch's route, under the extension's.
+/// The cell watch's route, under the extension's. A follower names itself
+/// in the query, `?class=<class>&cell=<cell>`, its own cell by its class
+/// and its name within the class, and counts among the cell's followers
+/// while its watch is open; a watch that names no follower counts for
+/// nothing.
 pub const WATCH_ROUTE: &str = "/watch";
+
+/// A cell that follows another, as its watch of that cell names it: the
+/// query of [`WATCH_ROUTE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Follower {
+    /// The follower's class.
+    pub class: String,
+    /// The follower's cell, named within its class.
+    pub cell: String,
+}
 
 /// The relay's route, under the extension's.
 pub const FOLLOWS_ROUTE: &str = "/follows";
@@ -100,7 +114,8 @@ pub struct LoadReport {
 /// hub's public listener: each server-sent event's data is one of these,
 /// as JSON tagged by `event`.
 ///
-/// A watch begins with a snapshot: [`CellWatchEvent::Cell`], then the
+/// A watch begins with a snapshot: [`CellWatchEvent::Cell`], then
+/// [`CellWatchEvent::Unfollowed`] if the cell has been told so, then the
 /// retired entry instances, then the ready ones that have not retired,
 /// then [`CellWatchEvent::Synced`]. After it, each change as it happens.
 /// The retired instances come first, so that a follower never makes an
@@ -179,4 +194,9 @@ pub enum CellWatchEvent {
         /// The instance.
         instance: InstanceId,
     },
+    /// The cell drains, and no cell follows it any more: each that did has
+    /// let go of it, which a cell's hub does only once none of its
+    /// choosers holds an offer to it, so no offer from another cell is
+    /// still on its way. Sent once, and in every snapshot after it.
+    Unfollowed,
 }

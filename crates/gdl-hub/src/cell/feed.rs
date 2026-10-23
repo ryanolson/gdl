@@ -14,6 +14,10 @@
 //! lock, and a watch takes its snapshot and subscribes under the same
 //! lock, so that no change between the two is lost or seen twice.
 //!
+//! The feed also counts the cells that follow this one, by the watches
+//! their hubs hold open ([`super::followers`]), and tells its watchers once
+//! the cell drains and none does any more, under the same lock.
+//!
 //! The feed also keeps the entry instances' load reports
 //! ([`super::load`]), under the same lock, so that a report is taken only
 //! from an instance that is usable when it arrives, and the summary made
@@ -27,9 +31,9 @@
 //! is sent `left` without `retired`; it is gone either way. Reading
 //! velo-hub's service directory in process (its V4) would close it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -45,6 +49,7 @@ use velo_hub::velo::discovery::ServiceEvent;
 use velo_hub::velo::{InstanceId, PeerInfo};
 
 use super::count::Watched;
+use super::followers::{Followers, Following, Key};
 use super::load::Reports;
 use crate::fanout::Watchers;
 use gdl_watch::{CellWatchError, CellWatchEvent};
@@ -80,6 +85,7 @@ impl Feed {
                 entries: HashMap::new(),
                 unresolved: HashMap::new(),
                 loads: Reports::new(period),
+                followers: Followers::new(),
                 events: broadcast::channel(buffer).0,
             }),
             epoch: watch::Sender::new(None),
@@ -97,6 +103,34 @@ impl Feed {
     /// is withdrawn. It counts among the watchers from
     /// the moment it is asked for, so that one held waiting is seen.
     pub(super) async fn watch(&self) -> Result<CellWatch, CellWatchError> {
+        Ok(CellWatch {
+            events: self.open(None).await?,
+            _following: None,
+        })
+    }
+
+    /// [`Feed::watch`], for `follower`, which counts among the cell's
+    /// followers from its snapshot until the watch is dropped.
+    pub(super) async fn follow(
+        self: &Arc<Self>,
+        follower: Key,
+    ) -> Result<CellWatch, CellWatchError> {
+        let events = self.open(Some(&follower)).await?;
+        Ok(CellWatch {
+            events,
+            _following: Some(Following {
+                feed: Arc::clone(self),
+                follower,
+            }),
+        })
+    }
+
+    /// A watch's events, counted for `follower` from its snapshot, which
+    /// is taken under the same lock.
+    async fn open(
+        &self,
+        follower: Option<&Key>,
+    ) -> Result<BoxStream<'static, CellWatchEvent>, CellWatchError> {
         let counted = self.watchers.count();
         let mut settled = self.epoch.subscribe();
         let epoch = tokio::select! {
@@ -110,15 +144,31 @@ impl Feed {
             )
         })?;
         let (snapshot, events) = {
-            let shared = self.lock();
+            let mut shared = self.lock();
+            if let Some(follower) = follower {
+                shared.followers.followed(follower);
+            }
             (
                 shared.snapshot(&self.name, &self.class, epoch),
                 shared.events.subscribe(),
             )
         };
-        Ok(CellWatch {
-            events: self.watchers.stream(counted, snapshot, events),
-        })
+        Ok(self.watchers.stream(counted, snapshot, events))
+    }
+
+    /// One of `follower`'s watches ended: the draining cell's watchers are
+    /// told if no cell follows it any more.
+    pub(super) fn unfollow(&self, follower: &Key) {
+        let mut shared = self.lock();
+        let state = shared.state;
+        if shared.followers.left(follower, state) {
+            shared.send(CellWatchEvent::Unfollowed);
+        }
+    }
+
+    /// The cells that follow this one, as they change.
+    pub(super) fn followers(&self) -> watch::Receiver<BTreeSet<Key>> {
+        self.lock().followers.subscribe()
     }
 
     /// How many watches are open or waiting to begin, as it changes.
@@ -148,6 +198,9 @@ impl Feed {
         if shared.state != state {
             shared.state = state;
             shared.send(CellWatchEvent::State { state });
+            if shared.followers.settle(state) {
+                shared.send(CellWatchEvent::Unfollowed);
+            }
         }
     }
 
@@ -298,6 +351,8 @@ struct Shared {
     /// The members of the entry segments, and those that left whose `left`
     /// waits for the loopback.
     entries: HashMap<InstanceId, Entry>,
+    /// The cells that follow this one.
+    followers: Followers,
     /// Instances the loopback shows in an entry segment's services that the
     /// hub's members do not hold, with their segment: one whose services
     /// were committed before its admission, or one whose loopback events
@@ -471,9 +526,10 @@ impl Shared {
         }
     }
 
-    /// The cell, then every retired entry instance, then every ready one,
-    /// then the marker: retirements first, so that a follower that applies
-    /// the events in order never makes a retired instance routable.
+    /// The cell, then whether no cell follows the draining cell, then
+    /// every retired entry instance, then every ready one, then the
+    /// marker: retirements first, so that a follower that applies the
+    /// events in order never makes a retired instance routable.
     fn snapshot(&self, name: &str, class: &str, epoch: u64) -> Vec<CellWatchEvent> {
         let mut retired: Vec<(usize, InstanceId)> = Vec::new();
         let mut ready: Vec<(usize, InstanceId, &PeerInfo)> = Vec::new();
@@ -494,6 +550,9 @@ impl Shared {
             state: self.state,
             load: self.loads.summary(),
         });
+        if self.followers.unfollowed() {
+            events.push(CellWatchEvent::Unfollowed);
+        }
         events.extend(
             retired
                 .into_iter()
@@ -521,6 +580,8 @@ impl Shared {
 /// Dropping it releases what the hub holds for it.
 pub struct CellWatch {
     events: BoxStream<'static, CellWatchEvent>,
+    /// The follower the watch counts for, until it is dropped.
+    _following: Option<Following>,
 }
 
 impl Stream for CellWatch {

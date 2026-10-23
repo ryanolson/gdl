@@ -7,7 +7,7 @@ use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use serde::de::DeserializeOwned;
 
-use super::{CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, WATCH_ROUTE};
+use super::{CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower, WATCH_ROUTE};
 
 /// How long a connection to a cell's hub may take to open.
 const CONNECT: Duration = Duration::from_secs(5);
@@ -50,7 +50,17 @@ impl CellWatcher {
         &self,
         hub: &str,
     ) -> Result<BoxStream<'static, CellWatchEvent>, CellWatchError> {
-        self.open(hub, WATCH_ROUTE).await
+        self.open(hub, WATCH_ROUTE, None).await
+    }
+
+    /// [`CellWatcher::watch`], as `follower`: the cell's hub counts it
+    /// among the cell's followers while the watch is open.
+    pub async fn follow(
+        &self,
+        hub: &str,
+        follower: &Follower,
+    ) -> Result<BoxStream<'static, CellWatchEvent>, CellWatchError> {
+        self.open(hub, WATCH_ROUTE, Some(follower)).await
     }
 
     /// Watch what the hub at `hub`, `host:port`, follows: its relay, each
@@ -62,19 +72,22 @@ impl CellWatcher {
         &self,
         hub: &str,
     ) -> Result<BoxStream<'static, FollowEvent>, CellWatchError> {
-        self.open(hub, FOLLOWS_ROUTE).await
+        self.open(hub, FOLLOWS_ROUTE, None).await
     }
 
     async fn open<T: DeserializeOwned + Send + 'static>(
         &self,
         hub: &str,
         route: &str,
+        follower: Option<&Follower>,
     ) -> Result<BoxStream<'static, T>, CellWatchError> {
         gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
         let url = format!("http://{hub}/v1/ext/{EXTENSION}{route}");
-        let mut response = self
-            .http
-            .get(&url)
+        let mut request = self.http.get(&url);
+        if let Some(follower) = follower {
+            request = request.query(follower);
+        }
+        let mut response = request
             .send()
             .await
             .map_err(|e| CellWatchError(format!("GET {url}: {e}")))?;
