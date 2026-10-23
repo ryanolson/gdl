@@ -4,6 +4,7 @@
 //! everything here is the same for every segment, so it is written once
 //! and tested here rather than in each generated crate.
 
+mod barrier;
 mod system;
 
 use std::collections::BTreeMap;
@@ -366,15 +367,11 @@ impl<H> ProcessConfig<H> {
             cell.check(&layout, segment)
                 .map_err(|e| placement(e.to_string()))?;
         }
-        // In a cell, the start barrier stops at the class boundary: the
-        // cells of another class come and go on their own, and are found
-        // through the hub's relay, not waited for.
-        let waited =
-            |other: &str| self.cell.is_none() || layout.class_of(other) == layout.class_of(segment);
+        let barrier = barrier::Barrier::new(&layout, segment, self.cell.is_some());
         let inner: Vec<String> = layout
             .sends_to(segment)
             .into_iter()
-            .filter(|other| waited(other))
+            .filter(|other| barrier.waits_for(other))
             .collect();
         // The segments that send to this one: their instances are the ones
         // that must stop routing here before a retirement may end.
@@ -395,12 +392,7 @@ impl<H> ProcessConfig<H> {
         if let Some(unknown) = counts.keys().find(|s| !segments.contains(&s.as_str())) {
             return Err(placement(format!("{table}: no segment `{unknown}`")));
         }
-        if let Some(other) = counts.keys().find(|s| !waited(s)) {
-            return Err(placement(format!(
-                "{table}: `{other}` is in class `{}`, and an instance in a cell waits only for the segments of its own class",
-                layout.class_of(other).unwrap_or_default()
-            )));
-        }
+        barrier.check(table, counts)?;
         if !other.is_empty() {
             return Err(placement(
                 "[instances] counts the instances a roster directory waits for, [min_replicas] the loaded instances a hub waits for; a deployment uses one",
@@ -409,7 +401,7 @@ impl<H> ProcessConfig<H> {
         // Every instance waits for the same membership.
         let expect: Vec<(&str, usize)> = segments
             .iter()
-            .filter(|s| waited(s))
+            .filter(|s| barrier.waits_for(s))
             .map(|s| (*s, counts.get(*s).copied().unwrap_or(1)))
             .collect();
         let wait = Duration::from_millis(self.rendezvous_ms);
