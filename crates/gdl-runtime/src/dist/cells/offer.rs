@@ -28,11 +28,37 @@ use crate::dist::runtime::{Handed, Runtime};
 pub(crate) enum Answer {
     /// The cell's entry took the request.
     Accepted(Accepted),
-    /// The cell declined it, or it never left: another cell may be
-    /// offered it.
-    Declined(Error),
+    /// The cell did not take it: another cell may be offered it.
+    Missed(Missed),
     /// The request's error: no other cell is offered it.
     Failed(Error),
+}
+
+/// Why a cell did not take a request, with its error.
+pub(crate) enum Missed {
+    /// The cell's entry declined it.
+    Declined(Error),
+    /// The hand-off never left this instance: no cell said anything.
+    Unsent(Error),
+}
+
+impl Missed {
+    /// What a request that `self` was the last word on fails with, now
+    /// that `then` came of its next offer: the last refusal, unless no
+    /// cell has refused it yet. A hand-off that never left is not a cell's
+    /// answer, so it never replaces one.
+    fn then(self, then: Missed) -> Missed {
+        match (self, then) {
+            (Missed::Declined(refusal), Missed::Unsent(_)) => Missed::Declined(refusal),
+            (_, then) => then,
+        }
+    }
+
+    fn into_error(self) -> Error {
+        match self {
+            Missed::Declined(error) | Missed::Unsent(error) => error,
+        }
+    }
 }
 
 /// What became of an offer, as `crossing` sent it to the cell `cell`.
@@ -48,11 +74,11 @@ pub(crate) fn answer(offered: Offered, crossing: &Crossing, cell: u64) -> Answer
             }
             Ok(Err(error)) if declines(&error) => {
                 crossing.declined(cell);
-                Answer::Declined(error)
+                Answer::Missed(Missed::Declined(error))
             }
             Ok(Err(error)) | Err(error) => Answer::Failed(error),
         },
-        Offered::Unsent(error) => Answer::Declined(error),
+        Offered::Unsent(error) => Answer::Missed(Missed::Unsent(error)),
         Offered::Unknown(error) => Answer::Failed(Error::new(
             ErrorKind::OutcomeUnknown,
             format!(
@@ -94,11 +120,12 @@ impl Runtime {
         }
     }
 
-    /// After the cell `declined` declined `envelope` with `refusal`, offer it
+    /// After the cell `cell` did not take `envelope` (`missed`), offer it
     /// to the cells not yet offered it, as the first was chosen, until one
     /// takes it, the request fails, or `cell_failovers` more were offered
-    /// it. When every cell that may take it declined, the request fails
-    /// with the last refusal. Each choice starts from the request's own
+    /// it. When no cell may take it any more, or no failover is left, the
+    /// request fails with the last refusal, or, when no cell refused it,
+    /// with the last hand-off that never left. Each choice starts from the request's own
     /// context, `cx`, which `envelope`'s was made from, so a declined
     /// selector's meta is not sent to the next cell; a declined choice's
     /// lease ends before the next choice.
@@ -111,11 +138,11 @@ impl Runtime {
         cx: &Cx,
         mut envelope: Forward,
         timed: bool,
-        declined: u64,
-        refusal: Error,
+        cell: u64,
+        missed: Missed,
     ) -> Result<Handed> {
-        let mut offered = vec![declined];
-        let mut refusal = refusal;
+        let mut offered = vec![cell];
+        let mut missed = missed;
         while offered.len() <= self.config.cell_failovers {
             if let Within::Selector { .. } = crossing.within() {
                 envelope.cx = WireCx::of(cx);
@@ -143,13 +170,13 @@ impl Runtime {
                     });
                 }
                 Answer::Failed(error) => return Err(error),
-                Answer::Declined(declined) => {
+                Answer::Missed(then) => {
                     offered.push(cell);
-                    refusal = declined;
+                    missed = missed.then(then);
                 }
             }
         }
-        Err(refusal)
+        Err(missed.into_error())
     }
 }
 
@@ -252,6 +279,24 @@ mod tests {
             let chosen = instances.get(0).expect("never empty");
             Ok(gdl::Choice::new(chosen).with_meta("session", "chosen"))
         }
+    }
+
+    /// A request fails with its last refusal; a hand-off that never left
+    /// is the error only while no cell has refused it.
+    #[test]
+    fn the_last_refusal_outlasts_a_hand_off_that_never_left() {
+        let full = || Missed::Declined(Error::new(ErrorKind::Overloaded, "full"));
+        let unsent = || Missed::Unsent(Error::new(ErrorKind::Transport, "unsent"));
+        let kind = |missed: Missed| missed.into_error().kind();
+        assert_eq!(kind(full().then(unsent())), ErrorKind::Overloaded);
+        assert_eq!(
+            kind(full().then(unsent()).then(unsent())),
+            ErrorKind::Overloaded
+        );
+        assert_eq!(kind(unsent().then(full())), ErrorKind::Overloaded);
+        assert_eq!(kind(unsent().then(unsent())), ErrorKind::Transport);
+        let retired = Missed::Declined(Error::new(ErrorKind::Placement, "other deployment"));
+        assert_eq!(kind(full().then(retired)), ErrorKind::Placement);
     }
 
     /// `S => D`, with `S` in `a` of `global` and `D` in `d` of `model_x`.

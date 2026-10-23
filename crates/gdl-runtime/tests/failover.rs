@@ -408,6 +408,72 @@ async fn when_every_cell_declines_the_request_is_overloaded() {
     }
 }
 
+/// A hand-off that never left is not a refusal: when a full cell has
+/// declined the request and the next cell's hand-off never left, the
+/// request fails with the full cell's `Overloaded`, whether its
+/// failovers run out there or its cells do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hand_off_that_never_left_does_not_replace_the_last_refusal() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let assemble = |deployment: &Deployment| reference_graph(deployment, &quiet);
+    let cells_out = chooser(&spec, &hub, "", Selectors::new(), &assemble).await;
+    let failovers_out = chooser(
+        &spec,
+        &hub,
+        "cell_failovers = 1\n",
+        Selectors::new(),
+        &assemble,
+    )
+    .await;
+    let m1 = reference_cell(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        &one_at_a_time,
+        &quiet,
+    )
+    .await;
+    let m2 = reference_cell(
+        &spec,
+        &directory,
+        degraded(M2, "m2-hub:1337"),
+        &|r| r,
+        &quiet,
+    )
+    .await;
+    let expected = [(M1, CellState::Ready), (M2, CellState::Degraded)];
+    for chooser in [&cells_out, &failovers_out] {
+        following(&tables(chooser), &expected).await;
+    }
+    let held = hold(&cells_out, "held").await;
+    assert_eq!(
+        (m1.forwards(), m2.forwards()),
+        (1, 0),
+        "held where it should be"
+    );
+    let unsent = m2.entries[0].segment.peer_info().instance_id();
+    for chooser in [&cells_out, &failovers_out] {
+        chooser.node.unregister_peer(unsent);
+    }
+
+    for chooser in [&cells_out, &failovers_out] {
+        let before = offered(&[&m1, &m2]);
+        let error = ask(&chooser.segment)
+            .await
+            .expect_err("the full cell declined and the other was never reached");
+        assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
+        let now = offered(&[&m1, &m2]);
+        assert_eq!([now[0] - before[0], now[1] - before[1]], [1, 0]);
+    }
+    drop(held);
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
 /// The chosen cell's entry admits the request but its acknowledgement
 /// comes after the chooser's setup timeout: the request fails with
 /// `OutcomeUnknown`, the entry's B ran exactly once, and no other cell
