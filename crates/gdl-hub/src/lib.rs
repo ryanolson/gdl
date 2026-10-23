@@ -8,9 +8,11 @@
 //! cell's record through a [`gdl_cells::CellDirectory`].
 mod cell;
 mod quorum;
+mod setup;
 
 pub use cell::{CellError, CellHealth, CellReadiness, CellTiming, SegmentHealth};
 pub use quorum::Quorum;
+pub use setup::{cell_from_env, hub_builder};
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};
 use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};

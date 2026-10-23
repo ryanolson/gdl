@@ -1,7 +1,7 @@
-//! Run one graph discovery hub.
-use gdl_hub::GraphAdmission;
+//! Run one graph discovery hub: `gdl-hub deployment.json`. A cell's hub
+//! takes its cell's settings from `GDL_CELL__*` variables.
 use gdl_model::{DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT};
-use velo_hub::{Hub, HubConfig};
+use velo_hub::HubConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -25,11 +25,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let spec: DeploymentSpec = serde_json::from_slice(&std::fs::read(path)?)?;
     let spec = DeploymentSpec::new(spec.graph, spec.placement)?;
+    let cell = gdl_hub::cell_from_env()?;
     let mut config = HubConfig::default();
     config.server.public_port = HUB_PUBLIC_PORT;
     config.server.control_port = HUB_CONTROL_PORT;
-    Hub::builder(config)
-        .extension(GraphAdmission::new(spec))
+    gdl_hub::hub_builder(config, spec, cell)?
         .serve()
         .await?
         .run_until_signal()
