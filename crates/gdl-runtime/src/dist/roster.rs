@@ -22,7 +22,7 @@ use gdl::{Error, ErrorKind, Result};
 /// How many times a selector is asked for one hand-off before the runtime
 /// gives up: each further ask follows a membership change that made the
 /// last choice ineligible, and membership changes seconds apart.
-const CHOICES: usize = 8;
+pub(crate) const CHOICES: usize = 8;
 
 /// The instances of every segment, as velo peers, and whether this
 /// instance may route to them yet.
@@ -32,10 +32,16 @@ const CHOICES: usize = 8;
 /// clone and follows membership: an instance that joins later is added
 /// once it is ready, one that retires is skipped while its segment has
 /// another, and one that leaves is dropped.
+///
+/// A chooser's roster also holds its tables of the cells of the classes
+/// it sends to: a hand-off into another class routes by them, since the
+/// roster holds no instance of that class.
 #[derive(Debug, Clone)]
 pub struct Roster {
     segments: BTreeMap<String, Vec<PeerInfo>>,
     live: Arc<Live>,
+    #[cfg(feature = "hub")]
+    cells: Option<super::Cells>,
 }
 
 impl Default for Roster {
@@ -43,6 +49,8 @@ impl Default for Roster {
         Self {
             segments: BTreeMap::new(),
             live: Arc::new(Live::new()),
+            #[cfg(feature = "hub")]
+            cells: None,
         }
     }
 }
@@ -93,6 +101,19 @@ impl Roster {
     /// The state this roster shares with the runtime that routes with it.
     pub(crate) fn live(&self) -> &Arc<Live> {
         &self.live
+    }
+
+    /// Route the hand-offs into other classes by `cells`, a chooser's
+    /// tables.
+    #[cfg(feature = "hub")]
+    pub(crate) fn choose_cells(&mut self, cells: super::Cells) {
+        self.cells = Some(cells);
+    }
+
+    /// The chooser's tables, for an instance that is one.
+    #[cfg(feature = "hub")]
+    pub(crate) fn cells(&self) -> Option<&super::Cells> {
+        self.cells.as_ref()
     }
 }
 
@@ -216,11 +237,16 @@ impl Live {
             Picker::Open => &route.next.open,
         };
         let sequence = next.fetch_add(1, Ordering::Relaxed);
-        let index = match policy {
-            Policy::RoundRobin => sequence % route.eligible.len(),
-            Policy::Random => (random.hash_one(sequence) % route.eligible.len() as u64) as usize,
-        };
-        Ok(route.eligible[index])
+        Ok(route.eligible[turn(policy, sequence, route.eligible.len(), random)])
+    }
+}
+
+/// The index `policy` picks among `len` instances on the turn `sequence`.
+#[inline]
+pub(crate) fn turn(policy: Policy, sequence: usize, len: usize, random: &RandomState) -> usize {
+    match policy {
+        Policy::RoundRobin => sequence % len,
+        Policy::Random => (random.hash_one(sequence) % len as u64) as usize,
     }
 }
 

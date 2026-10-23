@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use gdl_cells::CellState;
@@ -357,9 +358,7 @@ impl Followed {
                 state,
                 ..
             } => {
-                if !wanted.contains_key(&class) {
-                    return None;
-                }
+                let segments = wanted.get(&class)?;
                 let key = (class, cell);
                 if self
                     .generations
@@ -371,9 +370,10 @@ impl Followed {
                 self.generations.insert(key.clone(), generation);
                 // A newer generation replaces the older at once: nothing
                 // of the older one is carried over.
-                let older = self
-                    .follows
-                    .insert(key.clone(), Follow::new(generation, region, state));
+                let older = self.follows.insert(
+                    key.clone(),
+                    Follow::new(generation, region, state, segments),
+                );
                 Some((key, older.map_or(Change::Table, Change::Ended)))
             }
             FollowEvent::State {
@@ -472,16 +472,23 @@ struct Follow {
     exposed: HashMap<InstanceId, (String, PeerInfo)>,
     /// Retired entry instances, with their segments: never exposed again.
     retired: HashMap<InstanceId, String>,
+    /// The built-in routers' turn per entry segment, carried into each
+    /// table the follow makes.
+    turns: BTreeMap<String, Arc<AtomicUsize>>,
 }
 
 impl Follow {
-    fn new(generation: u64, region: String, state: CellState) -> Self {
+    fn new(generation: u64, region: String, state: CellState, segments: &BTreeSet<String>) -> Self {
         Self {
             generation,
             region,
             state,
             exposed: HashMap::new(),
             retired: HashMap::new(),
+            turns: segments
+                .iter()
+                .map(|segment| (segment.clone(), Arc::default()))
+                .collect(),
         }
     }
 
@@ -544,6 +551,10 @@ impl Follow {
             .map(|(id, _)| *id)
             .collect();
         retired.sort_by_key(InstanceId::as_u128);
+        let offered = eligible
+            .iter()
+            .map(|id| gdl::InstanceId::from_u128(id.as_u128()))
+            .collect();
         CellTable {
             class: key.0.clone(),
             cell: key.1.clone(),
@@ -551,7 +562,9 @@ impl Follow {
             region: self.region.clone(),
             state: self.state,
             eligible: eligible.into_boxed_slice(),
+            offered,
             retired: retired.into_boxed_slice(),
+            turn: self.turns.get(segment).map(Arc::clone).unwrap_or_default(),
         }
     }
 }

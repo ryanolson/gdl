@@ -291,7 +291,7 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
         fwd.heads(&mut heads);
         for pos in 1..forward.len() {
             let sends = forward[pos - 1].0 == rt.segment && forward[pos].0 != rt.segment;
-            let Router::Selector { name, selector } = &plan.routers[pos] else {
+            let Some((name, selector)) = plan.routers[pos].selector() else {
                 continue;
             };
             let (Some((wants, wanted)), Some((carries, carried))) =

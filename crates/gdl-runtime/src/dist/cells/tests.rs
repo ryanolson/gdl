@@ -75,7 +75,7 @@ fn follower() -> (
     Recorded,
     Arc<crate::dist::roster::Live>,
 ) {
-    let cells = Cells::new(["f"]);
+    let cells = Cells::new("r", ["f"]);
     let recorded = Recorded {
         cells: cells.clone(),
         calls: Arc::default(),
@@ -194,6 +194,49 @@ fn an_entry_is_registered_before_a_table_holds_it() {
     assert_eq!(recorded.take(), [Call::Register(x.instance_id())]);
     assert_eq!(table(&cells, M1).expect("held").eligible, [x.instance_id()]);
     assert!(cells.is_registered(x.instance_id()));
+}
+
+/// Every table one follow of a cell makes takes its turns from one
+/// counter, so that a round robin within the cell goes on across events;
+/// a new generation starts its own. Each table offers a selector its
+/// eligible instances, index for index.
+#[test]
+fn a_cells_tables_keep_its_turn_until_it_is_followed_again() {
+    let (mut follows, cells, _, _) = follower();
+    let now = Instant::now();
+    let (x, y) = (peer(), peer());
+    let turn = |cells: &Cells| {
+        let table = cells.table("f").expect("kept");
+        Arc::clone(&table.cells[0].turn)
+    };
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+    );
+    let first = turn(&cells);
+    live(&mut follows, now, [exposed(M1, 1, &y)]);
+    assert!(
+        Arc::ptr_eq(&first, &turn(&cells)),
+        "an event reset the turn"
+    );
+    let table = cells.table("f").expect("kept");
+    let offered: Vec<u128> = table.cells[0]
+        .offered
+        .iter()
+        .map(|id| id.as_u128())
+        .collect();
+    let eligible: Vec<u128> = table.cells[0]
+        .eligible
+        .iter()
+        .map(|id| id.as_u128())
+        .collect();
+    assert_eq!(offered, eligible);
+    live(&mut follows, now, [follow(M1, 2, CellState::Ready)]);
+    assert!(
+        !Arc::ptr_eq(&first, &turn(&cells)),
+        "a refollow kept the turn"
+    );
 }
 
 #[test]

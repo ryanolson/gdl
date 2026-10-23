@@ -1,22 +1,29 @@
-//! The cells a chooser follows: for each entry segment of the hops it
-//! sends into another class, and each cell of that class its hub follows,
-//! the entry instances it may route to. A chooser is an instance in a cell
-//! whose segment holds the outer end of a hop that leaves its class. It
-//! reads its own hub's relay (`GET /v1/ext/gdl-cell/follows`) for its life
-//! and keeps the tables a request will choose from, one immutable table
-//! per entry segment, swapped whole, as the roster's is.
+//! The cells a chooser follows, and how it routes by them: for each entry
+//! segment of the hops it sends into another class, and each cell of that
+//! class its hub follows, the entry instances it may route to. A chooser
+//! is an instance in a cell whose segment holds the outer end of a hop
+//! that leaves its class. It reads its own hub's relay
+//! (`GET /v1/ext/gdl-cell/follows`) for its life and keeps the tables a
+//! request chooses from, one immutable table per entry segment, swapped
+//! whole, as the roster's is. Each hand-off into the other class chooses
+//! a cell from its table by the class's cell policy, then an instance of
+//! that cell ([`Crossing`]).
 
+mod crossing;
 mod follow;
+mod policy;
 mod task;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use crossing::{Crossing, Target, Within, targets};
 pub(crate) use task::follow;
 // The membership's tests drive the follower beside their own.
 #[cfg(test)]
 pub(crate) use follow::Follows;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
@@ -32,15 +39,19 @@ use velo::InstanceId;
 /// class that the chooser's hub relays: the cell's current follow (its
 /// generation), its state, its region, the entry instances it exposes,
 /// and those that retired, which are never routed to. A table changes
-/// only when the relay says so, and is replaced whole.
+/// only when the relay says so, and is replaced whole. The chooser's own
+/// region is kept with them, for the cell policy.
 #[derive(Clone)]
 pub struct Cells {
     shared: Arc<Shared>,
 }
 
 struct Shared {
-    /// Fixed at the launch: one per entry segment the instance sends to.
-    segments: BTreeMap<String, ArcSwap<EntryTable>>,
+    /// The region of the chooser's own cell.
+    region: Arc<str>,
+    /// Fixed at the launch: one per entry segment the instance sends to,
+    /// each shared with the hand-offs that choose from it.
+    segments: BTreeMap<String, Arc<ArcSwap<EntryTable>>>,
     /// Counts each change of a table, or of what is registered with velo.
     changes: watch::Sender<u64>,
     /// The instances the follower registered with velo, mirrored for
@@ -55,13 +66,15 @@ struct Shared {
 }
 
 impl Cells {
-    /// Empty tables for the entry segments `segments`.
-    pub(crate) fn new<'a>(segments: impl IntoIterator<Item = &'a str>) -> Self {
+    /// Empty tables for the entry segments `segments`, of a chooser in
+    /// `region`.
+    pub(crate) fn new<'a>(region: &str, segments: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
             shared: Arc::new(Shared {
+                region: Arc::from(region),
                 segments: segments
                     .into_iter()
-                    .map(|segment| (segment.to_string(), ArcSwap::default()))
+                    .map(|segment| (segment.to_string(), Arc::default()))
                     .collect(),
                 changes: watch::Sender::new(0),
                 registered: watch::Sender::new(HashSet::new()),
@@ -110,7 +123,18 @@ impl Cells {
 
     /// `segment`'s table: one load, no lock, no allocation.
     pub(crate) fn table(&self, segment: &str) -> Option<arc_swap::Guard<Arc<EntryTable>>> {
-        self.shared.segments.get(segment).map(ArcSwap::load)
+        self.shared.segments.get(segment).map(|slot| slot.load())
+    }
+
+    /// Where `segment`'s table is kept, for a hand-off that chooses from
+    /// it on every request without looking it up.
+    pub(crate) fn slot(&self, segment: &str) -> Option<Arc<ArcSwap<EntryTable>>> {
+        self.shared.segments.get(segment).map(Arc::clone)
+    }
+
+    /// The region of the chooser's own cell.
+    pub(crate) fn region(&self) -> Arc<str> {
+        Arc::clone(&self.shared.region)
     }
 
     /// Replace `segment`'s table.
@@ -241,7 +265,24 @@ pub(crate) struct CellTable {
     pub(crate) region: String,
     pub(crate) state: CellState,
     pub(crate) eligible: Box<[InstanceId]>,
+    /// `eligible` as a selector sees it, index for index, made with the
+    /// table so that a selection borrows it rather than converting each
+    /// id per request.
+    pub(crate) offered: Box<[gdl::InstanceId]>,
     pub(crate) retired: Box<[InstanceId]>,
+    /// The built-in routers' turn within the cell, shared by every table
+    /// of the cell's follow, so that a new table keeps the turn.
+    pub(crate) turn: Arc<AtomicUsize>,
+}
+
+/// Refuse a chooser of `segment` whose placement names, for a class it
+/// sends to, a cell policy the runtime does not provide. Nothing for a
+/// segment that sends into no other class.
+pub(crate) fn check_policies(layout: &Layout, segment: &str) -> gdl::Result<()> {
+    for class in entries(layout, segment).keys() {
+        policy::of(layout, class)?;
+    }
+    Ok(())
 }
 
 /// What `segment` sends into other classes: for each class one of its

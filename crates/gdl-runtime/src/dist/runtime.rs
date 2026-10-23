@@ -10,6 +10,8 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 
 use super::admission::{Admission, Egress};
+#[cfg(feature = "hub")]
+use super::cells::Within;
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 use super::roster::{Live, Picker, Policy, Roster};
@@ -320,6 +322,10 @@ pub(crate) struct Runtime {
     /// The selectors this instance's crossings name, resolved once: one
     /// per name, shared by every crossing that names it.
     selectors: BTreeMap<String, Arc<dyn Erased>>,
+    /// A chooser's hand-offs into other classes, by hop and position,
+    /// with the cells each chooses from; empty for any other instance.
+    #[cfg(feature = "hub")]
+    crossings: BTreeMap<(usize, usize), super::cells::Target>,
     random: RandomState,
     /// Set once a retiring instance stops taking hand-offs and openings.
     closed: AtomicBool,
@@ -364,6 +370,11 @@ impl Runtime {
             };
             selectors.insert(name.to_string(), selector);
         }
+        #[cfg(feature = "hub")]
+        let crossings = match roster.cells() {
+            Some(cells) => super::cells::targets(&layout, &segment, cells)?,
+            None => BTreeMap::new(),
+        };
         for peer in roster.peers() {
             if peer.instance_id() != fabric.instance() {
                 fabric.register_peer(peer.clone())?;
@@ -383,6 +394,8 @@ impl Runtime {
             egress: Egress::new(config.egress_limit, config.admission_wait),
             routes: Arc::clone(roster.live()),
             selectors,
+            #[cfg(feature = "hub")]
+            crossings,
             random: RandomState::new(),
             closed: AtomicBool::new(false),
             names: Names {
@@ -459,8 +472,24 @@ impl Runtime {
 
     /// The router of the hand-off at forward position `pos` of hop `hop`,
     /// for a crossing this instance sends: a policy, or a selector that
-    /// `Runtime::new` resolved.
+    /// `Runtime::new` resolved; for a chooser's hand-off into another
+    /// class, a cell of that class first, then an instance within it by
+    /// the same.
     pub(crate) fn router(&self, hop: usize, pos: usize) -> Router {
+        let router = self.instance_router(hop, pos);
+        #[cfg(feature = "hub")]
+        if let Some(target) = self.crossings.get(&(hop, pos)) {
+            return Router::Cells(Arc::new(super::cells::Crossing::new(
+                target.clone(),
+                router,
+            )));
+        }
+        router
+    }
+
+    /// The placement's router of the hand-off at forward position `pos`
+    /// of hop `hop`, which chooses an instance.
+    fn instance_router(&self, hop: usize, pos: usize) -> Router {
         match self.layout.request_router(hop, pos) {
             RequestRouter::RoundRobin => Router::Policy(Policy::RoundRobin),
             RequestRouter::Random => Router::Policy(Policy::Random),
@@ -481,6 +510,9 @@ impl Runtime {
     /// items. `router` chooses the instance: a policy picks at once; a
     /// selector is given `cx` and the head, and what it chose comes back
     /// with its lease, for the caller to hold while it holds the request.
+    /// A chooser's hand-off into another class first chooses a cell, then
+    /// an instance of it the same way; which hand-offs those are was
+    /// settled when the runtime was built.
     ///
     /// When the chosen instance is this one, the entry runs by a direct
     /// call: velo is not relied on to deliver a message to its own sender.
@@ -511,6 +543,16 @@ impl Runtime {
                 envelope.cx.add_meta(picked.meta);
                 (instance, picked.lease)
             }
+            #[cfg(feature = "hub")]
+            Router::Cells(crossing) => match crossing.within() {
+                Within::Policy(policy) => (crossing.pick(*policy, &self.random)?, None),
+                Within::Selector { selector, .. } => {
+                    let (instance, picked) =
+                        crossing.choose(&**selector, cx, &envelope.payload).await?;
+                    envelope.cx.add_meta(picked.meta);
+                    (instance, picked.lease)
+                }
+            },
         };
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
@@ -601,6 +643,25 @@ pub(crate) enum Router {
         name: Arc<str>,
         selector: Arc<dyn Erased>,
     },
+    /// A chooser's hand-off into another class: a cell by the class's
+    /// cell policy, then an instance of it by the placement's router.
+    #[cfg(feature = "hub")]
+    Cells(Arc<super::cells::Crossing>),
+}
+
+impl Router {
+    /// The selector that chooses the instance, by name, if one does.
+    pub(crate) fn selector(&self) -> Option<(&Arc<str>, &Arc<dyn Erased>)> {
+        match self {
+            Self::Policy(_) => None,
+            Self::Selector { name, selector } => Some((name, selector)),
+            #[cfg(feature = "hub")]
+            Self::Cells(crossing) => match crossing.within() {
+                Within::Policy(_) => None,
+                Within::Selector { name, selector } => Some((name, selector)),
+            },
+        }
+    }
 }
 
 /// A hand-off the next segment accepted.

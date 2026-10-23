@@ -23,16 +23,22 @@ use crate::dist::roster::Live;
 const REWATCH: Duration = Duration::from_millis(100);
 
 /// Start following the cells of the classes `segment` sends to, for an
-/// instance in a cell at the hub `host`, whose public listener is on
-/// `public_port`: one task, which reads the hub's relay into the tables
-/// it returns and registers their instances with `node`, until the handle
-/// is aborted. `None`, and nothing started, for a segment that holds no
-/// hop into another class. Only an instance in a cell may call it: one
-/// without a cell follows nothing. `live` is the instance's own
-/// membership, `drain` how long an instance in no table stays registered.
+/// instance in a cell of `region` at the hub `host`, whose public
+/// listener is on `public_port`: one task, which reads the hub's relay
+/// into the tables it returns and registers their instances with `node`,
+/// until the handle is aborted. `None`, and nothing started, for a
+/// segment that holds no hop into another class. Only an instance in a
+/// cell may call it: one without a cell follows nothing. `live` is the
+/// instance's own membership, `drain` how long an instance in no table
+/// stays registered.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the chooser's settings, its hub, and its membership, as the launch holds them"
+)]
 pub(crate) fn follow(
     layout: &Layout,
     segment: &str,
+    region: &str,
     host: &str,
     public_port: u16,
     node: &Velo,
@@ -50,7 +56,7 @@ pub(crate) fn follow(
     } else {
         format!("{host}:{public_port}")
     };
-    let cells = Cells::new(wanted.values().flatten().map(String::as_str));
+    let cells = Cells::new(region, wanted.values().flatten().map(String::as_str));
     let follows = Follows::new(cells.clone(), node.clone(), Arc::clone(live), drain, wanted);
     let task = tokio::spawn(run(Hub { watcher, address }, follows));
     Ok(Some((cells, task)))

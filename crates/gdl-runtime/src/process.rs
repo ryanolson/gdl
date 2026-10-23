@@ -366,6 +366,10 @@ impl<H> ProcessConfig<H> {
         if let Some(cell) = &self.cell {
             cell.check(&layout, segment)
                 .map_err(|e| placement(e.to_string()))?;
+            // A chooser that cannot run its cell policy refuses before it
+            // registers or loads.
+            #[cfg(feature = "hub")]
+            crate::dist::check_cell_policies(&layout, segment)?;
         }
         let barrier = barrier::Barrier::new(&layout, segment, self.cell.is_some());
         let inner: Vec<String> = layout
@@ -464,13 +468,15 @@ impl<H> ProcessConfig<H> {
                 let sends: Vec<&str> = inner.iter().map(String::as_str).collect();
                 // A chooser in a cell follows the cells of the classes it
                 // sends to from here too, so that its tables fill while it
-                // meets; an instance without a cell follows none. The
-                // follower is ended with whatever ends the launch, a failed
-                // rendezvous or a stop included.
-                if self.cell.is_some() {
+                // meets, and routes into those classes by them; an instance
+                // without a cell follows none. The follower is ended with
+                // whatever ends the launch, a failed rendezvous or a stop
+                // included.
+                if let Some(cell) = &self.cell {
                     chooser = crate::dist::follow_cells(
                         &layout,
                         segment,
+                        &cell.region,
                         host,
                         *public_port,
                         &node,
@@ -481,6 +487,9 @@ impl<H> ProcessConfig<H> {
                 }
                 // The membership leaves to the chooser what its tables hold.
                 let cells = chooser.as_ref().map(|(cells, _)| cells.clone());
+                if let Some(cells) = &cells {
+                    roster.choose_cells(cells.clone());
+                }
                 session.follow(
                     Arc::clone(roster.live()),
                     node.clone(),
@@ -532,8 +541,6 @@ impl<H> ProcessConfig<H> {
             setup: self.runtime.setup_timeout,
             process: process.clone(),
             _follower: follower,
-            #[cfg(feature = "hub")]
-            cells: chooser.as_ref().map(|(cells, _)| cells.clone()),
             #[cfg(feature = "hub")]
             _chooser: chooser.map(|(_, task)| task),
             _leaving: leaving,
@@ -598,9 +605,6 @@ pub struct Launch {
     /// The roster directory's membership follower; the hub session owns
     /// its own.
     _follower: Option<Abort>,
-    /// A chooser's tables of the cells it follows.
-    #[cfg(feature = "hub")]
-    cells: Option<crate::dist::Cells>,
     /// A chooser's follower of those cells, which lives as long as the
     /// launch, through its drain.
     #[cfg(feature = "hub")]
@@ -699,13 +703,14 @@ impl Launch {
         &self.roster
     }
 
-    /// The tables of the cells this instance follows: for a chooser, an
-    /// instance in a cell under a hub whose segment holds a hop into
-    /// another class, one per entry segment of the hops it sends there.
-    /// `None` for any other instance, which follows no cell.
+    /// The tables of the cells this instance follows and routes into:
+    /// for a chooser, an instance in a cell under a hub whose segment
+    /// holds a hop into another class, one per entry segment of the hops
+    /// it sends there. `None` for any other instance, which follows no
+    /// cell.
     #[cfg(feature = "hub")]
     pub fn cells(&self) -> Option<crate::dist::Cells> {
-        self.cells.clone()
+        self.roster.cells().cloned()
     }
 
     /// Announce that this instance's handlers are installed, wait until

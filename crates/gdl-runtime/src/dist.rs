@@ -13,9 +13,9 @@ mod segment;
 mod stages;
 
 #[cfg(feature = "hub")]
-pub(crate) use cells::follow as follow_cells;
-#[cfg(feature = "hub")]
 pub use cells::{Cells, FollowedCell};
+#[cfg(feature = "hub")]
+pub(crate) use cells::{check_policies as check_cell_policies, follow as follow_cells};
 #[cfg(feature = "hub")]
 pub use fabric::HubSession;
 pub use fabric::bind_node;
