@@ -608,8 +608,9 @@ mod tests {
 
     /// What a chooser's boundary pick costs over a pick in its own roster,
     /// over the same instances, what of it is the read of the clock that
-    /// judges each summary's age and each cell's damping, and a pick with
-    /// the acceptance that follows it: reported, not gated. Run it with
+    /// judges each summary's age and each cell's damping, and what is the
+    /// lease on the cell's follow, taken and let go, and a pick with the
+    /// acceptance that follows it: reported, not gated. Run it with
     /// `--ignored --nocapture`.
     #[test]
     #[ignore = "a measurement, not a check: run it with --ignored --nocapture"]
@@ -651,6 +652,11 @@ mod tests {
                 std::hint::black_box(tokio::time::Instant::now());
                 ids[0]
             });
+            let leases = Arc::clone(&crossing.target.table.load().cells[0].leases);
+            let lease = time(&|| {
+                drop(std::hint::black_box(CellLease::take(&leases)));
+                ids[0]
+            });
             let accepted = time(&|| {
                 let (id, cell, _) = crossing
                     .pick(Policy::RoundRobin, &random, &[])
@@ -659,7 +665,7 @@ mod tests {
                 id
             });
             println!(
-                "round {round}: roster pick {roster:?}, boundary pick {boundary:?}, of which the clock {clock:?}; pick and acceptance {accepted:?}"
+                "round {round}: roster pick {roster:?}, boundary pick {boundary:?}, of which the clock {clock:?} and the lease {lease:?}; pick and acceptance {accepted:?}"
             );
         }
     }
