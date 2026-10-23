@@ -138,7 +138,7 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
         let opening = source.watch();
         tokio::pin!(opening);
         let opened = loop {
-            let (due, poll) = (follows.next_due(), follows.next_poll(Instant::now()));
+            let (due, poll) = (follows.next_due(), follows.next_poll());
             tokio::select! {
                 opened = &mut opening => break opened,
                 chore = next_chore(&mut chores.acks, due, poll) => chores.run(chore, &mut follows, &source),
@@ -161,7 +161,7 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
         let pause = tokio::time::sleep(REWATCH);
         tokio::pin!(pause);
         loop {
-            let (due, poll) = (follows.next_due(), follows.next_poll(Instant::now()));
+            let (due, poll) = (follows.next_due(), follows.next_poll());
             tokio::select! {
                 () = &mut pause => break,
                 chore = next_chore(&mut chores.acks, due, poll) => chores.run(chore, &mut follows, &source),
@@ -181,7 +181,7 @@ async fn read<S: Source, R: Registry>(
 ) {
     let mut snapshot = Some(follows.snapshot());
     loop {
-        let (due, poll) = (follows.next_due(), follows.next_poll(Instant::now()));
+        let (due, poll) = (follows.next_due(), follows.next_poll());
         tokio::select! {
             event = events.next() => {
                 let Some(event) = event else {

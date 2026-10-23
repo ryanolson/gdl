@@ -251,24 +251,24 @@ impl<R: Registry> Follows<R> {
     }
 
     /// When the follower looks again for a follow to acknowledge: `None`
-    /// while it has none, else [`ACK_POLL`] after it first had one, and
-    /// that instant until [`Follows::acknowledgements`] is asked for.
-    pub(super) fn next_poll(&mut self, now: Instant) -> Option<Instant> {
-        if !self.followed.awaiting() {
-            self.poll = None;
-            return None;
-        }
-        Some(*self.poll.get_or_insert(now + ACK_POLL))
+    /// while it has none. It is set where a follow may come to need one,
+    /// as a change makes it not offered or a snapshot shows it so, and by
+    /// each look that leaves one waiting, so that an event never passes
+    /// over the follows to find out.
+    pub(super) fn next_poll(&self) -> Option<Instant> {
+        self.poll
     }
 
     /// The acknowledgements due at `now`, each of a follow, current or
     /// earlier, that is not offered, that this instance holds no lease on,
     /// and whose revision it has yet to acknowledge: each is marked as
     /// being sent, until [`Follows::acknowledged`] says whether its hub
-    /// took it.
+    /// took it. The follower looks again [`ACK_POLL`] later while a follow
+    /// still waits for one.
     pub(super) fn acknowledgements(&mut self, now: Instant) -> Vec<Unoffered> {
-        self.poll = None;
-        self.followed.due(now)
+        let due = self.followed.due(now);
+        self.poll = self.followed.awaiting().then(|| now + ACK_POLL);
+        due
     }
 
     /// The hub took `unoffered`, or did not, when it is sent again after
@@ -279,13 +279,16 @@ impl<R: Registry> Follows<R> {
         let Some(follow) = self.followed.find_mut(&key, unoffered.generation) else {
             return;
         };
-        if follow.ack == Ack::Sending(unoffered.revision) {
-            follow.ack = if taken {
-                Ack::Sent(unoffered.revision)
-            } else {
-                Ack::Failed(now + ACK_RETRY)
-            };
+        if follow.ack != Ack::Sending(unoffered.revision) {
+            return;
         }
+        if taken {
+            follow.ack = Ack::Sent(unoffered.revision);
+            return;
+        }
+        let again = now + ACK_RETRY;
+        follow.ack = Ack::Failed(again);
+        self.poll = Some(self.poll.map_or(again, |poll| poll.min(again)));
     }
 
     /// When the next unregistration falls due, if one does.
@@ -671,6 +674,7 @@ impl Followed {
         self.follows
             .values()
             .chain(self.closing.values())
+            .inspect(|_| scanned())
             .any(|follow| !follow.offered && matches!(follow.ack, Ack::None | Ack::Failed(_)))
     }
 
@@ -683,6 +687,7 @@ impl Followed {
                 .map(|((key, _), follow)| (key, follow)),
         );
         for (key, follow) in follows {
+            scanned();
             let ready = match follow.ack {
                 Ack::None => true,
                 Ack::Failed(at) => at <= now,
@@ -894,6 +899,15 @@ thread_local! {
     /// The instances the tables made on this thread have read, so that a
     /// test counts an event's work rather than timing it.
     pub(super) static READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The follows the acknowledgements' bookkeeping on this thread has
+    /// looked at.
+    pub(super) static SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one follow looked at for an acknowledgement, in a test.
+fn scanned() {
+    #[cfg(test)]
+    SCANNED.with(|scanned| scanned.set(scanned.get() + 1));
 }
 
 /// The relay's snapshot as a watch delivers it, applied apart from what

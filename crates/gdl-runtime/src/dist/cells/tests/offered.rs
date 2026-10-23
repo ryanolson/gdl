@@ -8,7 +8,7 @@ use gdl_cells::CellState;
 use gdl_watch::{FollowEvent, Unoffered};
 use tokio::time::Instant;
 
-use super::super::follow::{ACK_POLL, ACK_RETRY, Follows};
+use super::super::follow::{ACK_POLL, ACK_RETRY, Follows, SCANNED};
 use super::super::lease::CellLease;
 use super::super::{CellTable, Cells};
 use super::{
@@ -73,7 +73,7 @@ fn a_follow_not_offered_is_acknowledged_once_its_last_lease_ends() {
     let (mut follows, cells, _, now) = followed();
     let before = chosen_from(&cells);
     let held = offer(&cells).expect("offered");
-    assert_eq!(follows.next_poll(now), None, "nothing to acknowledge");
+    assert_eq!(follows.next_poll(), None, "nothing to acknowledge");
 
     live(&mut follows, now, [offering(1, 2, false)]);
     let shown = table(&cells, M1).expect("followed");
@@ -83,16 +83,16 @@ fn a_follow_not_offered_is_acknowledged_once_its_last_lease_ends() {
         CellLease::take(&before.leases).is_none(),
         "a lease taken from a table loaded before the mark"
     );
-    assert_eq!(follows.next_poll(now), Some(now), "looked for at once");
+    assert_eq!(follows.next_poll(), Some(now), "looked for at once");
     assert_eq!(follows.acknowledgements(now), [], "a lease is held");
-    assert_eq!(follows.next_poll(now), Some(now + ACK_POLL));
+    assert_eq!(follows.next_poll(), Some(now + ACK_POLL));
 
     drop(held);
     let due = follows.acknowledgements(now + ACK_POLL);
     assert_eq!(due, [unoffered(1, 2)]);
     assert_eq!(follows.acknowledgements(now + ACK_POLL), [], "sent twice");
     follows.acknowledged(&due[0], true, now + ACK_POLL);
-    assert_eq!(follows.next_poll(now + ACK_POLL), None);
+    assert_eq!(follows.next_poll(), None);
 }
 
 /// A follow offered again takes leases again and shows its instances, and
@@ -104,8 +104,8 @@ fn a_follow_offered_again_owes_nothing_of_its_earlier_revision() {
     let (mut follows, cells, _, now) = followed();
     live(&mut follows, now, [offering(1, 2, false)]);
     live(&mut follows, now, [offering(1, 3, true)]);
-    assert_eq!(follows.next_poll(now), None);
     assert_eq!(follows.acknowledgements(now), []);
+    assert_eq!(follows.next_poll(), None, "looked for again");
     let shown = table(&cells, M1).expect("followed");
     assert!(shown.offered && shown.eligible.len() == 1, "{shown:?}");
     assert!(offer(&cells).is_some(), "offered again, but refused");
@@ -203,4 +203,61 @@ fn a_snapshot_keeps_the_leases_and_hidden_instances_of_its_follows() {
     );
     drop(held);
     assert_eq!(follows.acknowledgements(now), [unoffered(1, 2)]);
+}
+
+/// An event of one cell, and the follower's look at when it next looks
+/// for an acknowledgement, which its task takes after every event, pass
+/// over no follow: only the look itself does, once a poll.
+#[test]
+fn an_event_passes_over_no_follow_to_acknowledge() {
+    let (mut follows, _, _, _) = follower();
+    let now = Instant::now();
+    let named = |n: usize| format!("c{n}");
+    for n in 0..50 {
+        let cell = named(n);
+        live(
+            &mut follows,
+            now,
+            [
+                FollowEvent::Follow {
+                    class: "model_x".into(),
+                    cell: cell.clone(),
+                    generation: 1,
+                    region: "r".into(),
+                    state: CellState::Draining,
+                    load: None,
+                },
+                FollowEvent::Offering {
+                    class: "model_x".into(),
+                    cell,
+                    generation: 1,
+                    revision: 2,
+                    offered: false,
+                },
+            ],
+        );
+    }
+    SCANNED.with(|scanned| scanned.set(0));
+    for _ in 0..100 {
+        follows.apply(
+            FollowEvent::Load {
+                class: "model_x".into(),
+                cell: named(0),
+                generation: 1,
+                load: None,
+            },
+            now,
+        );
+        follows.next_poll();
+    }
+    assert_eq!(
+        SCANNED.with(std::cell::Cell::get),
+        0,
+        "an event passed over the follows"
+    );
+    assert_eq!(follows.acknowledgements(now).len(), 50);
+    assert!(
+        SCANNED.with(std::cell::Cell::get) <= 100,
+        "a poll looked at a follow twice"
+    );
 }
