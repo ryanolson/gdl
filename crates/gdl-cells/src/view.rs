@@ -18,7 +18,8 @@ use crate::{CellEvent, CellRecord, Version, Withdrawal};
 ///   the `seq` change, never from a time in the record. An expired record
 ///   is not offered, and a late copy of the same version does not make it
 ///   fresh again; a newer one does.
-/// - A completed snapshot drops the cells it did not hold.
+/// - A completed snapshot drops the cells it did not hold, keeping the
+///   version of each as a withdrawal's.
 ///
 /// The caller passes the time, so the view never reads a clock of its own.
 #[derive(Debug, Default)]
@@ -55,8 +56,20 @@ impl CellView {
             CellEvent::Withdrawn { withdrawal, .. } => self.withdraw(&withdrawal),
             CellEvent::Synced { snapshot, .. } => {
                 if snapshot {
-                    let held = &self.snapshot;
-                    self.cells.retain(|cell, _| held.contains(cell));
+                    // A cell the snapshot does not hold was withdrawn while
+                    // the watch could not see it. Its last version seen
+                    // becomes its tombstone, so a late copy of it, by
+                    // another path, does not bring it back.
+                    let (held, withdrawn) = (&self.snapshot, &mut self.withdrawn);
+                    self.cells.retain(|cell, seen| {
+                        let keep = held.contains(cell);
+                        if !keep {
+                            let version = seen.record.version();
+                            let tombstone = withdrawn.entry(cell.clone()).or_insert(version);
+                            *tombstone = (*tombstone).max(version);
+                        }
+                        keep
+                    });
                 }
                 self.snapshot.clear();
             }

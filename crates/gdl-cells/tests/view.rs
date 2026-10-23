@@ -183,3 +183,20 @@ fn a_resumed_watch_drops_nothing() {
     view.apply(synced(true), now);
     assert!(names(&view, now).is_empty());
 }
+
+/// A cell withdrawn while the watch lagged reaches the view only as its
+/// absence from the new snapshot. The view keeps the version it had seen,
+/// so a late copy of it, by another path, does not bring it back.
+#[test]
+fn a_cell_a_snapshot_drops_is_not_brought_back_by_a_late_copy() {
+    let now = Instant::now();
+    let mut view = CellView::new();
+    view.apply(put("m1", 1, 5), now);
+    view.apply(CellEvent::Resnapshot, now);
+    view.apply(synced(true), now);
+    assert_eq!(seen(&view, "m1", now), None);
+    view.apply(put("m1", 1, 5), now);
+    assert_eq!(seen(&view, "m1", now), None);
+    view.apply(put("m1", 1, 6), now);
+    assert_eq!(seen(&view, "m1", now), Some((1, 6)));
+}
