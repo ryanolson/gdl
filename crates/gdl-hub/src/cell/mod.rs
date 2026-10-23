@@ -44,8 +44,10 @@ pub use feed::CellWatch;
 ///
 /// The state follows [`Quorum`]. Its routes, under `/v1/ext/gdl-cell/` on
 /// the public listener: `GET health`, the cell health endpoint, which
-/// answers 200 when the cell is `ready` and 503 otherwise, with a
-/// [`CellHealth`] body; and `GET watch`, the cell's watch for the hubs that
+/// answers 200 when the cell is `ready` and, for each class its settings
+/// require cells of, at least that many followed cells of the class have
+/// a complete snapshot and last said they are `ready`, and 503 otherwise,
+/// with a [`CellHealth`] body; and `GET watch`, the cell's watch for the hubs that
 /// follow it: server-sent events, each one [`crate::CellWatchEvent`] as
 /// JSON, with a keep-alive every 10 s. The watch carries the cell's state
 /// and epoch and its entry instances, ready and retired, with their
@@ -187,20 +189,22 @@ impl<D: CellDirectory> CellReadiness<D> {
             .filter(|boundary| boundary.from == cell.class)
             .map(|boundary| boundary.into.clone())
             .collect();
-        let health = CellHealth::of(
+        let health = watch::Sender::new(CellHealth::of(
             &Quorum::new(quorums.iter().cloned(), timing.hold),
             CellState::Unavailable,
-        );
+            &cell.requires,
+        ));
+        let relay = Arc::new(Relay::new(timing.watch_buffer, health.clone()));
         Ok(Self {
             directory: Arc::new(directory),
             record,
             quorums,
             timing,
-            health: watch::Sender::new(health),
+            health,
             feed: Arc::new(feed),
             admission: OnceLock::new(),
             sends: sends.into_iter().collect(),
-            relay: Arc::new(Relay::new(timing.watch_buffer)),
+            relay,
             tasks: Mutex::default(),
         })
     }
@@ -344,9 +348,10 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 get(move || {
                     let health = self.health.borrow().clone();
                     async move {
-                        let status = match health.state {
-                            CellState::Ready => StatusCode::OK,
-                            _ => StatusCode::SERVICE_UNAVAILABLE,
+                        let status = if health.healthy() {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
                         };
                         (status, Json(health))
                     }
@@ -450,27 +455,60 @@ impl Default for CellTiming {
     }
 }
 
-/// The body of the cell health endpoint: the cell's state, and each
-/// segment of its class with its usable instances and its quorum.
+/// The body of the cell health endpoint: the cell's state, each segment
+/// of its class with its usable instances and its quorum, and, for a cell
+/// whose settings require cells of the classes it sends to, each such
+/// class with the count required and the count met.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellHealth {
-    /// The cell's state.
+    /// The cell's state, from its own quorum: what its record and its
+    /// watch carry.
     pub state: CellState,
     /// Each segment of the cell's class, by name.
     pub segments: BTreeMap<String, SegmentHealth>,
+    /// Each class the cell's settings require cells of, by name; absent
+    /// from the body when there is none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub requires: BTreeMap<String, RequiredHealth>,
 }
 
 impl CellHealth {
-    /// The body for `quorum`'s counts in `state`.
-    pub(crate) fn of(quorum: &Quorum, state: CellState) -> Self {
+    /// The body for `quorum`'s counts in `state`, with none of the
+    /// required cells met yet.
+    pub(crate) fn of(quorum: &Quorum, state: CellState, requires: &BTreeMap<String, u32>) -> Self {
         Self {
             state,
             segments: quorum
                 .segments()
                 .map(|(name, usable, quorum)| (name.to_string(), SegmentHealth { usable, quorum }))
                 .collect(),
+            requires: requires
+                .iter()
+                .map(|(class, &required)| (class.clone(), RequiredHealth { required, met: 0 }))
+                .collect(),
         }
     }
+
+    /// Whether the endpoint answers 200: the cell is `ready`, and each
+    /// required class has as many ready, followed cells as it requires.
+    pub fn healthy(&self) -> bool {
+        self.state == CellState::Ready
+            && self
+                .requires
+                .values()
+                .all(|required| required.met >= required.required)
+    }
+}
+
+/// One class a cell requires cells of, in [`CellHealth`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequiredHealth {
+    /// The ready, followed cells of the class the cell needs to be
+    /// healthy.
+    pub required: u32,
+    /// The followed cells of the class whose snapshot is complete and
+    /// whose link last said they are `ready`.
+    pub met: u32,
 }
 
 /// One segment of a cell's class, in [`CellHealth`].

@@ -20,7 +20,9 @@ mod quorum;
 mod setup;
 mod watch;
 
-pub use cell::{CellError, CellHealth, CellReadiness, CellTiming, CellWatch, SegmentHealth};
+pub use cell::{
+    CellError, CellHealth, CellReadiness, CellTiming, CellWatch, RequiredHealth, SegmentHealth,
+};
 pub use follow::FollowsWatch;
 pub use quorum::Quorum;
 pub use setup::{cell_from_env, hub_builder};

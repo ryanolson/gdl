@@ -7,6 +7,12 @@
 //! or whose task is still running after a newer generation began, never
 //! writes again. Each change is applied and sent under one lock, and a
 //! watch takes its snapshot and subscribes under the same lock.
+//!
+//! The relay also counts, per class, the installed follows whose link
+//! last said `ready`, and shows each count in the cell's health as it
+//! changes, under the same lock, so that a count is never overwritten by
+//! an older one. A change costs one count, never a pass over the
+//! follows.
 
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
@@ -20,7 +26,7 @@ use tokio::sync::{broadcast, watch};
 use velo_hub::velo::{InstanceId, PeerInfo};
 
 use crate::fanout::Watchers;
-use crate::{CellWatchEvent, FollowEvent};
+use crate::{CellHealth, CellWatchEvent, FollowEvent};
 
 /// The followed cells, and the relay's watchers.
 pub(crate) struct Relay {
@@ -34,13 +40,16 @@ pub(crate) struct Relay {
 
 impl Relay {
     /// A relay whose watchers are ended when they fall more than `buffer`
-    /// events behind.
-    pub(crate) fn new(buffer: usize) -> Self {
+    /// events behind, and which shows how many ready cells of each class
+    /// it follows in `health`.
+    pub(crate) fn new(buffer: usize, health: watch::Sender<CellHealth>) -> Self {
         Self {
             shared: Mutex::new(Shared {
                 generations: HashMap::new(),
                 follows: HashMap::new(),
                 events: broadcast::channel(buffer).0,
+                ready: HashMap::new(),
+                health,
             }),
             watchers: Watchers::new(),
             following: watch::Sender::new(BTreeMap::new()),
@@ -103,7 +112,11 @@ impl Relay {
         for event in installed.snapshot(cell, generation) {
             let _ = events.send(event);
         }
+        let counted = installed.counted().then(|| installed.class.clone());
         follow.installed = Some(installed);
+        if let Some(class) = counted {
+            shared.count(&class, true);
+        }
     }
 
     /// The cell watch of the follow `generation` of `cell` sent `event`,
@@ -120,9 +133,14 @@ impl Relay {
         else {
             return;
         };
+        let counted = installed.counted();
         installed.apply(cell, generation, event, |event| {
             let _ = events.send(event);
         });
+        if installed.counted() != counted {
+            let class = installed.class.clone();
+            shared.count(&class, !counted);
+        }
     }
 
     /// A watch of the relay: its snapshot, then each change.
@@ -161,6 +179,9 @@ struct Shared {
     /// Each followed cell's current follow.
     follows: HashMap<String, Follow>,
     events: broadcast::Sender<FollowEvent>,
+    /// Per class, the installed follows whose link last said `ready`.
+    ready: HashMap<String, u32>,
+    health: watch::Sender<CellHealth>,
 }
 
 /// One cell's current follow: its generation, and what it exposes once
@@ -172,20 +193,47 @@ struct Follow {
 
 impl Shared {
     fn end(&mut self, cell: &str, generation: u64) {
-        let Some(follow) = self
+        if self
             .follows
             .get(cell)
-            .filter(|follow| follow.generation == generation)
-        else {
+            .is_none_or(|follow| follow.generation != generation)
+        {
             return;
-        };
-        if follow.installed.is_some() {
+        }
+        let follow = self
+            .follows
+            .remove(cell)
+            .expect("the follow was just found");
+        if let Some(installed) = follow.installed {
             let _ = self.events.send(FollowEvent::Dropped {
                 cell: cell.to_string(),
                 generation,
             });
+            if installed.counted() {
+                self.count(&installed.class, false);
+            }
         }
-        self.follows.remove(cell);
+    }
+
+    /// One more, or one fewer, ready cell of `class` is followed: show the
+    /// count in the cell's health, if the cell requires cells of the
+    /// class.
+    fn count(&mut self, class: &str, more: bool) {
+        let ready = self.ready.entry(class.to_string()).or_insert(0);
+        if more {
+            *ready += 1;
+        } else {
+            *ready = ready.saturating_sub(1);
+        }
+        let ready = *ready;
+        self.health
+            .send_if_modified(|health| match health.requires.get_mut(class) {
+                Some(required) if required.met != ready => {
+                    required.met = ready;
+                    true
+                }
+                _ => false,
+            });
     }
 
     /// Every installed follow, by cell, then the marker.
@@ -237,6 +285,12 @@ impl Installed {
             retired: HashMap::new(),
             ready: HashMap::new(),
         }
+    }
+
+    /// Whether the cell counts toward what a requirement of its class
+    /// meets: its link last said it is `ready`.
+    fn counted(&self) -> bool {
+        self.state == CellState::Ready
     }
 
     /// Whether the state the cell last sent lets its instances be routed
@@ -388,7 +442,7 @@ impl Stream for FollowsWatch {
 #[cfg(test)]
 mod tests {
     use super::{Installed, Relay};
-    use crate::{CellWatchEvent, FollowEvent};
+    use crate::{CellHealth, CellWatchEvent, FollowEvent, Quorum};
     use futures::{FutureExt, StreamExt};
     use gdl_cells::CellState;
     use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
@@ -398,6 +452,13 @@ mod tests {
             InstanceId::new_v4(),
             WorkerAddress::from_encoded(b"tcp://test".to_vec()),
         )
+    }
+
+    /// The health of a cell that requires two ready cells of `model_x`.
+    fn health() -> CellHealth {
+        let quorum = Quorum::new([("a", 1)], std::time::Duration::ZERO);
+        let requires = [("model_x".to_string(), 2)].into();
+        CellHealth::of(&quorum, CellState::Unavailable, &requires)
     }
 
     fn installed(state: CellState) -> Installed {
@@ -511,7 +572,7 @@ mod tests {
     /// the installed one first.
     #[test]
     fn only_the_current_generation_writes() {
-        let relay = Relay::new(16);
+        let relay = Relay::new(16, tokio::sync::watch::Sender::new(health()));
         let mut watch = relay.watch();
         assert_eq!(pending(&mut watch), [FollowEvent::Synced]);
         let first = relay.begin("m");
@@ -566,5 +627,35 @@ mod tests {
         );
         relay.forget("m");
         assert!(relay.following().borrow().is_empty());
+    }
+
+    /// The count of ready, followed cells of a class follows each install,
+    /// change of state, and drop of a current generation, and nothing of
+    /// an earlier one.
+    #[test]
+    fn a_class_counts_its_installed_ready_cells() {
+        let health = tokio::sync::watch::Sender::new(health());
+        let shown = health.subscribe();
+        let met = || shown.borrow().requires["model_x"].met;
+        let relay = Relay::new(16, health);
+        let (m, n) = (relay.begin("m"), relay.begin("n"));
+        relay.install("m", m, installed(CellState::Ready));
+        relay.install("n", n, installed(CellState::Degraded));
+        assert_eq!(met(), 1);
+        relay.apply("n", n, state(CellState::Ready));
+        assert_eq!(met(), 2);
+        relay.apply("n", n, state(CellState::Ready));
+        assert_eq!(met(), 2, "no change of state");
+        relay.apply("m", m, state(CellState::Unavailable));
+        assert_eq!(met(), 1);
+        relay.end("m", m);
+        assert_eq!(met(), 1, "m was not ready");
+        let later = relay.begin("n");
+        assert_eq!(met(), 0, "the new generation dropped the ready one");
+        relay.apply("n", n, state(CellState::Ready));
+        relay.end("n", n);
+        relay.install("n", later, installed(CellState::Ready));
+        assert_eq!(met(), 1);
+        assert!(!shown.borrow().healthy(), "and the cell is unavailable");
     }
 }
