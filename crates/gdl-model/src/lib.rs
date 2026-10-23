@@ -10,6 +10,7 @@
 mod config;
 mod deployment;
 mod diagram;
+mod encoding;
 mod hash;
 mod manifest;
 mod metrics;
@@ -24,6 +25,7 @@ pub use deployment::{
     DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
     SegmentRegistration, segment_name_problem,
 };
+pub use encoding::Encoding;
 pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
 pub use metrics::{
     COMPONENT_LABEL, ENDPOINT_LABEL, MetricField, MetricKind, NAMESPACE_LABEL, RUNTIME_LABELS,

@@ -35,11 +35,13 @@ pub use figment;
 /// `Endpoints`, and `export`) expand to `::gdl::...`, so a crate that uses
 /// one depends on `gdl` itself, as node crates do.
 pub use gdl;
+#[doc(hidden)]
+pub use gdl::message_encoding;
 pub use gdl_model::{
-    CrossingReport, DeploymentSpec, GraphConfig, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, HopInfo,
-    HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement, PlacementError, PlacementErrors,
-    RequestRouter, Role, Run, SELECTORS, SegmentRegistration, SelectorInfo, TypeInfo, WireReason,
-    layout, resolve_config,
+    CrossingReport, DeploymentSpec, Encoding, GraphConfig, HUB_CONTROL_PORT, HUB_PUBLIC_PORT,
+    HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement, PlacementError,
+    PlacementErrors, RequestRouter, Role, Run, SELECTORS, SegmentRegistration, SelectorInfo,
+    TypeInfo, WireReason, layout, resolve_config,
 };
 #[cfg(feature = "json-lines")]
 pub use json::serve_json_lines;
@@ -89,7 +91,8 @@ pub use wire::{Codec, RequestCodec, StreamCodec};
 /// - `SourceReq` and `SourceItem`: aliases for the source's request and item
 ///   types.
 ///
-/// Bump `schema` whenever a message type's wire form changes.
+/// Bump `schema` whenever a message type's serde representation changes.
+/// Declared codec changes update the contract hash automatically.
 ///
 /// The expansion reaches the runtime through `$crate`, so a contract crate
 /// can depend on gdl-runtime under another name. Names starting with `__gdl` or `__Gdl`

@@ -281,20 +281,22 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
             ));
         }
         let mut plan = HopPlan::new(hop);
-        plan.routers = (0..forward.len())
-            .map(|pos| rt.router(usize::from(index), pos))
-            .collect();
         // A selector that reads the head as a type must be given that
         // type: each crossing this segment sends is checked against its
         // edge's codec, which every slot has, `Absent` or not.
         let mut heads = Vec::new();
         fwd.heads(&mut heads);
+        plan.routers = std::iter::once(gdl_model::Encoding::default())
+            .chain(heads.iter().map(|head| head.2))
+            .enumerate()
+            .map(|(pos, encoding)| rt.router(usize::from(index), pos, encoding))
+            .collect();
         for pos in 1..forward.len() {
             let sends = forward[pos - 1].0 == rt.segment && forward[pos].0 != rt.segment;
-            let Router::Selector { name, selector } = &plan.routers[pos] else {
+            let Router::Selector { name, selector, .. } = &plan.routers[pos] else {
                 continue;
             };
-            let (Some((wants, wanted)), Some((carries, carried))) =
+            let (Some((wants, wanted)), Some((carries, carried, _))) =
                 (selector.edge(), heads.get(pos - 1))
             else {
                 continue;

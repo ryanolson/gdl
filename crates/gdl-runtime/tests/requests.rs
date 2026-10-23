@@ -15,13 +15,34 @@ fn the_streamed_manifest_marks_its_streamed_edges() {
     let manifest = streamed::contract::manifest();
     assert_eq!(
         manifest.hops[0].forward_types,
-        vec![TypeInfo::streamed("Ask", true, "Word", true)]
+        vec![TypeInfo::streamed(
+            "Ask",
+            true,
+            Default::default(),
+            "Word",
+            true,
+            Default::default()
+        )]
     );
     assert_eq!(
         manifest.hops[1].forward_types,
         vec![
-            TypeInfo::streamed("Brief", true, "Word", true),
-            TypeInfo::streamed("Brief", true, "Word", true),
+            TypeInfo::streamed(
+                "Brief",
+                true,
+                Default::default(),
+                "Word",
+                true,
+                Default::default()
+            ),
+            TypeInfo::streamed(
+                "Brief",
+                true,
+                Default::default(),
+                "Word",
+                true,
+                Default::default()
+            ),
         ]
     );
     for hop in &manifest.hops {
@@ -44,6 +65,7 @@ fn the_stream_marker_and_the_item_type_change_the_contract_hash() {
     other_item.hops[1].forward_types[1].stream = Some(ItemInfo {
         name: "Token".to_string(),
         wire: true,
+        encoding: Default::default(),
     });
     assert_ne!(base.contract_hash(), other_item.contract_hash());
 }
@@ -51,7 +73,14 @@ fn the_stream_marker_and_the_item_type_change_the_contract_hash() {
 #[test]
 fn a_streamed_crossing_needs_a_codec_for_each_part() {
     let mut manifest = streamed::contract::manifest();
-    manifest.hops[1].forward_types[1] = TypeInfo::streamed("Brief", false, "Word", false);
+    manifest.hops[1].forward_types[1] = TypeInfo::streamed(
+        "Brief",
+        false,
+        Default::default(),
+        "Word",
+        false,
+        Default::default(),
+    );
     let placement = Placement::new()
         .segment("front", ["A", "B", "C", "G"])
         .segment("back", ["D", "F", "E"]);
@@ -76,6 +105,7 @@ fn a_streamed_response_type_is_refused() {
     manifest.hops[1].backward_types[0].stream = Some(ItemInfo {
         name: "Word".to_string(),
         wire: true,
+        encoding: Default::default(),
     });
     let placement = Placement::new().segment("all", ["A", "B", "C", "D", "E", "F", "G"]);
     let errors = layout(&manifest, &placement).expect_err("invalid").0;

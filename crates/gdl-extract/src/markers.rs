@@ -42,10 +42,18 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
             if let Some(origin) = message(&mut resolver, Def::Type(krate, module, index)) {
                 let wire = wire(&mut resolver, &mut impls, krate, module, index);
                 let ty = &resolver.crates[krate].modules[module].types[index];
+                let encoding = match gdl_syntax::message_encoding(&ty.attrs) {
+                    Ok(encoding) => encoding,
+                    Err(error) => {
+                        problems.push(format!("{}: {error}", ty.at));
+                        continue;
+                    }
+                };
                 offer.messages.push(MessageEntry {
                     name: ty.name.clone(),
                     path: origin.path,
                     wire,
+                    encoding,
                     public: ty.vis == Vis::Public && public(&resolver, krate, module),
                 });
             }
@@ -92,13 +100,24 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                 .resolve(krate, module, path.segments(), absolute)
                 .and_then(|def| Some((message(&mut resolver, def)?, def)));
             match found {
-                Some((origin, Def::Type(c, m, i))) => offer.exports.push(ExportEntry {
-                    path: public_path(&resolver, krate, module, &name),
-                    name,
-                    origin,
-                    wire: wire(&mut resolver, &mut impls, c, m, i),
-                    public,
-                }),
+                Some((origin, Def::Type(c, m, i))) => {
+                    let ty = &resolver.crates[c].modules[m].types[i];
+                    let encoding = match gdl_syntax::message_encoding(&ty.attrs) {
+                        Ok(encoding) => encoding,
+                        Err(error) => {
+                            problems.push(format!("{}: {error}", ty.at));
+                            continue;
+                        }
+                    };
+                    offer.exports.push(ExportEntry {
+                        path: public_path(&resolver, krate, module, &name),
+                        name,
+                        origin,
+                        wire: wire(&mut resolver, &mut impls, c, m, i),
+                        encoding,
+                        public,
+                    });
+                }
                 Some(_) => unreachable!("a message is a type"),
                 None => problems.push(format!(
                     "{at}: export `{name}`: `{}` names no type that derives `Message`",

@@ -23,8 +23,8 @@ fn manifest() -> Manifest {
             forward: vec![],
             inner: "D".into(),
             backward: vec![],
-            forward_types: vec![TypeInfo::new("Request", true)],
-            backward_types: vec![TypeInfo::new("Reply", true)],
+            forward_types: vec![TypeInfo::new("Request", true, Default::default())],
+            backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }],
     }
 }
@@ -128,10 +128,13 @@ fn a_segment_sends_to_the_next_run_and_the_runs_it_opens() {
             inner: "D".into(),
             backward: vec!["B".into()],
             forward_types: vec![
-                TypeInfo::new("Request", true),
-                TypeInfo::new("Request", true),
+                TypeInfo::new("Request", true, Default::default()),
+                TypeInfo::new("Request", true, Default::default()),
             ],
-            backward_types: vec![TypeInfo::new("Reply", true), TypeInfo::new("Reply", true)],
+            backward_types: vec![
+                TypeInfo::new("Reply", true, Default::default()),
+                TypeInfo::new("Reply", true, Default::default()),
+            ],
         }],
     };
     let placement = Placement::new()
@@ -185,10 +188,10 @@ fn a_forward_path_that_returns_sends_both_ways() {
             inner: "D".into(),
             backward: vec![],
             forward_types: vec![
-                TypeInfo::new("Request", true),
-                TypeInfo::new("Request", true),
+                TypeInfo::new("Request", true, Default::default()),
+                TypeInfo::new("Request", true, Default::default()),
             ],
-            backward_types: vec![TypeInfo::new("Reply", true)],
+            backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }],
     };
     let placement = Placement::new()

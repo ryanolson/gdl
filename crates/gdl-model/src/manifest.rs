@@ -2,8 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Role;
 use crate::hash::Fnv;
+use crate::{Encoding, Role};
 
 /// The shape of a graph as data: its nodes, hops, and typed edges.
 ///
@@ -13,7 +13,7 @@ use crate::hash::Fnv;
 pub struct Manifest {
     /// The graph's name.
     pub name: String,
-    /// The schema version. Bump it whenever any message type's wire form
+    /// The schema version. Bump it whenever any message type's serde representation
     /// changes: type names alone cannot fingerprint a serde representation.
     pub schema: u32,
     /// Every node, in declaration order.
@@ -74,6 +74,8 @@ pub struct TypeInfo {
     /// Whether the type has a codec, so an edge carrying it may be cut. For
     /// a streamed request the item type must have one as well.
     pub wire: bool,
+    /// The encoding declared by the message, or named MessagePack by default.
+    pub encoding: Encoding,
     /// The item type of a streamed request. `None` for any other type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<ItemInfo>,
@@ -86,14 +88,17 @@ pub struct ItemInfo {
     pub name: String,
     /// Whether the type has a codec.
     pub wire: bool,
+    /// The encoding of each input stream item.
+    pub encoding: Encoding,
 }
 
 impl TypeInfo {
     /// A type entry.
-    pub fn new(name: impl Into<String>, wire: bool) -> Self {
+    pub fn new(name: impl Into<String>, wire: bool, encoding: Encoding) -> Self {
         Self {
             name: name.into(),
             wire,
+            encoding,
             stream: None,
         }
     }
@@ -102,15 +107,19 @@ impl TypeInfo {
     pub fn streamed(
         head: impl Into<String>,
         head_wire: bool,
+        head_encoding: Encoding,
         item: impl Into<String>,
         item_wire: bool,
+        item_encoding: Encoding,
     ) -> Self {
         Self {
             name: head.into(),
             wire: head_wire,
+            encoding: head_encoding,
             stream: Some(ItemInfo {
                 name: item.into(),
                 wire: item_wire,
+                encoding: item_encoding,
             }),
         }
     }
@@ -144,8 +153,8 @@ impl HopInfo {
 
 impl Manifest {
     /// The contract hash: changes when the name, schema, nodes, roles,
-    /// topology, or edge types (including which requests are streamed, and
-    /// their item types) change. Deployments check it so that segments
+    /// topology, or edge types and encodings (including which requests are streamed,
+    /// and their item types) change. Deployments check it so that segments
     /// built from different contracts never exchange traffic.
     pub fn contract_hash(&self) -> u64 {
         let mut h = Fnv::new();
@@ -162,11 +171,15 @@ impl Manifest {
             h.strs(&hop.backward);
             for ty in hop.forward_types.iter().chain(&hop.backward_types) {
                 h.str(&ty.name);
+                h.str(ty.encoding.name());
+                h.u64(u64::from(ty.encoding.version()));
                 match &ty.stream {
                     None => h.u64(0),
                     Some(item) => {
                         h.u64(1);
                         h.str(&item.name);
+                        h.str(item.encoding.name());
+                        h.u64(u64::from(item.encoding.version()));
                     }
                 }
             }

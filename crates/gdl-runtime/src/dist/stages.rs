@@ -63,7 +63,7 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
     /// Collect, for each forward edge from this part of the hop on, the
     /// type its codec carries as the head, and the type's name.
     #[doc(hidden)]
-    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str)>);
+    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str, gdl_model::Encoding)>);
 
     #[doc(hidden)]
     fn walk(
@@ -139,8 +139,13 @@ where
         self.rest.streamed(out);
     }
 
-    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str)>) {
-        out.push(C::head());
+    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str, gdl_model::Encoding)>) {
+        let (id, name) = C::head();
+        out.push((
+            id,
+            name,
+            self.codec.map(|codec| codec.encoding()).unwrap_or_default(),
+        ));
         self.rest.heads(out);
     }
 
@@ -182,8 +187,13 @@ impl<C: RequestCodec> DForward for FwdEnd<C> {
         out.push(C::STREAMED);
     }
 
-    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str)>) {
-        out.push(C::head());
+    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str, gdl_model::Encoding)>) {
+        let (id, name) = C::head();
+        out.push((
+            id,
+            name,
+            self.codec.map(|codec| codec.encoding()).unwrap_or_default(),
+        ));
     }
 
     async fn walk(

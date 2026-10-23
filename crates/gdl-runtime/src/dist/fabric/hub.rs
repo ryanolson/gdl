@@ -922,8 +922,8 @@ mod tests {
                     inner: "Echo".into(),
                     forward: vec![],
                     backward: vec![],
-                    forward_types: vec![TypeInfo::new("Request", true)],
-                    backward_types: vec![TypeInfo::new("Reply", true)],
+                    forward_types: vec![TypeInfo::new("Request", true, Default::default())],
+                    backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
                 }],
             };
             let placement = Placement::new()

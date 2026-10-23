@@ -21,6 +21,8 @@ pub struct Resolved {
     pub path: String,
     /// Whether it is a wire type.
     pub wire: bool,
+    /// The encoding declared by the defining message.
+    pub encoding: gdl_model::Encoding,
 }
 
 /// One way a listed crate offers a message.
@@ -29,6 +31,7 @@ struct Candidate {
     origin: Origin,
     path: String,
     wire: bool,
+    encoding: gdl_model::Encoding,
     /// Whether it is an export, and whether its own package exports it:
     /// what decides the path the contract names it by.
     export: Option<bool>,
@@ -66,6 +69,7 @@ pub(crate) fn resolve(
                 },
                 path: m.path.clone(),
                 wire: m.wire,
+                encoding: m.encoding,
                 export: None,
                 public: m.public,
             });
@@ -76,6 +80,7 @@ pub(crate) fn resolve(
                 origin: e.origin.clone(),
                 path: e.path.clone(),
                 wire: e.wire,
+                encoding: e.encoding,
                 export: Some(e.origin.package == offer.package),
                 public: e.public,
             });
@@ -122,6 +127,7 @@ pub(crate) fn resolve(
                     origin: pinned.origin.clone(),
                     path: pinned.path.clone(),
                     wire: pinned.wire,
+                    encoding: pinned.encoding,
                 },
             );
             continue;
@@ -164,6 +170,7 @@ pub(crate) fn resolve(
                         origin: best.origin.clone(),
                         path: best.path.clone(),
                         wire: best.wire,
+                        encoding: best.encoding,
                     },
                 );
             }
@@ -269,6 +276,7 @@ pub(crate) mod tests {
                     name: path.rsplit("::").next().expect("name").to_string(),
                     path: (*path).to_string(),
                     wire: true,
+                    encoding: Default::default(),
                     public: true,
                 })
                 .collect(),
@@ -284,6 +292,7 @@ pub(crate) mod tests {
                         path: (*origin).to_string(),
                     },
                     wire: true,
+                    encoding: Default::default(),
                     public: true,
                 })
                 .collect(),

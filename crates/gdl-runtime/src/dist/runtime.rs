@@ -460,7 +460,7 @@ impl Runtime {
     /// The router of the hand-off at forward position `pos` of hop `hop`,
     /// for a crossing this instance sends: a policy, or a selector that
     /// `Runtime::new` resolved.
-    pub(crate) fn router(&self, hop: usize, pos: usize) -> Router {
+    pub(crate) fn router(&self, hop: usize, pos: usize, encoding: gdl_model::Encoding) -> Router {
         match self.layout.request_router(hop, pos) {
             RequestRouter::RoundRobin => Router::Policy(Policy::RoundRobin),
             RequestRouter::Random => Router::Policy(Policy::Random),
@@ -468,6 +468,7 @@ impl Runtime {
                 Some(selector) => Router::Selector {
                     name: Arc::from(name.as_str()),
                     selector: Arc::clone(selector),
+                    encoding,
                 },
                 // Resolved for every crossing this instance sends; another
                 // segment's crossing is never sent from here.
@@ -503,10 +504,12 @@ impl Runtime {
                     .pick(segment, Picker::Request, *policy, &self.random)?,
                 None,
             ),
-            Router::Selector { selector, .. } => {
+            Router::Selector {
+                selector, encoding, ..
+            } => {
                 let (instance, picked) = self
                     .routes
-                    .choose(segment, &**selector, cx, &envelope.payload)
+                    .choose(segment, &**selector, cx, &envelope.payload, *encoding)
                     .await?;
                 // A request that ended while its selector chose is not
                 // handed on; its lease goes with `picked`. The caller's
@@ -605,6 +608,7 @@ pub(crate) enum Router {
     Selector {
         name: Arc<str>,
         selector: Arc<dyn Erased>,
+        encoding: gdl_model::Encoding,
     },
 }
 

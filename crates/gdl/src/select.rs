@@ -67,19 +67,26 @@ pub struct Encoded;
 mod sealed {
     use std::any::TypeId;
 
+    use gdl_model::Encoding;
     use serde::de::DeserializeOwned;
 
     use crate::error::{Error, ErrorKind, Result};
 
     pub trait Sealed: Sized {
-        fn decode(bytes: &[u8]) -> Result<Self>;
+        fn decode(bytes: &[u8], encoding: Encoding) -> Result<Self>;
         /// The type that the crossing's edge must carry, if any.
         fn edge() -> Option<(TypeId, &'static str)>;
     }
 
     impl<T: DeserializeOwned + Send + Sync + 'static> Sealed for T {
-        fn decode(bytes: &[u8]) -> Result<Self> {
-            rmp_serde::from_slice(bytes).map_err(|e| {
+        fn decode(bytes: &[u8], encoding: Encoding) -> Result<Self> {
+            let decoded = match encoding {
+                Encoding::Json => serde_json::from_slice(bytes).map_err(|e| e.to_string()),
+                Encoding::Msgpack | Encoding::MsgpackArray => {
+                    rmp_serde::from_slice(bytes).map_err(|e| e.to_string())
+                }
+            };
+            decoded.map_err(|e| {
                 Error::new(
                     ErrorKind::Codec,
                     format!(
@@ -96,7 +103,7 @@ mod sealed {
     }
 
     impl Sealed for super::Encoded {
-        fn decode(_: &[u8]) -> Result<Self> {
+        fn decode(_: &[u8], _: Encoding) -> Result<Self> {
             Ok(super::Encoded)
         }
 
@@ -307,6 +314,7 @@ pub trait Erased: Send + Sync + 'static {
         &'a self,
         cx: &'a Cx,
         head: &'a [u8],
+        encoding: gdl_model::Encoding,
         instances: Instances<'a>,
     ) -> BoxFuture<'a, Result<Picked>>;
 
@@ -323,10 +331,11 @@ impl<S: Selector> Erased for Typed<S> {
         &'a self,
         cx: &'a Cx,
         bytes: &'a [u8],
+        encoding: gdl_model::Encoding,
         instances: Instances<'a>,
     ) -> BoxFuture<'a, Result<Picked>> {
         Box::pin(async move {
-            let head = <S::Head as sealed::Sealed>::decode(bytes)?;
+            let head = <S::Head as sealed::Sealed>::decode(bytes, encoding)?;
             let request = Request {
                 cx,
                 head: &head,

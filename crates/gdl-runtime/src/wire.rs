@@ -8,6 +8,7 @@ use futures::StreamExt;
 use gdl::Streamed;
 use gdl::{Error, ErrorKind, Result};
 use gdl::{Items, items};
+use gdl_model::Encoding;
 
 /// How one edge's message type crosses a segment boundary.
 ///
@@ -17,12 +18,22 @@ use gdl::{Items, items};
 /// bound; carrying the already-monomorphized functions can. An edge whose
 /// type is not serializable has no codec, and a placement that would cross
 /// it is rejected before anything runs.
+///
+/// The message's `#[gdl(codec = "...")]` chooses named MessagePack
+/// (`msgpack`, the default), positional MessagePack (`msgpack_array`), or
+/// JSON (`json`). Arrays must not conditionally omit fields.
 pub struct Codec<T> {
     encode: fn(&T) -> Result<Vec<u8>>,
     decode: fn(&[u8]) -> Result<T>,
+    encoding: Encoding,
 }
 
 impl<T> Codec<T> {
+    /// The encoding of this complete message.
+    pub fn encoding(&self) -> Encoding {
+        self.encoding
+    }
+
     /// Encode one value.
     pub fn encode(&self, value: &T) -> Result<Vec<u8>> {
         (self.encode)(value)
@@ -35,11 +46,17 @@ impl<T> Codec<T> {
 }
 
 impl<T: Serialize + DeserializeOwned> Codec<T> {
-    /// The msgpack codec for `T`.
-    pub fn msgpack() -> Self {
+    /// A serde codec for `T` using the selected encoding.
+    pub fn new(encoding: Encoding) -> Self {
+        let (encode, decode) = match encoding {
+            Encoding::Msgpack => (encode_msgpack::<T> as _, decode_msgpack::<T> as _),
+            Encoding::MsgpackArray => (encode_array::<T> as _, decode_msgpack::<T> as _),
+            Encoding::Json => (encode_json::<T> as _, decode_json::<T> as _),
+        };
         Self {
-            encode: encode_msgpack::<T>,
-            decode: decode_msgpack::<T>,
+            encode,
+            decode,
+            encoding,
         }
     }
 }
@@ -56,6 +73,7 @@ impl<T> fmt::Debug for Codec<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Codec")
             .field("type", &std::any::type_name::<T>())
+            .field("encoding", &self.encoding)
             .finish()
     }
 }
@@ -74,6 +92,8 @@ pub trait RequestCodec: sealed::Sealed + Copy + Send + Sync + 'static {
     /// itself, or a streamed request's head. A routing selector that reads
     /// the head must read it as this type.
     fn head() -> (std::any::TypeId, &'static str);
+    /// The encoding used for the request's head.
+    fn encoding(&self) -> Encoding;
 
     /// The request as it crosses.
     fn split(&self, value: Self::Value) -> Result<Split>;
@@ -97,6 +117,10 @@ impl<T: Send + 'static> RequestCodec for Codec<T> {
 
     fn head() -> (std::any::TypeId, &'static str) {
         (std::any::TypeId::of::<T>(), std::any::type_name::<T>())
+    }
+
+    fn encoding(&self) -> Encoding {
+        self.encoding
     }
 
     fn split(&self, value: T) -> Result<Split> {
@@ -156,6 +180,10 @@ impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
         (std::any::TypeId::of::<H>(), std::any::type_name::<H>())
     }
 
+    fn encoding(&self) -> Encoding {
+        self.head.encoding
+    }
+
     fn split(&self, value: Streamed<H, T>) -> Result<Split> {
         let (head, input) = value.into_parts();
         let item = self.item;
@@ -192,15 +220,24 @@ mod sealed {
     impl<H, T> Sealed for super::StreamCodec<H, T> {}
 }
 
-// Compact (array-form) msgpack: field names are not repeated per item. A
-// change to a message's wire form needs a schema bump anyway, so named
-// fields would buy nothing.
 fn encode_msgpack<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    rmp_serde::to_vec_named(value).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
+}
+
+fn encode_array<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     rmp_serde::to_vec(value).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
 }
 
 fn decode_msgpack<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     rmp_serde::from_slice(bytes).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
+}
+
+fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    serde_json::to_vec(value).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
+}
+
+fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    serde_json::from_slice(bytes).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
 }
 
 /// The codec for a concrete type, or `None` if it is not wire-capable.
@@ -211,12 +248,14 @@ fn decode_msgpack<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 /// `&Probe<T>` tries the bounded impl first. Inside a generic function the
 /// bound is not provable for an arbitrary `T`, so the fallback would always
 /// win; that is why the graph macro expands this per edge.
+/// A message's annotation chooses the encoding; an unmarked serde type
+/// uses named-field MessagePack.
 #[macro_export]
 macro_rules! wire_codec {
     ($ty:ty) => {{
         #[allow(unused_imports)]
         use $crate::__private::{ViaLocal as _, ViaWire as _};
-        (&$crate::__private::Probe::<$ty>::new()).__gdl_codec()
+        (&$crate::__private::Probe::<$ty>::new()).__gdl_codec($crate::message_encoding!($ty))
     }};
 }
 
@@ -239,6 +278,7 @@ pub mod probe {
     use serde::de::DeserializeOwned;
 
     use super::Codec;
+    use gdl_model::Encoding;
 
     pub struct Probe<T>(PhantomData<fn() -> T>);
 
@@ -258,21 +298,21 @@ pub mod probe {
     // the caller's scope, where a trait of theirs with a method of the same
     // name would make it ambiguous.
     pub trait ViaWire<T> {
-        fn __gdl_codec(&self) -> Option<Codec<T>>;
+        fn __gdl_codec(&self, encoding: Encoding) -> Option<Codec<T>>;
     }
 
     impl<T: Serialize + DeserializeOwned> ViaWire<T> for Probe<T> {
-        fn __gdl_codec(&self) -> Option<Codec<T>> {
-            Some(Codec::msgpack())
+        fn __gdl_codec(&self, encoding: Encoding) -> Option<Codec<T>> {
+            Some(Codec::new(encoding))
         }
     }
 
     pub trait ViaLocal<T> {
-        fn __gdl_codec(&self) -> Option<Codec<T>>;
+        fn __gdl_codec(&self, encoding: Encoding) -> Option<Codec<T>>;
     }
 
     impl<T> ViaLocal<T> for &Probe<T> {
-        fn __gdl_codec(&self) -> Option<Codec<T>> {
+        fn __gdl_codec(&self, _: Encoding) -> Option<Codec<T>> {
             None
         }
     }

@@ -21,8 +21,8 @@ fn manifest() -> Manifest {
             forward: vec![],
             inner: "D".into(),
             backward: vec![],
-            forward_types: vec![TypeInfo::new("Req", true)],
-            backward_types: vec![TypeInfo::new("Item", true)],
+            forward_types: vec![TypeInfo::new("Req", true, Default::default())],
+            backward_types: vec![TypeInfo::new("Item", true, Default::default())],
         }],
     }
 }
@@ -473,7 +473,7 @@ fn a_package_bound_from_two_paths_is_refused() {
     manifest.hops[0].backward.push("F".into());
     manifest.hops[0]
         .backward_types
-        .push(TypeInfo::new("Item", true));
+        .push(TypeInfo::new("Item", true, Default::default()));
     let placement = gdl_model::Placement::new()
         .segment("front", ["S", "F"])
         .segment("engine", ["D"]);
@@ -594,7 +594,14 @@ fn a_streaming_source_is_not_served_as_json_lines() {
     let out = std::path::Path::new("/work/segments");
     let spec = spec(split(), &[("D", "tiny_nodes::D")]);
     let mut manifest = manifest();
-    manifest.hops[0].forward_types = vec![TypeInfo::streamed("Req", true, "Chunk", true)];
+    manifest.hops[0].forward_types = vec![TypeInfo::streamed(
+        "Req",
+        true,
+        Default::default(),
+        "Chunk",
+        true,
+        Default::default(),
+    )];
     let files = rendered(&spec, &manifest, out).expect("render");
     let front = &files[&PathBuf::from("front/src/lib.rs")];
     assert!(!front.contains("serve_json_lines"), "{front}");
@@ -713,8 +720,8 @@ fn two_roots() -> Manifest {
         forward: vec![],
         inner: "D".into(),
         backward: vec![],
-        forward_types: vec![TypeInfo::new("Req", true)],
-        backward_types: vec![TypeInfo::new("Item", true)],
+        forward_types: vec![TypeInfo::new("Req", true, Default::default())],
+        backward_types: vec![TypeInfo::new("Item", true, Default::default())],
     });
     manifest
 }

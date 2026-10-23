@@ -40,7 +40,7 @@ pub fn graph(input: TokenStream) -> TokenStream {
 /// The expansion behind `gdl_message::Message`: the `Message` and `Shape`
 /// impls, and one catalogue entry for the type, named through
 /// `::gdl_message`.
-#[proc_macro_derive(Message)]
+#[proc_macro_derive(Message, attributes(gdl))]
 pub fn message(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     result(message::expand(&input, &through_message()))
@@ -48,7 +48,7 @@ pub fn message(input: TokenStream) -> TokenStream {
 
 /// The same derive, reached as `gdl::Message`: named through `::gdl`, so a
 /// crate that depends on gdl alone can use it.
-#[proc_macro_derive(GdlMessage)]
+#[proc_macro_derive(GdlMessage, attributes(gdl))]
 pub fn gdl_message(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     result(message::expand(&input, &through_gdl()))

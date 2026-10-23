@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// A prompt as words.
 #[derive(Serialize, Deserialize, gdl_message::Message)]
+#[gdl(codec = "msgpack_array")]
 pub struct Words;
 
 pub mod engine;
@@ -20,6 +21,7 @@ mod hidden {
 
     /// Serialized by hand.
     #[derive(Message)]
+    #[gdl(codec = "json")]
     pub struct Session;
 
     impl serde::Serialize for Session {

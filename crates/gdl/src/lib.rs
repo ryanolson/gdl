@@ -35,7 +35,7 @@ pub use compose::{
 pub use cx::{Cx, Deadline, RequestId};
 pub use error::{Error, ErrorKind, Result};
 pub use gdl_macros::{Config, Endpoints, Metrics};
-pub use gdl_model::{ConfigField, ConfigSchema, ConfigValue, MetricField, MetricKind};
+pub use gdl_model::{ConfigField, ConfigSchema, ConfigValue, Encoding, MetricField, MetricKind};
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 pub use metrics::Metrics;
@@ -51,6 +51,8 @@ pub use select::{
 pub use service::{Client, Endpoints, Service};
 pub use streamed::Streamed;
 
+#[doc(hidden)]
+pub use gdl_message::message_encoding;
 /// Message types, from `gdl-message`. A protocols crate depends on that
 /// crate alone; a node crate can reach the same items here.
 pub use gdl_message::{Catalogue, Identity, MessageInfo, Shape};

@@ -19,6 +19,143 @@ struct SerializeOnly(u32);
 
 struct NotSerde(#[allow(dead_code)] Rc<u32>);
 
+#[derive(Debug, PartialEq, Serialize, Deserialize, gdl::Message)]
+#[gdl(codec = "json")]
+/// A message whose JSON codec is selected through an alias too.
+pub struct Json {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    optional: Option<String>,
+    text: String,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, gdl::Message)]
+#[gdl(codec = "msgpack_array")]
+/// A fixed-layout message with an explicit positional encoding.
+pub struct Array {
+    n: u32,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, gdl::Message)]
+#[gdl(codec = "msgpack")]
+/// A message with an explicit named-field encoding.
+pub struct Named {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    optional: Option<u32>,
+    n: u32,
+}
+
+mod selected {
+    use super::{Array, Json, Named};
+
+    gdl_runtime::graph! {
+        name = "codecs", schema = 1;
+        source A: Json + stream Array -> stream Named;
+        sink B: Json + stream Array -> stream Named;
+        topology: A => B;
+    }
+}
+
+#[test]
+fn the_manifest_records_each_parts_codec_and_hashes_every_choice() {
+    use gdl_runtime::Encoding;
+
+    let manifest = selected::manifest();
+    assert_eq!(manifest.hops[0].forward_types[0].encoding, Encoding::Json);
+    assert_eq!(
+        manifest.hops[0].forward_types[0]
+            .stream
+            .as_ref()
+            .expect("streamed input")
+            .encoding,
+        Encoding::MsgpackArray
+    );
+    assert_eq!(
+        manifest.hops[0].backward_types[0].encoding,
+        Encoding::Msgpack
+    );
+    assert_eq!(
+        gdl_runtime::Manifest::from_toml(&manifest.to_toml()).expect("parse"),
+        manifest
+    );
+    for part in 0..3 {
+        let mut changed = manifest.clone();
+        let encoding = match part {
+            0 => &mut changed.hops[0].forward_types[0].encoding,
+            1 => {
+                &mut changed.hops[0].forward_types[0]
+                    .stream
+                    .as_mut()
+                    .expect("streamed input")
+                    .encoding
+            }
+            _ => &mut changed.hops[0].backward_types[0].encoding,
+        };
+        *encoding = match encoding {
+            Encoding::Msgpack => Encoding::Json,
+            _ => Encoding::Msgpack,
+        };
+        assert_ne!(
+            manifest.contract_hash(),
+            changed.contract_hash(),
+            "part {part}"
+        );
+    }
+}
+
+#[test]
+fn message_annotations_select_the_codec_for_aliases_too() {
+    type Alias = Json;
+    let value = Json {
+        optional: None,
+        text: "hello".into(),
+    };
+    let codec = wire_codec!(Alias).expect("wire");
+    let bytes = codec.encode(&value).expect("encode");
+    assert_eq!(serde_json::from_slice::<Json>(&bytes).expect("JSON"), value);
+    assert_eq!(codec.decode(&bytes).expect("decode"), value);
+
+    let array = Array { n: 7 };
+    let codec = wire_codec!(Array).expect("wire");
+    assert_eq!(codec.encode(&array).expect("encode"), [0x91, 7]);
+    assert_eq!(codec.decode(&[0x91, 7]).expect("decode"), array);
+
+    let named = Named {
+        optional: None,
+        n: 7,
+    };
+    let codec = wire_codec!(Named).expect("wire");
+    let bytes = codec.encode(&named).expect("encode");
+    assert_eq!(codec.decode(&bytes).expect("decode"), named);
+    assert_eq!(
+        rmp_serde::from_slice::<std::collections::BTreeMap<String, u32>>(&bytes).expect("map")["n"],
+        7
+    );
+}
+
+#[tokio::test]
+async fn a_stream_codec_uses_each_parts_declared_encoding() {
+    use futures::StreamExt;
+    use gdl::{Streamed, items};
+    use gdl_runtime::RequestCodec;
+
+    let codec = gdl_runtime::stream_codec!(Json, Array).expect("wire");
+    let head = Json {
+        optional: None,
+        text: "head".into(),
+    };
+    let request = Streamed::new(head, items(futures::stream::iter([Ok(Array { n: 7 })])));
+    let split = codec.split(request).expect("split");
+    let head: Json = serde_json::from_slice(&split.head).expect("JSON head");
+    assert_eq!(head.text, "head");
+    let encoded: Vec<_> = split.input.expect("input").collect().await;
+    assert_eq!(encoded, [Ok(vec![0x91, 7])]);
+    let joined = codec
+        .join(&split.head, Some(items(futures::stream::iter(encoded))))
+        .expect("join");
+    let (_, input) = joined.into_parts();
+    assert_eq!(input.collect::<Vec<_>>().await, [Ok(Array { n: 7 })]);
+}
+
 #[test]
 fn serde_types_get_a_codec_that_round_trips() {
     let codec = wire_codec!(Plain).expect("Plain is wire-capable");
@@ -28,6 +165,93 @@ fn serde_types_get_a_codec_that_round_trips() {
     };
     let bytes = codec.encode(&value).expect("encode");
     assert_eq!(codec.decode(&bytes).expect("decode"), value);
+}
+
+#[test]
+fn the_default_codec_preserves_omitted_middle_fields() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Request {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        optional: Option<u8>,
+        required: u8,
+    }
+
+    let codec = wire_codec!(Request).expect("wire");
+    for optional in [None, Some(3)] {
+        let value = Request {
+            optional,
+            required: 10,
+        };
+        let bytes = codec.encode(&value).expect("encode");
+        assert_eq!(codec.decode(&bytes).expect("decode"), value);
+    }
+}
+
+#[test]
+fn the_default_codec_does_not_shift_one_optional_field_into_another() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Request {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first: Option<u8>,
+        #[serde(default)]
+        second: Option<u8>,
+    }
+
+    let codec = wire_codec!(Request).expect("wire");
+    let value = Request {
+        first: None,
+        second: Some(7),
+    };
+    let bytes = codec.encode(&value).expect("encode");
+    assert_eq!(codec.decode(&bytes).expect("decode"), value);
+}
+
+#[test]
+fn the_default_codec_preserves_nested_api_shapes() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Request {
+        messages: Vec<Message>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        temperature: Option<f64>,
+        tools: serde_json::Value,
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "role", rename_all = "snake_case")]
+    enum Message {
+        User {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+            content: Content,
+        },
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum Content {
+        Text(String),
+        Parts(Vec<Part>),
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum Part {
+        Text { text: String },
+    }
+
+    let codec = wire_codec!(Request).expect("wire");
+    for content in [
+        serde_json::json!("hello"),
+        serde_json::json!([{"type": "text", "text": "hello"}]),
+    ] {
+        let value: Request = serde_json::from_value(serde_json::json!({
+            "messages": [{"role": "user", "content": content}],
+            "tools": {"type": "object", "properties": {"city": {"type": "string"}}}
+        }))
+        .expect("request");
+        let bytes = codec.encode(&value).expect("encode");
+        assert_eq!(codec.decode(&bytes).expect("decode"), value);
+    }
 }
 
 #[test]

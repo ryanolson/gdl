@@ -104,6 +104,13 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ## Graphs and types
 
+### Positional MessagePack cannot preserve conditional field omissions
+
+- **What happens:** a message using `#[gdl(codec = "msgpack_array")]` can fail to decode or put values in the wrong fields when serde omits a field.
+- **Why:** arrays retain values in order but do not identify which field was omitted. The wire probe checks serde trait bounds, not the behavior of each value.
+- **Workaround:** use the default `msgpack` codec, which includes field names, or select `json`. Reserve `msgpack_array` for fixed field layouts without conditional omissions.
+- **Would lift it:** rejecting conditional omissions during positional encoding.
+
 ### A `Streamed` named through a type alias cannot cross segments
 
 - **What happens:** the alias is an ordinary type to the graph macro, so the edge gets no streaming codec, and the edge cannot be split across segments.
