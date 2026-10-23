@@ -103,6 +103,22 @@ fn a_cells_settings_are_read_from_the_environment() {
     });
 }
 
+/// An IPv6 hub address starts with `[`, as a list would: it is read as
+/// the address it is.
+#[test]
+fn an_ipv6_hub_address_is_read_as_written() {
+    Jail::expect_with(|jail| {
+        model_cell(jail, "/srv/cells");
+        jail.set_env("GDL_CELL__HUB", "[::1]:1337");
+        let cell = cell_from_env().map_err(|e| e.to_string())?;
+        assert_eq!(
+            cell.and_then(|cell| cell.hub).as_deref(),
+            Some("[::1]:1337")
+        );
+        Ok(())
+    });
+}
+
 #[test]
 fn a_misspelled_or_malformed_cell_variable_is_refused() {
     for (variable, value, expected) in [
