@@ -76,7 +76,8 @@ impl Crossing {
     /// the choice is checked when it returns (ruling 154): if the cell's
     /// table changed meanwhile and the instance is no longer eligible in
     /// the cell's current table, the choice and its lease are dropped and
-    /// both the cell and the instance are chosen again. Boxed, as
+    /// both the cell and the instance are chosen again. A request that
+    /// ended while its selector chose is not handed on. Boxed, as
     /// [`Live::choose`](crate::dist::roster::Live::choose) is.
     pub(crate) fn choose<'a>(
         &'a self,
@@ -97,6 +98,11 @@ impl Crossing {
                         Instances::new(&self.target.segment, &cell.offered),
                     )
                     .await?;
+                // A request that ended while its selector chose gets no
+                // instance; its lease goes with `picked`. The caller's
+                // select sees the end only at its next await, and the
+                // send can leave before that.
+                cx.check()?;
                 let chosen = cell.eligible[picked.index];
                 if still_eligible(&self.target.table.load(), &cell, chosen) {
                     return Ok((chosen, picked));
@@ -386,6 +392,43 @@ mod tests {
         );
         drop(lease);
         assert_eq!(waiting.leases.load(Ordering::SeqCst), 0);
+    }
+
+    /// Cancels the request it chooses for, then chooses, with a lease.
+    struct Cancelling(Arc<AtomicUsize>);
+
+    impl gdl::Selector for Cancelling {
+        type Head = gdl::Encoded;
+
+        async fn select<'a>(
+            &'a self,
+            request: gdl::Request<'a, gdl::Encoded>,
+            instances: Instances<'a>,
+        ) -> Result<gdl::Choice<'a>> {
+            request.cx().cancel();
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let chosen = instances.get(0).expect("one");
+            Ok(gdl::Choice::new(chosen).with_lease(Lease(Arc::clone(&self.0))))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_cancelled_while_its_selector_chose_gets_no_instance() {
+        let ids = ids(1);
+        let leases = Arc::new(AtomicUsize::new(0));
+        let crossing = crossing(
+            vec![cell("m", CellState::Ready, &ids)],
+            Router::Policy(Policy::RoundRobin),
+        );
+        let selector = gdl::__runtime::Typed(Arc::new(Cancelling(Arc::clone(&leases))));
+        let cx = Cx::new();
+        let error = crossing
+            .choose(&selector, &cx, &[], Default::default())
+            .await
+            .map(|(id, _)| id)
+            .expect_err("a cancelled request was given an instance");
+        assert_eq!(error.kind(), gdl::ErrorKind::Cancelled, "{error}");
+        assert_eq!(leases.load(Ordering::SeqCst), 0, "the lease was kept");
     }
 
     #[tokio::test]
