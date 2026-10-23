@@ -714,7 +714,7 @@ impl Router {
 /// The cell a chooser's hand-off is offered to, and the crossing that
 /// chose it; never one without the `hub` feature, which has no cells.
 #[cfg(feature = "hub")]
-type Offering<'a> = Option<(&'a super::cells::Crossing, super::cells::Chosen)>;
+type Offering<'a> = Option<(&'a super::cells::Crossing, u64)>;
 #[cfg(not(feature = "hub"))]
 type Offering<'a> = Option<std::marker::PhantomData<&'a ()>>;
 

@@ -107,10 +107,13 @@ impl Damping {
         }
     }
 
-    /// The cell accepted an offer: its damping ends.
+    /// The cell accepted an offer: its damping ends. A cell that is not
+    /// damped writes nothing.
     pub(crate) fn accept(&self) {
-        self.state.store(0, Ordering::Relaxed);
-        wrote();
+        if self.is_damped() {
+            self.state.store(0, Ordering::Relaxed);
+            wrote();
+        }
     }
 
     /// `now` as milliseconds since the origin.

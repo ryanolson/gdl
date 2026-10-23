@@ -19,7 +19,7 @@ use gdl::__runtime::Lease;
 use gdl::{Cx, Error, ErrorKind, Result};
 use velo::InstanceId;
 
-use super::{Chosen, Crossing, Within};
+use super::{Crossing, Within};
 use crate::dist::envelope::{self, Accepted, Forward, WireCx};
 use crate::dist::fabric::Offered;
 use crate::dist::runtime::{Handed, Runtime};
@@ -35,19 +35,19 @@ pub(crate) enum Answer {
     Failed(Error),
 }
 
-/// What became of an offer, as `crossing` sent it to the cell `chosen`.
+/// What became of an offer, as `crossing` sent it to the cell `cell`.
 /// A cell that declined it is damped, and a damped cell that accepted it
 /// is no longer; a hand-off that never left says nothing of the cell, and
 /// changes nothing.
-pub(crate) fn answer(offered: Offered, crossing: &Crossing, chosen: Chosen) -> Answer {
+pub(crate) fn answer(offered: Offered, crossing: &Crossing, cell: u64) -> Answer {
     match offered {
         Offered::Answered(reply) => match envelope::decode::<Result<Accepted, Error>>(&reply) {
             Ok(Ok(accepted)) => {
-                crossing.accepted(chosen);
+                crossing.accepted(cell);
                 Answer::Accepted(accepted)
             }
             Ok(Err(error)) if declines(&error) => {
-                crossing.declined(chosen);
+                crossing.declined(cell);
                 Answer::Declined(error)
             }
             Ok(Err(error)) | Err(error) => Answer::Failed(error),
@@ -67,16 +67,17 @@ pub(crate) fn answer(offered: Offered, crossing: &Crossing, chosen: Chosen) -> A
 impl Runtime {
     /// Choose, for `envelope`, a cell of the class `crossing` enters that
     /// is not in `offered`, by the class's cell policy, then an instance
-    /// of it by the hop's router: the instance, the cell, and a selector's
-    /// lease, with the selector's meta added to `envelope`. `None` when no
-    /// such cell may take it.
+    /// of it by the hop's router: the instance, the cell's
+    /// [`id`](super::CellTable::id), and a selector's lease, with the
+    /// selector's meta added to `envelope`. `None` when no such cell may
+    /// take it.
     pub(crate) async fn choose_cell(
         &self,
         crossing: &Crossing,
         cx: &Cx,
         envelope: &mut Forward,
         offered: &[u64],
-    ) -> Result<Option<(InstanceId, Chosen, Option<Lease>)>> {
+    ) -> Result<Option<(InstanceId, u64, Option<Lease>)>> {
         match crossing.within() {
             Within::Policy(policy) => Ok(crossing
                 .pick(*policy, self.random(), offered)
@@ -110,10 +111,10 @@ impl Runtime {
         cx: &Cx,
         mut envelope: Forward,
         timed: bool,
-        declined: Chosen,
+        declined: u64,
         refusal: Error,
     ) -> Result<Handed> {
-        let mut offered = vec![declined.id];
+        let mut offered = vec![declined];
         let mut refusal = refusal;
         while offered.len() <= self.config.cell_failovers {
             if let Within::Selector { .. } = crossing.within() {
@@ -143,7 +144,7 @@ impl Runtime {
                 }
                 Answer::Failed(error) => return Err(error),
                 Answer::Declined(declined) => {
-                    offered.push(cell.id);
+                    offered.push(cell);
                     refusal = declined;
                 }
             }
@@ -405,6 +406,11 @@ mod tests {
     /// The crossing into `model_x` of [`layout`], over `cells`, each with
     /// one entry instance and an idle summary.
     fn crossing_over(names: &[&str]) -> Crossing {
+        followed_over(names).0
+    }
+
+    /// [`crossing_over`], with the tables it chooses from.
+    fn followed_over(names: &[&str]) -> (Crossing, Cells) {
         let cells = Cells::new("home", ["d"]);
         let tables = names
             .iter()
@@ -429,7 +435,43 @@ mod tests {
         cells.store("d", EntryTable { cells: tables });
         let mut targets = targets(&layout(), "a", &cells).expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
-        Crossing::new(target, Router::Policy(Policy::RoundRobin))
+        (
+            Crossing::new(target, Router::Policy(Policy::RoundRobin)),
+            cells,
+        )
+    }
+
+    /// An acceptance ends the damping the cell has when it accepts, not
+    /// the one it had when its offer was chosen: an offer chosen before a
+    /// decline damped the cell ends that damping, and of two offers chosen
+    /// while it was damped, only the first acceptance writes.
+    #[test]
+    fn an_acceptance_ends_the_damping_the_cell_has_when_it_accepts() {
+        let writes = || super::super::damping::WRITES.with(Cell::get);
+        let random = std::hash::RandomState::new();
+        let (lone, cells) = followed_over(&["m1"]);
+        let pick = || {
+            lone.pick(Policy::RoundRobin, &random, &[])
+                .expect("a lone cell is always chosen")
+                .1
+        };
+        let damped = || cells.followed("d")[0].damped.is_some();
+        let (first, second) = (pick(), pick());
+        lone.declined(second);
+        assert!(damped());
+        lone.accepted(first);
+        assert!(
+            !damped(),
+            "an offer chosen before the decline left it damped"
+        );
+
+        lone.declined(pick());
+        let (first, second) = (pick(), pick());
+        let wrote = writes();
+        lone.accepted(first);
+        lone.accepted(second);
+        assert!(!damped());
+        assert_eq!(writes() - wrote, 1, "an undamped cell's acceptance wrote");
     }
 
     /// A pick whose cell accepts allocates nothing and, while the cell is

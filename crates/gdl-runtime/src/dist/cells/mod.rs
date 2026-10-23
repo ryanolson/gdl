@@ -20,7 +20,7 @@ mod task;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use crossing::{Chosen, Crossing, Target, Within, targets};
+pub(crate) use crossing::{Crossing, Target, Within, targets};
 pub(crate) use offer::{Answer, answer};
 pub(crate) use task::follow;
 // The membership's tests drive the follower beside their own.
