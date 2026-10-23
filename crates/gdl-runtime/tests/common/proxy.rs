@@ -1,0 +1,154 @@
+//! A TCP proxy in front of one of a hub's ports, for the tests that make a
+//! hub fall silent, go away, or cut its connections under running
+//! instances.
+
+use std::sync::Arc;
+
+/// How a [`Proxy`] treats its connections.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Forward,
+    /// Accept and hold, answering nothing: a hub that stops answering
+    /// without closing its connections.
+    Silent,
+    /// Close at once: a hub that is briefly gone.
+    Refuse,
+    /// Forward until a client sends a `DELETE`, then fall silent before
+    /// passing it on: a hub that answers an announcement and then stops
+    /// answering at the withdrawal that follows it.
+    SilentAtDelete,
+}
+
+/// A TCP proxy in front of one of a hub's ports, so that a test can make
+/// the hub fall silent or go away for a while under running instances.
+pub struct Proxy {
+    pub port: u16,
+    mode: Arc<tokio::sync::watch::Sender<Mode>>,
+    /// Signalled when `SilentAtDelete` held a `DELETE`.
+    pub intercepted: Arc<tokio::sync::Notify>,
+}
+
+impl Proxy {
+    pub async fn new(target: std::net::SocketAddr) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("valid test fixture");
+        let port = listener.local_addr().expect("valid test fixture").port();
+        let (mode, modes) = tokio::sync::watch::channel(Mode::Forward);
+        let mode = Arc::new(mode);
+        let intercepted = Arc::new(tokio::sync::Notify::new());
+        let (setter, seen) = (Arc::clone(&mode), Arc::clone(&intercepted));
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let held = Held {
+                    set: Arc::clone(&setter),
+                    seen: Arc::clone(&seen),
+                };
+                tokio::spawn(relay(client, target, modes.clone(), held));
+            }
+        });
+        Self {
+            port,
+            mode,
+            intercepted,
+        }
+    }
+
+    pub fn set(&self, mode: Mode) {
+        let _ = self.mode.send(mode);
+    }
+}
+
+/// What a relay needs to hold a `DELETE`: the proxy's mode, which it
+/// turns silent, and the signal that it did.
+struct Held {
+    set: Arc<tokio::sync::watch::Sender<Mode>>,
+    seen: Arc<tokio::sync::Notify>,
+}
+
+/// Relay one connection while the mode forwards; hold it while silent;
+/// drop it once refusing.
+async fn relay(
+    mut client: tokio::net::TcpStream,
+    target: std::net::SocketAddr,
+    mut mode: tokio::sync::watch::Receiver<Mode>,
+    held: Held,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Settle the mode first: hold while silent, return when refusing.
+    loop {
+        let now = *mode.borrow_and_update();
+        match now {
+            Mode::Refuse => return,
+            Mode::Silent => {
+                if mode.changed().await.is_err() {
+                    return;
+                }
+            }
+            Mode::Forward | Mode::SilentAtDelete => break,
+        }
+    }
+    let Ok(mut server) = tokio::net::TcpStream::connect(target).await else {
+        return;
+    };
+    let (mut from_client, mut to_client) = client.split();
+    let (mut from_server, mut to_server) = server.split();
+    let (mut up, mut down) = ([0u8; 8192], [0u8; 8192]);
+    // The last bytes sent upstream, so that a request line split across
+    // two reads is still recognized.
+    let mut tail: Vec<u8> = Vec::new();
+    loop {
+        let now = *mode.borrow_and_update();
+        match now {
+            Mode::Refuse => return,
+            Mode::Silent => {
+                if mode.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            Mode::Forward | Mode::SilentAtDelete => {}
+        }
+        tokio::select! {
+            read = from_client.read(&mut up) => match read {
+                Ok(n) if n > 0 => {
+                    let mut seen = tail.clone();
+                    seen.extend_from_slice(&up[..n]);
+                    let found = (now == Mode::SilentAtDelete)
+                        .then(|| seen.windows(7).position(|w| w == b"DELETE "))
+                        .flatten();
+                    if let Some(at) = found {
+                        // What came before the request goes on; the request
+                        // is held here, with every other connection.
+                        let before = at.saturating_sub(tail.len());
+                        let _ = to_server.write_all(&up[..before]).await;
+                        let _ = held.set.send(Mode::Silent);
+                        held.seen.notify_one();
+                        // Until the test changes the mode again, not at
+                        // this change, which is the proxy's own.
+                        mode.borrow_and_update();
+                        let _ = mode.changed().await;
+                        return;
+                    }
+                    if to_server.write_all(&up[..n]).await.is_err() {
+                        return;
+                    }
+                    let keep = seen.len().saturating_sub(6);
+                    tail = seen[keep..].to_vec();
+                }
+                _ => return,
+            },
+            read = from_server.read(&mut down) => match read {
+                Ok(n) if n > 0 => {
+                    if to_client.write_all(&down[..n]).await.is_err() {
+                        return;
+                    }
+                }
+                _ => return,
+            },
+            changed = mode.changed() => if changed.is_err() {
+                return;
+            },
+        }
+    }
+}

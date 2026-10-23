@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 pub mod cells;
+pub mod proxy;
 pub mod selecting;
 pub mod streamed;
 pub mod system;
