@@ -3,6 +3,18 @@
 
 use gdl_model::ClassBoundary;
 
+/// A class boundary, as the classification reads it: the hop it falls on.
+pub(crate) trait Boundary {
+    /// The index of the hop the boundary falls on.
+    fn hop(&self) -> usize;
+}
+
+impl Boundary for ClassBoundary {
+    fn hop(&self) -> usize {
+        self.hop
+    }
+}
+
 /// For each of `hops` hops, whether its forward hand-offs that reach this
 /// segment are offers: the hop crosses one of `boundaries` at its inner
 /// end, and `inner_here` says this segment holds that end. The hop's
@@ -10,15 +22,16 @@ use gdl_model::ClassBoundary;
 /// every hand-off of it that reaches the segment comes from another class.
 /// One pass over the boundaries, so that a graph with many of them costs
 /// in proportion to its size.
-pub(crate) fn offered_hops<'a>(
-    boundaries: impl IntoIterator<Item = &'a ClassBoundary>,
+pub(crate) fn offered_hops<'a, B: Boundary + 'a>(
+    boundaries: impl IntoIterator<Item = &'a B>,
     hops: usize,
     inner_here: impl Fn(usize) -> bool,
 ) -> Vec<bool> {
     let mut offered = vec![false; hops];
     for boundary in boundaries {
-        if let Some(offer) = offered.get_mut(boundary.hop) {
-            *offer = inner_here(boundary.hop);
+        let hop = boundary.hop();
+        if let Some(offer) = offered.get_mut(hop) {
+            *offer = inner_here(hop);
         }
     }
     offered
@@ -28,36 +41,37 @@ pub(crate) fn offered_hops<'a>(
 mod tests {
     use std::cell::Cell;
 
-    use gdl_model::ClassBoundary;
+    use super::{Boundary, offered_hops};
 
-    use super::offered_hops;
-
-    /// Boundaries at every other one of `hops` hops.
-    fn boundaries(hops: usize) -> Vec<ClassBoundary> {
-        (0..hops)
-            .step_by(2)
-            .map(|hop| ClassBoundary {
-                hop,
-                from: "global".into(),
-                into: "model_x".into(),
-            })
-            .collect()
+    /// A boundary that counts each time its hop is read.
+    struct Counted<'a> {
+        hop: usize,
+        reads: &'a Cell<usize>,
     }
 
-    /// How many boundaries classifying `hops` hops reads, and what it
-    /// finds.
+    impl Boundary for Counted<'_> {
+        fn hop(&self) -> usize {
+            self.reads.set(self.reads.get() + 1);
+            self.hop
+        }
+    }
+
+    /// How many reads of a boundary classifying `hops` hops takes, with a
+    /// boundary at every other hop, and what it finds.
     fn classified(hops: usize) -> (usize, Vec<bool>) {
-        let boundaries = boundaries(hops);
-        let read = Cell::new(0);
-        let counted = boundaries.iter().inspect(|_| read.set(read.get() + 1));
-        let offered = offered_hops(counted, hops, |hop| hop % 4 == 0);
-        (read.get(), offered)
+        let reads = Cell::new(0);
+        let boundaries: Vec<Counted<'_>> = (0..hops)
+            .step_by(2)
+            .map(|hop| Counted { hop, reads: &reads })
+            .collect();
+        let offered = offered_hops(&boundaries, hops, |hop| hop % 4 == 0);
+        (reads.get(), offered)
     }
 
     /// Each hop that crosses a boundary at an inner end this segment holds
     /// is an offer, and no other; classifying them reads each boundary a
-    /// bounded number of times, so twice the hops cost twice the reads,
-    /// not four times.
+    /// bounded number of times, however it holds them, so twice the hops
+    /// cost twice the reads, not four times.
     #[test]
     fn classifying_offers_reads_each_boundary_once() {
         let (_, offered) = classified(8);
