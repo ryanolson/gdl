@@ -257,7 +257,7 @@ pub struct SegmentHealth {
 }
 
 /// Why a cell's hub cannot start.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CellError(String);
 
 impl CellError {
@@ -267,6 +267,15 @@ impl CellError {
 }
 
 impl std::fmt::Display for CellError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// The message alone, as `Display` gives it: a binary that returns the
+// error from `main` prints its `Debug`, which would otherwise quote and
+// escape the message.
+impl std::fmt::Debug for CellError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
