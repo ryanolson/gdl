@@ -12,6 +12,7 @@
 
 #![allow(dead_code)]
 
+pub mod boundary;
 pub mod cells;
 pub mod proxy;
 pub mod selecting;

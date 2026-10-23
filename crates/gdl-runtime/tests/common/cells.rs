@@ -176,8 +176,17 @@ pub async fn cell_hub(
     cell: CellSettings,
     directory: &Resolving,
 ) -> (Hub, Arc<CellReadiness<Resolving>>) {
+    cell_hub_of(&spec(), cell, directory).await
+}
+
+/// [`cell_hub`] for the deployment `spec`.
+pub async fn cell_hub_of(
+    spec: &DeploymentSpec,
+    cell: CellSettings,
+    directory: &Resolving,
+) -> (Hub, Arc<CellReadiness<Resolving>>) {
     let name = cell.hub.clone().expect("a cell's hub has a name");
-    let (hub, readiness) = unresolved_cell_hub(cell, directory).await;
+    let (hub, readiness) = unresolved_cell_hub_of(spec, cell, directory).await;
     directory.resolve(&name, &format!("127.0.0.1:{}", hub.public_addr().port()));
     (hub, readiness)
 }
@@ -188,11 +197,19 @@ pub async fn unresolved_cell_hub(
     cell: CellSettings,
     directory: &Resolving,
 ) -> (Hub, Arc<CellReadiness<Resolving>>) {
+    unresolved_cell_hub_of(&spec(), cell, directory).await
+}
+
+async fn unresolved_cell_hub_of(
+    spec: &DeploymentSpec,
+    cell: CellSettings,
+    directory: &Resolving,
+) -> (Hub, Arc<CellReadiness<Resolving>>) {
     let readiness = Arc::new(
-        CellReadiness::new(&spec(), cell, directory.clone(), timing()).expect("valid test fixture"),
+        CellReadiness::new(spec, cell, directory.clone(), timing()).expect("valid test fixture"),
     );
     let hub = Hub::builder(hub_config())
-        .extension(GraphAdmission::new(spec()))
+        .extension(GraphAdmission::new(spec.clone()))
         .extension(Arc::clone(&readiness))
         .serve()
         .await
