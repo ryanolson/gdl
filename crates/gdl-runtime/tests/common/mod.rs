@@ -702,7 +702,7 @@ pub fn reference_manifest(wire: impl Fn(&str) -> bool) -> gdl_runtime::Manifest 
         role,
         binding: (role != Role::Source).then(|| name.to_lowercase()),
     };
-    let ty = |name: &str| TypeInfo::new(name, wire(name));
+    let ty = |name: &str| TypeInfo::new(name, wire(name), Default::default());
     let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     Manifest {
         name: "reference".to_string(),

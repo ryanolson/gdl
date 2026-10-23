@@ -276,13 +276,20 @@ fn differences(
             .messages
             .iter()
             .find(|m| m.dir == origin.dir && m.path == origin.path)
-            .map_or("unregistered", |m| wire(m.wire))
+            .map_or_else(|| "unregistered".into(), |m| wire(m.wire, m.encoding))
     };
     let built: BTreeSet<String> = registered
         .messages
         .iter()
         .filter(|m| mine(&m.dir))
-        .map(|m| format!("message `{}` at `{}`, {}", m.name, m.path, wire(m.wire)))
+        .map(|m| {
+            format!(
+                "message `{}` at `{}`, {}",
+                m.name,
+                m.path,
+                wire(m.wire, m.encoding)
+            )
+        })
         .chain(registered.exports.iter().filter(|e| mine(&e.dir)).map(|e| {
             format!(
                 "export `{}` at `{}`, of `{}` ({} {}), {}",
@@ -353,7 +360,14 @@ fn differences(
     let read: BTreeSet<String> = offer
         .messages
         .iter()
-        .map(|m| format!("message `{}` at `{}`, {}", m.name, m.path, wire(m.wire)))
+        .map(|m| {
+            format!(
+                "message `{}` at `{}`, {}",
+                m.name,
+                m.path,
+                wire(m.wire, m.encoding)
+            )
+        })
         .chain(offer.exports.iter().map(|e| {
             format!(
                 "export `{}` at `{}`, of `{}` ({} {}), {}",
@@ -362,7 +376,7 @@ fn differences(
                 e.origin.path,
                 e.origin.package,
                 e.origin.version,
-                wire(e.wire)
+                wire(e.wire, e.encoding)
             )
         }))
         .chain(offer.nodes.iter().map(|n| {
@@ -429,8 +443,12 @@ fn differences(
     problems
 }
 
-fn wire(wire: bool) -> &'static str {
-    if wire { "wire" } else { "local" }
+fn wire(wire: bool, encoding: gdl_model::Encoding) -> String {
+    format!(
+        "{} (codec {})",
+        if wire { "wire" } else { "local" },
+        encoding.name()
+    )
 }
 
 /// A port, with each message by package, version, and path. `item` is
@@ -546,6 +564,7 @@ mod tests {
                 name: "Words".into(),
                 path: "protocols::Words".into(),
                 wire: words_wire,
+                encoding: Default::default(),
             }],
             exports: vec![ExportInfo {
                 package: "facade".into(),
@@ -599,6 +618,7 @@ mod tests {
                 path: "facade::Words".into(),
                 origin: read_origin("protocols::Words"),
                 wire: true,
+                encoding: Default::default(),
                 public: true,
             }],
             nodes: vec![NodeEntry {
@@ -661,10 +681,20 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "registered by the build, not read from source: export `Words` at `facade::Words`, of `protocols::Words` (protocols 0.1.0), local",
-                "read from source, not registered by the build: export `Words` at `facade::Words`, of `protocols::Words` (protocols 0.1.0), wire",
+                "registered by the build, not read from source: export `Words` at `facade::Words`, of `protocols::Words` (protocols 0.1.0), local (codec msgpack)",
+                "read from source, not registered by the build: export `Words` at `facade::Words`, of `protocols::Words` (protocols 0.1.0), wire (codec msgpack)",
             ]
         );
+    }
+
+    #[test]
+    fn an_exports_encoding_is_compared_with_its_defining_message() {
+        let mut catalogue = registered(true, false);
+        catalogue.messages[0].encoding = gdl_model::Encoding::Json;
+        let problems = differences(&catalogue, &facade, &read());
+        assert_eq!(problems.len(), 2);
+        assert!(problems[0].contains("codec json"), "{problems:?}");
+        assert!(problems[1].contains("codec msgpack"), "{problems:?}");
     }
 
     /// A metric the build registers that the source does not show, as

@@ -281,25 +281,33 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
             ));
         }
         let mut plan = HopPlan::new(hop);
-        plan.routers = (0..forward.len())
-            .map(|pos| rt.router(usize::from(index), pos))
-            .collect();
         // A selector that reads the head as a type must be given that
         // type: each crossing this segment sends is checked against its
         // edge's codec, which every slot has, `Absent` or not.
         let mut heads = Vec::new();
         fwd.heads(&mut heads);
+        // A selector reads the head in its edge's encoding: the head that
+        // crosses at `pos` is the one stage `pos - 1` sends.
+        plan.routers = (0..forward.len())
+            .map(|pos| {
+                let encoding = pos
+                    .checked_sub(1)
+                    .map(|at| heads[at].encoding)
+                    .unwrap_or_default();
+                rt.router(usize::from(index), pos, encoding)
+            })
+            .collect();
         for pos in 1..forward.len() {
             let sends = forward[pos - 1].0 == rt.segment && forward[pos].0 != rt.segment;
             let Some((name, selector)) = plan.routers[pos].selector() else {
                 continue;
             };
-            let (Some((wants, wanted)), Some((carries, carried))) =
-                (selector.edge(), heads.get(pos - 1))
-            else {
+            let head = &heads[pos - 1];
+            let Some((wants, wanted)) = selector.edge() else {
                 continue;
             };
-            if sends && wants != *carries {
+            if sends && wants != head.id {
+                let carried = head.name;
                 return Err(Error::new(
                     ErrorKind::Placement,
                     format!(

@@ -13,6 +13,7 @@ mod cell;
 mod config;
 mod deployment;
 mod diagram;
+mod encoding;
 mod fleet;
 mod hash;
 mod manifest;
@@ -31,6 +32,7 @@ pub use deployment::{
     DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
     SegmentPhase, SegmentRegistration, segment_name_problem, segment_service,
 };
+pub use encoding::Encoding;
 pub use fleet::{Fleet, FleetError, FleetErrors, FleetTable};
 pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};
 pub use metrics::{

@@ -11,7 +11,7 @@ type Hop<'a> = (&'a str, &'a [&'a str], &'a str, &'a [&'a str]);
 
 /// A manifest of `nodes` and `hops`, every edge a wire type.
 fn manifest(nodes: &[(&str, Role)], hops: &[Hop]) -> Manifest {
-    let ty = || TypeInfo::new("T", true);
+    let ty = || TypeInfo::new("T", true, Default::default());
     Manifest {
         name: "bounded".into(),
         schema: 1,
@@ -62,7 +62,12 @@ fn cells(forward: &[&str], backward: &[&str]) -> Manifest {
             ("Model", &[], "Engine", &["Detok"]),
         ],
     );
-    let named = |names: &[&str]| names.iter().map(|&n| TypeInfo::new(n, true)).collect();
+    let named = |names: &[&str]| {
+        names
+            .iter()
+            .map(|&n| TypeInfo::new(n, true, Default::default()))
+            .collect()
+    };
     graph.hops[0].forward_types = named(&["ChatRequest"]);
     graph.hops[0].backward_types = named(&["ChatChunk"]);
     graph.hops[1].forward_types = named(&["Prompt"]);
@@ -333,7 +338,14 @@ fn two_boundaries_into_one_class_are_not_a_cycle() {
 #[test]
 fn a_streamed_request_into_another_class_costs_two_round_trips() {
     let mut graph = cells(&[], &[]);
-    graph.hops[2].forward_types = vec![TypeInfo::streamed("Tokens", true, "Token", true)];
+    graph.hops[2].forward_types = vec![TypeInfo::streamed(
+        "Tokens",
+        true,
+        Default::default(),
+        "Token",
+        true,
+        Default::default(),
+    )];
     for placement in cell_placements(&graph, CELL_CLASSES) {
         let report = layout(&graph, &placement).expect("a layout").report();
         assert_eq!(report.wan_round_trips(), 2);
@@ -376,7 +388,7 @@ fn a_boundary_problem_is_reported_with_every_other_problem() {
         );
     }
     let mut opaque = graph.clone();
-    opaque.hops[0].forward_types[0] = TypeInfo::new("ChatRequest", false);
+    opaque.hops[0].forward_types[0] = TypeInfo::new("ChatRequest", false, Default::default());
     for placement in cell_placements(&opaque, CELL_CLASSES) {
         assert_all(
             refusals(&opaque, &placement),

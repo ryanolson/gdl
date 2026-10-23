@@ -104,6 +104,28 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ## Graphs and types
 
+### Positional MessagePack cannot preserve conditional field omissions
+
+- **What happens:** a message using `#[gdl(codec = "msgpack_array")]` can fail to decode or put values in the wrong fields when serde omits a field.
+- **Why:** arrays retain values in order but do not identify which field was omitted. The wire probe checks serde trait bounds, not the behavior of each value.
+- **Workaround:** use the default `msgpack` codec, which includes field names, or select `json`. Reserve `msgpack_array` for fixed field layouts without conditional omissions.
+- **Would lift it:** rejecting conditional omissions during positional encoding.
+
+### JSON cannot preserve every serde value
+
+- **What happens:** `#[gdl(codec = "json")]` writes NaN and infinities as `null`. A required float then fails to decode. An optional float changes from `Some` to `None`.
+- **Maps:** JSON rejects keys such as tuples at the sender. String and integer keys work.
+- **Why:** the wire probe checks serde traits. Those traits do not prove that every value fits JSON.
+- **Workaround:** use the default `msgpack` encoding for nonfinite floats or unsupported map keys.
+- **Would lift it:** a lossless JSON representation for these values, used by both sender and receiver.
+
+### Catalogue entries without encoding metadata require re-extraction
+
+- **What happens:** a saved message or export without `encoding` prevents the catalogue from loading. Adding a crate also loads that catalogue first.
+- **Why:** an absent field does not prove the default encoding. An extractor that predates codec selection can miss a newer source annotation.
+- **Recovery:** remove the entry named by the error first. With the current `cargo-gdl`, re-add directory or registry crates using `cargo gdl extract` and the same `--catalog` directory. Re-import Git crates through the composer after removing their entries.
+- **Would lift it:** re-extraction of entries whose stored format lacks the required metadata.
+
 ### A `Streamed` named through a type alias cannot cross segments
 
 - **What happens:** the alias is an ordinary type to the graph macro, so the edge gets no streaming codec, and the edge cannot be split across segments.
@@ -191,6 +213,12 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ## Tooling
 
+### The composer does not list marked message re-exports
+
+- **What happens:** the catalog reader and generator resolve marked message re-exports. The composer omits them from its message list. A frontend can have empty message selectors when its canonical messages are private, even with public marked exports.
+- **Why:** the composer populates these controls from public `messages` entries, without adding `exports` entries and their canonical identities.
+- **What lifts it:** include marked exports in the message controls and retain their original message identities. The film's reference package defines its messages at the crate root; its vendor extension still demonstrates marked re-exports through source extraction and generation.
+
 ### The composer's server cannot build crates that need CUDA
 
 - **What happens:** a graph spec compiles nothing, so composing works for any crate. A contract spec that names such a crate's messages, however, cannot be built on a server without CUDA. With `--docker`, **Build and apply** builds every segment in the one build image of the deployment (`build_image`). A segment whose crates need CUDA builds only if that image has the CUDA toolkit.
@@ -272,3 +300,11 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Why:** an apply builds images and publishes ports, so it is opt-in, as local imports are. A wait for health holds the request for the start period of the segments (30 minutes, to cover the time to load models).
 - **Workaround:** for another Docker host, download the bundle and run it there. Follow a started project with `docker compose -p gdl-<graph> logs -f`, and stop it with `docker compose -p gdl-<graph> down`.
 - **See:** plan 13, the 2026-10-21 addendum.
+
+## Film production
+
+### Opening voice assembly requires sequential speaker segments
+
+- **What happens:** `tools/video/voices.mjs assemble` rejects overlapping or interleaved inputs. It also rejects a take that exceeds its editorial cue window. Raw responses remain available for listening and manual editing.
+- **Why:** ElevenLabs dialogue returns one mixed recording. Timestamp cuts cannot separate simultaneous voices. The assembly tool preserves the scheduled pauses and does not shorten speech to fit a cue.
+- **What lifts it:** isolated speaker stems or a performance with sequential inputs. A longer take needs a new editorial window or a new recording. Generation never retries automatically.

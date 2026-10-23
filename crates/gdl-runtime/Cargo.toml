@@ -13,10 +13,10 @@ publish.workspace = true
 fault-injection = []
 # Discovery through a hub (`[hub] host = "..."` in a segment's settings),
 # for a deployment whose instances share no directory.
-hub = ["dep:velo-hub", "dep:serde_json", "dep:gdl-cells", "dep:gdl-watch", "tokio/net"]
+hub = ["dep:velo-hub", "dep:gdl-cells", "dep:gdl-watch", "tokio/net"]
 # `serve_json_lines`: a graph's source served as JSON lines, for the binary
 # of a segment that hosts the source.
-json-lines = ["dep:serde_json", "tokio/io-util"]
+json-lines = ["tokio/io-util"]
 
 [dependencies]
 tracing = "0.1"
@@ -36,7 +36,7 @@ prometheus = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 velo = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
@@ -66,6 +66,10 @@ name = "remote"
 harness = false
 
 [[bench]]
+name = "codecs"
+harness = false
+
+[[bench]]
 name = "footprint"
 harness = false
 
@@ -92,3 +96,7 @@ required-features = ["hub"]
 [[test]]
 name = "boundary"
 required-features = ["hub"]
+
+[[test]]
+name = "allocs"
+harness = false

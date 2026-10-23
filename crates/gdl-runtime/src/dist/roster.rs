@@ -265,13 +265,19 @@ impl Live {
         selector: &'a dyn Erased,
         cx: &'a Cx,
         head: &'a [u8],
+        encoding: gdl_model::Encoding,
     ) -> BoxFuture<'a, Result<(InstanceId, Picked)>> {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.table.load_full();
                 let offered = route(&table, segment)?;
                 let picked = selector
-                    .select(cx, head, Instances::new(segment, &offered.offered))
+                    .select(
+                        cx,
+                        head,
+                        encoding,
+                        Instances::new(segment, &offered.offered),
+                    )
                     .await?;
                 let chosen = offered.eligible[picked.index];
                 let now = self.table.load();
@@ -704,7 +710,7 @@ mod tests {
 
         async fn choose(live: &Live, selector: &dyn Erased) -> Result<InstanceId> {
             let cx = Cx::new();
-            live.choose("worker", selector, &cx, &[])
+            live.choose("worker", selector, &cx, &[], Default::default())
                 .await
                 .map(|(id, _)| id)
         }
@@ -795,7 +801,7 @@ mod tests {
                 async move {
                     let selector = Typed(waiting);
                     let cx = Cx::new();
-                    live.choose("worker", &selector, &cx, &[])
+                    live.choose("worker", &selector, &cx, &[], Default::default())
                         .await
                         .map(|(id, picked)| (id, picked.lease))
                 }

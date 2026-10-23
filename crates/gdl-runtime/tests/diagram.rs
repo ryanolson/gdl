@@ -185,8 +185,16 @@ fn names_and_types_are_escaped() {
             forward: vec![],
             inner: "end".to_string(),
             backward: vec![],
-            forward_types: vec![TypeInfo::new("Vec < Option < String > >", true)],
-            backward_types: vec![TypeInfo::new(r#"Tagged < "a\b" >"#, true)],
+            forward_types: vec![TypeInfo::new(
+                "Vec < Option < String > >",
+                true,
+                Default::default(),
+            )],
+            backward_types: vec![TypeInfo::new(
+                r#"Tagged < "a\b" >"#,
+                true,
+                Default::default(),
+            )],
         }],
     };
     let placement = Placement::new().segment("my \"seg\"", ["start", "end"]);
@@ -254,8 +262,8 @@ fn a_layout_of_another_graph_is_refused() {
             forward: vec![],
             inner: "Y".to_string(),
             backward: vec![],
-            forward_types: vec![TypeInfo::new("u32", true)],
-            backward_types: vec![TypeInfo::new("u32", true)],
+            forward_types: vec![TypeInfo::new("u32", true, Default::default())],
+            backward_types: vec![TypeInfo::new("u32", true, Default::default())],
         }],
     };
     let reference = three_segments();
@@ -276,7 +284,7 @@ fn an_inconsistent_manifest_is_refused() {
     undeclared.hops[1].forward.push("Z".to_string());
     undeclared.hops[1]
         .forward_types
-        .push(TypeInfo::new("Pre", true));
+        .push(TypeInfo::new("Pre", true, Default::default()));
     let mut untyped = reference_manifest(|_| true);
     untyped.hops[1].backward_types.pop();
     for manifest in [undeclared, untyped] {
@@ -315,10 +323,16 @@ fn a_type_named_by_its_path_is_labeled_by_its_name() {
             forward_types: vec![TypeInfo::streamed(
                 ":: chat_protocols :: Session",
                 true,
+                Default::default(),
                 ":: r#gen :: audio :: Frame",
                 false,
+                Default::default(),
             )],
-            backward_types: vec![TypeInfo::new("Vec < :: p :: Chunk >", true)],
+            backward_types: vec![TypeInfo::new(
+                "Vec < :: p :: Chunk >",
+                true,
+                Default::default(),
+            )],
         }],
     };
     let mermaid = manifest.to_mermaid(None).expect("draw");

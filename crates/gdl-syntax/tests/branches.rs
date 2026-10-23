@@ -22,7 +22,13 @@ fn independent_roots_keep_identical_contracts_separate() {
     assert_eq!(graph.hops[0].inner, "ChatWorker");
     assert_eq!(graph.hops[1].inner, "ResponsesWorker");
     let manifest = graph
-        .manifest(&|name| Some((format!("protocol::{name}"), true)))
+        .manifest(&|name| {
+            Some(gdl_model::TypeInfo::new(
+                format!("protocol::{name}"),
+                true,
+                Default::default(),
+            ))
+        })
         .expect("manifest");
     let placement = gdl_model::Placement::from_toml("[segment.front]\nnodes=['Chat','Responses']\n[segment.chat]\nnodes=['ChatWorker']\n[segment.responses]\nnodes=['ResponsesWorker']").expect("placement");
     gdl_model::layout(&manifest, &placement).expect("independent segment placement");
@@ -45,7 +51,13 @@ fn explicit_sink_references_share_one_node() {
     .expect("explicit shared sink");
     assert_eq!(graph.nodes.len(), 3);
     let manifest = graph
-        .manifest(&|name| Some((format!("protocol::{name}"), true)))
+        .manifest(&|name| {
+            Some(gdl_model::TypeInfo::new(
+                format!("protocol::{name}"),
+                true,
+                Default::default(),
+            ))
+        })
         .expect("manifest");
     let placement = gdl_model::Placement::new()
         .segment("front", ["Chat", "Responses"])
@@ -77,7 +89,13 @@ fn identity_operators_have_independent_placement() {
     )
     .expect("pipeline syntax");
     let manifest = graph
-        .manifest(&|name| Some((format!("protocol::{name}"), true)))
+        .manifest(&|name| {
+            Some(gdl_model::TypeInfo::new(
+                format!("protocol::{name}"),
+                true,
+                Default::default(),
+            ))
+        })
         .expect("valid identity fixture");
     assert_eq!(
         manifest
@@ -118,7 +136,7 @@ fn identity_ports_cannot_change_message_types_in_a_manifest() {
     )
     .expect("valid identity fixture");
     let manifest = graph
-        .manifest(&|name| Some((name.into(), true)))
+        .manifest(&|name| Some(gdl_model::TypeInfo::new(name, true, Default::default())))
         .expect("valid identity fixture");
     let placement = gdl_model::Placement::new().segment("all", ["Input", "F", "O", "B", "End"]);
     gdl_model::layout(&manifest, &placement).expect("valid identity fixture");

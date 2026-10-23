@@ -118,7 +118,7 @@ mod tests {
         ids: &[InstanceId],
     ) -> InstanceId {
         let picked = selector
-            .select(cx, head, Instances::new("worker", ids))
+            .select(cx, head, Default::default(), Instances::new("worker", ids))
             .await
             .expect("a choice");
         ids[picked.index]

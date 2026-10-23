@@ -209,7 +209,11 @@ fn inconsistent_manifests_are_rejected() {
     duplicate.hops[1].backward.push("G".into());
     duplicate.hops[1]
         .backward_types
-        .push(gdl_runtime::TypeInfo::new("Chunk", true));
+        .push(gdl_runtime::TypeInfo::new(
+            "Chunk",
+            true,
+            Default::default(),
+        ));
     assert!(!errors(&duplicate, &single).is_empty());
 }
 
@@ -337,8 +341,8 @@ fn an_operator_may_own_only_one_downstream_hop() {
             forward: vec![],
             inner: "B".into(),
             backward: vec![],
-            forward_types: vec![gdl_runtime::TypeInfo::new("Pre", true)],
-            backward_types: vec![gdl_runtime::TypeInfo::new("Out", true)],
+            forward_types: vec![gdl_runtime::TypeInfo::new("Pre", true, Default::default())],
+            backward_types: vec![gdl_runtime::TypeInfo::new("Out", true, Default::default())],
         },
     );
     assert!(matches!(
@@ -358,8 +362,8 @@ fn an_operator_may_own_only_one_downstream_hop() {
         forward: vec![],
         inner: inner.into(),
         backward: vec![],
-        forward_types: vec![gdl_runtime::TypeInfo::new("Pre", true)],
-        backward_types: vec![gdl_runtime::TypeInfo::new("Out", true)],
+        forward_types: vec![gdl_runtime::TypeInfo::new("Pre", true, Default::default())],
+        backward_types: vec![gdl_runtime::TypeInfo::new("Out", true, Default::default())],
     };
     repeated.hops.insert(1, hop("B", "X"));
     repeated.hops.insert(2, hop("X", "B"));

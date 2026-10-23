@@ -22,9 +22,9 @@ fn manifest() -> Manifest {
         forward: vec![],
         inner: inner.into(),
         backward: backward.iter().map(|&n| n.into()).collect(),
-        forward_types: vec![TypeInfo::new("T", true)],
+        forward_types: vec![TypeInfo::new("T", true, Default::default())],
         backward_types: (0..=backward.len())
-            .map(|_| TypeInfo::new("T", true))
+            .map(|_| TypeInfo::new("T", true, Default::default()))
             .collect(),
     };
     Manifest {

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// What a user asks.
 #[derive(Serialize, Deserialize, gdl_message::Message)]
+#[gdl(codec = "json")]
 pub struct Prompt {
     /// The prompt text.
     pub text: String,
@@ -12,6 +13,7 @@ pub struct Prompt {
 
 /// One piece of the answer.
 #[derive(Serialize, Deserialize, gdl_message::Message)]
+#[gdl(codec = "msgpack_array")]
 pub struct Chunk {
     /// The chunk's text.
     pub text: String,
@@ -23,6 +25,7 @@ pub mod engine {
 
     /// The prompt as the engine takes it.
     #[derive(Serialize, Deserialize, gdl_message::Message)]
+    #[cfg_attr(all(), gdl(codec = "json"))]
     pub struct Words {
         /// The words.
         pub words: Vec<String>,

@@ -192,6 +192,7 @@ mod tests {
                 name: "Words".into(),
                 path: "renamed::Words".into(),
                 wire: true,
+                encoding: Default::default(),
                 public: true,
             }],
             exports: Vec::new(),

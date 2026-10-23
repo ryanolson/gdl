@@ -29,6 +29,11 @@ pub use shape::{Identity, Message, Shape};
 /// alone. The expansion names this crate as `::gdl_message`, so a crate
 /// that derives `Message` this way depends on it directly; `gdl::Message`
 /// is the same derive for a crate that depends on gdl instead.
+///
+/// `#[gdl(codec = "msgpack")]` selects the default named-field MessagePack
+/// encoding. `msgpack_array` selects positional arrays, whose fields must
+/// not be conditionally omitted. `json` selects JSON. The encoding applies
+/// to the complete value; nested messages do not select another codec.
 pub use gdl_macros::Message;
 
 /// Offer messages under this crate's own paths: on a `pub use` of message
@@ -54,6 +59,7 @@ pub mod __private {
         Node, Port, Role, port,
     };
     pub use crate::shape::{Identity, Message as MessageTrait, Shape};
+    pub use gdl_model::Encoding;
     pub use linkme;
 
     /// Whether a type is a wire type: `Serialize` and `DeserializeOwned`.
@@ -94,4 +100,35 @@ pub mod __private {
             false
         }
     }
+
+    pub trait DeclaredEncoding {
+        fn __gdl_encoding(&self) -> Encoding;
+    }
+
+    impl<T: crate::Message> DeclaredEncoding for WireProbe<T> {
+        fn __gdl_encoding(&self) -> Encoding {
+            T::ENCODING
+        }
+    }
+
+    pub trait DefaultEncoding {
+        fn __gdl_encoding(&self) -> Encoding;
+    }
+
+    impl<T> DefaultEncoding for &WireProbe<T> {
+        fn __gdl_encoding(&self) -> Encoding {
+            Encoding::default()
+        }
+    }
+}
+
+/// The encoding of a concrete message type, including an unmarked serde type.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! message_encoding {
+    ($ty:ty) => {{
+        #[allow(unused_imports)]
+        use $crate::__private::{DeclaredEncoding as _, DefaultEncoding as _};
+        (&$crate::__private::WireProbe::<$ty>::new()).__gdl_encoding()
+    }};
 }

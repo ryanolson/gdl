@@ -29,16 +29,16 @@ fn manifest() -> Manifest {
                 forward: vec![],
                 inner: "F".into(),
                 backward: vec![],
-                forward_types: vec![TypeInfo::new("Request", true)],
-                backward_types: vec![TypeInfo::new("Reply", true)],
+                forward_types: vec![TypeInfo::new("Request", true, Default::default())],
+                backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
             },
             HopInfo {
                 outer: "F".into(),
                 forward: vec![],
                 inner: "D".into(),
                 backward: vec![],
-                forward_types: vec![TypeInfo::new("Tokens", true)],
-                backward_types: vec![TypeInfo::new("Reply", true)],
+                forward_types: vec![TypeInfo::new("Tokens", true, Default::default())],
+                backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
             },
         ],
     }
@@ -326,7 +326,7 @@ fn a_class_problem_does_not_hide_a_routing_problem() {
 #[test]
 fn a_class_problem_does_not_hide_a_crossing_problem() {
     let mut opaque = manifest();
-    opaque.hops[0].forward_types[0] = TypeInfo::new("Request", false);
+    opaque.hops[0].forward_types[0] = TypeInfo::new("Request", false, Default::default());
     let errors = match layout(&opaque, &parsed(UNKNOWN_SEGMENT)) {
         Ok(_) => panic!("laid out a crossing without a codec"),
         Err(errors) => errors.to_string(),

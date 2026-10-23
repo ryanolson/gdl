@@ -472,11 +472,11 @@ impl Runtime {
 
     /// The router of the hand-off at forward position `pos` of hop `hop`,
     /// for a crossing this instance sends: a policy, or a selector that
-    /// `Runtime::new` resolved; for a chooser's hand-off into another
-    /// class, a cell of that class first, then an instance within it by
-    /// the same.
-    pub(crate) fn router(&self, hop: usize, pos: usize) -> Router {
-        let router = self.instance_router(hop, pos);
+    /// `Runtime::new` resolved, reading the head in `encoding`, its edge's;
+    /// for a chooser's hand-off into another class, a cell of that class
+    /// first, then an instance within it by the same.
+    pub(crate) fn router(&self, hop: usize, pos: usize, encoding: gdl_model::Encoding) -> Router {
+        let router = self.instance_router(hop, pos, encoding);
         #[cfg(feature = "hub")]
         if let Some(target) = self.crossings.get(&(hop, pos)) {
             return Router::Cells(Arc::new(super::cells::Crossing::new(
@@ -489,7 +489,7 @@ impl Runtime {
 
     /// The placement's router of the hand-off at forward position `pos`
     /// of hop `hop`, which chooses an instance.
-    fn instance_router(&self, hop: usize, pos: usize) -> Router {
+    fn instance_router(&self, hop: usize, pos: usize, encoding: gdl_model::Encoding) -> Router {
         match self.layout.request_router(hop, pos) {
             RequestRouter::RoundRobin => Router::Policy(Policy::RoundRobin),
             RequestRouter::Random => Router::Policy(Policy::Random),
@@ -497,6 +497,7 @@ impl Runtime {
                 Some(selector) => Router::Selector {
                     name: Arc::from(name.as_str()),
                     selector: Arc::clone(selector),
+                    encoding,
                 },
                 // Resolved for every crossing this instance sends; another
                 // segment's crossing is never sent from here.
@@ -535,20 +536,30 @@ impl Runtime {
                     .pick(segment, Picker::Request, *policy, &self.random)?,
                 None,
             ),
-            Router::Selector { selector, .. } => {
+            Router::Selector {
+                selector, encoding, ..
+            } => {
                 let (instance, picked) = self
                     .routes
-                    .choose(segment, &**selector, cx, &envelope.payload)
+                    .choose(segment, &**selector, cx, &envelope.payload, *encoding)
                     .await?;
+                // A request that ended while its selector chose is not
+                // handed on; its lease goes with `picked`. The caller's
+                // select sees the end only at its next await, and the
+                // send can leave before that.
+                cx.check()?;
                 envelope.cx.add_meta(picked.meta);
                 (instance, picked.lease)
             }
             #[cfg(feature = "hub")]
             Router::Cells(crossing) => match crossing.within() {
                 Within::Policy(policy) => (crossing.pick(*policy, &self.random)?, None),
-                Within::Selector { selector, .. } => {
-                    let (instance, picked) =
-                        crossing.choose(&**selector, cx, &envelope.payload).await?;
+                Within::Selector {
+                    selector, encoding, ..
+                } => {
+                    let (instance, picked) = crossing
+                        .choose(&**selector, cx, &envelope.payload, *encoding)
+                        .await?;
                     envelope.cx.add_meta(picked.meta);
                     (instance, picked.lease)
                 }
@@ -642,6 +653,7 @@ pub(crate) enum Router {
     Selector {
         name: Arc<str>,
         selector: Arc<dyn Erased>,
+        encoding: gdl_model::Encoding,
     },
     /// A chooser's hand-off into another class: a cell by the class's
     /// cell policy, then an instance of it by the placement's router.
@@ -654,11 +666,11 @@ impl Router {
     pub(crate) fn selector(&self) -> Option<(&Arc<str>, &Arc<dyn Erased>)> {
         match self {
             Self::Policy(_) => None,
-            Self::Selector { name, selector } => Some((name, selector)),
+            Self::Selector { name, selector, .. } => Some((name, selector)),
             #[cfg(feature = "hub")]
             Self::Cells(crossing) => match crossing.within() {
                 Within::Policy(_) => None,
-                Within::Selector { name, selector } => Some((name, selector)),
+                Within::Selector { name, selector, .. } => Some((name, selector)),
             },
         }
     }

@@ -37,7 +37,15 @@ impl Crossing {
     pub(crate) fn new(target: Target, router: Router) -> Self {
         let within = match router {
             Router::Policy(policy) => Within::Policy(policy),
-            Router::Selector { name, selector } => Within::Selector { name, selector },
+            Router::Selector {
+                name,
+                selector,
+                encoding,
+            } => Within::Selector {
+                name,
+                selector,
+                encoding,
+            },
             Router::Cells(crossing) => crossing.within.clone(),
         };
         Self {
@@ -75,6 +83,7 @@ impl Crossing {
         selector: &'a dyn Erased,
         cx: &'a Cx,
         head: &'a [u8],
+        encoding: gdl_model::Encoding,
     ) -> BoxFuture<'a, Result<(InstanceId, Picked)>> {
         Box::pin(async move {
             for _ in 0..CHOICES {
@@ -84,6 +93,7 @@ impl Crossing {
                     .select(
                         cx,
                         head,
+                        encoding,
                         Instances::new(&self.target.segment, &cell.offered),
                     )
                     .await?;
@@ -141,6 +151,7 @@ pub(crate) enum Within {
     Selector {
         name: Arc<str>,
         selector: Arc<dyn Erased>,
+        encoding: gdl_model::Encoding,
     },
 }
 
@@ -348,7 +359,7 @@ mod tests {
                 let selector = gdl::__runtime::Typed(waiting);
                 let cx = Cx::new();
                 crossing
-                    .choose(&selector, &cx, &[])
+                    .choose(&selector, &cx, &[], Default::default())
                     .await
                     .map(|(id, picked)| (id, picked.lease))
             }
