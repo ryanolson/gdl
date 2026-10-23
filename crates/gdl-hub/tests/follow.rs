@@ -669,6 +669,68 @@ async fn a_withdrawn_record_does_not_end_a_live_follow() {
     model_hub.shutdown().await.expect("the hub stops");
 }
 
+/// A followed cell that drains stays followed, exposing nothing, while
+/// any of its instances is a member of its hub. Once the last leaves, its
+/// hub withdraws its record and ends its watch, and the global drops the
+/// follow and does not follow the cell again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
+    let directory = Resolving::new();
+    let mut records = Records::new(&directory.inner);
+    let (model_hub, model_cell) = serve_cell(
+        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (instances, _) = meet_the_quorum(&model_hub).await;
+    let (record, _) = records.until(CellState::Ready).await;
+    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let mut watch = global_cell.follows();
+    let mut relay = Relay::of(&snapshot(&mut watch).await);
+    until(&mut watch, &mut relay, "the follow", |relay| {
+        relay.exposed(CELL).contains(&instances[0].id())
+    })
+    .await;
+    let generation = relay.follows[CELL].generation;
+
+    model_cell.drain().await.expect("the cell drains");
+    until(&mut watch, &mut relay, "the cell draining", |relay| {
+        relay.follows[CELL].state == CellState::Draining
+    })
+    .await;
+    assert!(relay.exposed(CELL).is_empty());
+    for instance in instances {
+        instance.leave().await;
+    }
+    until(&mut watch, &mut relay, "the follow dropped", |relay| {
+        !relay.follows.contains_key(CELL)
+    })
+    .await;
+    following(
+        &global_cell,
+        "the drained cell no longer followed",
+        |cells| !cells.contains_key(CELL),
+    )
+    .await;
+    // Once the directory has shown it a later write, the global has
+    // decided on every record before it, and not followed the cell again.
+    let cells = written_and_followed(&directory, &global_cell, &record).await;
+    assert!(!cells.contains_key(CELL), "followed again: {cells:?}");
+    for event in pending(&mut watch) {
+        relay.apply(&event);
+    }
+    assert!(
+        relay
+            .follows
+            .get(CELL)
+            .is_none_or(|followed| followed.generation == generation),
+        "followed again"
+    );
+    global_hub.shutdown().await.expect("the hub stops");
+    model_hub.shutdown().await.expect("the hub stops");
+}
+
 /// A followed cell whose record expires on the global's clock while its
 /// link is live stays followed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

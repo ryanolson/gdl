@@ -71,7 +71,8 @@ pub use feed::CellWatch;
 /// counting, the judgment, the record, or another watcher. A watch begins
 /// once the record is first stored, since its epoch is settled only then:
 /// one that arrives earlier waits up to 5 s, then is refused (503). Every
-/// watch ends when the hub stops.
+/// watch ends when the hub stops, or once a drained cell's record is
+/// withdrawn.
 ///
 /// A cell whose class sends to other classes follows their cells: for
 /// each class it sends to, it watches `directory`, and follows each home
@@ -119,9 +120,14 @@ pub use feed::CellWatch;
 /// is not written, since a reader keeps only the newest. The record's
 /// epoch is fixed for the life of the hub process and later than any the
 /// directory held for the cell when it started, and its `seq` rises with
-/// every write. It does not withdraw the record when the hub stops: a
-/// cell that stops without draining leaves its record to expire on its
-/// readers' clocks.
+/// every write. Once a drain has started and no instance of the cell's
+/// class is a member of the hub, it withdraws the record, after a last
+/// write that says the cell is `draining`, and writes it no more; then it
+/// ends the cell's watches and refuses new ones, so that the hubs that
+/// follow the cell drop it. A drained cell's hub serves the cell no more:
+/// it is started again to serve it. It does not withdraw the record when
+/// the hub stops: a cell that stops without draining leaves its record to
+/// expire on its readers' clocks.
 pub struct CellReadiness<D: CellDirectory> {
     directory: Arc<D>,
     /// The record as published, but for its state and version.
@@ -205,6 +211,8 @@ impl<D: CellDirectory> CellReadiness<D> {
             .iter()
             .map(|segment| (segment.clone(), cell.quorum(segment)))
             .collect();
+        let class_segments: Vec<String> =
+            quorums.iter().map(|(segment, _)| segment.clone()).collect();
         let entries = layout.entry_segments(&cell.class);
         let segments = quorums
             .iter()
@@ -240,7 +248,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             sends: sends.into_iter().collect(),
             summary: (!entries.is_empty()).then_some(cell.summary),
             relay,
-            drain: Arc::new(Drain::new()),
+            drain: Arc::new(Drain::new(class_segments)),
             tasks: Mutex::default(),
         })
     }
@@ -253,7 +261,8 @@ impl<D: CellDirectory> CellReadiness<D> {
 
     /// A watch of the cell, in process: what `GET watch` serves, as typed
     /// events. It begins once the cell's record is stored, since its epoch
-    /// is settled only then; refused if the hub stops first.
+    /// is settled only then; refused if the hub stops first, and once the
+    /// drained cell's record is withdrawn.
     pub async fn watch(&self) -> Result<CellWatch, CellWatchError> {
         self.feed.watch().await
     }
@@ -362,6 +371,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 record: self.record.clone(),
                 heartbeat: self.timing.heartbeat,
                 feed: Arc::clone(&self.feed),
+                drain: Arc::clone(&self.drain),
             }
             .run(written, summaries, cancel.clone()),
         );
@@ -514,12 +524,15 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             .get()
             .and_then(|admission| admission.member(committed.owner));
         if let Some((segment, peer)) = member {
+            self.drain
+                .joined(&segment, committed.owner, committed.incarnation);
             self.feed
                 .joined(&segment, committed.incarnation, committed.epoch, peer);
         }
     }
 
     fn on_removed(&self, removal: Removal) {
+        self.drain.removed(&removal);
         self.feed.removed(removal);
     }
 }

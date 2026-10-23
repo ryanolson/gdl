@@ -41,7 +41,7 @@ impl CellWatcher {
 
     /// Watch the cell whose hub is at `hub`, `host:port` as the cell's
     /// record names it. The events end when the hub ends the watch (it
-    /// stopped, or this watcher fell behind), when the connection fails or
+    /// stopped, this watcher fell behind, or the cell's drain ended), when the connection fails or
     /// goes idle, or at an event that does not parse; a follower then
     /// watches again from a snapshot. A hub that has not yet published its
     /// cell's record holds the watch until it has, since the epoch it would

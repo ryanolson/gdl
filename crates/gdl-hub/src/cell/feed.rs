@@ -93,7 +93,8 @@ impl Feed {
 
     /// A watch of the cell: its snapshot, then each change. It begins once
     /// the cell's record is stored, since the epoch is settled only then;
-    /// refused if the hub stops first. It counts among the watchers from
+    /// refused if the hub stops first, or once the drained cell's record
+    /// is withdrawn. It counts among the watchers from
     /// the moment it is asked for, so that one held waiting is seen.
     pub(super) async fn watch(&self) -> Result<CellWatch, CellWatchError> {
         let counted = self.watchers.count();
@@ -104,7 +105,9 @@ impl Feed {
             epoch = settled.wait_for(Option::is_some) => epoch.ok().and_then(|epoch| *epoch),
         };
         let epoch = epoch.ok_or_else(|| {
-            CellWatchError::new("the cell's hub stopped before it published the cell's record")
+            CellWatchError::new(
+                "the cell's hub serves no watch: it stopped before it published the cell's record, or the cell was drained",
+            )
         })?;
         let (snapshot, events) = {
             let shared = self.lock();
@@ -123,7 +126,8 @@ impl Feed {
         self.watchers.watchers()
     }
 
-    /// End every watch: the hub stops.
+    /// End every watch, and refuse those asked for from now: the hub
+    /// stops, or the drained cell's record was withdrawn.
     pub(super) fn close(&self) {
         self.watchers.close();
     }

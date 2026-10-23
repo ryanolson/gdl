@@ -1,14 +1,18 @@
 //! The cell's record, published on each change of the judged state and
-//! on the heartbeat, with the load summary as it is when it is written.
+//! on the heartbeat, with the load summary as it is when it is written,
+//! and withdrawn once the cell's drain has ended.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, LoadSummary};
+use gdl_cells::{
+    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, LoadSummary, Withdrawal,
+};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use super::drain::Drain;
 use super::feed::Feed;
 
 /// The longest the publisher reads the directory for the cell's last
@@ -20,8 +24,11 @@ pub(super) struct Publisher<D> {
     pub(super) directory: Arc<D>,
     pub(super) record: CellRecord,
     pub(super) heartbeat: Duration,
-    /// Told the epoch once a write is stored under it.
+    /// Told the epoch once a write is stored under it, and closed once
+    /// the record is withdrawn.
     pub(super) feed: Arc<Feed>,
+    /// The cell's drain, whose end withdraws the record.
+    pub(super) drain: Arc<Drain>,
 }
 
 impl<D: CellDirectory> Publisher<D> {
@@ -45,7 +52,11 @@ impl<D: CellDirectory> Publisher<D> {
     /// it does not change, on every heartbeat. A state that changes while
     /// a write is in flight is written once that write ends; one replaced
     /// meanwhile by a later state is not written at all, since a reader
-    /// keeps only the newest record.
+    /// keeps only the newest record. Once the cell's drain has ended, the
+    /// record is withdrawn, after a last write that says it is `draining`
+    /// if the last did not, and nothing is written again: a heartbeat
+    /// after the withdrawal would bring the record back. The cell's
+    /// watches end then, so that the hubs that follow the cell drop it.
     async fn publish_until(
         &self,
         states: &mut watch::Receiver<CellState>,
@@ -54,7 +65,7 @@ impl<D: CellDirectory> Publisher<D> {
         let directory = &*self.directory;
         let mut writer = Writer::start(directory, &self.record, self.heartbeat).await;
         let feed = &*self.feed;
-        let state = *states.borrow_and_update();
+        let mut state = *states.borrow_and_update();
         let load = *loads.borrow();
         writer
             .publish(directory, feed, &self.record, state, load)
@@ -62,22 +73,34 @@ impl<D: CellDirectory> Publisher<D> {
         let mut heartbeat =
             tokio::time::interval_at(tokio::time::Instant::now() + self.heartbeat, self.heartbeat);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let ended = self.drain.ended();
+        tokio::pin!(ended);
         loop {
             tokio::select! {
+                biased;
                 changed = states.changed() => {
                     if changed.is_err() {
                         return;
                     }
                     heartbeat.reset();
                 }
+                () = &mut ended => break,
                 _ = heartbeat.tick() => {}
             }
-            let state = *states.borrow_and_update();
+            state = *states.borrow_and_update();
             let load = *loads.borrow();
             writer
                 .publish(directory, feed, &self.record, state, load)
                 .await;
         }
+        if state != CellState::Draining {
+            let load = *loads.borrow();
+            writer
+                .publish(directory, feed, &self.record, CellState::Draining, load)
+                .await;
+        }
+        writer.withdraw(directory, &self.record).await;
+        feed.close();
     }
 }
 
@@ -162,6 +185,42 @@ impl Writer {
                 }
             }
             Err(error) => tracing::warn!(%error, "the cell's record was not published"),
+        }
+    }
+}
+
+impl Writer {
+    /// Withdraw the record, after every write before it, retried once a
+    /// heartbeat until the directory takes it.
+    async fn withdraw(&mut self, directory: &impl CellDirectory, record: &CellRecord) {
+        loop {
+            self.seq += 1;
+            let withdrawal = Withdrawal {
+                class: record.class.clone(),
+                cell: record.name.clone(),
+                epoch: self.epoch,
+                seq: self.seq,
+            };
+            match tokio::time::timeout(self.bound, directory.withdraw(withdrawal)).await {
+                Ok(Ok(())) => return,
+                Ok(Err(DirectoryError::NotNewer { held, .. })) if held.epoch == self.epoch => {
+                    self.seq = held.seq;
+                    continue;
+                }
+                // A later hub of the cell holds its record now: it is that
+                // hub's to withdraw.
+                Ok(Err(DirectoryError::NotNewer { held, .. })) if held.epoch > self.epoch => {
+                    tracing::warn!(%held, "another hub publishes this cell with a later epoch");
+                    return;
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "the drained cell's record was not withdrawn");
+                }
+                Err(_) => {
+                    tracing::warn!(bound = ?self.bound, "the drained cell's record was not withdrawn in time");
+                }
+            }
+            tokio::time::sleep(self.bound).await;
         }
     }
 }
