@@ -3,7 +3,7 @@ use crate::dist::roster::Live;
 use futures::StreamExt;
 use futures::stream::{BoxStream, SelectAll};
 use gdl::{Error, ErrorKind, Result};
-use gdl_model::SegmentRegistration;
+use gdl_model::{SegmentPhase, SegmentRegistration, segment_service};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -90,7 +90,7 @@ impl HubSession {
     ) -> Result<Roster> {
         let deadline = tokio::time::Instant::now() + wait;
         if self.loaded.is_none() {
-            self.loaded = Some(self.announce(Phase::Loaded, deadline).await?);
+            self.loaded = Some(self.announce(SegmentPhase::Loaded, deadline).await?);
         }
         let mut last = String::new();
         loop {
@@ -142,7 +142,7 @@ impl HubSession {
     pub async fn ready(&mut self, roster: &Roster, inner: &[&str], wait: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + wait;
         if self.serving.is_none() {
-            self.serving = Some(self.announce(Phase::Serving, deadline).await?);
+            self.serving = Some(self.announce(SegmentPhase::Serving, deadline).await?);
         }
         let live = roster.live();
         let mut last = String::new();
@@ -205,7 +205,7 @@ impl HubSession {
     /// add it now. Retried until `deadline`.
     pub(crate) async fn announce_ready(&mut self, deadline: tokio::time::Instant) -> Result<()> {
         if self.ready.is_none() {
-            self.ready = Some(self.persist(Phase::Ready, deadline).await?);
+            self.ready = Some(self.persist(SegmentPhase::Ready, deadline).await?);
         }
         Ok(())
     }
@@ -217,7 +217,7 @@ impl HubSession {
     /// hub did not answer is left to the drain's bound.
     pub(crate) async fn retire(&mut self, deadline: tokio::time::Instant) -> Result<()> {
         if self.retired.is_none() {
-            self.retired = Some(self.persist(Phase::Retired, deadline).await?);
+            self.retired = Some(self.persist(SegmentPhase::Retired, deadline).await?);
         }
         for mut guard in [self.ready.take(), self.loaded.take()]
             .into_iter()
@@ -246,8 +246,8 @@ impl HubSession {
         let members = self.members().await?;
         let mut routing = HashSet::new();
         for segment in senders {
-            routing.extend(self.instances(segment, Phase::Loaded).await?);
-            routing.extend(self.instances(segment, Phase::Retired).await?);
+            routing.extend(self.instances(segment, SegmentPhase::Loaded).await?);
+            routing.extend(self.instances(segment, SegmentPhase::Retired).await?);
         }
         let avoiding: HashSet<InstanceId> = self
             .client
@@ -315,7 +315,7 @@ impl HubSession {
     /// held, retried until `deadline`.
     pub(crate) async fn drained(&mut self, deadline: tokio::time::Instant) -> Result<()> {
         if self.drained.is_none() {
-            self.drained = Some(self.persist(Phase::Drained, deadline).await?);
+            self.drained = Some(self.persist(SegmentPhase::Drained, deadline).await?);
         }
         Ok(())
     }
@@ -326,7 +326,7 @@ impl HubSession {
     /// stop answering without closing its connections.
     async fn persist(
         &self,
-        phase: Phase,
+        phase: SegmentPhase,
         deadline: tokio::time::Instant,
     ) -> Result<HubServiceRegistration> {
         loop {
@@ -349,7 +349,7 @@ impl HubSession {
         let members = self.members().await?;
         let mut drained = HashSet::new();
         for segment in segments {
-            drained.extend(self.instances(segment, Phase::Drained).await?);
+            drained.extend(self.instances(segment, SegmentPhase::Drained).await?);
         }
         Ok(members
             .iter()
@@ -395,10 +395,10 @@ impl HubSession {
 
     async fn announce(
         &self,
-        phase: Phase,
+        phase: SegmentPhase,
         deadline: tokio::time::Instant,
     ) -> Result<HubServiceRegistration> {
-        let name = service(&self.registration.segment, phase);
+        let name = segment_service(&self.registration.segment, phase);
         let announced = self.client.register_service(&name);
         tokio::time::timeout_at(deadline, announced)
             .await
@@ -412,11 +412,11 @@ impl HubSession {
     }
 
     /// The instances of `segment` in `phase`.
-    async fn instances(&self, segment: &str, phase: Phase) -> Result<HashSet<InstanceId>> {
+    async fn instances(&self, segment: &str, phase: SegmentPhase) -> Result<HashSet<InstanceId>> {
         Ok(self
             .client
             .services()
-            .get_instances(&service(segment, phase))
+            .get_instances(&segment_service(segment, phase))
             .await
             .map_err(failure)?
             .into_iter()
@@ -436,12 +436,12 @@ impl HubSession {
             .collect();
         let mut loaded = BTreeMap::new();
         for segment in &segments {
-            let instances = self.instances(segment, Phase::Loaded).await?;
+            let instances = self.instances(segment, SegmentPhase::Loaded).await?;
             loaded.insert(segment.clone(), instances);
         }
         let mut retired = HashSet::new();
         for segment in &segments {
-            retired.extend(self.instances(segment, Phase::Retired).await?);
+            retired.extend(self.instances(segment, SegmentPhase::Retired).await?);
         }
         let mut roster = Roster::new();
         for member in members {
@@ -462,7 +462,7 @@ impl HubSession {
         let members = self.members().await?;
         let mut serving = HashSet::new();
         for segment in segments {
-            serving.extend(self.instances(segment, Phase::Serving).await?);
+            serving.extend(self.instances(segment, SegmentPhase::Serving).await?);
         }
         let members = members.iter().map(|m| m.peer.instance_id()).collect();
         Ok((members, serving))
@@ -584,14 +584,14 @@ impl Follower {
         let wanted: Vec<(Watched, String)> = retired.chain(rest).collect();
         for (watched, segment) in wanted {
             let phase = match watched {
-                Watched::Retired => Phase::Retired,
-                Watched::Ready => Phase::Ready,
-                Watched::Serving => Phase::Serving,
+                Watched::Retired => SegmentPhase::Retired,
+                Watched::Ready => SegmentPhase::Ready,
+                Watched::Serving => SegmentPhase::Serving,
             };
             let services = self.client.services();
             let opened = tokio::time::timeout(
                 POLL * 50,
-                services.watch_instances(&service(&segment, phase)),
+                services.watch_instances(&segment_service(&segment, phase)),
             );
             let mut stream = match opened.await {
                 Ok(Ok(stream)) => stream,
@@ -806,35 +806,6 @@ fn is_final(error: &ClientError) -> bool {
 
 const POLL: Duration = Duration::from_millis(100);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase {
-    Loaded,
-    Serving,
-    Ready,
-    Drained,
-    Retired,
-}
-
-/// The hub service that announces a segment's instances in `phase`. The
-/// segment's name is hex, because a service name has a narrower alphabet.
-/// A phase has at most seven letters, so that `SEGMENT_NAME_LIMIT` holds.
-fn service(segment: &str, phase: Phase) -> String {
-    let phase = match phase {
-        Phase::Loaded => "loaded",
-        Phase::Serving => "serving",
-        Phase::Ready => "ready",
-        Phase::Drained => "drained",
-        Phase::Retired => "retired",
-    };
-    format!(
-        "gdl-{phase}-{}",
-        segment
-            .bytes()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    )
-}
-
 /// The hub service an instance serves to promise that it never routes to
 /// `retired` again.
 fn avoids(retired: InstanceId) -> String {
@@ -892,7 +863,7 @@ async fn container_address(port: u16) -> Result<std::net::SocketAddr> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Phase, service};
+    use gdl_model::{SegmentPhase, segment_service};
 
     mod following {
         use super::super::{Gate, HubSession};
@@ -1115,18 +1086,17 @@ mod tests {
     #[test]
     fn the_segment_name_limit_fits_the_hubs_service_names() {
         let fits = "s".repeat(gdl_model::SEGMENT_NAME_LIMIT);
-        assert!(velo_hub::protocol::is_valid_service_name(&service(
+        assert!(velo_hub::protocol::is_valid_service_name(&segment_service(
             &fits,
-            Phase::Serving
+            SegmentPhase::Serving
         )));
-        assert!(velo_hub::protocol::is_valid_service_name(&service(
+        assert!(velo_hub::protocol::is_valid_service_name(&segment_service(
             &fits,
-            Phase::Loaded
+            SegmentPhase::Loaded
         )));
         let over = "s".repeat(gdl_model::SEGMENT_NAME_LIMIT + 1);
-        assert!(!velo_hub::protocol::is_valid_service_name(&service(
-            &over,
-            Phase::Serving
-        )));
+        assert!(!velo_hub::protocol::is_valid_service_name(
+            &segment_service(&over, SegmentPhase::Serving)
+        ));
     }
 }

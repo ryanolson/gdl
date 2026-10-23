@@ -21,6 +21,47 @@ pub const DEFAULT_DEADLINE: std::time::Duration = std::time::Duration::from_secs
 /// per byte of the name, within velo-hub's 128.
 pub const SEGMENT_NAME_LIMIT: usize = 58;
 
+/// A phase of a segment's instance that it announces to its hub, as a
+/// service named by [`segment_service`]: `loaded`, once its nodes are ready
+/// to work; `serving`, once its handlers are installed; `ready`, once it
+/// routes; `drained`, once a source has finished its requests; and
+/// `retired`, once it has been stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SegmentPhase {
+    /// The instance's nodes are ready to work.
+    Loaded,
+    /// The instance's handlers are installed.
+    Serving,
+    /// The instance routes.
+    Ready,
+    /// A source instance has finished its requests.
+    Drained,
+    /// The instance has been stopped.
+    Retired,
+}
+
+/// The hub service that announces `segment`'s instances in `phase`. Every
+/// instance and the hub's own extensions name the services by this one
+/// rule. The segment's name is hex, because a service name has a narrower
+/// alphabet. A phase has at most seven letters, so that
+/// [`SEGMENT_NAME_LIMIT`] holds.
+pub fn segment_service(segment: &str, phase: SegmentPhase) -> String {
+    let phase = match phase {
+        SegmentPhase::Loaded => "loaded",
+        SegmentPhase::Serving => "serving",
+        SegmentPhase::Ready => "ready",
+        SegmentPhase::Drained => "drained",
+        SegmentPhase::Retired => "retired",
+    };
+    format!(
+        "gdl-{phase}-{}",
+        segment
+            .bytes()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
+}
+
 /// Why `name` cannot name a segment, if it cannot: the one rule the
 /// generator and the composer both apply. A segment is named in settings
 /// keys, where a key set in the environment arrives lowercased, and in a

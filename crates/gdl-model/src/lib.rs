@@ -27,7 +27,7 @@ pub use cell::{CellSettings, DirectoryBackend, check_cell_name, check_region_nam
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{
     DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
-    SegmentRegistration, segment_name_problem,
+    SegmentPhase, SegmentRegistration, segment_name_problem, segment_service,
 };
 pub use fleet::{Fleet, FleetError, FleetErrors, FleetTable};
 pub use manifest::{HopInfo, ItemInfo, Manifest, NodeInfo, TypeInfo};

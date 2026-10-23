@@ -1,5 +1,36 @@
-//! Hub registration identity checks.
-use gdl_model::{DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo};
+//! Hub registration identity checks, and the names of a segment's hub
+//! services.
+use gdl_model::{
+    DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase, TypeInfo,
+    segment_service,
+};
+
+/// Every instance and every hub of a deployment name a segment's services
+/// by this rule, so a change to it is a change to the hub protocol: the
+/// names are pinned.
+#[test]
+fn a_segments_hub_services_are_named_by_phase_and_hex() {
+    let names: Vec<String> = [
+        SegmentPhase::Loaded,
+        SegmentPhase::Serving,
+        SegmentPhase::Ready,
+        SegmentPhase::Drained,
+        SegmentPhase::Retired,
+    ]
+    .into_iter()
+    .map(|phase| segment_service("model-e", phase))
+    .collect();
+    assert_eq!(
+        names,
+        [
+            "gdl-loaded-6d6f64656c2d65",
+            "gdl-serving-6d6f64656c2d65",
+            "gdl-ready-6d6f64656c2d65",
+            "gdl-drained-6d6f64656c2d65",
+            "gdl-retired-6d6f64656c2d65",
+        ]
+    );
+}
 
 #[test]
 fn registration_must_match_graph_placement_and_segment() {
