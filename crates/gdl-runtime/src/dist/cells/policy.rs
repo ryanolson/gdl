@@ -154,28 +154,6 @@ impl HomeFirst {
 }
 
 impl HomeFirst {
-    /// The best tier of the eligible cells whose damping window has no
-    /// more than `cut` milliseconds left, and how many cells hold it.
-    fn best(
-        cells: &[Arc<CellTable>],
-        region: &str,
-        excluded: &[u64],
-        now: Instant,
-        cut: u64,
-    ) -> Option<(u8, u64)> {
-        let mut best: Option<(u8, u64)> = None;
-        for cell in cells {
-            let Some((tier, _)) = Self::tier(cell, region, excluded, now) else {
-                continue;
-            };
-            if cell.damping.left(now) > cut {
-                continue;
-            }
-            best = ranked(best, tier);
-        }
-        best
-    }
-
     /// The least `cut` such that no more than `allowed` of the eligible
     /// cells have more than `cut` milliseconds of their damping windows
     /// left, when `longest` is the most any has: a binary search of
@@ -208,22 +186,26 @@ impl HomeFirst {
     }
 }
 
-/// `best` with one more cell of `tier`.
-fn ranked(best: Option<(u8, u64)>, tier: u8) -> Option<(u8, u64)> {
-    match best {
-        Some((at, count)) if at == tier => Some((at, count + 1)),
-        Some((at, count)) if at < tier => Some((at, count)),
-        _ => Some((tier, 1)),
-    }
+/// A random number for the `nth` cell of a choice from its `draw`: the
+/// splitmix64 finalizer, so that one draw gives each cell its own.
+fn mix(draw: u64, nth: u64) -> u64 {
+    let mut z = draw ^ nth.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 impl CellChooser for HomeFirst {
     /// Two passes and no allocation while no more than half of the
-    /// eligible cells are damped: the best tier of the undamped cells and
-    /// how many hold it, then the two drawn ones of them. A damping state
-    /// read once per pass; a cell damped between the passes is passed
-    /// over in the second, and when that leaves none of the tier, none is
-    /// chosen for the attempt.
+    /// eligible cells are damped: how many cells are eligible and how
+    /// many damped, which sets which damped cells are passed over; then
+    /// one pass that reads each cell's damping once, keeps the best tier
+    /// of the cells not passed over, and draws two of them as it goes, by
+    /// reservoir sampling. Since the choice is made in the pass that reads
+    /// the damping, a cell damped or undamped by another request during
+    /// the choice never leaves it without a cell: if every cell the pass
+    /// would take was damped meanwhile, the eligible cell of the best tier
+    /// whose window ends soonest is chosen, as the cap would have.
     fn choose(
         &self,
         cells: &[Arc<CellTable>],
@@ -233,60 +215,75 @@ impl CellChooser for HomeFirst {
         draw: u64,
     ) -> Option<usize> {
         let (mut eligible, mut damped, mut longest) = (0u64, 0u64, 0u64);
-        let mut best: Option<(u8, u64)> = None;
         for cell in cells {
-            let Some((tier, _)) = Self::tier(cell, region, excluded, now) else {
+            if Self::tier(cell, region, excluded, now).is_none() {
                 continue;
-            };
+            }
             eligible += 1;
             let left = cell.damping.left(now);
             if left > 0 {
                 damped += 1;
                 longest = longest.max(left);
-                continue;
             }
-            best = ranked(best, tier);
         }
         let allowed = eligible / 2;
         let cut = if damped <= allowed {
             0
         } else {
-            let cut = Self::cut(cells, region, excluded, now, allowed, longest);
-            best = Self::best(cells, region, excluded, now, cut);
-            cut
+            Self::cut(cells, region, excluded, now, allowed, longest)
         };
-        let (best, count) = best?;
-        // Two distinct members of the tier from one draw: the first by the
-        // draw's remainder, the second by its quotient among the others.
-        let first = draw % count;
-        let second = match count {
-            1 => first,
-            _ => (first + 1 + (draw / count) % (count - 1)) % count,
-        };
-        let mut chosen: [Option<(usize, &LoadSummary)>; 2] = [None, None];
-        let mut nth = 0;
+        let mut best: Option<u8> = None;
+        let mut count = 0u64;
+        let mut drawn: [Option<(usize, &LoadSummary)>; 2] = [None, None];
+        let mut fallback: Option<(u8, u64, usize)> = None;
         for (at, cell) in cells.iter().enumerate() {
             let Some((tier, load)) = Self::tier(cell, region, excluded, now) else {
                 continue;
             };
-            if tier != best || cell.damping.left(now) > cut {
+            let left = cell.damping.left(now);
+            if left > cut {
+                if fallback.is_none_or(|(of, ends, _)| (tier, left) < (of, ends)) {
+                    fallback = Some((tier, left, at));
+                }
                 continue;
             }
-            if nth == first {
-                chosen[0] = Some((at, load));
+            match best {
+                Some(of) if of < tier => continue,
+                Some(of) if of == tier => {}
+                _ => {
+                    best = Some(tier);
+                    count = 0;
+                    drawn = [None, None];
+                }
             }
-            if nth == second {
-                chosen[1] = Some((at, load));
+            count += 1;
+            // Each cell of the tier is one of the two drawn with the same
+            // chance, 2 in `count` once `count` passes two.
+            let slot = match count {
+                1 => Some(0),
+                2 => Some(1),
+                _ => usize::try_from(mix(draw, count) % count)
+                    .ok()
+                    .filter(|slot| *slot < 2),
+            };
+            if let Some(slot) = slot {
+                drawn[slot] = Some((at, load));
             }
-            nth += 1;
         }
-        // A tie goes to the first choice, which is uniform over the tier.
-        match chosen {
-            [Some((first, a)), Some((second, b))] => {
-                Some(if Self::lighter(b, a) { second } else { first })
-            }
+        match drawn {
+            [Some((first, a)), Some((second, b))] => Some(if Self::lighter(b, a) {
+                second
+            } else if Self::lighter(a, b) {
+                first
+            } else if mix(draw, 0) & 1 == 0 {
+                // A tie goes to either alike, so that every cell of a
+                // tier of one load is chosen as often.
+                first
+            } else {
+                second
+            }),
             [Some((one, _)), None] | [None, Some((one, _))] => Some(one),
-            [None, None] => None,
+            [None, None] => fallback.map(|(_, _, at)| at),
         }
     }
 
@@ -753,8 +750,45 @@ mod tests {
         assert_eq!(chosen_at(&cells, now), names(&["damped"]));
     }
 
-    /// Cells of one tier and one load are drawn alike: a tie goes to the
-    /// first of the two choices, which is uniform.
+    /// A cell damped or undamped while a choice is made, as another
+    /// request's decline or acceptance does, never leaves the choice with
+    /// no cell while another stays eligible, nor a lone cell unchosen:
+    /// here the ready cell's damping changes on another thread throughout,
+    /// beside a degraded cell that is always there to take the request,
+    /// and alone. Counts the choices that found no cell.
+    #[test]
+    fn a_damping_that_changes_during_a_choice_leaves_it_a_cell() {
+        let now = origin();
+        let cells = [
+            cell("ready", HOME, CellState::Ready, 1, now),
+            cell("degraded", HOME, CellState::Degraded, 1, now),
+        ];
+        for choosable in [&cells[..], &cells[..1]] {
+            let done = std::sync::atomic::AtomicBool::new(false);
+            let empty = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                        cells[0].damping.decline(now);
+                        cells[0].damping.accept();
+                    }
+                });
+                let empty = draws(100_000)
+                    .filter(|draw| HomeFirst.choose(choosable, HOME, &[], now, *draw).is_none())
+                    .count();
+                done.store(true, std::sync::atomic::Ordering::Relaxed);
+                empty
+            });
+            assert_eq!(
+                empty,
+                0,
+                "of {} cells, choices that found none",
+                choosable.len()
+            );
+        }
+    }
+
+    /// Cells of one tier and one load are drawn alike: of the two drawn,
+    /// a tie goes to either.
     #[test]
     fn every_best_cell_is_drawn_alike() {
         let now = origin();
@@ -764,13 +798,16 @@ mod tests {
             cell("b", HOME, CellState::Ready, 1, now),
             cell("c", HOME, CellState::Ready, 1, now),
         ];
-        let mut counts = [0usize; 4];
-        for draw in 0..300 {
+        let mut counts = [0u64; 4];
+        for draw in draws(3000) {
             counts[HomeFirst
                 .choose(&cells, HOME, &[], now, draw)
                 .expect("a cell")] += 1;
         }
-        assert_eq!(counts, [100, 0, 100, 100]);
+        assert_eq!(counts[1], 0, "{counts:?}");
+        for at in [0, 2, 3] {
+            assert!(counts[at].abs_diff(1000) < 150, "{counts:?}");
+        }
     }
 
     #[test]
