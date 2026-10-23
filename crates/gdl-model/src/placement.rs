@@ -477,6 +477,18 @@ impl Layout {
         &self.boundaries
     }
 
+    /// The entry segments of `class`: those holding the inner end of a hop
+    /// that crosses into it, which is all a chooser in another class
+    /// reaches. Empty for a class no hop enters.
+    pub fn entry_segments(&self, class: &str) -> BTreeSet<&str> {
+        self.boundaries
+            .iter()
+            .filter(|boundary| boundary.into == class)
+            .filter_map(|boundary| self.hops[boundary.hop].backward_runs.first())
+            .map(|inner| inner.segment.as_str())
+            .collect()
+    }
+
     /// Crossings and anchors for one request through each root and, when
     /// the placement has classes, the WAN round trips each class boundary
     /// adds when the request spills to a cell in another region.

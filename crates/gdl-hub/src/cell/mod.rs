@@ -194,15 +194,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             .iter()
             .map(|segment| (segment.clone(), cell.quorum(segment)))
             .collect();
-        // An entry segment holds the inner end of a hop that crosses into
-        // the class: it is all a chooser in another class reaches.
-        let entries: BTreeSet<&str> = layout
-            .boundaries()
-            .iter()
-            .filter(|boundary| boundary.into == cell.class)
-            .filter_map(|boundary| layout.hops()[boundary.hop].backward_runs.first())
-            .map(|inner| inner.segment.as_str())
-            .collect();
+        let entries = layout.entry_segments(&cell.class);
         let segments = quorums
             .iter()
             .map(|(segment, _)| (segment.clone(), entries.contains(segment.as_str())))
