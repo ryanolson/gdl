@@ -286,22 +286,26 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
         // edge's codec, which every slot has, `Absent` or not.
         let mut heads = Vec::new();
         fwd.heads(&mut heads);
-        plan.routers = std::iter::once(gdl_model::Encoding::default())
-            .chain(heads.iter().map(|head| head.2))
-            .enumerate()
-            .map(|(pos, encoding)| rt.router(usize::from(index), pos, encoding))
+        plan.routers = (0..forward.len())
+            .map(|pos| rt.router(usize::from(index), pos))
             .collect();
         for pos in 1..forward.len() {
             let sends = forward[pos - 1].0 == rt.segment && forward[pos].0 != rt.segment;
-            let Router::Selector { name, selector, .. } = &plan.routers[pos] else {
-                continue;
-            };
-            let (Some((wants, wanted)), Some((carries, carried, _))) =
-                (selector.edge(), heads.get(pos - 1))
+            let Router::Selector {
+                name,
+                selector,
+                encoding,
+            } = &mut plan.routers[pos]
             else {
                 continue;
             };
-            if sends && wants != *carries {
+            let head = &heads[pos - 1];
+            *encoding = head.encoding;
+            let Some((wants, wanted)) = selector.edge() else {
+                continue;
+            };
+            if sends && wants != head.id {
+                let carried = head.name;
                 return Err(Error::new(
                     ErrorKind::Placement,
                     format!(

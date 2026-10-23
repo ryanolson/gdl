@@ -231,6 +231,8 @@ A remote forward node cannot observe cancel in the middle of its transform: no a
 - Envelopes and `gdl.open` messages use velo's raw-bytes unary with msgpack. velo's typed unary is JSON and is not used.
 - Stream items cross as `WireItem = Open | Item(bytes) | Fail(gdl::Error)`, where the bytes come from the edge's codec (msgpack). velo sees only `WireItem` (section 6). A `Fail` is followed by `finalize`. velo's own `SenderError` frame is non-terminal and carries only a string, so gdl does not use it.
 
+**Addendum 2026-10-23.** Each application message selects named MessagePack, positional MessagePack, or JSON (ruling 177). The head and items of a streamed request select independently. The envelope and control frames retain their own encoding. Runtime edges and typed selectors share the same serde dispatch. Edge construction selects monomorphized function pointers once. Each item calls those pointers without an encoding lookup or a type-erased allocation.
+
 ### 7.8 Velo facts the runtime relies on (velo 0.19)
 
 **Addendum 2026-10-19.** gdl now depends on velo 0.21.0 by git rev (`515941c`, velo#135; `1bbeb88` since 2026-10-20, for reply reservation renewal), because no release yet builds on macOS: 0.19 and 0.20 set `TCP_USER_TIMEOUT`, which socket2 has only on Linux. 0.21 makes `Velo` a cheap handle, so the runtime and generated segments hold `Velo`, not `Arc<Velo>`. The facts below were checked against 0.19, and the suite still passes on 0.21. When a release contains velo#135, pin it with `=x.y.z` again.
@@ -347,6 +349,8 @@ The macro emits node markers, the `Bindings` typestate, the typed graph structur
 
 - **Wire capability.** For each edge type the expansion calls an autoref probe on the concrete type (`(&&Probe::<Raw>::new()).codec()`), which yields `Some(Codec)` when the type implements `Serialize + DeserializeOwned` and `None` otherwise. A probe inside a generic helper would always pick the fallback, so the macro emits it only at concrete types. Tests cover type aliases, concrete generics, serialize-only types, and non-wire types. A type that deserializes only by borrowing from its input cannot be classified: its higher-ranked `Deserialize` bound fails after method selection, so the probe is a compile error rather than `None` (found in milestone 1, `crates/gdl-runtime/tests/ui/borrowed-message.rs`). Message types must own their data. A streamed forward edge probes its head and its item, and pairs them only when both are wire types (`stream_codec!`, ruling 30).
 - **Schema version.** Rust type names cannot fingerprint a serde representation. `CONTRACT_HASH` covers node names, roles, topology, type names, and the `schema` number, and a change to any message type's wire form requires a `schema` bump. Contract evolution rules are later work.
+
+**Addendum 2026-10-23.** The manifest hash also covers each message encoding and its wire revision (ruling 177). A codec change therefore changes deployment identity without a `schema` bump. Changes to a message's serde representation still require a `schema` bump. Stored catalogue entries must include their encoding. Missing metadata requires re-extraction, because an earlier extractor can miss a newer annotation.
 
 **Addendum (2026-10-16, as built).**
 

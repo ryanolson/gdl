@@ -15,6 +15,7 @@
 //!
 //! The design and its rulings are in `agent-docs/plan.md`.
 
+mod codec;
 mod compose;
 mod cx;
 mod error;
@@ -92,6 +93,7 @@ pub use gdl_macros::Node;
 /// request's visit records. Not a stable interface.
 #[doc(hidden)]
 pub mod __runtime {
+    pub use crate::codec::{decoder, encoder};
     pub use crate::cx::wall_now_nanos;
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
     pub use crate::meter::{

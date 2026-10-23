@@ -111,6 +111,21 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Workaround:** use the default `msgpack` codec, which includes field names, or select `json`. Reserve `msgpack_array` for fixed field layouts without conditional omissions.
 - **Would lift it:** rejecting conditional omissions during positional encoding.
 
+### JSON cannot preserve every serde value
+
+- **What happens:** `#[gdl(codec = "json")]` writes NaN and infinities as `null`. A required float then fails to decode. An optional float changes from `Some` to `None`.
+- **Maps:** JSON rejects keys such as tuples at the sender. String and integer keys work.
+- **Why:** the wire probe checks serde traits. Those traits do not prove that every value fits JSON.
+- **Workaround:** use the default `msgpack` encoding for nonfinite floats or unsupported map keys.
+- **Would lift it:** a lossless JSON representation for these values, used by both sender and receiver.
+
+### Catalogue entries without encoding metadata require re-extraction
+
+- **What happens:** a saved message or export without `encoding` prevents the catalogue from loading. Adding a crate also loads that catalogue first.
+- **Why:** an absent field does not prove the default encoding. An extractor that predates codec selection can miss a newer source annotation.
+- **Recovery:** remove the entry named by the error first. With the current `cargo-gdl`, re-add directory or registry crates using `cargo gdl extract` and the same `--catalog` directory. Re-import Git crates through the composer after removing their entries.
+- **Would lift it:** re-extraction of entries whose stored format lacks the required metadata.
+
 ### A `Streamed` named through a type alias cannot cross segments
 
 - **What happens:** the alias is an ordinary type to the graph macro, so the edge gets no streaming codec, and the edge cannot be split across segments.

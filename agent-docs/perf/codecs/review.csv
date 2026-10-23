@@ -1,0 +1,16 @@
+fixture,codec,variant,bytes,encode_ns,encode_events,decode_ns,decode_events
+scalar,msgpack_array,baseline,2,14.0,1,5.2,0
+scalar,msgpack_array,reserved,2,8.8,1,5.3,0
+scalar,msgpack,baseline,4,14.5,1,8.6,0
+scalar,msgpack,reserved,4,11.2,1,8.6,0
+scalar,json,baseline,7,14.0,1,17.9,0
+token,msgpack_array,baseline,14,22.7,2,30.7,1
+token,msgpack_array,reserved,14,15.0,1,30.7,1
+token,msgpack,baseline,40,67.5,4,45.7,1
+token,msgpack,reserved,40,21.4,1,46.2,1
+token,json,baseline,57,56.0,1,95.2,1
+chunk,msgpack_array,baseline,44,76.5,4,104.4,4
+chunk,msgpack_array,reserved,44,27.5,1,104.2,4
+chunk,msgpack,baseline,108,113.4,5,146.3,4
+chunk,msgpack,reserved,108,45.4,1,145.8,4
+chunk,json,baseline,150,117.8,2,231.4,4

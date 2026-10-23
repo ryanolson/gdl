@@ -80,18 +80,13 @@ mod sealed {
 
     impl<T: DeserializeOwned + Send + Sync + 'static> Sealed for T {
         fn decode(bytes: &[u8], encoding: Encoding) -> Result<Self> {
-            let decoded = match encoding {
-                Encoding::Json => serde_json::from_slice(bytes).map_err(|e| e.to_string()),
-                Encoding::Msgpack | Encoding::MsgpackArray => {
-                    rmp_serde::from_slice(bytes).map_err(|e| e.to_string())
-                }
-            };
-            decoded.map_err(|e| {
+            crate::codec::decoder::<T>(encoding)(bytes).map_err(|e| {
                 Error::new(
                     ErrorKind::Codec,
                     format!(
-                        "a selector could not read the request's head as `{}`: {e}",
-                        std::any::type_name::<T>()
+                        "a selector could not read the request's head as `{}`: {}",
+                        std::any::type_name::<T>(),
+                        e.message()
                     ),
                 )
             })

@@ -19,11 +19,8 @@ fn message_codecs_have_one_default_and_explicit_variants() {
         encoding("struct A;").expect("valid codec declaration"),
         Encoding::Msgpack
     );
-    for (name, expected) in [
-        ("msgpack", Encoding::Msgpack),
-        ("msgpack_array", Encoding::MsgpackArray),
-        ("json", Encoding::Json),
-    ] {
+    for expected in Encoding::ALL {
+        let name = expected.name();
         assert_eq!(
             encoding(&format!("#[gdl(codec = {name:?})] struct A;"))
                 .expect("valid codec declaration"),

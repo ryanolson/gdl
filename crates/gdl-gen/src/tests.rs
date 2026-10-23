@@ -113,6 +113,7 @@ fn a_graph_files_manifest_is_built_as_its_contract_prints_it() {
         root.join("tests/fixtures/compose/pinned.toml"),
         root.join("tests/fixtures/compose/versions-pinned.toml"),
         root.join("tests/fixtures/compose/streamed.toml"),
+        root.join("tests/fixtures/compose/facade.toml"),
     ] {
         let spec = Spec::load(&spec).expect("spec");
         let built = prepare(&spec, None, &target, emit::Deps::Relative, Offers::Read)
@@ -121,6 +122,32 @@ fn a_graph_files_manifest_is_built_as_its_contract_prints_it() {
         let compiled = compiled_manifest(&spec, &target);
         assert_eq!(built, compiled);
         assert_eq!(built.contract_hash(), compiled.contract_hash());
+
+        let placement = gdl_model::Placement::new()
+            .segment("all", built.nodes.iter().map(|node| node.name.as_str()));
+        let deployment = gdl_model::DeploymentSpec::new(built, placement).expect("deployment");
+        let json = serde_json::to_string_pretty(&deployment).expect("deployment JSON");
+        let deployed: gdl_model::DeploymentSpec =
+            serde_json::from_str(&json).expect("read deployment JSON");
+        assert_eq!(deployed.graph, compiled);
+        assert_eq!(deployed.graph.contract_hash(), compiled.contract_hash());
+
+        if spec.file.ends_with("pinned.toml") || spec.file.ends_with("streamed.toml") {
+            let head = &compiled.hops[0].forward_types[0];
+            assert_eq!(head.encoding, gdl_model::Encoding::Json);
+            if let Some(item) = &head.stream {
+                assert_eq!(item.encoding, gdl_model::Encoding::MsgpackArray);
+            }
+            assert_eq!(
+                compiled.hops[0].backward_types[0].encoding,
+                gdl_model::Encoding::MsgpackArray
+            );
+        } else if spec.file.ends_with("facade.toml") {
+            assert_eq!(
+                compiled.hops[0].forward_types[0].encoding,
+                gdl_model::Encoding::Json
+            );
+        }
     }
 }
 

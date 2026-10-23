@@ -13,27 +13,30 @@ pub fn message_encoding(attrs: &[Meta]) -> syn::Result<Encoding> {
         };
         list.parse_nested_meta(|meta| {
             if !meta.path.is_ident("codec") {
-                return Err(
-                    meta.error("expected codec = \"msgpack\", \"msgpack_array\", or \"json\"")
-                );
+                return Err(meta.error(format!("expected codec = \"...\", one of: {}", choices())));
             }
             if encoding.is_some() {
                 return Err(meta.error("a message declares its codec only once"));
             }
             let value: syn::LitStr = meta.value()?.parse()?;
-            encoding = Some(match value.value().as_str() {
-                "msgpack" => Encoding::Msgpack,
-                "msgpack_array" => Encoding::MsgpackArray,
-                "json" => Encoding::Json,
-                _ => {
-                    return Err(syn::Error::new_spanned(
-                        value,
-                        "unknown codec: expected msgpack, msgpack_array, or json",
-                    ));
-                }
-            });
+            let name = value.value();
+            encoding = Some(
+                Encoding::ALL
+                    .into_iter()
+                    .find(|encoding| encoding.name() == name)
+                    .ok_or_else(|| {
+                        syn::Error::new_spanned(
+                            value,
+                            format!("unknown codec: expected {}", choices()),
+                        )
+                    })?,
+            );
             Ok(())
         })?;
     }
     Ok(encoding.unwrap_or_default())
+}
+
+fn choices() -> String {
+    Encoding::ALL.map(Encoding::name).join(", ")
 }

@@ -279,6 +279,112 @@ fn a_decode_failure_is_a_codec_error() {
     assert_eq!(error.kind(), gdl::ErrorKind::Codec);
 }
 
+#[test]
+fn messagepack_bytes_and_errors_stay_the_same_across_buffer_sizes() {
+    use gdl_runtime::Encoding;
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Payload {
+        text: String,
+        numbers: Vec<u32>,
+    }
+    for size in [0, 1, 63, 127, 128, 129, 4096, 65536] {
+        let value = Payload {
+            text: "x".repeat(size),
+            numbers: vec![0, 255, 65536],
+        };
+        for (encoding, expected) in [
+            (
+                Encoding::Msgpack,
+                rmp_serde::to_vec_named(&value).expect("named"),
+            ),
+            (
+                Encoding::MsgpackArray,
+                rmp_serde::to_vec(&value).expect("array"),
+            ),
+        ] {
+            let codec = Codec::<Payload>::new(encoding);
+            assert_eq!(codec.encode(&value).expect("encode"), expected);
+            assert_eq!(codec.decode(&expected).expect("decode"), value);
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct Refused;
+    impl Serialize for Refused {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("refused value"))
+        }
+    }
+    for encoding in Encoding::ALL {
+        let error = Codec::<Refused>::new(encoding)
+            .encode(&Refused)
+            .expect_err("refused");
+        assert_eq!(error.kind(), gdl::ErrorKind::Codec);
+        assert!(error.message().contains("refused value"));
+    }
+}
+
+#[test]
+fn json_limits_are_value_dependent_despite_serde_bounds() {
+    use gdl_runtime::Encoding;
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Score {
+        value: f64,
+    }
+
+    let json = Codec::<Score>::new(Encoding::Json);
+    let msgpack = Codec::<Score>::new(Encoding::Msgpack);
+    let finite = Score { value: 42.5 };
+    assert_eq!(
+        json.decode(&json.encode(&finite).expect("finite"))
+            .expect("decode"),
+        finite
+    );
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let bytes = json.encode(&Score { value }).expect("encodes as null");
+        assert_eq!(bytes, br#"{"value":null}"#);
+        assert_eq!(
+            json.decode(&bytes).expect_err("null is not f64").kind(),
+            gdl::ErrorKind::Codec
+        );
+        let decoded = msgpack
+            .decode(&msgpack.encode(&Score { value }).expect("encode"))
+            .expect("decode");
+        assert!(decoded.value == value || (value.is_nan() && decoded.value.is_nan()));
+    }
+    let json = Codec::<Option<f64>>::new(Encoding::Json);
+    assert_eq!(
+        json.decode(&json.encode(&Some(f64::NAN)).expect("null"))
+            .expect("option"),
+        None
+    );
+
+    let tuples = BTreeMap::from([((1_u8, 2_u8), 3_u8)]);
+    let json = Codec::<BTreeMap<(u8, u8), u8>>::new(Encoding::Json);
+    assert_eq!(
+        json.encode(&tuples).expect_err("tuple key").kind(),
+        gdl::ErrorKind::Codec
+    );
+    let msgpack = Codec::<BTreeMap<(u8, u8), u8>>::new(Encoding::Msgpack);
+    assert_eq!(
+        msgpack
+            .decode(&msgpack.encode(&tuples).expect("encode"))
+            .expect("decode"),
+        tuples
+    );
+
+    let integers = BTreeMap::from([(1_u8, 2_u8)]);
+    let json = Codec::<BTreeMap<u8, u8>>::new(Encoding::Json);
+    assert_eq!(
+        json.decode(&json.encode(&integers).expect("integer key"))
+            .expect("decode"),
+        integers
+    );
+}
+
 /// Why the graph macro must expand the probe per edge: inside a generic
 /// function the bounded impl cannot be selected, so even a serde type falls
 /// back to "no codec".

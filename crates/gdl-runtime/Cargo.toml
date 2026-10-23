@@ -61,6 +61,10 @@ name = "remote"
 harness = false
 
 [[bench]]
+name = "codecs"
+harness = false
+
+[[bench]]
 name = "footprint"
 harness = false
 
@@ -75,3 +79,7 @@ required-features = ["hub"]
 [[test]]
 name = "rosters"
 required-features = ["hub"]
+
+[[test]]
+name = "allocs"
+harness = false

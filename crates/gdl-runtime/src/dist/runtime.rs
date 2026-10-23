@@ -459,8 +459,9 @@ impl Runtime {
 
     /// The router of the hand-off at forward position `pos` of hop `hop`,
     /// for a crossing this instance sends: a policy, or a selector that
-    /// `Runtime::new` resolved.
-    pub(crate) fn router(&self, hop: usize, pos: usize, encoding: gdl_model::Encoding) -> Router {
+    /// `Runtime::new` resolved. Hop construction supplies each selector's
+    /// edge encoding before the router is used.
+    pub(crate) fn router(&self, hop: usize, pos: usize) -> Router {
         match self.layout.request_router(hop, pos) {
             RequestRouter::RoundRobin => Router::Policy(Policy::RoundRobin),
             RequestRouter::Random => Router::Policy(Policy::Random),
@@ -468,7 +469,7 @@ impl Runtime {
                 Some(selector) => Router::Selector {
                     name: Arc::from(name.as_str()),
                     selector: Arc::clone(selector),
-                    encoding,
+                    encoding: Default::default(),
                 },
                 // Resolved for every crossing this instance sends; another
                 // segment's crossing is never sent from here.

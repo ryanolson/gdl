@@ -1,9 +1,9 @@
-//! One cut with different head, input item, and response encodings.
+//! Two cuts with different head, input item, and response encodings.
 
 mod common;
 
 use futures::StreamExt;
-use gdl::{Choice, Cx, Instances, Items, Request, Selector, Sink, Streamed, items};
+use gdl::{Choice, Cx, Forward, Instances, Items, Request, Selector, Sink, Streamed, items};
 use gdl_runtime::{Deployment, Placement, RequestRouter, Roster, RuntimeConfig};
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,15 @@ pub struct Input {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, gdl::Message)]
+#[gdl(codec = "json")]
+/// JSON at a later crossing exposes a router left at the default decoder.
+pub struct Routed {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    optional: Option<u32>,
+    offset: u32,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, gdl::Message)]
 /// A response using the default named MessagePack encoding.
 pub struct Output {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,19 +41,38 @@ pub struct Output {
 }
 
 mod contract {
-    use super::{Head, Input, Output};
+    use super::{Head, Input, Output, Routed};
     gdl_runtime::graph! {
         name = "codecs", schema = 1;
         source A: Head + stream Input -> stream Output;
-        sink B: Head + stream Input -> stream Output;
-        topology: A => B;
+        forward F: Head + stream Input -> Routed + stream Input;
+        sink B: Routed + stream Input -> stream Output;
+        topology: A => F => B;
     }
 }
 
 struct Engine;
 
+struct Relay;
+
+impl Forward for Relay {
+    type In = Streamed<Head, Input>;
+    type Out = Streamed<Routed, Input>;
+
+    async fn forward(&self, _: &Cx, request: Self::In) -> gdl::Result<Self::Out> {
+        let (head, input) = request.into_parts();
+        Ok(Streamed::new(
+            Routed {
+                optional: head.optional,
+                offset: head.offset,
+            },
+            input,
+        ))
+    }
+}
+
 impl Sink for Engine {
-    type Req = Streamed<Head, Input>;
+    type Req = Streamed<Routed, Input>;
     type Item = Output;
 
     async fn generate(&self, cx: Cx, request: Self::Req) -> gdl::Result<Items<Output>> {
@@ -78,16 +106,40 @@ impl Selector for ByHead {
     }
 }
 
+struct ByRouted;
+
+impl Selector for ByRouted {
+    type Head = Routed;
+
+    async fn select<'a>(
+        &'a self,
+        request: Request<'a, Routed>,
+        instances: Instances<'a>,
+    ) -> gdl::Result<Choice<'a>> {
+        assert_eq!(
+            &serde_json::from_slice::<Routed>(request.bytes()).expect("JSON"),
+            request.head()
+        );
+        Ok(Choice::new(instances.get(0).expect("one engine")))
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mixed_codecs_cross_tcp_with_a_typed_selector_and_absent_sink() {
-    let nodes = [common::velo_node().await, common::velo_node().await];
+async fn mixed_codecs_cross_tcp_with_each_edges_typed_selector_and_absent_bindings() {
+    let nodes = [
+        common::velo_node().await,
+        common::velo_node().await,
+        common::velo_node().await,
+    ];
     let manifest = contract::manifest();
     let placement = Placement::new()
         .segment("front", ["A"])
+        .segment("middle", ["F"])
         .segment("engine", ["B"])
-        .route("B", RequestRouter::Selector("head".into()));
+        .route("F", RequestRouter::Selector("head".into()))
+        .route("B", RequestRouter::Selector("routed".into()));
     let mut roster = Roster::new();
-    for (name, node) in ["front", "engine"].iter().zip(&nodes) {
+    for (name, node) in ["front", "middle", "engine"].iter().zip(&nodes) {
         roster.add(*name, node.peer_info());
     }
     let mut config = RuntimeConfig::default();
@@ -103,8 +155,21 @@ async fn mixed_codecs_cross_tcp_with_a_typed_selector_and_absent_sink() {
     .expect("deployment");
     let root = contract::assemble(&front, contract::Bindings::new()).expect("absent sink");
     let front = front.start(root).expect("start");
-    let engine = Deployment::new(
+    let mut config = RuntimeConfig::default();
+    config.selectors.add("routed", ByRouted).expect("selector");
+    let middle = Deployment::new(
         nodes[1].clone(),
+        &manifest,
+        &placement,
+        "middle",
+        &roster,
+        config,
+    )
+    .expect("deployment");
+    let root = contract::assemble(&middle, contract::Bindings::new().f(Relay)).expect("relay");
+    let _middle = middle.start(root).expect("start");
+    let engine = Deployment::new(
+        nodes[2].clone(),
         &manifest,
         &placement,
         "engine",

@@ -29,11 +29,6 @@ pub struct Codec<T> {
 }
 
 impl<T> Codec<T> {
-    /// The encoding of this complete message.
-    pub fn encoding(&self) -> Encoding {
-        self.encoding
-    }
-
     /// Encode one value.
     pub fn encode(&self, value: &T) -> Result<Vec<u8>> {
         (self.encode)(value)
@@ -48,14 +43,9 @@ impl<T> Codec<T> {
 impl<T: Serialize + DeserializeOwned> Codec<T> {
     /// A serde codec for `T` using the selected encoding.
     pub fn new(encoding: Encoding) -> Self {
-        let (encode, decode) = match encoding {
-            Encoding::Msgpack => (encode_msgpack::<T> as _, decode_msgpack::<T> as _),
-            Encoding::MsgpackArray => (encode_array::<T> as _, decode_msgpack::<T> as _),
-            Encoding::Json => (encode_json::<T> as _, decode_json::<T> as _),
-        };
         Self {
-            encode,
-            decode,
+            encode: gdl::__runtime::encoder::<T>(encoding),
+            decode: gdl::__runtime::decoder::<T>(encoding),
             encoding,
         }
     }
@@ -93,7 +83,7 @@ pub trait RequestCodec: sealed::Sealed + Copy + Send + Sync + 'static {
     /// the head must read it as this type.
     fn head() -> (std::any::TypeId, &'static str);
     /// The encoding used for the request's head.
-    fn encoding(&self) -> Encoding;
+    fn head_encoding(&self) -> Encoding;
 
     /// The request as it crosses.
     fn split(&self, value: Self::Value) -> Result<Split>;
@@ -119,7 +109,7 @@ impl<T: Send + 'static> RequestCodec for Codec<T> {
         (std::any::TypeId::of::<T>(), std::any::type_name::<T>())
     }
 
-    fn encoding(&self) -> Encoding {
+    fn head_encoding(&self) -> Encoding {
         self.encoding
     }
 
@@ -180,7 +170,7 @@ impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
         (std::any::TypeId::of::<H>(), std::any::type_name::<H>())
     }
 
-    fn encoding(&self) -> Encoding {
+    fn head_encoding(&self) -> Encoding {
         self.head.encoding
     }
 
@@ -218,26 +208,6 @@ mod sealed {
 
     impl<T> Sealed for super::Codec<T> {}
     impl<H, T> Sealed for super::StreamCodec<H, T> {}
-}
-
-fn encode_msgpack<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    rmp_serde::to_vec_named(value).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
-}
-
-fn encode_array<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    rmp_serde::to_vec(value).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
-}
-
-fn decode_msgpack<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    rmp_serde::from_slice(bytes).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
-}
-
-fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    serde_json::to_vec(value).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
-}
-
-fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    serde_json::from_slice(bytes).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
 }
 
 /// The codec for a concrete type, or `None` if it is not wire-capable.
