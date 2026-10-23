@@ -373,6 +373,20 @@ fn a_cell_table_is_read_from_the_environment() {
         );
         Ok(())
     });
+    // The `dir` backend and its directory.
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", &format!("{BASE}{CELL}"))?;
+        jail.set_env("GDL_CELL__DIRECTORY", "dir");
+        jail.set_env("GDL_CELL__DIR", "/srv/cells");
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        assert_eq!(
+            config.cell().map(|cell| &cell.directory),
+            Some(&DirectoryBackend::Dir {
+                path: "/srv/cells".into()
+            })
+        );
+        Ok(())
+    });
     // The whole table from the environment.
     Jail::expect_with(|jail| {
         jail.create_file("config.toml", BASE)?;
@@ -408,6 +422,15 @@ fn a_misspelled_cell_key_is_refused() {
             return Err("a fleet file is not a directory backend".into());
         };
         assert!(error.to_string().contains("static"), "{error}");
+        Ok(())
+    });
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", &format!("{BASE}{CELL}"))?;
+        jail.set_env("GDL_CELL__DIRECTORY", "dir");
+        let Err(error) = Config::load(["config.toml"]) else {
+            return Err("the dir backend without its directory".into());
+        };
+        assert!(error.to_string().contains("needs `dir`"), "{error}");
         Ok(())
     });
     Jail::expect_with(|jail| {

@@ -119,6 +119,34 @@ fn a_misspelled_key_or_an_unknown_backend_is_refused() {
     }
 }
 
+/// The `dir` backend's directory is the `dir` key: required with it, and
+/// refused with any other backend, so that a path never sits unread.
+#[test]
+fn the_dir_backend_takes_its_path_and_no_other_backend_does() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    let cell = settings(&format!("{LEAST}directory = 'dir'\ndir = '/srv/cells'\n"));
+    assert_eq!(
+        cell.directory,
+        DirectoryBackend::Dir {
+            path: "/srv/cells".into()
+        }
+    );
+    let text = toml::to_string(&cell).expect("toml");
+    assert_eq!(settings(&text), cell, "{text}");
+    for (bad, why) in [
+        ("directory = 'dir'\n", "needs `dir`"),
+        ("directory = 'dir'\ndir = ''\n", "needs `dir`"),
+        ("dir = '/srv/cells'\n", "\"relay\""),
+        ("directory = 'relay'\ndir = '/srv/cells'\n", "\"relay\""),
+        ("directory = 'memory'\ndir = '/srv/cells'\n", "\"memory\""),
+    ] {
+        let Err(error) = toml::from_str::<CellSettings>(&format!("{LEAST}{bad}")) else {
+            panic!("{bad}: accepted");
+        };
+        assert!(error.to_string().contains(why), "{bad}: {error}");
+    }
+}
+
 /// A segment the settings give no quorum needs one usable instance.
 #[test]
 fn a_quorum_falls_back_to_one() {

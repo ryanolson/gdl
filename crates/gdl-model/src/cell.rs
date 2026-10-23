@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,13 +14,14 @@ use crate::{Error, Layout};
 /// class = "model_x"
 /// region = "us-east-1"
 /// home = "global-us-east-1"    # optional: the cell of a parent class the policy prefers
-/// directory = "relay"          # optional: "relay" (the default) or "memory"
+/// directory = "relay"          # optional: "relay" (the default), "memory", or "dir"
+/// # dir = "/var/lib/gdl/cells" # with "dir", and only with it: the shared directory
 /// seeds = ["hub-a:1337"]       # optional: hub addresses to join the relay mesh from
 /// [ready]                      # optional: the quorum of each segment of the class
 /// e = 4
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "Table", into = "Table")]
 pub struct CellSettings {
     /// The cell's name.
     pub name: String,
@@ -32,23 +33,20 @@ pub struct CellSettings {
     /// one. A preference, not a dependency of discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
-    /// Where the cell's record is published and the other cells are found.
-    #[serde(default)]
+    /// Where the cell's record is published and the other cells are found:
+    /// the `directory` key, with the `dir` key for [`DirectoryBackend::Dir`].
     pub directory: DirectoryBackend,
     /// Hub addresses, `host:port`, to join the relay mesh from; kept as
     /// given.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seeds: Vec<String>,
     /// Usable instances each segment of the class needs for the cell to be
     /// ready; see [`CellSettings::quorum`].
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ready: BTreeMap<String, u32>,
 }
 
 /// Where cell records are published and watched. Each backend's own
 /// settings arrive with the backend.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DirectoryBackend {
     /// Each cell reports to the global cells of its region, and the global
     /// cells relay what they receive to each other.
@@ -57,6 +55,13 @@ pub enum DirectoryBackend {
     /// One directory in the process, shared by every hub in it: for tests
     /// that run several cells in one process.
     Memory,
+    /// One file per cell under `path`, a directory that every hub on one
+    /// host shares, through a volume under Compose.
+    Dir {
+        /// The shared directory, as given: a relative path is the
+        /// process's working directory's.
+        path: PathBuf,
+    },
 }
 
 impl CellSettings {
@@ -137,4 +142,101 @@ fn check_label(kind: &str, name: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The `[cell]` table as written. `directory` and `dir` are two keys of
+/// one choice, so that the settings read flat (`GDL_CELL__DIR`), and they
+/// are joined here, where a path given to a backend that reads none can be
+/// refused rather than left unread.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Table {
+    name: String,
+    class: String,
+    region: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    home: Option<String>,
+    #[serde(default)]
+    directory: Backend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    seeds: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    ready: BTreeMap<String, u32>,
+}
+
+/// The `directory` key's values.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Backend {
+    #[default]
+    Relay,
+    Memory,
+    Dir,
+}
+
+impl Backend {
+    fn name(self) -> &'static str {
+        match self {
+            Backend::Relay => "relay",
+            Backend::Memory => "memory",
+            Backend::Dir => "dir",
+        }
+    }
+}
+
+impl TryFrom<Table> for CellSettings {
+    type Error = String;
+
+    fn try_from(table: Table) -> Result<Self, String> {
+        let directory = match (table.directory, table.dir) {
+            (Backend::Relay, None) => DirectoryBackend::Relay,
+            (Backend::Memory, None) => DirectoryBackend::Memory,
+            (Backend::Dir, Some(path)) if !path.as_os_str().is_empty() => {
+                DirectoryBackend::Dir { path }
+            }
+            (Backend::Dir, _) => {
+                return Err(
+                    "[cell] directory = \"dir\" needs `dir`, the path of the shared directory"
+                        .into(),
+                );
+            }
+            (backend, Some(path)) => {
+                return Err(format!(
+                    "[cell] dir = {path:?} is read only by the `dir` backend, not by directory = \"{}\"",
+                    backend.name()
+                ));
+            }
+        };
+        Ok(Self {
+            name: table.name,
+            class: table.class,
+            region: table.region,
+            home: table.home,
+            directory,
+            seeds: table.seeds,
+            ready: table.ready,
+        })
+    }
+}
+
+impl From<CellSettings> for Table {
+    fn from(settings: CellSettings) -> Self {
+        let (directory, dir) = match settings.directory {
+            DirectoryBackend::Relay => (Backend::Relay, None),
+            DirectoryBackend::Memory => (Backend::Memory, None),
+            DirectoryBackend::Dir { path } => (Backend::Dir, Some(path)),
+        };
+        Self {
+            name: settings.name,
+            class: settings.class,
+            region: settings.region,
+            home: settings.home,
+            directory,
+            dir,
+            seeds: settings.seeds,
+            ready: settings.ready,
+        }
+    }
 }
