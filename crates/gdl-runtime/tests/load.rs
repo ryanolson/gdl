@@ -170,7 +170,7 @@ async fn shut(hubs: impl IntoIterator<Item = Hub>) {
 /// Two entry instances each hold a request: the cell's summary sums their
 /// admitted roots and their limits, and counts them, on the cell watch,
 /// on the cell's record, on the global hub's relay, and in the chooser's
-/// table. When the requests finish, the summary falls, everywhere.
+/// table. As each request finishes, the summary falls, everywhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_entry_instances_load_reaches_the_choosers_table() {
     let spec = spec_of(placement());
@@ -226,7 +226,12 @@ async fn the_entry_instances_load_reaches_the_choosers_table() {
     );
     table_holds(&cells, busy).await;
 
-    drop(held);
+    let [first, second] = held;
+    drop(first);
+    let one = summary(1, 2, 0);
+    load(&mut watch, one).await;
+    table_holds(&cells, one).await;
+    drop(second);
     let idle = summary(0, 2, 0);
     load(&mut watch, idle).await;
     table_holds(&cells, idle).await;

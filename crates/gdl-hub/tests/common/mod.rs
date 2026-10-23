@@ -205,6 +205,14 @@ impl Instance {
             .await
     }
 
+    /// The credential of this instance's registration.
+    pub fn credential(&self) -> velo_hub::protocol::Credential {
+        self.client
+            .registration()
+            .expect("the instance is registered")
+            .credential
+    }
+
     /// Whether the hub still holds this instance's registration: a call
     /// that needs its credential is answered.
     pub async fn registered(&self) -> bool {

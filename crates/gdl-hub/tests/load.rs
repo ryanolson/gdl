@@ -219,8 +219,10 @@ async fn a_report_older_than_three_periods_is_dropped() {
 
 /// Only a registered, usable entry instance's report is taken, and only
 /// with its own credential: not another segment's instance, not an entry
-/// instance that is not ready yet, not a report without a credential or
-/// with a malformed one. A refusal leaves the reporter registered.
+/// instance that is not ready yet, not a report in an entry instance's
+/// name with another registered instance's credential, without a
+/// credential, or with a malformed one. A refusal leaves the reporter
+/// registered, and a forged report is never counted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_report_from_anything_but_a_usable_entry_instance_is_refused() {
     let (hub, readiness) = hub_of(
@@ -250,6 +252,15 @@ async fn a_report_from_anything_but_a_usable_entry_instance_is_refused() {
         gdl_watch::load_path(entry.id()),
     );
     let http = reqwest::Client::new();
+    let borrowed = http
+        .post(&forged)
+        .header("x-velo-hub-credential", sink.credential().to_header_value())
+        .json(&report(9, 9, 9))
+        .send()
+        .await
+        .expect("the hub answers");
+    assert_eq!(borrowed.status().as_u16(), 401);
+    assert!(sink.registered().await, "the forger's own lease was lost");
     let bare = http
         .post(&forged)
         .json(&report(9, 9, 9))
