@@ -1,13 +1,23 @@
 //! The cell's watch as its hub serves it: what a watch begins with, and the
 //! changes after it, fanned out to every watcher.
 //!
-//! Three sources feed it, each from where it is known first: the hub's
-//! registration hooks say who an entry instance is and when it leaves; the
-//! counting's loopback watches say when it is ready or retires; the
-//! judgment says when the cell's state changes. Each change is applied and
-//! sent under one lock, and a watch takes its snapshot and subscribes
-//! under the same lock, so that no change between the two is lost or seen
-//! twice.
+//! Three sources feed it: the hub's registration hooks say who an entry
+//! instance is and when it leaves; the counting's loopback watches say when
+//! it is ready or retires; the judgment says when the cell's state changes.
+//! The first two are ordered against each other by what the hub does
+//! first: it commits a registration's services before its admission, so
+//! what the loopback shows of an instance the members do not hold yet is
+//! kept until they do; and it drops a departed instance's services after
+//! telling this extension, so `left` waits until the loopback shows the
+//! instance in no service, and whatever the loopback delivers before that
+//! came before the departure. Each change is applied and sent under one
+//! lock, and a watch takes its snapshot and subscribes under the same
+//! lock, so that no change between the two is lost or seen twice.
+//!
+//! The `ready` and `retired` watches are two streams that velo-hub does
+//! not order with each other: an instance whose withdrawal from `ready`
+//! the loopback delivers before its retirement, and that leaves before the
+//! retirement arrives, is sent `left` without `retired`.
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
@@ -125,19 +135,27 @@ impl Feed {
     }
 
     /// The hub committed a registration of `segment`: who the instance is,
-    /// as the hub's members name it.
+    /// as the hub's members name it. What the loopback showed of it before
+    /// is applied now, its retirement first: the hub commits the services
+    /// a registration brings before it commits the registration's
+    /// admission.
     pub(super) fn joined(&self, segment: &str, incarnation: Incarnation, peer: PeerInfo) {
         let mut shared = self.lock();
         let Some(index) = shared.entry_index(segment) else {
             return;
         };
         let id = peer.instance_id();
+        let held = match shared.unresolved.remove(&id) {
+            Some((at, held)) if at == index => held,
+            _ => Held::default(),
+        };
         match shared.entries.get_mut(&id) {
             // A registration that renews the instance's: what it announced
             // stands.
             Some(entry) => {
                 entry.incarnation = incarnation;
                 entry.peer = peer;
+                entry.departed = false;
             }
             None => {
                 shared.entries.insert(
@@ -148,36 +166,35 @@ impl Feed {
                         peer,
                         ready: false,
                         retired: false,
+                        held,
+                        departed: false,
                     },
                 );
             }
         }
-        if shared.unresolved.remove(&id).is_some() {
-            shared.ready(index, id);
+        if held.retired {
+            shared.announce(Watched::Retired, id);
+        }
+        if held.ready {
+            shared.announce(Watched::Ready, id);
         }
     }
 
     /// The hub removed an incarnation of an instance: it left, unless a
-    /// later registration of it has been committed since.
+    /// later registration of it has been committed since. The hub tells
+    /// this extension before it drops the instance's services, so what the
+    /// loopback has not delivered of it yet happened before it left: `left`
+    /// is sent once the loopback shows it in no service.
     pub(super) fn removed(&self, removal: Removal) {
         let mut shared = self.lock();
-        let Some(entry) = shared.entries.get(&removal.id) else {
+        let Some(entry) = shared.entries.get_mut(&removal.id) else {
             return;
         };
         if entry.incarnation > removal.incarnation {
             return;
         }
-        let entry = shared
-            .entries
-            .remove(&removal.id)
-            .expect("the entry was just found");
-        if entry.ready || entry.retired {
-            let segment = shared.segments[entry.segment].0.clone();
-            shared.send(CellWatchEvent::Left {
-                segment,
-                instance: removal.id,
-            });
-        }
+        entry.departed = true;
+        shared.leave_if_gone(removal.id);
     }
 
     /// The counting saw `event` on the `watched` service of the class's
@@ -187,30 +204,11 @@ impl Feed {
         if !shared.segments.get(index).is_some_and(|(_, entry)| *entry) {
             return;
         }
-        match (watched, event) {
-            (Watched::Ready, ServiceEvent::Initial(ids)) => {
-                // A watch that opens again sees the set as it is: an
-                // instance it left out withdrew `ready` or left meanwhile.
-                let current: HashSet<&InstanceId> = ids.iter().collect();
-                shared
-                    .unresolved
-                    .retain(|id, segment| *segment != index || current.contains(id));
-                for id in ids {
-                    shared.ready(index, *id);
-                }
-            }
-            (Watched::Ready, ServiceEvent::Added(id)) => shared.ready(index, *id),
-            (Watched::Ready, ServiceEvent::Removed(id)) => {
-                shared.unresolved.remove(id);
-            }
-            (Watched::Retired, ServiceEvent::Initial(ids)) => {
-                for id in ids {
-                    shared.retired(index, *id);
-                }
-            }
-            (Watched::Retired, ServiceEvent::Added(id)) => shared.retired(index, *id),
-            // Retirement is final until the instance leaves.
-            (Watched::Retired, ServiceEvent::Removed(_)) | (_, ServiceEvent::Disconnected) => {}
+        match event {
+            ServiceEvent::Initial(ids) => shared.resync(index, watched, ids),
+            ServiceEvent::Added(id) => shared.hold(index, watched, *id, true),
+            ServiceEvent::Removed(id) => shared.hold(index, watched, *id, false),
+            ServiceEvent::Disconnected => {}
         }
     }
 }
@@ -223,12 +221,14 @@ struct Shared {
     /// The class's segments, in its order, each with whether it is an
     /// entry segment.
     segments: Vec<(String, bool)>,
-    /// The members of the entry segments.
+    /// The members of the entry segments, and those that left whose `left`
+    /// waits for the loopback.
     entries: HashMap<InstanceId, Entry>,
-    /// Instances seen ready that the hub's members do not hold, by segment:
-    /// one whose loopback `ready` arrived after it left, until its removal
-    /// from `ready` arrives too.
-    unresolved: HashMap<InstanceId, usize>,
+    /// Instances the loopback shows in an entry segment's services that the
+    /// hub's members do not hold, with their segment: one whose services
+    /// were committed before its admission, or one whose loopback events
+    /// arrive after it left, until its removals arrive too.
+    unresolved: HashMap<InstanceId, (usize, Held)>,
     events: broadcast::Sender<CellWatchEvent>,
 }
 
@@ -241,6 +241,31 @@ struct Entry {
     ready: bool,
     /// Whether it has retired.
     retired: bool,
+    /// Which of its services the loopback shows it in now.
+    held: Held,
+    /// Whether the hub removed it.
+    departed: bool,
+}
+
+/// Which of an instance's `ready` and `retired` services the loopback
+/// shows it in.
+#[derive(Debug, Clone, Copy, Default)]
+struct Held {
+    ready: bool,
+    retired: bool,
+}
+
+impl Held {
+    fn set(&mut self, watched: Watched, held: bool) {
+        match watched {
+            Watched::Ready => self.ready = held,
+            Watched::Retired => self.retired = held,
+        }
+    }
+
+    fn none(self) -> bool {
+        !self.ready && !self.retired
+    }
 }
 
 impl Shared {
@@ -256,39 +281,108 @@ impl Shared {
         let _ = self.events.send(event);
     }
 
-    fn ready(&mut self, index: usize, id: InstanceId) {
-        let Some(entry) = self.entries.get_mut(&id) else {
-            self.unresolved.insert(id, index);
-            return;
-        };
-        if entry.segment != index || entry.ready {
-            return;
-        }
-        entry.ready = true;
-        if !entry.retired {
-            let event = CellWatchEvent::Ready {
-                segment: self.segments[index].0.clone(),
-                peer: entry.peer.clone(),
-            };
-            self.send(event);
+    /// The loopback shows `id` in, or out of, the `watched` service of the
+    /// segment at `index`.
+    fn hold(&mut self, index: usize, watched: Watched, id: InstanceId, held: bool) {
+        match self.entries.get_mut(&id) {
+            Some(entry) if entry.segment == index => {
+                entry.held.set(watched, held);
+                if held {
+                    self.announce(watched, id);
+                } else if entry.departed {
+                    self.leave_if_gone(id);
+                }
+            }
+            Some(_) => {}
+            None => {
+                let (_, shown) = self
+                    .unresolved
+                    .entry(id)
+                    .or_insert((index, Held::default()));
+                shown.set(watched, held);
+                if shown.none() {
+                    self.unresolved.remove(&id);
+                }
+            }
         }
     }
 
-    /// An instance that is not a member has left: its retirement is not
-    /// news.
-    fn retired(&mut self, index: usize, id: InstanceId) {
+    /// A watch that opens again shows the `watched` service of the segment
+    /// at `index` as it is: an instance it leaves out withdrew from it or
+    /// left meanwhile.
+    fn resync(&mut self, index: usize, watched: Watched, ids: &[InstanceId]) {
+        let current: HashSet<&InstanceId> = ids.iter().collect();
+        let mut gone = Vec::new();
+        for (id, entry) in &mut self.entries {
+            if entry.segment == index {
+                entry.held.set(watched, current.contains(id));
+                if entry.departed && entry.held.none() {
+                    gone.push(*id);
+                }
+            }
+        }
+        self.unresolved.retain(|id, (at, shown)| {
+            if *at == index {
+                shown.set(watched, current.contains(id));
+            }
+            !shown.none()
+        });
+        for id in gone {
+            self.leave_if_gone(id);
+        }
+        for id in ids {
+            self.hold(index, watched, *id, true);
+        }
+    }
+
+    /// Announce that the member `id` is ready, or retired, once: a ready
+    /// one only while it has not retired, since retirement is final.
+    fn announce(&mut self, watched: Watched, id: InstanceId) {
         let Some(entry) = self.entries.get_mut(&id) else {
             return;
         };
-        if entry.segment != index || entry.retired {
-            return;
-        }
-        entry.retired = true;
-        let event = CellWatchEvent::Retired {
-            segment: self.segments[index].0.clone(),
-            instance: id,
+        let segment = self.segments[entry.segment].0.clone();
+        let event = match watched {
+            Watched::Ready if !entry.ready => {
+                entry.ready = true;
+                if entry.retired {
+                    return;
+                }
+                CellWatchEvent::Ready {
+                    segment,
+                    peer: entry.peer.clone(),
+                }
+            }
+            Watched::Retired if !entry.retired => {
+                entry.retired = true;
+                CellWatchEvent::Retired {
+                    segment,
+                    instance: id,
+                }
+            }
+            _ => return,
         };
         self.send(event);
+    }
+
+    /// Send `left` for the departed member `id` once the loopback shows it
+    /// in no service, if the watch has named it.
+    fn leave_if_gone(&mut self, id: InstanceId) {
+        if !self
+            .entries
+            .get(&id)
+            .is_some_and(|entry| entry.departed && entry.held.none())
+        {
+            return;
+        }
+        let entry = self.entries.remove(&id).expect("the entry was just found");
+        if entry.ready || entry.retired {
+            let segment = self.segments[entry.segment].0.clone();
+            self.send(CellWatchEvent::Left {
+                segment,
+                instance: id,
+            });
+        }
     }
 
     /// The cell, then every retired entry instance, then every ready one,
@@ -425,11 +519,17 @@ mod tests {
         events
     }
 
+    /// A watch whose snapshot has been read.
     fn watch(feed: &Feed) -> CellWatch {
-        let mut watch = feed.watch().expect("the epoch is settled");
+        let mut watch = watch_now(feed);
         let snapshot = pending(&mut watch);
         assert_eq!(snapshot.last(), Some(&CellWatchEvent::Synced));
         watch
+    }
+
+    /// A watch with its snapshot unread.
+    fn watch_now(feed: &Feed) -> CellWatch {
+        feed.watch().expect("the epoch is settled")
     }
 
     fn removal(id: InstanceId, incarnation: u64) -> Removal {
@@ -468,8 +568,9 @@ mod tests {
     }
 
     /// A removal of an earlier incarnation than the one committed is
-    /// stale; the current one's is a departure, after which a late
-    /// `retired` or `ready` from the loopback is not news.
+    /// stale; the current one's is a departure, sent once when the loopback
+    /// shows the instance in no service. What the loopback shows of it
+    /// after that is not news: its removals clear it.
     #[tokio::test]
     async fn a_departure_is_fenced_by_incarnation_and_final() {
         let feed = feed();
@@ -479,17 +580,24 @@ mod tests {
         feed.joined("f", Incarnation::from_u64(2), member.clone());
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         feed.removed(removal(id, 1));
+        feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
+        feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         assert_eq!(
             pending(&mut watch),
             [CellWatchEvent::Ready {
                 segment: "f".into(),
-                peer: member,
-            }]
+                peer: member.clone(),
+            }],
+            "a stale removal is no departure"
         );
         feed.removed(removal(id, 2));
         feed.removed(removal(id, 2));
+        assert_eq!(pending(&mut watch), [], "it is still in `ready`");
+        feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
+        feed.removed(removal(id, 2));
         feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
-        feed.observe(0, Watched::Ready, &ServiceEvent::Initial(vec![id]));
+        feed.observe(0, Watched::Retired, &ServiceEvent::Removed(id));
+        feed.joined("f", Incarnation::from_u64(3), member);
         assert_eq!(
             pending(&mut watch),
             [CellWatchEvent::Left {
@@ -497,6 +605,98 @@ mod tests {
                 instance: id,
             }],
             "one departure, and nothing after it"
+        );
+    }
+
+    /// A registration can bring its services with it, and the hub commits
+    /// them before admission: the loopback may show the instance ready and
+    /// retired before the hub's members say who it is. Its retirement is
+    /// kept until they do, and it is never sent as ready.
+    #[tokio::test]
+    async fn a_retirement_seen_before_the_peer_is_known_is_kept() {
+        let feed = feed();
+        let mut watch = watch(&feed);
+        let member = peer();
+        let id = member.instance_id();
+        feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
+        feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
+        feed.joined("f", Incarnation::from_u64(1), member);
+        let retired = CellWatchEvent::Retired {
+            segment: "f".into(),
+            instance: id,
+        };
+        assert_eq!(pending(&mut watch), std::slice::from_ref(&retired));
+        let mut again = watch_now(&feed);
+        assert_eq!(pending(&mut again)[1..], [retired, CellWatchEvent::Synced]);
+    }
+
+    /// The hub tells this extension of a departure before it drops the
+    /// instance's services, so a retirement the loopback has not delivered
+    /// yet happened before the departure: it is sent, and `left` after it,
+    /// once the loopback shows the instance in no service.
+    #[tokio::test]
+    async fn a_departure_waits_for_what_the_loopback_holds_before_it() {
+        let feed = feed();
+        let mut watch = watch(&feed);
+        let member = peer();
+        let id = member.instance_id();
+        feed.joined("f", Incarnation::from_u64(1), member.clone());
+        feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
+        feed.removed(removal(id, 1));
+        feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
+        feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
+        feed.observe(0, Watched::Retired, &ServiceEvent::Removed(id));
+        assert_eq!(
+            pending(&mut watch),
+            [
+                CellWatchEvent::Ready {
+                    segment: "f".into(),
+                    peer: member,
+                },
+                CellWatchEvent::Retired {
+                    segment: "f".into(),
+                    instance: id,
+                },
+                CellWatchEvent::Left {
+                    segment: "f".into(),
+                    instance: id,
+                },
+            ]
+        );
+    }
+
+    /// A loopback watch that opens again shows each service as it is: a
+    /// departed member it leaves out is sent `left`, and what was kept for
+    /// an instance the members never held is dropped.
+    #[tokio::test]
+    async fn a_watch_opened_again_completes_a_departure() {
+        let feed = feed();
+        let mut watch = watch(&feed);
+        let (member, stranger) = (peer(), peer());
+        let id = member.instance_id();
+        feed.joined("f", Incarnation::from_u64(1), member.clone());
+        feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
+        feed.observe(
+            0,
+            Watched::Retired,
+            &ServiceEvent::Added(stranger.instance_id()),
+        );
+        feed.removed(removal(id, 1));
+        feed.observe(0, Watched::Retired, &ServiceEvent::Initial(vec![]));
+        feed.observe(0, Watched::Ready, &ServiceEvent::Initial(vec![]));
+        feed.joined("f", Incarnation::from_u64(1), stranger);
+        assert_eq!(
+            pending(&mut watch),
+            [
+                CellWatchEvent::Ready {
+                    segment: "f".into(),
+                    peer: member,
+                },
+                CellWatchEvent::Left {
+                    segment: "f".into(),
+                    instance: id,
+                },
+            ]
         );
     }
 
@@ -521,7 +721,7 @@ mod tests {
             instance: id,
         };
         assert_eq!(pending(&mut watch), std::slice::from_ref(&retired));
-        let mut again = feed.watch().expect("the epoch is settled");
+        let mut again = watch_now(&feed);
         let snapshot = pending(&mut again);
         assert_eq!(snapshot[1..], [retired, CellWatchEvent::Synced]);
     }
