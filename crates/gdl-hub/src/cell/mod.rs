@@ -7,7 +7,6 @@ use gdl_model::{CellSettings, DeploymentSpec};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use velo_hub::axum::response::sse::{Event, KeepAlive, Sse};
 use velo_hub::axum::response::{IntoResponse, Response};
 use velo_hub::axum::{Json, Router, http::StatusCode, routing::get};
 use velo_hub::store::Removal;
@@ -17,11 +16,6 @@ use velo_hub::{
 
 use crate::{CellWatchError, GraphAdmission, Quorum};
 use feed::Feed;
-
-/// How often a watch with nothing to say sends a keep-alive comment, as
-/// velo-hub's service watch does, so that a watcher's idle timeout tells a
-/// stalled connection from a quiet cell.
-const KEEP_ALIVE: Duration = Duration::from_secs(10);
 
 /// How long a watch that arrives before the cell's record is first stored
 /// waits for it: a follower finds the cell by its record, so it can ask
@@ -339,12 +333,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 /// not stored its record in time, or stops first, answers 503.
 fn serve(watch: Result<CellWatch, CellWatchError>) -> Response {
     match watch {
-        Ok(watch) => {
-            let events = futures::StreamExt::map(watch, |event| Event::default().json_data(event));
-            Sse::new(events)
-                .keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
-                .into_response()
-        }
+        Ok(watch) => crate::fanout::serve(Box::pin(watch)),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
 }

@@ -10,6 +10,7 @@
 //! and its entry instances, as [`CellWatchEvent`]s, which a hub that
 //! follows the cell reads with a [`CellWatcher`].
 mod cell;
+mod fanout;
 mod quorum;
 mod setup;
 mod watch;

@@ -31,12 +31,12 @@ use futures::Stream;
 use futures::stream::BoxStream;
 use gdl_cells::CellState;
 use tokio::sync::{broadcast, watch};
-use tokio_util::sync::CancellationToken;
 use velo_hub::store::{Incarnation, Removal};
 use velo_hub::velo::discovery::ServiceEvent;
 use velo_hub::velo::{InstanceId, PeerInfo};
 
 use super::count::Watched;
+use crate::fanout::Watchers;
 use crate::{CellWatchError, CellWatchEvent};
 
 /// The fan-out of one cell's watch.
@@ -46,11 +46,7 @@ pub(super) struct Feed {
     shared: Mutex<Shared>,
     /// The record's epoch, once a write is stored under it.
     epoch: watch::Sender<Option<u64>>,
-    /// Cancelled when the hub stops: every watch ends, so that the
-    /// listener's drain never waits one out.
-    closed: CancellationToken,
-    /// How many watches are open.
-    watching: watch::Sender<usize>,
+    watchers: Watchers,
 }
 
 impl Feed {
@@ -74,8 +70,7 @@ impl Feed {
                 events: broadcast::channel(buffer).0,
             }),
             epoch: watch::Sender::new(None),
-            closed: CancellationToken::new(),
-            watching: watch::Sender::new(0),
+            watchers: Watchers::new(),
         }
     }
 
@@ -88,11 +83,11 @@ impl Feed {
     /// refused if the hub stops first. It counts among the watchers from
     /// the moment it is asked for, so that one held waiting is seen.
     pub(super) async fn watch(&self) -> Result<CellWatch, CellWatchError> {
-        let counted = Counted::new(&self.watching);
+        let counted = self.watchers.count();
         let mut settled = self.epoch.subscribe();
         let epoch = tokio::select! {
             biased;
-            () = self.closed.cancelled() => None,
+            () = self.watchers.closed().cancelled() => None,
             epoch = settled.wait_for(Option::is_some) => epoch.ok().and_then(|epoch| *epoch),
         };
         let epoch = epoch.ok_or_else(|| {
@@ -105,29 +100,19 @@ impl Feed {
                 shared.events.subscribe(),
             )
         };
-        let watch = Watch {
-            snapshot: snapshot.into_iter(),
-            events,
-            closed: self.closed.clone(),
-            _counted: counted,
-        };
-        let events = futures::stream::unfold(watch, |mut watch| async move {
-            let event = watch.next().await?;
-            Some((event, watch))
-        });
         Ok(CellWatch {
-            events: Box::pin(events),
+            events: self.watchers.stream(counted, snapshot, events),
         })
     }
 
     /// How many watches are open or waiting to begin, as it changes.
     pub(super) fn watchers(&self) -> watch::Receiver<usize> {
-        self.watching.subscribe()
+        self.watchers.watchers()
     }
 
     /// End every watch: the hub stops.
     pub(super) fn close(&self) {
-        self.closed.cancel();
+        self.watchers.close();
     }
 
     /// The record is stored under `epoch`, which is now the hub's for
@@ -455,53 +440,6 @@ impl Stream for CellWatch {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.events.as_mut().poll_next(cx)
-    }
-}
-
-/// One watcher's place in the feed: its snapshot, then its cursor in the
-/// changes, which is all it holds.
-struct Watch {
-    snapshot: std::vec::IntoIter<CellWatchEvent>,
-    events: broadcast::Receiver<CellWatchEvent>,
-    closed: CancellationToken,
-    _counted: Counted,
-}
-
-impl Watch {
-    async fn next(&mut self) -> Option<CellWatchEvent> {
-        if let Some(event) = self.snapshot.next() {
-            return Some(event);
-        }
-        tokio::select! {
-            biased;
-            () = self.closed.cancelled() => None,
-            received = self.events.recv() => match received {
-                Ok(event) => Some(event),
-                Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    // What it holds is stale: it watches again from a
-                    // snapshot.
-                    tracing::info!(missed, "a cell watcher fell behind; its watch ends");
-                    None
-                }
-                Err(broadcast::error::RecvError::Closed) => None,
-            },
-        }
-    }
-}
-
-/// One watch in the count of watchers, until it is dropped.
-struct Counted(watch::Sender<usize>);
-
-impl Counted {
-    fn new(watching: &watch::Sender<usize>) -> Self {
-        watching.send_modify(|watching| *watching += 1);
-        Self(watching.clone())
-    }
-}
-
-impl Drop for Counted {
-    fn drop(&mut self) {
-        self.0.send_modify(|watching| *watching -= 1);
     }
 }
 
