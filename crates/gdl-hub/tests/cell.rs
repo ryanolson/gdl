@@ -213,8 +213,9 @@ async fn only_ready_instances_that_have_not_retired_are_counted() {
     first.announce(SegmentPhase::Retired).await;
     counted(&cell, 0).await;
 
-    // Serving alone does not: a second instance serves, and a third that
-    // is ready is the only one counted.
+    // Serving alone does not: with a second instance that only serves
+    // and a third that is ready, the count drops to zero when the third
+    // leaves the hub, as an instance that leaves stops counting.
     let mut serving = Instance::join(&hub, "d").await;
     serving.announce(SegmentPhase::Loaded).await;
     serving.announce(SegmentPhase::Serving).await;
@@ -222,14 +223,13 @@ async fn only_ready_instances_that_have_not_retired_are_counted() {
     third.announce(SegmentPhase::Ready).await;
     let health = counted(&cell, 1).await;
     assert_eq!(usable(&health, "f"), 0, "f has no instance");
+    third.leave().await;
+    counted(&cell, 0).await;
+
     // The retired one withdrawing `ready` changes nothing; the serving one
-    // turning ready counts.
+    // turning ready counts, and stops counting when it leaves.
     first.withdraw(SegmentPhase::Ready).await;
     serving.announce(SegmentPhase::Ready).await;
-    counted(&cell, 2).await;
-
-    // One that leaves the hub stops counting.
-    third.leave().await;
     counted(&cell, 1).await;
     serving.leave().await;
     counted(&cell, 0).await;
