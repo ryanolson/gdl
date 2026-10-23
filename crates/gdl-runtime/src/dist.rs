@@ -7,6 +7,7 @@ mod envelope;
 mod fabric;
 mod hop;
 mod launch;
+mod offers;
 mod roster;
 mod runtime;
 mod segment;

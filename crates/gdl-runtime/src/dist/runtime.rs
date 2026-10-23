@@ -341,6 +341,9 @@ pub(crate) struct Runtime {
     /// Set once an entry instance of a draining cell stops taking offers,
     /// the hand-offs from another class.
     offers_declined: AtomicBool,
+    /// Whether each hop's hand-offs to this segment are offers, worked out
+    /// once.
+    offers: Vec<bool>,
     names: Names,
     /// Forward hand-offs, backward runs, and request streams this instance
     /// has taken on.
@@ -397,6 +400,12 @@ impl Runtime {
             placement: layout.placement_hash(),
         };
         let tag = format!("{:016x}-{:016x}", identity.contract, identity.placement);
+        let offers = super::offers::offered_hops(layout.boundaries(), layout.hops().len(), |hop| {
+            layout.hops()[hop]
+                .backward_runs
+                .first()
+                .is_some_and(|inner| inner.segment == segment)
+        });
         Ok(Self {
             admission: Admission::new(
                 config.admission_limit,
@@ -411,6 +420,7 @@ impl Runtime {
             random: RandomState::new(),
             closed: AtomicBool::new(false),
             offers_declined: AtomicBool::new(false),
+            offers,
             names: Names {
                 forward: format!("gdl-fwd-{tag}"),
                 open: format!("gdl-open-{tag}"),
@@ -477,21 +487,9 @@ impl Runtime {
     }
 
     /// Whether the forward hand-offs of hop `hop` that reach this segment
-    /// are offers: the hop crosses a class boundary at its inner end,
-    /// which this segment holds. Its other stages are all in the class
-    /// it leaves (the boundary rule), so every hand-off of it that reaches
-    /// this segment comes from another class.
+    /// are offers from another class ([`super::offers::offered_hops`]).
     pub(crate) fn offered(&self, hop: usize) -> bool {
-        self.layout
-            .boundaries()
-            .iter()
-            .any(|boundary| boundary.hop == hop)
-            && self
-                .layout
-                .hops()
-                .get(hop)
-                .and_then(|layout| layout.backward_runs.first())
-                .is_some_and(|inner| inner.segment == self.segment)
+        self.offers.get(hop).copied().unwrap_or(false)
     }
 
     pub(crate) fn names(&self) -> &Names {
