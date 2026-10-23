@@ -560,7 +560,11 @@ impl Runtime {
                 (instance, picked.lease)
             }
             #[cfg(feature = "hub")]
-            Router::Cells(crossing) => return self.offer(crossing, cx, envelope, timed).await,
+            // Boxed: inline, the offer's state would make this future, and
+            // so every hand-off's task, 1,472 bytes instead of 880.
+            Router::Cells(crossing) => {
+                return Box::pin(self.offer(crossing, cx, envelope, timed)).await;
+            }
         };
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
