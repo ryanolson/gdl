@@ -29,8 +29,8 @@ impl Launch {
     }
 
     /// The segments whose instances are this one's drain sources: while
-    /// its cell drains, the cell's entry segments, or none for an entry
-    /// instance; otherwise those hosting a source that can reach it.
+    /// its cell drains, the cell's entry segments, for an entry instance
+    /// too; otherwise those hosting a source that can reach it.
     pub(super) fn drain_sources(&self) -> Vec<String> {
         #[cfg(feature = "hub")]
         if let Some(sources) = self.cell_drain.as_ref().and_then(|cell| cell.sources()) {
