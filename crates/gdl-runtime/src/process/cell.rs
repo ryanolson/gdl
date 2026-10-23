@@ -4,9 +4,9 @@
 //! in a binary without hub discovery, takes no part in a cell's drain, and
 //! every answer here is the one its stop has without a cell.
 
-use super::Launch;
 #[cfg(feature = "hub")]
 use super::Peers;
+use super::{Drains, Launch};
 
 impl Launch {
     /// Resolves when the cell's drain begins this instance's stop; never
@@ -37,6 +37,27 @@ impl Launch {
             return sources.to_vec();
         }
         self.reaching.clone()
+    }
+
+    /// For an entry instance of a draining cell, close `segment`'s entries
+    /// once its bound has passed, or at `deadline`; for any other, nothing.
+    /// What it reads is taken now, so that the wait borrows nothing of the
+    /// launch while the stop goes on beside it.
+    pub(super) fn cell_drain_closes<'a>(
+        &self,
+        segment: &'a dyn Drains,
+        deadline: tokio::time::Instant,
+    ) -> impl Future<Output = ()> + use<'a> {
+        #[cfg(feature = "hub")]
+        let closes = self.cell_drain.as_ref().and_then(|cell| cell.closes());
+        #[cfg(not(feature = "hub"))]
+        let closes: Option<tokio::time::Instant> = None;
+        async move {
+            if let Some(at) = closes {
+                tokio::time::sleep_until(at.min(deadline)).await;
+                segment.close();
+            }
+        }
     }
 
     /// For an entry instance of a draining cell, wait until it may stop

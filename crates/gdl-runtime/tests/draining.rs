@@ -449,6 +449,63 @@ async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
     }
 }
 
+/// An entry instance stops taking new work at its bound even when its
+/// serving body is slow to finish once told to stop: the offer of a stale
+/// chooser after the bound is declined, and the other cell answers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_declines_after_its_bound_while_its_body_finishes() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let (e1, quiet) = (Events::new(), Events::quiet());
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    // A drain bound longer than the test, so that it does not cut the
+    // body short.
+    let (m1, proxy) = model_proxied(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 60000\n",
+        &|deployment| reference_graph(deployment, &e1),
+    )
+    .await;
+    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let cells = tables(&chooser);
+    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+    proxy.set(Mode::Undrained);
+    let entry = &m1.entries[0];
+    entry.body.send_replace(true);
+
+    m1.readiness.drain().await.expect("the cell drains");
+    ask(&chooser.segment)
+        .await
+        .expect("the draining cell answered");
+    assert_eq!(
+        (m1.forwards(), m2.forwards()),
+        (1, 0),
+        "taken within the bound"
+    );
+    closed(entry, PAST_BOUND).await;
+    let before = (offers(&m1), offers(&m2));
+    ask(&chooser.segment)
+        .await
+        .expect("the other cell answered");
+    assert_eq!(
+        (offers(&m1), offers(&m2)),
+        (before.0 + 1, before.1 + 1),
+        "not offered to the draining cell, then the other"
+    );
+    assert_eq!(
+        (m1.forwards(), m2.forwards()),
+        (1, 1),
+        "taken past the bound"
+    );
+    entry.body.send_replace(false);
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
 /// A request the entry took before its cell drained is answered after the
 /// entry stopped taking work, and the entry announces that it has drained
 /// only once it holds no request.

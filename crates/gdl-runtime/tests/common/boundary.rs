@@ -66,6 +66,9 @@ pub struct Running<H> {
     pub cells: Option<Cells>,
     /// The instance's velo node.
     pub node: Velo,
+    /// While true, the instance's serving body, once it is told to stop,
+    /// waits before it returns, as a body that finishes its own work does.
+    pub body: Arc<tokio::sync::watch::Sender<bool>>,
     serving: JoinHandle<gdl::Result<()>>,
 }
 
@@ -139,9 +142,13 @@ pub async fn run_graph<H: Register + Send + Sync + 'static>(
     let root = assemble(&deployment)?;
     let started = deployment.start(root)?;
     let (tx, rx) = oneshot::channel();
+    let body = Arc::new(tokio::sync::watch::Sender::new(false));
+    let held = body.subscribe();
     let serving = tokio::spawn(launch.serve(started, |segment, shutdown| async move {
         let _ = tx.send(segment);
         shutdown.cancelled().await;
+        let mut held = held;
+        let _ = held.wait_for(|held| !*held).await;
         Ok(())
     }));
     let segment = tokio::time::timeout(WAIT, rx)
@@ -153,6 +160,7 @@ pub async fn run_graph<H: Register + Send + Sync + 'static>(
         segment,
         cells,
         node,
+        body,
         serving,
     })
 }

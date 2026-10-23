@@ -801,7 +801,8 @@ impl Launch {
     /// taking new work, and stays ready, for a bound after it learns of the
     /// drain: the setup timeout and twice the cell's `summary_ms`, so that
     /// an offer from a chooser whose view of the cell is stale lands. Then
-    /// it stops without retiring, declines what reaches it, finishes the
+    /// it stops without retiring, declines what reaches it from then,
+    /// however long its serving body takes to finish, finishes the
     /// requests it holds, announces that it has drained, and leaves. An
     /// interior instance serves until every entry instance of its cell has
     /// drained or left, then stops as above. While its cell drains, the
@@ -932,6 +933,9 @@ impl Launch {
                         },
                     }
                 };
+                // An entry instance of a draining cell stops taking work at
+                // its bound, however long the body takes to finish.
+                let closing = self.cell_drain_closes(segment.as_ref(), deadline);
                 // Peers hear of the retirement while the body finishes; a
                 // lost lease took the hub that would hear it.
                 let retiring = async {
@@ -939,10 +943,10 @@ impl Launch {
                         self.retire(deadline).await;
                     }
                 };
-                let (result, ()) = tokio::select! {
+                let (result, (), ()) = tokio::select! {
                     biased;
                     () = process.stops(2) => return Err(second()),
-                    both = async { tokio::join!(finished, retiring) } => both,
+                    all = async { tokio::join!(finished, retiring, closing) } => all,
                 };
                 (result, stop, deadline)
             }

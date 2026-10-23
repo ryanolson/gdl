@@ -145,13 +145,22 @@ impl CellDrain {
         })
     }
 
+    /// For an entry instance that has learned of its cell's drain, when its
+    /// bound passes: when it stops taking new work.
+    pub(crate) fn closes(&self) -> Option<Instant> {
+        let learned = (*self.learned.borrow())?;
+        match &self.role {
+            Role::Entry { bound } => Some(learned + *bound),
+            Role::Interior { .. } => None,
+        }
+    }
+
     /// Wait, for an entry instance of a draining cell, until the bound has
     /// passed since it learned of the drain, or until `deadline`; any
     /// other instance goes on at once.
     pub(crate) async fn accepting(&self, deadline: Instant) {
-        let learned = *self.learned.borrow();
-        if let (Role::Entry { bound }, Some(learned)) = (&self.role, learned) {
-            tokio::time::sleep_until((learned + *bound).min(deadline)).await;
+        if let Some(at) = self.closes() {
+            tokio::time::sleep_until(at.min(deadline)).await;
         }
     }
 
