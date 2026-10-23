@@ -592,3 +592,50 @@ async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
     task.abort();
 }
+
+/// A watch that cannot begin, because the hub accepts the connection and
+/// does not answer, holds no unregistration past its drain: the deadlines
+/// are kept while the next watch is asked for.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_watch_holds_no_unregistration() {
+    let (follows, cells, recorded, _) = follower();
+    let x = peer();
+    let watches = VecDeque::from([vec![
+        follow(M1, 1, CellState::Ready),
+        exposed(M1, 1, &x),
+        FollowEvent::Synced,
+        left(M1, 1, &x),
+    ]]);
+    let (opened, mut watching) = tokio::sync::watch::channel(0);
+    // The second watch is asked for and never begins.
+    let (_release, released) = tokio::sync::watch::channel(1);
+    let task = tokio::spawn(run(
+        Scripted {
+            watches: Mutex::new(watches),
+            opened,
+            released,
+        },
+        follows,
+    ));
+    watching
+        .wait_for(|opened| *opened >= 2)
+        .await
+        .expect("the task runs");
+    assert!(cells.is_registered(x.instance_id()));
+    let mut changes = cells.changes();
+    tokio::time::timeout(
+        DRAIN * 2,
+        changes.wait_for(|_| !cells.is_registered(x.instance_id())),
+    )
+    .await
+    .expect("a stalled watch held an unregistration past its drain")
+    .expect("the task runs");
+    assert_eq!(
+        recorded.take(),
+        [
+            Call::Register(x.instance_id()),
+            Call::Unregister(x.instance_id())
+        ]
+    );
+    task.abort();
+}

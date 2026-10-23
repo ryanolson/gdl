@@ -89,7 +89,18 @@ impl Source for Hub {
 pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<R>) {
     let mut refused: Option<String> = None;
     loop {
-        match source.watch().await {
+        // A hub can take the connection and not answer: the deadlines are
+        // kept while the watch is asked for.
+        let opening = source.watch();
+        tokio::pin!(opening);
+        let opened = loop {
+            let due = follows.next_due();
+            tokio::select! {
+                opened = &mut opening => break opened,
+                () = until(due) => follows.forget(Instant::now()),
+            }
+        };
+        match opened {
             Ok(events) => {
                 if refused.take().is_some() {
                     tracing::info!("the hub's relay of the cells it follows is watched again");
