@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+gdl-cells = { path = "../gdl-cells" }
 gdl-model = { path = "../gdl-model" }
 velo-hub = { workspace = true, features = ["server"] }
 serde_json.workspace = true

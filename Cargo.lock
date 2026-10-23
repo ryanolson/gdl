@@ -753,6 +753,7 @@ dependencies = [
 name = "gdl-hub"
 version = "0.1.0"
 dependencies = [
+ "gdl-cells",
  "gdl-model",
  "serde",
  "serde_json",

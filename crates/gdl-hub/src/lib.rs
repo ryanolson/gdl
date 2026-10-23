@@ -1,4 +1,8 @@
 //! Discovery hub with admission restricted to one GDL deployment.
+mod quorum;
+
+pub use quorum::Quorum;
+
 use gdl_model::{DeploymentSpec, SegmentRegistration};
 use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};
 
