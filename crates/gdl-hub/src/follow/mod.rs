@@ -80,6 +80,11 @@ impl<D: CellDirectory> Follower<D> {
                     Some(ended) = follows.links.join_next() => follows.ended(ended),
                 }
             }
+            // A watch that failed or ended may have been part way through
+            // its snapshot: the cells it named so far must not count as
+            // held when the next one's snapshot completes, or a cell
+            // withdrawn meanwhile would be kept.
+            follows.view.apply(CellEvent::Resnapshot, Instant::now());
             let pause = tokio::time::sleep(REWATCH);
             tokio::pin!(pause);
             loop {
