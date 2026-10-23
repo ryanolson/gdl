@@ -30,9 +30,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
-use gdl_cells::CellState;
+use gdl_cells::{CellState, LoadSummary};
 use gdl_model::Layout;
 use tokio::sync::watch;
+use tokio::time::Instant;
 use velo::InstanceId;
 
 /// The tables of the cells a chooser instance follows, shared by its
@@ -40,8 +41,9 @@ use velo::InstanceId;
 ///
 /// Per entry segment, one table of every followed cell of the segment's
 /// class that the chooser's hub relays: the cell's current follow (its
-/// generation), its state, its region, the entry instances it exposes,
-/// and those that retired, which are never routed to. A table changes
+/// generation), its state, its region, its load summary with the time it
+/// arrived, the entry instances it exposes, and those that retired, which
+/// are never routed to. A table changes
 /// only when the relay says so, and is replaced whole. The chooser's own
 /// region is kept with them, for the cell policy.
 #[derive(Clone)]
@@ -97,6 +99,7 @@ impl Cells {
         let Some(table) = self.table(segment) else {
             return Vec::new();
         };
+        let now = Instant::now();
         table
             .cells
             .iter()
@@ -106,6 +109,10 @@ impl Cells {
                 generation: cell.generation,
                 region: cell.region.clone(),
                 state: cell.state,
+                load: cell.load.map(|(load, _)| load),
+                load_age: cell
+                    .load
+                    .map(|(_, arrived)| now.saturating_duration_since(arrived)),
                 eligible: cell.eligible.to_vec(),
                 retired: cell.retired.to_vec(),
             })
@@ -245,6 +252,14 @@ pub struct FollowedCell {
     pub region: String,
     /// The cell's state, as its hub last sent it.
     pub state: CellState,
+    /// The cell's load summary, as its hub last sent it: `None` while it
+    /// has none. Nothing chooses by it yet.
+    pub load: Option<LoadSummary>,
+    /// How long ago, on this instance's clock, the summary arrived: a
+    /// summary is sent when it changes, so this is the time since it last
+    /// changed, or since the follow was first shown. `None` with no
+    /// summary.
+    pub load_age: Option<std::time::Duration>,
     /// The entry instances of the segment that may be routed to, by id:
     /// none while the state is `draining` or `unavailable`.
     pub eligible: Vec<InstanceId>,
@@ -270,6 +285,8 @@ pub(crate) struct CellTable {
     pub(crate) generation: u64,
     pub(crate) region: String,
     pub(crate) state: CellState,
+    /// The cell's load summary, and when it arrived.
+    pub(crate) load: Option<(LoadSummary, Instant)>,
     pub(crate) eligible: Box<[InstanceId]>,
     /// `eligible` as a selector sees it, index for index, made with the
     /// table so that a selection borrows it rather than converting each

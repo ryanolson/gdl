@@ -133,6 +133,7 @@ mod tests {
             generation: 1,
             region: region.into(),
             state,
+            load: None,
             offered: eligible
                 .iter()
                 .map(|id| gdl::InstanceId::from_u128(id.as_u128()))

@@ -246,6 +246,7 @@ mod tests {
             generation: 1,
             region: "home".into(),
             state,
+            load: None,
             eligible: eligible.into(),
             offered: eligible
                 .iter()

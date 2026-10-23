@@ -148,7 +148,7 @@ async fn read<R: Registry>(follows: &mut Follows<R>, mut events: BoxStream<'stat
                 match snapshot.take() {
                     Some(complete) if synced => follows.resnapshot(complete, Instant::now()),
                     Some(mut filling) => {
-                        filling.apply(event);
+                        filling.apply(event, Instant::now());
                         snapshot = Some(filling);
                     }
                     None if synced => return,

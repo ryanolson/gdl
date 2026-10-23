@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use gdl_cells::CellState;
+use gdl_cells::{CellState, LoadSummary};
 use gdl_watch::FollowEvent;
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo, WorkerAddress};
@@ -266,7 +266,7 @@ fn a_snapshot_of_the_same_follow_keeps_its_turn() {
     turn(&cells).fetch_add(1, Ordering::Relaxed);
     let mut snapshot = follows.snapshot();
     for event in events() {
-        snapshot.apply(event);
+        snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
     assert_eq!(
@@ -278,7 +278,7 @@ fn a_snapshot_of_the_same_follow_keeps_its_turn() {
     // own.
     let mut snapshot = follows.snapshot();
     for event in [follow(M1, 2, CellState::Ready), exposed(M1, 2, &x)] {
-        snapshot.apply(event);
+        snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
     assert_eq!(turn(&cells).load(Ordering::Relaxed), 0);
@@ -554,7 +554,7 @@ fn a_snapshot_replaces_what_was_held() {
         exposed(M1, 1, &x),
         exposed(M1, 1, &z),
     ] {
-        snapshot.apply(event);
+        snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now);
     let held = table(&cells, M1).expect("held");
@@ -577,7 +577,7 @@ fn a_snapshot_replaces_what_was_held() {
     let mut snapshot = follows.snapshot();
     let w = peer();
     for event in [follow(M2, 3, CellState::Ready), exposed(M2, 3, &w)] {
-        snapshot.apply(event);
+        snapshot.apply(event, now);
     }
     follows.resnapshot(snapshot, now + DRAIN);
     assert_eq!(recorded.take(), [Call::Register(w.instance_id())]);
@@ -800,4 +800,101 @@ fn a_later_membership_drain_keeps_its_peer() {
     // The membership's drain ends: it unregisters the peer then.
     Cells::drained(Some(&cells), id, || recorded.unregister(id));
     assert_eq!(recorded.take(), [Call::Unregister(id)]);
+}
+
+fn loaded(cell: &str, generation: u64, load: Option<LoadSummary>) -> FollowEvent {
+    FollowEvent::Load {
+        class: "model_x".into(),
+        cell: cell.into(),
+        generation,
+        load,
+    }
+}
+
+fn summary(admitted: u64) -> LoadSummary {
+    LoadSummary {
+        admitted,
+        limit: 16,
+        instances: 2,
+        refusals: 0,
+    }
+}
+
+/// A cell's load summary is kept with the time it arrived on the
+/// chooser's clock: from its follow's first event, from a snapshot, and
+/// from each load event of its current generation, and its age is
+/// measured from then. Another generation's summary is ignored, and one
+/// that says there is none clears it. A load event costs its own cell's
+/// table alone.
+#[tokio::test(start_paused = true)]
+async fn a_cells_load_is_kept_with_the_time_it_arrived() {
+    let (mut follows, cells, _, _) = follower();
+    let start = Instant::now();
+    let second = Duration::from_secs(1);
+    let first = FollowEvent::Follow {
+        class: "model_x".into(),
+        cell: M1.into(),
+        generation: 1,
+        region: "r".into(),
+        state: CellState::Ready,
+        load: Some(summary(3)),
+    };
+    live(
+        &mut follows,
+        start,
+        [first, follow(M2, 1, CellState::Ready)],
+    );
+    let crowd: Vec<PeerInfo> = (0..64).map(|_| peer()).collect();
+    live(&mut follows, start, crowd.iter().map(|p| exposed(M2, 1, p)));
+    tokio::time::advance(second * 3).await;
+    let held = table(&cells, M1).expect("held");
+    assert_eq!(
+        (held.load, held.load_age),
+        (Some(summary(3)), Some(second * 3))
+    );
+    assert_eq!(table(&cells, M2).expect("held").load, None);
+
+    super::follow::READ.with(|read| read.set(0));
+    live(
+        &mut follows,
+        start + second * 3,
+        [loaded(M1, 1, Some(summary(5)))],
+    );
+    assert_eq!(
+        super::follow::READ.with(std::cell::Cell::get),
+        0,
+        "a load event read another cell's instances"
+    );
+    tokio::time::advance(second).await;
+    let held = table(&cells, M1).expect("held");
+    assert_eq!((held.load, held.load_age), (Some(summary(5)), Some(second)));
+
+    live(
+        &mut follows,
+        start + second * 4,
+        [loaded(M1, 2, Some(summary(9)))],
+    );
+    assert_eq!(table(&cells, M1).expect("held").load, Some(summary(5)));
+    live(&mut follows, start + second * 4, [loaded(M1, 1, None)]);
+    let held = table(&cells, M1).expect("held");
+    assert_eq!((held.load, held.load_age), (None, None));
+
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(
+        FollowEvent::Follow {
+            class: "model_x".into(),
+            cell: M1.into(),
+            generation: 1,
+            region: "r".into(),
+            state: CellState::Ready,
+            load: Some(summary(7)),
+        },
+        start + second * 4,
+    );
+    follows.resnapshot(snapshot, start + second * 4);
+    let held = table(&cells, M1).expect("held");
+    assert_eq!(
+        (held.load, held.load_age),
+        (Some(summary(7)), Some(Duration::ZERO))
+    );
 }

@@ -462,16 +462,23 @@ async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::Followe
                 generation,
                 region,
                 state,
-                ..
-            } => tables.push(gdl_runtime::FollowedCell {
-                class,
-                cell,
-                generation,
-                region,
-                state,
-                eligible: Vec::new(),
-                retired: Vec::new(),
-            }),
+                load,
+            } => {
+                // No instance here reports within the 10 s summary period,
+                // so there is no summary, and no age to compare.
+                assert_eq!(load, None, "a summary within the test");
+                tables.push(gdl_runtime::FollowedCell {
+                    class,
+                    cell,
+                    generation,
+                    region,
+                    state,
+                    load: None,
+                    load_age: None,
+                    eligible: Vec::new(),
+                    retired: Vec::new(),
+                });
+            }
             FollowEvent::Exposed { cell, peer, .. } => {
                 let table = tables
                     .iter_mut()

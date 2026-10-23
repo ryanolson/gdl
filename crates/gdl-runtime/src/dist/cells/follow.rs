@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
-use gdl_cells::CellState;
+use gdl_cells::{CellState, LoadSummary};
 use gdl_watch::FollowEvent;
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
@@ -91,7 +91,7 @@ impl<R: Registry> Follows<R> {
     /// with an exposed instance registered first and every instance no
     /// follow holds any more unregistered after the drain.
     pub(crate) fn apply(&mut self, event: FollowEvent, now: Instant) {
-        let (key, change) = match self.followed.apply(&self.wanted, event) {
+        let (key, change) = match self.followed.apply(&self.wanted, event, now) {
             Some(changed) => changed,
             None => return,
         };
@@ -353,10 +353,16 @@ enum Change {
 }
 
 impl Followed {
-    /// Apply one event: the cell it changed, and how, or `None` for an
-    /// event of a class or segment not sent to, or of a generation that is
-    /// not its cell's current one, which changes nothing.
-    fn apply(&mut self, wanted: &Wanted, event: FollowEvent) -> Option<(Key, Change)> {
+    /// Apply one event, which arrived at `now`: the cell it changed, and
+    /// how, or `None` for an event of a class or segment not sent to, or
+    /// of a generation that is not its cell's current one, which changes
+    /// nothing.
+    fn apply(
+        &mut self,
+        wanted: &Wanted,
+        event: FollowEvent,
+        now: Instant,
+    ) -> Option<(Key, Change)> {
         let wants = |class: &str, segment: &str| {
             wanted
                 .get(class)
@@ -369,7 +375,7 @@ impl Followed {
                 generation,
                 region,
                 state,
-                ..
+                load,
             } => {
                 let segments = wanted.get(&class)?;
                 let key = (class, cell);
@@ -385,7 +391,13 @@ impl Followed {
                 // of the older one is carried over.
                 let older = self.follows.insert(
                     key.clone(),
-                    Follow::new(generation, region, state, segments),
+                    Follow::new(
+                        generation,
+                        region,
+                        state,
+                        load.map(|load| (load, now)),
+                        segments,
+                    ),
                 );
                 Some((key, older.map_or(Change::Table, Change::Ended)))
             }
@@ -398,6 +410,16 @@ impl Followed {
                 let key = (class, cell);
                 let hidden = self.current(&key, generation)?.set_state(state);
                 Some((key, Change::Hidden(hidden)))
+            }
+            FollowEvent::Load {
+                class,
+                cell,
+                generation,
+                load,
+            } => {
+                let key = (class, cell);
+                self.current(&key, generation)?.load = load.map(|load| (load, now));
+                Some((key, Change::Table))
             }
             FollowEvent::Exposed {
                 class,
@@ -463,7 +485,7 @@ impl Followed {
                 Some((key, Change::Ended(follow)))
             }
             // The snapshot's marker, which the task reads.
-            FollowEvent::Synced | FollowEvent::Load { .. } => None,
+            FollowEvent::Synced => None,
         }
     }
 
@@ -481,6 +503,8 @@ struct Follow {
     generation: u64,
     region: String,
     state: CellState,
+    /// The cell's load summary, and when it arrived.
+    load: Option<(LoadSummary, Instant)>,
     /// Exposed entry instances that have not retired, with their segments.
     exposed: HashMap<InstanceId, (String, PeerInfo)>,
     /// Retired entry instances, with their segments: never exposed again.
@@ -491,11 +515,18 @@ struct Follow {
 }
 
 impl Follow {
-    fn new(generation: u64, region: String, state: CellState, segments: &BTreeSet<String>) -> Self {
+    fn new(
+        generation: u64,
+        region: String,
+        state: CellState,
+        load: Option<(LoadSummary, Instant)>,
+        segments: &BTreeSet<String>,
+    ) -> Self {
         Self {
             generation,
             region,
             state,
+            load,
             exposed: HashMap::new(),
             retired: HashMap::new(),
             turns: segments
@@ -575,6 +606,7 @@ impl Follow {
             generation: self.generation,
             region: self.region.clone(),
             state: self.state,
+            load: self.load,
             eligible: eligible.into_boxed_slice(),
             offered,
             retired: retired.into_boxed_slice(),
@@ -599,9 +631,10 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
-    /// Apply one event of the snapshot, before its `synced`, by the same
-    /// rules as after it; nothing is registered until it is complete.
-    pub(super) fn apply(&mut self, event: FollowEvent) {
-        let _ = self.followed.apply(&self.wanted, event);
+    /// Apply one event of the snapshot, which arrived at `now`, before its
+    /// `synced`, by the same rules as after it; nothing is registered until
+    /// it is complete.
+    pub(super) fn apply(&mut self, event: FollowEvent, now: Instant) {
+        let _ = self.followed.apply(&self.wanted, event, now);
     }
 }
