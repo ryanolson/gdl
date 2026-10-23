@@ -125,9 +125,11 @@ pub enum ErrorKind {
     Placement,
     /// A routing selector could not choose an instance for the request.
     Routing,
-    /// A hand-off went unanswered, or the transport failed after it may
-    /// have left: the receiver may have taken the request and run it, so
-    /// trying it again may run it twice.
+    /// A hand-off into a cell went unanswered, or the transport failed
+    /// after it may have left: the receiver may have taken the request and
+    /// run it, so trying it again may run it twice. Raised for a chooser's
+    /// hand-off into another class; any other hand-off that goes
+    /// unanswered fails with `Transport`.
     OutcomeUnknown,
 }
 
