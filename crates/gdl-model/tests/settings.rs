@@ -81,6 +81,7 @@ fn a_cells_settings_are_read_whole() {
             directory: DirectoryBackend::Memory,
             seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
             ready: BTreeMap::from([("d".into(), 4)]),
+            requires: BTreeMap::new(),
             hub: Some("model-x-01-hub:1337".into()),
         }
     );
@@ -296,4 +297,58 @@ fn a_segment_outside_the_placement_is_not_in_the_cells_class() {
         error.to_string(),
         "[cell] class: this instance's segment `zz` is not in class `model_x`"
     );
+}
+
+const GLOBAL: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+
+/// A cell's health needs this many ready cells of each class it sends to:
+/// `[requires]`, read whole and kept through TOML.
+#[test]
+fn a_cells_requirements_are_read_whole() {
+    let cell = settings(&format!("{GLOBAL}[requires]\nmodel_x = 2\n"));
+    assert_eq!(cell.requires, BTreeMap::from([("model_x".into(), 2)]));
+    let text = toml::to_string(&cell).expect("toml");
+    assert_eq!(settings(&text), cell, "{text}");
+    assert!(settings(GLOBAL).requires.is_empty());
+    cell.check_hub(&classed()).expect("global sends to model_x");
+    cell.check(&classed(), "b")
+        .expect("global sends to model_x");
+}
+
+/// A requirement names a class the cell's class sends to, with a count of
+/// at least 1, for a hub and for an instance alike.
+#[test]
+fn a_requirement_of_a_class_not_sent_to_or_of_zero_is_refused() {
+    let cases = [
+        (
+            format!("{GLOBAL}[requires]\nglobal = 1\n"),
+            "b",
+            "[cell] requires: `global` is not a class that `global` sends to",
+        ),
+        (
+            format!("{GLOBAL}[requires]\nmodel_y = 1\n"),
+            "b",
+            "[cell] requires: `model_y` is not a class that `global` sends to",
+        ),
+        (
+            format!("{GLOBAL}[requires]\nmodel_x = 0\n"),
+            "b",
+            "[cell] requires: `model_x` is 0; a requirement is at least 1",
+        ),
+        (
+            "name = 'm'\nclass = 'model_x'\nregion = 'r'\n[requires]\nglobal = 1\n".to_string(),
+            "d",
+            "[cell] requires: `global` is not a class that `model_x` sends to",
+        ),
+    ];
+    for (text, segment, expected) in cases {
+        let Err(error) = settings(&text).check_hub(&classed()) else {
+            panic!("accepted {text}");
+        };
+        assert_eq!(error.to_string(), expected, "{text}");
+        let Err(error) = settings(&text).check(&classed(), segment) else {
+            panic!("accepted {text} for `{segment}`");
+        };
+        assert_eq!(error.to_string(), expected, "{text}");
+    }
 }

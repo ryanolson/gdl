@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +23,8 @@ use crate::{Error, Layout};
 /// hub = "model-x-01-hub:1337"  # optional: where other cells' hubs reach this cell's hub
 /// [ready]                      # optional: the quorum of each segment of the class
 /// e = 4
+/// [requires]                   # optional: ready cells of each class it sends to that its health needs
+/// model_y = 1
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Table", into = "Table")]
@@ -43,6 +48,10 @@ pub struct CellSettings {
     /// Usable instances each segment of the class needs for the cell to be
     /// ready; see [`CellSettings::quorum`].
     pub ready: BTreeMap<String, u32>,
+    /// How many ready cells of each class the cell's class sends to its
+    /// hub must follow for the cell health endpoint to answer that the
+    /// cell is healthy. Only the cell's hub reads it.
+    pub requires: BTreeMap<String, u32>,
     /// The address, `host:port`, at which other cells' hubs reach this
     /// cell's hub: the hub address of the cell's record. Only the cell's
     /// hub reads it, and it needs it to publish the record.
@@ -81,8 +90,9 @@ impl CellSettings {
 
     /// Whether these settings fit an instance of `segment` in `layout`: the
     /// placement has classes, the cell's class is one of them, the segment
-    /// is in it, and every `ready` key is a segment of it. Every problem is
-    /// reported.
+    /// is in it, every `ready` key is a segment of it, and every `requires`
+    /// key is a class it sends to, with a count of at least 1. Every
+    /// problem is reported.
     pub fn check(&self, layout: &Layout, segment: &str) -> Result<(), Error> {
         refuse(self.problems(layout, Some(segment)))
     }
@@ -120,7 +130,26 @@ impl CellSettings {
                 .keys()
                 .filter(|key| layout.class_of(key) != Some(class))
                 .map(|key| format!("[cell] ready: `{key}` is not a segment of class `{class}`"));
-            own.into_iter().chain(strays).collect()
+            let sent: BTreeSet<&str> = layout
+                .boundaries()
+                .iter()
+                .filter(|boundary| boundary.from == class)
+                .map(|boundary| boundary.into.as_str())
+                .collect();
+            let requires = self.requires.iter().filter_map(|(required, &count)| {
+                if !sent.contains(required.as_str()) {
+                    Some(format!(
+                        "[cell] requires: `{required}` is not a class that `{class}` sends to"
+                    ))
+                } else if count == 0 {
+                    Some(format!(
+                        "[cell] requires: `{required}` is 0; a requirement is at least 1"
+                    ))
+                } else {
+                    None
+                }
+            });
+            own.into_iter().chain(strays).chain(requires).collect()
         }
     }
 }
@@ -216,6 +245,8 @@ struct Table {
     seeds: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ready: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    requires: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hub: Option<String>,
 }
@@ -274,6 +305,7 @@ impl TryFrom<Table> for CellSettings {
             directory,
             seeds: table.seeds,
             ready: table.ready,
+            requires: table.requires,
             hub: table.hub,
         })
     }
@@ -295,6 +327,7 @@ impl From<CellSettings> for Table {
             dir,
             seeds: settings.seeds,
             ready: settings.ready,
+            requires: settings.requires,
             hub: settings.hub,
         }
     }

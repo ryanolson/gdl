@@ -96,6 +96,7 @@ fn a_cells_settings_are_read_from_the_environment() {
                 },
                 seeds: vec!["hub-a:1337".into()],
                 ready: BTreeMap::from([("d".into(), 2)]),
+                requires: BTreeMap::new(),
                 hub: Some("model-x-01-hub:1337".into()),
             })
         );
@@ -114,6 +115,24 @@ fn an_ipv6_hub_address_is_read_as_written() {
         assert_eq!(
             cell.and_then(|cell| cell.hub).as_deref(),
             Some("[::1]:1337")
+        );
+        Ok(())
+    });
+}
+
+/// A requirement is `GDL_CELL__REQUIRES__<CLASS>`, its class matched
+/// without regard to case, as a quorum's segment is.
+#[test]
+fn a_cells_requirements_are_read_from_the_environment() {
+    Jail::expect_with(|jail| {
+        jail.set_env("GDL_CELL__NAME", "global-us-east-1");
+        jail.set_env("GDL_CELL__CLASS", "global");
+        jail.set_env("GDL_CELL__REGION", "us-east-1");
+        jail.set_env("GDL_CELL__REQUIRES__MODEL_X", "2");
+        let cell = cell_from_env().map_err(|e| e.to_string())?;
+        assert_eq!(
+            cell.map(|cell| cell.requires),
+            Some(BTreeMap::from([("model_x".into(), 2)]))
         );
         Ok(())
     });
@@ -158,6 +177,7 @@ fn settings(directory: DirectoryBackend) -> CellSettings {
         directory,
         seeds: vec![],
         ready: BTreeMap::new(),
+        requires: BTreeMap::new(),
         hub: Some("model-x-01-hub:1337".into()),
     }
 }

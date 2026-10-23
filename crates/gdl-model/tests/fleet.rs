@@ -169,11 +169,18 @@ fn a_cells_settings_have_its_quorum_resolved() {
             seeds: vec![],
             // The cell's own `e`; the class's `d` and `f`.
             ready: BTreeMap::from([("d".into(), 1), ("e".into(), 8), ("f".into(), 2)]),
+            requires: BTreeMap::new(),
             hub: None,
         }
     );
+    assert!(larger.requires.is_empty(), "model_x requires nothing");
     let global = fleet.cell("global-eu-west-1").expect("a cell");
     assert_eq!(global.home, None);
+    assert_eq!(
+        global.requires,
+        BTreeMap::from([("model_x".into(), 1)]),
+        "the class's requirements"
+    );
     assert_eq!(global.quorum("a"), 2);
     assert!(fleet.cell("model-x-09-us-east-1").is_none());
 

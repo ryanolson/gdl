@@ -339,6 +339,7 @@ fn a_cell_table_is_read_from_a_file() {
             directory: DirectoryBackend::Relay,
             seeds: vec!["hub-a:1337".into()],
             ready: BTreeMap::from([("front".into(), 3)]),
+            requires: BTreeMap::new(),
             hub: None,
         })
     );
@@ -370,6 +371,7 @@ fn a_cell_table_is_read_from_the_environment() {
                 directory: DirectoryBackend::Memory,
                 seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
                 ready: BTreeMap::from([("back".into(), 4), ("front".into(), 3)]),
+                requires: BTreeMap::new(),
                 hub: None,
             })
         );

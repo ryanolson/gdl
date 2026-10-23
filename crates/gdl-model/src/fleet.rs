@@ -160,15 +160,14 @@ impl Fleet {
     /// The settings of the cell `name`, with its quorum resolved: for each
     /// segment, the cell's own `ready` if it sets that segment, else its
     /// class's default; a segment with neither is left to
-    /// [`CellSettings::quorum`]'s fallback. The directory, seeds, and hub
+    /// [`CellSettings::quorum`]'s fallback. Its `requires` is its class's. The directory, seeds, and hub
     /// address are not in the fleet file and take their defaults. Meant for a fleet that
     /// [`Fleet::check`] accepted, whose `ready` keys are all segments of
     /// the cell's class.
     pub fn cell(&self, name: &str) -> Option<CellSettings> {
         let cell = self.cells.get(name)?;
-        let mut ready = self
-            .classes
-            .get(&cell.class)
+        let defaults = self.classes.get(&cell.class);
+        let mut ready = defaults
             .map(|class| class.ready.clone())
             .unwrap_or_default();
         ready.extend(cell.ready.iter().map(|(s, n)| (s.clone(), *n)));
@@ -180,6 +179,9 @@ impl Fleet {
             directory: DirectoryBackend::default(),
             seeds: Vec::new(),
             ready,
+            requires: defaults
+                .map(|class| class.requires.clone())
+                .unwrap_or_default(),
             hub: None,
         })
     }
