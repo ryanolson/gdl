@@ -916,22 +916,18 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
     );
 }
 
-/// A cell's damping is the chooser's, not its follow's: it outlives the
-/// tables an event makes again, a newer generation, a refollow after the
-/// cell was dropped, and a new snapshot. A cell that is not damped is
-/// forgotten once it is not followed, and is undamped when it is again.
+/// A cell's damping is the chooser's, not its follow's, and is found by
+/// the cell's name: it outlives the tables an event makes again, a newer
+/// generation, a refollow after the cell was dropped, and a new snapshot,
+/// with or without the cell, since the follower never touches it.
 #[tokio::test(start_paused = true)]
 async fn a_cells_damping_outlives_its_follows_and_snapshots() {
     let (mut follows, cells, _, _) = follower();
     let now = Instant::now();
     let window = Some(Duration::from_secs(1));
     live(&mut follows, now, [follow(M1, 1, CellState::Ready)]);
-    let damping = |cells: &Cells| {
-        let table = cells.table("f").expect("a table");
-        Arc::clone(&table.cells[0].damping)
-    };
     assert_eq!(table(&cells, M1).expect("held").damped, None);
-    damping(&cells).decline(now);
+    cells.damping().decline(super::cell_id("model_x", M1), now);
     assert_eq!(table(&cells, M1).expect("held").damped, window);
 
     live(&mut follows, now, [state(M1, 1, CellState::Degraded)]);
@@ -950,14 +946,6 @@ async fn a_cells_damping_outlives_its_follows_and_snapshots() {
         window,
         "a refollow"
     );
-    let mut snapshot = follows.snapshot();
-    snapshot.apply(follow(M1, 1, CellState::Ready), now);
-    follows.resnapshot(snapshot, now);
-    assert_eq!(
-        table(&cells, M1).expect("held").damped,
-        window,
-        "a snapshot"
-    );
     follows.resnapshot(follows.snapshot(), now);
     let mut snapshot = follows.snapshot();
     snapshot.apply(follow(M1, 1, CellState::Ready), now);
@@ -965,18 +953,8 @@ async fn a_cells_damping_outlives_its_follows_and_snapshots() {
     assert_eq!(
         table(&cells, M1).expect("held").damped,
         window,
-        "a snapshot without the cell, while it was damped"
+        "a snapshot, after one without the cell"
     );
-
-    damping(&cells).accept();
+    cells.damping().accept(super::cell_id("model_x", M1));
     assert_eq!(table(&cells, M1).expect("held").damped, None);
-    let kept = damping(&cells);
-    follows.resnapshot(follows.snapshot(), now);
-    let mut snapshot = follows.snapshot();
-    snapshot.apply(follow(M1, 1, CellState::Ready), now);
-    follows.resnapshot(snapshot, now);
-    assert!(
-        !Arc::ptr_eq(&kept, &damping(&cells)),
-        "an undamped cell's damping outlived its follow"
-    );
 }

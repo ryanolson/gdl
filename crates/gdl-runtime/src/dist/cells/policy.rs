@@ -11,20 +11,23 @@ use gdl_model::{CellPolicy, Layout};
 use tokio::time::Instant;
 
 use super::CellTable;
+use super::damping::Damped;
 
 /// How a chooser picks a cell of a class it sends to.
 pub(crate) trait CellChooser: Send + Sync + 'static {
     /// The index in `cells` of the cell to send this attempt to, or `None`
     /// when no cell may take it. `region` is the chooser's own; `excluded`
     /// holds the [`id`](CellTable::id)s of the cells that declined this
-    /// request, never chosen again for it; `now` is the chooser's clock,
-    /// on which each cell's summary arrived; `draw` is a random number
-    /// drawn for this attempt.
+    /// request, never chosen again for it; `damped` the cells the chooser
+    /// damps, as one moment's view; `now` is the chooser's clock, on which
+    /// each cell's summary arrived; `draw` is a random number drawn for
+    /// this attempt.
     fn choose(
         &self,
         cells: &[Arc<CellTable>],
         region: &str,
         excluded: &[u64],
+        damped: &Damped,
         now: Instant,
         draw: u64,
     ) -> Option<usize>;
@@ -156,20 +159,21 @@ impl HomeFirst {
 impl HomeFirst {
     /// The least `cut` such that no more than `allowed` of the eligible
     /// cells have more than `cut` milliseconds of their damping windows
-    /// left, when `longest` is the most any has: a binary search of
-    /// counting passes, at most about 15 over a window of 30 s, with no
-    /// allocation. Taken only when more than `allowed` cells are damped.
+    /// left in `damped`, when `longest` is the most any has: a binary
+    /// search of counting passes, at most about 15 over a window of 30 s,
+    /// each a search of the damped cells per cell, with no allocation.
+    /// Taken only when more than `allowed` cells are damped.
     fn cut(
         cells: &[Arc<CellTable>],
         region: &str,
         excluded: &[u64],
-        now: Instant,
+        (damped, now): (&Damped, Instant),
         allowed: u64,
         longest: u64,
     ) -> u64 {
         let over = |cut: u64| -> u64 {
             let damped = cells.iter().filter(|cell| {
-                Self::tier(cell, region, excluded, now).is_some() && cell.damping.left(now) > cut
+                Self::tier(cell, region, excluded, now).is_some() && damped.left(cell.id, now) > cut
             });
             u64::try_from(damped.count()).unwrap_or(u64::MAX)
         };
@@ -196,55 +200,54 @@ fn mix(draw: u64, nth: u64) -> u64 {
 }
 
 impl CellChooser for HomeFirst {
-    /// Two passes and no allocation while no more than half of the
-    /// eligible cells are damped: how many cells are eligible and how
-    /// many damped, which sets which damped cells are passed over; then
-    /// one pass that reads each cell's damping once, keeps the best tier
-    /// of the cells not passed over, and draws two of them as it goes, by
-    /// reservoir sampling. Since the choice is made in the pass that reads
-    /// the damping, a cell damped or undamped by another request during
-    /// the choice never leaves it without a cell: if every cell the pass
-    /// would take was damped meanwhile, the eligible cell of the best tier
-    /// whose window ends soonest is chosen, as the cap would have.
+    /// One pass and no allocation while no cell's damping window lasts:
+    /// the best tier of the eligible cells, with two of them drawn as it
+    /// goes, by reservoir sampling. While a window lasts, a pass first
+    /// counts the eligible and the damped cells, which sets which damped
+    /// cells are passed over, each a search of the short list of damped
+    /// cells. `damped` is one moment's view, so the cap and the cells drawn
+    /// from agree whatever other requests decline or accept meanwhile, and
+    /// a choice finds a cell whenever one is eligible.
     fn choose(
         &self,
         cells: &[Arc<CellTable>],
         region: &str,
         excluded: &[u64],
+        damped: &Damped,
         now: Instant,
         draw: u64,
     ) -> Option<usize> {
-        let (mut eligible, mut damped, mut longest) = (0u64, 0u64, 0u64);
-        for cell in cells {
-            if Self::tier(cell, region, excluded, now).is_none() {
-                continue;
+        let lasts = damped.lasts(now);
+        let cut = if lasts {
+            let (mut eligible, mut held, mut longest) = (0u64, 0u64, 0u64);
+            for cell in cells {
+                if Self::tier(cell, region, excluded, now).is_none() {
+                    continue;
+                }
+                eligible += 1;
+                let left = damped.left(cell.id, now);
+                if left > 0 {
+                    held += 1;
+                    longest = longest.max(left);
+                }
             }
-            eligible += 1;
-            let left = cell.damping.left(now);
-            if left > 0 {
-                damped += 1;
-                longest = longest.max(left);
+            let allowed = eligible / 2;
+            if held <= allowed {
+                0
+            } else {
+                Self::cut(cells, region, excluded, (damped, now), allowed, longest)
             }
-        }
-        let allowed = eligible / 2;
-        let cut = if damped <= allowed {
-            0
         } else {
-            Self::cut(cells, region, excluded, now, allowed, longest)
+            0
         };
         let mut best: Option<u8> = None;
         let mut count = 0u64;
         let mut drawn: [Option<(usize, &LoadSummary)>; 2] = [None, None];
-        let mut fallback: Option<(u8, u64, usize)> = None;
         for (at, cell) in cells.iter().enumerate() {
             let Some((tier, load)) = Self::tier(cell, region, excluded, now) else {
                 continue;
             };
-            let left = cell.damping.left(now);
-            if left > cut {
-                if fallback.is_none_or(|(of, ends, _)| (tier, left) < (of, ends)) {
-                    fallback = Some((tier, left, at));
-                }
+            if lasts && damped.left(cell.id, now) > cut {
                 continue;
             }
             match best {
@@ -283,7 +286,7 @@ impl CellChooser for HomeFirst {
                 second
             }),
             [Some((one, _)), None] | [None, Some((one, _))] => Some(one),
-            [None, None] => fallback.map(|(_, _, at)| at),
+            [None, None] => None,
         }
     }
 
@@ -305,7 +308,8 @@ mod tests {
     use gdl_cells::LoadSummary;
     use velo::InstanceId;
 
-    use super::super::{Damping, Load};
+    use super::super::Load;
+    use super::super::damping::{Damped, Damping};
     use super::*;
 
     const SECOND: Duration = Duration::from_secs(1);
@@ -386,7 +390,6 @@ mod tests {
             eligible,
             retired: Box::new([]),
             turn: Arc::new(AtomicUsize::new(0)),
-            damping: Arc::new(Damping::new(origin())),
         })
     }
 
@@ -422,10 +425,20 @@ mod tests {
 
     /// The cells `home_first` chooses at `now` over many draws, by name.
     fn chosen_at(cells: &[Arc<CellTable>], now: Instant) -> BTreeSet<String> {
+        chosen_damped(cells, &Damped::default(), now)
+    }
+
+    /// [`chosen_at`], with the cells in `damped` damped.
+    fn chosen_damped(cells: &[Arc<CellTable>], damped: &Damped, now: Instant) -> BTreeSet<String> {
         draws(256)
-            .filter_map(|draw| HomeFirst.choose(cells, HOME, &[], now, draw))
+            .filter_map(|draw| HomeFirst.choose(cells, HOME, &[], damped, now, draw))
             .map(|at| cells[at].cell.clone())
             .collect()
+    }
+
+    /// The [`id`](CellTable::id) of the cell `name` here.
+    fn id(name: &str) -> u64 {
+        super::super::cell_id("model_x", name)
     }
 
     fn names(names: &[&str]) -> BTreeSet<String> {
@@ -478,7 +491,7 @@ mod tests {
         for state in [CellState::Unavailable, CellState::Draining] {
             let cells = [cell("home", HOME, state, 1, now)];
             assert_eq!(
-                HomeFirst.choose(&cells, HOME, &[], now, 0),
+                HomeFirst.choose(&cells, HOME, &[], &Damped::default(), now, 0),
                 None,
                 "{state:?}"
             );
@@ -491,8 +504,14 @@ mod tests {
         ];
         assert_eq!(chosen_at(&cells, now), names(&["away"]));
         let cells = [cell("empty", HOME, CellState::Ready, 0, now)];
-        assert_eq!(HomeFirst.choose(&cells, HOME, &[], now, 3), None);
-        assert_eq!(HomeFirst.choose(&[], HOME, &[], now, 3), None);
+        assert_eq!(
+            HomeFirst.choose(&cells, HOME, &[], &Damped::default(), now, 3),
+            None
+        );
+        assert_eq!(
+            HomeFirst.choose(&[], HOME, &[], &Damped::default(), now, 3),
+            None
+        );
     }
 
     /// A cell with no summary, or one older than three of its periods, is
@@ -611,7 +630,7 @@ mod tests {
             let mut counts = vec![0; cells.len()];
             for draw in draws(N) {
                 counts[HomeFirst
-                    .choose(cells, HOME, &[], now, draw)
+                    .choose(cells, HOME, &[], &Damped::default(), now, draw)
                     .expect("a cell")] += 1;
             }
             counts
@@ -659,7 +678,9 @@ mod tests {
         let chosen_without = |names: &[&str]| -> BTreeSet<String> {
             let excluded = excluded(names);
             draws(64)
-                .filter_map(|draw| HomeFirst.choose(&cells, HOME, &excluded, now, draw))
+                .filter_map(|draw| {
+                    HomeFirst.choose(&cells, HOME, &excluded, &Damped::default(), now, draw)
+                })
                 .map(|at| cells[at].cell.clone())
                 .collect()
         };
@@ -680,34 +701,36 @@ mod tests {
     #[test]
     fn a_cell_that_declined_is_not_chosen_while_its_window_lasts() {
         let now = origin();
+        let damping = Damping::default();
         let cells = [
             cell("a", HOME, CellState::Ready, 1, now),
             cell("b", HOME, CellState::Ready, 1, now),
             cell("c", HOME, CellState::Ready, 1, now),
         ];
+        let chosen = |at: Instant| chosen_damped(&cells, &damping.view(), at);
         let every = names(&["a", "b", "c"]);
         let just = Duration::from_millis(1);
-        cells[0].damping.decline(now);
-        assert_eq!(chosen_at(&cells, now), names(&["b", "c"]));
-        assert_eq!(chosen_at(&cells, now + SECOND - just), names(&["b", "c"]));
-        assert_eq!(chosen_at(&cells, now + SECOND), every);
-        cells[0].damping.decline(now + SECOND);
-        assert_eq!(
-            chosen_at(&cells, now + SECOND * 3 - just),
-            names(&["b", "c"])
-        );
-        assert_eq!(chosen_at(&cells, now + SECOND * 3), every);
-        cells[0].damping.decline(now + SECOND * 3);
-        assert_eq!(chosen_at(&cells, now + SECOND * 3), names(&["b", "c"]));
-        cells[0].damping.accept();
-        assert_eq!(chosen_at(&cells, now + SECOND * 3), every);
+        damping.decline(id("a"), now);
+        assert_eq!(chosen(now), names(&["b", "c"]));
+        assert_eq!(chosen(now + SECOND - just), names(&["b", "c"]));
+        assert_eq!(chosen(now + SECOND), every);
+        damping.decline(id("a"), now + SECOND);
+        assert_eq!(chosen(now + SECOND * 3 - just), names(&["b", "c"]));
+        assert_eq!(chosen(now + SECOND * 3), every);
+        damping.decline(id("a"), now + SECOND * 3);
+        assert_eq!(chosen(now + SECOND * 3), names(&["b", "c"]));
+        damping.accept(id("a"));
+        assert_eq!(chosen(now + SECOND * 3), every);
 
         let cells = [
             cell("home", HOME, CellState::Ready, 1, now),
             cell("away", AWAY, CellState::Ready, 1, now),
         ];
-        cells[0].damping.decline(now);
-        assert_eq!(chosen_at(&cells, now), names(&["away"]));
+        damping.decline(id("home"), now);
+        assert_eq!(
+            chosen_damped(&cells, &damping.view(), now),
+            names(&["away"])
+        );
     }
 
     /// At most half of the eligible cells, rounded down, are damped at
@@ -718,27 +741,34 @@ mod tests {
     #[test]
     fn at_most_half_of_the_eligible_cells_are_damped() {
         let now = origin() + SECOND;
+        let damping = Damping::default();
         let cells = [
             cell("soonest", HOME, CellState::Ready, 1, now),
             cell("sooner", HOME, CellState::Ready, 1, now),
             cell("latest", HOME, CellState::Ready, 1, now),
         ];
-        cells[0].damping.decline(now - SECOND / 2);
-        cells[1].damping.decline(now - SECOND / 4);
-        cells[2].damping.decline(now);
-        assert_eq!(chosen_at(&cells, now), names(&["soonest", "sooner"]));
-        assert_eq!(chosen_at(&cells[..2], now), names(&["soonest"]));
-        assert_eq!(chosen_at(&cells[1..], now), names(&["sooner"]));
-        assert_eq!(chosen_at(&cells[2..], now), names(&["latest"]));
-        let id = |at: usize| super::super::cell_id("model_x", &cells[at].cell);
+        damping.decline(id("soonest"), now - SECOND / 2);
+        damping.decline(id("sooner"), now - SECOND / 4);
+        damping.decline(id("latest"), now);
+        let damped = damping.view();
+        assert_eq!(
+            chosen_damped(&cells, &damped, now),
+            names(&["soonest", "sooner"])
+        );
+        assert_eq!(
+            chosen_damped(&cells[..2], &damped, now),
+            names(&["soonest"])
+        );
+        assert_eq!(chosen_damped(&cells[1..], &damped, now), names(&["sooner"]));
+        assert_eq!(chosen_damped(&cells[2..], &damped, now), names(&["latest"]));
         let without = |excluded: &[u64]| -> BTreeSet<String> {
             draws(64)
-                .filter_map(|draw| HomeFirst.choose(&cells, HOME, excluded, now, draw))
+                .filter_map(|draw| HomeFirst.choose(&cells, HOME, excluded, &damped, now, draw))
                 .map(|at| cells[at].cell.clone())
                 .collect()
         };
-        assert_eq!(without(&[id(0)]), names(&["sooner"]));
-        assert_eq!(without(&[id(0), id(1)]), names(&["latest"]));
+        assert_eq!(without(&[id("soonest")]), names(&["sooner"]));
+        assert_eq!(without(&[id("soonest"), id("sooner")]), names(&["latest"]));
         // A cell that is not eligible counts for nothing: with only one
         // eligible cell, it is chosen, damped or not.
         let cells = [
@@ -746,19 +776,24 @@ mod tests {
             cell("draining", HOME, CellState::Draining, 1, now),
             cell_loaded("unknown", HOME, CellState::Ready, 1, Loaded::None),
         ];
-        cells[0].damping.decline(now);
-        assert_eq!(chosen_at(&cells, now), names(&["damped"]));
+        damping.decline(id("damped"), now);
+        assert_eq!(
+            chosen_damped(&cells, &damping.view(), now),
+            names(&["damped"])
+        );
     }
 
-    /// A cell damped or undamped while a choice is made, as another
-    /// request's decline or acceptance does, never leaves the choice with
+    /// A cell damped or undamped while choices are made, as other
+    /// requests' declines and acceptances do, never leaves a choice with
     /// no cell while another stays eligible, nor a lone cell unchosen:
     /// here the ready cell's damping changes on another thread throughout,
     /// beside a degraded cell that is always there to take the request,
-    /// and alone. Counts the choices that found no cell.
+    /// and alone. Each choice reads the damping as a chooser does, once.
+    /// Counts the choices that found no cell.
     #[test]
     fn a_damping_that_changes_during_a_choice_leaves_it_a_cell() {
         let now = origin();
+        let damping = Damping::default();
         let cells = [
             cell("ready", HOME, CellState::Ready, 1, now),
             cell("degraded", HOME, CellState::Degraded, 1, now),
@@ -768,12 +803,16 @@ mod tests {
             let empty = std::thread::scope(|scope| {
                 scope.spawn(|| {
                     while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                        cells[0].damping.decline(now);
-                        cells[0].damping.accept();
+                        damping.decline(id("ready"), now);
+                        damping.accept(id("ready"));
                     }
                 });
                 let empty = draws(100_000)
-                    .filter(|draw| HomeFirst.choose(choosable, HOME, &[], now, *draw).is_none())
+                    .filter(|draw| {
+                        HomeFirst
+                            .choose(choosable, HOME, &[], &damping.view(), now, *draw)
+                            .is_none()
+                    })
                     .count();
                 done.store(true, std::sync::atomic::Ordering::Relaxed);
                 empty
@@ -785,6 +824,71 @@ mod tests {
                 choosable.len()
             );
         }
+    }
+
+    /// A choice sees every cell's damping as it was at one moment, so the
+    /// cap and the two choices are made over the same cells: with three
+    /// eligible cells, at most one of them damped, so at least two are
+    /// drawn from, and the heaviest never wins a pair. Here another thread
+    /// damps all three, their windows ending in turn, and ends their
+    /// damping, throughout. Counts the choices of the heaviest.
+    #[test]
+    fn a_choice_reads_one_moment_of_the_damping() {
+        let now = origin() + SECOND;
+        let damping = Damping::default();
+        let cells = [
+            busy("heavy", HOME, CellState::Ready, 70, 0, now),
+            busy("light", HOME, CellState::Ready, 10, 0, now),
+            busy("middle", HOME, CellState::Ready, 40, 0, now),
+        ];
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let heaviest = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    damping.decline(id("heavy"), now - SECOND / 2);
+                    damping.decline(id("light"), now - SECOND / 4);
+                    damping.decline(id("middle"), now);
+                    for name in ["heavy", "light", "middle"] {
+                        damping.accept(id(name));
+                    }
+                }
+            });
+            let heaviest = draws(100_000)
+                .filter(|draw| {
+                    HomeFirst.choose(&cells, HOME, &[], &damping.view(), now, *draw) == Some(0)
+                })
+                .count();
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            heaviest
+        });
+        assert_eq!(heaviest, 0, "choices of the heaviest cell");
+    }
+
+    /// The case without threads: a view read before three cells were
+    /// damped, with windows ending 2, 4, and 8 s on, still holds none
+    /// of them, and a choice by it never takes the heaviest; a choice by
+    /// the view after leaves the two that end soonest to be drawn, and
+    /// takes the lighter of them.
+    #[test]
+    fn a_view_read_before_a_change_is_chosen_by_as_it_was() {
+        let now = origin() + SECOND * 8;
+        let damping = Damping::default();
+        let cells = [
+            busy("heavy", HOME, CellState::Ready, 70, 0, now),
+            busy("light", HOME, CellState::Ready, 10, 0, now),
+            busy("middle", HOME, CellState::Ready, 40, 0, now),
+        ];
+        let before = damping.view();
+        // A first decline damps for 1 s from it.
+        for (name, ends) in [("heavy", 2), ("light", 4), ("middle", 8)] {
+            damping.decline(id(name), now + SECOND * (ends - 1));
+        }
+        let after = damping.view();
+        for (name, ends) in [("heavy", 2000), ("light", 4000), ("middle", 8000)] {
+            assert_eq!(after.left(id(name), now), ends, "{name}");
+        }
+        assert!(!chosen_damped(&cells, &before, now).contains("heavy"));
+        assert_eq!(chosen_damped(&cells, &after, now), names(&["light"]));
     }
 
     /// Cells of one tier and one load are drawn alike: of the two drawn,
@@ -801,7 +905,7 @@ mod tests {
         let mut counts = [0u64; 4];
         for draw in draws(3000) {
             counts[HomeFirst
-                .choose(&cells, HOME, &[], now, draw)
+                .choose(&cells, HOME, &[], &Damped::default(), now, draw)
                 .expect("a cell")] += 1;
         }
         assert_eq!(counts[1], 0, "{counts:?}");

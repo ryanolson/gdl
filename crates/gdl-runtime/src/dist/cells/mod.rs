@@ -62,6 +62,9 @@ struct Shared {
     segments: BTreeMap<String, Arc<ArcSwap<EntryTable>>>,
     /// Counts each change of a table, or of what is registered with velo.
     changes: watch::Sender<u64>,
+    /// The cells this chooser damps, shared by every hand-off that
+    /// chooses from the tables.
+    damping: Arc<Damping>,
     /// The instances the follower registered with velo, mirrored for
     /// readers; the follower keeps its own copy. Its lock is also the one
     /// lock over the two owners of a peer's registration, this follower
@@ -85,6 +88,7 @@ impl Cells {
                     .map(|segment| (segment.to_string(), Arc::default()))
                     .collect(),
                 changes: watch::Sender::new(0),
+                damping: Arc::default(),
                 registered: watch::Sender::new(HashSet::new()),
                 draining: Mutex::default(),
             }),
@@ -103,6 +107,7 @@ impl Cells {
             return Vec::new();
         };
         let now = Instant::now();
+        let damped = self.shared.damping.view();
         table
             .cells
             .iter()
@@ -116,10 +121,9 @@ impl Cells {
                 load_age: cell
                     .load
                     .map(|load| now.saturating_duration_since(load.arrived)),
-                damped: cell
-                    .damping
-                    .is_damped()
-                    .then(|| std::time::Duration::from_millis(cell.damping.left(now))),
+                damped: damped
+                    .is_damped(cell.id)
+                    .then(|| std::time::Duration::from_millis(damped.left(cell.id, now))),
                 eligible: cell.eligible.to_vec(),
                 retired: cell.retired.to_vec(),
             })
@@ -152,6 +156,11 @@ impl Cells {
     /// The region of the chooser's own cell.
     pub(crate) fn region(&self) -> Arc<str> {
         Arc::clone(&self.shared.region)
+    }
+
+    /// The cells this chooser damps.
+    pub(crate) fn damping(&self) -> Arc<Damping> {
+        Arc::clone(&self.shared.damping)
     }
 
     /// Replace `segment`'s table.
@@ -308,9 +317,6 @@ pub(crate) struct CellTable {
     /// The built-in routers' turn within the cell, shared by every table
     /// of the cell's follow, so that a new table keeps the turn.
     pub(crate) turn: Arc<AtomicUsize>,
-    /// The chooser's damping of the cell, shared by every table of the
-    /// cell, of every follow of it.
-    pub(crate) damping: Arc<Damping>,
 }
 
 /// A cell's load summary as its tables hold it: when it arrived, on the

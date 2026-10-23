@@ -15,6 +15,7 @@ use gdl::{Cx, Error, Instances, Result};
 use gdl_model::Layout;
 use velo::InstanceId;
 
+use super::damping::Damping;
 use super::policy::{self, CellChooser};
 use super::{CellTable, Cells, EntryTable};
 use crate::dist::roster::{CHOICES, Policy, turn};
@@ -135,25 +136,20 @@ impl Crossing {
         &self.target.class
     }
 
-    /// The cell `cell` declined an offer: it is damped, as its table now
-    /// holds it, unless it is no longer followed.
+    /// The cell `cell` declined an offer: the chooser damps it.
     pub(crate) fn declined(&self, cell: u64) {
-        let table = self.target.table.load();
-        if let Some(cell) = table.cells.iter().find(|followed| followed.id == cell) {
-            cell.damping.decline(tokio::time::Instant::now());
-        }
+        self.target
+            .damping
+            .decline(cell, tokio::time::Instant::now());
     }
 
-    /// The cell `cell` accepted an offer: its damping, as the cell has it
-    /// now, ends, whatever it was when the offer was chosen: another
+    /// The cell `cell` accepted an offer: its damping, as the chooser has
+    /// it now, ends, whatever it was when the offer was chosen: another
     /// request's decline may have damped it since, or another acceptance
-    /// ended it. One load of the table and a pass over its cells for the
-    /// one, with no allocation; a cell that is not damped writes nothing.
+    /// ended it. A cell that is not damped writes nothing, and costs one
+    /// load and a search of the damped cells, with no allocation.
     pub(crate) fn accepted(&self, cell: u64) {
-        let table = self.target.table.load();
-        if let Some(cell) = table.cells.iter().find(|followed| followed.id == cell) {
-            cell.damping.accept();
-        }
+        self.target.damping.accept(cell);
     }
 
     /// The cell the policy chooses from `table` for one attempt, of those
@@ -169,6 +165,7 @@ impl Crossing {
                 &table.cells,
                 &target.region,
                 excluded,
+                &target.damping.view(),
                 tokio::time::Instant::now(),
                 draw,
             )
@@ -209,7 +206,7 @@ pub(crate) enum Within {
 
 /// What a hand-off into another class chooses from: the class, its entry
 /// segment, the chooser's table of that segment's cells, the chooser's
-/// region, and the class's cell policy.
+/// region, the class's cell policy, and the cells the chooser damps.
 #[derive(Clone)]
 pub(crate) struct Target {
     class: String,
@@ -217,6 +214,8 @@ pub(crate) struct Target {
     table: Arc<ArcSwap<EntryTable>>,
     region: Arc<str>,
     policy: &'static dyn CellChooser,
+    /// The cells the chooser damps, shared by all its hand-offs.
+    damping: Arc<Damping>,
 }
 
 /// The hand-offs of `segment` that cross into another class, by hop and
@@ -253,6 +252,7 @@ pub(crate) fn targets(
                 table,
                 region: cells.region(),
                 policy: policy::of(layout, &boundary.into)?,
+                damping: cells.damping(),
             },
         );
     }
@@ -296,7 +296,6 @@ mod tests {
                 .collect(),
             retired: Box::new([]),
             turn,
-            damping: Arc::new(super::super::Damping::new(tokio::time::Instant::now())),
         })
     }
 
@@ -311,6 +310,7 @@ mod tests {
                 table,
                 region: Arc::from("home"),
                 policy: &policy::HomeFirst,
+                damping: Arc::default(),
             },
             router,
         )

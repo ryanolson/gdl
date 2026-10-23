@@ -372,7 +372,6 @@ mod tests {
                     offered: Box::new([gdl::InstanceId::from_u128(id.as_u128())]),
                     retired: Box::new([]),
                     turn: Arc::new(AtomicUsize::new(0)),
-                    damping: Arc::new(super::super::Damping::new(tokio::time::Instant::now())),
                 })]),
             },
         );
@@ -428,7 +427,6 @@ mod tests {
                     offered: Box::new([gdl::InstanceId::from_u128(id.as_u128())]),
                     retired: Box::new([]),
                     turn: Arc::new(AtomicUsize::new(0)),
-                    damping: Arc::new(super::super::Damping::new(tokio::time::Instant::now())),
                 })
             })
             .collect();
