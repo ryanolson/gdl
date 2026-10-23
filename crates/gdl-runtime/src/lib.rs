@@ -20,12 +20,12 @@ mod wire;
 pub use binary::{Builder, Failure, SegmentBinary, Serving, run_segment, segment_main};
 pub use config::build_node;
 pub use decl::{Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDecl, SourceDecl};
-#[cfg(feature = "hub")]
-pub use dist::HubSession;
 pub use dist::{
     BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment, Entries,
     FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, Served, bind_node,
 };
+#[cfg(feature = "hub")]
+pub use dist::{Cells, FollowedCell, HubSession};
 #[cfg(feature = "fault-injection")]
 pub use dist::{Faults, Gate};
 pub use figment;
@@ -35,6 +35,8 @@ pub use figment;
 /// `Endpoints`, and `export`) expand to `::gdl::...`, so a crate that uses
 /// one depends on `gdl` itself, as node crates do.
 pub use gdl;
+#[cfg(feature = "hub")]
+pub use gdl_cells::CellState;
 pub use gdl_model::{
     CellSettings, CrossingReport, DeploymentSpec, DirectoryBackend, GraphConfig, HUB_CONTROL_PORT,
     HUB_PUBLIC_PORT, HopInfo, HopLayout, ItemInfo, Layout, Manifest, NodeInfo, Placement,

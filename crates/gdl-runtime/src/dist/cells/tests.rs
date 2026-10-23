@@ -1,0 +1,594 @@
+//! The follower's rules, without a hub: its state machine driven by
+//! events and an explicit clock, and its task driven by scripted watches.
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use futures::StreamExt;
+use futures::stream::BoxStream;
+use gdl_cells::CellState;
+use gdl_watch::FollowEvent;
+use tokio::time::Instant;
+use velo::{InstanceId, PeerInfo, WorkerAddress};
+
+use super::follow::Follows;
+use super::task::{Source, run};
+use super::{Cells, FollowedCell};
+use crate::dist::fabric::Registry;
+use crate::dist::roster::Roster;
+
+const DRAIN: Duration = Duration::from_secs(10);
+const M1: &str = "m1";
+const M2: &str = "m2";
+
+/// What the follower asked velo for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Call {
+    Register(InstanceId),
+    Unregister(InstanceId),
+}
+
+/// Records the follower's registrations, and checks from inside each that
+/// no table holds the instance yet: a call by instance goes only to an
+/// instance registered before it is routable.
+#[derive(Clone)]
+struct Recorded {
+    cells: Cells,
+    calls: Arc<Mutex<Vec<Call>>>,
+}
+
+impl Registry for Recorded {
+    fn register(&self, peer: PeerInfo) -> gdl::Result<()> {
+        let id = peer.instance_id();
+        for segment in self.cells.segments() {
+            for cell in self.cells.followed(segment) {
+                assert!(
+                    !cell.eligible.contains(&id) && !cell.retired.contains(&id),
+                    "{id} was in a table before it was registered"
+                );
+            }
+        }
+        self.calls.lock().expect("lock").push(Call::Register(id));
+        Ok(())
+    }
+
+    fn unregister(&self, instance: InstanceId) {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push(Call::Unregister(instance));
+    }
+}
+
+impl Recorded {
+    fn take(&self) -> Vec<Call> {
+        std::mem::take(&mut *self.calls.lock().expect("lock"))
+    }
+}
+
+/// A follower of `model_x`'s entry segment `f`, and the record of what it
+/// asks velo for.
+fn follower() -> (
+    Follows<Recorded>,
+    Cells,
+    Recorded,
+    Arc<crate::dist::roster::Live>,
+) {
+    let cells = Cells::new(["f"]);
+    let recorded = Recorded {
+        cells: cells.clone(),
+        calls: Arc::default(),
+    };
+    let live = Arc::clone(Roster::new().live());
+    let wanted = BTreeMap::from([("model_x".to_string(), BTreeSet::from(["f".to_string()]))]);
+    let follows = Follows::new(
+        cells.clone(),
+        recorded.clone(),
+        Arc::clone(&live),
+        DRAIN,
+        wanted,
+    );
+    (follows, cells, recorded, live)
+}
+
+fn peer() -> PeerInfo {
+    PeerInfo::new(
+        InstanceId::new_v4(),
+        WorkerAddress::from_encoded(b"tcp://test".to_vec()),
+    )
+}
+
+fn follow(cell: &str, generation: u64, state: CellState) -> FollowEvent {
+    FollowEvent::Follow {
+        class: "model_x".into(),
+        cell: cell.into(),
+        generation,
+        region: "r".into(),
+        state,
+        load: None,
+    }
+}
+
+fn exposed(cell: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
+    FollowEvent::Exposed {
+        class: "model_x".into(),
+        cell: cell.into(),
+        generation,
+        segment: "f".into(),
+        peer: peer.clone(),
+    }
+}
+
+fn retired(cell: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
+    FollowEvent::Retired {
+        class: "model_x".into(),
+        cell: cell.into(),
+        generation,
+        segment: "f".into(),
+        instance: peer.instance_id(),
+    }
+}
+
+fn left(cell: &str, generation: u64, peer: &PeerInfo) -> FollowEvent {
+    FollowEvent::Left {
+        class: "model_x".into(),
+        cell: cell.into(),
+        generation,
+        segment: "f".into(),
+        instance: peer.instance_id(),
+    }
+}
+
+fn state(cell: &str, generation: u64, state: CellState) -> FollowEvent {
+    FollowEvent::State {
+        class: "model_x".into(),
+        cell: cell.into(),
+        generation,
+        state,
+    }
+}
+
+fn dropped(cell: &str, generation: u64) -> FollowEvent {
+    FollowEvent::Dropped {
+        class: "model_x".into(),
+        cell: cell.into(),
+        generation,
+    }
+}
+
+fn table(cells: &Cells, cell: &str) -> Option<FollowedCell> {
+    cells.followed("f").into_iter().find(|t| t.cell == cell)
+}
+
+fn sorted(peers: &[&PeerInfo]) -> Vec<InstanceId> {
+    let mut ids: Vec<InstanceId> = peers.iter().map(|peer| peer.instance_id()).collect();
+    ids.sort_by_key(|id| id.as_u128());
+    ids
+}
+
+/// Apply `events` at `now`, after an empty snapshot.
+fn live(
+    follows: &mut Follows<Recorded>,
+    now: Instant,
+    events: impl IntoIterator<Item = FollowEvent>,
+) {
+    for event in events {
+        follows.apply(event, now);
+    }
+}
+
+#[test]
+fn an_entry_is_registered_before_a_table_holds_it() {
+    let (mut follows, cells, recorded, _) = follower();
+    let now = Instant::now();
+    let x = peer();
+    live(&mut follows, now, [follow(M1, 1, CellState::Ready)]);
+    let installed = table(&cells, M1).expect("a table from the follow");
+    assert_eq!(
+        (installed.generation, installed.state),
+        (1, CellState::Ready)
+    );
+    assert!(installed.eligible.is_empty());
+    live(&mut follows, now, [exposed(M1, 1, &x)]);
+    assert_eq!(recorded.take(), [Call::Register(x.instance_id())]);
+    assert_eq!(table(&cells, M1).expect("held").eligible, [x.instance_id()]);
+    assert!(cells.is_registered(x.instance_id()));
+}
+
+#[test]
+fn a_removed_entry_is_unregistered_after_the_drain() {
+    let (mut follows, cells, recorded, _) = follower();
+    let start = Instant::now();
+    let x = peer();
+    live(
+        &mut follows,
+        start,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+    );
+    recorded.take();
+    let gone = start + Duration::from_secs(1);
+    live(&mut follows, gone, [left(M1, 1, &x)]);
+    assert!(
+        table(&cells, M1).expect("held").eligible.is_empty(),
+        "left, not removed"
+    );
+    assert_eq!(follows.next_due(), Some(gone + DRAIN));
+    follows.forget(gone + DRAIN - Duration::from_millis(1));
+    assert_eq!(recorded.take(), [], "unregistered before the drain");
+    assert!(cells.is_registered(x.instance_id()));
+    follows.forget(gone + DRAIN);
+    assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
+    assert!(!cells.is_registered(x.instance_id()));
+    assert_eq!(follows.next_due(), None);
+}
+
+/// A follow dropped and followed again is a new generation: what the
+/// newer one holds is not unregistered for the older one, and not
+/// registered twice.
+#[test]
+fn a_newer_generation_keeps_what_it_holds() {
+    let (mut follows, cells, recorded, _) = follower();
+    let start = Instant::now();
+    let x = peer();
+    live(
+        &mut follows,
+        start,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+    );
+    recorded.take();
+    live(&mut follows, start, [dropped(M1, 1)]);
+    assert!(
+        table(&cells, M1).is_none(),
+        "a dropped follow's table stayed"
+    );
+    let again = start + Duration::from_secs(1);
+    live(
+        &mut follows,
+        again,
+        [follow(M1, 2, CellState::Ready), exposed(M1, 2, &x)],
+    );
+    assert_eq!(recorded.take(), [], "registered again");
+    let held = table(&cells, M1).expect("the new generation");
+    assert_eq!((held.generation, held.eligible), (2, vec![x.instance_id()]));
+    follows.forget(start + DRAIN);
+    assert_eq!(
+        recorded.take(),
+        [],
+        "the older generation unregistered what the newer holds"
+    );
+    let gone = start + DRAIN * 2;
+    live(&mut follows, gone, [left(M1, 2, &x)]);
+    follows.forget(gone + DRAIN);
+    assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
+}
+
+/// A newer generation replaces the older one's table at once, and the
+/// older one's events, its follow included, change nothing after it.
+#[test]
+fn an_older_generation_is_ignored() {
+    let (mut follows, cells, recorded, _) = follower();
+    let now = Instant::now();
+    let (x, y) = (peer(), peer());
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+    );
+    live(&mut follows, now, [follow(M1, 2, CellState::Degraded)]);
+    let held = table(&cells, M1).expect("the new generation");
+    assert_eq!((held.generation, held.state), (2, CellState::Degraded));
+    assert!(
+        held.eligible.is_empty(),
+        "an instance of generation 1 was kept"
+    );
+    recorded.take();
+    live(
+        &mut follows,
+        now,
+        [
+            exposed(M1, 1, &y),
+            state(M1, 1, CellState::Unavailable),
+            follow(M1, 1, CellState::Ready),
+            dropped(M1, 1),
+        ],
+    );
+    assert_eq!(table(&cells, M1).expect("still held"), held);
+    assert_eq!(recorded.take(), []);
+    follows.forget(now + DRAIN);
+    assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
+}
+
+#[test]
+fn a_retired_entry_is_marked_and_never_eligible_again() {
+    let (mut follows, cells, recorded, _) = follower();
+    let now = Instant::now();
+    let (x, y) = (peer(), peer());
+    live(
+        &mut follows,
+        now,
+        [
+            follow(M1, 1, CellState::Ready),
+            exposed(M1, 1, &x),
+            exposed(M1, 1, &y),
+            retired(M1, 1, &x),
+            exposed(M1, 1, &x),
+        ],
+    );
+    let held = table(&cells, M1).expect("held");
+    assert_eq!(held.eligible, [y.instance_id()]);
+    assert_eq!(held.retired, [x.instance_id()]);
+    // Retired, it stays registered: work sent before may still be under way.
+    follows.forget(now + DRAIN);
+    assert!(
+        recorded
+            .take()
+            .iter()
+            .all(|call| matches!(call, Call::Register(_)))
+    );
+    live(&mut follows, now + DRAIN, [left(M1, 1, &x)]);
+    assert!(table(&cells, M1).expect("held").retired.is_empty());
+    follows.forget(now + DRAIN * 2);
+    assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
+}
+
+/// A state that exposes nothing takes every entry out of the table, since
+/// the relay sends no `left` for an instance hidden when it leaves; a
+/// state that exposes them again is followed by an `exposed` for each.
+#[test]
+fn a_state_that_exposes_nothing_empties_the_table() {
+    let (mut follows, cells, recorded, _) = follower();
+    let now = Instant::now();
+    let (x, y) = (peer(), peer());
+    live(
+        &mut follows,
+        now,
+        [
+            follow(M1, 1, CellState::Ready),
+            exposed(M1, 1, &x),
+            exposed(M1, 1, &y),
+            retired(M1, 1, &y),
+            state(M1, 1, CellState::Unavailable),
+        ],
+    );
+    let hidden = table(&cells, M1).expect("held");
+    assert_eq!(hidden.state, CellState::Unavailable);
+    assert!(hidden.eligible.is_empty());
+    assert_eq!(hidden.retired, [y.instance_id()], "a retirement is kept");
+    recorded.take();
+    let back = now + Duration::from_secs(1);
+    live(
+        &mut follows,
+        back,
+        [state(M1, 1, CellState::Degraded), exposed(M1, 1, &x)],
+    );
+    assert_eq!(table(&cells, M1).expect("held").eligible, [x.instance_id()]);
+    assert_eq!(recorded.take(), [], "registered again");
+    follows.forget(now + DRAIN);
+    assert_eq!(recorded.take(), [], "unregistered while exposed again");
+    let draining = now + DRAIN;
+    live(&mut follows, draining, [state(M1, 1, CellState::Draining)]);
+    follows.forget(draining + DRAIN);
+    assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
+}
+
+/// Only the entry segments of the chooser's own hops are kept: another
+/// segment's instances and another class's cells are neither tabled nor
+/// registered.
+#[test]
+fn only_the_entry_segments_sent_to_are_kept() {
+    let (mut follows, cells, recorded, _) = follower();
+    let now = Instant::now();
+    let x = peer();
+    live(
+        &mut follows,
+        now,
+        [
+            follow(M1, 1, CellState::Ready),
+            FollowEvent::Exposed {
+                class: "model_x".into(),
+                cell: M1.into(),
+                generation: 1,
+                segment: "d".into(),
+                peer: x.clone(),
+            },
+            FollowEvent::Follow {
+                class: "model_y".into(),
+                cell: M2.into(),
+                generation: 1,
+                region: "r".into(),
+                state: CellState::Ready,
+                load: None,
+            },
+            FollowEvent::Exposed {
+                class: "model_y".into(),
+                cell: M2.into(),
+                generation: 1,
+                segment: "f".into(),
+                peer: x.clone(),
+            },
+        ],
+    );
+    assert_eq!(cells.followed("f").len(), 1);
+    assert!(table(&cells, M1).expect("held").eligible.is_empty());
+    assert_eq!(recorded.take(), []);
+}
+
+/// A peer this instance's own membership routes to is never unregistered
+/// for a cell's table.
+#[test]
+fn the_instances_own_membership_keeps_a_peer() {
+    let (mut follows, _, recorded, live_members) = follower();
+    let now = Instant::now();
+    let x = peer();
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+    );
+    live_members.join("f", x.instance_id());
+    live(&mut follows, now, [left(M1, 1, &x)]);
+    follows.forget(now + DRAIN);
+    assert_eq!(recorded.take(), [Call::Register(x.instance_id())]);
+}
+
+/// A fresh snapshot replaces whatever was held: cells it lacks are
+/// removed, cells it has hold exactly what it says, new instances are
+/// registered first, and only what no table holds any more is
+/// unregistered.
+#[test]
+fn a_snapshot_replaces_what_was_held() {
+    let (mut follows, cells, recorded, _) = follower();
+    let now = Instant::now();
+    let (x, y, z) = (peer(), peer(), peer());
+    live(
+        &mut follows,
+        now,
+        [
+            follow(M1, 1, CellState::Ready),
+            exposed(M1, 1, &x),
+            follow(M2, 1, CellState::Ready),
+            exposed(M2, 1, &y),
+        ],
+    );
+    recorded.take();
+    // The relay's process is a new one: its generations start again.
+    let mut snapshot = follows.snapshot();
+    for event in [
+        follow(M1, 1, CellState::Degraded),
+        retired(M1, 1, &z),
+        exposed(M1, 1, &x),
+        exposed(M1, 1, &z),
+    ] {
+        snapshot.apply(event);
+    }
+    follows.resnapshot(snapshot, now);
+    let held = table(&cells, M1).expect("held");
+    assert_eq!(
+        (held.generation, held.state, held.eligible, held.retired),
+        (
+            1,
+            CellState::Degraded,
+            vec![x.instance_id()],
+            vec![z.instance_id()]
+        )
+    );
+    assert!(
+        table(&cells, M2).is_none(),
+        "a cell the snapshot lacks was kept"
+    );
+    assert_eq!(recorded.take(), [], "a retired instance was registered");
+    follows.forget(now + DRAIN);
+    assert_eq!(recorded.take(), [Call::Unregister(y.instance_id())]);
+    let mut snapshot = follows.snapshot();
+    let w = peer();
+    for event in [follow(M2, 3, CellState::Ready), exposed(M2, 3, &w)] {
+        snapshot.apply(event);
+    }
+    follows.resnapshot(snapshot, now + DRAIN);
+    assert_eq!(recorded.take(), [Call::Register(w.instance_id())]);
+    assert_eq!(table(&cells, M2).expect("held").eligible, sorted(&[&w]));
+    assert!(table(&cells, M1).is_none());
+    follows.forget(now + DRAIN * 2);
+    assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
+}
+
+/// Watches scripted in order, each a list of events that ends the watch;
+/// after the last, a watch that never ends. Each watch asked for is
+/// counted, and begins only once the test has released that many.
+struct Scripted {
+    watches: Mutex<VecDeque<Vec<FollowEvent>>>,
+    opened: tokio::sync::watch::Sender<usize>,
+    released: tokio::sync::watch::Receiver<usize>,
+}
+
+impl Source for Scripted {
+    async fn watch(&self) -> Result<BoxStream<'static, FollowEvent>, String> {
+        let mut opened = 0;
+        self.opened.send_modify(|count| {
+            *count += 1;
+            opened = *count;
+        });
+        let mut released = self.released.clone();
+        released
+            .wait_for(|released| *released >= opened)
+            .await
+            .map_err(|_| "the test ended".to_string())?;
+        let next = self.watches.lock().expect("lock").pop_front();
+        Ok(match next {
+            Some(events) => futures::stream::iter(events).boxed(),
+            None => futures::stream::pending().boxed(),
+        })
+    }
+}
+
+/// A watch that ends part way through its snapshot changes nothing: the
+/// tables stay as the last complete snapshot and its changes made them,
+/// until a complete one replaces them.
+#[tokio::test(start_paused = true)]
+async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
+    let (follows, cells, recorded, _) = follower();
+    let (x, y) = (peer(), peer());
+    let watches = VecDeque::from([
+        vec![
+            follow(M1, 1, CellState::Ready),
+            exposed(M1, 1, &x),
+            FollowEvent::Synced,
+            follow(M2, 1, CellState::Ready),
+        ],
+        // A new relay process, cut before its snapshot is complete.
+        vec![follow(M1, 1, CellState::Unavailable)],
+        vec![
+            follow(M1, 4, CellState::Ready),
+            exposed(M1, 4, &y),
+            FollowEvent::Synced,
+        ],
+    ]);
+    let (opened, mut watching) = tokio::sync::watch::channel(0);
+    let (release, released) = tokio::sync::watch::channel(2);
+    let task = tokio::spawn(run(
+        Scripted {
+            watches: Mutex::new(watches),
+            opened,
+            released,
+        },
+        follows,
+    ));
+    // The third watch is asked for once the second has ended.
+    watching
+        .wait_for(|opened| *opened >= 3)
+        .await
+        .expect("the task runs");
+    let tables = cells.followed("f");
+    assert_eq!(
+        tables
+            .iter()
+            .map(|t| (t.cell.as_str(), t.generation))
+            .collect::<Vec<_>>(),
+        [(M1, 1), (M2, 1)]
+    );
+    assert_eq!(tables[0].state, CellState::Ready);
+    assert_eq!(tables[0].eligible, [x.instance_id()]);
+    assert_eq!(recorded.take(), [Call::Register(x.instance_id())]);
+    release.send_replace(4);
+    watching
+        .wait_for(|opened| *opened >= 4)
+        .await
+        .expect("the task runs");
+    let tables = cells.followed("f");
+    assert_eq!(tables.len(), 1);
+    assert_eq!(
+        (tables[0].generation, tables[0].eligible.clone()),
+        (4, vec![y.instance_id()])
+    );
+    assert_eq!(recorded.take(), [Call::Register(y.instance_id())]);
+    // The unregistration falls due on the task's own clock.
+    tokio::time::sleep(DRAIN).await;
+    let mut changes = cells.changes();
+    changes
+        .wait_for(|_| !cells.is_registered(x.instance_id()))
+        .await
+        .expect("the task runs");
+    assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
+    task.abort();
+}

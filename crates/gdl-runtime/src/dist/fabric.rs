@@ -77,6 +77,29 @@ pub(crate) fn unregister_peer(node: &Velo, instance: InstanceId) {
     node.unregister_peer(instance);
 }
 
+/// Where a follower of other cells makes their instances reachable by
+/// instance id, and forgets them: the instance's node, or, in a test, a
+/// record of what it was asked, so that the order of a registration and
+/// a table's change can be seen from inside the call.
+#[cfg(feature = "hub")]
+pub(crate) trait Registry: Send + 'static {
+    /// Make `peer` reachable before anything can be routed to it.
+    fn register(&self, peer: PeerInfo) -> Result<()>;
+    /// Forget `instance`, once nothing can be in flight to it.
+    fn unregister(&self, instance: InstanceId);
+}
+
+#[cfg(feature = "hub")]
+impl Registry for Velo {
+    fn register(&self, peer: PeerInfo) -> Result<()> {
+        register_peer(self, peer)
+    }
+
+    fn unregister(&self, instance: InstanceId) {
+        unregister_peer(self, instance);
+    }
+}
+
 /// Stop `node` taking requests, let the handlers it is running finish
 /// within `within`, and close its transports. Called once the instance
 /// holds no request; a stream holds its request's share until velo has

@@ -408,6 +408,9 @@ impl<H> ProcessConfig<H> {
             .collect();
         let wait = Duration::from_millis(self.rendezvous_ms);
         let drain = self.runtime.drain_bound();
+        // A chooser's follower of the cells it sends to, under a hub.
+        #[cfg(feature = "hub")]
+        let mut chooser = None;
         let (node, roster, peers, follower) = match discovery {
             Discovery::Files(dir) => {
                 ready.await?;
@@ -462,6 +465,20 @@ impl<H> ProcessConfig<H> {
                 let all: Vec<&str> = segments.to_vec();
                 let sends: Vec<&str> = inner.iter().map(String::as_str).collect();
                 session.follow(Arc::clone(roster.live()), node.clone(), &all, &sends, drain);
+                // A chooser in a cell follows the cells of the classes it
+                // sends to from here too, so that its tables fill while it
+                // meets; an instance without a cell follows none.
+                if self.cell.is_some() {
+                    chooser = crate::dist::follow_cells(
+                        &layout,
+                        segment,
+                        host,
+                        *public_port,
+                        &node,
+                        roster.live(),
+                        drain,
+                    )?;
+                }
                 let met = session.roster(&expect, wait).await?;
                 for (segment, peers) in met.segments() {
                     for peer in peers {
@@ -505,6 +522,10 @@ impl<H> ProcessConfig<H> {
             setup: self.runtime.setup_timeout,
             process: process.clone(),
             _follower: follower,
+            #[cfg(feature = "hub")]
+            cells: chooser.as_ref().map(|(cells, _)| cells.clone()),
+            #[cfg(feature = "hub")]
+            _chooser: chooser.map(|(_, task)| Abort(task)),
             _leaving: leaving,
         })
     }
@@ -567,6 +588,13 @@ pub struct Launch {
     /// The roster directory's membership follower; the hub session owns
     /// its own.
     _follower: Option<Abort>,
+    /// A chooser's tables of the cells it follows.
+    #[cfg(feature = "hub")]
+    cells: Option<crate::dist::Cells>,
+    /// A chooser's follower of those cells, which lives as long as the
+    /// launch, through its drain.
+    #[cfg(feature = "hub")]
+    _chooser: Option<Abort>,
     /// Dropped last, on every way out: says the instance has left.
     _leaving: Leaving,
 }
@@ -659,6 +687,15 @@ impl Launch {
     /// Every instance of every segment.
     pub fn roster(&self) -> &Roster {
         &self.roster
+    }
+
+    /// The tables of the cells this instance follows: for a chooser, an
+    /// instance in a cell under a hub whose segment holds a hop into
+    /// another class, one per entry segment of the hops it sends there.
+    /// `None` for any other instance, which follows no cell.
+    #[cfg(feature = "hub")]
+    pub fn cells(&self) -> Option<crate::dist::Cells> {
+        self.cells.clone()
     }
 
     /// Announce that this instance's handlers are installed, wait until

@@ -13,7 +13,7 @@ publish.workspace = true
 fault-injection = []
 # Discovery through a hub (`[hub] host = "..."` in a segment's settings),
 # for a deployment whose instances share no directory.
-hub = ["dep:velo-hub", "dep:serde_json", "tokio/net"]
+hub = ["dep:velo-hub", "dep:serde_json", "dep:gdl-cells", "dep:gdl-watch", "tokio/net"]
 # `serve_json_lines`: a graph's source served as JSON lines, for the binary
 # of a segment that hosts the source.
 json-lines = ["dep:serde_json", "tokio/io-util"]
@@ -27,6 +27,10 @@ dashmap = { workspace = true }
 gdl = { path = "../gdl" }
 gdl-macros = { path = "../gdl-macros" }
 gdl-model = { path = "../gdl-model" }
+# A chooser's tables of the cells its hub follows, read from the hub's
+# relay, under `hub`.
+gdl-cells = { path = "../gdl-cells", optional = true }
+gdl-watch = { path = "../gdl-watch", optional = true }
 futures = { workspace = true }
 prometheus = { workspace = true }
 rmp-serde = { workspace = true }
@@ -39,6 +43,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
+gdl-cells = { path = "../gdl-cells" }
 gdl-hub = { path = "../gdl-hub" }
 gdl-runtime = { path = ".", features = ["fault-injection", "hub", "json-lines"] }
 figment = { workspace = true, features = ["test"] }
@@ -78,4 +83,8 @@ required-features = ["hub"]
 
 [[test]]
 name = "cells"
+required-features = ["hub"]
+
+[[test]]
+name = "choosers"
 required-features = ["hub"]
