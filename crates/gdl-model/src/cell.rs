@@ -108,6 +108,16 @@ impl CellSettings {
     }
 }
 
+/// Whether `name` can name a cell: a DNS label.
+pub fn check_cell_name(name: &str) -> Result<(), String> {
+    check_label("cell", name)
+}
+
+/// Whether `name` can name a region: a DNS label.
+pub fn check_region_name(name: &str) -> Result<(), String> {
+    check_label("region", name)
+}
+
 /// The longest cell or region name: a DNS label's.
 const LABEL_LIMIT: usize = 63;
 
@@ -115,7 +125,7 @@ const LABEL_LIMIT: usize = 63;
 /// becomes a host name, a URL path segment, part of a hub's service names,
 /// and part of a certificate's identity, and a region's is used beside it.
 /// `kind` names what the name is for in the refusal.
-pub(crate) fn check_label(kind: &str, name: &str) -> Result<(), String> {
+fn check_label(kind: &str, name: &str) -> Result<(), String> {
     let shaped = name.starts_with(|c: char| c.is_ascii_lowercase())
         && name.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
         && name

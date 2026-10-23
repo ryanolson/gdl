@@ -23,7 +23,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub use cell::{CellSettings, DirectoryBackend};
+pub use cell::{CellSettings, DirectoryBackend, check_cell_name, check_region_name};
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{
     DEFAULT_DEADLINE, DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT, SEGMENT_NAME_LIMIT,
@@ -37,8 +37,8 @@ pub use metrics::{
 };
 pub use placement::{
     CellPolicy, ClassBoundary, CrossingReport, HopLayout, Layout, Placement, PlacementError,
-    PlacementErrors, RequestRouter, Run, SELECTORS, SelectorInfo, WireReason, check_selector_name,
-    layout,
+    PlacementErrors, RequestRouter, Run, SELECTORS, SelectorInfo, WireReason, check_class_name,
+    check_selector_name, layout,
 };
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.

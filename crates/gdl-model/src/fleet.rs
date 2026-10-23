@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cell::check_label;
+use crate::cell::{check_cell_name, check_region_name};
 use crate::{CellSettings, DirectoryBackend, Error, Layout};
 
 mod errors;
@@ -105,13 +105,13 @@ impl Fleet {
         }
         for (name, cell) in &self.cells {
             let table = || FleetTable::Cell(name.clone());
-            if let Err(reason) = check_label("cell", name) {
+            if let Err(reason) = check_cell_name(name) {
                 errors.push(FleetError::InvalidCellName {
                     cell: name.clone(),
                     reason,
                 });
             }
-            if let Err(reason) = check_label("region", &cell.region) {
+            if let Err(reason) = check_region_name(&cell.region) {
                 errors.push(FleetError::InvalidRegion {
                     cell: name.clone(),
                     reason,

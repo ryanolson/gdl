@@ -1,0 +1,23 @@
+[package]
+name = "gdl-cells"
+description = "The cell plane's shared types: the cell record, the cell directory and its backends, and the reader's view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Every directory backend and the hub depend on this crate, so it stays
+# free of velo and velo-hub: a backend crate must not pull in the
+# transport to implement the trait.
+[dependencies]
+futures = { workspace = true }
+gdl-model = { path = "../gdl-model" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

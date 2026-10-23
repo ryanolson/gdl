@@ -138,7 +138,7 @@ pub fn check_selector_name(name: &str) -> Result<(), String> {
 /// that deploy a class, and a value a setting in the environment carries,
 /// so it has a settings key's shape. It never names a routing policy, so
 /// the policies' names are not reserved.
-fn check_class_name(name: &str) -> Result<(), String> {
+pub fn check_class_name(name: &str) -> Result<(), String> {
     check_name_shape("class", name)
 }
 
