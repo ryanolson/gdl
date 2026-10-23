@@ -1,0 +1,8 @@
+# The typed cell watch: review round 2
+
+Reviewer: the same reviewer as round 1, read-only (2026-10-23). Target: `d0c0c8e..1d8e121`. The reviewer accepted finding 1's fix and the epoch wait. Verdict: REJECT, one major and one minor finding.
+
+| # | Severity | Finding | Ruling | Evidence | Change |
+|---|---|---|---|---|---|
+| 1 | major | A retirement can still be lost when the loopback delivers the instance's withdrawal from `ready` before its departure and its retirement after it: `Left` without `Retired` | partially valid, ruled by the coordinator a known limitation: velo-hub's removal hook gives only the instance's id and incarnation, and its `ready` and `retired` watches are not ordered against each other, so the extension cannot tell that a retirement is still in flight without velo-hub's V4 (cells.md 13) or a change to how instances announce retirement; the instance is gone from a follower either way | the reviewer's probe, kept as `a_retirement_delivered_after_the_withdrawal_and_the_departure_comes_before_left`, fails with `[Ready, Left]` | the probe is an ignored test naming the finding and V4, so lifting the ignore is the first step once V4 exists; `LIMITATIONS.md` and the feed's doc state the interleaving; no timer or guess was added (`96de676`) |
+| 2 | minor | The HTTP epoch-wait test opened the gate without knowing the hub held the request, so an immediate refusal passed it 30 of 30 runs | valid | with the route made to refuse at once, the test passed | a watch counts in `watchers()` from when it is asked for; the test waits for both the in-process and the HTTP watch to be held before it opens the gate, and fails 20 of 20 runs under the immediate refusal (`b776301`) |
