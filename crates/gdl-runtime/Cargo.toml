@@ -75,3 +75,7 @@ required-features = ["hub"]
 [[test]]
 name = "rosters"
 required-features = ["hub"]
+
+[[test]]
+name = "cells"
+required-features = ["hub"]

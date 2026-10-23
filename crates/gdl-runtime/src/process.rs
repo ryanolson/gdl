@@ -54,6 +54,9 @@ use system::{Health, Phase, SystemSettings};
 /// class = "model_x"       # the launch refuses a class that is not the segment's
 /// region = "us-east-1"
 /// ```
+///
+/// An instance in a cell waits at its launch only for the segments of its
+/// own class: `[instances]` and `[min_replicas]` may name no other.
 pub struct ProcessConfig<H> {
     listen: SocketAddr,
     roster: Option<PathBuf>,
@@ -316,7 +319,9 @@ impl<H> ProcessConfig<H> {
     /// serves, the instance registers before it is ready, so the hub knows
     /// it is live, then waits for at least `[min_replicas]` loaded
     /// instances of each segment that have not retired, and takes those as
-    /// its roster. How many instances a segment has under a hub is not
+    /// its roster. An instance in a cell (`[cell]`) waits, either way,
+    /// only for the segments of its own class: the cells of another class
+    /// are not part of its start. How many instances a segment has under a hub is not
     /// fixed: from just before it announces `loaded`, the instance follows
     /// membership, so that an instance that joins later is routed to once
     /// it is ready, and one that retires or leaves is not.
@@ -355,7 +360,16 @@ impl<H> ProcessConfig<H> {
             cell.check(&layout, segment)
                 .map_err(|e| placement(e.to_string()))?;
         }
-        let inner: Vec<String> = layout.sends_to(segment).into_iter().collect();
+        // In a cell, the start barrier stops at the class boundary: the
+        // cells of another class come and go on their own, and are found
+        // through the hub's relay, not waited for.
+        let waited =
+            |other: &str| self.cell.is_none() || layout.class_of(other) == layout.class_of(segment);
+        let inner: Vec<String> = layout
+            .sends_to(segment)
+            .into_iter()
+            .filter(|other| waited(other))
+            .collect();
         // The segments that send to this one: their instances are the ones
         // that must stop routing here before a retirement may end.
         let senders: Vec<String> = segments
@@ -375,6 +389,12 @@ impl<H> ProcessConfig<H> {
         if let Some(unknown) = counts.keys().find(|s| !segments.contains(&s.as_str())) {
             return Err(placement(format!("{table}: no segment `{unknown}`")));
         }
+        if let Some(other) = counts.keys().find(|s| !waited(s)) {
+            return Err(placement(format!(
+                "{table}: `{other}` is in class `{}`, and an instance in a cell waits only for the segments of its own class",
+                layout.class_of(other).unwrap_or_default()
+            )));
+        }
         if !other.is_empty() {
             return Err(placement(
                 "[instances] counts the instances a roster directory waits for, [min_replicas] the loaded instances a hub waits for; a deployment uses one",
@@ -383,6 +403,7 @@ impl<H> ProcessConfig<H> {
         // Every instance waits for the same membership.
         let expect: Vec<(&str, usize)> = segments
             .iter()
+            .filter(|s| waited(s))
             .map(|s| (*s, counts.get(*s).copied().unwrap_or(1)))
             .collect();
         let wait = Duration::from_millis(self.rendezvous_ms);
@@ -641,7 +662,8 @@ impl Launch {
     }
 
     /// Announce that this instance's handlers are installed, wait until
-    /// every instance it can route to has announced the same, release the
+    /// every instance it can route to has announced the same (in a cell,
+    /// every instance of its own class it routes to), release the
     /// roster, then run `serve` with the started `segment` until it
     /// finishes. A request that reaches this instance before the barrier
     /// waits at the held roster.

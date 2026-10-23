@@ -535,26 +535,36 @@ async fn a_cell_that_does_not_fit_the_deployment_stops_the_launch() {
 }
 
 /// The control: a `[cell]` that fits passes the check, and the launch goes
-/// on to wait for the nodes and meet the roster, where it waits for the
-/// other class's instance and says so.
+/// on to wait for the nodes and meet the roster. In a cell it meets only
+/// the segments of its own class, so it launches with no instance of the
+/// other class; without the cell it waits for that instance and says so.
 #[tokio::test]
 async fn a_cell_that_fits_the_deployment_launches() {
-    let dir = tempfile::Builder::new()
-        .prefix("gdl-cell-")
-        .tempdir()
-        .expect("roster directory");
-    let config = load(&[
-        &format!(
+    for cell in [true, false] {
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-cell-")
+            .tempdir()
+            .expect("roster directory");
+        let roster = format!(
             "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 200\n",
             dir.path().display()
-        ),
-        &format!("{CELL}[cell.ready]\nfront = 2\n"),
-    ])
-    .expect("parses");
-    let (launched, awaited) = launch_cell(&config, "front", &classed()).await;
-    let Err(error) = launched else {
-        panic!("met a roster with no `back` instance")
-    };
-    assert!(awaited, "the check stopped a cell that fits");
-    assert!(error.to_string().contains("back (0 of 1)"), "{error}");
+        );
+        let settings = format!("{CELL}[cell.ready]\nfront = 2\n");
+        let layers: Vec<&str> = if cell {
+            vec![&roster, &settings]
+        } else {
+            vec![&roster]
+        };
+        let config = load(&layers).expect("parses");
+        let (launched, awaited) = launch_cell(&config, "front", &classed()).await;
+        assert!(awaited, "the check stopped a cell that fits");
+        match (cell, launched) {
+            (true, Ok(_)) => {}
+            (true, Err(error)) => panic!("a cell waited for another class: {error}"),
+            (false, Ok(_)) => panic!("met a roster with no `back` instance"),
+            (false, Err(error)) => {
+                assert!(error.to_string().contains("back (0 of 1)"), "{error}");
+            }
+        }
+    }
 }
