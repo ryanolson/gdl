@@ -137,4 +137,8 @@ pub enum DirectoryError {
         /// The version of the refused write.
         offered: Version,
     },
+    /// The backend could not do what was asked: for the `dir` backend, a
+    /// file or directory it could not read or write.
+    #[error("the directory is unavailable: {0}")]
+    Unavailable(String),
 }

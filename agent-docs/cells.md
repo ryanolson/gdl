@@ -205,6 +205,8 @@ The owner's question offered two paths: each model cell tells every global hub, 
 
 Amended 2026-10-22 during implementation: a fleet file has no live state, so `static` became `memory` (one process) and `dir` (one host).
 
+Addendum, 2026-10-22, `dir` as built (`gdl_cells::DirDirectory`, chosen with `[cell] directory = "dir"` and the path in `[cell] dir`, which no other backend takes): each cell's file holds its record or its withdrawal's tombstone, so a late write is refused across processes too, with a write order (wall-clock nanoseconds, raised past the process's last write) that orders the several changes one poll finds. A class's directory is polled only while the class has a watch in the process, and a watch from `None` waits for a poll, so its snapshot is the files present when it began. A resume token is a place in what one process watched: it is refused from another process, after a restart, and after a spell in which nothing in the process watched the class and its files changed. Two writes of one cell between two polls are one change. A file the backend cannot read or write is `DirectoryError::Unavailable`, a variant added for it. `LIMITATIONS.md` lists what a user can run into.
+
 The relay's weak point is the one the owner pointed at: a model cell's discovery by remote globals depends on its home hub. A home that is down hides a healthy model cell from any global that was not already following it; globals that were keep routing to it over their follow links. The store backend does not have that coupling. Section 6 ranks the store backends.
 
 ### 4.3 A global routes a request

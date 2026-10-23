@@ -14,6 +14,8 @@ publish.workspace = true
 futures = { workspace = true }
 gdl-model = { path = "../gdl-model" }
 serde = { workspace = true }
+# The `dir` backend's files.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
@@ -24,7 +26,7 @@ conformance = []
 [dev-dependencies]
 # The crate's own tests run the conformance suite against `memory`.
 gdl-cells = { path = ".", features = ["conformance"] }
-serde_json = { workspace = true }
+tempfile = { workspace = true }
 # A paused clock lets the suite's bounds be tested against a backend that
 # never completes, without waiting them out.
 tokio = { workspace = true, features = ["test-util"] }
