@@ -3,7 +3,10 @@
 //! Each usable entry instance reports its admission once a period; the
 //! hub keeps each one's latest report, and once a period sums the reports
 //! it counts: those of instances still usable, and no older than three
-//! periods. Taking a report and making a summary each cost the work of
+//! periods. The instance and the hub keep their periods on their own
+//! clocks, so two reports can arrive between two summaries: the later
+//! one's admission stands, and the refusals of the earlier one, which no
+//! summary counted, are carried into it. Taking a report and making a summary each cost the work of
 //! one instance and of the cell's entry instances, once a period, never
 //! per request. The reports are kept under the feed's lock, with the entry
 //! instances they belong to, so that whether an instance is usable is
@@ -28,7 +31,7 @@ const KEPT: u32 = 3;
 /// Each entry instance's latest report, and the summary last made of
 /// them.
 pub(super) struct Reports {
-    reports: HashMap<InstanceId, (Instant, LoadReport)>,
+    reports: HashMap<InstanceId, Report>,
     /// How long a report counts for.
     kept: Duration,
     summary: Option<LoadSummary>,
@@ -45,8 +48,18 @@ impl Reports {
     }
 
     /// `instance`, a usable entry instance, reported `load` at `now`.
-    pub(super) fn put(&mut self, instance: InstanceId, load: LoadReport, now: Instant) {
-        self.reports.insert(instance, (now, load));
+    pub(super) fn put(&mut self, instance: InstanceId, mut load: LoadReport, now: Instant) {
+        if let Some(earlier) = self.reports.get(&instance)
+            && !earlier.summarized
+        {
+            load.refusals = load.refusals.saturating_add(earlier.load.refusals);
+        }
+        let report = Report {
+            at: now,
+            load,
+            summarized: false,
+        };
+        self.reports.insert(instance, report);
     }
 
     /// The summary last made.
@@ -65,15 +78,16 @@ impl Reports {
         now: Instant,
     ) -> Option<Option<LoadSummary>> {
         let kept = self.kept;
-        self.reports.retain(|instance, (at, _)| {
-            usable(instance) && now.saturating_duration_since(*at) <= kept
+        self.reports.retain(|instance, report| {
+            report.summarized = true;
+            usable(instance) && now.saturating_duration_since(report.at) <= kept
         });
         let summary = (!self.reports.is_empty()).then(|| {
             let mut summary = LoadSummary {
                 instances,
                 ..LoadSummary::default()
             };
-            for (_, report) in self.reports.values() {
+            for Report { load: report, .. } in self.reports.values() {
                 summary.admitted = summary.admitted.saturating_add(report.admitted);
                 summary.limit = summary.limit.saturating_add(report.limit);
                 summary.refusals = summary.refusals.saturating_add(report.refusals);
@@ -85,6 +99,14 @@ impl Reports {
             summary
         })
     }
+}
+
+/// One instance's latest report.
+struct Report {
+    at: Instant,
+    load: LoadReport,
+    /// Whether a summary has counted it.
+    summarized: bool,
 }
 
 /// Make the cell's summary once a `period` until `cancel`, starting one
@@ -176,5 +198,39 @@ mod tests {
             "a dropped report is not kept"
         );
         assert_eq!(reports.summary().map(|summary| summary.admitted), Some(2));
+    }
+
+    /// The instance and the hub keep their periods on their own clocks, so
+    /// two reports of one instance can arrive between two summaries: the
+    /// later one's admission stands, and the earlier one's refusals are
+    /// not lost, since no summary counted them.
+    #[test]
+    fn refusals_no_summary_counted_are_carried_into_the_next_report() {
+        let period = Duration::from_secs(1);
+        let a = InstanceId::new_v4();
+        let start = Instant::now();
+        let mut reports = Reports::new(period);
+        reports.put(a, report(3, 8, 2), start);
+        reports.put(a, report(1, 8, 1), start);
+        assert_eq!(
+            reports.summarize(|_| true, 1, start),
+            Some(Some(LoadSummary {
+                admitted: 1,
+                limit: 8,
+                instances: 1,
+                refusals: 3,
+            }))
+        );
+        reports.put(a, report(1, 8, 0), start);
+        assert_eq!(
+            reports.summarize(|_| true, 1, start),
+            Some(Some(LoadSummary {
+                admitted: 1,
+                limit: 8,
+                instances: 1,
+                refusals: 0,
+            })),
+            "refusals a summary counted were carried again"
+        );
     }
 }
