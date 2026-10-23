@@ -50,65 +50,6 @@ pub struct CellReadiness<D: CellDirectory> {
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
-/// How a cell's hub paces its judgment and its record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CellTiming {
-    /// How long the quorum must hold before the cell is `ready`.
-    pub hold: Duration,
-    /// How often the record is published while the state does not change.
-    pub heartbeat: Duration,
-    /// How long a reader keeps the record without seeing it published
-    /// again: three heartbeats by default.
-    pub lease: Duration,
-}
-
-impl Default for CellTiming {
-    fn default() -> Self {
-        Self {
-            hold: Quorum::DEFAULT_HOLD,
-            heartbeat: Duration::from_secs(10),
-            lease: CellRecord::DEFAULT_LEASE,
-        }
-    }
-}
-
-/// The body of the cell health endpoint: the cell's state, and each
-/// segment of its class with its usable instances and its quorum.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CellHealth {
-    /// The cell's state.
-    pub state: CellState,
-    /// Each segment of the cell's class, by name.
-    pub segments: BTreeMap<String, SegmentHealth>,
-}
-
-/// Why a cell's hub cannot start.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CellError(String);
-
-impl CellError {
-    pub(crate) fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
-    }
-}
-
-impl std::fmt::Display for CellError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for CellError {}
-
-/// One segment of a cell's class, in [`CellHealth`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SegmentHealth {
-    /// The instances usable for fresh work.
-    pub usable: u32,
-    /// The usable instances the cell needs to be ready.
-    pub quorum: u32,
-}
-
 impl<D: CellDirectory> CellReadiness<D> {
     /// The extension for the cell `cell` of the deployment `spec`,
     /// publishing through `directory`. Settings from which no well-formed
@@ -157,8 +98,10 @@ impl<D: CellDirectory> CellReadiness<D> {
             .iter()
             .map(|segment| (segment.clone(), cell.quorum(segment)))
             .collect();
-        let health =
-            Quorum::new(quorums.iter().cloned(), timing.hold).health(CellState::Unavailable);
+        let health = CellHealth::of(
+            &Quorum::new(quorums.iter().cloned(), timing.hold),
+            CellState::Unavailable,
+        );
         Ok(Self {
             directory: Arc::new(directory),
             record,
@@ -173,19 +116,6 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// usable instances and quorum.
     pub fn health(&self) -> watch::Receiver<CellHealth> {
         self.health.subscribe()
-    }
-}
-
-impl Quorum {
-    /// The health endpoint's body for this quorum in `state`.
-    fn health(&self, state: CellState) -> CellHealth {
-        CellHealth {
-            state,
-            segments: self
-                .segments()
-                .map(|(name, usable, quorum)| (name.to_string(), SegmentHealth { usable, quorum }))
-                .collect(),
-        }
     }
 }
 
@@ -271,3 +201,75 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 
     fn on_removed(&self, _: Removal) {}
 }
+
+/// How a cell's hub paces its judgment and its record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellTiming {
+    /// How long the quorum must hold before the cell is `ready`.
+    pub hold: Duration,
+    /// How often the record is published while the state does not change.
+    pub heartbeat: Duration,
+    /// How long a reader keeps the record without seeing it published
+    /// again: three heartbeats by default.
+    pub lease: Duration,
+}
+
+impl Default for CellTiming {
+    fn default() -> Self {
+        Self {
+            hold: Quorum::DEFAULT_HOLD,
+            heartbeat: Duration::from_secs(10),
+            lease: CellRecord::DEFAULT_LEASE,
+        }
+    }
+}
+
+/// The body of the cell health endpoint: the cell's state, and each
+/// segment of its class with its usable instances and its quorum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellHealth {
+    /// The cell's state.
+    pub state: CellState,
+    /// Each segment of the cell's class, by name.
+    pub segments: BTreeMap<String, SegmentHealth>,
+}
+
+impl CellHealth {
+    /// The body for `quorum`'s counts in `state`.
+    pub(crate) fn of(quorum: &Quorum, state: CellState) -> Self {
+        Self {
+            state,
+            segments: quorum
+                .segments()
+                .map(|(name, usable, quorum)| (name.to_string(), SegmentHealth { usable, quorum }))
+                .collect(),
+        }
+    }
+}
+
+/// One segment of a cell's class, in [`CellHealth`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentHealth {
+    /// The instances usable for fresh work.
+    pub usable: u32,
+    /// The usable instances the cell needs to be ready.
+    pub quorum: u32,
+}
+
+/// Why a cell's hub cannot start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellError(String);
+
+impl CellError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl std::fmt::Display for CellError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CellError {}

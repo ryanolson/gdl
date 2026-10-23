@@ -30,13 +30,6 @@ pub struct Quorum {
     state: CellState,
 }
 
-#[derive(Debug, Clone)]
-struct Segment {
-    name: String,
-    quorum: u32,
-    usable: u32,
-}
-
 impl Quorum {
     /// How long the quorum must hold before a cell is `ready`, unless its
     /// hub is given another.
@@ -120,4 +113,11 @@ impl Quorum {
             .iter()
             .map(|s| (s.name.as_str(), s.usable, s.quorum))
     }
+}
+
+#[derive(Debug, Clone)]
+struct Segment {
+    name: String,
+    quorum: u32,
+    usable: u32,
 }
