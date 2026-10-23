@@ -247,10 +247,14 @@ async fn the_membership_does_not_unregister_what_a_table_holds() {
     }
 }
 
-/// An entry that leaves its cell's table, then the chooser's own hub,
-/// stays registered past the chooser's drain until the membership's own
-/// drain, which began later, ends. The drain is 1 s, and the entry leaves
-/// the hub half a second after the table, so that the two drains end apart.
+/// End to end, through the hubs: an entry that leaves its cell's table,
+/// then the chooser's own hub, is still reachable once the chooser's drain
+/// is over. The drain is 1 s, and the entry leaves the hub half a second
+/// after the table, so that the two drains end apart. It does not observe
+/// when the membership saw the departure, so a membership slow to see it
+/// would also keep the peer; the order of the two drains is pinned, with
+/// both followers driven step by step, by the runtime's own test of them
+/// (`dist::fabric::hub::drains`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_later_membership_drain_keeps_its_peer() {
     let directory = Resolving::new();

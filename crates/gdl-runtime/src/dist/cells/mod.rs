@@ -12,6 +12,9 @@ mod task;
 mod tests;
 
 pub(crate) use task::follow;
+// The membership's tests drive the follower beside their own.
+#[cfg(test)]
+pub(crate) use follow::Follows;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};

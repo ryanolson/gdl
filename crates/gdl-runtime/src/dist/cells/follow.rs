@@ -27,7 +27,7 @@ type Key = (String, String);
 
 /// The follower's state: each followed cell's current follow, the tables
 /// made from them, and the instances it registered with velo.
-pub(super) struct Follows<R> {
+pub(crate) struct Follows<R> {
     cells: Cells,
     registry: R,
     /// This instance's own membership: a peer it routes to is never
@@ -55,7 +55,7 @@ pub(super) struct Follows<R> {
 }
 
 impl<R: Registry> Follows<R> {
-    pub(super) fn new(
+    pub(crate) fn new(
         cells: Cells,
         registry: R,
         live: Arc<Live>,
@@ -89,7 +89,7 @@ impl<R: Registry> Follows<R> {
     /// [`Followed::apply`]'s rules: what it changed is then published,
     /// with an exposed instance registered first and every instance no
     /// follow holds any more unregistered after the drain.
-    pub(super) fn apply(&mut self, event: FollowEvent, now: Instant) {
+    pub(crate) fn apply(&mut self, event: FollowEvent, now: Instant) {
         let (key, change) = match self.followed.apply(&self.wanted, event) {
             Some(changed) => changed,
             None => return,
@@ -178,7 +178,7 @@ impl<R: Registry> Follows<R> {
     /// Unregister what has fallen due by `now`: each instance that no
     /// table holds again since, and that this instance's own membership
     /// does not route to.
-    pub(super) fn forget(&mut self, now: Instant) {
+    pub(crate) fn forget(&mut self, now: Instant) {
         let mut forgot = false;
         while let Some(&(at, id)) = self.forget.front() {
             if at > now {
@@ -309,7 +309,7 @@ impl<R: Registry> Follows<R> {
 }
 
 /// For each class sent to, the entry segments kept.
-pub(super) type Wanted = BTreeMap<String, BTreeSet<String>>;
+pub(crate) type Wanted = BTreeMap<String, BTreeSet<String>>;
 
 /// The follows one watch has shown: each cell's current follow, and the
 /// newest generation of each cell, so that an older one is ignored even
