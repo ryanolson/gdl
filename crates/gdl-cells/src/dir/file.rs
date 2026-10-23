@@ -149,9 +149,10 @@ impl Seen {
 
 /// Read the class directory `dir` of `class`: each cell's file, reusing
 /// what `previous` read of a file that has not changed since. A missing
-/// directory holds no cells. A file that cannot be read, or does not hold
-/// its cell's entry, is kept without one; a file that is not a cell's
-/// (a writer's temporary file, say) is passed over.
+/// directory holds no cells. A file that does not hold its cell's entry is
+/// kept without one, and one that is not a cell's (a writer's temporary
+/// file, say) is passed over; a cell's file that cannot be read is an
+/// error, which a writer meets too.
 pub(super) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<Files> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -168,16 +169,19 @@ pub(super) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<File
         if gdl_model::check_cell_name(cell).is_err() {
             continue;
         }
-        // Gone since the listing, or not a plain file: not a cell's file.
-        let Some((modified, len)) = entry
-            .metadata()
-            .ok()
-            .filter(std::fs::Metadata::is_file)
-            .and_then(|metadata| Some((metadata.modified().ok()?, metadata.len())))
-        else {
-            continue;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            // Gone since the listing.
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         };
-        let stamp = Stamp { modified, len };
+        if !metadata.is_file() {
+            continue;
+        }
+        let stamp = Stamp {
+            modified: metadata.modified()?,
+            len: metadata.len(),
+        };
         if let Some(seen) = previous.get(cell).filter(|seen| seen.unchanged(stamp)) {
             files.insert(cell.to_owned(), seen.clone());
             continue;
@@ -186,7 +190,7 @@ pub(super) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<File
         let entry = match load(&entry.path(), class, cell) {
             Ok(entry) => entry.map(Arc::new),
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(_) => None,
+            Err(error) => return Err(error),
         };
         files.insert(cell.to_owned(), Seen { stamp, read, entry });
     }

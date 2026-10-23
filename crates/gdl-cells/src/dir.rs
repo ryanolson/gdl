@@ -37,7 +37,9 @@ pub use watch::DirWatch;
 /// process, one task lists the class's directory and reads each file that
 /// may have changed, and the differences are the watch's changes. Two
 /// writes of one cell between two polls are one change, the later; a
-/// reader keeps a cell's newest record, so it misses no state. Every file
+/// reader keeps a cell's newest record, so it misses no state. A file that
+/// does not parse is skipped; a cell's file that cannot be read ends every
+/// watch of its class with [`DirectoryError::Unavailable`]. Every file
 /// operation runs on a blocking thread.
 ///
 /// A resume token is a place in what this process watched, shared by its

@@ -393,6 +393,47 @@ async fn a_record_lost_while_unwatched_refuses_the_token() {
     assert!(snapshot(&mut watch(&a, None)).await.0.is_empty());
 }
 
+/// A cell's file that is there but cannot be read is not a file that does
+/// not parse: the watch ends with the error, as the write does.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_file_it_cannot_read_is_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = temp();
+    let (a, b) = (
+        DirDirectory::new(temp.path()),
+        DirDirectory::new(temp.path()),
+    );
+    a.publish(record("m1", 1, 1)).await.expect("m1");
+    let file = temp.path().join(MODEL).join("m1.json");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("m1 closed");
+    match std::fs::read(&file) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+        // A user every file is open to, such as root, cannot run the case.
+        other => {
+            eprintln!("m1's file is still readable ({other:?}): nothing to test");
+            return;
+        }
+    }
+    let mut seen = watch(&b, None);
+    assert!(
+        matches!(
+            next(&mut seen).await,
+            Some(Err(DirectoryError::Unavailable(_)))
+        ),
+        "a watch of a class with an unreadable file"
+    );
+    assert!(next(&mut seen).await.is_none(), "an error ends the watch");
+    assert!(
+        matches!(
+            a.publish(record("m1", 1, 2)).await,
+            Err(DirectoryError::Unavailable(_))
+        ),
+        "a write over an unreadable file"
+    );
+}
+
 /// A token is served across the latest `history` changes and no more,
 /// though the class was watched throughout.
 #[tokio::test]
