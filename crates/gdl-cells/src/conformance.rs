@@ -162,6 +162,16 @@ async fn snapshot(watch: &mut impl Events) -> (Vec<(String, Version)>, ResumeTok
     .await
 }
 
+/// What the directory holds for `class`, read through a new watch's
+/// snapshot: each cell's name and version.
+async fn held<D: CellDirectory>(directory: &D, class: &str) -> Vec<(String, Version)> {
+    snapshot(&mut watch(directory, class, None)).await.0
+}
+
+fn at(cell: &str, epoch: u64, seq: u64) -> (String, Version) {
+    (cell.to_owned(), Version { epoch, seq })
+}
+
 /// The next event is a put of `cell` at `version`; its token.
 async fn put(watch: &mut impl Events, cell: &str, epoch: u64, seq: u64) -> ResumeToken {
     match next(watch, &format!("the put of {cell}")).await {
@@ -272,6 +282,8 @@ async fn writes_are_ordered_by_epoch_and_seq<B: Backend>(backend: &B) {
         (1, 2),
         (1, 1),
     );
+    // Read before any later write could cover what a refusal stored.
+    assert_eq!(held(&reader, MODEL).await, [at("m1", 1, 2)]);
     // A new epoch wins over any seq of an older one.
     publish(&writer, record(MODEL, "m1", 2, 0))
         .await
@@ -284,6 +296,7 @@ async fn writes_are_ordered_by_epoch_and_seq<B: Backend>(backend: &B) {
         (2, 0),
         (2, 0),
     );
+    assert_eq!(held(&reader, MODEL).await, [at("m1", 2, 0)]);
     withdraw(&writer, withdrawal(MODEL, "m1", 2, 1))
         .await
         .expect("a withdrawal");
@@ -299,6 +312,7 @@ async fn writes_are_ordered_by_epoch_and_seq<B: Backend>(backend: &B) {
         (2, 1),
         (1, 9),
     );
+    assert_eq!(held(&reader, MODEL).await, []);
     publish(&writer, record(MODEL, "m1", 3, 0))
         .await
         .expect("a newer epoch");
@@ -314,21 +328,14 @@ async fn writes_are_ordered_by_epoch_and_seq<B: Backend>(backend: &B) {
         (1, 5),
         (1, 5),
     );
+    assert_eq!(held(&reader, MODEL).await, [at("m1", 3, 0)]);
     publish(&writer, record(MODEL, "m9", 1, 6))
         .await
         .expect("newer than the tombstone");
     put(&mut watch, "m9", 1, 6).await;
 
     // The directory holds each cell's newest write, through any handle.
-    let mut fresh = self::watch(&writer, MODEL, None);
-    let (records, _) = snapshot(&mut fresh).await;
-    assert_eq!(
-        records,
-        [
-            ("m1".to_owned(), Version { epoch: 3, seq: 0 }),
-            ("m9".to_owned(), Version { epoch: 1, seq: 6 })
-        ]
-    );
+    assert_eq!(held(&writer, MODEL).await, [at("m1", 3, 0), at("m9", 1, 6)]);
 }
 
 async fn a_watch_sees_its_class_snapshot_then_changes<B: Backend>(backend: &B) {
@@ -387,6 +394,15 @@ async fn a_watch_sees_its_class_snapshot_then_changes<B: Backend>(backend: &B) {
 
 async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
     let [writer, reader] = within("a fresh directory", backend.fresh()).await;
+    // The other class has as many changes as this case makes before it
+    // tries a token of this class there, so a backend that numbers each
+    // class's changes alike would find the position, and only the token's
+    // class refuses it.
+    for seq in 1..=3 {
+        publish(&writer, record(GLOBAL, "g1", 1, seq))
+            .await
+            .expect("a global cell");
+    }
     let mut live = watch(&reader, MODEL, None);
     let (_, start) = snapshot(&mut live).await;
     publish(&writer, record(MODEL, "m1", 1, 1))
@@ -435,7 +451,8 @@ async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
     put(&mut resumed, "m3", 1, 1).await;
     drop(resumed);
 
-    // Another class's token is not served.
+    // Another class's token is not served, though that class has changes
+    // up to its position.
     let mut elsewhere = watch(&reader, GLOBAL, Some(last));
     assert_eq!(
         next(&mut elsewhere, "another class's token").await,
