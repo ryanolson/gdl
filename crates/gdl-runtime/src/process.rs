@@ -462,7 +462,6 @@ impl<H> ProcessConfig<H> {
                 roster.hold();
                 let all: Vec<&str> = segments.to_vec();
                 let sends: Vec<&str> = inner.iter().map(String::as_str).collect();
-                session.follow(Arc::clone(roster.live()), node.clone(), &all, &sends, drain);
                 // A chooser in a cell follows the cells of the classes it
                 // sends to from here too, so that its tables fill while it
                 // meets; an instance without a cell follows none. The
@@ -480,6 +479,16 @@ impl<H> ProcessConfig<H> {
                     )?
                     .map(|(cells, task)| (cells, Abort(task)));
                 }
+                // The membership leaves to the chooser what its tables hold.
+                let cells = chooser.as_ref().map(|(cells, _)| cells.clone());
+                session.follow(
+                    Arc::clone(roster.live()),
+                    node.clone(),
+                    &all,
+                    &sends,
+                    drain,
+                    cells,
+                );
                 let met = session.roster(&expect, wait).await?;
                 for (segment, peers) in met.segments() {
                     for peer in peers {

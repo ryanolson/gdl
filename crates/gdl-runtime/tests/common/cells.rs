@@ -272,6 +272,16 @@ impl Instance {
         )
         .build();
         node.register_handler(ping).expect("valid test fixture");
+        Self::join_as(hub, segment, node).await
+    }
+
+    /// Join `hub` as an instance of `segment` too, on this instance's node:
+    /// one velo instance that is a member of two hubs.
+    pub async fn also(&self, hub: &Hub, segment: &'static str) -> Self {
+        Self::join_as(hub, segment, self.node.clone()).await
+    }
+
+    async fn join_as(hub: &Hub, segment: &'static str, node: Velo) -> Self {
         let client = HubClient::builder()
             .host("127.0.0.1")
             .public_port(hub.public_addr().port())

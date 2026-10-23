@@ -418,7 +418,7 @@ fn only_the_entry_segments_sent_to_are_kept() {
 /// for a cell's table.
 #[test]
 fn the_instances_own_membership_keeps_a_peer() {
-    let (mut follows, _, recorded, live_members) = follower();
+    let (mut follows, cells, recorded, live_members) = follower();
     let now = Instant::now();
     let x = peer();
     live(
@@ -430,6 +430,12 @@ fn the_instances_own_membership_keeps_a_peer() {
     live(&mut follows, now, [left(M1, 1, &x)]);
     follows.forget(now + DRAIN);
     assert_eq!(recorded.take(), [Call::Register(x.instance_id())]);
+    // The membership owns the registration now, and unregisters it when it
+    // leaves: the follower gives it up rather than keep it for good.
+    assert!(
+        !cells.is_registered(x.instance_id()),
+        "the follower kept a registration no table holds"
+    );
 }
 
 /// A fresh snapshot replaces whatever was held: cells it lacks are

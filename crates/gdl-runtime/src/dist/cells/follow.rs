@@ -189,16 +189,19 @@ impl<R: Registry> Follows<R> {
                 continue;
             }
             self.due.remove(&id);
-            if self.held.contains_key(&id) || self.live.routes_to(id) {
+            if self.held.contains_key(&id) || !self.registered.remove(&id) {
                 continue;
             }
-            if self.registered.remove(&id) {
-                self.registry.unregister(id);
-                self.cells.registered(|registered| {
-                    registered.remove(&id);
-                });
-                forgot = true;
-            }
+            // A peer this instance's own membership routes to is its to
+            // unregister when it leaves: the follower gives it up.
+            let (registry, live) = (&self.registry, &self.live);
+            self.cells.registered(|registered| {
+                registered.remove(&id);
+                if !live.routes_to(id) {
+                    registry.unregister(id);
+                }
+            });
+            forgot = true;
         }
         if forgot {
             self.cells.changed();
@@ -212,12 +215,17 @@ impl<R: Registry> Follows<R> {
         if self.registered.contains(&id) {
             return true;
         }
-        match self.registry.register(peer.clone()) {
+        let registry = &self.registry;
+        let registered = self.cells.registered(|registered| {
+            let done = registry.register(peer.clone());
+            if done.is_ok() {
+                registered.insert(id);
+            }
+            done
+        });
+        match registered {
             Ok(()) => {
                 self.registered.insert(id);
-                self.cells.registered(|registered| {
-                    registered.insert(id);
-                });
                 true
             }
             Err(error) => {

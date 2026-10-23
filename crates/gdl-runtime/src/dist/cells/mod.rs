@@ -41,7 +41,9 @@ struct Shared {
     /// Counts each change of a table, or of what is registered with velo.
     changes: watch::Sender<u64>,
     /// The instances the follower registered with velo, mirrored for
-    /// readers; the follower keeps its own copy.
+    /// readers; the follower keeps its own copy. Its lock is also the one
+    /// lock over the two owners of a peer's registration, this follower
+    /// and the instance's membership ([`Cells::exclusive`]).
     registered: watch::Sender<HashSet<InstanceId>>,
 }
 
@@ -110,9 +112,36 @@ impl Cells {
         }
     }
 
-    /// Mirror the follower's registrations for readers.
-    fn registered(&self, change: impl FnOnce(&mut HashSet<InstanceId>)) {
-        self.shared.registered.send_modify(change);
+    /// Run `act` while no registration of the follower can change, with
+    /// the set the follower holds: the instance's membership registers a
+    /// peer and routes to it, or decides whether to unregister one, inside
+    /// it, so that its decision and the follower's never cross. One velo
+    /// instance can be both a member of this instance's hub and an entry
+    /// of a followed cell, and then the last owner to let go unregisters.
+    pub(crate) fn exclusive<T>(&self, act: impl FnOnce(&HashSet<InstanceId>) -> T) -> T {
+        act(&self.shared.registered.borrow())
+    }
+
+    /// [`Cells::exclusive`] for a chooser's tables, if the instance is a
+    /// chooser; for any other instance, `act` with nothing held.
+    pub(crate) fn exclusive_of<T>(
+        cells: Option<&Cells>,
+        act: impl FnOnce(&HashSet<InstanceId>) -> T,
+    ) -> T {
+        match cells {
+            Some(cells) => cells.exclusive(act),
+            None => act(&HashSet::new()),
+        }
+    }
+
+    /// Change the follower's registrations with `change`, under the lock
+    /// [`Cells::exclusive`] takes.
+    fn registered<T>(&self, change: impl FnOnce(&mut HashSet<InstanceId>) -> T) -> T {
+        let mut result = None;
+        self.shared.registered.send_modify(|registered| {
+            result = Some(change(registered));
+        });
+        result.expect("send_modify runs the change")
     }
 
     /// Tell readers that something changed.

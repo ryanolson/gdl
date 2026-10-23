@@ -172,6 +172,81 @@ async fn an_entry_is_registered_with_velo_while_a_table_holds_it() {
     }
 }
 
+/// One velo instance that is a member of the chooser's own hub and an
+/// entry of a followed cell has two owners of its registration: when it
+/// leaves the chooser's hub, the membership's drain does not unregister
+/// what a cell's table still holds. A second instance, a member of the
+/// chooser's hub alone, leaves after it, and its unregistration shows that
+/// the membership's drain of the first has run. The drain is 500 ms, and
+/// the membership looks at its drains once a second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_membership_does_not_unregister_what_a_table_holds() {
+    let directory = Resolving::new();
+    let (global, _) = cell_hub(global_hub(), &directory).await;
+    let (m1, _) = cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (f1, _d1) = (
+        Instance::ready(&m1, "f").await,
+        Instance::ready(&m1, "d").await,
+    );
+    let extra = format!("{}[runtime]\ndrain_ms = 500\n", global_cell());
+    let config = settings(
+        global.public_addr().port(),
+        global.control_addr().port(),
+        5_000,
+        &extra,
+    );
+    let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
+    let node = chooser.node();
+    let cells = chooser.cells().expect("a chooser");
+    until(&cells, "the entry in the table", |cells| {
+        followed(cells, "f", M1)
+            .is_some_and(|m| m.state == CellState::Ready && m.eligible == [f1.id()])
+    })
+    .await;
+    // The same instance joins the chooser's own hub, as does one that is
+    // only there; the chooser's membership follows both.
+    let mut local = f1.also(&global, "f").await;
+    let mut witness = Instance::join(&global, "f").await;
+    for member in [&mut local, &mut witness] {
+        member.announce(SegmentPhase::Serving).await;
+        member.announce(SegmentPhase::Ready).await;
+    }
+    // The membership registers what is ready in `gdl-ready-f`, one watch,
+    // in order: once the witness is reachable, it has taken the entry too.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !pings(&node, witness.id()).await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the membership never registered the witness"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let witness_id = witness.id();
+    local.leave().await;
+    let _witness_node = witness.leave().await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while pings(&node, witness_id).await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the membership never unregistered an instance that left"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        followed(&cells, "f", M1).is_some_and(|m| m.eligible == [f1.id()]),
+        "the cell's table changed"
+    );
+    assert!(cells.is_registered(f1.id()));
+    assert!(
+        pings(&node, f1.id()).await,
+        "the membership unregistered an entry a cell's table holds"
+    );
+    drop(chooser);
+    for hub in [global, m1] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
 /// When the hub's follow of a cell is cut and followed again, the new
 /// generation holds an entry the old one held, and the drain the old one's
 /// end started does not unregister it; an entry only the old generation

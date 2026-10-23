@@ -1,4 +1,5 @@
 use crate::Roster;
+use crate::dist::Cells;
 use crate::dist::roster::Live;
 use futures::StreamExt;
 use futures::stream::{BoxStream, SelectAll};
@@ -277,8 +278,9 @@ impl HubSession {
         segments: &[&str],
         inner: &[&str],
         drain: Duration,
+        cells: Option<Cells>,
     ) {
-        let follower = self.follower(live, node, segments, inner, drain);
+        let follower = self.follower(live, node, segments, inner, drain, cells);
         if let Some(earlier) = self.follower.replace(tokio::spawn(follower.run())) {
             earlier.abort();
         }
@@ -292,6 +294,7 @@ impl HubSession {
         segments: &[&str],
         inner: &[&str],
         drain: Duration,
+        cells: Option<Cells>,
     ) -> Follower {
         Follower {
             client: self.client.clone(),
@@ -306,6 +309,7 @@ impl HubSession {
             unsent: Vec::new(),
             forget: Vec::new(),
             unresolved: Vec::new(),
+            cells,
             #[cfg(test)]
             members_gate: None,
         }
@@ -518,6 +522,8 @@ struct Follower {
     /// say who they are: retried each tick, so that one failed question
     /// does not leave a joiner out for good.
     unresolved: Vec<(String, InstanceId)>,
+    /// A chooser's tables, whose registrations this follower leaves alone.
+    cells: Option<Cells>,
     /// Holds the follower once the hub has said who the members are, so a
     /// test can change membership in between.
     #[cfg(test)]
@@ -700,9 +706,16 @@ impl Follower {
             }
             // Registered before it is routable: a call addressed by
             // instance finds no peer it was not told of.
-            match super::register_peer(&self.node, member.peer.clone()) {
-                Ok(()) => self.live.join(&segment, id),
-                Err(_) => self.unresolved.push((segment, id)),
+            let (node, live) = (&self.node, &self.live);
+            let registered = Cells::exclusive_of(self.cells.as_ref(), |_| {
+                let registered = super::register_peer(node, member.peer.clone());
+                if registered.is_ok() {
+                    live.join(&segment, id);
+                }
+                registered
+            });
+            if registered.is_err() {
+                self.unresolved.push((segment, id));
             }
         }
     }
@@ -740,12 +753,17 @@ impl Follower {
 
     async fn tick(&mut self) {
         let now = tokio::time::Instant::now();
-        let node = &self.node;
+        let (node, cells) = (&self.node, &self.cells);
         self.forget.retain(|(at, id)| {
             if *at > now {
                 return true;
             }
-            super::unregister_peer(node, *id);
+            // A peer a chooser's table holds is the chooser's to forget.
+            Cells::exclusive_of(cells.as_ref(), |held| {
+                if !held.contains(id) {
+                    super::unregister_peer(node, *id);
+                }
+            });
             false
         });
         // An instance added here can displace a retired one, which is then
@@ -949,6 +967,7 @@ mod tests {
                 &["front", "sink"],
                 &["sink"],
                 Duration::from_secs(30),
+                None,
             );
             let gate = Arc::new(Gate::default());
             follower.members_gate = Some(Arc::clone(&gate));
@@ -989,6 +1008,7 @@ mod tests {
                 &["front", "sink"],
                 &["sink"],
                 Duration::from_secs(30),
+                None,
             );
             // The only sink routed to has retired; a second is ready, but
             // the hub could not say who it was when its event came.
