@@ -294,21 +294,38 @@ impl Fabric {
             Ok(unary) => unary,
             Err(error) => return Offered::Unsent(transport(error)),
         };
-        let mut send = send.raw_payload(payload.into()).instance(instance).send();
-        let answered = async {
-            if let Err(error) = send.admitted().await {
-                return Offered::Unsent(transport(error));
-            }
-            match (&mut send).await {
-                Ok(bytes) => Offered::Answered(bytes.to_vec()),
-                Err(error) => Offered::Unknown(transport(error)),
-            }
-        };
+        let send = send.raw_payload(payload.into()).instance(instance).send();
         // A send still waiting for its admission when the time runs out may
         // be admitted later: velo's send task outlives the wait for it.
-        tokio::time::timeout(timeout, answered)
+        tokio::time::timeout(timeout, Offering(send))
             .await
             .unwrap_or_else(|_| Offered::Unknown(unanswered(name, instance, timeout)))
+    }
+}
+
+/// A unary send, its admission, then its answer: a future of its own,
+/// rather than an `async` block, so that it is as large as the send and
+/// no larger, and a chooser's hand-off keeps every hand-off's size. velo
+/// keeps the send's admission once it has it, so asking again on every
+/// poll costs a read of its state.
+#[cfg(feature = "hub")]
+struct Offering(velo::UnaryResult);
+
+#[cfg(feature = "hub")]
+impl std::future::Future for Offering {
+    type Output = Offered;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Offered> {
+        let send = &mut self.0;
+        match Pin::new(&mut send.admitted()).poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Offered::Unsent(transport(error))),
+            Poll::Ready(Ok(())) => {}
+        }
+        Pin::new(send).poll(cx).map(|answer| match answer {
+            Ok(bytes) => Offered::Answered(bytes.to_vec()),
+            Err(error) => Offered::Unknown(transport(error)),
+        })
     }
 }
 

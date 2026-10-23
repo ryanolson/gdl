@@ -8,7 +8,7 @@
 //! whole, as the roster's is. Each hand-off into the other class chooses
 //! a cell from its table by the class's cell policy, then an instance of
 //! that cell ([`Crossing`]), and offers the request to another cell when
-//! that one declines it (`Runtime::offer`).
+//! that one declines it (`Runtime::fail_over`).
 
 mod crossing;
 mod follow;
@@ -19,6 +19,7 @@ mod task;
 mod tests;
 
 pub(crate) use crossing::{Crossing, Target, Within, targets};
+pub(crate) use offer::{Answer, answer};
 pub(crate) use task::follow;
 // The membership's tests drive the follower beside their own.
 #[cfg(test)]

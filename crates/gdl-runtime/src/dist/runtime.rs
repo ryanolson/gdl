@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use super::admission::{Admission, Egress};
 #[cfg(feature = "hub")]
-use super::cells::Within;
+use super::cells::{Answer, Within};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 use super::roster::{Live, Picker, Policy, Roster};
@@ -527,7 +527,7 @@ impl Runtime {
     /// with its lease, for the caller to hold while it holds the request.
     /// A chooser's hand-off into another class first chooses a cell, then
     /// an instance of it the same way, and offers the request to another
-    /// cell when that one declines it ([`Runtime::offer`]); which
+    /// cell when that one declines it ([`Runtime::fail_over`]); which
     /// hand-offs those are was settled when the runtime was built.
     ///
     /// When the chosen instance is this one, the entry runs by a direct
@@ -545,10 +545,12 @@ impl Runtime {
         timed: bool,
     ) -> Result<Handed> {
         self.released().await?;
-        let (instance, lease) = match router {
+        #[cfg_attr(not(feature = "hub"), allow(unused_variables))]
+        let (instance, lease, offering): (_, _, Offering<'_>) = match router {
             Router::Policy(policy) => (
                 self.routes
                     .pick(segment, Picker::Request, *policy, &self.random)?,
+                None,
                 None,
             ),
             Router::Selector { selector, .. } => {
@@ -557,15 +559,48 @@ impl Runtime {
                     .choose(segment, &**selector, cx, &envelope.payload)
                     .await?;
                 envelope.cx.add_meta(picked.meta);
-                (instance, picked.lease)
+                (instance, picked.lease, None)
             }
             #[cfg(feature = "hub")]
-            // Boxed: inline, the offer's state would make this future, and
-            // so every hand-off's task, 1,472 bytes instead of 880.
             Router::Cells(crossing) => {
-                return Box::pin(self.offer(crossing, cx, envelope, timed)).await;
+                let (instance, cell, lease) = self
+                    .choose_cell(crossing, cx, &mut envelope, &[])
+                    .await?
+                    .ok_or_else(|| crossing.no_cell())?;
+                (instance, lease, Some((crossing, cell)))
             }
         };
+        // An offer to a cell, always remote: a chooser never chooses
+        // itself, since the cell's entry is of another class.
+        #[cfg(feature = "hub")]
+        if let Some((crossing, cell)) = offering {
+            let bytes = super::envelope::encode(&envelope)?;
+            let sent = timed.then(tokio::time::Instant::now);
+            let offered = self
+                .fabric
+                .offer(
+                    instance,
+                    &self.names.forward,
+                    bytes,
+                    self.config.setup_timeout,
+                )
+                .await;
+            return match super::cells::answer(offered, crossing) {
+                Answer::Accepted(accepted) => Ok(Handed {
+                    accepted,
+                    sent,
+                    lease,
+                }),
+                Answer::Failed(error) => Err(error),
+                // Boxed, and only here: inline, the failover's state would
+                // grow this future, and so every hand-off's task.
+                Answer::Declined(refusal) => {
+                    drop(lease);
+                    let failover = self.fail_over(crossing, cx, envelope, timed, cell, refusal);
+                    Box::pin(failover).await
+                }
+            };
+        }
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
             let entry = Arc::clone(entries.forward(envelope.hop, envelope.pos)?);
@@ -675,6 +710,13 @@ impl Router {
         }
     }
 }
+
+/// The cell a chooser's hand-off is offered to, and the crossing that
+/// chose it; never one without the `hub` feature, which has no cells.
+#[cfg(feature = "hub")]
+type Offering<'a> = Option<(&'a super::cells::Crossing, u64)>;
+#[cfg(not(feature = "hub"))]
+type Offering<'a> = Option<std::marker::PhantomData<&'a ()>>;
 
 /// A hand-off the next segment accepted.
 pub(crate) struct Handed {
