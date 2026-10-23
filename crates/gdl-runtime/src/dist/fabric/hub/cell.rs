@@ -35,6 +35,9 @@ pub(crate) struct CellDrain {
     /// When the instance learned that its cell drains, on its own clock.
     learned: watch::Receiver<Option<Instant>>,
     role: Role,
+    /// The cell's entry segments, whose instances are the drain sources of
+    /// every instance of the cell while it drains.
+    entries: Vec<String>,
     watch: JoinHandle<()>,
 }
 
@@ -43,9 +46,8 @@ enum Role {
     /// An instance of an entry segment, which takes new work for `bound`
     /// after it learns of the drain.
     Entry { bound: Duration },
-    /// Any other instance, whose drain sources are the instances of the
-    /// cell's `entries` segments.
-    Interior { entries: Vec<String> },
+    /// Any other instance.
+    Interior,
 }
 
 /// How long an entry instance keeps taking new work after it learns that
@@ -80,10 +82,9 @@ impl CellDrain {
             true => Role::Entry {
                 bound: bound(setup, cell.summary),
             },
-            false => Role::Interior {
-                entries: entries.into_iter().map(ToString::to_string).collect(),
-            },
+            false => Role::Interior,
         };
+        let entries = entries.into_iter().map(ToString::to_string).collect();
         let watcher =
             CellWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
         let address = crate::dist::cells::hub_address(host, public_port);
@@ -92,6 +93,7 @@ impl CellDrain {
         Ok(Some(Self {
             learned,
             role,
+            entries,
             watch,
         }))
     }
@@ -105,8 +107,8 @@ impl CellDrain {
         let learned = self.learned().await;
         match &self.role {
             Role::Entry { bound } => tokio::time::sleep_until(learned + *bound).await,
-            Role::Interior { entries } => {
-                let entries: Vec<&str> = entries.iter().map(String::as_str).collect();
+            Role::Interior => {
+                let entries: Vec<&str> = self.entries.iter().map(String::as_str).collect();
                 loop {
                     // A hub can stop answering without closing its
                     // connections; the lease's own end stops the instance.
@@ -126,32 +128,30 @@ impl CellDrain {
     /// Whether the stop the drain begins retires the instance. An entry
     /// instance does not: a chooser stops offering to a draining cell by
     /// its state, and one whose view is stale enough to offer still is
-    /// declined once the entry closes; a retirement sent ahead of the close
-    /// would only take the entry from that chooser's view while it may
-    /// still take the offer.
+    /// declined once the entry declines offers; a retirement sent ahead of
+    /// that would only take the entry from that chooser's view while it
+    /// may still take the offer.
     pub(crate) fn retires(&self) -> bool {
-        matches!(self.role, Role::Interior { .. })
+        matches!(self.role, Role::Interior)
     }
 
     /// While the cell drains, the segments whose instances are this
-    /// instance's drain sources: the cell's entry segments for an interior
-    /// instance, and none for an entry instance, whose bound stands in for
-    /// them. `None` while the instance has not learned of a drain.
+    /// instance's drain sources: the cell's entry segments, for an entry
+    /// instance too, since a request another entry instance took may still
+    /// hand work to it inside the cell. `None` while the instance has not
+    /// learned of a drain.
     pub(crate) fn sources(&self) -> Option<&[String]> {
         self.learned.borrow().as_ref()?;
-        Some(match &self.role {
-            Role::Entry { .. } => &[],
-            Role::Interior { entries } => entries,
-        })
+        Some(&self.entries)
     }
 
     /// For an entry instance that has learned of its cell's drain, when its
-    /// bound passes: when it stops taking new work.
-    pub(crate) fn closes(&self) -> Option<Instant> {
+    /// bound passes: when it stops taking offers.
+    pub(crate) fn declines(&self) -> Option<Instant> {
         let learned = (*self.learned.borrow())?;
         match &self.role {
             Role::Entry { bound } => Some(learned + *bound),
-            Role::Interior { .. } => None,
+            Role::Interior => None,
         }
     }
 
@@ -159,14 +159,14 @@ impl CellDrain {
     /// passed since it learned of the drain, or until `deadline`; any
     /// other instance goes on at once.
     pub(crate) async fn accepting(&self, deadline: Instant) {
-        if let Some(at) = self.closes() {
+        if let Some(at) = self.declines() {
             tokio::time::sleep_until(at.min(deadline)).await;
         }
     }
 
     /// Whether the instance announces that it has drained once it holds
-    /// no request: an entry instance of a draining cell does, since the
-    /// cell's interior instances wait for it.
+    /// no request: an entry instance of a draining cell does, since every
+    /// instance of the cell waits for it.
     pub(crate) fn announces(&self) -> bool {
         matches!(self.role, Role::Entry { .. }) && self.learned.borrow().is_some()
     }

@@ -61,6 +61,9 @@ struct HopCore<F, I, B> {
     /// The figures of the entries this hop has in this segment, when the
     /// segment records them.
     figures: HopFigures,
+    /// Whether the hop's hand-offs to this segment are offers from another
+    /// class, which a draining cell's entry declines.
+    offer: bool,
 }
 
 /// The figures of a hop's entries in one segment: where a visit to the
@@ -321,7 +324,9 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
             }
             None => HopFigures::default(),
         };
+        let offer = rt.offered(usize::from(index));
         Ok(Self(Arc::new(HopCore {
+            offer,
             rt,
             index,
             fwd,
@@ -715,8 +720,11 @@ where
         )
         .await?;
         // A retiring instance that has closed refuses, releasing the share
-        // it just took.
+        // it just took; so does a draining cell's entry, for an offer.
         rt.check_open()?;
+        if self.offer {
+            rt.check_offer()?;
+        }
         // A run that will produce a stream (the inner end's output, or a
         // relay's onward input) takes its egress permit before
         // acknowledging, so a full instance refuses instead of stalling.

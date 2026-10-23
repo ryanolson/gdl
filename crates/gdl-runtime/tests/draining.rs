@@ -14,11 +14,11 @@
 mod common;
 
 use std::sync::Arc;
-
 use std::time::{Duration, Instant};
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, ask, model_of, model_proxied, placement, run_graph, spec_of,
+    Model, ModelCell, RUNTIME, Running, ask, model_configured, model_of, model_proxied, placement,
+    run_graph, spec_of,
 };
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::proxy::Mode;
@@ -28,7 +28,9 @@ use gdl::{Cx, ErrorKind, Next, Selectors};
 use gdl_cells::{CellDirectory, CellEvent, CellRecord};
 use gdl_hub::CellReadiness;
 use gdl_model::{SegmentPhase, segment_service};
-use gdl_runtime::{CellState, Cells, Deployment, DeploymentSpec, Register, RuntimeConfig};
+use gdl_runtime::{
+    CellState, Cells, Deployment, DeploymentSpec, Register, RequestRouter, RuntimeConfig,
+};
 use gdl_watch::CellWatchEvent;
 use tokio::task::JoinHandle;
 use velo::InstanceId;
@@ -278,8 +280,19 @@ fn release(events: &Events, text: &str) {
     events.record(format!("test:release:{text}"));
 }
 
-/// Wait until `instance` has closed its entries: its cell's drain made it
-/// stop taking work.
+/// Wait until `instance`, an entry instance, declines offers: its bound
+/// has passed since it learned of its cell's drain.
+async fn declining<H>(instance: &Running<H>) {
+    tokio::time::timeout(PAST_BOUND, async {
+        while !instance.segment.declines_offers() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the entry instance declined offers in time");
+}
+
+/// Wait until `instance` has closed its entries: it stopped taking work.
 async fn closed<H>(instance: &Running<H>, within: Duration) {
     tokio::time::timeout(within, async {
         while !instance.segment.is_closed() {
@@ -412,7 +425,7 @@ async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
     // Held at the entry, so that the entry is still there once it stops
     // taking work.
     let held = gated(&chooser, &e1, "held").await;
-    closed(&m1.entries[0], PAST_BOUND).await;
+    declining(&m1.entries[0]).await;
     assert!(
         started.elapsed() >= BOUND,
         "the entry stopped taking work {:?} after the drain began",
@@ -485,7 +498,7 @@ async fn an_entry_declines_after_its_bound_while_its_body_finishes() {
         (1, 0),
         "taken within the bound"
     );
-    closed(entry, PAST_BOUND).await;
+    declining(entry).await;
     let before = (offers(&m1), offers(&m2));
     ask(&chooser.segment)
         .await
@@ -502,6 +515,152 @@ async fn an_entry_declines_after_its_bound_while_its_body_finishes() {
     );
     entry.body.send_replace(false);
     for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// The entry and C, cut apart inside the model cell: `f` runs B, D, E,
+/// and F, and `d` runs C, so a request the entry took crosses to `d` and
+/// back into `f` for D.
+fn through_the_interior() -> gdl_runtime::Placement {
+    gdl_runtime::Placement::new()
+        .segment("a", ["A", "G"])
+        .segment("f", ["B", "D", "E", "F"])
+        .segment("d", ["C"])
+        .class("global", ["a"])
+        .class("model_x", ["f", "d"])
+}
+
+/// An entry instance that stops taking offers at its bound still takes
+/// the hand-offs inside its cell that a request it took makes: a request
+/// held at C, in `d`, past the bound, comes back into `f` for D and is
+/// answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_takes_the_continuations_of_its_requests_past_its_bound() {
+    let spec = spec_of(through_the_interior());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
+    following(&tables(&chooser), &[(M1, CellState::Ready)]).await;
+    ask(&chooser.segment).await.expect("answered");
+    let held = gated(&chooser, &events, "held").await;
+
+    m1.readiness.drain().await.expect("the cell drains");
+    let entry = &m1.entries[0];
+    declining(entry).await;
+    assert_eq!(entry.segment.admitted(), 1, "the request is admitted");
+    assert!(
+        !entry.segment.is_closed(),
+        "the entry closed with a request"
+    );
+    release(&events, "held");
+    tokio::time::timeout(WAIT, held)
+        .await
+        .expect("the held request answered in time")
+        .expect("the request's task")
+        .expect("the request came back into the entry and was answered");
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// Hands D to any entry instance but the one `avoid` names, by its id,
+/// once it names one.
+#[derive(Clone, Default)]
+struct Elsewhere {
+    avoid: Arc<std::sync::Mutex<Option<u128>>>,
+}
+
+impl gdl::Selector for Elsewhere {
+    type Head = gdl::Encoded;
+
+    async fn select<'a>(
+        &'a self,
+        _: gdl::Request<'a, gdl::Encoded>,
+        instances: gdl::Instances<'a>,
+    ) -> gdl::Result<gdl::Choice<'a>> {
+        let avoid = *self.avoid.lock().expect("lock");
+        let chosen = instances
+            .iter()
+            .find(|instance| Some(instance.id().as_u128()) != avoid)
+            .or_else(|| instances.get(0))
+            .expect("never empty");
+        Ok(gdl::Choice::new(chosen))
+    }
+}
+
+/// An entry instance that took no request of its own still takes, past
+/// its bound and once it has announced that it drained, the hand-offs
+/// inside its cell that a request another entry instance took makes: the
+/// cell's entry instances are its drain sources too. Here `d` hands D to
+/// the entry instance that did not take the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_takes_the_continuations_of_another_entrys_requests() {
+    let spec =
+        spec_of(through_the_interior().route("D", RequestRouter::Selector("elsewhere".into())));
+    let directory = Resolving::new();
+    let events = Events::new();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let elsewhere = Elsewhere::default();
+    let configure = |segment: &str, runtime: RuntimeConfig| match segment {
+        "d" => {
+            let mut selectors = Selectors::new();
+            selectors
+                .add("elsewhere", elsewhere.clone())
+                .expect("a selector");
+            RuntimeConfig {
+                selectors,
+                ..runtime
+            }
+        }
+        _ => runtime,
+    };
+    let two = Model {
+        entries: 2,
+        ..ready(M1, "m1-hub:1337")
+    };
+    let m1 = model_configured(&spec, &directory, two, &configure, &|deployment| {
+        reference_graph(deployment, &events)
+    })
+    .await;
+    until(
+        &tables(&chooser),
+        "both entry instances followed",
+        |cells| followed(cells, "f", M1).is_some_and(|m| m.eligible.len() == 2 && m.load.is_some()),
+    )
+    .await;
+    let held = gated(&chooser, &events, "held").await;
+    let (taker, other) = match m1.entries[0].segment.admitted() {
+        1 => (&m1.entries[0], &m1.entries[1]),
+        _ => (&m1.entries[1], &m1.entries[0]),
+    };
+    *elsewhere.avoid.lock().expect("lock") = Some(id(taker).as_u128());
+    let mut drained = phase(&m1.hub, "f", SegmentPhase::Drained).await;
+
+    m1.readiness.drain().await.expect("the cell drains");
+    shown(&mut drained, id(other)).await;
+    // An entry instance that closed once it had drained itself would close
+    // within a question to the hub; nothing shows that one that waits for
+    // the others will not, so it is given several of its questions' time.
+    let early = tokio::time::timeout(Duration::from_millis(500), async {
+        while !other.segment.is_closed() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    assert!(
+        early.await.is_err(),
+        "an entry instance closed while another holds a request"
+    );
+    release(&events, "held");
+    tokio::time::timeout(WAIT, held)
+        .await
+        .expect("the held request answered in time")
+        .expect("the request's task")
+        .expect("the other entry instance took D and the request was answered");
+    for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
@@ -523,7 +682,7 @@ async fn an_entry_announces_drained_once_its_requests_are_answered() {
 
     m1.readiness.drain().await.expect("the cell drains");
     let entry = &m1.entries[0];
-    closed(entry, PAST_BOUND).await;
+    declining(entry).await;
     assert_eq!(entry.segment.admitted(), 1, "the request admitted before");
     assert!(
         !shows(&mut drained, id(entry)),
@@ -560,7 +719,7 @@ async fn an_interior_instance_serves_until_the_entry_instances_have_drained() {
         let mut retired = phase(&m1.hub, "d", SegmentPhase::Retired).await;
 
         m1.readiness.drain().await.expect("the cell drains");
-        closed(&m1.entries[0], PAST_BOUND).await;
+        declining(&m1.entries[0]).await;
         let sink = &m1.sink;
         assert!(!sink.segment.is_closed(), "the interior instance closed");
         assert!(

@@ -712,6 +712,11 @@ pub trait Drains: Send + Sync + 'static {
     /// for a launch that serves no segment.
     fn close(&self) {}
 
+    /// Refuse the offers that arrive from now on, the hand-offs from
+    /// another class, and take the rest. Nothing by default, for a launch
+    /// that serves no segment.
+    fn decline_offers(&self) {}
+
     /// What its admission holds, for the load report of an entry instance
     /// in a cell. `None` by default, for a launch that serves no segment,
     /// which reports nothing.
@@ -731,6 +736,10 @@ impl<H: Send + Sync + 'static> Drains for Segment<H> {
 
     fn close(&self) {
         Segment::close(self);
+    }
+
+    fn decline_offers(&self) {
+        Segment::decline_offers(self);
     }
 }
 
@@ -801,9 +810,12 @@ impl Launch {
     /// taking new work, and stays ready, for a bound after it learns of the
     /// drain: the setup timeout and twice the cell's `summary_ms`, so that
     /// an offer from a chooser whose view of the cell is stale lands. Then
-    /// it stops without retiring, declines what reaches it from then,
-    /// however long its serving body takes to finish, finishes the
-    /// requests it holds, announces that it has drained, and leaves. An
+    /// it stops without retiring, declines offers from other cells from
+    /// then, however long its serving body takes to finish, finishes the
+    /// requests it holds, and announces that it has drained. It takes the
+    /// hand-offs inside its cell, which carry the requests the cell's entry
+    /// instances took, until every entry instance has drained or left,
+    /// then closes and leaves. An
     /// interior instance serves until every entry instance of its cell has
     /// drained or left, then stops as above. While its cell drains, the
     /// entry instances are an interior instance's drain sources, whatever
@@ -933,9 +945,9 @@ impl Launch {
                         },
                     }
                 };
-                // An entry instance of a draining cell stops taking work at
+                // An entry instance of a draining cell stops taking offers at
                 // its bound, however long the body takes to finish.
-                let closing = self.cell_drain_closes(segment.as_ref(), deadline);
+                let closing = self.cell_drain_declines(segment.as_ref(), deadline);
                 // Peers hear of the retirement while the body finishes; a
                 // lost lease took the hub that would hear it.
                 let retiring = async {
@@ -998,10 +1010,12 @@ impl Launch {
     /// this one has drained or left. Then it closes its entries (ruling
     /// 150) and waits until it holds no request; a stream holds its share
     /// until velo has handed its output on. Each wait ends at `deadline`.
-    /// While its cell drains, an interior instance's sources in (B) are
-    /// the cell's entry instances, and an entry instance closes only once
-    /// its bound has passed, and announces that it has drained once it
-    /// holds no request. With `hub` false (its lease is lost), the hub is
+    /// While its cell drains, an entry instance first waits out its bound,
+    /// declines offers, waits until it holds no request, and announces
+    /// that it has drained; and every instance's sources in (B) are the
+    /// cell's entry instances, so that an entry instance too takes the
+    /// hand-offs inside the cell until no entry instance holds a request
+    /// that may make one. With `hub` false (its lease is lost), the hub is
     /// not asked. Polls; nothing is added to a request's path.
     async fn drain(
         &mut self,
@@ -1010,6 +1024,7 @@ impl Launch {
         // Only a hub is asked; a roster directory has no lease to lose.
         hub: bool,
     ) {
+        self.cell_drain_settles(segment, deadline, hub).await;
         let sources = self.drain_sources();
         let reaching: Vec<&str> = sources.iter().map(String::as_str).collect();
         let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
@@ -1107,15 +1122,11 @@ impl Launch {
             #[cfg(feature = "hub")]
             Peers::Hub(_) => {}
         }
-        self.cell_drain_accepting(deadline).await;
         segment.close();
         while segment.admitted() > 0 {
             if !pause(DRAIN_POLL).await {
                 break;
             }
-        }
-        if hub {
-            self.cell_drained(deadline).await;
         }
     }
 }

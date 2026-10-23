@@ -291,7 +291,7 @@ pub async fn model_proxied<H: Register + Send + Sync + 'static>(
 ) -> (ModelCell<H>, Proxy) {
     let (settings_of_hub, timing, extra) = summarized(cell, runtime);
     let (hub, readiness, proxy) = cell_hub_proxied(spec, settings_of_hub, directory, timing).await;
-    let cell = instances(spec, (hub, readiness), cell, &extra, &|r| r, assemble).await;
+    let cell = instances(spec, (hub, readiness), cell, &extra, &|_, r| r, assemble).await;
     (cell, proxy)
 }
 
@@ -326,7 +326,25 @@ async fn start_model<H: Register + Send + Sync + 'static>(
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> ModelCell<H> {
     let hub = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
-    instances(spec, hub, cell, extra, entry, assemble).await
+    let configure = |segment: &str, runtime| match segment {
+        "f" => entry(runtime),
+        _ => runtime,
+    };
+    instances(spec, hub, cell, extra, &configure, assemble).await
+}
+
+/// [`model_summarized`] with [`RUNTIME`], each instance's runtime
+/// settings changed by `configure`, given the instance's segment.
+pub async fn model_configured<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> ModelCell<H> {
+    let (settings_of_hub, timing, extra) = summarized(cell, RUNTIME);
+    let hub = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
+    instances(spec, hub, cell, &extra, configure, assemble).await
 }
 
 /// Start `cell`'s instances at its hub, each with `extra` added to its
@@ -336,7 +354,7 @@ async fn instances<H: Register + Send + Sync + 'static>(
     (hub, readiness): (Hub, Arc<CellReadiness<Resolving>>),
     cell: Model<'_>,
     extra: &str,
-    entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
+    configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> ModelCell<H> {
     let entries = cell.entries;
@@ -352,10 +370,7 @@ async fn instances<H: Register + Send + Sync + 'static>(
     let mut running = join_all(segments.into_iter().map(|segment| {
         let config = &config;
         async move {
-            let runtime = match segment {
-                "f" => entry(config.runtime.clone()),
-                _ => config.runtime.clone(),
-            };
+            let runtime = configure(segment, config.runtime.clone());
             run_graph(config, segment, spec, runtime, assemble)
                 .await
                 .expect("a model instance serves")

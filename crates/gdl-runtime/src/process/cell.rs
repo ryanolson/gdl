@@ -5,7 +5,7 @@
 //! every answer here is the one its stop has without a cell.
 
 #[cfg(feature = "hub")]
-use super::Peers;
+use super::{DRAIN_POLL, Peers};
 use super::{Drains, Launch};
 
 impl Launch {
@@ -39,53 +39,58 @@ impl Launch {
         self.reaching.clone()
     }
 
-    /// For an entry instance of a draining cell, close `segment`'s entries
-    /// once its bound has passed, or at `deadline`; for any other, nothing.
-    /// What it reads is taken now, so that the wait borrows nothing of the
-    /// launch while the stop goes on beside it.
-    pub(super) fn cell_drain_closes<'a>(
+    /// For an entry instance of a draining cell, decline offers once its
+    /// bound has passed, or at `deadline`; for any other, nothing. What it
+    /// reads is taken now, so that the wait borrows nothing of the launch
+    /// while the stop goes on beside it.
+    pub(super) fn cell_drain_declines<'a>(
         &self,
         segment: &'a dyn Drains,
         deadline: tokio::time::Instant,
     ) -> impl Future<Output = ()> + use<'a> {
         #[cfg(feature = "hub")]
-        let closes = self.cell_drain.as_ref().and_then(|cell| cell.closes());
+        let declines = self.cell_drain.as_ref().and_then(|cell| cell.declines());
         #[cfg(not(feature = "hub"))]
-        let closes: Option<tokio::time::Instant> = None;
+        let declines: Option<tokio::time::Instant> = None;
         async move {
-            if let Some(at) = closes {
+            if let Some(at) = declines {
                 tokio::time::sleep_until(at.min(deadline)).await;
-                segment.close();
+                segment.decline_offers();
             }
         }
     }
 
-    /// For an entry instance of a draining cell, wait until it may stop
-    /// taking new work, or until `deadline`.
-    pub(super) async fn cell_drain_accepting(&self, deadline: tokio::time::Instant) {
+    /// For an entry instance of a draining cell: wait until its bound has
+    /// passed, or until `deadline`, decline offers, wait until it holds no
+    /// request, so that every request it took has been answered, and
+    /// announce that it has drained, retried until `deadline`; with `hub`
+    /// false (its lease is lost), nothing is announced. Any other instance
+    /// goes on at once.
+    pub(super) async fn cell_drain_settles(
+        &mut self,
+        segment: &dyn Drains,
+        deadline: tokio::time::Instant,
+        hub: bool,
+    ) {
         #[cfg(feature = "hub")]
-        if let Some(cell) = &self.cell_drain {
-            cell.accepting(deadline).await;
-        }
-        #[cfg(not(feature = "hub"))]
-        let _ = deadline;
-    }
-
-    /// For an entry instance of a draining cell that holds no request,
-    /// announce that it has drained, retried until `deadline`: the cell's
-    /// interior instances wait for it.
-    pub(super) async fn cell_drained(&mut self, deadline: tokio::time::Instant) {
-        #[cfg(feature = "hub")]
-        if let (Peers::Hub(session), Some(cell)) = (&mut self.peers, &self.cell_drain)
+        if let Some(cell) = &self.cell_drain
             && cell.announces()
-            && let Err(error) = session.drained(deadline).await
         {
-            eprintln!(
-                "{}: could not announce that it drained, so the cell's interior instances wait for it to leave: {error}",
-                self.segment
-            );
+            cell.accepting(deadline).await;
+            segment.decline_offers();
+            while segment.admitted() > 0 && tokio::time::Instant::now() + DRAIN_POLL <= deadline {
+                tokio::time::sleep(DRAIN_POLL).await;
+            }
+            if let (Peers::Hub(session), true) = (&mut self.peers, hub)
+                && let Err(error) = session.drained(deadline).await
+            {
+                eprintln!(
+                    "{}: could not announce that it drained, so the cell's other instances wait for it to leave: {error}",
+                    self.segment
+                );
+            }
         }
         #[cfg(not(feature = "hub"))]
-        let _ = deadline;
+        let _ = (segment, deadline, hub);
     }
 }
