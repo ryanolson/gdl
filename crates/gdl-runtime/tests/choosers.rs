@@ -247,6 +247,60 @@ async fn the_membership_does_not_unregister_what_a_table_holds() {
     }
 }
 
+/// An entry that leaves its cell's table, then the chooser's own hub,
+/// stays registered past the chooser's drain until the membership's own
+/// drain, which began later, ends. The drain is 1 s, and the entry leaves
+/// the hub half a second after the table, so that the two drains end apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_membership_drain_keeps_its_peer() {
+    let directory = Resolving::new();
+    let (global, _) = cell_hub(global_hub(), &directory).await;
+    let (m1, _) = cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (f1, _d1) = (
+        Instance::ready(&m1, "f").await,
+        Instance::ready(&m1, "d").await,
+    );
+    let extra = format!("{}[runtime]\ndrain_ms = 1000\n", global_cell());
+    let config = settings(
+        global.public_addr().port(),
+        global.control_addr().port(),
+        5_000,
+        &extra,
+    );
+    let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
+    let node = chooser.node();
+    let cells = chooser.cells().expect("a chooser");
+    until(&cells, "the entry in the table", |cells| {
+        followed(cells, "f", M1)
+            .is_some_and(|m| m.state == CellState::Ready && m.eligible == [f1.id()])
+    })
+    .await;
+    let id = f1.id();
+    let mut local = f1.also(&global, "f").await;
+    local.announce(SegmentPhase::Serving).await;
+    local.announce(SegmentPhase::Ready).await;
+    let _node = f1.leave().await;
+    until(&cells, "the entry out of the table", |cells| {
+        followed(cells, "f", M1).is_none_or(|m| m.eligible.is_empty())
+    })
+    .await;
+    // The membership's drain begins after the chooser's.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    local.leave().await;
+    until(&cells, "the chooser's drain over", |cells| {
+        !cells.is_registered(id)
+    })
+    .await;
+    assert!(
+        pings(&node, id).await,
+        "the chooser's drain cut the membership's short"
+    );
+    drop(chooser);
+    for hub in [global, m1] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
 /// When the hub's follow of a cell is cut and followed again, the new
 /// generation holds an entry the old one held, and the drain the old one's
 /// end started does not unregister it; an entry only the old generation

@@ -192,12 +192,13 @@ impl<R: Registry> Follows<R> {
             if self.held.contains_key(&id) || !self.registered.remove(&id) {
                 continue;
             }
-            // A peer this instance's own membership routes to is its to
-            // unregister when it leaves: the follower gives it up.
-            let (registry, live) = (&self.registry, &self.live);
-            self.cells.registered(|registered| {
+            // A peer this instance's own membership routes to, or is still
+            // draining, is the membership's to unregister when its drain
+            // ends: the follower gives it up.
+            let (registry, live, cells) = (&self.registry, &self.live, &self.cells);
+            cells.registered(|registered| {
                 registered.remove(&id);
-                if !live.routes_to(id) {
+                if !live.routes_to(id) && !cells.membership_drains(id) {
                     registry.unregister(id);
                 }
             });

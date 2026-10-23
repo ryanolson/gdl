@@ -721,7 +721,8 @@ impl Follower {
     }
 
     fn left(&mut self, segment: &str, id: InstanceId) {
-        self.live.leave(segment, id);
+        let live = &self.live;
+        Cells::leaving(self.cells.as_ref(), id, || live.leave(segment, id));
         self.unresolved.retain(|(_, unresolved)| *unresolved != id);
         // Dropping the promise ends it at the hub, in the background.
         self.acknowledged.remove(&id);
@@ -759,10 +760,8 @@ impl Follower {
                 return true;
             }
             // A peer a chooser's table holds is the chooser's to forget.
-            Cells::exclusive_of(cells.as_ref(), |held| {
-                if !held.contains(id) {
-                    super::unregister_peer(node, *id);
-                }
+            Cells::drained(cells.as_ref(), *id, || {
+                super::unregister_peer(node, *id);
             });
             false
         });

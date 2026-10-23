@@ -677,3 +677,39 @@ async fn a_stalled_watch_holds_no_unregistration() {
     );
     task.abort();
 }
+
+/// A peer that leaves a cell's table, then this instance's own membership,
+/// stays registered until the membership's own drain ends, which comes
+/// after the follower's: the follower's deadline does not cut it short.
+/// The membership's side is what its follower does when the peer leaves
+/// and when its own drain ends.
+#[test]
+fn a_later_membership_drain_keeps_its_peer() {
+    let (mut follows, cells, recorded, live_members) = follower();
+    let start = Instant::now();
+    let x = peer();
+    let id = x.instance_id();
+    live(
+        &mut follows,
+        start,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+    );
+    live_members.join("f", id);
+    recorded.take();
+    live(&mut follows, start, [left(M1, 1, &x)]);
+    // Half the drain later, the peer leaves the membership too.
+    Cells::leaving(Some(&cells), id, || live_members.leave("f", id));
+    follows.forget(start + DRAIN);
+    assert_eq!(
+        recorded.take(),
+        [],
+        "the follower unregistered a peer the membership is still draining"
+    );
+    assert!(
+        !cells.is_registered(id),
+        "the follower kept what it gave up"
+    );
+    // The membership's drain ends: it unregisters the peer then.
+    Cells::drained(Some(&cells), id, || recorded.unregister(id));
+    assert_eq!(recorded.take(), [Call::Unregister(id)]);
+}

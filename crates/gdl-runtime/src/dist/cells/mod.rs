@@ -14,7 +14,7 @@ mod tests;
 pub(crate) use task::follow;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
 use gdl_cells::CellState;
@@ -45,6 +45,10 @@ struct Shared {
     /// lock over the two owners of a peer's registration, this follower
     /// and the instance's membership ([`Cells::exclusive`]).
     registered: watch::Sender<HashSet<InstanceId>>,
+    /// The peers the instance's membership saw leave and has not yet
+    /// unregistered: until its own drain ends, the follower leaves them
+    /// registered. Changed and read only under `registered`'s lock.
+    draining: Mutex<HashSet<InstanceId>>,
 }
 
 impl Cells {
@@ -58,6 +62,7 @@ impl Cells {
                     .collect(),
                 changes: watch::Sender::new(0),
                 registered: watch::Sender::new(HashSet::new()),
+                draining: Mutex::default(),
             }),
         }
     }
@@ -132,6 +137,44 @@ impl Cells {
             Some(cells) => cells.exclusive(act),
             None => act(&HashSet::new()),
         }
+    }
+
+    /// The membership saw `id` leave: `leave` marks it left, and until the
+    /// membership's drain of it ends ([`Cells::drained`]) the follower does
+    /// not unregister it, whatever its own drain says.
+    pub(crate) fn leaving(cells: Option<&Cells>, id: InstanceId, leave: impl FnOnce()) {
+        Self::exclusive_of(cells, |_| {
+            leave();
+            if let Some(cells) = cells {
+                cells.draining().insert(id);
+            }
+        });
+    }
+
+    /// The membership's drain of `id` ended: `unregister` runs unless a
+    /// table's registration holds it, which the follower then forgets in
+    /// its own time.
+    pub(crate) fn drained(cells: Option<&Cells>, id: InstanceId, unregister: impl FnOnce()) {
+        Self::exclusive_of(cells, |held| {
+            if let Some(cells) = cells {
+                cells.draining().remove(&id);
+            }
+            if !held.contains(&id) {
+                unregister();
+            }
+        });
+    }
+
+    /// Whether the membership is draining `id`; asked under the lock.
+    fn membership_drains(&self, id: InstanceId) -> bool {
+        self.draining().contains(&id)
+    }
+
+    fn draining(&self) -> std::sync::MutexGuard<'_, HashSet<InstanceId>> {
+        self.shared
+            .draining
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Change the follower's registrations with `change`, under the lock
