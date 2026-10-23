@@ -220,6 +220,16 @@ impl<H> Segment<H> {
         }
     }
 
+    /// Forward hand-offs that reached this instance, those it refused
+    /// included. Available only with the `fault-injection` feature.
+    #[cfg(feature = "fault-injection")]
+    pub fn offered(&self) -> usize {
+        self.rt
+            .served
+            .offered
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Egress permits this instance holds: one per stream it is producing.
     pub fn egress_in_use(&self) -> usize {
         self.rt.egress.in_use()

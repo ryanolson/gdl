@@ -705,6 +705,10 @@ pub(crate) struct Served {
     pub(crate) forwards: AtomicUsize,
     pub(crate) runs: AtomicUsize,
     pub(crate) inputs: AtomicUsize,
+    /// Forward hand-offs that arrived, refused ones too: what a test
+    /// counts to see where a request was offered.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) offered: AtomicUsize,
 }
 
 #[cfg(test)]

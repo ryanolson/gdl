@@ -674,6 +674,10 @@ where
         let arrived =
             HopFigures::at(&self.figures.forward, pos).map(|figures| (figures, Instant::now()));
         #[cfg(feature = "fault-injection")]
+        rt.served
+            .offered
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "fault-injection")]
         if let Some(delay) = rt.config.faults.delay_forward_arrival {
             tokio::time::sleep(delay).await;
         }

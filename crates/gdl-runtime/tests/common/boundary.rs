@@ -9,6 +9,7 @@ use std::sync::Arc;
 use futures::future::join_all;
 use gdl::{Cx, Next};
 use gdl_model::CellSettings;
+use gdl_runtime::velo::Velo;
 use gdl_runtime::{
     Cells, Deployment, DeploymentSpec, Placement, Process, ProcessConfig, Register, RuntimeConfig,
     Segment,
@@ -52,12 +53,14 @@ pub fn model_hub_needing(name: &str, hub: &str, entries: u32) -> CellSettings {
 /// timeout and drain, so that an instance that stops leaves soon.
 pub const RUNTIME: &str = "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 2000\n";
 
-/// One instance of a segment of the reference graph, serving.
+/// One instance of a segment, serving.
 pub struct Running<H> {
     pub process: Process,
     pub segment: Arc<Segment<H>>,
     /// The tables of a chooser.
     pub cells: Option<Cells>,
+    /// The instance's velo node.
+    pub node: Velo,
     serving: JoinHandle<gdl::Result<()>>,
 }
 
@@ -65,6 +68,11 @@ impl<H> Running<H> {
     /// How many forward hand-offs the instance took.
     pub fn forwards(&self) -> usize {
         self.segment.served().forwards
+    }
+
+    /// How many forward hand-offs reached the instance, taken or refused.
+    pub fn offered(&self) -> usize {
+        self.segment.offered()
     }
 
     /// Stop the instance and wait until it has left.
@@ -86,11 +94,26 @@ pub async fn run(
     runtime: RuntimeConfig,
     events: &Arc<Events>,
 ) -> gdl::Result<Running<impl Next<Prompt, Chunk> + Register + use<>>> {
+    run_graph(config, segment, spec, runtime, &|deployment| {
+        reference_graph(deployment, events)
+    })
+    .await
+}
+
+/// [`run`] for any graph of `spec`, whose root `assemble` builds.
+pub async fn run_graph<H: Register + Send + Sync + 'static>(
+    config: &ProcessConfig<Nothing>,
+    segment: &'static str,
+    spec: &DeploymentSpec,
+    runtime: RuntimeConfig,
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> gdl::Result<Running<H>> {
     let process = Process::start(config).await?;
     let launch = config
         .launch(&process, segment, SEGMENTS, spec, async { Ok(()) })
         .await?;
     let cells = launch.cells();
+    let node = launch.node();
     let deployment = Deployment::new(
         launch.node(),
         &spec.graph,
@@ -99,7 +122,7 @@ pub async fn run(
         launch.roster(),
         runtime,
     )?;
-    let root = reference_graph(&deployment, events)?;
+    let root = assemble(&deployment)?;
     let started = deployment.start(root)?;
     let (tx, rx) = oneshot::channel();
     let serving = tokio::spawn(launch.serve(started, |segment, shutdown| async move {
@@ -115,6 +138,7 @@ pub async fn run(
         process,
         segment,
         cells,
+        node,
         serving,
     })
 }
@@ -145,6 +169,43 @@ pub async fn model(
     entries: usize,
     events: &Arc<Events>,
 ) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
+    let cell = Model {
+        name,
+        hub: hub_name,
+        quorum,
+        entries,
+    };
+    model_of(spec, directory, cell, &|runtime| runtime, &|deployment| {
+        reference_graph(deployment, events)
+    })
+    .await
+}
+
+/// What a model cell has: its name, the name its hub is reached under,
+/// how many entry instances it needs, and how many it starts.
+#[derive(Clone, Copy)]
+pub struct Model<'a> {
+    pub name: &'a str,
+    pub hub: &'a str,
+    pub quorum: u32,
+    pub entries: usize,
+}
+
+/// [`model`] for any graph of `spec`, whose root `assemble` builds, with
+/// each entry instance's runtime settings changed by `entry`.
+pub async fn model_of<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> ModelCell<H> {
+    let Model {
+        name,
+        hub: hub_name,
+        quorum,
+        entries,
+    } = cell;
     let (hub, _) = cell_hub_of(spec, model_hub_needing(name, hub_name, quorum), directory).await;
     let extra = format!("{}{RUNTIME}", model_cell(name));
     let config = settings(
@@ -159,7 +220,11 @@ pub async fn model(
     let mut running = join_all(segments.into_iter().map(|segment| {
         let config = &config;
         async move {
-            run(config, segment, spec, config.runtime.clone(), events)
+            let runtime = match segment {
+                "f" => entry(config.runtime.clone()),
+                _ => config.runtime.clone(),
+            };
+            run_graph(config, segment, spec, runtime, assemble)
                 .await
                 .expect("a model instance serves")
         }
