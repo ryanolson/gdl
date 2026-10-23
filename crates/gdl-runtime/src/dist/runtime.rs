@@ -594,9 +594,9 @@ impl Runtime {
                 Answer::Failed(error) => Err(error),
                 // Boxed, and only here: inline, the failover's state would
                 // grow this future, and so every hand-off's task.
-                Answer::Declined(refusal) => {
+                Answer::Missed(missed) => {
                     drop(lease);
-                    let failover = self.fail_over(crossing, cx, envelope, timed, cell, refusal);
+                    let failover = self.fail_over(crossing, cx, envelope, timed, cell, missed);
                     Box::pin(failover).await
                 }
             };
