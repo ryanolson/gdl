@@ -29,6 +29,9 @@ pub(super) struct Publisher<D> {
     pub(super) feed: Arc<Feed>,
     /// The cell's drain, whose end withdraws the record.
     pub(super) drain: Arc<Drain>,
+    /// The state of the record last stored, for a drain to be answered
+    /// once its record is.
+    pub(super) stored: watch::Sender<Option<CellState>>,
 }
 
 impl<D: CellDirectory> Publisher<D> {
@@ -64,11 +67,12 @@ impl<D: CellDirectory> Publisher<D> {
     ) {
         let directory = &*self.directory;
         let mut writer = Writer::start(directory, &self.record, self.heartbeat).await;
+        let stored = &self.stored;
         let feed = &*self.feed;
         let mut state = *states.borrow_and_update();
         let load = *loads.borrow();
         writer
-            .publish(directory, feed, &self.record, state, load)
+            .publish(directory, (feed, stored), &self.record, state, load)
             .await;
         let mut heartbeat =
             tokio::time::interval_at(tokio::time::Instant::now() + self.heartbeat, self.heartbeat);
@@ -90,13 +94,19 @@ impl<D: CellDirectory> Publisher<D> {
             state = *states.borrow_and_update();
             let load = *loads.borrow();
             writer
-                .publish(directory, feed, &self.record, state, load)
+                .publish(directory, (feed, stored), &self.record, state, load)
                 .await;
         }
         if state != CellState::Draining {
             let load = *loads.borrow();
             writer
-                .publish(directory, feed, &self.record, CellState::Draining, load)
+                .publish(
+                    directory,
+                    (feed, stored),
+                    &self.record,
+                    CellState::Draining,
+                    load,
+                )
                 .await;
         }
         writer.withdraw(directory, &self.record).await;
@@ -144,7 +154,7 @@ impl Writer {
     async fn publish(
         &mut self,
         directory: &impl CellDirectory,
-        feed: &Feed,
+        (feed, stored): (&Feed, &watch::Sender<Option<CellState>>),
         record: &CellRecord,
         state: CellState,
         load: Option<LoadSummary>,
@@ -166,6 +176,7 @@ impl Writer {
                 // The watch carries the record's epoch, which is settled
                 // once a write is stored under it.
                 feed.settle(self.epoch);
+                stored.send_replace(Some(state));
                 self.stored = true;
             }
             Err(DirectoryError::NotNewer { held, offered, .. }) => {

@@ -150,6 +150,8 @@ pub struct CellReadiness<D: CellDirectory> {
     relay: Arc<Relay>,
     /// The cell's drain.
     drain: Arc<Drain>,
+    /// The state of the cell's record last stored in the directory.
+    stored: watch::Sender<Option<CellState>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -250,6 +252,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             summary: (!entries.is_empty()).then_some(cell.summary),
             relay,
             drain: Arc::new(Drain::new(class_segments)),
+            stored: watch::Sender::new(None),
             tasks: Mutex::default(),
         })
     }
@@ -282,8 +285,11 @@ impl<D: CellDirectory> CellReadiness<D> {
 
     /// Start the cell's drain, as `POST drain` on the control listener
     /// does, and return the cell's health once it shows the cell
-    /// `draining`: by then the cell's watchers have been sent the state,
-    /// and its writer has it to publish. From then the cell is `draining`
+    /// `draining` and the directory has stored a record that says so: by
+    /// then the cell's watchers have been sent the state too. A directory
+    /// that takes more than 5 s to store the record leaves the drain to be
+    /// answered without it, since the drain has started either way. From
+    /// then the cell is `draining`
     /// whatever its quorum, for the life of the hub process; a drain
     /// already started is answered the same way. Refused for a cell whose
     /// class no hop enters, which has no entry instances to stop taking
@@ -295,13 +301,19 @@ impl<D: CellDirectory> CellReadiness<D> {
             ));
         }
         self.drain.start();
-        let mut shown = self.health.subscribe();
-        // The judgment takes the drain at once; the bound is for a hub
-        // whose judgment has ended, which answers with what it shows.
-        let _ = tokio::time::timeout(
-            SETTLE,
-            shown.wait_for(|health| health.state == CellState::Draining),
-        )
+        let (mut shown, mut stored) = (self.health.subscribe(), self.stored.subscribe());
+        // The judgment takes the drain at once, and the writer writes it
+        // next; the bound is for a hub whose judgment has ended, or a
+        // directory that does not answer, and the drain is answered with
+        // what the hub shows then.
+        let _ = tokio::time::timeout(SETTLE, async {
+            let _ = shown
+                .wait_for(|health| health.state == CellState::Draining)
+                .await;
+            let _ = stored
+                .wait_for(|state| *state == Some(CellState::Draining))
+                .await;
+        })
         .await;
         let health = shown.borrow().clone();
         Ok(health)
@@ -373,6 +385,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 heartbeat: self.timing.heartbeat,
                 feed: Arc::clone(&self.feed),
                 drain: Arc::clone(&self.drain),
+                stored: self.stored.clone(),
             }
             .run(written, summaries, cancel.clone()),
         );

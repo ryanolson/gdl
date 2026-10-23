@@ -8,7 +8,7 @@
 mod common;
 
 use common::{
-    CELL, GLOBAL, Instance, Records, WAIT, cell_hub, get, global_requiring, health, hub_of,
+    CELL, GLOBAL, Gated, Instance, Records, WAIT, cell_hub, get, global_requiring, health, hub_of,
     meet_the_quorum, timing, usable,
 };
 use futures::{FutureExt, StreamExt};
@@ -232,6 +232,56 @@ async fn a_drained_cell_with_no_instance_is_withdrawn_at_once() {
         seen.iter().rev().nth(1),
         Some(&Some(CellState::Draining)),
         "not draining before it was withdrawn: {seen:?}"
+    );
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// The record the directory holds for the model cell now, if any.
+async fn held(directory: &MemoryDirectory) -> Option<gdl_cells::CellRecord> {
+    let mut watch = directory.watch("model_x", None);
+    let mut record = None;
+    let read = async {
+        while let Some(Ok(event)) = watch.next().await {
+            match event {
+                CellEvent::Current(current) if current.name == CELL => record = Some(current),
+                CellEvent::Synced { .. } => return,
+                _ => {}
+            }
+        }
+    };
+    tokio::time::timeout(WAIT, read)
+        .await
+        .expect("the directory's snapshot in time");
+    record
+}
+
+/// A drain is answered only once the directory has stored the record
+/// that says the cell is draining: while the directory holds the write,
+/// the drain waits for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_is_answered_once_the_draining_record_is_stored() {
+    let directory = Gated::new();
+    let mut records = Records::new(&directory.inner);
+    let (hub, cell) = cell_hub(directory.clone(), timing()).await;
+    let (_instances, _) = meet_the_quorum(&hub).await;
+    records.until(CellState::Ready).await;
+
+    directory.close();
+    let inner = directory.inner.clone();
+    let draining = tokio::spawn(async move {
+        cell.drain().await.expect("the cell drains");
+        held(&inner).await.map(|record| record.state)
+    });
+    directory.holding().await;
+    directory.open();
+    let stored = tokio::time::timeout(WAIT, draining)
+        .await
+        .expect("the drain answered in time")
+        .expect("the drain's task");
+    assert_eq!(
+        stored,
+        Some(CellState::Draining),
+        "the drain was answered before its record was stored"
     );
     hub.shutdown().await.expect("the hub stops");
 }
