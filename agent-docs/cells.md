@@ -315,6 +315,8 @@ pub enum CellEvent { Put(CellRecord), Withdrawn(CellName), Resnapshot }
 
 Expiry is not in the trait: the consumer enforces the lease on its own clock from the last `seq` it saw, for every backend, so the rule is one rule whatever the store does with TTLs.
 
+Addendum, 2026-10-22, during implementation: the trait above is the design's sketch; `crates/gdl-cells` holds the trait as built, and where they differ the crate holds. It makes explicit what the sketch left implicit: a withdrawal is a write ordered by `(epoch, seq)` like a publish (`withdraw` takes the cell's `Withdrawal`, its name and version) and leaves a tombstone; a watch's snapshot ends with `Synced` and its token, every change carries the token to resume after it, and a token of another class, one the backend no longer serves, or a watcher that falls behind its buffer ends the watch with `Resnapshot`; and the watch is an associated type, so a backend's stream is named. The reader's rules (newest `(epoch, seq)` wins, tombstones, expiry on the reader's clock) are one type, `CellView`, for every backend.
+
 ### 6.2 The network between regions
 
 gdl requires any instance to open a stream to any other, in both directions (section 2.6), so the network must route arbitrary instance addresses across regions. Load balancers and service endpoints do not fit: PrivateLink is consumer-to-provider through an NLB, and VPC Lattice routes to a target group, while a velo producer must dial the one process that minted its anchor.
