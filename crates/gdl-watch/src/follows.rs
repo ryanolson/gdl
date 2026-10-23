@@ -70,7 +70,8 @@ pub enum FollowEvent {
         /// The state it changed to.
         state: CellState,
     },
-    /// A followed cell's load summary changed.
+    /// A followed cell's load summary, as its cell watch sent it: once a
+    /// summary period while the cell has one, changed or not.
     Load {
         /// The cell's class.
         class: String,
@@ -78,7 +79,7 @@ pub enum FollowEvent {
         cell: String,
         /// The follow's generation.
         generation: u64,
-        /// The summary it changed to.
+        /// The summary.
         load: Option<LoadSummary>,
     },
     /// An entry instance of a followed cell is routable.

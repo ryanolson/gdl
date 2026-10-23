@@ -232,12 +232,19 @@ mod tests {
                     limit: 8,
                     instances: 2,
                     refusals: 1,
+                    period_ms: 1000,
                 })
             })
             .expect("an event serializes"),
             serde_json::json!({
                 "event": "load",
-                "load": { "admitted": 3, "limit": 8, "instances": 2, "refusals": 1 },
+                "load": {
+                    "admitted": 3,
+                    "limit": 8,
+                    "instances": 2,
+                    "refusals": 1,
+                    "period_ms": 1000
+                },
             }),
         );
         assert_eq!(

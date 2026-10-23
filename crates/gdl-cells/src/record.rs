@@ -97,8 +97,9 @@ pub enum CellState {
 
 /// The load of a cell's entry segments, summed over their usable
 /// instances, as the cell's hub makes it once a summary period from the
-/// instances' reports. Admission counts roots, not engine work, so a
-/// policy built on it is an admission heuristic.
+/// instances' reports, and sends it on the cell's watch each period,
+/// changed or not. Admission counts roots, not engine work, so a policy
+/// built on it is an admission heuristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoadSummary {
     /// The roots the instances that reported hold admitted.
@@ -111,6 +112,10 @@ pub struct LoadSummary {
     /// The hand-offs the instances that reported declined, each in the
     /// period before its report.
     pub refusals: u64,
+    /// The cell's summary period, in milliseconds: a reader that has had
+    /// no summary for a few periods knows its last one is stale, without
+    /// knowing the cell's settings.
+    pub period_ms: u64,
 }
 
 /// A cell's withdrawal of its record: the last write of a cell that

@@ -12,7 +12,8 @@ mod common;
 use std::sync::Arc;
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, ask, model_summarized, placement, run_graph, spec_of,
+    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, model_summarized, placement, run_graph,
+    spec_of,
 };
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::{Chunk, Events, Plan, Prompt, WAIT, prompt, reference_graph};
@@ -42,6 +43,7 @@ fn summary(admitted: u64, entries: u32, refusals: u64) -> Option<LoadSummary> {
         limit: LIMIT as u64 * u64::from(entries),
         instances: entries,
         refusals,
+        period_ms: u64::try_from(SUMMARY.as_millis()).expect("a short period"),
     })
 }
 

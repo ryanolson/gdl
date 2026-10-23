@@ -817,6 +817,7 @@ fn summary(admitted: u64) -> LoadSummary {
         limit: 16,
         instances: 2,
         refusals: 0,
+        period_ms: 1000,
     }
 }
 

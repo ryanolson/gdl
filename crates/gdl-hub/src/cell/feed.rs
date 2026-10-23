@@ -248,7 +248,9 @@ impl Feed {
     }
 
     /// Make the cell's load summary at `now` from the reports of its usable
-    /// entry instances, and send it to the watchers if it changed.
+    /// entry instances, and send it to the watchers: every period while
+    /// there is one, changed or not, so that a watcher's age of the last
+    /// it had says how fresh it is; and once when there is none.
     pub(super) fn summarize(&self, now: Instant) -> Option<LoadSummary> {
         let mut shared = self.lock();
         let Shared { entries, loads, .. } = &mut *shared;
@@ -259,10 +261,12 @@ impl Feed {
                 .get(id)
                 .is_some_and(|entry| entry.usable() && entry.epoch == epoch)
         };
-        if let Some(load) = loads.summarize(usable, instances, now) {
+        let changed = loads.summarize(usable, instances, now).is_some();
+        let load = shared.loads.summary();
+        if changed || load.is_some() {
             shared.send(CellWatchEvent::Load { load });
         }
-        shared.loads.summary()
+        load
     }
 
     /// The counting saw `event` on the `watched` service of the class's

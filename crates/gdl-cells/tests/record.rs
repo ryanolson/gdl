@@ -22,6 +22,7 @@ fn record() -> CellRecord {
             limit: 64,
             instances: 2,
             refusals: 1,
+            period_ms: 10_000,
         }),
     }
 }

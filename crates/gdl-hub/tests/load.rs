@@ -1,8 +1,8 @@
 //! A cell's load summary: each usable entry instance reports its
 //! admission to its cell's hub once a period, authenticated as itself;
 //! the hub sums the reports it counts into the cell's summary, which the
-//! record carries on each heartbeat, the cell watch sends when it
-//! changes, and a following hub relays. Instances here report by hand,
+//! record carries on each heartbeat, the cell watch sends each period,
+//! and a following hub relays. Instances here report by hand,
 //! as the runtime's reporter does, through velo-hub's extension client.
 //! Every hub runs in process on OS-assigned ports; every wait is for
 //! something observed.
@@ -55,6 +55,7 @@ fn summary(admitted: u64, limit: u64, instances: u32, refusals: u64) -> Option<L
         limit,
         instances,
         refusals,
+        period_ms: 1000,
     })
 }
 
@@ -322,7 +323,8 @@ async fn follow_event(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> 
 
 /// A hub that follows a cell relays its summary: in the follow's first
 /// event, then as each load event of the cell, with the follow's
-/// generation.
+/// generation. The cell sends its summary every period, so the earlier
+/// one may be relayed again before the new one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_following_hub_relays_the_summary() {
     let directory = Resolving::new();
@@ -376,6 +378,7 @@ async fn a_following_hub_relays_the_summary() {
                 generation: of,
                 load,
             } = follow_event(&mut follows).await
+                && load != summary(3, 8, 1, 1)
             {
                 return (class, cell, of, load);
             }
@@ -392,6 +395,74 @@ async fn a_following_hub_relays_the_summary() {
             summary(5, 8, 1, 0)
         )
     );
+    for hub in [global_hub, model_hub] {
+        hub.shutdown().await.expect("the hub stops");
+    }
+}
+
+/// A summary is sent every period, changed or not, and carries its
+/// period, so that a reader can tell a quiet cell's summary from a stale
+/// one by its age: a cell whose one entry instance reports the same load
+/// each period sends the same summary each period, on its watch and on a
+/// following hub's relay. The instance reports once a period, as the
+/// runtime's reporter does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_cells_summary_is_sent_every_period() {
+    let directory = Resolving::new();
+    let (model_hub, model) = serve_cell(
+        cell(common::CELL, "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let mut cell_watch = watch(&model).await;
+    let mut instances = Vec::new();
+    for segment in ["f", "d", "d"] {
+        instances.push(join_ready(&model_hub, segment).await);
+    }
+    ready(&mut cell_watch, 1).await;
+    let (global_hub, global) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let mut follows = global.follows();
+    let quiet = summary(2, 8, 1, 0);
+    assert_eq!(
+        quiet.map(|quiet| quiet.period_ms),
+        Some(1000),
+        "the summary's period"
+    );
+    let reporting = async {
+        loop {
+            instances[0]
+                .report(report(2, 8, 0))
+                .await
+                .expect("the hub takes it");
+            tokio::time::sleep(PERIOD).await;
+        }
+    };
+    let seen = async {
+        let mut watched = 0;
+        while watched < 3 {
+            if let CellWatchEvent::Load { load } =
+                cell_watch.next().await.expect("the watch goes on")
+                && load == quiet
+            {
+                watched += 1;
+            }
+        }
+        let mut relayed = 0;
+        while relayed < 2 {
+            if let FollowEvent::Load { load, .. } = follow_event(&mut follows).await
+                && load == quiet
+            {
+                relayed += 1;
+            }
+        }
+    };
+    tokio::select! {
+        () = reporting => {}
+        waited = tokio::time::timeout(PERIOD * 8, seen) => {
+            assert!(waited.is_ok(), "the quiet summary was not sent every period");
+        }
+    }
     for hub in [global_hub, model_hub] {
         hub.shutdown().await.expect("the hub stops");
     }

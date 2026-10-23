@@ -100,8 +100,9 @@ pub use feed::CellWatch;
 /// admitted and the admission limits summed, the usable entry instances
 /// counted, and the refusals of each report's period summed; `None` while
 /// no report is counted, and always for a class that no hop enters. The
-/// watch sends it as a `load` event when it changes, and the record
-/// carries it on its next write.
+/// watch sends it as a `load` event every period while there is one,
+/// changed or not, so that a watcher's age of it says how fresh it is,
+/// and once when there is none; the record carries it on its next write.
 ///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,

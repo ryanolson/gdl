@@ -106,10 +106,12 @@ pub enum CellWatchEvent {
         /// The state it changed to.
         state: CellState,
     },
-    /// The cell's load summary changed: sent at most once a summary
-    /// period.
+    /// The cell's load summary: sent once a summary period while the cell
+    /// has one, changed or not, so that a watcher can tell a quiet cell
+    /// from a stale summary by its age, and once when it no longer has
+    /// one.
     Load {
-        /// The summary it changed to.
+        /// The summary.
         load: Option<LoadSummary>,
     },
     /// An entry instance announced that it is ready, and has not retired.

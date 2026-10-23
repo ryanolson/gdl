@@ -256,9 +256,9 @@ pub struct FollowedCell {
     /// has none. Nothing chooses by it yet.
     pub load: Option<LoadSummary>,
     /// How long ago, on this instance's clock, the summary arrived: a
-    /// summary is sent when it changes, so this is the time since it last
-    /// changed, or since the follow was first shown. `None` with no
-    /// summary.
+    /// cell's hub sends its summary every period, so this is the time
+    /// since the hub last made it, or since the follow was first shown.
+    /// `None` with no summary.
     pub load_age: Option<std::time::Duration>,
     /// The entry instances of the segment that may be routed to, by id:
     /// none while the state is `draining` or `unavailable`.

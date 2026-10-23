@@ -35,6 +35,8 @@ pub(super) struct Reports {
     reports: HashMap<InstanceId, Report>,
     /// How long a report counts for.
     kept: Duration,
+    /// The summary period, which each summary carries.
+    period_ms: u64,
     summary: Option<LoadSummary>,
 }
 
@@ -44,6 +46,7 @@ impl Reports {
         Self {
             reports: HashMap::new(),
             kept: period * KEPT,
+            period_ms: u64::try_from(period.as_millis()).unwrap_or(u64::MAX),
             summary: None,
         }
     }
@@ -100,6 +103,7 @@ impl Reports {
         let summary = (!self.reports.is_empty()).then(|| {
             let mut summary = LoadSummary {
                 instances,
+                period_ms: self.period_ms,
                 ..LoadSummary::default()
             };
             for Report { load: report, .. } in self.reports.values() {
@@ -128,8 +132,8 @@ struct Report {
 
 /// Make the cell's summary once a `period` until `cancel`, starting one
 /// period from now, when the first reports can have arrived: each one
-/// goes to the feed's watchers when it changed, and to `loads`, which the
-/// record is written from.
+/// goes to the feed's watchers (every period while there is one), and to
+/// `loads`, which the record is written from when it changed.
 pub(super) async fn run(
     feed: Arc<Feed>,
     period: Duration,
@@ -191,6 +195,7 @@ mod tests {
             limit: 16,
             instances: 2,
             refusals: 1,
+            period_ms: 1000,
         };
         assert_eq!(reports.summarize(|_, _| true, 2, start), Some(Some(both)));
         assert_eq!(reports.summarize(|_, _| true, 2, start + period * 3), None);
@@ -205,6 +210,7 @@ mod tests {
                 limit: 8,
                 instances: 2,
                 refusals: 0,
+                period_ms: 1000,
             })),
             "a's report is past three periods"
         );
@@ -220,6 +226,7 @@ mod tests {
                 limit: 8,
                 instances: 1,
                 refusals: 0,
+                period_ms: 1000,
             })),
             "a dropped report is not kept"
         );
@@ -245,6 +252,7 @@ mod tests {
                 limit: 8,
                 instances: 1,
                 refusals: 3,
+                period_ms: 1000,
             }))
         );
         reports.put(a, *EPOCH, report(1, 8, 0), start);
@@ -255,6 +263,7 @@ mod tests {
                 limit: 8,
                 instances: 1,
                 refusals: 0,
+                period_ms: 1000,
             })),
             "refusals a summary counted were carried again"
         );
@@ -267,6 +276,7 @@ mod tests {
                 limit: 8,
                 instances: 1,
                 refusals: 2,
+                period_ms: 1000,
             })),
             "the summary's period lost the refusals of a report it never counted"
         );
@@ -280,6 +290,7 @@ mod tests {
                 limit: 8,
                 instances: 1,
                 refusals: 0,
+                period_ms: 1000,
             })),
             "an earlier registration's refusals were carried into a later one's"
         );
