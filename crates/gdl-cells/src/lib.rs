@@ -13,8 +13,8 @@
 //!
 //! A backend crate and the hub both depend on this crate, so it holds no
 //! transport: no velo, no velo-hub, no HTTP. The hub's publishing (its
-//! quorum and the state it derives), the follow link between hubs, and
-//! the cell policy that picks a cell live elsewhere.
+//! quorum and the state it derives) is `gdl-hub`'s; the follow link
+//! between hubs and the cell policy that picks a cell live elsewhere.
 
 #[cfg(feature = "conformance")]
 pub mod conformance;
