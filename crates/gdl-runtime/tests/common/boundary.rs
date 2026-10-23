@@ -171,14 +171,19 @@ pub async fn model(
 }
 
 /// A request through the source that streams three items, and its
-/// answer: `Ok` when every item came, the error otherwise.
+/// answer: `Ok` when every item came, the error otherwise. The whole
+/// request is bounded by [`WAIT`].
 pub async fn ask<H: Next<Prompt, Chunk>>(front: &Segment<H>) -> gdl::Result<()> {
     let plan = Plan {
         tokens: 3,
         ..Plan::default()
     };
-    let out = front.call(Cx::new(), prompt("across", plan)).await?;
-    let answer = collect(out).await;
+    let answer = tokio::time::timeout(WAIT, async {
+        let out = front.call(Cx::new(), prompt("across", plan)).await?;
+        Ok::<_, gdl::Error>(collect(out).await)
+    })
+    .await
+    .expect("the request was answered in time")?;
     if let Some(Err(error)) = answer.iter().find(|item| item.is_err()) {
         return Err(error.clone());
     }

@@ -250,6 +250,9 @@ mod tests {
         )
     }
 
+    /// The longest a test waits for something it expects.
+    const WAIT: Duration = Duration::from_secs(5);
+
     fn ids(n: usize) -> Vec<InstanceId> {
         (0..n).map(|_| InstanceId::new_v4()).collect()
     }
@@ -350,13 +353,19 @@ mod tests {
                     .map(|(id, picked)| (id, picked.lease))
             }
         });
-        waiting.arrived.notified().await;
+        tokio::time::timeout(WAIT, waiting.arrived.notified())
+            .await
+            .expect("the selector was asked in time");
         // While the selector waits, its choice leaves the cell's table.
         crossing.target.table.store(Arc::new(EntryTable {
             cells: Box::new([cell("m", CellState::Ready, &ids[1..])]),
         }));
         waiting.release.notify_one();
-        let (chosen, lease) = choosing.await.expect("joined").expect("a choice");
+        let (chosen, lease) = tokio::time::timeout(WAIT, choosing)
+            .await
+            .expect("chose in time")
+            .expect("joined")
+            .expect("a choice");
         assert_eq!(chosen, ids[1], "sent to an instance its cell no longer has");
         assert_eq!(waiting.calls.load(Ordering::SeqCst), 2);
         assert_eq!(
