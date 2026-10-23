@@ -36,7 +36,7 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### An instance of an earlier build reads an unknown outcome as a transport error
 
-- **What happens:** an error of the kind `OutcomeUnknown` (a hand-off whose answer did not come, so the receiver may have run it) reaches an instance built before the kind existed as a `Transport` error whose message begins `[outcome unknown] `. An instance of this build reads it back as `OutcomeUnknown`.
+- **What happens:** an error of the kind `OutcomeUnknown` (a hand-off whose answer did not come, so the receiver may have run it) reaches an instance built before the kind existed as a `Transport` error whose message begins `[outcome unknown] `. An instance of this build reads it back as `OutcomeUnknown`. A `Transport` error whose own message begins with `[outcome unknown] ` or `[transport] ` is sent with `[transport] ` before it, so that this build reads it back as it was; an earlier build shows the prefix.
 - **Why:** an earlier build refuses an error kind it does not know, and with it the stream item that carries the error, and it refuses an error with a field it does not know too. So the new kind is sent as the earlier kind nearest it, with its name in the message.
 - **Would lift it:** nothing, for the builds that came before; a kind added later is sent the same way.
 - **See:** `crates/gdl/src/error.rs`.

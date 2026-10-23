@@ -155,7 +155,9 @@ impl fmt::Display for ErrorKind {
 /// its message. A peer of an earlier build refuses a kind it does not know,
 /// and with it the whole item that carries the error, so a kind added
 /// since is sent as the earlier kind nearest it, with its own name at the
-/// start of the message ([`OUTCOME_UNKNOWN`]), and read back here. An extra
+/// start of the message ([`OUTCOME_UNKNOWN`]), and read back here; a
+/// message of the earlier kind that begins the same way is escaped
+/// ([`TRANSPORT`]). An extra
 /// field would not do: such a peer refuses an error of three fields too.
 #[derive(Serialize, Deserialize)]
 struct Wire<M> {
@@ -183,6 +185,12 @@ enum WireKind {
 /// `Transport` error. A peer of an earlier build shows it as written.
 const OUTCOME_UNKNOWN: &str = "[outcome unknown] ";
 
+/// What starts the message of a `Transport` error whose own message
+/// begins with [`OUTCOME_UNKNOWN`] or with this, so that it is not read
+/// back as another kind or with its message cut. Only such a message pays
+/// for it.
+const TRANSPORT: &str = "[transport] ";
+
 impl Serialize for Error {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let message = std::borrow::Cow::Borrowed(self.message.as_str());
@@ -193,6 +201,14 @@ impl Serialize for Error {
             ErrorKind::Truncated => (WireKind::Truncated, message),
             ErrorKind::NotHosted => (WireKind::NotHosted, message),
             ErrorKind::Overloaded => (WireKind::Overloaded, message),
+            ErrorKind::Transport
+                if message.starts_with(OUTCOME_UNKNOWN) || message.starts_with(TRANSPORT) =>
+            {
+                (
+                    WireKind::Transport,
+                    std::borrow::Cow::Owned(format!("{TRANSPORT}{message}")),
+                )
+            }
             ErrorKind::Transport => (WireKind::Transport, message),
             ErrorKind::Codec => (WireKind::Codec, message),
             ErrorKind::Placement => (WireKind::Placement, message),
@@ -216,6 +232,9 @@ impl From<Wire<String>> for Error {
             WireKind::NotHosted => ErrorKind::NotHosted,
             WireKind::Overloaded => ErrorKind::Overloaded,
             WireKind::Transport => {
+                if let Some(rest) = message.strip_prefix(TRANSPORT) {
+                    return Self::new(ErrorKind::Transport, rest);
+                }
                 if let Some(rest) = message.strip_prefix(OUTCOME_UNKNOWN) {
                     return Self::new(ErrorKind::OutcomeUnknown, rest);
                 }
@@ -261,6 +280,34 @@ mod tests {
         let received: Error = rmp_serde::from_slice(&bytes).expect("decode");
         assert!(!received.is_relayed());
         assert_eq!(received, error);
+    }
+
+    /// Every error crosses as it was, whatever its message begins with:
+    /// a transport error whose message looks like the wire's marker, or its
+    /// escape, is not read as another kind or with its message changed.
+    #[test]
+    fn a_message_that_looks_like_the_marker_crosses_as_it_was() {
+        let messages = [
+            "",
+            "peer refused",
+            "[outcome unknown] peer refused before send",
+            "[outcome unknown] ",
+            "[transport] peer refused",
+            "[transport] [outcome unknown] peer refused",
+            "[outcome unknown] [transport] peer refused",
+        ];
+        for kind in [
+            ErrorKind::Transport,
+            ErrorKind::OutcomeUnknown,
+            ErrorKind::Node,
+        ] {
+            for message in messages {
+                let error = Error::new(kind, message);
+                let bytes = rmp_serde::to_vec(&error).expect("encode");
+                let back: Error = rmp_serde::from_slice(&bytes).expect("decode");
+                assert_eq!(back, error, "{kind:?} {message:?}");
+            }
+        }
     }
 
     /// The error and its kinds as the previous build declares them.
