@@ -306,8 +306,9 @@ async fn a_retired_entry_declines_and_another_cell_answers() {
 
 /// With every cell full, a request is offered to at most
 /// `1 + cell_failovers` cells, each once, and fails with the last
-/// refusal's `Overloaded`. The cells are filled through the chooser
-/// itself, each held request taking the next cell with room.
+/// refusal's `Overloaded`; with more failovers than cells, it runs out of
+/// cells first, and fails the same way. The cells are filled through the
+/// chooser itself, each held request taking the next cell with room.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn when_every_cell_declines_the_request_is_overloaded() {
     let spec = spec_of(placement());
@@ -328,6 +329,14 @@ async fn when_every_cell_declines_the_request_is_overloaded() {
         &spec,
         &hub,
         "cell_failovers = 0\n",
+        Selectors::new(),
+        &assemble,
+    )
+    .await;
+    let many = chooser(
+        &spec,
+        &hub,
+        "cell_failovers = 4\n",
         Selectors::new(),
         &assemble,
     )
@@ -362,7 +371,7 @@ async fn when_every_cell_declines_the_request_is_overloaded() {
         (M2, CellState::Degraded),
         (M3, CellState::Degraded),
     ];
-    for chooser in [&default, &one, &none] {
+    for chooser in [&default, &one, &none, &many] {
         following(&tables(chooser), &expected).await;
     }
     let mut held = Vec::new();
@@ -375,7 +384,7 @@ async fn when_every_cell_declines_the_request_is_overloaded() {
         "each cell holds one"
     );
 
-    for (chooser, tried) in [(&default, 3), (&one, 2), (&none, 1)] {
+    for (chooser, tried) in [(&default, 3), (&one, 2), (&none, 1), (&many, 3)] {
         let before = offered(&cells);
         let error = ask(&chooser.segment).await.expect_err("every cell is full");
         assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
