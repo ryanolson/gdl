@@ -76,10 +76,11 @@ impl Crossing {
     /// Choose a cell for one attempt, then ask `selector` to choose among
     /// that cell's eligible entry instances alone; `None` when no cell but
     /// those in `excluded` may take it. A selector may wait, so the choice
-    /// is checked when it returns (ruling 154): if the cell's table changed
-    /// meanwhile and the instance is no longer eligible in the cell's
-    /// current table, the choice and its lease are dropped and both the
-    /// cell and the instance are chosen again. Boxed, as
+    /// is checked when it returns (ruling 154): if the instance is no
+    /// longer eligible in the cell's current table, or the cell itself no
+    /// longer is by the cell policy (its summary went, or went stale), the
+    /// choice and its lease are dropped and both the cell and the instance
+    /// are chosen again. Boxed, as
     /// [`Live::choose`](crate::dist::roster::Live::choose) is.
     pub(crate) fn choose<'a>(
         &'a self,
@@ -102,7 +103,14 @@ impl Crossing {
                     )
                     .await?;
                 let chosen = cell.eligible[picked.index];
-                if still_eligible(&self.target.table.load(), &cell, chosen) {
+                let target = &self.target;
+                let now = tokio::time::Instant::now();
+                let policy = |current: &CellTable| {
+                    target
+                        .policy
+                        .eligible(current, &target.region, excluded, now)
+                };
+                if still_eligible(&target.table.load(), &cell, chosen, policy) {
                     return Ok(Some((chosen, cell.id, picked)));
                 }
             }
@@ -169,14 +177,21 @@ impl Crossing {
 }
 
 /// Whether `chosen`, an instance of `cell`, is still eligible in `table`,
-/// which may be newer: `cell` itself is still current, or the cell's
-/// current table, of whatever generation, still offers it.
-fn still_eligible(table: &EntryTable, cell: &Arc<CellTable>, chosen: InstanceId) -> bool {
+/// which may be newer: the cell's current table, of whatever generation,
+/// is `cell` itself or still offers it, and `policy` still takes it.
+fn still_eligible(
+    table: &EntryTable,
+    cell: &Arc<CellTable>,
+    chosen: InstanceId,
+    policy: impl Fn(&CellTable) -> bool,
+) -> bool {
     table
         .cells
         .iter()
         .find(|now| now.class == cell.class && now.cell == cell.cell)
-        .is_some_and(|now| Arc::ptr_eq(now, cell) || now.eligible.contains(&chosen))
+        .is_some_and(|now| {
+            (Arc::ptr_eq(now, cell) || now.eligible.contains(&chosen)) && policy(now)
+        })
 }
 
 /// How the instance within the chosen cell is chosen: the hand-off's own
@@ -471,6 +486,77 @@ mod tests {
         assert_eq!(waiting.leases.load(Ordering::SeqCst), 0);
     }
 
+    /// A selector that waits, over a crossing into the one cell `m`, whose
+    /// first choice is held until `change` has run: what the choice comes
+    /// to once it is let go.
+    async fn chosen_after(
+        change: impl AsyncFnOnce(&Crossing, &[InstanceId]),
+    ) -> Option<(InstanceId, u64)> {
+        let ids = ids(2);
+        let waiting = Arc::new(Waiting {
+            target: ids[0],
+            calls: AtomicUsize::new(0),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            leases: Arc::new(AtomicUsize::new(0)),
+        });
+        let crossing = Arc::new(crossing(
+            vec![cell("m", CellState::Ready, &ids)],
+            Router::Policy(Policy::RoundRobin),
+        ));
+        let choosing = tokio::spawn({
+            let crossing = Arc::clone(&crossing);
+            let waiting = Arc::clone(&waiting);
+            async move {
+                let selector = gdl::__runtime::Typed(waiting);
+                let cx = Cx::new();
+                crossing
+                    .choose(&selector, &cx, &[], &[])
+                    .await
+                    .map(|chosen| chosen.map(|(id, cell, _)| (id, cell)))
+            }
+        });
+        tokio::time::timeout(WAIT, waiting.arrived.notified())
+            .await
+            .expect("the selector was asked in time");
+        change(&crossing, &ids).await;
+        waiting.release.notify_one();
+        tokio::time::timeout(WAIT, choosing)
+            .await
+            .expect("chose in time")
+            .expect("joined")
+            .expect("no error")
+    }
+
+    /// A cell whose summary is gone while the selector waited is not sent
+    /// to, though it still has the chosen instance: with no other cell,
+    /// there is no choice, and the request fails with `Routing`.
+    #[tokio::test]
+    async fn a_cell_whose_summary_went_while_the_selector_waited_is_not_sent_to() {
+        let chosen = chosen_after(async |crossing: &Crossing, ids: &[InstanceId]| {
+            let mut unknown = Arc::try_unwrap(cell("m", CellState::Ready, ids)).expect("one owner");
+            unknown.load = None;
+            crossing.target.table.store(Arc::new(EntryTable {
+                cells: Box::new([Arc::new(unknown)]),
+            }));
+        })
+        .await;
+        assert_eq!(chosen, None, "sent to a cell with no summary");
+    }
+
+    /// A cell whose summary went stale while the selector waited, on the
+    /// chooser's clock, is not sent to either, though its table is the one
+    /// it was chosen from.
+    #[tokio::test(start_paused = true)]
+    async fn a_cell_whose_summary_went_stale_while_the_selector_waited_is_not_sent_to() {
+        let chosen = chosen_after(async |_: &Crossing, _: &[InstanceId]| {
+            // The summary's period is 60 s; it is stale after three.
+            tokio::time::advance(Duration::from_secs(181)).await;
+        })
+        .await;
+        assert_eq!(chosen, None, "sent to a cell whose summary is stale");
+    }
+
     #[tokio::test]
     async fn a_choice_still_in_its_cells_newer_table_is_kept() {
         let ids = ids(2);
@@ -482,15 +568,15 @@ mod tests {
         let newer = EntryTable {
             cells: Box::new([cell("m", CellState::Ready, &ids)]),
         };
-        assert!(still_eligible(&newer, chosen, ids[0]));
+        assert!(still_eligible(&newer, chosen, ids[0], |_| true));
         let fewer = EntryTable {
             cells: Box::new([cell("m", CellState::Ready, &ids[1..])]),
         };
-        assert!(!still_eligible(&fewer, chosen, ids[0]));
+        assert!(!still_eligible(&fewer, chosen, ids[0], |_| true));
         let gone = EntryTable {
             cells: Box::new([]),
         };
-        assert!(!still_eligible(&gone, chosen, ids[1]));
+        assert!(!still_eligible(&gone, chosen, ids[1], |_| true));
     }
 
     /// What a chooser's boundary pick costs over a pick in its own roster,

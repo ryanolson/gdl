@@ -28,6 +28,12 @@ pub(crate) trait CellChooser: Send + Sync + 'static {
         now: Instant,
         draw: u64,
     ) -> Option<usize>;
+
+    /// Whether `cell` may still be sent to at `now`, by the same rules as
+    /// [`choose`](CellChooser::choose) but for damping: a choice that waited
+    /// on a selector is checked again with it, since the cell's summary may
+    /// have gone or gone stale meanwhile.
+    fn eligible(&self, cell: &CellTable, region: &str, excluded: &[u64], now: Instant) -> bool;
 }
 
 /// The cell policy the placement names for `class`, refused, naming the
@@ -282,6 +288,12 @@ impl CellChooser for HomeFirst {
             [Some((one, _)), None] | [None, Some((one, _))] => Some(one),
             [None, None] => None,
         }
+    }
+
+    /// Whether `cell` is in a tier: a damped cell is still eligible, since
+    /// damping steers the next choices, not one already made.
+    fn eligible(&self, cell: &CellTable, region: &str, excluded: &[u64], now: Instant) -> bool {
+        Self::tier(cell, region, excluded, now).is_some()
     }
 }
 
