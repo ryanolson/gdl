@@ -431,6 +431,46 @@ mod tests {
         assert_eq!(leases.load(Ordering::SeqCst), 0, "the lease was kept");
     }
 
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Prompt {
+        text: String,
+    }
+
+    /// Reads the head as a `Prompt`, then takes the first instance.
+    struct Reading;
+
+    impl gdl::Selector for Reading {
+        type Head = Prompt;
+
+        async fn select<'a>(
+            &'a self,
+            request: gdl::Request<'a, Prompt>,
+            instances: Instances<'a>,
+        ) -> Result<gdl::Choice<'a>> {
+            assert_eq!(request.head().text, "hello");
+            Ok(gdl::Choice::new(instances.get(0).expect("one")))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_selector_reads_the_head_in_its_edges_encoding() {
+        let ids = ids(1);
+        let crossing = crossing(
+            vec![cell("m", CellState::Ready, &ids)],
+            Router::Policy(Policy::RoundRobin),
+        );
+        let selector = gdl::__runtime::Typed(Arc::new(Reading));
+        let head = serde_json::to_vec(&Prompt {
+            text: "hello".into(),
+        })
+        .expect("encoded");
+        let (chosen, _) = crossing
+            .choose(&selector, &Cx::new(), &head, gdl_model::Encoding::Json)
+            .await
+            .expect("the selector read a JSON head");
+        assert_eq!(chosen, ids[0]);
+    }
+
     #[tokio::test]
     async fn a_choice_still_in_its_cells_newer_table_is_kept() {
         let ids = ids(2);
