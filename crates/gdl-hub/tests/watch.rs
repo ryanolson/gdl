@@ -369,7 +369,7 @@ async fn a_watcher_that_falls_behind_its_buffer_is_ended() {
     };
     let (hub, cell_readiness) = cell_hub(directory.clone(), timing).await;
     let published = records.next().await;
-    let mut behind = cell_readiness.watch().expect("the record is published");
+    let mut behind = cell_readiness.watch().await.expect("the hub runs");
     let mut watch = watching(&hub).await;
     let mut view = View::of(&snapshot(&mut watch).await);
 
@@ -469,7 +469,7 @@ async fn dropping_a_watch_releases_it() {
             .expect("the extension lives");
     };
     count(0).await;
-    let inside = cell_readiness.watch().expect("the record is published");
+    let inside = cell_readiness.watch().await.expect("the hub runs");
     count(1).await;
     let mut outside = watching(&hub).await;
     snapshot(&mut outside).await;
@@ -481,32 +481,43 @@ async fn dropping_a_watch_releases_it() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// A hub refuses a watch until it has published its cell's record, since
-/// until then the epoch it would send is not settled; then the watch
-/// carries the record's epoch.
+/// A watch that arrives before the hub has stored its cell's record waits
+/// for it, since until then the epoch it would send is not settled; then
+/// it carries the record's epoch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watch_waits_for_the_cells_first_record() {
     let gate = Gated::new();
     let mut records = Records::new(&gate.inner);
     gate.close();
-    let (hub, _cell) = hub_of(settings(), gate.clone(), timing()).await;
+    let (hub, cell_readiness) = hub_of(settings(), gate.clone(), timing()).await;
     gate.holding().await;
-    let watcher = CellWatcher::new().expect("a client");
-    let refused = watcher.watch(&address(&hub)).await;
-    let Err(error) = refused else {
-        panic!("watched a cell that has published nothing");
-    };
-    assert!(error.to_string().contains("503"), "{error}");
+    let mut inside = Box::pin(cell_readiness.watch());
+    assert!(
+        futures::poll!(inside.as_mut()).is_pending(),
+        "no epoch while the write is held"
+    );
+    let address = address(&hub);
+    let outside = tokio::spawn(async move {
+        let watcher = CellWatcher::new().expect("a client");
+        watcher.watch(&address).await
+    });
     gate.open();
     let published = records.next().await;
-    let mut watch = watching(&hub).await;
-    assert_eq!(
-        snapshot(&mut watch).await,
-        [
-            cell(published.epoch, CellState::Unavailable),
-            CellWatchEvent::Synced
-        ]
-    );
+    let expected = [
+        cell(published.epoch, CellState::Unavailable),
+        CellWatchEvent::Synced,
+    ];
+    let mut inside = tokio::time::timeout(WAIT, inside)
+        .await
+        .expect("the watch begins in time")
+        .expect("the hub runs");
+    assert_eq!(snapshot(&mut inside).await, expected);
+    let mut outside = tokio::time::timeout(WAIT, outside)
+        .await
+        .expect("the hub answers in time")
+        .expect("the task runs")
+        .expect("the hub serves the watch");
+    assert_eq!(snapshot(&mut outside).await, expected);
     hub.shutdown().await.expect("the hub stops");
 }
 

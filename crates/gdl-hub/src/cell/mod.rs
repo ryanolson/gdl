@@ -23,6 +23,11 @@ use feed::Feed;
 /// stalled connection from a quiet cell.
 const KEEP_ALIVE: Duration = Duration::from_secs(10);
 
+/// How long a watch that arrives before the cell's record is first stored
+/// waits for it: a follower finds the cell by its record, so it can ask
+/// in the moment between the write and the hub learning it was stored.
+const SETTLE: Duration = Duration::from_secs(5);
+
 mod count;
 mod feed;
 mod judge;
@@ -56,9 +61,10 @@ pub use feed::CellWatch;
 /// holds only its place in a buffer of [`CellTiming::watch_buffer`] events
 /// shared by all: one that falls further behind has its watch ended, and
 /// watches again from a snapshot, so a slow watcher never slows the
-/// counting, the judgment, the record, or another watcher. The watch is
-/// refused (503) until the record is first stored, since its epoch is
-/// settled only then, and every watch ends when the hub stops.
+/// counting, the judgment, the record, or another watcher. A watch begins
+/// once the record is first stored, since its epoch is settled only then:
+/// one that arrives earlier waits up to 5 s, then is refused (503). Every
+/// watch ends when the hub stops.
 ///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,
@@ -179,10 +185,10 @@ impl<D: CellDirectory> CellReadiness<D> {
     }
 
     /// A watch of the cell, in process: what `GET watch` serves, as typed
-    /// events. Refused until the cell's record is stored, since its epoch
-    /// is settled only then.
-    pub fn watch(&self) -> Result<CellWatch, CellWatchError> {
-        self.feed.watch()
+    /// events. It begins once the cell's record is stored, since its epoch
+    /// is settled only then; refused if the hub stops first.
+    pub async fn watch(&self) -> Result<CellWatch, CellWatchError> {
+        self.feed.watch().await
     }
 
     /// How many watches of the cell are open, as it changes.
@@ -280,8 +286,17 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             .route(
                 crate::watch::ROUTE,
                 get(move || {
-                    let watch = feed.watch();
-                    async move { serve(watch) }
+                    let feed = Arc::clone(&feed);
+                    async move {
+                        let watch = tokio::time::timeout(SETTLE, feed.watch())
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(CellWatchError::new(
+                                    "the cell has not published its record yet, so its epoch is not settled",
+                                ))
+                            });
+                        serve(watch)
+                    }
                 }),
             )
     }
@@ -320,7 +335,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 }
 
 /// The watch as server-sent events, each one JSON value; a hub that has
-/// not stored its record answers 503.
+/// not stored its record in time, or stops first, answers 503.
 fn serve(watch: Result<CellWatch, CellWatchError>) -> Response {
     match watch {
         Ok(watch) => {

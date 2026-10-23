@@ -42,8 +42,8 @@ impl CellWatcher {
     /// stopped, or this watcher fell behind), when the connection fails or
     /// goes idle, or at an event that does not parse; a follower then
     /// watches again from a snapshot. A hub that has not yet published its
-    /// cell's record refuses the watch, since the epoch it would send is
-    /// not settled.
+    /// cell's record holds the watch until it has, since the epoch it would
+    /// send is not settled before, and refuses it after 5 s.
     pub async fn watch(
         &self,
         hub: &str,

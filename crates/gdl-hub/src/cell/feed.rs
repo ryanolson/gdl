@@ -41,6 +41,8 @@ pub(super) struct Feed {
     name: String,
     class: String,
     shared: Mutex<Shared>,
+    /// The record's epoch, once a write is stored under it.
+    epoch: watch::Sender<Option<u64>>,
     /// Cancelled when the hub stops: every watch ends, so that the
     /// listener's drain never waits one out.
     closed: CancellationToken,
@@ -63,12 +65,12 @@ impl Feed {
             class,
             shared: Mutex::new(Shared {
                 state: CellState::Unavailable,
-                epoch: None,
                 segments,
                 entries: HashMap::new(),
                 unresolved: HashMap::new(),
                 events: broadcast::channel(buffer).0,
             }),
+            epoch: watch::Sender::new(None),
             closed: CancellationToken::new(),
             watching: watch::Sender::new(0),
         }
@@ -78,16 +80,21 @@ impl Feed {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A watch of the cell: its snapshot, then each change. Refused until
-    /// the cell's record is stored, since the epoch is settled only then.
-    pub(super) fn watch(&self) -> Result<CellWatch, CellWatchError> {
+    /// A watch of the cell: its snapshot, then each change. It begins once
+    /// the cell's record is stored, since the epoch is settled only then;
+    /// refused if the hub stops first.
+    pub(super) async fn watch(&self) -> Result<CellWatch, CellWatchError> {
+        let mut settled = self.epoch.subscribe();
+        let epoch = tokio::select! {
+            biased;
+            () = self.closed.cancelled() => None,
+            epoch = settled.wait_for(Option::is_some) => epoch.ok().and_then(|epoch| *epoch),
+        };
+        let epoch = epoch.ok_or_else(|| {
+            CellWatchError::new("the cell's hub stopped before it published the cell's record")
+        })?;
         let (snapshot, events) = {
             let shared = self.lock();
-            let epoch = shared.epoch.ok_or_else(|| {
-                CellWatchError::new(
-                    "the cell has not published its record yet, so its epoch is not settled",
-                )
-            })?;
             (
                 shared.snapshot(&self.name, &self.class, epoch),
                 shared.events.subscribe(),
@@ -122,7 +129,11 @@ impl Feed {
     /// The record is stored under `epoch`, which is now the hub's for
     /// good.
     pub(super) fn settle(&self, epoch: u64) {
-        self.lock().epoch.get_or_insert(epoch);
+        self.epoch.send_if_modified(|settled| {
+            let unsettled = settled.is_none();
+            settled.get_or_insert(epoch);
+            unsettled
+        });
     }
 
     /// The judgment changed the cell's state.
@@ -216,8 +227,6 @@ impl Feed {
 /// What the feed knows, behind its lock.
 struct Shared {
     state: CellState,
-    /// The record's epoch, once one is stored.
-    epoch: Option<u64>,
     /// The class's segments, in its order, each with whether it is an
     /// entry segment.
     segments: Vec<(String, bool)>,
@@ -529,7 +538,10 @@ mod tests {
 
     /// A watch with its snapshot unread.
     fn watch_now(feed: &Feed) -> CellWatch {
-        feed.watch().expect("the epoch is settled")
+        feed.watch()
+            .now_or_never()
+            .expect("the epoch is settled")
+            .expect("the hub runs")
     }
 
     fn removal(id: InstanceId, incarnation: u64) -> Removal {
@@ -741,18 +753,23 @@ mod tests {
         assert_eq!(pending(&mut watch), []);
     }
 
-    /// A watch is refused until the epoch is settled, and the epoch, once
-    /// settled, does not change.
+    /// A watch begins once the epoch is settled, and the epoch, once
+    /// settled, does not change; a hub that stops first refuses it.
     #[tokio::test]
-    async fn the_epoch_is_settled_once() {
+    async fn a_watch_waits_for_the_epoch() {
         let feed = Feed::new("cell".into(), "class".into(), vec![], 16);
-        assert!(feed.watch().is_err());
+        let mut early = Box::pin(feed.watch());
+        assert!(futures::poll!(early.as_mut()).is_pending());
         feed.settle(7);
         feed.settle(8);
-        let mut watch = feed.watch().expect("the epoch is settled");
+        let mut watch = early.await.expect("the hub runs");
         match pending(&mut watch).first() {
             Some(CellWatchEvent::Cell { epoch, .. }) => assert_eq!(*epoch, 7),
             other => panic!("{other:?}"),
         }
+        let stopping = Feed::new("cell".into(), "class".into(), vec![], 16);
+        let refused = stopping.watch();
+        stopping.close();
+        assert!(refused.await.is_err());
     }
 }
