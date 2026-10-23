@@ -14,6 +14,7 @@ use velo_hub::{Committed, Extension, RegistrationView, Rejection, StartContext, 
 use crate::Quorum;
 
 mod count;
+mod judge;
 mod publish;
 
 /// Whether a cell can take work, judged and published by the cell's own
@@ -138,20 +139,30 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             counts,
             cancel.clone(),
         ));
+        let (states, written) = watch::channel(CellState::Unavailable);
+        let judging = tokio::spawn(
+            judge::Judge {
+                quorum: Quorum::new(self.quorums.iter().cloned(), self.timing.hold),
+                health: self.health.clone(),
+                states,
+            }
+            .run(updates, cancel.clone()),
+        );
+        // The writer is apart from the judgment, so that a directory that
+        // is slow to take a write never leaves the health endpoint behind
+        // the instances.
         let publishing = tokio::spawn(
             publish::Publisher {
                 directory: Arc::clone(&self.directory),
                 record: self.record.clone(),
-                quorum: Quorum::new(self.quorums.iter().cloned(), self.timing.hold),
                 heartbeat: self.timing.heartbeat,
-                health: self.health.clone(),
             }
-            .run(updates, cancel),
+            .run(written, cancel),
         );
         self.tasks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .extend([counting, publishing]);
+            .extend([counting, judging, publishing]);
         async { Ok(()) }
     }
 

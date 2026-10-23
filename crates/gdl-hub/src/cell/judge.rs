@@ -1,0 +1,98 @@
+//! The cell's state, judged as the counts change and as the hold runs
+//! out, and shown on the health endpoint. Nothing here waits for the
+//! directory: the writer takes the latest state from a watch.
+
+use std::time::Instant;
+
+use gdl_cells::CellState;
+use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
+
+use super::CellHealth;
+use super::count::Count;
+use crate::Quorum;
+
+pub(super) struct Judge {
+    pub(super) quorum: Quorum,
+    pub(super) health: watch::Sender<CellHealth>,
+    /// The state, for the writer: a change it has not written yet is
+    /// replaced by the next, so a slow write never delays a judgment.
+    pub(super) states: watch::Sender<CellState>,
+}
+
+impl Judge {
+    /// Judge until `cancel`, or until the counting ends.
+    pub(super) async fn run(
+        mut self,
+        mut counts: mpsc::Receiver<Count>,
+        cancel: CancellationToken,
+    ) {
+        tokio::select! {
+            () = self.judge_until(&mut counts) => {}
+            () = cancel.cancelled() => {}
+        }
+    }
+
+    async fn judge_until(&mut self, counts: &mut mpsc::Receiver<Count>) {
+        self.judge();
+        loop {
+            let held = self.quorum.next_change();
+            let hold = async {
+                match held {
+                    Some(at) => tokio::time::sleep_until(at.into()).await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                count = counts.recv() => {
+                    let Some(count) = count else { return };
+                    self.count(count);
+                }
+                () = hold => {}
+            }
+            self.judge();
+        }
+    }
+
+    fn count(&mut self, count: Count) {
+        match count {
+            Count::Synced(usable) => {
+                for (index, usable) in usable.into_iter().enumerate() {
+                    self.quorum.set_nth(index, usable);
+                }
+            }
+            Count::Changed(index, usable) => self.quorum.set_nth(index, usable),
+            Count::Lost => {
+                for index in 0..self.quorum.segments().count() {
+                    self.quorum.set_nth(index, 0);
+                }
+            }
+        }
+    }
+
+    /// Judge the state now, and show it: on the health endpoint, whose
+    /// body is updated in place so that a count costs no allocation, and
+    /// to the writer when it changed.
+    fn judge(&mut self) {
+        let state = self.quorum.state(Instant::now());
+        let quorum = &self.quorum;
+        self.health.send_if_modified(|health| {
+            let mut modified = health.state != state;
+            health.state = state;
+            for (name, usable, _) in quorum.segments() {
+                if let Some(segment) = health.segments.get_mut(name)
+                    && segment.usable != usable
+                {
+                    segment.usable = usable;
+                    modified = true;
+                }
+            }
+            modified
+        });
+        self.states.send_if_modified(|current| {
+            let changed = *current != state;
+            *current = state;
+            changed
+        });
+    }
+}

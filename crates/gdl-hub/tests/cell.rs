@@ -9,12 +9,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, MemoryDirectory, MemoryWatch};
+use gdl_cells::{
+    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryDirectory, MemoryWatch,
+    ResumeToken,
+};
 use gdl_hub::{CellHealth, CellReadiness, CellTiming, GraphAdmission, SegmentHealth};
 use gdl_model::{
     CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase,
     TypeInfo, segment_service,
 };
+use tokio::sync::watch;
 use velo_hub::client::{HubClient, HubServiceRegistration};
 use velo_hub::velo::Velo;
 use velo_hub::velo::discovery::ServiceRegistrationGuard;
@@ -80,10 +84,10 @@ fn timing() -> CellTiming {
 }
 
 /// A hub of the deployment with the cell's extension beside admission.
-async fn cell_hub(
-    directory: MemoryDirectory,
+async fn cell_hub<D: CellDirectory>(
+    directory: D,
     timing: CellTiming,
-) -> (Hub, Arc<CellReadiness<MemoryDirectory>>) {
+) -> (Hub, Arc<CellReadiness<D>>) {
     let cell = Arc::new(
         CellReadiness::new(&spec(), settings(), directory, timing).expect("valid test fixture"),
     );
@@ -173,8 +177,8 @@ impl Instance {
 }
 
 /// Wait until the extension's health satisfies `ready`, and return it.
-async fn health(
-    cell: &CellReadiness<MemoryDirectory>,
+async fn health<D: CellDirectory>(
+    cell: &CellReadiness<D>,
     what: &str,
     ready: impl FnMut(&CellHealth) -> bool,
 ) -> CellHealth {
@@ -556,4 +560,100 @@ fn settings_a_cells_hub_cannot_publish_are_refused() {
         };
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+/// A directory whose writes a test can hold: while it is closed, a
+/// publish waits, and the test sees how many wait.
+#[derive(Clone)]
+struct Gated {
+    inner: MemoryDirectory,
+    open: Arc<watch::Sender<bool>>,
+    held: Arc<watch::Sender<usize>>,
+}
+
+impl Gated {
+    fn new() -> Self {
+        Self {
+            inner: MemoryDirectory::new(),
+            open: Arc::new(watch::Sender::new(true)),
+            held: Arc::new(watch::Sender::new(0)),
+        }
+    }
+
+    fn close(&self) {
+        self.open.send_replace(false);
+    }
+
+    fn open(&self) {
+        self.open.send_replace(true);
+    }
+
+    /// Wait until a write is held at the gate.
+    async fn holding(&self) {
+        let mut held = self.held.subscribe();
+        tokio::time::timeout(WAIT, held.wait_for(|held| *held > 0))
+            .await
+            .expect("a write reached the gate in time")
+            .expect("the gate lives");
+    }
+
+    fn holds(&self) -> usize {
+        *self.held.borrow()
+    }
+}
+
+impl CellDirectory for Gated {
+    type Watch = MemoryWatch;
+
+    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+        let mut open = self.open.subscribe();
+        if !*open.borrow_and_update() {
+            self.held.send_modify(|held| *held += 1);
+            let _ = open.wait_for(|open| *open).await;
+            self.held.send_modify(|held| *held -= 1);
+        }
+        self.inner.publish(record).await
+    }
+
+    async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+        self.inner.withdraw(withdrawal).await
+    }
+
+    fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
+        self.inner.watch(class, from)
+    }
+}
+
+/// The cell's judgment does not wait for the directory: while a write of
+/// `ready` is held, an instance that leaves makes the cell degraded on the
+/// health endpoint at once. Once the directory takes writes again, it
+/// gets the cell's latest state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_write_does_not_hold_the_judgment() {
+    let gate = Gated::new();
+    let mut records = Records::new(&gate.inner);
+    // A hold long enough to close the gate in before it ends.
+    let timing = CellTiming {
+        hold: Duration::from_secs(1),
+        ..timing()
+    };
+    let (hub, cell) = cell_hub(gate.clone(), timing).await;
+    records.next().await;
+    let (mut instances, _) = meet_the_quorum(&hub).await;
+    records.until(CellState::Degraded).await;
+    gate.close();
+    health(&cell, "ready", |h| h.state == CellState::Ready).await;
+    gate.holding().await;
+
+    let last = instances.pop().expect("a d instance");
+    last.leave().await;
+    let judged = health(&cell, "the drop", |h| usable(h, "d") == 1).await;
+    assert_eq!(judged.state, CellState::Degraded);
+    let (status, body) = get(&hub, "/v1/ext/gdl-cell/health").await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(gate.holds(), 1, "the write of `ready` is still held");
+
+    gate.open();
+    records.until(CellState::Degraded).await;
+    hub.shutdown().await.expect("the hub stops");
 }
