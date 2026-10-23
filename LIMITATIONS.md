@@ -34,6 +34,13 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Would lift it:** the generator binding selector crates, planned with dynamo's KV router.
 - **See:** ruling 162.
 
+### An instance of an earlier build reads an unknown outcome as a transport error
+
+- **What happens:** an error of the kind `OutcomeUnknown` (a hand-off whose answer did not come, so the receiver may have run it) reaches an instance built before the kind existed as a `Transport` error whose message begins `[outcome unknown] `. An instance of this build reads it back as `OutcomeUnknown`.
+- **Why:** an earlier build refuses an error kind it does not know, and with it the stream item that carries the error, and it refuses an error with a field it does not know too. So the new kind is sent as the earlier kind nearest it, with its name in the message.
+- **Would lift it:** nothing, for the builds that came before; a kind added later is sent the same way.
+- **See:** `crates/gdl/src/error.rs`.
+
 ## Bring-up, shutdown, and membership
 
 ### Only a hub lets an instance join
@@ -148,7 +155,7 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### The runtime's `error_type` values are gdl's error kinds
 
-- **What happens:** `errors_total{error_type}`, and the response and end-to-end error counters, count by gdl's error kinds (`node`, `deadline_exceeded`, `truncated`, `not_hosted`, `overloaded`, `transport`, `codec`, `placement`, `routing`). dynamo's work handler counts by its own steps (`deserialization`, `generate`, `publish_response`, ...), so a dashboard keyed on those values sees none.
+- **What happens:** `errors_total{error_type}`, and the response and end-to-end error counters, count by gdl's error kinds (`node`, `deadline_exceeded`, `truncated`, `not_hosted`, `overloaded`, `transport`, `codec`, `placement`, `routing`, `outcome_unknown`). dynamo's work handler counts by its own steps (`deserialization`, `generate`, `publish_response`, ...), so a dashboard keyed on those values sees none.
 - **Would lift it:** an adapter that translates gdl's kinds to dynamo's values. gdl keeps its own errors (the owner, 2026-10-20).
 - **See:** rulings 134 and 136.
 

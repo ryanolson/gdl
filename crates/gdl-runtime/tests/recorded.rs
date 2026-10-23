@@ -15,7 +15,7 @@ use gdl::prometheus::{Encoder, Registry, TextEncoder};
 use gdl_runtime::{Placement, RuntimeConfig};
 
 /// The error kinds `error_type` takes.
-const KINDS: [&str; 9] = [
+const KINDS: [&str; 10] = [
     "node",
     "deadline_exceeded",
     "truncated",
@@ -25,6 +25,7 @@ const KINDS: [&str; 9] = [
     "codec",
     "placement",
     "routing",
+    "outcome_unknown",
 ];
 
 /// A deployment and the registry of each of its segments.

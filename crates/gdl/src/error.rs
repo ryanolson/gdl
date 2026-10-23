@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 /// It is serializable so that a failure raised in one segment reaches the
 /// consumer in another segment with its kind intact. An `Err` item in a
 /// response stream is terminal: the runtime ends the stream after it.
-#[derive(Clone, Serialize, Deserialize, thiserror::Error)]
+#[derive(Clone, Deserialize, thiserror::Error)]
+#[serde(from = "Wire<String>")]
 #[error("{kind}: {message}")]
 pub struct Error {
     kind: ErrorKind,
@@ -16,7 +17,6 @@ pub struct Error {
     /// failure on a response stream, rather than raising it: the runtime
     /// counts an error once, where it was raised. It is not sent: the
     /// receiving segment sets it again.
-    #[serde(skip)]
     relayed: bool,
 }
 
@@ -125,6 +125,10 @@ pub enum ErrorKind {
     Placement,
     /// A routing selector could not choose an instance for the request.
     Routing,
+    /// A hand-off went unanswered, or the transport failed after it may
+    /// have left: the receiver may have taken the request and run it, so
+    /// trying it again may run it twice.
+    OutcomeUnknown,
 }
 
 impl fmt::Display for ErrorKind {
@@ -140,7 +144,86 @@ impl fmt::Display for ErrorKind {
             Self::Codec => "codec error",
             Self::Placement => "placement error",
             Self::Routing => "routing error",
+            Self::OutcomeUnknown => "outcome unknown",
         })
+    }
+}
+
+/// An error as it crosses: its kind, among those every peer can read, and
+/// its message. A peer of an earlier build refuses a kind it does not know,
+/// and with it the whole item that carries the error, so a kind added
+/// since is sent as the earlier kind nearest it, with its own name at the
+/// start of the message ([`OUTCOME_UNKNOWN`]), and read back here. An extra
+/// field would not do: such a peer refuses an error of three fields too.
+#[derive(Serialize, Deserialize)]
+struct Wire<M> {
+    kind: WireKind,
+    message: M,
+}
+
+/// The kinds every peer reads. Never add to it: a new kind is sent as one
+/// of these.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum WireKind {
+    Node,
+    Cancelled,
+    DeadlineExceeded,
+    Truncated,
+    NotHosted,
+    Overloaded,
+    Transport,
+    Codec,
+    Placement,
+    Routing,
+}
+
+/// What starts the message of an [`ErrorKind::OutcomeUnknown`] sent as a
+/// `Transport` error. A peer of an earlier build shows it as written.
+const OUTCOME_UNKNOWN: &str = "[outcome unknown] ";
+
+impl Serialize for Error {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let message = std::borrow::Cow::Borrowed(self.message.as_str());
+        let (kind, message) = match self.kind {
+            ErrorKind::Node => (WireKind::Node, message),
+            ErrorKind::Cancelled => (WireKind::Cancelled, message),
+            ErrorKind::DeadlineExceeded => (WireKind::DeadlineExceeded, message),
+            ErrorKind::Truncated => (WireKind::Truncated, message),
+            ErrorKind::NotHosted => (WireKind::NotHosted, message),
+            ErrorKind::Overloaded => (WireKind::Overloaded, message),
+            ErrorKind::Transport => (WireKind::Transport, message),
+            ErrorKind::Codec => (WireKind::Codec, message),
+            ErrorKind::Placement => (WireKind::Placement, message),
+            ErrorKind::Routing => (WireKind::Routing, message),
+            ErrorKind::OutcomeUnknown => (
+                WireKind::Transport,
+                std::borrow::Cow::Owned(format!("{OUTCOME_UNKNOWN}{message}")),
+            ),
+        };
+        Wire { kind, message }.serialize(serializer)
+    }
+}
+
+impl From<Wire<String>> for Error {
+    fn from(Wire { kind, message }: Wire<String>) -> Self {
+        let kind = match kind {
+            WireKind::Node => ErrorKind::Node,
+            WireKind::Cancelled => ErrorKind::Cancelled,
+            WireKind::DeadlineExceeded => ErrorKind::DeadlineExceeded,
+            WireKind::Truncated => ErrorKind::Truncated,
+            WireKind::NotHosted => ErrorKind::NotHosted,
+            WireKind::Overloaded => ErrorKind::Overloaded,
+            WireKind::Transport => {
+                if let Some(rest) = message.strip_prefix(OUTCOME_UNKNOWN) {
+                    return Self::new(ErrorKind::OutcomeUnknown, rest);
+                }
+                ErrorKind::Transport
+            }
+            WireKind::Codec => ErrorKind::Codec,
+            WireKind::Placement => ErrorKind::Placement,
+            WireKind::Routing => ErrorKind::Routing,
+        };
+        Self::new(kind, message)
     }
 }
 
@@ -176,5 +259,82 @@ mod tests {
         let received: Error = rmp_serde::from_slice(&bytes).expect("decode");
         assert!(!received.is_relayed());
         assert_eq!(received, error);
+    }
+
+    /// The error and its kinds as the previous build declares them.
+    mod previous {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Serialize, Deserialize)]
+        pub struct Error {
+            pub kind: ErrorKind,
+            pub message: String,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+        pub enum ErrorKind {
+            Node,
+            Cancelled,
+            DeadlineExceeded,
+            Truncated,
+            NotHosted,
+            Overloaded,
+            Transport,
+            Codec,
+            Placement,
+            Routing,
+        }
+    }
+
+    const EARLIER: [(ErrorKind, previous::ErrorKind); 10] = [
+        (ErrorKind::Node, previous::ErrorKind::Node),
+        (ErrorKind::Cancelled, previous::ErrorKind::Cancelled),
+        (
+            ErrorKind::DeadlineExceeded,
+            previous::ErrorKind::DeadlineExceeded,
+        ),
+        (ErrorKind::Truncated, previous::ErrorKind::Truncated),
+        (ErrorKind::NotHosted, previous::ErrorKind::NotHosted),
+        (ErrorKind::Overloaded, previous::ErrorKind::Overloaded),
+        (ErrorKind::Transport, previous::ErrorKind::Transport),
+        (ErrorKind::Codec, previous::ErrorKind::Codec),
+        (ErrorKind::Placement, previous::ErrorKind::Placement),
+        (ErrorKind::Routing, previous::ErrorKind::Routing),
+    ];
+
+    /// Every kind the previous build has crosses in both directions as it
+    /// did, byte for byte.
+    #[test]
+    fn the_earlier_kinds_cross_as_they_did() {
+        for (kind, earlier) in EARLIER {
+            let error = Error::new(kind, "why");
+            let bytes = rmp_serde::to_vec(&error).expect("encode");
+            let then = previous::Error {
+                kind: earlier,
+                message: "why".into(),
+            };
+            assert_eq!(bytes, rmp_serde::to_vec(&then).expect("encode"), "{kind}");
+            let back: Error = rmp_serde::from_slice(&bytes).expect("decode");
+            assert_eq!(back, error);
+        }
+    }
+
+    /// A peer of the previous build reads an unknown outcome as the
+    /// transport error it would have raised itself, with the message
+    /// saying what it was; this build reads it back whole.
+    #[test]
+    fn an_unknown_outcome_crosses_to_a_peer_that_does_not_know_the_kind() {
+        let error = Error::new(ErrorKind::OutcomeUnknown, "no answer from cell m1");
+        let bytes = rmp_serde::to_vec(&error).expect("encode");
+        let then: previous::Error =
+            rmp_serde::from_slice(&bytes).expect("the previous build reads it");
+        assert_eq!(then.kind, previous::ErrorKind::Transport);
+        assert_eq!(then.message, "[outcome unknown] no answer from cell m1");
+        let back: Error = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(back, error);
+        assert_eq!(back.kind(), ErrorKind::OutcomeUnknown);
+        assert_eq!(back.message(), "no answer from cell m1");
+        let json = serde_json::to_string(&error).expect("encode");
+        assert_eq!(serde_json::from_str::<Error>(&json).expect("decode"), error);
     }
 }

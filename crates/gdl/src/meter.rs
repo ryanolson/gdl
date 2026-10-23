@@ -47,7 +47,7 @@ const BUCKETS: [f64; 22] = [
 
 /// The `error_type` label of each slot of an errors counter, as
 /// [`error_slot`] numbers them.
-const ERROR_KINDS: [&str; 9] = [
+const ERROR_KINDS: [&str; 10] = [
     "node",
     "deadline_exceeded",
     "truncated",
@@ -57,6 +57,7 @@ const ERROR_KINDS: [&str; 9] = [
     "codec",
     "placement",
     "routing",
+    "outcome_unknown",
 ];
 
 /// The slot of an errors counter that counts `kind`, or `None` for a
@@ -74,6 +75,7 @@ fn error_slot(kind: ErrorKind) -> Option<usize> {
         ErrorKind::Codec => Some(6),
         ErrorKind::Placement => Some(7),
         ErrorKind::Routing => Some(8),
+        ErrorKind::OutcomeUnknown => Some(9),
     }
 }
 
@@ -833,6 +835,7 @@ mod tests {
             (ErrorKind::Codec, "codec"),
             (ErrorKind::Placement, "placement"),
             (ErrorKind::Routing, "routing"),
+            (ErrorKind::OutcomeUnknown, "outcome_unknown"),
         ] {
             assert_eq!(error_slot(kind).map(|slot| ERROR_KINDS[slot]), Some(label));
         }
