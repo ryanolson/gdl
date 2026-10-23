@@ -125,8 +125,10 @@ pub use feed::CellWatch;
 /// class is a member of the hub, it withdraws the record, after a last
 /// write that says the cell is `draining`, and writes it no more; then it
 /// ends the cell's watches and refuses new ones, so that the hubs that
-/// follow the cell drop it. A drained cell's hub serves the cell no more:
-/// it is started again to serve it. It does not withdraw the record when
+/// follow the cell drop it. A drained cell's hub serves the cell no more,
+/// and refuses every registration from the moment the drain ends (409),
+/// since an instance that joined would never learn of the drain: it is
+/// started again to serve the cell. It does not withdraw the record when
 /// the hub stops: a cell that stops without draining leaves its record to
 /// expire on its readers' clocks.
 pub struct CellReadiness<D: CellDirectory> {
@@ -336,7 +338,9 @@ impl<D: CellDirectory> CellReadiness<D> {
 impl<D: CellDirectory> Extension for CellReadiness<D> {
     const NAME: &'static str = gdl_watch::EXTENSION;
     type Registration = ();
-    type Staged = ();
+    /// A registration under way, which keeps the cell's drain from
+    /// ending until it is committed or aborted.
+    type Staged = drain::Joining;
 
     fn requires() -> &'static [&'static str] {
         &[<GraphAdmission as Extension>::NAME]
@@ -522,15 +526,15 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         })
     }
 
-    async fn prepare(&self, _: &Txn<'_>, _: Option<()>) -> Result<(), Rejection> {
-        Ok(())
+    async fn prepare(&self, _: &Txn<'_>, _: Option<()>) -> Result<drain::Joining, Rejection> {
+        self.drain.join().map_err(Rejection::conflict)
     }
 
     fn admit(&self, _: &RegistrationView<'_>, _: Option<&()>) -> Result<(), Rejection> {
         Ok(())
     }
 
-    fn commit(&self, (): (), committed: &Committed<'_>) {
+    fn commit(&self, joining: drain::Joining, committed: &Committed<'_>) {
         // Admission committed first, as this extension requires it; its
         // lock is released before the feed's is taken.
         let member = self
@@ -543,6 +547,9 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             self.feed
                 .joined(&segment, committed.incarnation, committed.epoch, peer);
         }
+        // A member now, if it is one of the class's, before it stops
+        // holding the drain as a registration under way.
+        drop(joining);
     }
 
     fn on_removed(&self, removal: Removal) {

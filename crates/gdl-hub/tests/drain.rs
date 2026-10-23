@@ -205,6 +205,28 @@ async fn a_drained_cell_is_withdrawn_once_its_last_instance_leaves() {
     hub.shutdown().await.expect("the hub stops");
 }
 
+/// Once a drained cell's record is withdrawn, its hub refuses an instance
+/// that asks to join: the cell's watch, from which an instance learns of
+/// the drain, is gone, and nothing publishes the cell for it to serve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drained_cell_refuses_an_instance_once_it_is_withdrawn() {
+    let directory = MemoryDirectory::new();
+    let mut directory_watch = directory.watch("model_x", None);
+    let (hub, cell) = cell_hub(directory.clone(), timing()).await;
+    cell.drain().await.expect("the cell drains");
+    while !matches!(
+        next_of_cell(&mut directory_watch).await,
+        CellEvent::Withdrawn { .. }
+    ) {}
+
+    let joined = Instance::try_join(&hub, &common::spec(), "f").await;
+    assert!(
+        joined.is_err(),
+        "a drained, withdrawn cell admitted an instance"
+    );
+    hub.shutdown().await.expect("the hub stops");
+}
+
 /// A cell drained with no instance at its hub is withdrawn at once, after
 /// its record has said it is draining.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
