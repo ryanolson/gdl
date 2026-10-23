@@ -1,11 +1,11 @@
 //! The cell's record, published on each change of the judged state and
-//! on the heartbeat.
+//! on the heartbeat, with the load summary as it is when it is written.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, DirectoryError};
+use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, LoadSummary};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -25,15 +25,18 @@ pub(super) struct Publisher<D> {
 }
 
 impl<D: CellDirectory> Publisher<D> {
-    /// Publish the judged state until `cancel`, or until the judgment
-    /// ends.
+    /// Publish the judged state, with the summary `loads` holds when each
+    /// record is written, until `cancel`, or until the judgment ends. A
+    /// change of the summary is not a write of its own: the heartbeat
+    /// carries it, so that the directory's writes stay one a heartbeat.
     pub(super) async fn run(
         self,
         mut states: watch::Receiver<CellState>,
+        loads: watch::Receiver<Option<LoadSummary>>,
         cancel: CancellationToken,
     ) {
         tokio::select! {
-            () = self.publish_until(&mut states) => {}
+            () = self.publish_until(&mut states, &loads) => {}
             () = cancel.cancelled() => {}
         }
     }
@@ -43,12 +46,19 @@ impl<D: CellDirectory> Publisher<D> {
     /// a write is in flight is written once that write ends; one replaced
     /// meanwhile by a later state is not written at all, since a reader
     /// keeps only the newest record.
-    async fn publish_until(&self, states: &mut watch::Receiver<CellState>) {
+    async fn publish_until(
+        &self,
+        states: &mut watch::Receiver<CellState>,
+        loads: &watch::Receiver<Option<LoadSummary>>,
+    ) {
         let directory = &*self.directory;
         let mut writer = Writer::start(directory, &self.record, self.heartbeat).await;
         let feed = &*self.feed;
         let state = *states.borrow_and_update();
-        writer.publish(directory, feed, &self.record, state).await;
+        let load = *loads.borrow();
+        writer
+            .publish(directory, feed, &self.record, state, load)
+            .await;
         let mut heartbeat =
             tokio::time::interval_at(tokio::time::Instant::now() + self.heartbeat, self.heartbeat);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -63,7 +73,10 @@ impl<D: CellDirectory> Publisher<D> {
                 _ = heartbeat.tick() => {}
             }
             let state = *states.borrow_and_update();
-            writer.publish(directory, feed, &self.record, state).await;
+            let load = *loads.borrow();
+            writer
+                .publish(directory, feed, &self.record, state, load)
+                .await;
         }
     }
 }
@@ -111,10 +124,12 @@ impl Writer {
         feed: &Feed,
         record: &CellRecord,
         state: CellState,
+        load: Option<LoadSummary>,
     ) {
         self.seq += 1;
         let record = CellRecord {
             state,
+            load,
             epoch: self.epoch,
             seq: self.seq,
             ..record.clone()

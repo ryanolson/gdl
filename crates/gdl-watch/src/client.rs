@@ -226,6 +226,21 @@ mod tests {
             serde_json::json!({ "event": "state", "state": "degraded" }),
         );
         assert_eq!(
+            serde_json::to_value(CellWatchEvent::Load {
+                load: Some(gdl_cells::LoadSummary {
+                    admitted: 3,
+                    limit: 8,
+                    instances: 2,
+                    refusals: 1,
+                })
+            })
+            .expect("an event serializes"),
+            serde_json::json!({
+                "event": "load",
+                "load": { "admitted": 3, "limit": 8, "instances": 2, "refusals": 1 },
+            }),
+        );
+        assert_eq!(
             serde_json::to_value(CellWatchEvent::Synced).expect("an event serializes"),
             serde_json::json!({ "event": "synced" }),
         );

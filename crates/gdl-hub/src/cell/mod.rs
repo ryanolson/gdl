@@ -2,22 +2,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use gdl_cells::{CellDirectory, CellRecord, CellState};
+use gdl_cells::{CellDirectory, CellRecord, CellState, LoadSummary};
 use gdl_model::{CellSettings, DeploymentSpec};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use velo_hub::axum::response::{IntoResponse, Response};
-use velo_hub::axum::{Json, Router, http::StatusCode, routing::get};
+use velo_hub::axum::{
+    Json, Router,
+    http::StatusCode,
+    routing::{get, post},
+};
+use velo_hub::protocol::ErrorCode;
 use velo_hub::store::Removal;
 use velo_hub::{
-    AttachContext, Committed, Extension, RegistrationView, Rejection, StartContext, Txn,
+    AttachContext, Authorized, Committed, Extension, HubError, HubJson, RegistrationView,
+    Rejection, StartContext, Txn,
 };
 
 use crate::follow::{Follower, FollowsWatch, Relay};
 use crate::{GraphAdmission, Quorum};
 use feed::Feed;
-use gdl_watch::{CellWatchError, CellWatcher};
+use gdl_watch::{CellWatchError, CellWatcher, LoadReport};
 
 /// How long a watch that arrives before the cell's record is first stored
 /// waits for it: a follower finds the cell by its record, so it can ask
@@ -27,6 +33,7 @@ const SETTLE: Duration = Duration::from_secs(5);
 mod count;
 mod feed;
 mod judge;
+mod load;
 mod publish;
 
 pub use feed::CellWatch;
@@ -79,6 +86,23 @@ pub use feed::CellWatch;
 /// follow of the hub it replaces. A follow is never closed while its link
 /// lives.
 ///
+/// Each usable entry instance of the cell reports its admission to the
+/// hub once a load summary period (`[cell] summary_ms`), on the control
+/// listener: `POST instances/{instance_id}/load` with a
+/// [`gdl_watch::LoadReport`], authenticated as the instance it names by
+/// velo-hub's credential check ([`velo_hub::Authority::authorize`]). A
+/// report from anything else, a member of another segment, an entry
+/// instance that is not ready, has retired, or has left, or one fenced off
+/// by a later registration of the instance, is refused with 409, which
+/// costs the reporter nothing of its registration. Once a period the hub
+/// sums the latest report of each usable entry instance, dropping those
+/// older than three periods, into the cell's [`LoadSummary`]: the roots
+/// admitted and the admission limits summed, the usable entry instances
+/// counted, and the refusals of each report's period summed; `None` while
+/// no report is counted, and always for a class that no hop enters. The
+/// watch sends it as a `load` event when it changes, and the record
+/// carries it on its next write.
+///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,
 /// so that a slow directory never delays the judgment or the health
@@ -103,6 +127,9 @@ pub struct CellReadiness<D: CellDirectory> {
     admission: OnceLock<Arc<GraphAdmission>>,
     /// The classes the cell's class sends to, whose cells it follows.
     sends: Vec<String>,
+    /// The load summary's period, when the class has an entry segment to
+    /// summarize.
+    summary: Option<Duration>,
     /// What the hub follows.
     relay: Arc<Relay>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -115,8 +142,8 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// a class the placement does not have, a `ready` key outside it, a
     /// `requires` key that is not a class it sends to or a count of 0, no
     /// hub address, a malformed name or region, a lease that is not whole
-    /// milliseconds, a heartbeat of zero, a watch buffer of zero, or a
-    /// refollow delay of zero.
+    /// milliseconds, a summary period shorter than 1 s, a heartbeat of
+    /// zero, a watch buffer of zero, or a refollow delay of zero.
     pub fn new(
         spec: &DeploymentSpec,
         cell: CellSettings,
@@ -133,6 +160,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             )
         })?;
         gdl_model::check_hub_address(&hub).map_err(CellError::new)?;
+        gdl_model::check_summary(cell.summary).map_err(CellError::new)?;
         if timing.heartbeat.is_zero() {
             return Err(CellError::new("the cell's heartbeat is zero"));
         }
@@ -183,6 +211,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             record.name.clone(),
             record.class.clone(),
             segments,
+            cell.summary,
             timing.watch_buffer,
         );
         let sends: BTreeSet<String> = layout
@@ -206,6 +235,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             feed: Arc::new(feed),
             admission: OnceLock::new(),
             sends: sends.into_iter().collect(),
+            summary: (!entries.is_empty()).then_some(cell.summary),
             relay,
             tasks: Mutex::default(),
         })
@@ -281,6 +311,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             cancel.clone(),
         ));
         let (states, written) = watch::channel(CellState::Unavailable);
+        let (loads, summaries) = watch::channel(None::<LoadSummary>);
         let judging = tokio::spawn(
             judge::Judge {
                 quorum: Quorum::new(self.quorums.iter().cloned(), self.timing.hold),
@@ -300,9 +331,19 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 heartbeat: self.timing.heartbeat,
                 feed: Arc::clone(&self.feed),
             }
-            .run(written, cancel),
+            .run(written, summaries, cancel.clone()),
         );
         let mut tasks = vec![counting, judging, publishing];
+        // A class no hop enters has no entry instance to report, and so
+        // no summary to make.
+        if let Some(period) = self.summary {
+            tasks.push(tokio::spawn(load::run(
+                Arc::clone(&self.feed),
+                period,
+                loads,
+                cancel,
+            )));
+        }
         let follows = if self.sends.is_empty() {
             Ok(())
         } else {
@@ -384,6 +425,27 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             )
     }
 
+    fn control_routes(self: Arc<Self>) -> Router {
+        Router::new().route(
+            gdl_watch::LOAD_ROUTE,
+            post(
+                move |authorized: Authorized, HubJson(load): HubJson<LoadReport>| async move {
+                    self.feed
+                        .report(
+                            authorized.owner,
+                            authorized.lease,
+                            load,
+                            std::time::Instant::now(),
+                        )
+                        .map(|()| StatusCode::NO_CONTENT)
+                        // Not 401 or 404: velo-hub's client drops its
+                        // registration on those.
+                        .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
+                },
+            ),
+        )
+    }
+
     fn descriptor(&self) -> serde_json::Value {
         serde_json::json!({
             "cell": self.record.name,
@@ -408,7 +470,8 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             .get()
             .and_then(|admission| admission.member(committed.owner));
         if let Some((segment, peer)) = member {
-            self.feed.joined(&segment, committed.incarnation, peer);
+            self.feed
+                .joined(&segment, committed.incarnation, committed.epoch, peer);
         }
     }
 

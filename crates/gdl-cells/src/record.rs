@@ -39,7 +39,8 @@ pub struct CellRecord {
     /// so each reader measures the age on its own clock.
     #[serde(rename = "lease_ms", with = "millis", default = "default_lease")]
     pub lease: Duration,
-    /// The load of the cell's entry segment, when the hub publishes one.
+    /// The load of the cell's entry segments, when the hub has one: as it
+    /// was when the record was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load: Option<LoadSummary>,
 }
@@ -94,18 +95,21 @@ pub enum CellState {
     Draining,
 }
 
-/// The load of a cell's entry segment, summed over its usable instances.
-/// Admission counts roots, not engine work, so a policy built on it is an
-/// admission heuristic.
+/// The load of a cell's entry segments, summed over their usable
+/// instances, as the cell's hub makes it once a summary period from the
+/// instances' reports. Admission counts roots, not engine work, so a
+/// policy built on it is an admission heuristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoadSummary {
-    /// The roots the entry segment's instances have admitted.
+    /// The roots the instances that reported hold admitted.
     pub admitted: u64,
     /// The admission limit, summed over the same instances.
     pub limit: u64,
-    /// The entry segment's usable instances.
+    /// The usable entry instances, whether or not their reports are
+    /// counted.
     pub instances: u32,
-    /// The offers the entry segment refused in the last second.
+    /// The hand-offs the instances that reported declined, each in the
+    /// period before its report.
     pub refusals: u64,
 }
 

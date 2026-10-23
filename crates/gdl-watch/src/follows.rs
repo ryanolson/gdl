@@ -53,7 +53,7 @@ pub enum FollowEvent {
         region: String,
         /// The cell's state, as its hub last sent it.
         state: CellState,
-        /// The load of the cell's entry segment, as its hub last sent it.
+        /// The load of the cell's entry segments, as its hub last sent it.
         load: Option<LoadSummary>,
     },
     /// The snapshot is complete: the events before this one are every
@@ -69,6 +69,17 @@ pub enum FollowEvent {
         generation: u64,
         /// The state it changed to.
         state: CellState,
+    },
+    /// A followed cell's load summary changed.
+    Load {
+        /// The cell's class.
+        class: String,
+        /// The cell, named within its class.
+        cell: String,
+        /// The follow's generation.
+        generation: u64,
+        /// The summary it changed to.
+        load: Option<LoadSummary>,
     },
     /// An entry instance of a followed cell is routable.
     Exposed {

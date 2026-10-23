@@ -191,6 +191,11 @@ impl Relay {
                 assert!(installed.is_none(), "{cell} installed twice");
             }
             FollowEvent::Synced => {}
+            FollowEvent::Load {
+                cell, generation, ..
+            } => {
+                self.current(cell, *generation);
+            }
             FollowEvent::State {
                 cell,
                 generation,

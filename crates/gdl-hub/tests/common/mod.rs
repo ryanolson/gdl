@@ -19,8 +19,9 @@ use gdl_model::{
     CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase,
     TypeInfo, segment_service,
 };
+use gdl_watch::LoadReport;
 use tokio::sync::watch;
-use velo_hub::client::{HubClient, HubServiceRegistration};
+use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
 use velo_hub::velo::discovery::ServiceRegistrationGuard;
 use velo_hub::velo::{InstanceId, Velo};
 use velo_hub::{Hub, HubConfig};
@@ -194,6 +195,24 @@ impl Instance {
             .unregister()
             .await
             .expect("the hub drops the service");
+    }
+
+    /// Report `load` to the hub as this instance's admission.
+    pub async fn report(&self, load: LoadReport) -> Result<(), ClientError> {
+        self.client
+            .ext(gdl_watch::EXTENSION)
+            .control_post(&gdl_watch::load_path(self.id()), &load)
+            .await
+    }
+
+    /// Whether the hub still holds this instance's registration: a call
+    /// that needs its credential is answered.
+    pub async fn registered(&self) -> bool {
+        let mut probe = match self.client.register_service("probe").await {
+            Ok(probe) => probe,
+            Err(_) => return false,
+        };
+        probe.unregister().await.is_ok()
     }
 
     /// Leave the hub, as an instance whose lease ends does.

@@ -345,6 +345,15 @@ impl Installed {
                     }
                 }
             }
+            CellWatchEvent::Load { load } => {
+                self.load = load;
+                send(FollowEvent::Load {
+                    class,
+                    cell,
+                    generation,
+                    load,
+                });
+            }
             CellWatchEvent::Ready { segment, peer } => {
                 let id = peer.instance_id();
                 if self.retired.contains_key(&id) || self.ready.contains_key(&id) {

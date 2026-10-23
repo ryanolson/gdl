@@ -138,7 +138,7 @@ impl View {
                 let known = self.ready.remove(instance).is_some() | self.retired.remove(instance);
                 assert!(known, "an instance that left was never sent");
             }
-            CellWatchEvent::Synced => {}
+            CellWatchEvent::Synced | CellWatchEvent::Load { .. } => {}
         }
     }
 }

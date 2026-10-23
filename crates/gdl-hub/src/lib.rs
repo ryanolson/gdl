@@ -8,7 +8,11 @@
 //! cell's record through a [`gdl_cells::CellDirectory`], and serves the
 //! cell's watch (`GET /v1/ext/gdl-cell/watch`): the cell's state and epoch
 //! and its entry instances, as [`gdl_watch::CellWatchEvent`]s, which a hub
-//! that follows the cell reads with a [`gdl_watch::CellWatcher`]. The hub of a cell whose
+//! that follows the cell reads with a [`gdl_watch::CellWatcher`]. Its entry
+//! instances report their admission to it
+//! (`POST /v1/ext/gdl-cell/instances/{id}/load` on the control listener,
+//! a [`gdl_watch::LoadReport`]), from which it makes the cell's load
+//! summary, which its record and its watch carry. The hub of a cell whose
 //! class sends to other classes is such a follower: it finds their home
 //! cells in the directory, follows each over its watch, and relays what it
 //! follows to its own instances (`GET /v1/ext/gdl-cell/follows`, as

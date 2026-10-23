@@ -14,6 +14,11 @@
 //! lock, and a watch takes its snapshot and subscribes under the same
 //! lock, so that no change between the two is lost or seen twice.
 //!
+//! The feed also keeps the entry instances' load reports
+//! ([`super::load`]), under the same lock, so that a report is taken only
+//! from an instance that is usable when it arrives, and the summary made
+//! of them is sent to the watchers in order with the rest.
+//!
 //! The `ready` and `retired` watches are two streams that velo-hub does
 //! not order with each other, and its removal hook names no services, so
 //! one interleaving cannot be ordered here: the loopback delivers an
@@ -26,16 +31,21 @@ use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use futures::Stream;
 use futures::stream::BoxStream;
-use gdl_cells::CellState;
+use gdl_cells::{CellState, LoadSummary};
+use gdl_watch::LoadReport;
 use tokio::sync::{broadcast, watch};
+use velo_hub::Lease;
+use velo_hub::protocol::RegistrationEpoch;
 use velo_hub::store::{Incarnation, Removal};
 use velo_hub::velo::discovery::ServiceEvent;
 use velo_hub::velo::{InstanceId, PeerInfo};
 
 use super::count::Watched;
+use super::load::Reports;
 use crate::fanout::Watchers;
 use gdl_watch::{CellWatchError, CellWatchEvent};
 
@@ -51,12 +61,14 @@ pub(super) struct Feed {
 
 impl Feed {
     /// The feed of the cell `name` of `class`, whose class has `segments`
-    /// in its order, each with whether it is an entry segment. A watcher
-    /// that falls more than `buffer` events behind is ended.
+    /// in its order, each with whether it is an entry segment, and whose
+    /// load summary period is `period`. A watcher that falls more than
+    /// `buffer` events behind is ended.
     pub(super) fn new(
         name: String,
         class: String,
         segments: Vec<(String, bool)>,
+        period: Duration,
         buffer: usize,
     ) -> Self {
         Self {
@@ -67,6 +79,7 @@ impl Feed {
                 segments,
                 entries: HashMap::new(),
                 unresolved: HashMap::new(),
+                loads: Reports::new(period),
                 events: broadcast::channel(buffer).0,
             }),
             epoch: watch::Sender::new(None),
@@ -134,12 +147,18 @@ impl Feed {
         }
     }
 
-    /// The hub committed a registration of `segment`: who the instance is,
-    /// as the hub's members name it. What the loopback showed of it before
-    /// is applied now, its retirement first: the hub commits the services
-    /// a registration brings before it commits the registration's
-    /// admission.
-    pub(super) fn joined(&self, segment: &str, incarnation: Incarnation, peer: PeerInfo) {
+    /// The hub committed a registration of `segment`, in `epoch`: who the
+    /// instance is, as the hub's members name it. What the loopback showed
+    /// of it before is applied now, its retirement first: the hub commits
+    /// the services a registration brings before it commits the
+    /// registration's admission.
+    pub(super) fn joined(
+        &self,
+        segment: &str,
+        incarnation: Incarnation,
+        epoch: RegistrationEpoch,
+        peer: PeerInfo,
+    ) {
         let mut shared = self.lock();
         let Some(index) = shared.entry_index(segment) else {
             return;
@@ -154,6 +173,7 @@ impl Feed {
             // stands.
             Some(entry) => {
                 entry.incarnation = incarnation;
+                entry.epoch = epoch;
                 entry.peer = peer;
                 entry.departed = false;
             }
@@ -163,6 +183,7 @@ impl Feed {
                     Entry {
                         segment: index,
                         incarnation,
+                        epoch,
                         peer,
                         ready: false,
                         retired: false,
@@ -197,6 +218,49 @@ impl Feed {
         shared.leave_if_gone(removal.id);
     }
 
+    /// `owner`, holding `lease`, reported `load` at `now`: taken only from
+    /// a usable entry instance in the registration the lease is of, since
+    /// a report of an earlier one, or of an instance that retired, would
+    /// count work the cell no longer offers. The reason, when refused.
+    pub(super) fn report(
+        &self,
+        owner: InstanceId,
+        lease: Lease,
+        load: LoadReport,
+        now: Instant,
+    ) -> Result<(), String> {
+        let mut shared = self.lock();
+        match shared.entries.get(&owner) {
+            Some(entry) if entry.epoch != lease.epoch => Err(format!(
+                "instance {owner}'s registration is not the one the report's credential is of"
+            )),
+            Some(entry) if entry.usable() => {
+                shared.loads.put(owner, load, now);
+                Ok(())
+            }
+            Some(_) => Err(format!(
+                "instance {owner} is not usable: it is not ready, it retired, or it left"
+            )),
+            None => Err(format!(
+                "instance {owner} is not an entry instance of the cell"
+            )),
+        }
+    }
+
+    /// Make the cell's load summary at `now` from the reports of its usable
+    /// entry instances, and send it to the watchers if it changed.
+    pub(super) fn summarize(&self, now: Instant) -> Option<LoadSummary> {
+        let mut shared = self.lock();
+        let Shared { entries, loads, .. } = &mut *shared;
+        let usable = entries.values().filter(|entry| entry.usable()).count();
+        let instances = u32::try_from(usable).unwrap_or(u32::MAX);
+        let usable = |id: &InstanceId| entries.get(id).is_some_and(Entry::usable);
+        if let Some(load) = loads.summarize(usable, instances, now) {
+            shared.send(CellWatchEvent::Load { load });
+        }
+        shared.loads.summary()
+    }
+
     /// The counting saw `event` on the `watched` service of the class's
     /// segment at `index`.
     pub(super) fn observe(&self, index: usize, watched: Watched, event: &ServiceEvent) {
@@ -227,6 +291,8 @@ struct Shared {
     /// were committed before its admission, or one whose loopback events
     /// arrive after it left, until its removals arrive too.
     unresolved: HashMap<InstanceId, (usize, Held)>,
+    /// The entry instances' load reports.
+    loads: Reports,
     events: broadcast::Sender<CellWatchEvent>,
 }
 
@@ -234,6 +300,8 @@ struct Shared {
 struct Entry {
     segment: usize,
     incarnation: Incarnation,
+    /// The registration committed for it, which fences its reports.
+    epoch: RegistrationEpoch,
     peer: PeerInfo,
     /// Whether it has announced `ready`.
     ready: bool,
@@ -243,6 +311,14 @@ struct Entry {
     held: Held,
     /// Whether the hub removed it.
     departed: bool,
+}
+
+impl Entry {
+    /// Whether it is usable for fresh work, as the quorum counts: ready
+    /// and in `ready` now, not retired, and not removed by the hub.
+    fn usable(&self) -> bool {
+        self.ready && self.held.ready && !self.retired && !self.departed
+    }
 }
 
 /// Which of an instance's `ready` and `retired` services the loopback
@@ -404,7 +480,7 @@ impl Shared {
             class: class.to_string(),
             epoch,
             state: self.state,
-            load: None,
+            load: self.loads.summary(),
         });
         events.extend(
             retired
@@ -448,6 +524,8 @@ mod tests {
     use super::{CellWatch, Feed, Watched};
     use futures::{FutureExt, StreamExt};
     use gdl_watch::CellWatchEvent;
+    use std::time::Duration;
+    use velo_hub::protocol::RegistrationEpoch;
     use velo_hub::store::{Incarnation, Removal};
     use velo_hub::velo::discovery::ServiceEvent;
     use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
@@ -458,6 +536,7 @@ mod tests {
             "cell".into(),
             "class".into(),
             vec![("f".into(), true), ("d".into(), false)],
+            Duration::from_secs(1),
             16,
         );
         feed.settle(1);
@@ -514,7 +593,12 @@ mod tests {
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(early.instance_id()));
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(never.instance_id()));
         assert_eq!(pending(&mut watch), []);
-        feed.joined("f", Incarnation::from_u64(1), early.clone());
+        feed.joined(
+            "f",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            early.clone(),
+        );
         assert_eq!(
             pending(&mut watch),
             [CellWatchEvent::Ready {
@@ -527,7 +611,12 @@ mod tests {
             Watched::Ready,
             &ServiceEvent::Removed(never.instance_id()),
         );
-        feed.joined("f", Incarnation::from_u64(1), never);
+        feed.joined(
+            "f",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            never,
+        );
         assert_eq!(pending(&mut watch), [], "it left `ready` before it joined");
     }
 
@@ -541,7 +630,12 @@ mod tests {
         let mut watch = watch(&feed);
         let member = peer();
         let id = member.instance_id();
-        feed.joined("f", Incarnation::from_u64(2), member.clone());
+        feed.joined(
+            "f",
+            Incarnation::from_u64(2),
+            RegistrationEpoch::new(),
+            member.clone(),
+        );
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         feed.removed(removal(id, 1));
         feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
@@ -561,7 +655,12 @@ mod tests {
         feed.removed(removal(id, 2));
         feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
         feed.observe(0, Watched::Retired, &ServiceEvent::Removed(id));
-        feed.joined("f", Incarnation::from_u64(3), member);
+        feed.joined(
+            "f",
+            Incarnation::from_u64(3),
+            RegistrationEpoch::new(),
+            member,
+        );
         assert_eq!(
             pending(&mut watch),
             [CellWatchEvent::Left {
@@ -584,7 +683,12 @@ mod tests {
         let id = member.instance_id();
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
-        feed.joined("f", Incarnation::from_u64(1), member);
+        feed.joined(
+            "f",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            member,
+        );
         let retired = CellWatchEvent::Retired {
             segment: "f".into(),
             instance: id,
@@ -604,7 +708,12 @@ mod tests {
         let mut watch = watch(&feed);
         let member = peer();
         let id = member.instance_id();
-        feed.joined("f", Incarnation::from_u64(1), member.clone());
+        feed.joined(
+            "f",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            member.clone(),
+        );
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         feed.removed(removal(id, 1));
         feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
@@ -640,7 +749,12 @@ mod tests {
         let mut watch = watch(&feed);
         let member = peer();
         let id = member.instance_id();
-        feed.joined("f", Incarnation::from_u64(1), member.clone());
+        feed.joined(
+            "f",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            member.clone(),
+        );
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
         feed.removed(removal(id, 1));
@@ -674,7 +788,12 @@ mod tests {
         let mut watch = watch(&feed);
         let (member, stranger) = (peer(), peer());
         let id = member.instance_id();
-        feed.joined("f", Incarnation::from_u64(1), member.clone());
+        feed.joined(
+            "f",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            member.clone(),
+        );
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         feed.observe(
             0,
@@ -684,7 +803,12 @@ mod tests {
         feed.removed(removal(id, 1));
         feed.observe(0, Watched::Retired, &ServiceEvent::Initial(vec![]));
         feed.observe(0, Watched::Ready, &ServiceEvent::Initial(vec![]));
-        feed.joined("f", Incarnation::from_u64(1), stranger);
+        feed.joined(
+            "f",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            stranger,
+        );
         assert_eq!(
             pending(&mut watch),
             [
@@ -709,8 +833,18 @@ mod tests {
         let mut watch = watch(&feed);
         let (member, idle) = (peer(), peer());
         let id = member.instance_id();
-        feed.joined("f", Incarnation::from_u64(1), member);
-        feed.joined("f", Incarnation::from_u64(1), idle.clone());
+        feed.joined(
+            "f",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            member,
+        );
+        feed.joined(
+            "f",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            idle.clone(),
+        );
         feed.observe(0, Watched::Retired, &ServiceEvent::Added(id));
         feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
         feed.observe(0, Watched::Retired, &ServiceEvent::Removed(id));
@@ -734,7 +868,12 @@ mod tests {
         let mut watch = watch(&feed);
         let member = peer();
         let id = member.instance_id();
-        feed.joined("d", Incarnation::from_u64(1), member);
+        feed.joined(
+            "d",
+            Incarnation::from_u64(1),
+            RegistrationEpoch::new(),
+            member,
+        );
         feed.observe(1, Watched::Ready, &ServiceEvent::Added(id));
         feed.observe(1, Watched::Retired, &ServiceEvent::Added(id));
         feed.removed(removal(id, 1));
@@ -745,7 +884,13 @@ mod tests {
     /// settled, does not change; a hub that stops first refuses it.
     #[tokio::test]
     async fn a_watch_waits_for_the_epoch() {
-        let feed = Feed::new("cell".into(), "class".into(), vec![], 16);
+        let feed = Feed::new(
+            "cell".into(),
+            "class".into(),
+            vec![],
+            Duration::from_secs(1),
+            16,
+        );
         let mut early = Box::pin(feed.watch());
         assert!(futures::poll!(early.as_mut()).is_pending());
         feed.settle(7);
@@ -755,7 +900,13 @@ mod tests {
             Some(CellWatchEvent::Cell { epoch, .. }) => assert_eq!(*epoch, 7),
             other => panic!("{other:?}"),
         }
-        let stopping = Feed::new("cell".into(), "class".into(), vec![], 16);
+        let stopping = Feed::new(
+            "cell".into(),
+            "class".into(),
+            vec![],
+            Duration::from_secs(1),
+            16,
+        );
         let refused = stopping.watch();
         stopping.close();
         assert!(refused.await.is_err());

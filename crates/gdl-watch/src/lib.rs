@@ -1,10 +1,13 @@
 //! The watches a cell's hub serves, as typed events: the cell's watch,
 //! what it tells a hub that follows the cell; the relay, what it follows,
-//! for its own instances; and the client that reads both.
+//! for its own instances; and the client that reads both. Also the report
+//! an entry instance sends its own hub of its admission ([`LoadReport`]),
+//! from which the hub makes the cell's load summary.
 //!
-//! The hub (`gdl-hub`) serves them and a segment instance reads the relay,
-//! so the wire types, the routes, and the client live here, where both
-//! reach them without the runtime linking the hub's server.
+//! The hub (`gdl-hub`) serves them and a segment instance reads the relay
+//! and sends the report, so the wire types, the routes, and the client
+//! live here, where both reach them without the runtime linking the hub's
+//! server.
 
 use gdl_cells::{CellState, LoadSummary};
 use serde::{Deserialize, Serialize};
@@ -25,6 +28,30 @@ pub const WATCH_ROUTE: &str = "/watch";
 
 /// The relay's route, under the extension's.
 pub const FOLLOWS_ROUTE: &str = "/follows";
+
+/// The load report's route, under the extension's, on the hub's control
+/// listener: `POST` with a [`LoadReport`], carrying the credential of the
+/// instance the path names, which must be a usable entry instance of the
+/// cell.
+pub const LOAD_ROUTE: &str = "/instances/{instance_id}/load";
+
+/// [`LOAD_ROUTE`]'s path for `instance`.
+pub fn load_path(instance: InstanceId) -> String {
+    format!("/instances/{instance}/load")
+}
+
+/// What an entry instance reports of its admission to its cell's hub,
+/// once a load summary period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LoadReport {
+    /// The roots the instance holds admitted now.
+    pub admitted: u64,
+    /// Its admission limit.
+    pub limit: u64,
+    /// The hand-offs it declined (no room, or retired) since the last
+    /// report its hub took.
+    pub refusals: u64,
+}
 
 /// One event of a cell's watch, `GET /v1/ext/gdl-cell/watch` on the cell
 /// hub's public listener: each server-sent event's data is one of these,
@@ -66,8 +93,9 @@ pub enum CellWatchEvent {
         epoch: u64,
         /// The cell's state.
         state: CellState,
-        /// The load of the cell's entry segment: `None` until its
-        /// instances report admission, as in the cell's record.
+        /// The load of the cell's entry segments, as in the cell's
+        /// record: `None` while no usable entry instance has a report the
+        /// hub counts, and always for a class that no hop enters.
         load: Option<LoadSummary>,
     },
     /// The snapshot is complete: the events before this one are the cell
@@ -77,6 +105,12 @@ pub enum CellWatchEvent {
     State {
         /// The state it changed to.
         state: CellState,
+    },
+    /// The cell's load summary changed: sent at most once a summary
+    /// period.
+    Load {
+        /// The summary it changed to.
+        load: Option<LoadSummary>,
     },
     /// An entry instance announced that it is ready, and has not retired.
     Ready {

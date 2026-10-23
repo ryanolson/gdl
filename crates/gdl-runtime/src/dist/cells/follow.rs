@@ -463,7 +463,7 @@ impl Followed {
                 Some((key, Change::Ended(follow)))
             }
             // The snapshot's marker, which the task reads.
-            FollowEvent::Synced => None,
+            FollowEvent::Synced | FollowEvent::Load { .. } => None,
         }
     }
 
