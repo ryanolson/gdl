@@ -139,22 +139,27 @@ async fn ends(watch: &mut impl Events, what: &str) {
     }
 }
 
-/// The records of a snapshot, by cell name, and its `Synced` token.
+/// The records of a snapshot, by cell name, and its `Synced` token. The
+/// whole snapshot is bounded, not only each of its events, so a snapshot
+/// that never ends fails the case.
 async fn snapshot(watch: &mut impl Events) -> (Vec<(String, Version)>, ResumeToken) {
-    let mut records = Vec::new();
-    loop {
-        match next(watch, "the snapshot").await {
-            CellEvent::Current(record) => records.push((record.name.clone(), record.version())),
-            CellEvent::Synced {
-                token,
-                snapshot: true,
-            } => {
-                records.sort();
-                return (records, token);
+    within("the whole snapshot", async {
+        let mut records = Vec::new();
+        loop {
+            match next(watch, "the snapshot").await {
+                CellEvent::Current(record) => records.push((record.name.clone(), record.version())),
+                CellEvent::Synced {
+                    token,
+                    snapshot: true,
+                } => {
+                    records.sort();
+                    return (records, token);
+                }
+                other => panic!("the snapshot: {other:?}"),
             }
-            other => panic!("the snapshot: {other:?}"),
         }
-    }
+    })
+    .await
 }
 
 /// The next event is a put of `cell` at `version`; its token.
@@ -475,6 +480,8 @@ async fn a_lagging_watcher_is_cut_off<B: Backend>(backend: &B) {
     loop {
         match next(&mut lagging, "the lagging watcher").await {
             CellEvent::Put { record, .. } => {
+                // No more changes were made than this, so the loop ends.
+                assert!(expected <= changes, "a change never made: {record:?}");
                 assert_eq!(
                     record.version(),
                     Version {
