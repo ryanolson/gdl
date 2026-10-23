@@ -781,6 +781,33 @@ async fn dropping_a_relay_watch_releases_it() {
     assert_eq!(ended, None);
 }
 
+/// A watch of the relay taken once the hub has stopped ends at once,
+/// without the snapshot: a stopped hub's follows are not routable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_hub_relays_nothing() {
+    let directory = Resolving::new();
+    let (model_hub, _model_cell) = serve_cell(
+        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (instances, _) = meet_the_quorum(&model_hub).await;
+    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let mut watch = global_cell.follows();
+    let mut relay = Relay::of(&snapshot(&mut watch).await);
+    until(&mut watch, &mut relay, "the follow", |relay| {
+        relay.exposed(CELL).contains(&instances[0].id())
+    })
+    .await;
+    global_hub.shutdown().await.expect("the hub stops");
+    let after = tokio::time::timeout(WAIT, global_cell.follows().collect::<Vec<_>>())
+        .await
+        .expect("the watch ends in time");
+    assert_eq!(after, []);
+    model_hub.shutdown().await.expect("the hub stops");
+}
+
 /// The relay's wire form is JSON tagged by `event`, as the cell watch's
 /// is, so that an instance of another build reads it.
 #[test]

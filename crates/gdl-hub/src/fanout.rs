@@ -89,6 +89,11 @@ struct Watch<E> {
 
 impl<E: Clone> Watch<E> {
     async fn next(&mut self) -> Option<E> {
+        // A stopped hub sends nothing more, its snapshot included: what it
+        // held is no longer so.
+        if self.closed.is_cancelled() {
+            return None;
+        }
         if let Some(event) = self.snapshot.next() {
             return Some(event);
         }
