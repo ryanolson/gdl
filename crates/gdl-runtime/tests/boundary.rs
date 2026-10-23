@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use common::boundary::{ModelCell, RUNTIME, Running, ask, model, placement, run, spec_of};
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::{Events, WAIT};
+use futures::StreamExt;
 use gdl::{Choice, Encoded, ErrorKind, Instances, Request, Selector, Selectors};
 use gdl_model::CellPolicy;
 use gdl_runtime::{CellState, Cells, DeploymentSpec, RequestRouter, RuntimeConfig};
@@ -323,6 +324,64 @@ async fn a_selector_sees_only_the_chosen_cells_instances() {
         "{offered:?}"
     );
     for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// A boundary selector's lease is held while the response it chose for is
+/// open, and released when the caller drops it (ruling 157).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_boundary_selectors_lease_lives_as_long_as_the_response() {
+    let spec = spec_of(placement().route("B", RequestRouter::Selector("recording".into())));
+    let events = Events::new();
+    let directory = Resolving::new();
+    let recording = Recording::default();
+    let mut selectors = Selectors::new();
+    selectors
+        .add("recording", recording.clone())
+        .expect("a selector");
+    let (hub, chooser) = global(&spec, &directory, selectors, &events).await;
+    let m1 = model(&spec, &directory, M1, "m1-hub:1337", 1, 1, &events).await;
+    let cells = tables(&chooser);
+    until(&cells, "the cell ready", |cells| {
+        holds(cells, M1, CellState::Ready, 1)
+    })
+    .await;
+    // Three items, then the sink holds its stream open.
+    let plan = common::Plan {
+        tokens: 3,
+        hold_at_end: true,
+        ..common::Plan::default()
+    };
+    let mut out = tokio::time::timeout(
+        WAIT,
+        chooser
+            .segment
+            .call(gdl::Cx::new(), common::prompt("held", plan)),
+    )
+    .await
+    .expect("handed on in time")
+    .expect("handed on");
+    for _ in 0..3 {
+        let item = tokio::time::timeout(WAIT, out.next())
+            .await
+            .expect("an item in time");
+        assert!(matches!(item, Some(Ok(_))), "{item:?}");
+    }
+    assert_eq!(
+        recording.leases.load(Ordering::SeqCst),
+        1,
+        "the lease ended before the response did"
+    );
+    drop(out);
+    let released = tokio::time::timeout(WAIT, async {
+        while recording.leases.load(Ordering::SeqCst) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(released.is_ok(), "the lease outlived the response");
+    for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
