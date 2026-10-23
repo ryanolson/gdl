@@ -235,7 +235,7 @@ impl Feed {
                 "instance {owner}'s registration is not the one the report's credential is of"
             )),
             Some(entry) if entry.usable() => {
-                shared.loads.put(owner, load, now);
+                shared.loads.put(owner, lease.epoch, load, now);
                 Ok(())
             }
             Some(_) => Err(format!(
@@ -254,7 +254,11 @@ impl Feed {
         let Shared { entries, loads, .. } = &mut *shared;
         let usable = entries.values().filter(|entry| entry.usable()).count();
         let instances = u32::try_from(usable).unwrap_or(u32::MAX);
-        let usable = |id: &InstanceId| entries.get(id).is_some_and(Entry::usable);
+        let usable = |id: &InstanceId, epoch| {
+            entries
+                .get(id)
+                .is_some_and(|entry| entry.usable() && entry.epoch == epoch)
+        };
         if let Some(load) = loads.summarize(usable, instances, now) {
             shared.send(CellWatchEvent::Load { load });
         }
@@ -524,7 +528,9 @@ mod tests {
     use super::{CellWatch, Feed, Watched};
     use futures::{FutureExt, StreamExt};
     use gdl_watch::CellWatchEvent;
-    use std::time::Duration;
+    use gdl_watch::LoadReport;
+    use std::time::{Duration, Instant};
+    use velo_hub::Lease;
     use velo_hub::protocol::RegistrationEpoch;
     use velo_hub::store::{Incarnation, Removal};
     use velo_hub::velo::discovery::ServiceEvent;
@@ -878,6 +884,49 @@ mod tests {
         feed.observe(1, Watched::Retired, &ServiceEvent::Added(id));
         feed.removed(removal(id, 1));
         assert_eq!(pending(&mut watch), []);
+    }
+
+    /// A report belongs to the registration it was made in. An instance
+    /// that leaves and registers again under a new epoch has reported
+    /// nothing in it, whether its departure was complete before it came
+    /// back or the new registration renewed the departed one.
+    #[tokio::test]
+    async fn a_report_does_not_outlive_its_registration() {
+        let load = LoadReport {
+            admitted: 3,
+            limit: 8,
+            refusals: 0,
+        };
+        let now = Instant::now();
+        for complete in [true, false] {
+            let feed = feed();
+            let member = peer();
+            let id = member.instance_id();
+            let first = RegistrationEpoch::new();
+            feed.joined("f", Incarnation::from_u64(1), first, member.clone());
+            feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
+            let lease = Lease {
+                incarnation: Incarnation::from_u64(1),
+                epoch: first,
+            };
+            feed.report(id, lease, load, now).expect("taken");
+            feed.removed(removal(id, 1));
+            if complete {
+                feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
+            }
+            feed.joined(
+                "f",
+                Incarnation::from_u64(2),
+                RegistrationEpoch::new(),
+                member,
+            );
+            feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
+            assert_eq!(
+                feed.summarize(now),
+                None,
+                "the earlier registration's report counted, its departure complete: {complete}"
+            );
+        }
     }
 
     /// A watch begins once the epoch is settled, and the epoch, once

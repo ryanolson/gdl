@@ -20,6 +20,7 @@ use gdl_cells::LoadSummary;
 use gdl_watch::LoadReport;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use velo_hub::protocol::RegistrationEpoch;
 use velo_hub::velo::InstanceId;
 
 use super::feed::Feed;
@@ -47,15 +48,28 @@ impl Reports {
         }
     }
 
-    /// `instance`, a usable entry instance, reported `load` at `now`.
-    pub(super) fn put(&mut self, instance: InstanceId, mut load: LoadReport, now: Instant) {
+    /// `instance`, a usable entry instance in its registration `epoch`,
+    /// reported `load` at `now`. Its admission replaces the earlier
+    /// report's; its refusals are added to the earlier report's when no
+    /// summary has counted those yet and both are of one registration, so
+    /// that a summary's refusals are every refusal reported in its period,
+    /// even when two reports of the instance fall in one period.
+    pub(super) fn put(
+        &mut self,
+        instance: InstanceId,
+        epoch: RegistrationEpoch,
+        mut load: LoadReport,
+        now: Instant,
+    ) {
         if let Some(earlier) = self.reports.get(&instance)
             && !earlier.summarized
+            && earlier.epoch == epoch
         {
             load.refusals = load.refusals.saturating_add(earlier.load.refusals);
         }
         let report = Report {
             at: now,
+            epoch,
             load,
             summarized: false,
         };
@@ -67,20 +81,21 @@ impl Reports {
         self.summary
     }
 
-    /// Make the summary at `now`, of the `usable` entry instances: the
-    /// reports of the others, and those older than three periods, are
-    /// dropped. `None` while no report is counted. The summary, if it
-    /// changed.
+    /// Make the summary at `now`, of the reports that `usable` says are of
+    /// a usable entry instance in its current registration: the others,
+    /// and those older than three periods, are dropped, so that a report
+    /// never counts for a later registration of its instance. `None` while
+    /// no report is counted. The summary, if it changed.
     pub(super) fn summarize(
         &mut self,
-        usable: impl Fn(&InstanceId) -> bool,
+        usable: impl Fn(&InstanceId, RegistrationEpoch) -> bool,
         instances: u32,
         now: Instant,
     ) -> Option<Option<LoadSummary>> {
         let kept = self.kept;
         self.reports.retain(|instance, report| {
             report.summarized = true;
-            usable(instance) && now.saturating_duration_since(report.at) <= kept
+            usable(instance, report.epoch) && now.saturating_duration_since(report.at) <= kept
         });
         let summary = (!self.reports.is_empty()).then(|| {
             let mut summary = LoadSummary {
@@ -104,6 +119,8 @@ impl Reports {
 /// One instance's latest report.
 struct Report {
     at: Instant,
+    /// The registration it was made in.
+    epoch: RegistrationEpoch,
     load: LoadReport,
     /// Whether a summary has counted it.
     summarized: bool,
@@ -142,7 +159,12 @@ pub(super) async fn run(
 mod tests {
     use super::{LoadReport, LoadSummary, Reports};
     use std::time::{Duration, Instant};
+    use velo_hub::protocol::RegistrationEpoch;
     use velo_hub::velo::InstanceId;
+
+    /// The one registration every report here is made in.
+    static EPOCH: std::sync::LazyLock<RegistrationEpoch> =
+        std::sync::LazyLock::new(RegistrationEpoch::new);
 
     fn report(admitted: u64, limit: u64, refusals: u64) -> LoadReport {
         LoadReport {
@@ -161,19 +183,23 @@ mod tests {
         let (a, b) = (InstanceId::new_v4(), InstanceId::new_v4());
         let start = Instant::now();
         let mut reports = Reports::new(period);
-        assert_eq!(reports.summarize(|_| true, 2, start), None, "no change");
-        reports.put(a, report(3, 8, 1), start);
-        reports.put(b, report(2, 8, 0), start + period);
+        assert_eq!(reports.summarize(|_, _| true, 2, start), None, "no change");
+        reports.put(a, *EPOCH, report(3, 8, 1), start);
+        reports.put(b, *EPOCH, report(2, 8, 0), start + period);
         let both = LoadSummary {
             admitted: 5,
             limit: 16,
             instances: 2,
             refusals: 1,
         };
-        assert_eq!(reports.summarize(|_| true, 2, start), Some(Some(both)));
-        assert_eq!(reports.summarize(|_| true, 2, start + period * 3), None);
+        assert_eq!(reports.summarize(|_, _| true, 2, start), Some(Some(both)));
+        assert_eq!(reports.summarize(|_, _| true, 2, start + period * 3), None);
         assert_eq!(
-            reports.summarize(|_| true, 2, start + period * 3 + Duration::from_millis(1)),
+            reports.summarize(
+                |_, _| true,
+                2,
+                start + period * 3 + Duration::from_millis(1)
+            ),
             Some(Some(LoadSummary {
                 admitted: 2,
                 limit: 8,
@@ -183,12 +209,12 @@ mod tests {
             "a's report is past three periods"
         );
         assert_eq!(
-            reports.summarize(|id| *id != b, 1, start + period * 3),
+            reports.summarize(|id, _| *id != b, 1, start + period * 3),
             Some(None)
         );
-        reports.put(b, report(2, 8, 0), start);
+        reports.put(b, *EPOCH, report(2, 8, 0), start);
         assert_eq!(
-            reports.summarize(|_| true, 1, start),
+            reports.summarize(|_, _| true, 1, start),
             Some(Some(LoadSummary {
                 admitted: 2,
                 limit: 8,
@@ -210,10 +236,10 @@ mod tests {
         let a = InstanceId::new_v4();
         let start = Instant::now();
         let mut reports = Reports::new(period);
-        reports.put(a, report(3, 8, 2), start);
-        reports.put(a, report(1, 8, 1), start);
+        reports.put(a, *EPOCH, report(3, 8, 2), start);
+        reports.put(a, *EPOCH, report(1, 8, 1), start);
         assert_eq!(
-            reports.summarize(|_| true, 1, start),
+            reports.summarize(|_, _| true, 1, start),
             Some(Some(LoadSummary {
                 admitted: 1,
                 limit: 8,
@@ -221,9 +247,9 @@ mod tests {
                 refusals: 3,
             }))
         );
-        reports.put(a, report(1, 8, 0), start);
+        reports.put(a, *EPOCH, report(1, 8, 0), start);
         assert_eq!(
-            reports.summarize(|_| true, 1, start),
+            reports.summarize(|_, _| true, 1, start),
             Some(Some(LoadSummary {
                 admitted: 1,
                 limit: 8,
@@ -231,6 +257,31 @@ mod tests {
                 refusals: 0,
             })),
             "refusals a summary counted were carried again"
+        );
+        reports.put(a, *EPOCH, report(1, 8, 2), start);
+        reports.put(a, *EPOCH, report(1, 8, 0), start);
+        assert_eq!(
+            reports.summarize(|_, _| true, 1, start),
+            Some(Some(LoadSummary {
+                admitted: 1,
+                limit: 8,
+                instances: 1,
+                refusals: 2,
+            })),
+            "the summary's period lost the refusals of a report it never counted"
+        );
+        let later = RegistrationEpoch::new();
+        reports.put(a, *EPOCH, report(1, 8, 2), start);
+        reports.put(a, later, report(1, 8, 0), start);
+        assert_eq!(
+            reports.summarize(|_, epoch| epoch == later, 1, start),
+            Some(Some(LoadSummary {
+                admitted: 1,
+                limit: 8,
+                instances: 1,
+                refusals: 0,
+            })),
+            "an earlier registration's refusals were carried into a later one's"
         );
     }
 }
