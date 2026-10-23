@@ -17,6 +17,7 @@ use crate::{Error, Layout};
 /// directory = "relay"          # optional: "relay" (the default), "memory", or "dir"
 /// # dir = "/var/lib/gdl/cells" # with "dir", and only with it: the shared directory
 /// seeds = ["hub-a:1337"]       # optional: hub addresses to join the relay mesh from
+/// hub = "model-x-01-hub:1337"  # optional: where other cells' hubs reach this cell's hub
 /// [ready]                      # optional: the quorum of each segment of the class
 /// e = 4
 /// ```
@@ -42,6 +43,11 @@ pub struct CellSettings {
     /// Usable instances each segment of the class needs for the cell to be
     /// ready; see [`CellSettings::quorum`].
     pub ready: BTreeMap<String, u32>,
+    /// The address, `host:port`, at which other cells' hubs reach this
+    /// cell's hub: the hub address of the cell's record. Only the cell's
+    /// hub reads it, and it needs it to publish the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub: Option<String>,
 }
 
 /// Where cell records are published and watched. Each backend's own
@@ -78,9 +84,20 @@ impl CellSettings {
     /// is in it, and every `ready` key is a segment of it. Every problem is
     /// reported.
     pub fn check(&self, layout: &Layout, segment: &str) -> Result<(), Error> {
+        refuse(self.problems(layout, Some(segment)))
+    }
+
+    /// Whether these settings fit the cell's hub in `layout`: the rule of
+    /// [`CellSettings::check`] without an instance's own segment, since a
+    /// hub has none. Every problem is reported.
+    pub fn check_hub(&self, layout: &Layout) -> Result<(), Error> {
+        refuse(self.problems(layout, None))
+    }
+
+    fn problems(&self, layout: &Layout, segment: Option<&str>) -> Vec<String> {
         let class = self.class.as_str();
         let classes = layout.class_segments();
-        let problems: Vec<String> = if classes.is_empty() {
+        if classes.is_empty() {
             vec![format!(
                 "[cell] class = {class:?}, but the placement has no classes"
             )]
@@ -89,7 +106,7 @@ impl CellSettings {
                 "[cell] class: the placement has no class `{class}`"
             )]
         } else {
-            let own = match layout.class_of(segment) {
+            let own = segment.and_then(|segment| match layout.class_of(segment) {
                 Some(own) if own == class => None,
                 Some(own) => Some(format!(
                     "[cell] class: this instance's segment `{segment}` is in class `{own}`, not `{class}`"
@@ -97,19 +114,53 @@ impl CellSettings {
                 None => Some(format!(
                     "[cell] class: this instance's segment `{segment}` is not in class `{class}`"
                 )),
-            };
+            });
             let strays = self
                 .ready
                 .keys()
                 .filter(|key| layout.class_of(key) != Some(class))
                 .map(|key| format!("[cell] ready: `{key}` is not a segment of class `{class}`"));
             own.into_iter().chain(strays).collect()
-        };
-        if problems.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::new(problems.join("; ")))
         }
+    }
+}
+
+fn refuse(problems: Vec<String>) -> Result<(), Error> {
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::new(problems.join("; ")))
+    }
+}
+
+/// Whether `address` is `host:port` as a hub's address must be: a host
+/// name of letters, digits, `-`, and `.`, an IPv4 address, or a bracketed
+/// IPv6 address, and a port from 1 to 65535. Nothing else, so that a URL
+/// or a stray space is refused where it is written rather than where
+/// another hub dials it.
+fn check_hub_address(address: &str) -> Result<(), String> {
+    let shaped = address.rsplit_once(':').is_some_and(|(host, port)| {
+        let port = port.parse::<u16>().is_ok_and(|port| port > 0)
+            && port.bytes().all(|b| b.is_ascii_digit());
+        let host = match host.strip_prefix('[') {
+            Some(bracketed) => bracketed
+                .strip_suffix(']')
+                .is_some_and(|ip| ip.parse::<std::net::Ipv6Addr>().is_ok()),
+            None => {
+                !host.is_empty()
+                    && host
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+            }
+        };
+        port && host
+    });
+    if shaped {
+        Ok(())
+    } else {
+        Err(format!(
+            "[cell] hub = {address:?} must be `host:port`: a host name, an IPv4 address, or a bracketed IPv6 address, and a port from 1 to 65535"
+        ))
     }
 }
 
@@ -164,6 +215,8 @@ struct Table {
     seeds: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ready: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hub: Option<String>,
 }
 
 /// The `directory` key's values.
@@ -209,6 +262,9 @@ impl TryFrom<Table> for CellSettings {
                 ));
             }
         };
+        if let Some(hub) = &table.hub {
+            check_hub_address(hub)?;
+        }
         Ok(Self {
             name: table.name,
             class: table.class,
@@ -217,6 +273,7 @@ impl TryFrom<Table> for CellSettings {
             directory,
             seeds: table.seeds,
             ready: table.ready,
+            hub: table.hub,
         })
     }
 }
@@ -237,6 +294,7 @@ impl From<CellSettings> for Table {
             dir,
             seeds: settings.seeds,
             ready: settings.ready,
+            hub: settings.hub,
         }
     }
 }

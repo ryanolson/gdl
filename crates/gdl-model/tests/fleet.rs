@@ -169,6 +169,7 @@ fn a_cells_settings_have_its_quorum_resolved() {
             seeds: vec![],
             // The cell's own `e`; the class's `d` and `f`.
             ready: BTreeMap::from([("d".into(), 1), ("e".into(), 8), ("f".into(), 2)]),
+            hub: None,
         }
     );
     let global = fleet.cell("global-eu-west-1").expect("a cell");

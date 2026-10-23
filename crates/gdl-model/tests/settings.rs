@@ -64,6 +64,7 @@ region = "us-east-1"
 home = "global-us-east-1"
 directory = "memory"
 seeds = ["hub-a:1337", "hub-b:1337"]
+hub = "model-x-01-hub:1337"
 [ready]
 d = 4
 "#;
@@ -80,6 +81,7 @@ fn a_cells_settings_are_read_whole() {
             directory: DirectoryBackend::Memory,
             seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
             ready: BTreeMap::from([("d".into(), 4)]),
+            hub: Some("model-x-01-hub:1337".into()),
         }
     );
     let text = toml::to_string(&settings(MODEL)).expect("toml");
@@ -93,6 +95,7 @@ fn only_name_class_and_region_are_required() {
     assert_eq!(least.directory, DirectoryBackend::Relay);
     assert!(least.seeds.is_empty());
     assert!(least.ready.is_empty());
+    assert_eq!(least.hub, None);
     for missing in [
         "class = 'global'\nregion = 'r'\n",
         "name = 'g'\nregion = 'r'\n",
@@ -144,6 +147,74 @@ fn the_dir_backend_takes_its_path_and_no_other_backend_does() {
             panic!("{bad}: accepted");
         };
         assert!(error.to_string().contains(why), "{bad}: {error}");
+    }
+}
+
+/// The address other cells' hubs reach this cell's hub at is `host:port`,
+/// with a host name, an IPv4 address, or a bracketed IPv6 address.
+#[test]
+fn a_hub_address_is_host_and_port() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    for good in [
+        "hub:1337",
+        "hub.cells.internal:1",
+        "10.0.0.7:65535",
+        "[::1]:1337",
+    ] {
+        let cell = settings(&format!("{LEAST}hub = '{good}'\n"));
+        assert_eq!(cell.hub.as_deref(), Some(good));
+    }
+    for bad in [
+        "hub",
+        "hub:",
+        ":1337",
+        "hub:0",
+        "hub:65536",
+        "hub:port",
+        "hub a:1337",
+        "http://hub:1337",
+        "[zz]:1337",
+        "::1:1337",
+    ] {
+        let Err(error) = toml::from_str::<CellSettings>(&format!("{LEAST}hub = '{bad}'\n")) else {
+            panic!("{bad}: accepted");
+        };
+        assert!(
+            error.to_string().contains(&format!("[cell] hub = {bad:?}")),
+            "{bad}: {error}"
+        );
+    }
+}
+
+/// A cell's hub has no segment of its own: its settings fit when the
+/// placement has the cell's class and every `ready` key is a segment of
+/// it, the instance's rule without the instance.
+#[test]
+fn a_cells_hub_checks_its_settings_against_the_class() {
+    settings(MODEL).check_hub(&classed()).expect("a model cell");
+    let cases = [
+        (
+            laid(SEGMENTS),
+            MODEL,
+            "[cell] class = \"model_x\", but the placement has no classes",
+        ),
+        (
+            classed(),
+            "name = 'm'\nclass = 'model_y'\nregion = 'r'\n",
+            "[cell] class: the placement has no class `model_y`",
+        ),
+        (
+            classed(),
+            "name = 'm'\nclass = 'model_x'\nregion = 'r'\nready = { d = 1, a = 2, b = 1 }\n",
+            "[cell] ready: `a` is not a segment of class `model_x`; \
+             [cell] ready: `b` is not a segment of class `model_x`",
+        ),
+    ];
+    for (layout, text, expected) in cases {
+        let Err(error) = settings(text).check_hub(&layout) else {
+            panic!("accepted {text}");
+        };
+        assert_eq!(error.to_string(), expected, "{text}");
     }
 }
 
