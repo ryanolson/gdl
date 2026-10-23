@@ -214,6 +214,10 @@ async fn malformed_writes_are_refused<B: Backend>(backend: &B) {
             lease: Duration::ZERO,
             ..record(MODEL, "m1", 1, 1)
         },
+        CellRecord {
+            lease: Duration::from_micros(1_500),
+            ..record(MODEL, "m1", 1, 1)
+        },
     ];
     for record in bad {
         let result = publish(&writer, record.clone()).await;

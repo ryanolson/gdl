@@ -58,17 +58,21 @@ impl CellRecord {
     }
 
     /// Whether the record can be published: its cell, region, and class
-    /// names have their shapes, and its lease is at least a millisecond,
-    /// the unit it is stored in. Every problem is reported.
+    /// names have their shapes, and its lease is a whole number of
+    /// milliseconds, at least one: the unit it is stored in, so that a
+    /// stored record expires when the published one would. Every problem is
+    /// reported.
     pub fn check(&self) -> Result<(), DirectoryError> {
         let mut problems = names(&self.class, &self.name);
         if let Err(problem) = gdl_model::check_region_name(&self.region) {
             problems.push(problem);
         }
-        if self.lease.as_millis() == 0 {
+        let whole = self.lease.subsec_nanos().is_multiple_of(1_000_000)
+            && u64::try_from(self.lease.as_millis()).is_ok();
+        if self.lease.is_zero() || !whole {
             problems.push(format!(
-                "cell `{}`: the lease must be at least 1 ms",
-                self.name
+                "cell `{}`: the lease must be a whole number of milliseconds, at least 1, not {:?}",
+                self.name, self.lease
             ));
         }
         refuse(problems)
