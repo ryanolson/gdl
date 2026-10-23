@@ -5,9 +5,11 @@
 //! end, B. Every instance is a process of its own, in this test process.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::join_all;
 use gdl::{Cx, Next};
+use gdl_hub::{CellReadiness, CellTiming};
 use gdl_model::CellSettings;
 use gdl_runtime::velo::Velo;
 use gdl_runtime::{
@@ -18,7 +20,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use velo_hub::Hub;
 
-use super::cells::{Nothing, REGION, Resolving, cell_hub_of, model_cell, settings};
+use super::cells::{Nothing, REGION, Resolving, cell_hub_timed, model_cell, settings, timing};
 use super::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
 
 /// Every segment of [`placement`].
@@ -146,6 +148,8 @@ pub async fn run_graph<H: Register + Send + Sync + 'static>(
 /// A model cell of `spec`: its hub, its entry instances, and its `d`.
 pub struct ModelCell<H> {
     pub hub: Hub,
+    /// The cell's extension on its hub.
+    pub readiness: Arc<CellReadiness<Resolving>>,
     pub entries: Vec<Running<H>>,
     pub sink: Running<H>,
 }
@@ -200,19 +204,79 @@ pub async fn model_of<H: Register + Send + Sync + 'static>(
     entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> ModelCell<H> {
-    let Model {
-        name,
-        hub: hub_name,
-        quorum,
-        entries,
-    } = cell;
-    let (hub, _) = cell_hub_of(spec, model_hub_needing(name, hub_name, quorum), directory).await;
-    let extra = format!("{}{RUNTIME}", model_cell(name));
+    let hub = model_hub_needing(cell.name, cell.hub, cell.quorum);
+    let extra = format!("{}{RUNTIME}", model_cell(cell.name));
+    start_model(
+        spec,
+        directory,
+        cell,
+        (hub, timing()),
+        &extra,
+        entry,
+        assemble,
+    )
+    .await
+}
+
+/// The load summary period of [`model_summarized`]: the shortest.
+pub const SUMMARY: Duration = Duration::from_secs(1);
+
+/// [`model_of`], with the shortest load summary period, [`SUMMARY`], for
+/// the cell's hub and its instances, a heartbeat as long, so that the
+/// record carries each summary soon after it is made, and `runtime` as
+/// every instance's `[runtime]` table.
+pub async fn model_summarized<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    runtime: &str,
+    entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> ModelCell<H> {
+    let hub = CellSettings {
+        summary: SUMMARY,
+        ..model_hub_needing(cell.name, cell.hub, cell.quorum)
+    };
+    let timing = CellTiming {
+        heartbeat: SUMMARY,
+        ..timing()
+    };
+    let extra = format!(
+        "{}summary_ms = {}
+{runtime}",
+        model_cell(cell.name),
+        SUMMARY.as_millis()
+    );
+    start_model(
+        spec,
+        directory,
+        cell,
+        (hub, timing),
+        &extra,
+        entry,
+        assemble,
+    )
+    .await
+}
+
+/// Start the model cell `cell` with its hub's settings and timing, and
+/// `extra` added to every instance's settings.
+async fn start_model<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    (settings_of_hub, timing): (CellSettings, CellTiming),
+    extra: &str,
+    entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> ModelCell<H> {
+    let entries = cell.entries;
+    let (hub, readiness) = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
     let config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
         5_000,
-        &extra,
+        extra,
     );
     // Each instance's launch waits for the others of its class.
     let mut segments = vec!["d"];
@@ -232,7 +296,12 @@ pub async fn model_of<H: Register + Send + Sync + 'static>(
     .await;
     let entries = running.split_off(1);
     let sink = running.pop().expect("the sink");
-    ModelCell { hub, entries, sink }
+    ModelCell {
+        hub,
+        readiness,
+        entries,
+        sink,
+    }
 }
 
 /// A request through the source that streams three items, and its

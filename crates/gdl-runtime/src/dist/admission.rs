@@ -22,6 +22,7 @@ use gdl::{Error, ErrorKind, Result};
 /// deadlock.
 pub(crate) struct Admission {
     permits: Arc<Semaphore>,
+    limit: usize,
     wait: Duration,
     /// Woken whenever a root is newly admitted, so an entry that waits for a
     /// permit while another entry of its root takes one joins that entry
@@ -41,6 +42,7 @@ impl Admission {
     pub(crate) fn new(limit: usize, wait: Duration, attempt_limit: usize) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(limit)),
+            limit,
             wait,
             admitted: Notify::new(),
             ledger: Arc::new(DashMap::new()),
@@ -122,6 +124,15 @@ impl Admission {
     /// Roots currently admitted. For tests: must return to zero.
     pub(crate) fn admitted(&self) -> usize {
         self.ledger.len()
+    }
+
+    /// The roots admitted now and the limit, as a load report reads them:
+    /// one atomic load of the permits, since each admitted root holds one,
+    /// and no lock of the ledger's, which a request takes. A permit taken
+    /// and given back by a second entry of a root counts for that moment.
+    pub(crate) fn load(&self) -> (usize, usize) {
+        let free = self.permits.available_permits();
+        (self.limit.saturating_sub(free), self.limit)
     }
 
     /// Roots with outstanding attempts. For tests: must return to zero.
@@ -282,6 +293,26 @@ mod tests {
         assert_eq!(admission.admitted(), 1);
         drop((first, second));
         assert_eq!(admission.admitted(), 0);
+    }
+
+    /// The load counts each admitted root once, however many entries
+    /// share it, and nothing once its last share is gone.
+    #[tokio::test]
+    async fn the_load_counts_admitted_roots_against_the_limit() {
+        let admission = Admission::new(4, Duration::from_millis(20), 8);
+        assert_eq!(admission.load(), (0, 4));
+        let first = admission.admit(1).await.expect("first");
+        let second = admission.admit(1).await.expect("same root rides along");
+        let other = admission.admit(2).await.expect("another root");
+        assert_eq!(admission.load(), (2, 4));
+        drop((first, other));
+        assert_eq!(
+            admission.load(),
+            (1, 4),
+            "the root is held by its second share"
+        );
+        drop(second);
+        assert_eq!(admission.load(), (0, 4));
     }
 
     #[test]

@@ -22,7 +22,8 @@ use serde::de::DeserializeOwned;
 use velo::Velo;
 
 use crate::dist::{
-    Roster, RuntimeConfig, Segment, announce, announced, bind_node, follow_directory, shut_down,
+    Roster, RuntimeConfig, Segment, SegmentLoad, announce, announced, bind_node, follow_directory,
+    shut_down,
 };
 use gdl::Cx;
 use gdl::{Error, ErrorKind, Result};
@@ -54,13 +55,16 @@ use system::{Health, Phase, SystemSettings};
 /// name = "model-x-01-us-east-1"
 /// class = "model_x"       # the launch refuses a class that is not the segment's
 /// region = "us-east-1"
+/// summary_ms = 10000      # optional: how often an entry instance reports its admission to its hub
 /// ```
 ///
 /// An instance in a cell waits at its launch only for the segments of its
 /// own class: `[instances]` and `[min_replicas]` may name no other. Under a
 /// hub, one whose segment holds a hop into another class (a chooser) also
 /// follows its hub's relay of the cells the hub follows, into the tables
-/// [`Launch::cells`] reads.
+/// [`Launch::cells`] reads. One whose segment is an entry segment of its
+/// class (it holds the inner end of a hop into the class) reports its
+/// admission to its hub once every `summary_ms` while it is ready.
 pub struct ProcessConfig<H> {
     listen: SocketAddr,
     roster: Option<PathBuf>,
@@ -410,6 +414,13 @@ impl<H> ProcessConfig<H> {
             .collect();
         let wait = Duration::from_millis(self.rendezvous_ms);
         let drain = self.runtime.drain_bound();
+        // An entry instance in a cell reports its admission to its hub.
+        #[cfg(feature = "hub")]
+        let reports = self
+            .cell
+            .as_ref()
+            .filter(|cell| layout.entry_segments(&cell.class).contains(segment))
+            .map(|cell| cell.summary);
         // A chooser's follower of the cells it sends to, under a hub.
         #[cfg(feature = "hub")]
         let mut chooser = None;
@@ -543,6 +554,8 @@ impl<H> ProcessConfig<H> {
             _follower: follower,
             #[cfg(feature = "hub")]
             _chooser: chooser.map(|(_, task)| task),
+            #[cfg(feature = "hub")]
+            reports,
             _leaving: leaving,
         })
     }
@@ -609,6 +622,10 @@ pub struct Launch {
     /// launch, through its drain.
     #[cfg(feature = "hub")]
     _chooser: Option<Abort>,
+    /// For an entry instance in a cell, how often it reports its
+    /// admission to its hub.
+    #[cfg(feature = "hub")]
+    reports: Option<Duration>,
     /// Dropped last, on every way out: says the instance has left.
     _leaving: Leaving,
 }
@@ -674,11 +691,22 @@ pub trait Drains: Send + Sync + 'static {
     /// Refuse the requests that arrive from now on. Nothing by default,
     /// for a launch that serves no segment.
     fn close(&self) {}
+
+    /// What its admission holds, for the load report of an entry instance
+    /// in a cell. `None` by default, for a launch that serves no segment,
+    /// which reports nothing.
+    fn load(&self) -> Option<SegmentLoad> {
+        None
+    }
 }
 
 impl<H: Send + Sync + 'static> Drains for Segment<H> {
     fn admitted(&self) -> usize {
         Segment::admitted(self)
+    }
+
+    fn load(&self) -> Option<SegmentLoad> {
+        Some(Segment::load(self))
     }
 
     fn close(&self) {
@@ -820,6 +848,18 @@ impl Launch {
                         );
                     }
                 }
+                // An entry instance in a cell reports its admission from
+                // here, while it is usable, and stops before it retires.
+                #[cfg(feature = "hub")]
+                let reporter = match (&self.peers, self.reports) {
+                    (Peers::Hub(session), Some(period)) => {
+                        let segment = Arc::clone(&segment);
+                        let read = move || segment.load();
+                        let me = self.node.instance_id();
+                        Some(Abort(session.report_load(me, period, read)))
+                    }
+                    _ => None,
+                };
                 process.health.set(Phase::Ready);
                 eprintln!("{}: ready", self.segment);
                 let shutdown = Cx::new();
@@ -837,6 +877,8 @@ impl Launch {
                     () = process.stops(1) => (None, Ok(())),
                     result = lease => (None, result),
                 };
+                #[cfg(feature = "hub")]
+                drop(reporter);
                 let deadline = tokio::time::Instant::now() + self.drain;
                 process.health.set(Phase::Draining);
                 shutdown.cancel();

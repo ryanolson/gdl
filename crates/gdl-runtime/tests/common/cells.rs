@@ -185,8 +185,18 @@ pub async fn cell_hub_of(
     cell: CellSettings,
     directory: &Resolving,
 ) -> (Hub, Arc<CellReadiness<Resolving>>) {
+    cell_hub_timed(spec, cell, directory, timing()).await
+}
+
+/// [`cell_hub_of`] paced by `timing`.
+pub async fn cell_hub_timed(
+    spec: &DeploymentSpec,
+    cell: CellSettings,
+    directory: &Resolving,
+    timing: CellTiming,
+) -> (Hub, Arc<CellReadiness<Resolving>>) {
     let name = cell.hub.clone().expect("a cell's hub has a name");
-    let (hub, readiness) = unresolved_cell_hub_of(spec, cell, directory).await;
+    let (hub, readiness) = unresolved_cell_hub_of(spec, cell, directory, timing).await;
     directory.resolve(&name, &format!("127.0.0.1:{}", hub.public_addr().port()));
     (hub, readiness)
 }
@@ -197,16 +207,17 @@ pub async fn unresolved_cell_hub(
     cell: CellSettings,
     directory: &Resolving,
 ) -> (Hub, Arc<CellReadiness<Resolving>>) {
-    unresolved_cell_hub_of(&spec(), cell, directory).await
+    unresolved_cell_hub_of(&spec(), cell, directory, timing()).await
 }
 
 async fn unresolved_cell_hub_of(
     spec: &DeploymentSpec,
     cell: CellSettings,
     directory: &Resolving,
+    timing: CellTiming,
 ) -> (Hub, Arc<CellReadiness<Resolving>>) {
     let readiness = Arc::new(
-        CellReadiness::new(spec, cell, directory.clone(), timing()).expect("valid test fixture"),
+        CellReadiness::new(spec, cell, directory.clone(), timing).expect("valid test fixture"),
     );
     let hub = Hub::builder(hub_config())
         .extension(GraphAdmission::new(spec.clone()))

@@ -413,7 +413,18 @@ where
                     pos as u16,
                     Arc::new(move |envelope| {
                         let hop = Arc::clone(&hop);
-                        Box::pin(async move { hop.accept_forward(envelope).await })
+                        Box::pin(async move {
+                            let accepted = hop.accept_forward(envelope).await;
+                            if let Err(error) = &accepted
+                                && error.kind() == ErrorKind::Overloaded
+                            {
+                                hop.rt
+                                    .served
+                                    .declined
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            accepted
+                        })
                     }),
                 );
             }

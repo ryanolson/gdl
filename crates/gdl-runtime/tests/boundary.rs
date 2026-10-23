@@ -153,6 +153,7 @@ async fn a_ready_cell_before_a_degraded_one_and_never_an_unavailable_one() {
         hub: m2_hub,
         entries: _m2_entries,
         sink,
+        ..
     } = m2;
     sink.stop().await;
     until(&cells, "the cell unavailable", |cells| {

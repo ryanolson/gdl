@@ -759,6 +759,10 @@ pub(crate) struct Served {
     pub(crate) forwards: AtomicUsize,
     pub(crate) runs: AtomicUsize,
     pub(crate) inputs: AtomicUsize,
+    /// Forward hand-offs declined with no room (admission or egress
+    /// refused, or the instance retired): what a load report counts as
+    /// refusals. Only a refusal touches it.
+    pub(crate) declined: AtomicUsize,
     /// Forward hand-offs that arrived, refused ones too: what a test
     /// counts to see where a request was offered.
     #[cfg(feature = "fault-injection")]

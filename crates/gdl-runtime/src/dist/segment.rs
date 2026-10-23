@@ -152,6 +152,18 @@ pub struct Served {
     pub inputs: usize,
 }
 
+/// What an instance's admission holds, as its load report reads it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SegmentLoad {
+    /// The root requests it admits now.
+    pub admitted: usize,
+    /// How many it admits at once: `[runtime] admission_limit`.
+    pub limit: usize,
+    /// The forward hand-offs it has declined since it started, with no
+    /// room (admission or egress refused) or retired.
+    pub declined: usize,
+}
+
 /// A running segment instance.
 pub struct Segment<H> {
     rt: Arc<Runtime>,
@@ -190,6 +202,21 @@ impl<H> Segment<H> {
     /// every request it served has finished.
     pub fn admitted(&self) -> usize {
         self.rt.admission.admitted()
+    }
+
+    /// What its admission holds now, read from counters the admission and
+    /// the forward entries keep, without a lock a request takes.
+    pub fn load(&self) -> SegmentLoad {
+        let (admitted, limit) = self.rt.admission.load();
+        SegmentLoad {
+            admitted,
+            limit,
+            declined: self
+                .rt
+                .served
+                .declined
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     /// Refuse every forward hand-off and backward-run opening that arrives

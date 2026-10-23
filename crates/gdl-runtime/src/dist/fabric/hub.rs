@@ -1122,3 +1122,4 @@ mod tests {
 
 #[cfg(test)]
 mod drains;
+mod load;
