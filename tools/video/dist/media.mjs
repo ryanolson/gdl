@@ -137,9 +137,9 @@ export function validateManifest(value, scenes) {
       turnIds.add(turn.id);
     }
   }
-  for (const key of Object.keys(value)) if (!['composerUrl', 'voices', 'footage'].includes(key)) throw new TypeError(`unknown manifest key: ${key}`);
+  for (const key of Object.keys(value)) if (!['composerUrl', 'voices', 'footage', 'music'].includes(key)) throw new TypeError(`unknown manifest key: ${key}`);
   const composerUrl = Object.hasOwn(value, 'composerUrl') ? urlString(value.composerUrl, 'composerUrl', false) : 'http://127.0.0.1:8089/';
-  return { composerUrl, voices: mappings(value, 'voices', turnIds), footage: mappings(value, 'footage', sceneIds) };
+  return { composerUrl, voices: mappings(value, 'voices', turnIds), footage: mappings(value, 'footage', sceneIds), ...(Object.hasOwn(value, 'music') ? { music: urlString(value.music, 'music', true) } : {}) };
 }
 
 function mappings(manifest, key, known) {

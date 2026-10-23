@@ -28,6 +28,13 @@ test('manifest rejects non-string and unsafe media URLs', () => {
   assert.throws(() => validateManifest({ composerUrl: 'javascript:alert(1)' }, scenes));
 });
 
+test('optional music URL accepts relative media without adding a dialogue take', () => {
+  assert.deepEqual(validateManifest({ music: 'bed.wav' }, scenes), { composerUrl: 'http://127.0.0.1:8089/', voices: {}, footage: {}, music: 'bed.wav' });
+  assert.equal(validateManifest({ music: 'https://example.com/bed.mp3' }, scenes).music, 'https://example.com/bed.mp3');
+  assert.equal(Object.hasOwn(validateManifest({}, scenes), 'music'), false);
+  for (const music of [null, '', ' ', 17, {}, [], 'javascript:alert(1)', 'data:audio/wav;base64,AAAA', 'file:///private/bed.wav', 'a\nb.wav']) assert.throws(() => validateManifest({ music }, scenes));
+});
+
 test('live iframe is persistent, restricted to capture scenes, and none hides it', t => {
   const { stage, document } = browser(t);
   const deck = new FootageDeck({ stage, scenes, manifest: {} });

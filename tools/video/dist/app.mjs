@@ -9,7 +9,7 @@ import { appendTribute, createTributeRenderer } from './tribute.mjs';
 const element = id => document.getElementById(id);
 const stage = element('film-stage');
 const query = new URLSearchParams(location.search);
-let clock, scenes, renderer, tribute, voices, footage, manifest;
+let clock, scenes, renderer, tribute, voices, music, footage, manifest;
 let capture = false;
 let footageMode = 'none';
 let animationFrame = 0;
@@ -23,7 +23,7 @@ window.gdlFilm = {
   ready,
   get duration() { return scenes?.at(-1).end ?? 0; },
   seek,
-  pause() { clock?.pause(); voices?.pause(); footage?.pause(); if (clock) paint(); },
+  pause() { clock?.pause(); voices?.pause(); music?.pause(); footage?.pause(); if (clock) paint(); },
   setCapture,
   async setFootageMode(mode) {
     footage.setMode(mode); footageMode = mode; element('footage-mode').value = mode;
@@ -54,6 +54,7 @@ async function initialize() {
   for (const key of ['voices', 'footage']) {
     manifest[key] = Object.fromEntries(Object.entries(manifest[key]).map(([id, url]) => [id, new URL(url, manifestUrl).href]));
   }
+  if (manifest.music) manifest.music = new URL(manifest.music, manifestUrl).href;
   clock = new TimelineClock({ duration: scenes.at(-1).end });
   element('timeline').max = String(clock.snapshot().duration);
   element('timeline').disabled = false;
@@ -65,6 +66,14 @@ async function initialize() {
   for (const [id, url] of Object.entries(manifest.voices)) {
     const audio = new Audio(url); audio.preload = 'auto'; voices.setTake(id, audio);
   }
+  if (manifest.music) {
+    const duration = clock.snapshot().duration;
+    music = new VoiceScheduler({ scenes: [{ id: 'music', start: 0, end: duration, turns: [{ id: 'music-bed', start: 0, end: duration }] }], onError: ({ error }) => status(`Music: ${error.message}`, true) });
+    const audio = new Audio(); audio.id = 'background-audio'; audio.hidden = true; audio.preload = 'auto';
+    audio.addEventListener('error', () => status(`Music: ${audio.error?.message || 'The audio source could not be loaded.'}`, true));
+    audio.addEventListener('loadedmetadata', () => music.sync(clock.snapshot()));
+    music.setTake('music-bed', audio); audio.src = manifest.music; document.body.append(audio);
+  }
   buildSceneList();
   bindControls();
   await Promise.all([renderer.ready, tribute?.ready, document.fonts.ready]);
@@ -74,7 +83,7 @@ async function initialize() {
   footage.setMode(footageMode); element('footage-mode').value = footageMode;
   await seek(initial);
   if (query.get('capture') === '1') setCapture(true);
-  status('Silent rehearsal. Add selected voice takes and real demo clips through a media manifest.');
+  if (!element('status').classList.contains('error')) status(manifest.music ? 'Preview music configured. Add selected voice takes and real demo clips through the media manifest.' : 'Silent rehearsal. Add selected voice takes and real demo clips through a media manifest.');
   new ResizeObserver(fitStage).observe(element('preview-shell'));
   fitStage();
   resolveReady();
@@ -83,7 +92,7 @@ async function initialize() {
 
 async function seek(time) {
   if (!clock) throw new Error('Film stage is not ready.');
-  clock.pause(); voices.pause(); footage.pause(); clock.seek(time); voices.seek(clock.snapshot().time);
+  clock.pause(); voices.pause(); music?.pause(); footage.pause(); clock.seek(time); voices.seek(clock.snapshot().time); music?.sync(clock.snapshot());
   const frame = draw();
   await footage.seek(frame);
   return window.gdlFilm.getState();
@@ -115,6 +124,7 @@ function paint() {
   const snapshot = clock.snapshot();
   footage.sync(frame, { playing: snapshot.playing, rate: snapshot.rate });
   voices.sync(snapshot);
+  music?.sync(snapshot);
 }
 
 function loop() {

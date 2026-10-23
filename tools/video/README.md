@@ -111,13 +111,14 @@ The composer currently omits marked message re-exports from its message list. Sh
 
 ## Attach production media
 
-The default manifest is `tools/video/dist/media.json`. Its `voices` and `footage` maps are empty. The `composerUrl` field identifies the live composer.
+The default manifest is `tools/video/dist/media.json`. Its `voices` and `footage` maps are empty. The `composerUrl` field identifies the live composer. An optional `music` URL supplies a separate music bed for browser playback.
 
 Keep local takes under `tools/video/work/media/`. This directory also holds an optional manifest:
 
 ```json
 {
   "composerUrl": "http://127.0.0.1:8089/",
+  "music": "/media/opening-bed.wav",
   "voices": {
     "opening-1": "/media/opening-1.wav",
     "interruption-1": "/media/kyle-interruption.wav"
@@ -132,6 +133,8 @@ Save this file as `tools/video/work/media/manifest.json`. Open [the stage with t
 
 Voice keys identify turns as `<scene-id>-<number>`, with numbers that start at one. `interruption-1` is Kyle's first interruption. The stage removes delivery tags from visible captions. The script retains those tags for TTS production.
 
+Music follows the same play, pause, seek, speed, and capture controls. Its URL resolves relative to the selected manifest. Use a music-only bed here when the `voices` map supplies dialogue. A complete voice-and-music mix in this field would play dialogue twice. Preview music does not enter MP4 exports automatically.
+
 Footage keys identify scenes. These scenes require recorded proof clips for a final export:
 
 | Scene ID | Film interval |
@@ -145,6 +148,26 @@ Footage keys identify scenes. These scenes require recorded proof clips for a fi
 | `receipts` | 430–475s |
 
 The opening crawl occupies 0–24s. The cast interruption occupies 24–80s. Together they form the 80-second introduction. The final reveal occupies 475–505s. Cue timings remain provisional until the accepted voice takes and demonstration clips fit the edit.
+
+## Mix the opening music
+
+The opening holds the source level for one second. It fades to 12% during seconds one through two, then stays under the narrator. A five-millisecond fade ends at Kyle's first word, exactly 24 seconds into the film. The remainder is silent. This tool prepares the opening cue, not the complete score.
+
+Prepare a music-only bed from a local recording:
+
+```bash
+node tools/video/music.mjs --music '/absolute/path/to/main-title.m4a' --out tools/video/work/media/opening-bed.wav
+```
+
+The default output lasts 80 seconds. It uses 48 kHz stereo, 16-bit PCM. Short sources receive silence padding and never loop. `--music-start` skips a source preface. `--gain` lowers the source level if needed. A final limiter caps peaks without automatic boosting. Keep the source recording outside the repository.
+
+Mix a raw opening narrator take at film time two seconds:
+
+```bash
+node tools/video/music.mjs --music '/absolute/path/to/main-title.m4a' --voice tools/video/work/media/opening-1.mp3 --voice-at 2 --out tools/video/work/opening.wav
+```
+
+For an already aligned dialogue stem, use `--voice-at 0`. The voice continues through the music cut. `--duration 505` or `--duration 512` prepares a full-film-length output, with silence after the supplied material. Export with `render.mjs --audio tools/video/work/opening.wav`. The mixer does not download recordings or generate voices.
 
 ## Export an MP4
 

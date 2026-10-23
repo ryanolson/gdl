@@ -4,6 +4,19 @@ The optional [Hard Fork tribute](script.md#optional-post-credits-tag--a-nod-to-h
 
 Production note, 2026-10-22. The [script](script.md) is the source of spoken words and delivery cues. Its 39 spoken turns cover the narrator and six cartoon characters across 8:25. The annotations are prepared for audition. No voice takes have been generated.
 
+## Account setup
+
+The first audition covers the 80-second opening: nine turns, seven voices, and 936 tagged input characters. The complete script contains 6,106 tagged input characters. These counts exclude the two archive cues. Retakes need additional credits.
+
+- Use an ElevenLabs account with API access and available credits.
+- Create the key under Developers > API Keys. The [official setup guide](https://elevenlabs.io/docs/help-center/technical/how-do-i-authorize-myself-using-an-api-key) describes these controls.
+- Store a restricted API key in 1Password. Supply the item name or `op://` reference, not the key value.
+- Enable `text_to_speech`, `voices_read`, and `models_read`. The [official API schema](https://api.elevenlabs.io/openapi.json) defines these permissions. `user_read` is optional for a quota lookup.
+- Supply Ryan's custom `voice_id` when it is ready. A stock voice can cover his rehearsal turns.
+- Select the other stock voices during audition. Shared-library imports need the optional `add_voice_from_voice_library` permission.
+
+Inject the credential through the workstation's secret tooling. Keep credentials out of scripts, generated cue sheets, audio metadata, and logs. Music and sound-effects permissions are separate from speech and are not required for these voice auditions.
+
 ## Model and speaker assignment
 
 Select `eleven_v4` explicitly for Text to Dialogue. Its square-bracket audio cues also work with `eleven_v3`. See the official [audio-tag help](https://elevenlabs.io/docs/help-center/product/core-capabilities/text-to-speech/how-do-audio-tags-work-with-eleven-v3-and-v4).

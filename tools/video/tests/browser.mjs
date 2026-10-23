@@ -187,3 +187,73 @@ test('the optional tribute loads only on request and seeks reproducible guest an
     assert.equal(await page.locator('.film-root').isVisible(), true);
   } finally { await page.close(); }
 });
+
+test('optional preview music follows real Audio seek, rate, play, pause and capture transport', { timeout: 15000 }, async () => {
+  const page = await musicStage();
+  try {
+    const canonical = await readFile(new URL('../../../agent-docs/video/script.md', import.meta.url), 'utf8');
+    assert.equal((await page.evaluate(() => window.gdlFilm.getState())).totalVoices, [...canonical.matchAll(/^\*\*[^*]+:\*\* “/gm)].length);
+    assert.equal((await page.evaluate(() => window.gdlFilm.getState())).configuredVoices, 0);
+    await page.waitForFunction(() => document.getElementById('background-audio')?.readyState >= 1);
+    assert.equal(await page.locator('#background-audio').getAttribute('src'), `${baseUrl}media/music-fixture/bed.wav`);
+    await page.evaluate(() => window.gdlFilm.seek(4));
+    await page.waitForFunction(() => { const audio = document.getElementById('background-audio'); return audio.paused && Math.abs(audio.currentTime - 4) < .03; });
+    await page.locator('#rate').selectOption('1.5');
+    assert.equal(await page.locator('#background-audio').evaluate(audio => audio.playbackRate), 1.5);
+    await page.locator('#play').click();
+    await page.waitForFunction(() => { const audio = document.getElementById('background-audio'); return !audio.paused && audio.currentTime > 4.1; });
+    const checkpoint = await page.evaluate(() => { window.gdlFilm.setCapture(true); return document.getElementById('background-audio').currentTime; });
+    await page.waitForFunction(time => document.getElementById('background-audio').currentTime > time + .15, checkpoint);
+    await page.evaluate(() => window.gdlFilm.pause());
+    assert.equal(await page.locator('#background-audio').evaluate(audio => audio.paused), true);
+    await page.evaluate(() => window.gdlFilm.seek(9));
+    const held = await page.locator('#background-audio').evaluate(async audio => {
+      await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+      return { time: audio.currentTime, paused: audio.paused, rate: audio.playbackRate, capture: window.gdlFilm.getState().capture };
+    });
+    assert.ok(Math.abs(held.time - 9) < .03); assert.equal(held.paused, true); assert.equal(held.rate, 1.5); assert.equal(held.capture, true);
+  } finally { await page.close(); }
+});
+
+test('preview music source failures appear in the stage status', { timeout: 15000 }, async () => {
+  const page = await musicStage(true);
+  try { await page.locator('#status.error').filter({ hasText: /music/i }).waitFor({ state: 'visible', timeout: 3000 }); }
+  finally { await page.close(); }
+});
+
+test('an unset music bed creates no Audio element or media request', { timeout: 15000 }, async () => {
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+  const media = [];
+  page.on('request', request => { if (request.resourceType() === 'media') media.push(request.url()); });
+  try {
+    await page.goto(baseUrl); await page.evaluate(() => window.gdlFilm.ready);
+    assert.equal(await page.locator('#background-audio').count(), 0); assert.deepEqual(media, []);
+  } finally { await page.close(); }
+});
+
+async function musicStage(fail = false) {
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+  page.setDefaultTimeout(3000);
+  await page.route(url => url.pathname === '/media/music-fixture/manifest.json', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ music: 'bed.wav' }) }));
+  await page.route(url => url.pathname === '/media/music-fixture/bed.wav', route => {
+    if (fail) return route.fulfill({ status: 404, body: 'Missing test audio' });
+    const wave = silentWave();
+    const range = /^bytes=(\d+)-(\d*)$/.exec(route.request().headers().range ?? '');
+    const start = range ? Number(range[1]) : 0;
+    const end = range?.[2] ? Math.min(Number(range[2]), wave.length - 1) : wave.length - 1;
+    const body = wave.subarray(start, end + 1);
+    return route.fulfill({ status: range ? 206 : 200, contentType: 'audio/wav', headers: { 'accept-ranges': 'bytes', 'content-length': String(body.length), ...(range ? { 'content-range': `bytes ${start}-${end}/${wave.length}` } : {}) }, body });
+  });
+  try {
+    await page.goto(`${baseUrl}?manifest=/media/music-fixture/manifest.json`);
+    await page.evaluate(() => window.gdlFilm.ready); return page;
+  } catch (error) { await page.close(); throw error; }
+}
+
+function silentWave() {
+  const rate = 8000; const bytes = rate * 20 * 2; const wave = Buffer.alloc(44 + bytes);
+  wave.write('RIFF'); wave.writeUInt32LE(36 + bytes, 4); wave.write('WAVEfmt ', 8); wave.writeUInt32LE(16, 16);
+  wave.writeUInt16LE(1, 20); wave.writeUInt16LE(1, 22); wave.writeUInt32LE(rate, 24); wave.writeUInt32LE(rate * 2, 28);
+  wave.writeUInt16LE(2, 32); wave.writeUInt16LE(16, 34); wave.write('data', 36); wave.writeUInt32LE(bytes, 40);
+  return wave;
+}

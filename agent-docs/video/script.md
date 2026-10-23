@@ -22,7 +22,7 @@ Tags such as `[curious]` and `[short pause]` appear in official examples. Longer
 
 ## 00:00–00:24 — The graph was already there
 
-*Star field. Two seconds of quiet anticipation. Gold text recedes in perspective, with a measured cinematic narrator reading the same words. The crawl heading is THE GRAPH WAS ALREADY THERE. Use original text and score.*
+*Star field. The requested Star Wars main-title recording begins with its loud opening notes. Hold the source level through one second, then fade to a quiet bed by the narrator's entrance at two seconds. Gold text recedes in perspective, with a measured cinematic narrator reading the same words. The crawl heading is THE GRAPH WAS ALREADY THERE. Use the original narration below. Keep the recording outside the repository.*
 
 **Narrator:** “[measured, cinematic delivery] In the early days of Dynamo, the plan was a graph. [short pause] Define the logic. Choose the process boundaries. Build the pieces. Deploy them together. [short pause] Typed links and working pipelines took shape. [building resolve] The next challenge: make composition, builds, and deployment one workflow.”
 

@@ -14,7 +14,9 @@ Rehearsal addendum, 2026-10-22: the [published demo](https://github.com/ryanolso
 
 The actual public-spec Compose run fetched node revision `a6c607ba48b4edea33f684699c8701bbdd543207` and generated 22 files under `tools/video/work/deployment`: four Dockerfiles, four Cargo manifests, three runtime configs, seven Rust sources, and four root artifacts. Runtime and hub dependencies pin public GDL core `deefaa92f37ef3f6e4372c7c4c16eb1eccc1ac94`. The generated services are front, engine, accounting, and hub. The prepared public accounting overlay adds ledger. Docker build and apply remain untested. The [evidence ledger](evidence.md) records exact settings, ports, pins, and proof boundaries.
 
-The silent 80-second opening and 33.52-second real-composer tour are ready at 1080p. Voice takes remain at zero, and the portraits have neutral states only. Next, record the native request/accounting/metrics proof, rehearse Docker with the accounting overlay, then capture replication and the edge/backend variant before voice production and final assembly.
+The silent 80-second opening and 33.52-second real-composer tour are ready at 1080p. Voice takes remain at zero, and the portraits have neutral states only. The native request/accounting/metrics proof, Docker rehearsal, replication, and edge/backend captures remain pending.
+
+Audio direction addendum, 2026-10-22: begin voice auditions with the settled 80-second opening while the remaining demonstrations take shape. The owner selected the Star Wars main-title opening for the private rehearsal. Hold its opening notes at source level, fade to a quiet bed by the narrator's entrance at two seconds, and cut on Kyle's first word at 24 seconds. The source recording remains an external local file. Record final technical narration after its proof shots settle.
 
 ## The editorial decision
 
@@ -180,7 +182,7 @@ Use broad mouth-open cues rather than phoneme animation. Keep narration, charact
 | Voice and graphics | Selected voice takes, final paper assets, cue timings, and captions. | Names, delivery, and picture timing agree. |
 | Capture and edit | Separate animation, composer, terminal, and audio takes. | The exported film has no missing proof or unexplained transition. |
 
-Prepare the portraits and stage while rehearsing the demonstration. Use the exit conditions for final assembly. Do not spend voice-generation credits before the silent rehearsal establishes the demo shots.
+Prepare the portraits and stage while rehearsing the demonstration. Use the exit conditions for final assembly. The audio direction addendum authorizes opening auditions before the remaining demonstration takes. Final technical narration follows its proof shots.
 
 ### Demonstration work and remaining takes
 
