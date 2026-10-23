@@ -465,7 +465,9 @@ impl<H> ProcessConfig<H> {
                 session.follow(Arc::clone(roster.live()), node.clone(), &all, &sends, drain);
                 // A chooser in a cell follows the cells of the classes it
                 // sends to from here too, so that its tables fill while it
-                // meets; an instance without a cell follows none.
+                // meets; an instance without a cell follows none. The
+                // follower is ended with whatever ends the launch, a failed
+                // rendezvous or a stop included.
                 if self.cell.is_some() {
                     chooser = crate::dist::follow_cells(
                         &layout,
@@ -475,7 +477,8 @@ impl<H> ProcessConfig<H> {
                         &node,
                         roster.live(),
                         drain,
-                    )?;
+                    )?
+                    .map(|(cells, task)| (cells, Abort(task)));
                 }
                 let met = session.roster(&expect, wait).await?;
                 for (segment, peers) in met.segments() {
@@ -523,7 +526,7 @@ impl<H> ProcessConfig<H> {
             #[cfg(feature = "hub")]
             cells: chooser.as_ref().map(|(cells, _)| cells.clone()),
             #[cfg(feature = "hub")]
-            _chooser: chooser.map(|(_, task)| Abort(task)),
+            _chooser: chooser.map(|(_, task)| task),
             _leaving: leaving,
         })
     }

@@ -215,3 +215,34 @@ async fn a_placement_without_classes_follows_nothing() {
     assert!(source.cells().is_none() && sink.cells().is_none());
     hub.shutdown().await.expect("valid test fixture");
 }
+
+/// A chooser's launch that fails at its rendezvous ends the follower it
+/// started: its watch of the hub's relay closes with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_launch_ends_its_chooser() {
+    let directory = Resolving::new();
+    let (global, relay) = cell_hub(global_hub(), &directory).await;
+    let (public, control) = (global.public_addr().port(), global.control_addr().port());
+    // Two instances of `a` are required, and only one comes.
+    let extra = format!("{}[min_replicas]\na = 2\n", global_cell());
+    let config = settings(public, control, 1_500, &extra);
+    let launching = tokio::spawn(async move { launch(&config, "a").await.map(|_| ()) });
+    let mut watchers = relay.follows_watchers();
+    tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == 1))
+        .await
+        .expect("the chooser watched the relay while it met")
+        .expect("the hub lives");
+    let failed = tokio::time::timeout(WAIT, launching)
+        .await
+        .expect("the launch ended within the wait")
+        .expect("the launch's task");
+    assert!(
+        failed.is_err(),
+        "met a rendezvous with one of two instances"
+    );
+    tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == 0))
+        .await
+        .expect("a failed launch left its chooser following the relay")
+        .expect("the hub lives");
+    global.shutdown().await.expect("valid test fixture");
+}
