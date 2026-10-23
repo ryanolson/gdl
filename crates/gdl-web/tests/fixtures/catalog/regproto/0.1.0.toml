@@ -10,16 +10,19 @@ nodes = []
 name = "Local"
 path = "regproto::Local"
 wire = false
+encoding = "msgpack"
 public = true
 
 [[messages]]
 name = "Token"
 path = "regproto::Token"
 wire = true
+encoding = "msgpack"
 public = true
 
 [[messages]]
 name = "Words"
 path = "regproto::Words"
 wire = true
+encoding = "msgpack"
 public = true

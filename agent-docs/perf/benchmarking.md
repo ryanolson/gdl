@@ -90,6 +90,8 @@ A laptop run gates nothing smaller than 5%. It may block a change that is plainl
 
 ## Status
 
+**Addendum 2026-10-23.** [Message codec measurements](codecs.md) add shared-host Arm results from Cortex-X925 cores on Linux. They include codec CPU timings and allocation counts. TCP timing noise and unavailable hardware counters leave the dedicated-machine gates open.
+
 **2026-10-21 (the owner):** no dedicated benchmark machine is available for now. Laptop numbers stay labelled provisional, and the claims to confirm stay open. A laptop run still blocks a change that is plainly too expensive (over 5%), as the gates say.
 
 ## Needed from the owner

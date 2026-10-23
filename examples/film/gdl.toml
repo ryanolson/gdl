@@ -1,0 +1,29 @@
+[graph]
+path = "film.gdl"
+
+[messages]
+crates = ["gdl-demo-nodes", "acme-gdl-nodes"]
+
+[nodes]
+crates = ["gdl-demo-nodes", "acme-gdl-nodes"]
+pin = { Http = "gdl_demo_nodes::HttpFrontend", Engine = "gdl_demo_nodes::MockEngine", UsageTap = "acme_gdl_nodes::UsageTap" }
+
+[config.Engine]
+model = "film-engine"
+uppercase = true
+
+[config.UsageTap]
+tenant = "acme-film"
+enabled = true
+
+[gdl]
+path = "../../crates/gdl-runtime"
+
+[segment.front]
+nodes = ["Http"]
+
+[segment.engine]
+nodes = ["Engine"]
+
+[segment.accounting]
+nodes = ["UsageTap"]

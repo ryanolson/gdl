@@ -360,7 +360,11 @@ fn prepare(
         .graph
         .manifest(&|name| {
             let resolved = resolution.messages.get(name)?;
-            Some((resolved.path.clone(), resolved.wire))
+            Some(gdl_model::TypeInfo::new(
+                resolved.path.clone(),
+                resolved.wire,
+                resolved.encoding,
+            ))
         })
         .map_err(Error::new)?;
     let mut contract = spec::Contract {

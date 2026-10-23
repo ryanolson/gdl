@@ -16,6 +16,30 @@ struct Prompt {
 #[derive(gdl_message::Message)]
 struct Local;
 
+#[derive(gdl_message::Message)]
+#[gdl(codec = "json")]
+struct JsonMessage;
+
+#[derive(gdl_message::Message)]
+#[gdl(codec = "msgpack_array")]
+struct ArrayMessage;
+
+#[test]
+fn a_messages_encoding_is_registered_without_requiring_serde() {
+    let catalogue = Catalogue::linked();
+    assert_eq!(JsonMessage::ENCODING, gdl_model::Encoding::Json);
+    assert_eq!(ArrayMessage::ENCODING, gdl_model::Encoding::MsgpackArray);
+    assert_eq!(Prompt::ENCODING, gdl_model::Encoding::Msgpack);
+    for (name, encoding) in [
+        ("JsonMessage", JsonMessage::ENCODING),
+        ("ArrayMessage", ArrayMessage::ENCODING),
+    ] {
+        let message = find(&catalogue, name)[0];
+        assert_eq!(message.encoding, encoding);
+        assert!(!message.wire);
+    }
+}
+
 mod inner {
     use serde::{Deserialize, Serialize};
 
@@ -110,6 +134,7 @@ fn a_derived_message_is_registered_with_its_definition_path() {
             name: "Prompt".into(),
             path: "catalogue::Prompt".into(),
             wire: true,
+            encoding: Default::default(),
         }]
     );
     let words = find(&catalogue, "Words");

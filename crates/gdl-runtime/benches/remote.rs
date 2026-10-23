@@ -68,13 +68,13 @@ fn codec_direct(blob: &Blob) -> usize {
 }
 
 fn codec_crossing(blob: &Blob) -> usize {
-    let bytes = rmp_serde::to_vec(blob).expect("edge encode");
+    let codec = gdl_runtime::wire_codec!(Blob).expect("wire");
+    let bytes = codec.encode(blob).expect("edge encode");
     let frame = rmp_serde::to_vec(&velo::StreamFrame::Item(Crossing::Item(bytes))).expect("encode");
     match rmp_serde::from_slice::<velo::StreamFrame<Crossing>>(&frame).expect("decode") {
-        velo::StreamFrame::Item(Crossing::Item(bytes)) => rmp_serde::from_slice::<Blob>(&bytes)
-            .expect("edge decode")
-            .0
-            .len(),
+        velo::StreamFrame::Item(Crossing::Item(bytes)) => {
+            codec.decode(&bytes).expect("edge decode").0.len()
+        }
         _ => unreachable!(),
     }
 }

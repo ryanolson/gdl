@@ -108,9 +108,11 @@ impl Runtime {
             Within::Policy(policy) => Ok(crossing
                 .pick(*policy, self.random(), offered)
                 .map(|(instance, cell)| (instance, cell, None))),
-            Within::Selector { selector, .. } => {
+            Within::Selector {
+                selector, encoding, ..
+            } => {
                 let chosen = crossing
-                    .choose(&**selector, cx, &envelope.payload, offered)
+                    .choose(&**selector, cx, &envelope.payload, *encoding, offered)
                     .await?;
                 Ok(chosen.map(|(instance, cell, picked)| {
                     envelope.cx.add_meta(picked.meta);
@@ -321,8 +323,8 @@ mod tests {
                 forward: vec![],
                 inner: "D".into(),
                 backward: vec![],
-                forward_types: vec![gdl_model::TypeInfo::new("T", true)],
-                backward_types: vec![gdl_model::TypeInfo::new("T", true)],
+                forward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
+                backward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
             }],
         };
         let placement = gdl_model::Placement::new()
@@ -429,6 +431,7 @@ mod tests {
         let selector = Router::Selector {
             name: Arc::from("replacing"),
             selector: Arc::new(Typed(Arc::new(Replacing))),
+            encoding: Default::default(),
         };
         let routers = [
             policy.clone(),

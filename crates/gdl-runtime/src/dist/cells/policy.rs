@@ -936,8 +936,8 @@ mod tests {
                 forward: vec![],
                 inner: "D".into(),
                 backward: vec![],
-                forward_types: vec![gdl_model::TypeInfo::new("T", true)],
-                backward_types: vec![gdl_model::TypeInfo::new("T", true)],
+                forward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
+                backward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
             }],
         };
         let placement = gdl_model::Placement::new()

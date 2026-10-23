@@ -13,7 +13,7 @@ use gdl::{Cx, Deadline, RequestId};
 use gdl::{Error, ErrorKind, Result};
 
 /// The envelope format. A receiver rejects any other version.
-pub(crate) const VERSION: u8 = 2;
+pub(crate) const VERSION: u8 = 3;
 
 /// Which deployment a message belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

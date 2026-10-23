@@ -334,8 +334,8 @@ async fn a_choices_metadata_reaches_the_receiving_context() {
 
 /// The outer end holds its lease while the response it returns is open,
 /// and lets it go when the stream is dropped; a failure before the open
-/// signal lets it go at once; a hedging operator's two attempts each take
-/// one and give it back.
+/// signal lets it go at once; a hedging operator's attempts each take at
+/// most one and give it back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_outer_end_holds_a_lease_while_its_response_is_open() {
     let (instances, _) = two_engines().await;
@@ -391,7 +391,14 @@ async fn the_outer_end_holds_a_lease_while_its_response_is_open() {
         counting.live() == 0
     })
     .await;
-    assert_eq!(counting.taken(), 4, "each attempt chooses once");
+    // The winner chooses once. The loser chooses once too, unless it was
+    // dropped at the winner's first item before it reached the selector,
+    // which happens under load; what it chose, it gave back above.
+    assert!(
+        matches!(counting.taken(), 3 | 4),
+        "each attempt chooses at most once: {}",
+        counting.taken()
+    );
     assert!(settles(&cluster).await);
 }
 

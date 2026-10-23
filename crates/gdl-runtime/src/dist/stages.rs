@@ -61,9 +61,9 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
     fn streamed(&self, out: &mut Vec<bool>);
 
     /// Collect, for each forward edge from this part of the hop on, the
-    /// type its codec carries as the head, and the type's name.
+    /// head type, its name, and its encoding.
     #[doc(hidden)]
-    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str)>);
+    fn heads(&self, out: &mut Vec<HeadInfo>);
 
     #[doc(hidden)]
     fn walk(
@@ -84,6 +84,25 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
         head: &[u8],
         input: Option<Items<Vec<u8>>>,
     ) -> impl Future<Output = Result<FwdExit<Self::Out>>> + Send;
+}
+
+/// The head a forward edge carries, including when its node is absent.
+#[doc(hidden)]
+pub struct HeadInfo {
+    pub(crate) id: std::any::TypeId,
+    pub(crate) name: &'static str,
+    pub(crate) encoding: gdl_model::Encoding,
+}
+
+impl HeadInfo {
+    fn new<C: RequestCodec>(codec: Option<C>) -> Self {
+        let (id, name) = C::head();
+        Self {
+            id,
+            name,
+            encoding: codec.map(|codec| codec.head_encoding()).unwrap_or_default(),
+        }
+    }
 }
 
 /// One forward node of a distributed hop. `C` is the codec of the edge
@@ -139,8 +158,8 @@ where
         self.rest.streamed(out);
     }
 
-    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str)>) {
-        out.push(C::head());
+    fn heads(&self, out: &mut Vec<HeadInfo>) {
+        out.push(HeadInfo::new(self.codec));
         self.rest.heads(out);
     }
 
@@ -182,8 +201,8 @@ impl<C: RequestCodec> DForward for FwdEnd<C> {
         out.push(C::STREAMED);
     }
 
-    fn heads(&self, out: &mut Vec<(std::any::TypeId, &'static str)>) {
-        out.push(C::head());
+    fn heads(&self, out: &mut Vec<HeadInfo>) {
+        out.push(HeadInfo::new(self.codec));
     }
 
     async fn walk(

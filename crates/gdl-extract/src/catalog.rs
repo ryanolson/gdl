@@ -87,8 +87,13 @@ impl Catalog {
         files.sort();
         for file in files {
             let text = std::fs::read_to_string(&file).map_err(|e| io(&file, e))?;
-            let entry =
-                Entry::from_toml(&text).map_err(|e| Error(format!("{}: {e}", file.display())))?;
+            let entry = Entry::from_toml(&text).map_err(|e| {
+                Error(format!(
+                    "{}: {e}\nRemove this entry first. With the current cargo-gdl, re-add a directory or registry crate with cargo gdl extract <crate> --catalog {}; re-import a Git crate in the composer.",
+                    file.display(),
+                    dir.display(),
+                ))
+            })?;
             if file != catalog.file(&entry) {
                 return Err(Error(format!(
                     "{}: holds {}, which belongs in {}",

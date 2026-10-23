@@ -33,6 +33,62 @@ fn scratch(name: &str) -> tempfile::TempDir {
         .expect("temporary directory")
 }
 
+#[test]
+fn entries_without_encodings_require_reextraction_with_a_recovery_path() {
+    let workspace = workspace();
+    for (package, source) in [
+        ("read-protocols", None),
+        (
+            "read-facade",
+            Some("registry+https://github.com/rust-lang/crates.io-index"),
+        ),
+        (
+            "read-protocols",
+            Some("git+https://example.com/protocols?rev=abc#abc"),
+        ),
+    ] {
+        let temp = scratch("encoding");
+        let dir = temp.path();
+        let mut extracted = entry(&workspace, package, "2026-10-18T21:04:05Z");
+        if let Some(source) = source {
+            extracted.offer.source = source.into();
+        }
+        let mut catalog = Catalog::load(dir).expect("empty catalogue");
+        let (_, file) = catalog.add(extracted.clone()).expect("added");
+        let file = file.clone();
+        let text = std::fs::read_to_string(&file).expect("entry");
+        assert!(text.contains("encoding ="), "{text}");
+        let incomplete = text
+            .lines()
+            .filter(|line| !line.starts_with("encoding ="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file, incomplete).expect("entry without encoding");
+
+        let error = Catalog::load(dir)
+            .expect_err("no inferred encoding")
+            .to_string();
+        for expected in [
+            "missing field `encoding`",
+            file.to_str().expect("UTF-8"),
+            "Remove this entry",
+            "current cargo-gdl",
+            "cargo gdl extract",
+            "--catalog",
+            dir.to_str().expect("UTF-8"),
+            "re-import a Git crate in the composer",
+        ] {
+            assert!(error.contains(expected), "missing {expected:?}: {error}");
+        }
+
+        std::fs::remove_file(&file).expect("remove the entry named by the error");
+        let mut catalog = Catalog::load(dir).expect("recovered catalogue");
+        catalog.add(extracted.clone()).expect("re-extract and add");
+        let loaded = Catalog::load(dir).expect("current entry loads");
+        assert_eq!(loaded.entries().next(), Some(&extracted));
+    }
+}
+
 /// An entry is written once, as `<name>/<version>.toml`, with when it was
 /// added; adding it again keeps the file as it was.
 #[test]

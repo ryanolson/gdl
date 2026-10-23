@@ -32,8 +32,8 @@ fn spec() -> DeploymentSpec {
             inner: "Echo".into(),
             forward: vec![],
             backward: vec![],
-            forward_types: vec![TypeInfo::new("Request", true)],
-            backward_types: vec![TypeInfo::new("Reply", true)],
+            forward_types: vec![TypeInfo::new("Request", true, Default::default())],
+            backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }],
     };
     DeploymentSpec::new(
@@ -649,8 +649,8 @@ async fn an_instance_announces_before_it_waits_for_its_roster() {
             inner: inner.into(),
             forward: vec![],
             backward: vec![],
-            forward_types: vec![TypeInfo::new("Request", true)],
-            backward_types: vec![TypeInfo::new("Reply", true)],
+            forward_types: vec![TypeInfo::new("Request", true, Default::default())],
+            backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
         }
     }
     let chain = DeploymentSpec::new(
@@ -790,10 +790,10 @@ async fn a_returning_forward_path_does_not_deadlock_readiness() {
                 inner: "D".into(),
                 backward: vec![],
                 forward_types: vec![
-                    TypeInfo::new("Request", true),
-                    TypeInfo::new("Request", true),
+                    TypeInfo::new("Request", true, Default::default()),
+                    TypeInfo::new("Request", true, Default::default()),
                 ],
-                backward_types: vec![TypeInfo::new("Reply", true)],
+                backward_types: vec![TypeInfo::new("Reply", true, Default::default())],
             }],
         },
         Placement::new()

@@ -20,6 +20,16 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
     let ident = &input.ident;
     // `r#Prompt` is `Prompt`: graphs name the type, not its spelling.
     let name = ident.unraw().to_string();
+    let attrs = input
+        .attrs
+        .iter()
+        .map(|a| a.meta.clone())
+        .collect::<Vec<_>>();
+    let encoding = match gdl_syntax::message_encoding(&attrs)? {
+        gdl_model::Encoding::Msgpack => quote!(#root::Encoding::Msgpack),
+        gdl_model::Encoding::MsgpackArray => quote!(#root::Encoding::MsgpackArray),
+        gdl_model::Encoding::Json => quote!(#root::Encoding::Json),
+    };
     // `Message: Send + 'static`: every port type crosses tasks. The impl is
     // spanned at the type, so a type that is not `Send` is reported at its
     // definition, and a protocols crate cannot publish a message that no
@@ -27,6 +37,7 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
     let message = quote_spanned! {ident.span()=>
         impl #root::MessageTrait for #ident {
             const NAME: &'static str = #name;
+            const ENCODING: #root::Encoding = #encoding;
             const IDENTITY: #root::Identity = #root::Identity {
                 package: ::core::env!("CARGO_PKG_NAME"),
                 version: ::core::env!("CARGO_PKG_VERSION"),
@@ -57,6 +68,7 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
                 dir: ::core::env!("CARGO_MANIFEST_DIR"),
                 name: #name,
                 module: ::core::module_path!(),
+                encoding: #encoding,
                 wire: || {
                     #[allow(unused_imports)]
                     use #root::{WireNo as _, WireYes as _};

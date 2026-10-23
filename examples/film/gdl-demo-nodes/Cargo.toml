@@ -1,0 +1,18 @@
+[package]
+name = "gdl-demo-nodes"
+description = "Typed HTTP frontend and deterministic mock engine for the GDL film"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum.workspace = true
+futures.workspace = true
+gdl = { path = "../../../crates/gdl" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
