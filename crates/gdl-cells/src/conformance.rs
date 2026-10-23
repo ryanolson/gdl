@@ -194,7 +194,7 @@ fn not_newer(result: Result<(), DirectoryError>, held: (u64, u64), offered: (u64
 }
 
 async fn malformed_writes_are_refused<B: Backend>(backend: &B) {
-    let [writer, reader] = backend.fresh().await;
+    let [writer, reader] = within("a fresh directory", backend.fresh()).await;
     let mut watch = watch(&reader, MODEL, None);
     snapshot(&mut watch).await;
     let bad = [
@@ -240,7 +240,7 @@ async fn malformed_writes_are_refused<B: Backend>(backend: &B) {
 }
 
 async fn writes_are_ordered_by_epoch_and_seq<B: Backend>(backend: &B) {
-    let [writer, reader] = backend.fresh().await;
+    let [writer, reader] = within("a fresh directory", backend.fresh()).await;
     let mut watch = watch(&reader, MODEL, None);
     snapshot(&mut watch).await;
 
@@ -323,7 +323,7 @@ async fn writes_are_ordered_by_epoch_and_seq<B: Backend>(backend: &B) {
 }
 
 async fn a_watch_sees_its_class_snapshot_then_changes<B: Backend>(backend: &B) {
-    let [writer, reader, other] = backend.fresh().await;
+    let [writer, reader, other] = within("a fresh directory", backend.fresh()).await;
     let mut empty = watch(&reader, MODEL, None);
     assert!(
         snapshot(&mut empty).await.0.is_empty(),
@@ -377,7 +377,7 @@ async fn a_watch_sees_its_class_snapshot_then_changes<B: Backend>(backend: &B) {
 }
 
 async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
-    let [writer, reader] = backend.fresh().await;
+    let [writer, reader] = within("a fresh directory", backend.fresh()).await;
     let mut live = watch(&reader, MODEL, None);
     let (_, start) = snapshot(&mut live).await;
     publish(&writer, record(MODEL, "m1", 1, 1))
@@ -449,7 +449,7 @@ async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
 }
 
 async fn a_lagging_watcher_is_cut_off<B: Backend>(backend: &B) {
-    let [writer, reader] = backend.fresh().await;
+    let [writer, reader] = within("a fresh directory", backend.fresh()).await;
     let mut lagging = watch(&reader, MODEL, None);
     snapshot(&mut lagging).await;
     let mut reading = watch(&writer, MODEL, None);
@@ -493,7 +493,7 @@ async fn a_lagging_watcher_is_cut_off<B: Backend>(backend: &B) {
 }
 
 async fn a_dropped_watch_is_released<B: Backend>(backend: &B) {
-    let [directory] = backend.fresh().await;
+    let [directory] = within("a fresh directory", backend.fresh()).await;
     assert_eq!(backend.watchers(&directory, MODEL), 0);
     let mut first = watch(&directory, MODEL, None);
     let mut second = watch(&directory, MODEL, None);
