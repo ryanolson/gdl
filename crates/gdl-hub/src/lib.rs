@@ -5,14 +5,18 @@
 //! `gdl-cell` extension, which judges from the cell's usable instances and
 //! its quorum ([`Quorum`]) whether the cell can take work, answers on the
 //! cell health endpoint (`GET /v1/ext/gdl-cell/health`), and publishes the
-//! cell's record through a [`gdl_cells::CellDirectory`].
+//! cell's record through a [`gdl_cells::CellDirectory`]. A hub that
+//! follows a cell reads the cell's watch, [`CellWatchEvent`]s, with a
+//! [`CellWatcher`].
 mod cell;
 mod quorum;
 mod setup;
+mod watch;
 
 pub use cell::{CellError, CellHealth, CellReadiness, CellTiming, SegmentHealth};
 pub use quorum::Quorum;
 pub use setup::{cell_from_env, hub_builder};
+pub use watch::{CellWatchError, CellWatchEvent, CellWatcher};
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};
 use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};

@@ -126,7 +126,7 @@ impl<D: CellDirectory> CellReadiness<D> {
 }
 
 impl<D: CellDirectory> Extension for CellReadiness<D> {
-    const NAME: &'static str = "gdl-cell";
+    const NAME: &'static str = crate::watch::EXTENSION;
     type Registration = ();
     type Staged = ();
 
