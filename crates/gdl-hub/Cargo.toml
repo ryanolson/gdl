@@ -6,9 +6,17 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow = "1"
+futures.workspace = true
 gdl-cells = { path = "../gdl-cells" }
 gdl-model = { path = "../gdl-model" }
-velo-hub = { workspace = true, features = ["server"] }
+velo-hub = { workspace = true, features = ["server", "client"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tokio-util.workspace = true
+tracing = "0.1"
 serde.workspace = true
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+toml.workspace = true

@@ -20,7 +20,7 @@
 | `examples/asr` | A separate workspace with a streamed request, generated segments, and a demo that runs them. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments` |
 | `examples/http` | A separate workspace: a hosted `Frontend` on axum, its graph, and a test that drives the generated service over HTTP |
 | `examples/api` | A separate workspace: a `Service` with three typed entry points sharing one engine, and the deployment spec that `cargo gdl compose` and the composer's Deploy tab use |
-| `crates/gdl-hub` | The discovery hub: velo-hub with admission restricted to one deployment's graph and placement |
+| `crates/gdl-hub` | The discovery hub: velo-hub with admission restricted to one deployment's graph and placement (`GraphAdmission`), and, for a cell's hub, the `gdl-cell` extension (`CellReadiness`), which counts the cell's usable instances against its quorum, serves the cell health endpoint, and publishes the cell's record |
 
 ## Build, lint, test
 

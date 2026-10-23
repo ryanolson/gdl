@@ -753,11 +753,17 @@ dependencies = [
 name = "gdl-hub"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "futures",
  "gdl-cells",
  "gdl-model",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
  "velo-hub",
 ]
 

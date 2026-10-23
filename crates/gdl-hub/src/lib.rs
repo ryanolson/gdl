@@ -1,6 +1,15 @@
 //! Discovery hub with admission restricted to one GDL deployment.
+//!
+//! [`GraphAdmission`] admits only the segments of one deployment's graph
+//! and placement. A cell's hub runs [`CellReadiness`] beside it: the
+//! `gdl-cell` extension, which judges from the cell's usable instances and
+//! its quorum ([`Quorum`]) whether the cell can take work, answers on the
+//! cell health endpoint (`GET /v1/ext/gdl-cell/health`), and publishes the
+//! cell's record through a [`gdl_cells::CellDirectory`].
+mod cell;
 mod quorum;
 
+pub use cell::{CellError, CellHealth, CellReadiness, CellTiming, SegmentHealth};
 pub use quorum::Quorum;
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};

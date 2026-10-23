@@ -73,6 +73,14 @@ impl Quorum {
         }
     }
 
+    /// Count `usable` instances of the segment at `index` in the class's
+    /// order, for the next judgment: [`Quorum::set`] without the search.
+    pub(crate) fn set_nth(&mut self, index: usize, usable: u32) {
+        if let Some(entry) = self.segments.get_mut(index) {
+            entry.usable = usable;
+        }
+    }
+
     /// The cell's state at `now`, from the counts set so far. Each call is
     /// a judgment: a segment below its quorum here ends the hold, even if
     /// a later count restores it.
