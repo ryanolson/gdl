@@ -592,11 +592,11 @@ impl Runtime {
     ) -> Result<Handed> {
         self.released().await?;
         #[cfg_attr(not(feature = "hub"), allow(unused_variables))]
-        let (instance, lease, offering): (_, _, Offering<'_>) = match router {
+        let (instance, held, offering): (_, _, Offering<'_>) = match router {
             Router::Policy(policy) => (
                 self.routes
                     .pick(segment, Picker::Request, *policy, &self.random)?,
-                None,
+                Held::default(),
                 None,
             ),
             Router::Selector { selector, .. } => {
@@ -605,15 +605,15 @@ impl Runtime {
                     .choose(segment, &**selector, cx, &envelope.payload)
                     .await?;
                 envelope.cx.add_meta(picked.meta);
-                (instance, picked.lease, None)
+                (instance, Held::selector(picked.lease), None)
             }
             #[cfg(feature = "hub")]
             Router::Cells(crossing) => {
-                let (instance, cell, lease) = self
+                let (instance, cell, held) = self
                     .choose_cell(crossing, cx, &mut envelope, &[])
                     .await?
                     .ok_or_else(|| crossing.no_cell())?;
-                (instance, lease, Some((crossing, cell)))
+                (instance, held, Some((crossing, cell)))
             }
         };
         // An offer to a cell, always remote: a chooser never chooses
@@ -635,13 +635,13 @@ impl Runtime {
                 Answer::Accepted(accepted) => Ok(Handed {
                     accepted,
                     sent,
-                    lease,
+                    held,
                 }),
                 Answer::Failed(error) => Err(error),
                 // Boxed, and only here: inline, the failover's state would
                 // grow this future, and so every hand-off's task.
                 Answer::Missed(missed) => {
-                    drop(lease);
+                    drop(held);
                     let failover = self.fail_over(crossing, cx, envelope, timed, cell, missed);
                     Box::pin(failover).await
                 }
@@ -655,7 +655,7 @@ impl Runtime {
             return Ok(Handed {
                 accepted,
                 sent,
-                lease,
+                held,
             });
         }
         let bytes = super::envelope::encode(&envelope)?;
@@ -673,7 +673,7 @@ impl Runtime {
         Ok(Handed {
             accepted,
             sent,
-            lease,
+            held,
         })
     }
 
@@ -771,8 +771,40 @@ pub(crate) struct Handed {
     /// When it left, if the caller asked: after the wait for the roster,
     /// the routing, and the encoding.
     pub(crate) sent: Option<tokio::time::Instant>,
-    /// The selector's lease, to hold while the sender holds the request.
-    pub(crate) lease: Option<Lease>,
+    /// What the sender holds while it holds the request.
+    pub(crate) held: Held,
+}
+
+/// What a hand-off holds while its sender holds the request: the lease of
+/// the selector that chose where it went, if one did, and, for a
+/// chooser's offer to a cell, the lease on the cell's follow, by which the
+/// chooser knows when it no longer holds an offer to it.
+#[derive(Default)]
+#[allow(dead_code, reason = "held for their drop")]
+pub(crate) struct Held {
+    selector: Option<Lease>,
+    #[cfg(feature = "hub")]
+    cell: Option<super::cells::CellLease>,
+}
+
+impl Held {
+    /// A selector's lease, if it gave one.
+    fn selector(selector: Option<Lease>) -> Self {
+        Self {
+            selector,
+            ..Self::default()
+        }
+    }
+
+    /// A chooser's offer to a cell: the selector's lease, if it gave one,
+    /// and the lease on the cell's follow.
+    #[cfg(feature = "hub")]
+    pub(crate) fn cell(selector: Option<Lease>, cell: super::cells::CellLease) -> Self {
+        Self {
+            selector,
+            cell: Some(cell),
+        }
+    }
 }
 
 /// The selectors `segment` sends through: each crossing whose first node

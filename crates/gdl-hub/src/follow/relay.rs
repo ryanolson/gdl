@@ -10,13 +10,24 @@
 //! writes again. Each change is applied and sent under one lock, and a
 //! watch takes its snapshot and subscribes under the same lock.
 //!
+//! A follow is offered to the hub's choosers while its cell's state lets
+//! its instances be routed to, and each change between offered and not
+//! offered is the follow's next revision. One that is not offered closes
+//! once every chooser of its class among the hub's members has
+//! acknowledged its current revision ([`super::offer`]): the relay drops
+//! it, and ends its link. A follow whose link ends first, or that a newer
+//! epoch replaces, is not offered from then, and is kept beside the
+//! cell's later follows, its instances still relayed, until it closes the
+//! same way, since what the choosers offered to it may still be under
+//! way.
+//!
 //! The relay also counts, per class, the installed follows whose link
 //! last said `ready`, and shows each count in the cell's health as it
 //! changes, under the same lock, so that a count is never overwritten by
 //! an older one. A change costs one count, never a pass over the
 //! follows.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
@@ -25,11 +36,15 @@ use futures::Stream;
 use futures::stream::BoxStream;
 use gdl_cells::{CellState, LoadSummary};
 use tokio::sync::{broadcast, watch};
+use tokio_util::sync::CancellationToken;
+use velo_hub::protocol::RegistrationEpoch;
+use velo_hub::store::{Incarnation, Removal};
 use velo_hub::velo::{InstanceId, PeerInfo};
 
+use super::offer::{Choosers, Offer};
 use crate::CellHealth;
 use crate::fanout::Watchers;
-use gdl_watch::{CellWatchEvent, FollowEvent};
+use gdl_watch::{CellWatchEvent, FollowEvent, Unoffered};
 
 /// The followed cells, and the relay's watchers.
 pub(crate) struct Relay {
@@ -43,16 +58,24 @@ pub(crate) struct Relay {
 
 impl Relay {
     /// A relay whose watchers are ended when they fall more than `buffer`
-    /// events behind, and which shows how many ready cells of each class
-    /// it follows in `health`.
-    pub(crate) fn new(buffer: usize, health: watch::Sender<CellHealth>) -> Self {
+    /// events behind, which shows how many ready cells of each class it
+    /// follows in `health`, and whose follows that are not offered close
+    /// once every member of `choosers` that chooses their class has
+    /// acknowledged them.
+    pub(crate) fn new(
+        buffer: usize,
+        health: watch::Sender<CellHealth>,
+        choosers: Choosers,
+    ) -> Self {
         Self {
             shared: Mutex::new(Shared {
                 generations: HashMap::new(),
                 follows: HashMap::new(),
+                closing: HashMap::new(),
                 events: broadcast::channel(buffer).0,
                 ready: HashMap::new(),
                 health,
+                choosers,
             }),
             watchers: Watchers::new(),
             following: watch::Sender::new(BTreeMap::new()),
@@ -63,9 +86,11 @@ impl Relay {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Begin a new follow of the cell `cell` of `class`, and return its
-    /// generation. The cell's earlier follow, if any, is dropped first.
-    pub(crate) fn begin(&self, class: &str, cell: &str) -> u64 {
+    /// Begin a new follow of the cell `cell` of `class`: its generation,
+    /// and the signal that the relay closed it, on which its link ends.
+    /// The cell's earlier follow, if any, ends first, as
+    /// [`Relay::end`] ends it.
+    pub(crate) fn begin(&self, class: &str, cell: &str) -> (u64, CancellationToken) {
         let mut shared = self.lock();
         let generation = shared
             .generations
@@ -78,21 +103,28 @@ impl Relay {
         if let Some(earlier) = shared.follow(class, cell).map(|follow| follow.generation) {
             shared.end(class, cell, earlier);
         }
+        let close = CancellationToken::new();
         shared.follows.entry(class.to_string()).or_default().insert(
             cell.to_string(),
             Follow {
                 generation,
                 installed: None,
+                offer: Offer::new(true),
+                close: close.clone(),
             },
         );
         self.following.send_modify(|following| {
             following.insert((class.to_string(), cell.to_string()), generation);
         });
-        generation
+        (generation, close)
     }
 
-    /// The follow `generation` of the cell `cell` of `class` ended: if it
-    /// is the cell's current one, its instances are no longer exposed.
+    /// The link of the follow `generation` of the cell `cell` of `class`
+    /// ended, or a newer epoch replaced it: if it is the cell's current
+    /// follow, it is no longer offered, and it is kept, its instances
+    /// still relayed, until every chooser has acknowledged that, since
+    /// what they offered to the cell may still be under way. One whose
+    /// snapshot never completed was never relayed, and is forgotten.
     pub(crate) fn end(&self, class: &str, cell: &str, generation: u64) {
         self.lock().end(class, cell, generation);
     }
@@ -108,8 +140,10 @@ impl Relay {
     }
 
     /// The snapshot of the follow `generation` of `installed`'s cell is
-    /// complete: expose it, its state first, then its retired instances,
-    /// then the ready ones its state allows.
+    /// complete: expose it, its state first, then whether it is offered if
+    /// it is not, then its retired instances, then the ready ones its state
+    /// allows. A cell that takes no work is installed not offered, and
+    /// closes once acknowledged without ever having been offered.
     pub(crate) fn install(&self, generation: u64, installed: Installed) {
         let mut shared = self.lock();
         let Shared {
@@ -122,37 +156,115 @@ impl Relay {
         else {
             return;
         };
-        for event in installed.snapshot(generation) {
+        follow.offer = Offer::new(installed.exposes());
+        let offering = (!follow.offer.offered()).then(|| {
+            follow
+                .offer
+                .event(&installed.class, &installed.cell, generation)
+        });
+        for event in installed.snapshot(generation, offering) {
             let _ = events.send(event);
         }
-        let counted = installed.counted().then(|| installed.class.clone());
+        let counted = installed.counted();
+        let (class, cell) = (installed.class.clone(), installed.cell.clone());
         follow.installed = Some(installed);
-        if let Some(class) = counted {
+        if counted {
             shared.count(&class, true);
         }
+        shared.settle(&class, &cell, generation);
     }
 
     /// The cell watch of the follow `generation` of the cell `cell` of
-    /// `class` sent `event`, after its snapshot.
+    /// `class` sent `event`, after its snapshot: a change of state that
+    /// makes the follow offered or not offered is sent after it, at the
+    /// next revision.
     pub(crate) fn apply(&self, class: &str, cell: &str, generation: u64, event: CellWatchEvent) {
         let mut shared = self.lock();
         let Shared {
             follows, events, ..
         } = &mut *shared;
-        let Some(installed) = follows
+        let Some(follow) = follows
             .get_mut(class)
             .and_then(|cells| cells.get_mut(cell))
-            .filter(|follow| follow.generation == generation)
-            .and_then(|follow| follow.installed.as_mut())
+            .filter(|follow| follow.generation == generation && follow.installed.is_some())
         else {
             return;
         };
+        let installed = follow.installed.as_mut().expect("the follow is installed");
         let counted = installed.counted();
         installed.apply(generation, event, |event| {
             let _ = events.send(event);
         });
-        if installed.counted() != counted {
-            shared.count(class, !counted);
+        let (offered, recounted) = (installed.exposes(), installed.counted());
+        if follow.offer.set(offered) {
+            let _ = events.send(follow.offer.event(class, cell, generation));
+        }
+        if recounted != counted {
+            shared.count(class, recounted);
+        }
+        if !offered {
+            shared.settle(class, cell, generation);
+        }
+    }
+
+    /// `chooser`, in its registration of `epoch`, acknowledged that it
+    /// holds no offer to the follow `unoffered` names at its revision: it
+    /// counts if that is the follow's current revision and the follow is
+    /// still not offered, and the follow closes once every chooser of its
+    /// class has. Refused for an instance that chooses no cell of the
+    /// class at this hub.
+    pub(crate) fn acknowledge(
+        &self,
+        chooser: InstanceId,
+        epoch: RegistrationEpoch,
+        unoffered: &Unoffered,
+    ) -> Result<(), String> {
+        let mut shared = self.lock();
+        let Unoffered {
+            class,
+            cell,
+            generation,
+            revision,
+        } = unoffered;
+        if !shared.choosers.chooses(chooser, epoch, class) {
+            return Err(format!(
+                "instance {chooser} is not a member of this hub that chooses cells of class `{class}`"
+            ));
+        }
+        if shared
+            .offer(class, cell, *generation)
+            .is_some_and(|offer| offer.acknowledge(chooser, *revision))
+        {
+            shared.settle(class, cell, *generation);
+        }
+        Ok(())
+    }
+
+    /// The hub committed a registration of `id` in `segment`, as
+    /// `incarnation` in `epoch`: a chooser of a class is waited for by
+    /// every follow of the class that closes after it.
+    pub(crate) fn joined(
+        &self,
+        segment: &str,
+        id: InstanceId,
+        incarnation: Incarnation,
+        epoch: RegistrationEpoch,
+    ) {
+        self.lock().choosers.joined(segment, id, incarnation, epoch);
+    }
+
+    /// The hub removed an incarnation of an instance: a chooser that left
+    /// counts as one that acknowledged every follow of its classes, which
+    /// may close them.
+    pub(crate) fn removed(&self, removal: &Removal) {
+        let mut shared = self.lock();
+        let Some(classes) = shared.choosers.removed(removal) else {
+            return;
+        };
+        for class in classes.iter() {
+            for (cell, generation) in shared.left(class, removal.id) {
+                shared.settle(class, &cell, generation);
+            }
         }
     }
 
@@ -193,22 +305,56 @@ struct Shared {
     generations: HashMap<String, HashMap<String, u64>>,
     /// Each followed cell's current follow.
     follows: HashMap<String, HashMap<String, Follow>>,
+    /// Each cell's earlier follows, by generation, whose links ended and
+    /// that have yet to close.
+    closing: HashMap<String, HashMap<String, BTreeMap<u64, Closing>>>,
     events: broadcast::Sender<FollowEvent>,
     /// Per class, the installed follows whose link last said `ready`.
     ready: HashMap<String, u32>,
     health: watch::Sender<CellHealth>,
+    /// The members that must acknowledge a follow before it closes.
+    choosers: Choosers,
 }
 
-/// One cell's current follow: its generation, and what it exposes once
-/// its snapshot is complete.
+/// One cell's current follow: its generation, what it exposes once its
+/// snapshot is complete, whether it is offered, and the signal that ends
+/// its link once it closes.
 struct Follow {
     generation: u64,
     installed: Option<Installed>,
+    offer: Offer,
+    close: CancellationToken,
+}
+
+/// An earlier follow of a cell, not offered, whose link ended: what its
+/// link last showed, until it closes.
+struct Closing {
+    installed: Installed,
+    offer: Offer,
 }
 
 impl Shared {
     fn follow(&self, class: &str, cell: &str) -> Option<&Follow> {
         self.follows.get(class).and_then(|cells| cells.get(cell))
+    }
+
+    /// The offered state of the follow `generation` of the cell `cell` of
+    /// `class`, current and installed or closing.
+    fn offer(&mut self, class: &str, cell: &str, generation: u64) -> Option<&mut Offer> {
+        let current = self
+            .follows
+            .get_mut(class)
+            .and_then(|cells| cells.get_mut(cell))
+            .filter(|follow| follow.generation == generation && follow.installed.is_some());
+        match current {
+            Some(follow) => Some(&mut follow.offer),
+            None => self
+                .closing
+                .get_mut(class)
+                .and_then(|cells| cells.get_mut(cell))
+                .and_then(|closing| closing.get_mut(&generation))
+                .map(|closing| &mut closing.offer),
+        }
     }
 
     fn end(&mut self, class: &str, cell: &str, generation: u64) {
@@ -221,17 +367,88 @@ impl Shared {
         {
             return;
         }
-        let follow = cells.remove(cell).expect("the follow was just found");
-        if let Some(installed) = follow.installed {
-            let _ = self.events.send(FollowEvent::Dropped {
-                class: class.to_string(),
-                cell: cell.to_string(),
-                generation,
-            });
-            if installed.counted() {
-                self.count(class, false);
+        let Follow {
+            installed,
+            mut offer,
+            ..
+        } = cells.remove(cell).expect("the follow was just found");
+        let Some(installed) = installed else {
+            return;
+        };
+        if installed.counted() {
+            self.count(class, false);
+        }
+        if offer.set(false) {
+            let _ = self.events.send(offer.event(class, cell, generation));
+        }
+        self.closing
+            .entry(class.to_string())
+            .or_default()
+            .entry(cell.to_string())
+            .or_default()
+            .insert(generation, Closing { installed, offer });
+        self.settle(class, cell, generation);
+    }
+
+    /// Close the follow `generation` of the cell `cell` of `class` if it
+    /// is not offered and every chooser of the class acknowledged it:
+    /// drop it from the relay, and end its link if it is the current one.
+    fn settle(&mut self, class: &str, cell: &str, generation: u64) {
+        let choosers = self.choosers.count(class);
+        let dropped = || FollowEvent::Dropped {
+            class: class.to_string(),
+            cell: cell.to_string(),
+            generation,
+        };
+        if let Some(cells) = self.follows.get_mut(class)
+            && cells.get(cell).is_some_and(|follow| {
+                follow.generation == generation
+                    && follow.installed.is_some()
+                    && follow.offer.closes(choosers)
+            })
+        {
+            let follow = cells.remove(cell).expect("the follow was just found");
+            // Not offered, so not ready, and not counted.
+            follow.close.cancel();
+            let _ = self.events.send(dropped());
+            return;
+        }
+        let Some(cells) = self.closing.get_mut(class) else {
+            return;
+        };
+        let Some(generations) = cells.get_mut(cell) else {
+            return;
+        };
+        if generations
+            .get(&generation)
+            .is_some_and(|closing| closing.offer.closes(choosers))
+        {
+            generations.remove(&generation);
+            if generations.is_empty() {
+                cells.remove(cell);
+            }
+            let _ = self.events.send(dropped());
+        }
+    }
+
+    /// The chooser `id` of `class` left: forget what it acknowledged of
+    /// every follow of the class that is not offered, and return them, by
+    /// cell and generation, for each to be settled.
+    fn left(&mut self, class: &str, id: InstanceId) -> Vec<(String, u64)> {
+        let mut unoffered = Vec::new();
+        for (cell, follow) in self.follows.get_mut(class).into_iter().flatten() {
+            if follow.installed.is_some() && !follow.offer.offered() {
+                follow.offer.left(id);
+                unoffered.push((cell.clone(), follow.generation));
             }
         }
+        for (cell, generations) in self.closing.get_mut(class).into_iter().flatten() {
+            for (generation, closing) in generations {
+                closing.offer.left(id);
+                unoffered.push((cell.clone(), *generation));
+            }
+        }
+        unoffered
     }
 
     /// One more, or one fewer, ready cell of `class` is followed: show the
@@ -255,18 +472,36 @@ impl Shared {
             });
     }
 
-    /// Every installed follow, by class and cell, then the marker.
+    /// Every installed follow, by class and cell, each cell's closing
+    /// follows before its current one, then the marker.
     fn snapshot(&self) -> Vec<FollowEvent> {
-        let mut installed: Vec<(&Installed, u64)> = self
-            .follows
-            .values()
-            .flat_map(HashMap::values)
-            .filter_map(|follow| Some((follow.installed.as_ref()?, follow.generation)))
-            .collect();
-        installed.sort_by_key(|(cell, _)| (&cell.class, &cell.cell));
+        let mut cells: BTreeSet<(&str, &str)> = BTreeSet::new();
+        for (class, follows) in &self.follows {
+            for (cell, follow) in follows {
+                if follow.installed.is_some() {
+                    cells.insert((class, cell));
+                }
+            }
+        }
+        for (class, closing) in &self.closing {
+            cells.extend(closing.keys().map(|cell| (class.as_str(), cell.as_str())));
+        }
         let mut events = Vec::new();
-        for (cell, generation) in installed {
-            events.extend(cell.snapshot(generation));
+        for (class, cell) in cells {
+            let closing = self.closing.get(class).and_then(|cells| cells.get(cell));
+            for (generation, closing) in closing.into_iter().flatten() {
+                let offering = closing.offer.event(class, cell, *generation);
+                events.extend(closing.installed.snapshot(*generation, Some(offering)));
+            }
+            if let Some(follow) = self.follow(class, cell)
+                && let Some(installed) = &follow.installed
+            {
+                let offering = follow
+                    .offer
+                    .shown()
+                    .then(|| follow.offer.event(class, cell, follow.generation));
+                events.extend(installed.snapshot(follow.generation, offering));
+            }
         }
         events.push(FollowEvent::Synced);
         events
@@ -405,8 +640,8 @@ impl Installed {
     }
 
     /// The follow as a watch of the relay begins with it: the cell, then
-    /// its retired instances, then those it exposes.
-    fn snapshot(&self, generation: u64) -> Vec<FollowEvent> {
+    /// `offering`, then its retired instances, then those it exposes.
+    fn snapshot(&self, generation: u64, offering: Option<FollowEvent>) -> Vec<FollowEvent> {
         let mut retired: Vec<(&InstanceId, &String)> = self.retired.iter().collect();
         retired.sort_by_key(|(id, segment)| (*segment, id.as_u128()));
         let mut events = Vec::with_capacity(1 + self.retired.len() + self.ready.len());
@@ -418,6 +653,7 @@ impl Installed {
             state: self.state,
             load: self.load,
         });
+        events.extend(offering);
         events.extend(
             retired
                 .into_iter()
@@ -476,234 +712,4 @@ impl Stream for FollowsWatch {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Installed, Relay};
-    use crate::{CellHealth, Quorum};
-    use futures::{FutureExt, StreamExt};
-    use gdl_cells::CellState;
-    use gdl_watch::{CellWatchEvent, FollowEvent};
-    use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
-
-    fn peer() -> PeerInfo {
-        PeerInfo::new(
-            InstanceId::new_v4(),
-            WorkerAddress::from_encoded(b"tcp://test".to_vec()),
-        )
-    }
-
-    /// The health of a cell that requires two ready cells of `model_x`.
-    fn health() -> CellHealth {
-        let quorum = Quorum::new([("a", 1)], std::time::Duration::ZERO);
-        let requires = [("model_x".to_string(), 2)].into();
-        CellHealth::of(&quorum, CellState::Unavailable, &requires)
-    }
-
-    /// The cell `cell` of `model_x`, as its watch's first event shows it.
-    fn installed_cell(cell: &str, state: CellState) -> Installed {
-        Installed::new(cell.into(), "model_x".into(), "r".into(), state, None)
-    }
-
-    fn installed(state: CellState) -> Installed {
-        installed_cell("m", state)
-    }
-
-    /// The events `event` sends.
-    fn sent(installed: &mut Installed, event: CellWatchEvent) -> Vec<FollowEvent> {
-        let mut events = Vec::new();
-        installed.apply(1, event, |event| events.push(event));
-        events
-    }
-
-    fn exposed(peer: &PeerInfo) -> FollowEvent {
-        FollowEvent::Exposed {
-            class: "model_x".into(),
-            cell: "m".into(),
-            generation: 1,
-            segment: "f".into(),
-            peer: peer.clone(),
-        }
-    }
-
-    fn ready(peer: &PeerInfo) -> CellWatchEvent {
-        CellWatchEvent::Ready {
-            segment: "f".into(),
-            peer: peer.clone(),
-        }
-    }
-
-    fn state(state: CellState) -> CellWatchEvent {
-        CellWatchEvent::State { state }
-    }
-
-    /// The events the watch has now.
-    fn pending(watch: &mut super::FollowsWatch) -> Vec<FollowEvent> {
-        let mut events = Vec::new();
-        while let Some(Some(event)) = watch.next().now_or_never() {
-            events.push(event);
-        }
-        events
-    }
-
-    /// An instance retired is never exposed, even if its cell's watch named
-    /// it ready afterwards, which the watch does not do.
-    #[test]
-    fn a_retired_instance_is_never_exposed() {
-        let mut cell = installed(CellState::Ready);
-        let retiree = peer();
-        let id = retiree.instance_id();
-        let retired = sent(
-            &mut cell,
-            CellWatchEvent::Retired {
-                segment: "f".into(),
-                instance: id,
-            },
-        );
-        assert_eq!(retired.len(), 1);
-        assert_eq!(sent(&mut cell, ready(&retiree)), []);
-        assert_eq!(sent(&mut cell, state(CellState::Unavailable)).len(), 1);
-        assert_eq!(
-            sent(&mut cell, state(CellState::Ready)),
-            [FollowEvent::State {
-                class: "model_x".into(),
-                cell: "m".into(),
-                generation: 1,
-                state: CellState::Ready,
-            }]
-        );
-    }
-
-    /// A state that exposes nothing sends the state alone; one that exposes
-    /// again sends each ready instance after it, including one that became
-    /// ready meanwhile. An instance hidden when it leaves is sent no `left`,
-    /// since a consumer dropped it with the state.
-    #[test]
-    fn a_state_hides_and_exposes_the_ready_instances() {
-        let mut cell = installed(CellState::Degraded);
-        let (first, second, gone) = (peer(), peer(), peer());
-        assert_eq!(sent(&mut cell, ready(&first)), [exposed(&first)]);
-        assert_eq!(sent(&mut cell, ready(&gone)), [exposed(&gone)]);
-        assert_eq!(sent(&mut cell, ready(&first)), [], "sent once");
-        assert_eq!(sent(&mut cell, state(CellState::Draining)).len(), 1);
-        assert_eq!(sent(&mut cell, ready(&second)), []);
-        let left = CellWatchEvent::Left {
-            segment: "f".into(),
-            instance: gone.instance_id(),
-        };
-        assert_eq!(sent(&mut cell, left), []);
-        let mut again = sent(&mut cell, state(CellState::Ready));
-        assert_eq!(
-            again.remove(0),
-            FollowEvent::State {
-                class: "model_x".into(),
-                cell: "m".into(),
-                generation: 1,
-                state: CellState::Ready,
-            }
-        );
-        again.sort_by_key(|event| match event {
-            FollowEvent::Exposed { peer, .. } => peer.instance_id().as_u128(),
-            other => panic!("{other:?}"),
-        });
-        let mut expected = vec![exposed(&first), exposed(&second)];
-        expected.sort_by_key(|event| match event {
-            FollowEvent::Exposed { peer, .. } => peer.instance_id().as_u128(),
-            _ => 0,
-        });
-        assert_eq!(again, expected);
-    }
-
-    /// Only the current generation of a cell writes: an install, a change,
-    /// or an end of an earlier one is ignored, and a new generation drops
-    /// the installed one first.
-    #[test]
-    fn only_the_current_generation_writes() {
-        let relay = Relay::new(16, tokio::sync::watch::Sender::new(health()));
-        let mut watch = relay.watch();
-        assert_eq!(pending(&mut watch), [FollowEvent::Synced]);
-        let first = relay.begin("model_x", "m");
-        let instance = peer();
-        relay.install(first, installed_cell("m", CellState::Ready));
-        relay.apply("model_x", "m", first, ready(&instance));
-        let second = relay.begin("model_x", "m");
-        assert!(second > first);
-        relay.install(first, installed_cell("m", CellState::Ready));
-        relay.apply("model_x", "m", first, ready(&peer()));
-        relay.end("model_x", "m", first);
-        relay.install(second, installed_cell("m", CellState::Unavailable));
-        relay.apply("model_x", "m", second, ready(&instance));
-        let follow = |generation, state| FollowEvent::Follow {
-            class: "model_x".into(),
-            cell: "m".into(),
-            generation,
-            region: "r".into(),
-            state,
-            load: None,
-        };
-        assert_eq!(
-            pending(&mut watch),
-            [
-                follow(first, CellState::Ready),
-                FollowEvent::Exposed {
-                    class: "model_x".into(),
-                    cell: "m".into(),
-                    generation: first,
-                    segment: "f".into(),
-                    peer: instance.clone(),
-                },
-                FollowEvent::Dropped {
-                    class: "model_x".into(),
-                    cell: "m".into(),
-                    generation: first,
-                },
-                follow(second, CellState::Unavailable),
-            ]
-        );
-        relay.end("model_x", "m", second);
-        let third = relay.begin("model_x", "m");
-        assert!(third > second, "numbered past every earlier follow");
-        assert_eq!(
-            pending(&mut watch),
-            [FollowEvent::Dropped {
-                class: "model_x".into(),
-                cell: "m".into(),
-                generation: second,
-            }]
-        );
-        assert_eq!(
-            *relay.following().borrow(),
-            [(("model_x".to_string(), "m".to_string()), third)].into()
-        );
-        relay.forget("model_x", "m");
-        assert!(relay.following().borrow().is_empty());
-    }
-
-    /// The count of ready, followed cells of a class follows each install,
-    /// change of state, and drop of a current generation, and nothing of
-    /// an earlier one.
-    #[test]
-    fn a_class_counts_its_installed_ready_cells() {
-        let health = tokio::sync::watch::Sender::new(health());
-        let shown = health.subscribe();
-        let met = || shown.borrow().requires["model_x"].met;
-        let relay = Relay::new(16, health);
-        let (m, n) = (relay.begin("model_x", "m"), relay.begin("model_x", "n"));
-        relay.install(m, installed_cell("m", CellState::Ready));
-        relay.install(n, installed_cell("n", CellState::Degraded));
-        assert_eq!(met(), 1);
-        relay.apply("model_x", "n", n, state(CellState::Ready));
-        assert_eq!(met(), 2);
-        relay.apply("model_x", "n", n, state(CellState::Ready));
-        assert_eq!(met(), 2, "no change of state");
-        relay.apply("model_x", "m", m, state(CellState::Unavailable));
-        assert_eq!(met(), 1);
-        relay.end("model_x", "m", m);
-        assert_eq!(met(), 1, "m was not ready");
-        let later = relay.begin("model_x", "n");
-        assert_eq!(met(), 0, "the new generation dropped the ready one");
-        relay.apply("model_x", "n", n, state(CellState::Ready));
-        relay.end("model_x", "n", n);
-        relay.install(later, installed_cell("n", CellState::Ready));
-        assert_eq!(met(), 1);
-        assert!(!shown.borrow().healthy(), "and the cell is unavailable");
-    }
-}
+mod tests;

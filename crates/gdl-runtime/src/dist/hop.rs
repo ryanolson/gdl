@@ -10,10 +10,9 @@ use futures::{Future, Stream, StreamExt};
 use super::admission::{EgressPermit, Share};
 use super::envelope::{Accepted, Forward, Open, VERSION, WireCx, WireItem};
 use super::fabric::{Canceller, Frame, Inbound, Outbound, ReplyTo, Retirer};
-use super::runtime::{Entries, Handed, Router, Runtime};
+use super::runtime::{Entries, Handed, Held, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use gdl::__runtime as meter;
-use gdl::__runtime::Lease;
 use gdl::__runtime::{CHECK_INTERVAL, bound_measured};
 use gdl::__runtime::{END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit};
 use gdl::Next;
@@ -391,8 +390,9 @@ where
             result = core.run_remote(&attempt, req) => meter::note(root.as_ref(), result)?,
         };
         meter::note(root.as_ref(), attempt.check())?;
-        // The attempt slot, and a selector's lease, are held for as long as
-        // the response stream lives: one holder, so a lease adds no wrapper.
+        // The attempt slot, and the hand-off's leases, are held for as long
+        // as the response stream lives: one holder, so a lease adds no
+        // wrapper.
         let items = items_holding(items, (slot, lease));
         Ok(bound_measured(&attempt, guard, items, root))
     }
@@ -474,14 +474,15 @@ where
         }
     }
 
-    /// The outer end's side of a hop that leaves its segment, with the
-    /// lease of the selector that chose where it went, if one did: the
-    /// caller holds it as long as the response stream.
+    /// The outer end's side of a hop that leaves its segment, with what
+    /// the hand-off holds (the lease of the selector that chose where it
+    /// went, if one did, and a chooser's lease on the cell it offered the
+    /// request to): the caller holds it as long as the response stream.
     async fn run_remote(
         self: &Arc<Self>,
         attempt: &Cx,
         req: F::In,
-    ) -> Result<(Items<B::Out>, Option<Lease>)> {
+    ) -> Result<(Items<B::Out>, Held)> {
         let rt = &self.rt;
         let (inbound, mut reply) = rt.fabric.mint();
         let mut held_reply = rt.fabric.hold_reply(&reply);
@@ -548,7 +549,7 @@ where
             };
         }
         let exit = self.fwd.walk(1, self.plan.fwd_end(0), attempt, req).await?;
-        let mut lease = None;
+        let mut lease = Held::default();
         // As in local composition, nothing further starts for an interrupted
         // request. The last forward node may have ended the attempt, and a
         // hand-off sent now would start remote work under a context that
@@ -607,7 +608,7 @@ where
                 let Handed {
                     accepted,
                     sent,
-                    lease: chosen,
+                    held: chosen,
                 } = rt
                     .send_forward(
                         &self.plan.fwd_segments[at],
@@ -826,8 +827,8 @@ where
                         owner.is_some(),
                     );
                     let (sent, sent_at, lease) = match bounded(&cx, sending).await {
-                        Ok(handed) => (Ok(handed.accepted), handed.sent, handed.lease),
-                        Err(error) => (Err(error), None, None),
+                        Ok(handed) => (Ok(handed.accepted), handed.sent, handed.held),
+                        Err(error) => (Err(error), None, Held::default()),
                     };
                     // Handed on, the visit ends here: the response flows
                     // past this segment.

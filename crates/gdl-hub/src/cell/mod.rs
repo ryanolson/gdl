@@ -20,11 +20,11 @@ use velo_hub::{
     Rejection, StartContext, Txn,
 };
 
-use crate::follow::{Follower, FollowsWatch, Relay};
+use crate::follow::{Choosers, Follower, FollowsWatch, Relay};
 use crate::{GraphAdmission, Quorum};
 use drain::Drain;
 use feed::Feed;
-use gdl_watch::{CellWatchError, CellWatcher, LoadReport};
+use gdl_watch::{CellWatchError, CellWatcher, LoadReport, Unoffered};
 
 /// How long a watch that arrives before the cell's record is first stored
 /// waits for it: a follower finds the cell by its record, so it can ask
@@ -83,12 +83,21 @@ pub use feed::CellWatch;
 /// [`gdl_watch::FollowEvent`] as JSON, with the same keep-alive and buffer as
 /// the cell's watch: each followed cell's state, then its retired entry
 /// instances, then those it exposes, the ready ones that have not retired
-/// while its state is `ready` or `degraded`. A follow is dropped as soon
-/// as its link ends, and followed again, as a new generation, while the
-/// cell is still a home cell that takes work; a record that expires or is
-/// withdrawn ends no follow, and a newer epoch in the directory ends the
-/// follow of the hub it replaces. A follow is never closed while its link
-/// lives.
+/// while its state is `ready` or `degraded`. A follow is offered to the
+/// hub's choosers while its link lives and its state is one of those, and
+/// each change between offered and not offered is its next revision, which
+/// the relay carries. One that is not offered closes once every chooser of
+/// its class among the hub's members, the instances of the segments that
+/// hold the outer end of a hop into the class, has acknowledged its
+/// current revision or left: `POST instances/{instance_id}/unoffered` on
+/// the control listener, a [`gdl_watch::Unoffered`] with the chooser's own
+/// credential, refused with 409 from any other instance. Then the relay
+/// drops it and its link ends. A follow whose link ends, or that a newer
+/// epoch in the directory replaces, is not offered from then, and is kept
+/// beside the cell's later follows until it closes the same way; the cell
+/// is followed again, as a new generation, while it is still a home cell
+/// that takes work, and, after a follow closed, only from a later write
+/// of its record. A record that expires or is withdrawn ends no follow.
 ///
 /// Each usable entry instance of the cell reports its admission to the
 /// hub once a load summary period (`[cell] summary_ms`), on the control
@@ -241,7 +250,11 @@ impl<D: CellDirectory> CellReadiness<D> {
             CellState::Unavailable,
             &cell.requires,
         ));
-        let relay = Arc::new(Relay::new(timing.watch_buffer, health.clone()));
+        let relay = Arc::new(Relay::new(
+            timing.watch_buffer,
+            health.clone(),
+            choosers(&layout, &cell.class),
+        ));
         Ok(Self {
             directory: Arc::new(directory),
             record,
@@ -487,7 +500,21 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 
     fn control_routes(self: Arc<Self>) -> Router {
         let draining = Arc::clone(&self);
+        let relay = Arc::clone(&self.relay);
         Router::new()
+            .route(
+                gdl_watch::UNOFFERED_ROUTE,
+                post(
+                    move |authorized: Authorized, HubJson(unoffered): HubJson<Unoffered>| async move {
+                        relay
+                            .acknowledge(authorized.owner, authorized.lease.epoch, &unoffered)
+                            .map(|()| StatusCode::NO_CONTENT)
+                            // Not 401 or 404: velo-hub's client drops its
+                            // registration on those.
+                            .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
+                    },
+                ),
+            )
             .route(
                 gdl_watch::DRAIN_ROUTE,
                 post(move || async move {
@@ -544,6 +571,12 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         if let Some((segment, peer)) = member {
             self.drain
                 .joined(&segment, committed.owner, committed.incarnation);
+            self.relay.joined(
+                &segment,
+                committed.owner,
+                committed.incarnation,
+                committed.epoch,
+            );
             self.feed
                 .joined(&segment, committed.incarnation, committed.epoch, peer);
         }
@@ -554,8 +587,34 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 
     fn on_removed(&self, removal: Removal) {
         self.drain.removed(&removal);
+        self.relay.removed(&removal);
         self.feed.removed(removal);
     }
+}
+
+/// The segments of `class` that choose cells of the classes it sends to,
+/// each with those classes: the segments holding the outer end of a hop
+/// that crosses out of the class, whose instances offer requests to the
+/// cells this hub follows.
+fn choosers(layout: &gdl_model::Layout, class: &str) -> Choosers {
+    let mut segments: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for boundary in layout.boundaries() {
+        if boundary.from != class {
+            continue;
+        }
+        let hop = &layout.hops()[boundary.hop];
+        if let Some(outer) = hop.forward_runs.first() {
+            segments
+                .entry(outer.segment.clone())
+                .or_default()
+                .insert(boundary.into.clone());
+        }
+    }
+    Choosers::new(
+        segments
+            .into_iter()
+            .map(|(segment, classes)| (segment, classes.into_iter().collect())),
+    )
 }
 
 /// The watch as server-sent events, each one JSON value; a hub that has

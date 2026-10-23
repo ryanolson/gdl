@@ -390,6 +390,9 @@ mod tests {
             eligible,
             retired: Box::new([]),
             turn: Arc::new(AtomicUsize::new(0)),
+            offering: true,
+            revision: 1,
+            leases: Arc::default(),
         })
     }
 

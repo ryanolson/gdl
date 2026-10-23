@@ -5,13 +5,16 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gdl_cells::CellRecord;
+use tokio_util::sync::CancellationToken;
 
 use super::relay::{Installed, Relay};
 use gdl_watch::{CellWatchEvent, CellWatcher};
 
 /// Follow the cell of `record` in `generation` until its watch ends or
-/// fails, then drop it from the relay at once; after `refollow`, return
-/// the cell and the generation, for the follower to decide whether to
+/// fails, or until the relay closes the follow (`close`), then end it in
+/// the relay at once, which marks it not offered if the relay has not
+/// closed it; after `refollow`, return the cell, the generation, and
+/// whether the relay closed it, for the follower to decide whether to
 /// follow it again. The wait is in the link's own task, which already
 /// exists per followed cell, so a follower holds no timer per cell.
 pub(super) async fn run(
@@ -19,12 +22,16 @@ pub(super) async fn run(
     watcher: CellWatcher,
     record: CellRecord,
     generation: u64,
+    close: CancellationToken,
     refollow: Duration,
-) -> (String, u64) {
-    follow(&relay, &watcher, &record, generation).await;
+) -> (String, u64, bool) {
+    let closed = tokio::select! {
+        () = follow(&relay, &watcher, &record, generation) => false,
+        () = close.cancelled() => true,
+    };
     relay.end(&record.class, &record.name, generation);
     tokio::time::sleep(refollow).await;
-    (record.name, generation)
+    (record.name, generation, closed)
 }
 
 /// Read the cell's watch: its snapshot, installed in the relay once it is

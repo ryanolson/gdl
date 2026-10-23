@@ -1124,5 +1124,7 @@ mod cell;
 #[cfg(test)]
 mod drains;
 mod load;
+mod unoffered;
 
 pub(crate) use cell::CellDrain;
+pub(crate) use unoffered::Acknowledger;

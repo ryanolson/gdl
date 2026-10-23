@@ -2,7 +2,9 @@
 //! what it tells a hub that follows the cell; the relay, what it follows,
 //! for its own instances; and the client that reads both. Also the report
 //! an entry instance sends its own hub of its admission ([`LoadReport`]),
-//! from which the hub makes the cell's load summary.
+//! from which the hub makes the cell's load summary, and the
+//! acknowledgement a chooser sends its own hub once it no longer holds an
+//! offer to a followed cell that is not offered ([`Unoffered`]).
 //!
 //! The hub (`gdl-hub`) serves them and a segment instance reads the relay
 //! and its own cell's watch, for the cell's drain, and sends the report, so the wire types, the routes, and the client
@@ -47,6 +49,38 @@ pub const DRAIN_ROUTE: &str = "/drain";
 /// [`LOAD_ROUTE`]'s path for `instance`.
 pub fn load_path(instance: InstanceId) -> String {
     format!("/instances/{instance}/load")
+}
+
+/// The acknowledgement's route, under the extension's, on the hub's
+/// control listener: `POST` with an [`Unoffered`], carrying the
+/// credential of the instance the path names, which must be a member of
+/// the hub whose segment chooses cells of the class it names. Answered
+/// `204 No Content` once the hub has taken it, whether or not it still
+/// answers the follow's current revision; one that does not counts for
+/// nothing.
+pub const UNOFFERED_ROUTE: &str = "/instances/{instance_id}/unoffered";
+
+/// [`UNOFFERED_ROUTE`]'s path for `instance`.
+pub fn unoffered_path(instance: InstanceId) -> String {
+    format!("/instances/{instance}/unoffered")
+}
+
+/// What a chooser tells its own hub once it has applied a change of a
+/// followed cell to not offered and holds no offer to that follow: the
+/// follow, by the cell's class and name and its generation, and the
+/// revision of the change. It answers that revision alone: a later change
+/// of the follow, to offered or not, is not answered by it, so a hub
+/// never counts it for one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Unoffered {
+    /// The cell's class.
+    pub class: String,
+    /// The cell, named within its class.
+    pub cell: String,
+    /// The follow's generation.
+    pub generation: u64,
+    /// The revision of the change to not offered.
+    pub revision: u64,
 }
 
 /// What an entry instance reports of its admission to its cell's hub,

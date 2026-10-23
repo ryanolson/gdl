@@ -160,8 +160,10 @@ async fn a_ready_cell_before_a_degraded_one_and_never_an_unavailable_one() {
         ..
     } = m2;
     sink.stop().await;
+    // The global's hub lets go of a cell that takes no work, once the
+    // chooser acknowledges that it holds no offer to it.
     until(&cells, "the cell unavailable", |cells| {
-        followed(cells, "f", M2).is_some_and(|m| m.state == CellState::Unavailable)
+        followed(cells, "f", M2).is_none_or(|m| m.state == CellState::Unavailable)
     })
     .await;
     unplaced(ask(&chooser.segment).await);

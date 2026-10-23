@@ -19,7 +19,7 @@ use gdl_model::{
     CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase,
     TypeInfo, segment_service,
 };
-use gdl_watch::LoadReport;
+use gdl_watch::{LoadReport, Unoffered};
 use tokio::sync::watch;
 use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
 use velo_hub::velo::discovery::ServiceRegistrationGuard;
@@ -213,6 +213,15 @@ impl Instance {
         self.client
             .ext(gdl_watch::EXTENSION)
             .control_post(&gdl_watch::load_path(self.id()), &load)
+            .await
+    }
+
+    /// Tell the hub, as this instance, that it holds no offer to the
+    /// follow `unoffered` names, at its revision.
+    pub async fn acknowledge(&self, unoffered: &Unoffered) -> Result<(), ClientError> {
+        self.client
+            .ext(gdl_watch::EXTENSION)
+            .control_post(&gdl_watch::unoffered_path(self.id()), unoffered)
             .await
     }
 

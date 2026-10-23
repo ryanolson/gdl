@@ -6,9 +6,18 @@
 //! record, which cells to follow; each follow is a task of its own that
 //! reads one cell's watch into the [`Relay`]. The directory finds cells
 //! and the link carries them: a record that expires or is withdrawn never
-//! ends a follow, and a link that ends drops its follow at once, whatever
-//! the directory says. A newer epoch in the directory ends a follow too,
-//! since the hub it was following is gone.
+//! ends a follow, or changes whether it is offered, and a link that ends
+//! makes its follow not offered at once, whatever the directory says. A
+//! newer epoch in the directory ends a follow too, since the hub it was
+//! following is gone. The follow set is the home cells, so a cell leaves
+//! it only so: a cell that stops taking work stays followed, not offered,
+//! until the relay closes its follow.
+//!
+//! A follow the relay closed, once every chooser acknowledged that it is
+//! not offered, is followed again only once the directory shows a later
+//! write of the cell's record that makes it a home cell: until then the
+//! directory may still show the cell taking work when its link said it
+//! does not, and following it again would only close again.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,8 +31,10 @@ use tokio_util::sync::CancellationToken;
 use gdl_watch::CellWatcher;
 
 mod link;
+mod offer;
 mod relay;
 
+pub(crate) use offer::Choosers;
 pub use relay::FollowsWatch;
 pub(crate) use relay::Relay;
 
@@ -62,6 +73,7 @@ impl<D: CellDirectory> Follower<D> {
         let mut follows = Follows {
             view: CellView::new(),
             current: HashMap::new(),
+            closed: HashMap::new(),
             links: JoinSet::new(),
             follower: &self,
         };
@@ -112,9 +124,14 @@ struct Follows<'a, D> {
     view: CellView,
     /// Each cell followed: its link under way, or waiting to follow again.
     current: HashMap<String, Following>,
-    /// The links' tasks, each returning its cell and generation once it
-    /// has ended and waited to follow again. Dropping the set ends them.
-    links: JoinSet<(String, u64)>,
+    /// The cells whose follow the relay closed, each with the epoch and
+    /// `seq` of its record when it closed: followed again only from a
+    /// later write.
+    closed: HashMap<String, (u64, u64)>,
+    /// The links' tasks, each returning its cell, its generation, and
+    /// whether the relay closed it, once it has ended and waited to follow
+    /// again. Dropping the set ends them.
+    links: JoinSet<(String, u64, bool)>,
     follower: &'a Follower<D>,
 }
 
@@ -143,8 +160,10 @@ impl<D: CellDirectory> Follows<'_, D> {
     }
 
     /// Follow `cell` if its record makes it a home cell that takes work
-    /// and it is not followed yet; end its follow if the record has a newer
-    /// epoch than the one it began from, and follow it anew if it can.
+    /// and it is not followed yet, unless the relay closed its last follow
+    /// and the record is no later than it was then; end its follow if the
+    /// record has a newer epoch than the one it began from, and follow it
+    /// anew if it can.
     fn decide(&mut self, cell: &str, now: Instant) {
         let record = self.view.get(cell, now).cloned();
         if let Some(following) = self.current.get(cell) {
@@ -163,7 +182,13 @@ impl<D: CellDirectory> Follows<'_, D> {
                 .relay
                 .end(&self.follower.class, cell, following.generation);
         }
-        match record.filter(|record| self.follower.home(record)) {
+        if let (Some(record), Some(closed)) = (&record, self.closed.get(cell))
+            && (record.epoch, record.seq) > *closed
+        {
+            self.closed.remove(cell);
+        }
+        match record.filter(|record| self.follower.home(record) && !self.closed.contains_key(cell))
+        {
             Some(record) => self.start(record),
             None => self.follower.relay.forget(&self.follower.class, cell),
         }
@@ -171,9 +196,9 @@ impl<D: CellDirectory> Follows<'_, D> {
 
     /// A link's task ended: if it is the cell's current follow, follow the
     /// cell again if its record still makes it a home cell that takes work.
-    fn ended(&mut self, ended: Result<(String, u64), JoinError>) {
+    fn ended(&mut self, ended: Result<(String, u64, bool), JoinError>) {
         // A task aborted for a newer epoch was replaced already.
-        let Ok((cell, generation)) = ended else {
+        let Ok((cell, generation, closed)) = ended else {
             return;
         };
         if self
@@ -183,13 +208,24 @@ impl<D: CellDirectory> Follows<'_, D> {
         {
             return;
         }
-        self.current.remove(&cell);
+        let following = self
+            .current
+            .remove(&cell)
+            .expect("the follow was just found");
+        if closed {
+            let seq = self
+                .view
+                .get(&cell, Instant::now())
+                .filter(|record| record.epoch == following.epoch)
+                .map_or(0, |record| record.seq);
+            self.closed.insert(cell.clone(), (following.epoch, seq));
+        }
         self.decide(&cell, Instant::now());
     }
 
     fn start(&mut self, record: CellRecord) {
         let relay = &self.follower.relay;
-        let generation = relay.begin(&record.class, &record.name);
+        let (generation, close) = relay.begin(&record.class, &record.name);
         let name = record.name.clone();
         let epoch = record.epoch;
         let link = self.links.spawn(link::run(
@@ -197,6 +233,7 @@ impl<D: CellDirectory> Follows<'_, D> {
             self.follower.watcher.clone(),
             record,
             generation,
+            close,
             self.follower.refollow,
         ));
         self.current.insert(
