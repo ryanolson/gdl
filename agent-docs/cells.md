@@ -200,7 +200,10 @@ The owner's question offered two paths: each model cell tells every global hub, 
 |---|---|---|---|
 | `relay` (hierarchical; no new service, but new hub protocol) | a model cell's hub reports its record to its home hub through a new typed endpoint of the gdl hub extension (`PUT /v1/gdl/cells/{cell}`, with its own credential and lease). It cannot be a velo-hub registrant: `GraphAdmission` admits only segment registrations (`crates/gdl-hub/src/lib.rs:46`). Globals' hubs follow each other's cell lists over a typed watch, a full mesh of a handful of globals | any global hub | a few regions; no external dependency; a region keeps working when cut off |
 | `store` (replicated store) | each cell's hub writes its record into a regional replica | every hub watches its regional replica | many cells; an AWS-managed control plane; operators who already run one |
-| `static` | the fleet file | the fleet file | tests, Compose on one host |
+| `memory` | an in-process directory, shared by every hub in one process | in process | tests, tier 1 (section 14) |
+| `dir` | one JSON file per cell under a directory, `<dir>/<class>/<cell>.json`, written atomically by that cell's hub with a temporary file and a rename | polled by readers every 50 ms, as the roster directory is | Compose on one host, through a shared volume |
+
+Amended 2026-10-22 during implementation: a fleet file has no live state, so `static` became `memory` (one process) and `dir` (one host).
 
 The relay's weak point is the one the owner pointed at: a model cell's discovery by remote globals depends on its home hub. A home that is down hides a healthy model cell from any global that was not already following it; globals that were keep routing to it over their follow links. The store backend does not have that coupling. Section 6 ranks the store backends.
 
@@ -395,7 +398,7 @@ Not verified by the research, and to measure before relying on: DynamoDB MREC re
 Each lands with its tests first, and every multi-hub test runs its hubs and cells in one process over TCP on OS-assigned ports, with a delay injector standing in for a region.
 
 1. **The model.** `[class]` and `[cells]` in the placement, their validation and the boundary rule, the hash unchanged without them; `fleet.toml`; the crossing report's WAN column.
-2. **The cell's hub.** The `gdl-cell` extension (quorum over usable instances, `hold`, `degraded` and `unavailable`, the cell health endpoint), `CellDirectory` with `static` and `relay` (the report endpoint and its lease), the typed cell watch, and the relay of entry instances to global instances.
+2. **The cell's hub.** The `gdl-cell` extension (quorum over usable instances, `hold`, `degraded` and `unavailable`, the cell health endpoint), `CellDirectory` with `memory`, `dir`, and `relay` (the report endpoint and its lease), the typed cell watch, and the relay of entry instances to global instances.
 3. **The runtime.** Per-(segment, cell) tables in the follower, the cell policy trait and `home_first`, failover before acceptance across cells, `Routing` for no cell, entry instances as drain sources, the cost measured against the per-request gate, and the cross-cell retirement and drain acknowledgements of section 5.
 4. **The DynamoDB backend**, in its own crate behind the trait, with the directory conformance suite run against DynamoDB Local outside the default suite.
 5. **Deployment.** One bundle per class with its own hub, and the ingress health check pointed at the cell health endpoint.

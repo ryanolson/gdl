@@ -62,7 +62,7 @@ name = "model-x-01-us-east-1"
 class = "model_x"
 region = "us-east-1"
 home = "global-us-east-1"
-directory = "static"
+directory = "memory"
 seeds = ["hub-a:1337", "hub-b:1337"]
 [ready]
 d = 4
@@ -77,7 +77,7 @@ fn a_cells_settings_are_read_whole() {
             class: "model_x".into(),
             region: "us-east-1".into(),
             home: Some("global-us-east-1".into()),
-            directory: DirectoryBackend::Static,
+            directory: DirectoryBackend::Memory,
             seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
             ready: BTreeMap::from([("d".into(), 4)]),
         }
@@ -110,6 +110,8 @@ fn a_misspelled_key_or_an_unknown_backend_is_refused() {
     for bad in [
         "name = 'g'\nclass = 'global'\nregion = 'r'\nhone = 'h'\n",
         "name = 'g'\nclass = 'global'\nregion = 'r'\ndirectory = 'store'\n",
+        // A fleet file has no live state, so it is not a backend.
+        "name = 'g'\nclass = 'global'\nregion = 'r'\ndirectory = 'static'\n",
         "name = 'g'\nclass = 'global'\nregion = 'r'\nseeds = 'hub-a:1337'\n",
         "name = 'g'\nclass = 'global'\nregion = 'r'\nready = { a = -1 }\n",
     ] {

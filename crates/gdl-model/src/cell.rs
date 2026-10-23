@@ -14,7 +14,7 @@ use crate::{Error, Layout};
 /// class = "model_x"
 /// region = "us-east-1"
 /// home = "global-us-east-1"    # optional: the cell of a parent class the policy prefers
-/// directory = "relay"          # optional: "relay" (the default) or "static"
+/// directory = "relay"          # optional: "relay" (the default) or "memory"
 /// seeds = ["hub-a:1337"]       # optional: hub addresses to join the relay mesh from
 /// [ready]                      # optional: the quorum of each segment of the class
 /// e = 4
@@ -54,8 +54,9 @@ pub enum DirectoryBackend {
     /// cells relay what they receive to each other.
     #[default]
     Relay,
-    /// The cells are fixed by configuration.
-    Static,
+    /// One directory in the process, shared by every hub in it: for tests
+    /// that run several cells in one process.
+    Memory,
 }
 
 impl CellSettings {

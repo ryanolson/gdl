@@ -355,7 +355,7 @@ fn a_cell_table_is_read_from_the_environment() {
             &format!("{BASE}{CELL}[cell.ready]\nfront = 3\n"),
         )?;
         jail.set_env("GDL_CELL__REGION", "us-west-2");
-        jail.set_env("GDL_CELL__DIRECTORY", "static");
+        jail.set_env("GDL_CELL__DIRECTORY", "memory");
         jail.set_env("GDL_CELL__READY__BACK", "4");
         jail.set_env("GDL_CELL__SEEDS", r#"["hub-a:1337", "hub-b:1337"]"#);
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
@@ -366,7 +366,7 @@ fn a_cell_table_is_read_from_the_environment() {
                 class: "global".into(),
                 region: "us-west-2".into(),
                 home: None,
-                directory: DirectoryBackend::Static,
+                directory: DirectoryBackend::Memory,
                 seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
                 ready: BTreeMap::from([("back".into(), 4), ("front".into(), 3)]),
             })
@@ -401,6 +401,15 @@ fn a_misspelled_cell_key_is_refused() {
         panic!("an unknown directory backend")
     };
     assert!(error.to_string().contains("store"), "{error}");
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", &format!("{BASE}{CELL}"))?;
+        jail.set_env("GDL_CELL__DIRECTORY", "static");
+        let Err(error) = Config::load(["config.toml"]) else {
+            return Err("a fleet file is not a directory backend".into());
+        };
+        assert!(error.to_string().contains("static"), "{error}");
+        Ok(())
+    });
     Jail::expect_with(|jail| {
         jail.create_file("config.toml", &format!("{BASE}{CELL}"))?;
         jail.set_env("GDL_CELL__HONE", "g");
