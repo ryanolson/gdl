@@ -1,13 +1,16 @@
-//! The cell's watch: what a cell's hub tells a hub that follows the cell,
-//! as typed events, and the client that reads them.
+//! The watches a cell's hub serves, as typed events: the cell's watch,
+//! what it tells a hub that follows the cell; the relay, what it follows,
+//! for its own instances; and the client that reads both.
 
 use gdl_cells::{CellState, LoadSummary};
 use serde::{Deserialize, Serialize};
 use velo_hub::velo::{InstanceId, PeerInfo};
 
 mod client;
+pub(crate) mod follows;
 
 pub use client::{CellWatchError, CellWatcher};
+pub use follows::FollowEvent;
 
 /// The name the cell's extension mounts its routes under, at
 /// `/v1/ext/{EXTENSION}`.

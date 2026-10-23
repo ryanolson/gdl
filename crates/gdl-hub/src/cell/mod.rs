@@ -14,7 +14,8 @@ use velo_hub::{
     AttachContext, Committed, Extension, RegistrationView, Rejection, StartContext, Txn,
 };
 
-use crate::{CellWatchError, GraphAdmission, Quorum};
+use crate::follow::{Follower, FollowsWatch, Relay};
+use crate::{CellWatchError, CellWatcher, GraphAdmission, Quorum};
 use feed::Feed;
 
 /// How long a watch that arrives before the cell's record is first stored
@@ -60,6 +61,21 @@ pub use feed::CellWatch;
 /// one that arrives earlier waits up to 5 s, then is refused (503). Every
 /// watch ends when the hub stops.
 ///
+/// A cell whose class sends to other classes follows their cells: for
+/// each class it sends to, it watches `directory`, and follows each home
+/// cell of the class (one of its own region and deployment, whose record
+/// is `ready` or `degraded`) over the cell's watch, one link per cell. It
+/// relays what it follows on `GET follows`, server-sent events, each one
+/// [`crate::FollowEvent`] as JSON, with the same keep-alive and buffer as
+/// the cell's watch: each followed cell's state, then its retired entry
+/// instances, then those it exposes, the ready ones that have not retired
+/// while its state is `ready` or `degraded`. A follow is dropped as soon
+/// as its link ends, and followed again, as a new generation, while the
+/// cell is still a home cell that takes work; a record that expires or is
+/// withdrawn ends no follow, and a newer epoch in the directory ends the
+/// follow of the hub it replaces. A follow is never closed while its link
+/// lives.
+///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,
 /// so that a slow directory never delays the judgment or the health
@@ -82,6 +98,10 @@ pub struct CellReadiness<D: CellDirectory> {
     feed: Arc<Feed>,
     /// The hub's admission, whose members say who an entry instance is.
     admission: OnceLock<Arc<GraphAdmission>>,
+    /// The classes the cell's class sends to, whose cells it follows.
+    sends: Vec<String>,
+    /// What the hub follows.
+    relay: Arc<Relay>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -91,7 +111,8 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// record of this deployment's cell can be published are refused here:
     /// a class the placement does not have, a `ready` key outside it, no
     /// hub address, a malformed name or region, a lease that is not whole
-    /// milliseconds, a heartbeat of zero, or a watch buffer of zero.
+    /// milliseconds, a heartbeat of zero, a watch buffer of zero, or a
+    /// refollow delay of zero.
     pub fn new(
         spec: &DeploymentSpec,
         cell: CellSettings,
@@ -113,6 +134,10 @@ impl<D: CellDirectory> CellReadiness<D> {
         }
         if timing.watch_buffer == 0 {
             return Err(CellError::new("the cell's watch buffer is zero"));
+        }
+        if timing.refollow.is_zero() {
+            // A hub that refuses at once would be dialled in a loop.
+            return Err(CellError::new("the cell's refollow delay is zero"));
         }
         let record = CellRecord {
             name: cell.name.clone(),
@@ -156,6 +181,12 @@ impl<D: CellDirectory> CellReadiness<D> {
             segments,
             timing.watch_buffer,
         );
+        let sends: BTreeSet<String> = layout
+            .boundaries()
+            .iter()
+            .filter(|boundary| boundary.from == cell.class)
+            .map(|boundary| boundary.into.clone())
+            .collect();
         let health = CellHealth::of(
             &Quorum::new(quorums.iter().cloned(), timing.hold),
             CellState::Unavailable,
@@ -168,6 +199,8 @@ impl<D: CellDirectory> CellReadiness<D> {
             health: watch::Sender::new(health),
             feed: Arc::new(feed),
             admission: OnceLock::new(),
+            sends: sends.into_iter().collect(),
+            relay: Arc::new(Relay::new(timing.watch_buffer)),
             tasks: Mutex::default(),
         })
     }
@@ -189,6 +222,25 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// changes.
     pub fn watchers(&self) -> watch::Receiver<usize> {
         self.feed.watchers()
+    }
+
+    /// A watch of what the hub follows, in process: what `GET follows`
+    /// serves, as typed events. It ends at once if the hub has stopped.
+    pub fn follows(&self) -> FollowsWatch {
+        self.relay.watch()
+    }
+
+    /// How many watches of what the hub follows are open, as it changes.
+    pub fn follows_watchers(&self) -> watch::Receiver<usize> {
+        self.relay.watchers()
+    }
+
+    /// The cells the hub has decided to follow, each with the generation
+    /// of its follow, as it changes: a cell is here from the moment its
+    /// follow begins, before its snapshot is complete, and while its link
+    /// is down and it waits to follow the cell again.
+    pub fn following(&self) -> watch::Receiver<BTreeMap<String, u64>> {
+        self.relay.following()
     }
 }
 
@@ -244,15 +296,36 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             }
             .run(written, cancel),
         );
+        let mut tasks = vec![counting, judging, publishing];
+        let follows = if self.sends.is_empty() {
+            Ok(())
+        } else {
+            CellWatcher::new().map(|watcher| {
+                for class in &self.sends {
+                    let follower = Follower {
+                        directory: Arc::clone(&self.directory),
+                        relay: Arc::clone(&self.relay),
+                        watcher: watcher.clone(),
+                        refollow: self.timing.refollow,
+                        class: class.clone(),
+                        region: self.record.region.clone(),
+                        contract: self.record.contract,
+                        placement: self.record.placement,
+                    };
+                    tasks.push(tokio::spawn(follower.run(ctx.cancellation().clone())));
+                }
+            })
+        };
         self.tasks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .extend([counting, judging, publishing]);
-        async { Ok(()) }
+            .extend(tasks);
+        async { follows.map_err(anyhow::Error::from) }
     }
 
     async fn shutdown(&self) {
         self.feed.close();
+        self.relay.close();
         // The hub cancels the tasks before it shuts its extensions down;
         // what is left is to see them end.
         let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
@@ -264,6 +337,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 
     fn public_routes(self: Arc<Self>) -> Router {
         let feed = Arc::clone(&self.feed);
+        let relay = Arc::clone(&self.relay);
         Router::new()
             .route(
                 "/health",
@@ -292,6 +366,13 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                             });
                         serve(watch)
                     }
+                }),
+            )
+            .route(
+                crate::watch::follows::ROUTE,
+                get(move || {
+                    let watch = relay.watch();
+                    async move { crate::fanout::serve(watch.into_events()) }
                 }),
             )
     }
@@ -348,9 +429,13 @@ pub struct CellTiming {
     /// How long a reader keeps the record without seeing it published
     /// again: three heartbeats by default.
     pub lease: Duration,
-    /// How many events a watcher of the cell may fall behind by before its
-    /// watch ends: at least this many, rounded up to a power of two.
+    /// How many events a watcher of the cell, or of what its hub follows,
+    /// may fall behind by before its watch ends: at least this many,
+    /// rounded up to a power of two.
     pub watch_buffer: usize,
+    /// How long after a follow's link ends the hub waits before it may
+    /// follow the cell again.
+    pub refollow: Duration,
 }
 
 impl Default for CellTiming {
@@ -360,6 +445,7 @@ impl Default for CellTiming {
             heartbeat: Duration::from_secs(10),
             lease: CellRecord::DEFAULT_LEASE,
             watch_buffer: 1024,
+            refollow: Duration::from_millis(250),
         }
     }
 }

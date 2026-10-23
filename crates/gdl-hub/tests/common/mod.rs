@@ -360,3 +360,94 @@ impl CellDirectory for Gated {
         self.inner.watch(class, from)
     }
 }
+
+/// A directory that names each cell's hub as DNS would: a record's `hub`
+/// is a name, which a test resolves to the address the hub serves at once
+/// it serves, since a hub's port is assigned only then. A publish waits
+/// until its hub's name is resolved, then stores the record with the
+/// address in its place.
+#[derive(Clone)]
+pub struct Resolving {
+    pub inner: MemoryDirectory,
+    names: Arc<watch::Sender<HashMap<String, String>>>,
+}
+
+impl Resolving {
+    pub fn new() -> Self {
+        Self {
+            inner: MemoryDirectory::new(),
+            names: Arc::new(watch::Sender::new(HashMap::new())),
+        }
+    }
+
+    /// The hub named `name` serves as `hub`.
+    pub fn resolve(&self, name: &str, hub: &Hub) {
+        let address = format!("127.0.0.1:{}", hub.public_addr().port());
+        self.names.send_modify(|names| {
+            names.insert(name.to_string(), address);
+        });
+    }
+}
+
+impl CellDirectory for Resolving {
+    type Watch = MemoryWatch;
+
+    async fn publish(&self, mut record: CellRecord) -> Result<(), DirectoryError> {
+        let mut names = self.names.subscribe();
+        let address = names
+            .wait_for(|names| names.contains_key(&record.hub))
+            .await
+            .expect("the names live")[&record.hub]
+            .clone();
+        record.hub = address;
+        self.inner.publish(record).await
+    }
+
+    async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+        self.inner.withdraw(withdrawal).await
+    }
+
+    fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
+        self.inner.watch(class, from)
+    }
+}
+
+/// A hub of the deployment with the extension of the cell `cell`, its hub
+/// name resolved in `directory` once it serves.
+pub async fn serve_cell(
+    cell: CellSettings,
+    directory: &Resolving,
+    timing: CellTiming,
+) -> (Hub, Arc<CellReadiness<Resolving>>) {
+    let name = cell.hub.clone().expect("a cell's hub has a name");
+    let (hub, readiness) = hub_of(cell, directory.clone(), timing).await;
+    directory.resolve(&name, &hub);
+    (hub, readiness)
+}
+
+/// A model cell named `name` in `region` whose hub is named `hub`: `d`
+/// needs two usable instances, `f` one.
+pub fn model(name: &str, region: &str, hub: &str) -> CellSettings {
+    toml::from_str(&format!(
+        "name = '{name}'\nclass = 'model_x'\nregion = '{region}'\nhub = '{hub}'\n\
+         directory = 'memory'\n[ready]\nd = 2\n"
+    ))
+    .expect("valid test fixture")
+}
+
+pub const GLOBAL: &str = "global-01-us-east-1";
+
+/// The global cell in us-east-1, whose class runs `a` and sends to
+/// `model_x`, requiring `requires` ready model cells when it is not 0.
+pub fn global_requiring(requires: u32) -> CellSettings {
+    let requires = if requires == 0 {
+        String::new()
+    } else {
+        format!("[requires]\nmodel_x = {requires}\n")
+    };
+    toml::from_str(&format!(
+        "name = '{GLOBAL}'\nclass = 'global'\nregion = 'us-east-1'\nhub = 'global-01-hub:1337'\n\
+         directory = 'memory'\n{requires}"
+    ))
+    .expect("valid test fixture")
+}

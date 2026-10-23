@@ -1,12 +1,13 @@
-//! The client of a cell's watch: the hub's server-sent events, parsed into
-//! [`CellWatchEvent`]s.
+//! The client of a cell hub's watches: its server-sent events, parsed into
+//! [`CellWatchEvent`]s or [`FollowEvent`]s.
 
 use std::time::Duration;
 
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
+use serde::de::DeserializeOwned;
 
-use super::{CellWatchEvent, EXTENSION, ROUTE};
+use super::{CellWatchEvent, EXTENSION, FollowEvent, ROUTE, follows};
 
 /// How long a connection to a cell's hub may take to open.
 const CONNECT: Duration = Duration::from_secs(5);
@@ -19,7 +20,8 @@ const IDLE: Duration = Duration::from_secs(30);
 /// The most of a refusal's body kept for its error.
 const REFUSAL: usize = 1024;
 
-/// Watches cells' hubs, over one pool of connections.
+/// Watches cells' hubs, over one pool of connections: their cells, and
+/// what they follow.
 #[derive(Debug, Clone)]
 pub struct CellWatcher {
     http: reqwest::Client,
@@ -48,8 +50,28 @@ impl CellWatcher {
         &self,
         hub: &str,
     ) -> Result<BoxStream<'static, CellWatchEvent>, CellWatchError> {
+        self.open(hub, ROUTE).await
+    }
+
+    /// Watch what the hub at `hub`, `host:port`, follows: its relay, each
+    /// [`FollowEvent`] as it is sent. The events end when the hub ends the
+    /// watch (it stopped, or this watcher fell behind), when the
+    /// connection fails or goes idle, or at an event that does not parse;
+    /// a consumer then watches again from a snapshot.
+    pub async fn follows(
+        &self,
+        hub: &str,
+    ) -> Result<BoxStream<'static, FollowEvent>, CellWatchError> {
+        self.open(hub, follows::ROUTE).await
+    }
+
+    async fn open<T: DeserializeOwned + Send + 'static>(
+        &self,
+        hub: &str,
+        route: &str,
+    ) -> Result<BoxStream<'static, T>, CellWatchError> {
         gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
-        let url = format!("http://{hub}/v1/ext/{EXTENSION}{ROUTE}");
+        let url = format!("http://{hub}/v1/ext/{EXTENSION}{route}");
         let mut response = self
             .http
             .get(&url)
@@ -100,8 +122,9 @@ impl std::error::Error for CellWatchError {}
 
 /// The events in a watch's bytes, ending with the bytes, at the first
 /// error, or at the first event that does not parse.
-fn events<S, B, E>(bytes: S) -> impl Stream<Item = CellWatchEvent> + Send + 'static
+fn events<T, S, B, E>(bytes: S) -> impl Stream<Item = T> + Send + 'static
 where
+    T: DeserializeOwned + Send + 'static,
     S: Stream<Item = Result<B, E>> + Send + 'static,
     B: AsRef<[u8]>,
 {
@@ -134,7 +157,7 @@ fn event_end(buffer: &[u8]) -> Option<usize> {
 
 /// One server-sent event: `None` for one without data (a keep-alive
 /// comment), `Err` for one whose data is not an event.
-fn parse(raw: &[u8]) -> Result<Option<CellWatchEvent>, ()> {
+fn parse<T: DeserializeOwned>(raw: &[u8]) -> Result<Option<T>, ()> {
     let text = std::str::from_utf8(raw).map_err(|_| ())?;
     let mut data: Option<String> = None;
     for line in text.lines() {
@@ -165,7 +188,9 @@ mod tests {
             .iter()
             .map(|chunk| Ok(chunk.as_bytes().to_vec()))
             .collect();
-        futures::executor::block_on(events(futures::stream::iter(chunks)).collect())
+        futures::executor::block_on(
+            events::<CellWatchEvent, _, _, _>(futures::stream::iter(chunks)).collect(),
+        )
     }
 
     fn left(instance: InstanceId) -> CellWatchEvent {

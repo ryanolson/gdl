@@ -272,7 +272,7 @@ async fn a_hub_without_a_cell_has_no_cell_endpoint() {
 #[test]
 fn settings_a_cells_hub_cannot_publish_are_refused() {
     type Change = fn(&mut CellSettings);
-    let cases: [(&str, Change, CellTiming); 8] = [
+    let cases: [(&str, Change, CellTiming); 9] = [
         ("[cell] hub", |cell| cell.hub = None, timing()),
         // Settings made in code, not read: the address is checked here too.
         (
@@ -318,6 +318,14 @@ fn settings_a_cells_hub_cannot_publish_are_refused() {
             |_| {},
             CellTiming {
                 watch_buffer: 0,
+                ..timing()
+            },
+        ),
+        (
+            "refollow",
+            |_| {},
+            CellTiming {
+                refollow: Duration::ZERO,
                 ..timing()
             },
         ),
