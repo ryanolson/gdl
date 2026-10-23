@@ -51,15 +51,21 @@ pub(crate) fn follow(
     }
     let watcher =
         CellWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
-    let address = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]:{public_port}")
-    } else {
-        format!("{host}:{public_port}")
-    };
+    let address = hub_address(host, public_port);
     let cells = Cells::new(region, wanted.values().flatten().map(String::as_str));
     let follows = Follows::new(cells.clone(), node.clone(), Arc::clone(live), drain, wanted);
     let task = tokio::spawn(run(Hub { watcher, address }, follows));
     Ok(Some((cells, task)))
+}
+
+/// The address of the hub at `host` whose public listener is on `port`,
+/// `host:port` as a cell's watches take it, with an IPv6 host bracketed.
+pub(crate) fn hub_address(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 /// Where the follower reads the relay from.

@@ -5,7 +5,7 @@
 //! from which the hub makes the cell's load summary.
 //!
 //! The hub (`gdl-hub`) serves them and a segment instance reads the relay
-//! and sends the report, so the wire types, the routes, and the client
+//! and its own cell's watch, for the cell's drain, and sends the report, so the wire types, the routes, and the client
 //! live here, where both reach them without the runtime linking the hub's
 //! server.
 

@@ -58,7 +58,8 @@ pub use feed::CellWatch;
 /// require cells of, at least that many followed cells of the class have
 /// a complete snapshot and last said they are `ready`, and 503 otherwise,
 /// with a [`CellHealth`] body; and `GET watch`, the cell's watch for the hubs that
-/// follow it: server-sent events, each one [`gdl_watch::CellWatchEvent`] as
+/// follow it, and for the cell's own instances, which learn of its drain
+/// from it: server-sent events, each one [`gdl_watch::CellWatchEvent`] as
 /// JSON, with a keep-alive every 10 s. The watch carries the cell's state
 /// and epoch and its entry instances, ready and retired, with their
 /// `PeerInfo` from [`GraphAdmission`]'s members, so the hub must run

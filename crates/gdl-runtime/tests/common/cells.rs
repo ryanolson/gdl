@@ -201,6 +201,22 @@ pub async fn cell_hub_timed(
     (hub, readiness)
 }
 
+/// [`cell_hub_timed`], whose name resolves to a proxy in front of its
+/// public listener: the hubs that follow the cell reach it through the
+/// proxy, and its own instances, which are given its ports, do not.
+pub async fn cell_hub_proxied(
+    spec: &DeploymentSpec,
+    cell: CellSettings,
+    directory: &Resolving,
+    timing: CellTiming,
+) -> (Hub, Arc<CellReadiness<Resolving>>, super::proxy::Proxy) {
+    let name = cell.hub.clone().expect("a cell's hub has a name");
+    let (hub, readiness) = unresolved_cell_hub_of(spec, cell, directory, timing).await;
+    let proxy = super::proxy::Proxy::new(hub.public_addr()).await;
+    directory.resolve(&name, &format!("127.0.0.1:{}", proxy.port));
+    (hub, readiness, proxy)
+}
+
 /// [`cell_hub`], with its name left for the test to resolve: its record
 /// is published only once the test has.
 pub async fn unresolved_cell_hub(

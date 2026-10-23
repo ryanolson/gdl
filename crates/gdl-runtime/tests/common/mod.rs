@@ -79,6 +79,10 @@ pub struct Plan {
     pub cancel_in_forward: bool,
     /// C fails instead of passing the request on.
     pub fail_forward: bool,
+    /// C waits until the test logs `test:release:<text>` before passing
+    /// the request on, having logged `C:<text>` as it does for every
+    /// request.
+    pub gated: bool,
     /// D's `generate` fails instead of returning a stream.
     pub fail_generate: bool,
     /// D spawns a helper that waits for D's context to be cancelled, then
@@ -380,6 +384,12 @@ impl Forward for NodeC {
         }
         if req.plan.fail_forward {
             return Err(Error::node("forward failed"));
+        }
+        if req.plan.gated {
+            // The test releases it; a test that does not fails its own
+            // wait for the answer first.
+            let release = format!("test:release:{}", req.text);
+            self.events.wait_for(&release, WAIT * 6).await;
         }
         if req.plan.forward_delay_ms > 0 {
             let abandoned = OnDrop::new(

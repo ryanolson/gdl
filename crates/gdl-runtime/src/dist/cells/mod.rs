@@ -22,7 +22,7 @@ mod tests;
 
 pub(crate) use crossing::{Crossing, Target, Within, targets};
 pub(crate) use offer::{Answer, answer};
-pub(crate) use task::follow;
+pub(crate) use task::{follow, hub_address};
 // The membership's tests drive the follower beside their own.
 #[cfg(test)]
 pub(crate) use follow::Follows;
