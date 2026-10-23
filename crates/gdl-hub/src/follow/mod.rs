@@ -154,11 +154,13 @@ impl<D: CellDirectory> Follows<'_, D> {
                 .remove(cell)
                 .expect("the follow was just found");
             following.link.abort();
-            self.follower.relay.end(cell, following.generation);
+            self.follower
+                .relay
+                .end(&self.follower.class, cell, following.generation);
         }
         match record.filter(|record| self.follower.home(record)) {
             Some(record) => self.start(record),
-            None => self.follower.relay.forget(cell),
+            None => self.follower.relay.forget(&self.follower.class, cell),
         }
     }
 
@@ -182,7 +184,7 @@ impl<D: CellDirectory> Follows<'_, D> {
 
     fn start(&mut self, record: CellRecord) {
         let relay = &self.follower.relay;
-        let generation = relay.begin(&record.name);
+        let generation = relay.begin(&record.class, &record.name);
         let name = record.name.clone();
         let epoch = record.epoch;
         let link = self.links.spawn(link::run(

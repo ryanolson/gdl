@@ -22,7 +22,7 @@ pub(super) async fn run(
     refollow: Duration,
 ) -> (String, u64) {
     follow(&relay, &watcher, &record, generation).await;
-    relay.end(&record.name, generation);
+    relay.end(&record.class, &record.name, generation);
     tokio::time::sleep(refollow).await;
     (record.name, generation)
 }
@@ -51,7 +51,7 @@ async fn follow(relay: &Relay, watcher: &CellWatcher, record: &CellRecord, gener
             state,
             load,
         }) if name == record.name && class == record.class && epoch == record.epoch => {
-            Installed::new(class, record.region.clone(), state, load)
+            Installed::new(name, class, record.region.clone(), state, load)
         }
         Some(CellWatchEvent::Cell { name, epoch, .. }) => {
             tracing::info!(
@@ -69,15 +69,15 @@ async fn follow(relay: &Relay, watcher: &CellWatcher, record: &CellRecord, gener
         match events.next().await {
             Some(CellWatchEvent::Synced) => break,
             Some(CellWatchEvent::Cell { .. }) | None => return,
-            Some(event) => installed.apply(cell, generation, event, |_| {}),
+            Some(event) => installed.apply(generation, event, |_| {}),
         }
     }
-    relay.install(cell, generation, installed);
+    relay.install(generation, installed);
     while let Some(event) = events.next().await {
         if matches!(event, CellWatchEvent::Cell { .. } | CellWatchEvent::Synced) {
             // A second snapshot in one watch is not the protocol.
             return;
         }
-        relay.apply(cell, generation, event);
+        relay.apply(&record.class, cell, generation, event);
     }
 }

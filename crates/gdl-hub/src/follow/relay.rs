@@ -1,6 +1,8 @@
 //! What a hub follows, as its instances will route by it: each followed
 //! cell's current generation, and, once its snapshot is complete, its
-//! state and entry instances, fanned out to the relay's watchers.
+//! state and entry instances, fanned out to the relay's watchers. A cell
+//! is named within its class, as the directory names it, so two classes
+//! may each have a cell of one name.
 //!
 //! Every write names the generation it belongs to and is applied only
 //! while that generation is the cell's current one, so a link that ended,
@@ -32,10 +34,10 @@ use crate::{CellHealth, CellWatchEvent, FollowEvent};
 pub(crate) struct Relay {
     shared: Mutex<Shared>,
     watchers: Watchers,
-    /// The cells a follower has decided to follow, with the generation of
-    /// the follow under way or the last one, for whoever needs to see the
-    /// follower's decisions.
-    following: watch::Sender<BTreeMap<String, u64>>,
+    /// The cells a follower has decided to follow, by class and name, with
+    /// the generation of the follow under way or the last one, for whoever
+    /// needs to see the follower's decisions.
+    following: watch::Sender<BTreeMap<(String, String), u64>>,
 }
 
 impl Relay {
@@ -60,17 +62,22 @@ impl Relay {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Begin a new follow of `cell`, and return its generation. The
-    /// cell's earlier follow, if any, is dropped first.
-    pub(crate) fn begin(&self, cell: &str) -> u64 {
+    /// Begin a new follow of the cell `cell` of `class`, and return its
+    /// generation. The cell's earlier follow, if any, is dropped first.
+    pub(crate) fn begin(&self, class: &str, cell: &str) -> u64 {
         let mut shared = self.lock();
-        let generation = shared.generations.entry(cell.to_string()).or_insert(0);
+        let generation = shared
+            .generations
+            .entry(class.to_string())
+            .or_default()
+            .entry(cell.to_string())
+            .or_insert(0);
         *generation += 1;
         let generation = *generation;
-        if let Some(earlier) = shared.follows.get(cell).map(|follow| follow.generation) {
-            shared.end(cell, earlier);
+        if let Some(earlier) = shared.follow(class, cell).map(|follow| follow.generation) {
+            shared.end(class, cell, earlier);
         }
-        shared.follows.insert(
+        shared.follows.entry(class.to_string()).or_default().insert(
             cell.to_string(),
             Follow {
                 generation,
@@ -78,38 +85,43 @@ impl Relay {
             },
         );
         self.following.send_modify(|following| {
-            following.insert(cell.to_string(), generation);
+            following.insert((class.to_string(), cell.to_string()), generation);
         });
         generation
     }
 
-    /// The follow `generation` of `cell` ended: if it is the cell's
-    /// current one, its instances are no longer exposed.
-    pub(crate) fn end(&self, cell: &str, generation: u64) {
-        self.lock().end(cell, generation);
+    /// The follow `generation` of the cell `cell` of `class` ended: if it
+    /// is the cell's current one, its instances are no longer exposed.
+    pub(crate) fn end(&self, class: &str, cell: &str, generation: u64) {
+        self.lock().end(class, cell, generation);
     }
 
-    /// The follower no longer follows `cell`, until it decides again.
-    pub(crate) fn forget(&self, cell: &str) {
-        self.following
-            .send_if_modified(|following| following.remove(cell).is_some());
+    /// The follower no longer follows the cell `cell` of `class`, until it
+    /// decides again.
+    pub(crate) fn forget(&self, class: &str, cell: &str) {
+        self.following.send_if_modified(|following| {
+            following
+                .remove(&(class.to_string(), cell.to_string()))
+                .is_some()
+        });
     }
 
-    /// The snapshot of the follow `generation` of `cell` is complete:
-    /// expose it, its state first, then its retired instances, then the
-    /// ready ones its state allows.
-    pub(crate) fn install(&self, cell: &str, generation: u64, installed: Installed) {
+    /// The snapshot of the follow `generation` of `installed`'s cell is
+    /// complete: expose it, its state first, then its retired instances,
+    /// then the ready ones its state allows.
+    pub(crate) fn install(&self, generation: u64, installed: Installed) {
         let mut shared = self.lock();
         let Shared {
             follows, events, ..
         } = &mut *shared;
         let Some(follow) = follows
-            .get_mut(cell)
+            .get_mut(&installed.class)
+            .and_then(|cells| cells.get_mut(&installed.cell))
             .filter(|follow| follow.generation == generation && follow.installed.is_none())
         else {
             return;
         };
-        for event in installed.snapshot(cell, generation) {
+        for event in installed.snapshot(generation) {
             let _ = events.send(event);
         }
         let counted = installed.counted().then(|| installed.class.clone());
@@ -119,27 +131,27 @@ impl Relay {
         }
     }
 
-    /// The cell watch of the follow `generation` of `cell` sent `event`,
-    /// after its snapshot.
-    pub(crate) fn apply(&self, cell: &str, generation: u64, event: CellWatchEvent) {
+    /// The cell watch of the follow `generation` of the cell `cell` of
+    /// `class` sent `event`, after its snapshot.
+    pub(crate) fn apply(&self, class: &str, cell: &str, generation: u64, event: CellWatchEvent) {
         let mut shared = self.lock();
         let Shared {
             follows, events, ..
         } = &mut *shared;
         let Some(installed) = follows
-            .get_mut(cell)
+            .get_mut(class)
+            .and_then(|cells| cells.get_mut(cell))
             .filter(|follow| follow.generation == generation)
             .and_then(|follow| follow.installed.as_mut())
         else {
             return;
         };
         let counted = installed.counted();
-        installed.apply(cell, generation, event, |event| {
+        installed.apply(generation, event, |event| {
             let _ = events.send(event);
         });
         if installed.counted() != counted {
-            let class = installed.class.clone();
-            shared.count(&class, !counted);
+            shared.count(class, !counted);
         }
     }
 
@@ -160,8 +172,8 @@ impl Relay {
         self.watchers.watchers()
     }
 
-    /// The cells the follower follows, as it changes.
-    pub(crate) fn following(&self) -> watch::Receiver<BTreeMap<String, u64>> {
+    /// The cells the follower follows, by class and name, as it changes.
+    pub(crate) fn following(&self) -> watch::Receiver<BTreeMap<(String, String), u64>> {
         self.following.subscribe()
     }
 
@@ -171,13 +183,15 @@ impl Relay {
     }
 }
 
-/// What the relay knows, behind its lock.
+/// What the relay knows, behind its lock. Its maps are by class, then by
+/// cell, so that a lookup by the names an event carries allocates
+/// nothing.
 struct Shared {
     /// The last generation numbered for each cell ever followed, so that a
     /// later follow of it is numbered after every earlier one.
-    generations: HashMap<String, u64>,
+    generations: HashMap<String, HashMap<String, u64>>,
     /// Each followed cell's current follow.
-    follows: HashMap<String, Follow>,
+    follows: HashMap<String, HashMap<String, Follow>>,
     events: broadcast::Sender<FollowEvent>,
     /// Per class, the installed follows whose link last said `ready`.
     ready: HashMap<String, u32>,
@@ -192,25 +206,29 @@ struct Follow {
 }
 
 impl Shared {
-    fn end(&mut self, cell: &str, generation: u64) {
-        if self
-            .follows
+    fn follow(&self, class: &str, cell: &str) -> Option<&Follow> {
+        self.follows.get(class).and_then(|cells| cells.get(cell))
+    }
+
+    fn end(&mut self, class: &str, cell: &str, generation: u64) {
+        let Some(cells) = self.follows.get_mut(class) else {
+            return;
+        };
+        if cells
             .get(cell)
             .is_none_or(|follow| follow.generation != generation)
         {
             return;
         }
-        let follow = self
-            .follows
-            .remove(cell)
-            .expect("the follow was just found");
+        let follow = cells.remove(cell).expect("the follow was just found");
         if let Some(installed) = follow.installed {
             let _ = self.events.send(FollowEvent::Dropped {
+                class: class.to_string(),
                 cell: cell.to_string(),
                 generation,
             });
             if installed.counted() {
-                self.count(&installed.class, false);
+                self.count(class, false);
             }
         }
     }
@@ -236,19 +254,18 @@ impl Shared {
             });
     }
 
-    /// Every installed follow, by cell, then the marker.
+    /// Every installed follow, by class and cell, then the marker.
     fn snapshot(&self) -> Vec<FollowEvent> {
-        let mut cells: Vec<(&String, &Follow)> = self
+        let mut installed: Vec<(&Installed, u64)> = self
             .follows
-            .iter()
-            .filter(|(_, follow)| follow.installed.is_some())
+            .values()
+            .flat_map(HashMap::values)
+            .filter_map(|follow| Some((follow.installed.as_ref()?, follow.generation)))
             .collect();
-        cells.sort_by_key(|(cell, _)| *cell);
+        installed.sort_by_key(|(cell, _)| (&cell.class, &cell.cell));
         let mut events = Vec::new();
-        for (cell, follow) in cells {
-            if let Some(installed) = &follow.installed {
-                events.extend(installed.snapshot(cell, follow.generation));
-            }
+        for (cell, generation) in installed {
+            events.extend(cell.snapshot(generation));
         }
         events.push(FollowEvent::Synced);
         events
@@ -258,6 +275,7 @@ impl Shared {
 /// A followed cell as its cell watch has shown it.
 #[derive(Debug)]
 pub(crate) struct Installed {
+    cell: String,
     class: String,
     region: String,
     state: CellState,
@@ -272,12 +290,14 @@ pub(crate) struct Installed {
 impl Installed {
     /// A cell as its watch's first event shows it.
     pub(crate) fn new(
+        cell: String,
         class: String,
         region: String,
         state: CellState,
         load: Option<LoadSummary>,
     ) -> Self {
         Self {
+            cell,
             class,
             region,
             state,
@@ -303,22 +323,23 @@ impl Installed {
     /// the relay's watchers see of it to `send`.
     pub(crate) fn apply(
         &mut self,
-        cell: &str,
         generation: u64,
         event: CellWatchEvent,
         mut send: impl FnMut(FollowEvent),
     ) {
+        let (class, cell) = (self.class.clone(), self.cell.clone());
         match event {
             CellWatchEvent::State { state } => {
                 let hidden = !self.exposes();
                 self.state = state;
                 send(FollowEvent::State {
-                    cell: cell.to_string(),
+                    class,
+                    cell,
                     generation,
                     state,
                 });
                 if hidden && self.exposes() {
-                    for event in self.exposed(cell, generation) {
+                    for event in self.exposed(generation) {
                         send(event);
                     }
                 }
@@ -331,7 +352,8 @@ impl Installed {
                 self.ready.insert(id, (segment.clone(), peer.clone()));
                 if self.exposes() {
                     send(FollowEvent::Exposed {
-                        cell: cell.to_string(),
+                        class,
+                        cell,
                         generation,
                         segment,
                         peer,
@@ -342,7 +364,8 @@ impl Installed {
                 self.ready.remove(&instance);
                 if self.retired.insert(instance, segment.clone()).is_none() {
                     send(FollowEvent::Retired {
-                        cell: cell.to_string(),
+                        class,
+                        cell,
                         generation,
                         segment,
                         instance,
@@ -357,7 +380,8 @@ impl Installed {
                 let retired = self.retired.remove(&instance).is_some();
                 if exposed || retired {
                     send(FollowEvent::Left {
-                        cell: cell.to_string(),
+                        class,
+                        cell,
                         generation,
                         segment,
                         instance,
@@ -372,14 +396,14 @@ impl Installed {
 
     /// The follow as a watch of the relay begins with it: the cell, then
     /// its retired instances, then those it exposes.
-    fn snapshot(&self, cell: &str, generation: u64) -> Vec<FollowEvent> {
+    fn snapshot(&self, generation: u64) -> Vec<FollowEvent> {
         let mut retired: Vec<(&InstanceId, &String)> = self.retired.iter().collect();
         retired.sort_by_key(|(id, segment)| (*segment, id.as_u128()));
         let mut events = Vec::with_capacity(1 + self.retired.len() + self.ready.len());
         events.push(FollowEvent::Follow {
-            cell: cell.to_string(),
-            generation,
             class: self.class.clone(),
+            cell: self.cell.clone(),
+            generation,
             region: self.region.clone(),
             state: self.state,
             load: self.load,
@@ -388,26 +412,28 @@ impl Installed {
             retired
                 .into_iter()
                 .map(|(instance, segment)| FollowEvent::Retired {
-                    cell: cell.to_string(),
+                    class: self.class.clone(),
+                    cell: self.cell.clone(),
                     generation,
                     segment: segment.clone(),
                     instance: *instance,
                 }),
         );
         if self.exposes() {
-            events.extend(self.exposed(cell, generation));
+            events.extend(self.exposed(generation));
         }
         events
     }
 
     /// Every ready instance, as exposed.
-    fn exposed(&self, cell: &str, generation: u64) -> Vec<FollowEvent> {
+    fn exposed(&self, generation: u64) -> Vec<FollowEvent> {
         let mut ready: Vec<(&InstanceId, &(String, PeerInfo))> = self.ready.iter().collect();
         ready.sort_by_key(|(id, (segment, _))| (segment, id.as_u128()));
         ready
             .into_iter()
             .map(|(_, (segment, peer))| FollowEvent::Exposed {
-                cell: cell.to_string(),
+                class: self.class.clone(),
+                cell: self.cell.clone(),
                 generation,
                 segment: segment.clone(),
                 peer: peer.clone(),
@@ -461,19 +487,25 @@ mod tests {
         CellHealth::of(&quorum, CellState::Unavailable, &requires)
     }
 
+    /// The cell `cell` of `model_x`, as its watch's first event shows it.
+    fn installed_cell(cell: &str, state: CellState) -> Installed {
+        Installed::new(cell.into(), "model_x".into(), "r".into(), state, None)
+    }
+
     fn installed(state: CellState) -> Installed {
-        Installed::new("model_x".into(), "r".into(), state, None)
+        installed_cell("m", state)
     }
 
     /// The events `event` sends.
     fn sent(installed: &mut Installed, event: CellWatchEvent) -> Vec<FollowEvent> {
         let mut events = Vec::new();
-        installed.apply("m", 1, event, |event| events.push(event));
+        installed.apply(1, event, |event| events.push(event));
         events
     }
 
     fn exposed(peer: &PeerInfo) -> FollowEvent {
         FollowEvent::Exposed {
+            class: "model_x".into(),
             cell: "m".into(),
             generation: 1,
             segment: "f".into(),
@@ -521,6 +553,7 @@ mod tests {
         assert_eq!(
             sent(&mut cell, state(CellState::Ready)),
             [FollowEvent::State {
+                class: "model_x".into(),
                 cell: "m".into(),
                 generation: 1,
                 state: CellState::Ready,
@@ -550,6 +583,7 @@ mod tests {
         assert_eq!(
             again.remove(0),
             FollowEvent::State {
+                class: "model_x".into(),
                 cell: "m".into(),
                 generation: 1,
                 state: CellState::Ready,
@@ -575,21 +609,21 @@ mod tests {
         let relay = Relay::new(16, tokio::sync::watch::Sender::new(health()));
         let mut watch = relay.watch();
         assert_eq!(pending(&mut watch), [FollowEvent::Synced]);
-        let first = relay.begin("m");
+        let first = relay.begin("model_x", "m");
         let instance = peer();
-        relay.install("m", first, installed(CellState::Ready));
-        relay.apply("m", first, ready(&instance));
-        let second = relay.begin("m");
+        relay.install(first, installed_cell("m", CellState::Ready));
+        relay.apply("model_x", "m", first, ready(&instance));
+        let second = relay.begin("model_x", "m");
         assert!(second > first);
-        relay.install("m", first, installed(CellState::Ready));
-        relay.apply("m", first, ready(&peer()));
-        relay.end("m", first);
-        relay.install("m", second, installed(CellState::Unavailable));
-        relay.apply("m", second, ready(&instance));
+        relay.install(first, installed_cell("m", CellState::Ready));
+        relay.apply("model_x", "m", first, ready(&peer()));
+        relay.end("model_x", "m", first);
+        relay.install(second, installed_cell("m", CellState::Unavailable));
+        relay.apply("model_x", "m", second, ready(&instance));
         let follow = |generation, state| FollowEvent::Follow {
+            class: "model_x".into(),
             cell: "m".into(),
             generation,
-            class: "model_x".into(),
             region: "r".into(),
             state,
             load: None,
@@ -599,33 +633,36 @@ mod tests {
             [
                 follow(first, CellState::Ready),
                 FollowEvent::Exposed {
+                    class: "model_x".into(),
                     cell: "m".into(),
                     generation: first,
                     segment: "f".into(),
                     peer: instance.clone(),
                 },
                 FollowEvent::Dropped {
+                    class: "model_x".into(),
                     cell: "m".into(),
                     generation: first,
                 },
                 follow(second, CellState::Unavailable),
             ]
         );
-        relay.end("m", second);
-        let third = relay.begin("m");
+        relay.end("model_x", "m", second);
+        let third = relay.begin("model_x", "m");
         assert!(third > second, "numbered past every earlier follow");
         assert_eq!(
             pending(&mut watch),
             [FollowEvent::Dropped {
+                class: "model_x".into(),
                 cell: "m".into(),
                 generation: second,
             }]
         );
         assert_eq!(
             *relay.following().borrow(),
-            [("m".to_string(), third)].into()
+            [(("model_x".to_string(), "m".to_string()), third)].into()
         );
-        relay.forget("m");
+        relay.forget("model_x", "m");
         assert!(relay.following().borrow().is_empty());
     }
 
@@ -638,23 +675,23 @@ mod tests {
         let shown = health.subscribe();
         let met = || shown.borrow().requires["model_x"].met;
         let relay = Relay::new(16, health);
-        let (m, n) = (relay.begin("m"), relay.begin("n"));
-        relay.install("m", m, installed(CellState::Ready));
-        relay.install("n", n, installed(CellState::Degraded));
+        let (m, n) = (relay.begin("model_x", "m"), relay.begin("model_x", "n"));
+        relay.install(m, installed_cell("m", CellState::Ready));
+        relay.install(n, installed_cell("n", CellState::Degraded));
         assert_eq!(met(), 1);
-        relay.apply("n", n, state(CellState::Ready));
+        relay.apply("model_x", "n", n, state(CellState::Ready));
         assert_eq!(met(), 2);
-        relay.apply("n", n, state(CellState::Ready));
+        relay.apply("model_x", "n", n, state(CellState::Ready));
         assert_eq!(met(), 2, "no change of state");
-        relay.apply("m", m, state(CellState::Unavailable));
+        relay.apply("model_x", "m", m, state(CellState::Unavailable));
         assert_eq!(met(), 1);
-        relay.end("m", m);
+        relay.end("model_x", "m", m);
         assert_eq!(met(), 1, "m was not ready");
-        let later = relay.begin("n");
+        let later = relay.begin("model_x", "n");
         assert_eq!(met(), 0, "the new generation dropped the ready one");
-        relay.apply("n", n, state(CellState::Ready));
-        relay.end("n", n);
-        relay.install("n", later, installed(CellState::Ready));
+        relay.apply("model_x", "n", n, state(CellState::Ready));
+        relay.end("model_x", "n", n);
+        relay.install(later, installed_cell("n", CellState::Ready));
         assert_eq!(met(), 1);
         assert!(!shown.borrow().healthy(), "and the cell is unavailable");
     }

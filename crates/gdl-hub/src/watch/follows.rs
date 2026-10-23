@@ -16,8 +16,10 @@ pub(crate) const ROUTE: &str = "/follows";
 /// A follow is one cell, followed over its cell watch, in one generation:
 /// the follower numbers each follow of a cell, and a new one never carries
 /// anything over from an earlier one. Every event but
-/// [`FollowEvent::Synced`] names the cell and the generation it belongs
-/// to, so a consumer drops what a generation it no longer holds sends;
+/// [`FollowEvent::Synced`] names the cell, by its class and its name
+/// within the class as the cell directory names it, and the generation it
+/// belongs to, so a consumer drops what a generation it no longer holds
+/// sends;
 /// the relay itself never sends an event of a generation after its
 /// [`FollowEvent::Dropped`], or after a later generation of the same
 /// cell.
@@ -44,12 +46,12 @@ pub(crate) const ROUTE: &str = "/follows";
 pub enum FollowEvent {
     /// A follow is installed: its cell's snapshot is complete.
     Follow {
+        /// The cell's class.
+        class: String,
         /// The cell's name.
         cell: String,
         /// The follow's generation.
         generation: u64,
-        /// The cell's class.
-        class: String,
         /// The region the cell runs in, from its record.
         region: String,
         /// The cell's state, as its hub last sent it.
@@ -62,7 +64,9 @@ pub enum FollowEvent {
     Synced,
     /// A followed cell's state changed.
     State {
-        /// The cell.
+        /// The cell's class.
+        class: String,
+        /// The cell, named within its class.
         cell: String,
         /// The follow's generation.
         generation: u64,
@@ -71,7 +75,9 @@ pub enum FollowEvent {
     },
     /// An entry instance of a followed cell is routable.
     Exposed {
-        /// The cell.
+        /// The cell's class.
+        class: String,
+        /// The cell, named within its class.
         cell: String,
         /// The follow's generation.
         generation: u64,
@@ -83,7 +89,9 @@ pub enum FollowEvent {
     /// An entry instance of a followed cell retired: no new work may be
     /// sent to it.
     Retired {
-        /// The cell.
+        /// The cell's class.
+        class: String,
+        /// The cell, named within its class.
         cell: String,
         /// The follow's generation.
         generation: u64,
@@ -95,7 +103,9 @@ pub enum FollowEvent {
     /// An entry instance that an `exposed` or `retired` event named left
     /// its cell's hub.
     Left {
-        /// The cell.
+        /// The cell's class.
+        class: String,
+        /// The cell, named within its class.
         cell: String,
         /// The follow's generation.
         generation: u64,
@@ -107,7 +117,9 @@ pub enum FollowEvent {
     /// A follow ended: its cell watch ended or failed, or the cell's hub
     /// restarted. None of its instances is routable.
     Dropped {
-        /// The cell.
+        /// The cell's class.
+        class: String,
+        /// The cell, named within its class.
         cell: String,
         /// The follow's generation.
         generation: u64,

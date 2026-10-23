@@ -70,14 +70,25 @@ async fn until(
 }
 
 /// Wait until the cells the hub follows satisfy `done`, and return them.
+/// The cells are `model_x`'s, by name: the only class the global sends to.
 async fn following(
     cell: &CellReadiness<Resolving>,
     what: &str,
-    done: impl FnMut(&BTreeMap<String, u64>) -> bool,
+    mut done: impl FnMut(&BTreeMap<String, u64>) -> bool,
 ) -> BTreeMap<String, u64> {
+    let model_x = |cells: &BTreeMap<(String, String), u64>| -> BTreeMap<String, u64> {
+        cells
+            .iter()
+            .filter(|((class, _), _)| class == "model_x")
+            .map(|((_, cell), generation)| (cell.clone(), *generation))
+            .collect()
+    };
     let mut following = cell.following();
     let waited = tokio::time::timeout(WAIT, async {
-        following.wait_for(done).await.map(|cells| cells.clone())
+        following
+            .wait_for(|cells| done(&model_x(cells)))
+            .await
+            .map(|cells| model_x(&cells))
     })
     .await;
     match waited {
@@ -183,6 +194,7 @@ impl Relay {
                 cell,
                 generation,
                 state,
+                ..
             } => {
                 let followed = self.current(cell, *generation);
                 followed.state = *state;
@@ -231,7 +243,9 @@ impl Relay {
                     followed.exposed.remove(instance).is_some() | followed.retired.remove(instance);
                 assert!(known, "an instance that left was never sent");
             }
-            FollowEvent::Dropped { cell, generation } => {
+            FollowEvent::Dropped {
+                cell, generation, ..
+            } => {
                 self.current(cell, *generation);
                 self.follows.remove(cell);
             }
@@ -357,20 +371,22 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
         first,
         [
             FollowEvent::Follow {
+                class: "model_x".into(),
                 cell: CELL.into(),
                 generation,
-                class: "model_x".into(),
                 region: "us-east-1".into(),
                 state: CellState::Ready,
                 load: None,
             },
             FollowEvent::Retired {
+                class: "model_x".into(),
                 cell: CELL.into(),
                 generation,
                 segment: "f".into(),
                 instance: retiring.id(),
             },
             FollowEvent::Exposed {
+                class: "model_x".into(),
                 cell: CELL.into(),
                 generation,
                 segment: "f".into(),
@@ -382,6 +398,7 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
     let mut relay = Relay::of(&first);
 
     let state = |state| FollowEvent::State {
+        class: "model_x".into(),
         cell: CELL.into(),
         generation,
         state,
@@ -476,6 +493,7 @@ async fn a_cell_whose_hub_stops_is_dropped_and_its_successor_followed_anew() {
     assert_eq!(
         event,
         FollowEvent::Dropped {
+            class: "model_x".into(),
             cell: CELL.into(),
             generation: first,
         }
@@ -560,6 +578,7 @@ async fn a_hub_serving_another_cell_or_epoch_is_not_installed() {
     assert_eq!(
         event,
         FollowEvent::Dropped {
+            class: "model_x".into(),
             cell: CELL.into(),
             generation,
         }
@@ -769,6 +788,7 @@ fn a_relay_event_is_json_tagged_by_its_kind() {
     let instance = InstanceId::new_v4();
     assert_eq!(
         serde_json::to_value(FollowEvent::Left {
+            class: "model_x".into(),
             cell: CELL.into(),
             generation: 3,
             segment: "f".into(),
@@ -776,15 +796,19 @@ fn a_relay_event_is_json_tagged_by_its_kind() {
         })
         .expect("an event serializes"),
         serde_json::json!({
-            "event": "left", "cell": CELL, "generation": 3, "segment": "f", "instance": instance,
+            "event": "left", "class": "model_x", "cell": CELL, "generation": 3, "segment": "f",
+            "instance": instance,
         }),
     );
     assert_eq!(
         serde_json::to_value(FollowEvent::Dropped {
+            class: "model_x".into(),
             cell: GLOBAL.into(),
             generation: 1,
         })
         .expect("an event serializes"),
-        serde_json::json!({ "event": "dropped", "cell": GLOBAL, "generation": 1 }),
+        serde_json::json!({
+            "event": "dropped", "class": "model_x", "cell": GLOBAL, "generation": 1,
+        }),
     );
 }

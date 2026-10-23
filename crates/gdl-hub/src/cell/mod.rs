@@ -240,11 +240,11 @@ impl<D: CellDirectory> CellReadiness<D> {
         self.relay.watchers()
     }
 
-    /// The cells the hub has decided to follow, each with the generation
-    /// of its follow, as it changes: a cell is here from the moment its
-    /// follow begins, before its snapshot is complete, and while its link
-    /// is down and it waits to follow the cell again.
-    pub fn following(&self) -> watch::Receiver<BTreeMap<String, u64>> {
+    /// The cells the hub has decided to follow, by class and name, each
+    /// with the generation of its follow, as it changes: a cell is here
+    /// from the moment its follow begins, before its snapshot is complete,
+    /// and while its link is down and it waits to follow the cell again.
+    pub fn following(&self) -> watch::Receiver<BTreeMap<(String, String), u64>> {
         self.relay.following()
     }
 }

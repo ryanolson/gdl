@@ -99,10 +99,20 @@ pub async fn hub_of<D: CellDirectory>(
     directory: D,
     timing: CellTiming,
 ) -> (Hub, Arc<CellReadiness<D>>) {
+    hub_of_spec(spec(), cell, directory, timing).await
+}
+
+/// A hub of the deployment `spec` with the extension of the cell `cell`.
+pub async fn hub_of_spec<D: CellDirectory>(
+    spec: DeploymentSpec,
+    cell: CellSettings,
+    directory: D,
+    timing: CellTiming,
+) -> (Hub, Arc<CellReadiness<D>>) {
     let cell =
-        Arc::new(CellReadiness::new(&spec(), cell, directory, timing).expect("valid test fixture"));
+        Arc::new(CellReadiness::new(&spec, cell, directory, timing).expect("valid test fixture"));
     let hub = Hub::builder(config())
-        .extension(GraphAdmission::new(spec()))
+        .extension(GraphAdmission::new(spec))
         .extension(Arc::clone(&cell))
         .serve()
         .await
@@ -128,6 +138,11 @@ pub struct Instance {
 
 impl Instance {
     pub async fn join(hub: &Hub, segment: &'static str) -> Self {
+        Self::join_spec(hub, &spec(), segment).await
+    }
+
+    /// Join as an instance of `segment` of the deployment `spec`.
+    pub async fn join_spec(hub: &Hub, spec: &DeploymentSpec, segment: &'static str) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let tcp = velo_hub::velo::transports::tcp::TcpTransportBuilder::new()
             .from_listener(listener)
@@ -145,7 +160,7 @@ impl Instance {
             .control_port(hub.control_addr().port())
             .build()
             .expect("valid test fixture");
-        let registration = spec().registration(segment).expect("valid test fixture");
+        let registration = spec.registration(segment).expect("valid test fixture");
         let payload = serde_json::to_value(&registration).expect("valid test fixture");
         client
             .register(&node, BTreeMap::from([("gdl".to_string(), payload)]))

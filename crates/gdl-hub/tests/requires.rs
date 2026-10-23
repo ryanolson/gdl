@@ -6,13 +6,19 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use common::{
-    CELL, Instance, Records, Resolving, get, global_requiring, health, meet_the_quorum, model,
-    serve_cell, timing,
+    CELL, Instance, Records, Resolving, get, global_requiring, health, hub_of_spec,
+    meet_the_quorum, model, serve_cell, timing,
 };
 use gdl_cells::CellState;
-use gdl_hub::{CellHealth, RequiredHealth};
-use gdl_model::SegmentPhase;
+use gdl_hub::{CellHealth, CellReadiness, RequiredHealth};
+use gdl_model::{
+    CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase,
+    TypeInfo,
+};
+use velo_hub::Hub;
 
 fn met(health: &CellHealth) -> u32 {
     health.requires["model_x"].met
@@ -91,4 +97,108 @@ async fn a_global_is_healthy_with_its_quorum_and_its_required_cells() {
     health(&global_cell, "the link dropped", |h| met(h) == 0).await;
     assert_eq!(status(&global_hub).await.0, 503);
     global_hub.shutdown().await.expect("the hub stops");
+}
+
+/// Two roots in `global`'s segment `a`: `S => F` crosses into `model_x`,
+/// and `T => G` into `model_y`, so the global sends to both.
+fn two_classes() -> DeploymentSpec {
+    let node = |name: &str, role| NodeInfo {
+        name: name.into(),
+        role,
+        binding: (role != Role::Source).then(|| name.to_lowercase()),
+    };
+    let hop = |outer: &str, inner: &str| HopInfo {
+        outer: outer.into(),
+        forward: vec![],
+        inner: inner.into(),
+        backward: vec![],
+        forward_types: vec![TypeInfo::new("T", true)],
+        backward_types: vec![TypeInfo::new("T", true)],
+    };
+    let graph = Manifest {
+        name: "two-classes".into(),
+        schema: 1,
+        nodes: vec![
+            node("S", Role::Source),
+            node("T", Role::Source),
+            node("F", Role::Sink),
+            node("G", Role::Sink),
+        ],
+        hops: vec![hop("S", "F"), hop("T", "G")],
+    };
+    let placement = Placement::new()
+        .segment("a", ["S", "T"])
+        .segment("f", ["F"])
+        .segment("g", ["G"])
+        .class("global", ["a"])
+        .class("model_x", ["f"])
+        .class("model_y", ["g"]);
+    DeploymentSpec::new(graph, placement).expect("valid test fixture")
+}
+
+fn cell(name: &str, class: &str, hub: &str, requires: &str) -> CellSettings {
+    toml::from_str(&format!(
+        "name = '{name}'\nclass = '{class}'\nregion = 'us-east-1'\nhub = '{hub}'\n\
+         directory = 'memory'\n{requires}"
+    ))
+    .expect("valid test fixture")
+}
+
+/// A hub of `two_classes()` for `cell`, resolved in `directory`, with
+/// one ready instance of `segment`: its quorum.
+async fn serve_ready(
+    cell: CellSettings,
+    directory: &Resolving,
+    segment: &'static str,
+) -> (Hub, Arc<CellReadiness<Resolving>>, Instance) {
+    let name = cell.hub.clone().expect("a hub name");
+    let (hub, readiness) = hub_of_spec(two_classes(), cell, directory.clone(), timing()).await;
+    directory.resolve(&name, &hub);
+    let mut instance = Instance::join_spec(&hub, &two_classes(), segment).await;
+    instance.announce(SegmentPhase::Ready).await;
+    health(&readiness, "the cell's own quorum", |h| {
+        h.state == CellState::Ready
+    })
+    .await;
+    (hub, readiness, instance)
+}
+
+/// A cell is named within its class, as the directory keys it: a global
+/// that sends to two classes follows a cell of each that share a name,
+/// and each counts toward its own class's requirement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cells_of_two_classes_may_share_a_name() {
+    let directory = Resolving::new();
+    let (x_hub, _x, _x_instance) = serve_ready(
+        cell("m-us-east-1", "model_x", "x-hub:1337", ""),
+        &directory,
+        "f",
+    )
+    .await;
+    let (y_hub, _y, _y_instance) = serve_ready(
+        cell("m-us-east-1", "model_y", "y-hub:1337", ""),
+        &directory,
+        "g",
+    )
+    .await;
+    let (global_hub, global_cell, _own) = serve_ready(
+        cell(
+            "global-us-east-1",
+            "global",
+            "global-hub:1337",
+            "[requires]\nmodel_x = 1\nmodel_y = 1\n",
+        ),
+        &directory,
+        "a",
+    )
+    .await;
+    let healthy = health(&global_cell, "a ready cell of each class", |h| {
+        h.requires.values().all(|r| r.met == 1)
+    })
+    .await;
+    assert!(healthy.healthy(), "{healthy:?}");
+    assert_eq!(status(&global_hub).await.0, 200);
+    for hub in [global_hub, x_hub, y_hub] {
+        hub.shutdown().await.expect("the hub stops");
+    }
 }
