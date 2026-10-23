@@ -240,6 +240,21 @@ async fn only_ready_instances_that_have_not_retired_are_counted() {
     hub.shutdown().await.expect("the hub stops");
 }
 
+/// A ready instance that leaves `retired` counts again: the count follows
+/// the retired service both ways, through the hub.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_instance_that_leaves_retired_counts_again() {
+    let (hub, cell) = cell_hub(MemoryDirectory::new(), timing()).await;
+    let mut instance = Instance::join(&hub, "d").await;
+    instance.announce(SegmentPhase::Ready).await;
+    counted(&cell, 1).await;
+    instance.announce(SegmentPhase::Retired).await;
+    counted(&cell, 0).await;
+    instance.withdraw(SegmentPhase::Retired).await;
+    counted(&cell, 1).await;
+    hub.shutdown().await.expect("the hub stops");
+}
+
 /// The cell's records, as a reader of its class sees them.
 struct Records {
     watch: MemoryWatch,
