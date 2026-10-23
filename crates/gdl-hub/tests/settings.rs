@@ -84,6 +84,7 @@ fn a_cells_settings_are_read_from_the_environment() {
         model_cell(jail, "/srv/cells");
         jail.set_env("GDL_CELL__READY__D", "2");
         jail.set_env("GDL_CELL__SEEDS", r#"["hub-a:1337"]"#);
+        jail.set_env("GDL_CELL__SUMMARY_MS", "2500");
         assert_eq!(
             cell_from_env().map_err(|e| e.to_string())?,
             Some(CellSettings {
@@ -98,6 +99,7 @@ fn a_cells_settings_are_read_from_the_environment() {
                 ready: BTreeMap::from([("d".into(), 2)]),
                 requires: BTreeMap::new(),
                 hub: Some("model-x-01-hub:1337".into()),
+                summary: Duration::from_millis(2500),
             })
         );
         Ok(())
@@ -144,6 +146,7 @@ fn a_misspelled_or_malformed_cell_variable_is_refused() {
         ("GDL_CELL__HONE", "global-us-east-1", "hone"),
         ("GDL_CELL__HUB", "http://hub:1337", "[cell] hub"),
         ("GDL_CELL__DIRECTORY", "store", "store"),
+        ("GDL_CELL__SUMMARY_MS", "999", "summary_ms"),
     ] {
         Jail::expect_with(|jail| {
             model_cell(jail, "/srv/cells");
@@ -179,6 +182,7 @@ fn settings(directory: DirectoryBackend) -> CellSettings {
         ready: BTreeMap::new(),
         requires: BTreeMap::new(),
         hub: Some("model-x-01-hub:1337".into()),
+        summary: CellSettings::DEFAULT_SUMMARY,
     }
 }
 

@@ -171,6 +171,7 @@ fn a_cells_settings_have_its_quorum_resolved() {
             ready: BTreeMap::from([("d".into(), 1), ("e".into(), 8), ("f".into(), 2)]),
             requires: BTreeMap::new(),
             hub: None,
+            summary: CellSettings::DEFAULT_SUMMARY,
         }
     );
     assert!(larger.requires.is_empty(), "model_x requires nothing");

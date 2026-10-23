@@ -341,6 +341,7 @@ fn a_cell_table_is_read_from_a_file() {
             ready: BTreeMap::from([("front".into(), 3)]),
             requires: BTreeMap::new(),
             hub: None,
+            summary: CellSettings::DEFAULT_SUMMARY,
         })
     );
     let cell = config.cell().expect("a cell");
@@ -348,7 +349,8 @@ fn a_cell_table_is_read_from_a_file() {
 }
 
 /// `GDL_CELL__*` reaches `[cell]` as any other setting does, joining the
-/// file's table: a quorum by segment, and a list of seeds.
+/// file's table: a quorum by segment, a list of seeds, and the load
+/// summary's period.
 #[test]
 fn a_cell_table_is_read_from_the_environment() {
     Jail::expect_with(|jail| {
@@ -360,6 +362,7 @@ fn a_cell_table_is_read_from_the_environment() {
         jail.set_env("GDL_CELL__DIRECTORY", "memory");
         jail.set_env("GDL_CELL__READY__BACK", "4");
         jail.set_env("GDL_CELL__SEEDS", r#"["hub-a:1337", "hub-b:1337"]"#);
+        jail.set_env("GDL_CELL__SUMMARY_MS", "1500");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
         assert_eq!(
             config.cell(),
@@ -373,6 +376,7 @@ fn a_cell_table_is_read_from_the_environment() {
                 ready: BTreeMap::from([("back".into(), 4), ("front".into(), 3)]),
                 requires: BTreeMap::new(),
                 hub: None,
+                summary: std::time::Duration::from_millis(1500),
             })
         );
         Ok(())

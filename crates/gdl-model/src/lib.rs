@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 pub use cell::{
     CellSettings, DirectoryBackend, check_cell_name, check_hub_address, check_region_name,
+    check_summary,
 };
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{

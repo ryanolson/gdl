@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,7 @@ use crate::{Error, Layout};
 /// # dir = "/var/lib/gdl/cells" # with "dir", and only with it: the shared directory
 /// seeds = ["hub-a:1337"]       # optional: hub addresses to join the relay mesh from
 /// hub = "model-x-01-hub:1337"  # optional: where other cells' hubs reach this cell's hub
+/// summary_ms = 10000           # optional: the load summary's period, at least 1000
 /// [ready]                      # optional: the quorum of each segment of the class
 /// e = 4
 /// [requires]                   # optional: ready cells of each class it sends to that its health needs
@@ -57,6 +59,12 @@ pub struct CellSettings {
     /// hub reads it, and it needs it to publish the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub: Option<String>,
+    /// The load summary's period (`summary_ms`): how often each entry
+    /// instance of the cell reports its admission to the cell's hub, and
+    /// how often the hub summarizes the reports. The hub and its entry
+    /// instances read the same setting, so that a report arrives once a
+    /// summary.
+    pub summary: Duration,
 }
 
 /// Where cell records are published and watched. Each backend's own
@@ -80,6 +88,14 @@ pub enum DirectoryBackend {
 }
 
 impl CellSettings {
+    /// The load summary's period when `summary_ms` is not set.
+    pub const DEFAULT_SUMMARY: Duration = Duration::from_secs(10);
+
+    /// The shortest load summary period: a report per entry instance and a
+    /// summary per cell each period, which a shorter one would make a load
+    /// of their own.
+    pub const MIN_SUMMARY: Duration = Duration::from_secs(1);
+
     /// The usable instances `segment` needs for the cell to be ready: its
     /// `ready` entry, else 1. The fleet file supplies the class's default
     /// when it fills in a cell's settings, so the fallback applies only to
@@ -194,6 +210,20 @@ pub fn check_hub_address(address: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `summary` can be a load summary's period: at least
+/// [`CellSettings::MIN_SUMMARY`]. Reading [`CellSettings`] applies it; a
+/// hub applies it again to settings made in code.
+pub fn check_summary(summary: Duration) -> Result<(), String> {
+    if summary < CellSettings::MIN_SUMMARY {
+        return Err(format!(
+            "[cell] summary_ms = {} must be at least {}",
+            summary.as_millis(),
+            CellSettings::MIN_SUMMARY.as_millis()
+        ));
+    }
+    Ok(())
+}
+
 /// Whether `name` can name a cell: a DNS label.
 pub fn check_cell_name(name: &str) -> Result<(), String> {
     check_label("cell", name)
@@ -249,6 +279,16 @@ struct Table {
     requires: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hub: Option<String>,
+    #[serde(default = "default_summary_ms")]
+    summary_ms: u64,
+}
+
+fn default_summary_ms() -> u64 {
+    millis(CellSettings::DEFAULT_SUMMARY)
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The `directory` key's values.
@@ -297,6 +337,8 @@ impl TryFrom<Table> for CellSettings {
         if let Some(hub) = &table.hub {
             check_hub_address(hub)?;
         }
+        let summary = Duration::from_millis(table.summary_ms);
+        check_summary(summary)?;
         Ok(Self {
             name: table.name,
             class: table.class,
@@ -307,6 +349,7 @@ impl TryFrom<Table> for CellSettings {
             ready: table.ready,
             requires: table.requires,
             hub: table.hub,
+            summary,
         })
     }
 }
@@ -329,6 +372,7 @@ impl From<CellSettings> for Table {
             ready: settings.ready,
             requires: settings.requires,
             hub: settings.hub,
+            summary_ms: millis(settings.summary),
         }
     }
 }

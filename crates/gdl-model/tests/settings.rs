@@ -3,6 +3,7 @@
 //! serves.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use gdl_model::{
     CellSettings, DirectoryBackend, HopInfo, Layout, Manifest, NodeInfo, Placement, Role, TypeInfo,
@@ -83,6 +84,7 @@ fn a_cells_settings_are_read_whole() {
             ready: BTreeMap::from([("d".into(), 4)]),
             requires: BTreeMap::new(),
             hub: Some("model-x-01-hub:1337".into()),
+            summary: Duration::from_secs(10),
         }
     );
     let text = toml::to_string(&settings(MODEL)).expect("toml");
@@ -350,5 +352,31 @@ fn a_requirement_of_a_class_not_sent_to_or_of_zero_is_refused() {
             panic!("accepted {text} for `{segment}`");
         };
         assert_eq!(error.to_string(), expected, "{text}");
+    }
+}
+
+/// The load summary's period is `summary_ms`: 10 s unless set, and at
+/// least 1 s, since an instance reports and its hub summarizes once a
+/// period.
+#[test]
+fn the_summary_period_is_read_and_has_a_floor() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    assert_eq!(settings(LEAST).summary, Duration::from_secs(10));
+    let cell = settings(&format!("{LEAST}summary_ms = 1000\n"));
+    assert_eq!(cell.summary, Duration::from_secs(1));
+    let text = toml::to_string(&cell).expect("toml");
+    assert_eq!(settings(&text), cell, "{text}");
+    for bad in [
+        "summary_ms = 999\n",
+        "summary_ms = 0\n",
+        "summary_ms = -1\n",
+    ] {
+        let error = toml::from_str::<CellSettings>(&format!("{LEAST}{bad}"))
+            .expect_err(bad)
+            .to_string();
+        assert!(
+            bad.contains('-') || error.contains("summary_ms"),
+            "{bad}: {error}"
+        );
     }
 }
