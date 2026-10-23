@@ -2,11 +2,20 @@
 //! window after a decline, the cell is not chosen, so that requests do not
 //! each pay a round trip to a cell that is full until its summary says so.
 //! The window starts at [`FIRST_WINDOW`] and doubles, up to
-//! [`MAX_WINDOW`], with each decline after a window ended without an
-//! acceptance between; an offer the cell accepts ends its damping. As with
-//! Envoy's outlier ejection, the window grows while the cell keeps
-//! declining, and is capped so that a cell is tried again within a bounded
-//! time.
+//! [`MAX_WINDOW`], with each further decline with no acceptance between;
+//! an offer the cell accepts ends its damping. As with Envoy's outlier
+//! ejection, whose ejection time grows with consecutive ejections, the
+//! window grows while the cell keeps declining, and is capped so that a
+//! cell is tried again within a bounded time.
+//!
+//! A decline that lands while a window lasts is part of the event that
+//! began it, and leaves the window as it is: its offer was chosen before
+//! the window began, or because the cap let a damped cell through. So the
+//! declines of many requests that met one full cell at once are one
+//! decline, and the window doubles only on a decline of an offer made
+//! once the last window had passed. Extending the window on each of them
+//! would put a cell that was full for a moment out for [`MAX_WINDOW`]
+//! after a burst of six.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -167,5 +176,22 @@ mod tests {
         assert_eq!(damping.left(start + SECOND), 0);
         damping.decline(start + SECOND * 2);
         assert_eq!(damping.left(start + SECOND * 2), 1000);
+    }
+
+    /// Declines that land while one window lasts, as when many requests
+    /// in flight met one full cell at once, are one decline: the window
+    /// ends where the first one put it, and the next decline, after it,
+    /// doubles it once.
+    #[test]
+    fn declines_that_land_during_one_window_are_one_decline() {
+        let start = Instant::now();
+        let damping = Damping::new(start);
+        for at in 0..10 {
+            damping.decline(start + SECOND / 10 * at);
+        }
+        assert_eq!(damping.left(start), 1000);
+        assert_eq!(damping.left(start + SECOND), 0);
+        damping.decline(start + SECOND);
+        assert_eq!(damping.left(start + SECOND), 2000);
     }
 }
