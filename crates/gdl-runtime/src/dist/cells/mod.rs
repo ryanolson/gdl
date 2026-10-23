@@ -7,10 +7,12 @@
 //! request chooses from, one immutable table per entry segment, swapped
 //! whole, as the roster's is. Each hand-off into the other class chooses
 //! a cell from its table by the class's cell policy, then an instance of
-//! that cell ([`Crossing`]).
+//! that cell ([`Crossing`]), and offers the request to another cell when
+//! that one declines it (`Runtime::offer`).
 
 mod crossing;
 mod follow;
+mod offer;
 mod policy;
 mod task;
 #[cfg(test)]
@@ -261,6 +263,9 @@ pub(crate) struct EntryTable {
 pub(crate) struct CellTable {
     pub(crate) class: String,
     pub(crate) cell: String,
+    /// The cell's name as a number ([`cell_id`]), the same in every table
+    /// of the cell: what a request that the cell declined excludes.
+    pub(crate) id: u64,
     pub(crate) generation: u64,
     pub(crate) region: String,
     pub(crate) state: CellState,
@@ -273,6 +278,18 @@ pub(crate) struct CellTable {
     /// The built-in routers' turn within the cell, shared by every table
     /// of the cell's follow, so that a new table keeps the turn.
     pub(crate) turn: Arc<AtomicUsize>,
+}
+
+/// The number that names the cell `cell` of `class` in its tables: a hash
+/// of the two, so that a request can keep the cells it excluded without
+/// cloning a name, or a table, on every choice. Two cells whose names hash
+/// alike would be excluded together, for one request: with a 64-bit hash
+/// and a fleet's few cells, that does not happen.
+pub(crate) fn cell_id(class: &str, cell: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    (class, cell).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Refuse a chooser of `segment` whose placement names, for a class it

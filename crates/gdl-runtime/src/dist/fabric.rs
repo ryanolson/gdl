@@ -269,12 +269,66 @@ impl Fabric {
             .send();
         match tokio::time::timeout(timeout, send).await {
             Ok(reply) => reply.map(|bytes| bytes.to_vec()).map_err(transport),
-            Err(_) => Err(Error::new(
-                ErrorKind::Transport,
-                format!("`{name}` on {instance} did not answer within {timeout:?}"),
-            )),
+            Err(_) => Err(unanswered(name, instance, timeout)),
         }
     }
+
+    /// Offer `payload` to a unary handler on `instance`, as [`Fabric::call`]
+    /// calls it, telling apart a send velo refused before it reached the
+    /// transport, which provably never left this process, from one that
+    /// may have left. velo says the first through the send's admission: the
+    /// peer is not registered, its handshake failed or showed no such
+    /// handler, or no response slot was free. A peer that cannot be
+    /// connected to is not among them: velo's TCP transport reports a
+    /// connection it could not open after admitting the frame, as it does
+    /// a write that failed.
+    #[cfg(feature = "hub")]
+    pub(crate) async fn offer(
+        &self,
+        instance: InstanceId,
+        name: &str,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Offered {
+        let send = match self.velo.unary(name) {
+            Ok(unary) => unary,
+            Err(error) => return Offered::Unsent(transport(error)),
+        };
+        let mut send = send.raw_payload(payload.into()).instance(instance).send();
+        let answered = async {
+            if let Err(error) = send.admitted().await {
+                return Offered::Unsent(transport(error));
+            }
+            match (&mut send).await {
+                Ok(bytes) => Offered::Answered(bytes.to_vec()),
+                Err(error) => Offered::Unknown(transport(error)),
+            }
+        };
+        // A send still waiting for its admission when the time runs out may
+        // be admitted later: velo's send task outlives the wait for it.
+        tokio::time::timeout(timeout, answered)
+            .await
+            .unwrap_or_else(|_| Offered::Unknown(unanswered(name, instance, timeout)))
+    }
+}
+
+/// What became of a payload [`Fabric::offer`] offered.
+#[cfg(feature = "hub")]
+pub(crate) enum Offered {
+    /// The handler answered, with these bytes.
+    Answered(Vec<u8>),
+    /// velo refused the send before the transport took it: it never left.
+    Unsent(Error),
+    /// It may have left and been run: no answer came in time, or the send
+    /// failed after the transport took it.
+    Unknown(Error),
+}
+
+fn unanswered(name: &str, instance: InstanceId, timeout: Duration) -> Error {
+    Error::new(
+        ErrorKind::Transport,
+        format!("`{name}` on {instance} did not answer within {timeout:?}"),
+    )
 }
 
 fn transport(error: impl std::fmt::Display) -> Error {
@@ -505,5 +559,76 @@ impl Outbound {
             // `Sent` or `Discarded`: either way velo holds none of it now.
             let _ = retired.await;
         }
+    }
+}
+
+#[cfg(all(test, feature = "hub"))]
+mod tests {
+    use super::*;
+
+    /// The longest a test waits for an answer it expects.
+    const WAIT: Duration = Duration::from_secs(5);
+
+    async fn node() -> Velo {
+        bind_node(([127, 0, 0, 1], 0).into())
+            .await
+            .expect("a velo node")
+    }
+
+    fn fabric(node: &Velo) -> Fabric {
+        Fabric::new(node.clone(), None, None, Duration::from_secs(30))
+    }
+
+    /// A node whose `probe` handler answers with what it was sent.
+    async fn answering() -> Velo {
+        let node = node().await;
+        fabric(&node)
+            .register("probe", |bytes| Box::pin(async move { bytes }))
+            .expect("a handler");
+        node
+    }
+
+    /// velo refuses, before its transport takes it, a send to a peer it
+    /// was not told of and one for a handler the peer does not have.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn what_velo_proves_never_left() {
+        let sender = node().await;
+        let fabric = fabric(&sender);
+        let peer = answering().await;
+        let id = peer.instance_id();
+        let offered = fabric.offer(id, "probe", vec![7], WAIT).await;
+        assert!(
+            matches!(offered, Offered::Unsent(_)),
+            "to a peer not registered"
+        );
+        fabric.register_peer(peer.peer_info()).expect("registered");
+        let offered = fabric.offer(id, "probe", vec![7], WAIT).await;
+        assert!(matches!(offered, Offered::Answered(ref bytes) if bytes == &[7]));
+        let offered = fabric.offer(id, "absent", vec![7], WAIT).await;
+        assert!(
+            matches!(offered, Offered::Unsent(_)),
+            "to a handler it has not"
+        );
+    }
+
+    /// A peer that stopped after its handshake cannot be proven not to
+    /// have taken a send: velo's transport reports the connection it could
+    /// not open again as it would a write that failed. Bounded by a short
+    /// wait, which an answer that never comes runs out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_peer_that_stopped_is_not_proven_unsent() {
+        let sender = node().await;
+        let fabric = fabric(&sender);
+        let peer = answering().await;
+        let id = peer.instance_id();
+        fabric.register_peer(peer.peer_info()).expect("registered");
+        let offered = fabric.offer(id, "probe", vec![7], WAIT).await;
+        assert!(matches!(offered, Offered::Answered(_)));
+        shut_down(&peer, Duration::from_millis(100)).await;
+        drop(peer);
+        let offered = fabric
+            .offer(id, "probe", vec![7], Duration::from_secs(1))
+            .await;
+        assert!(matches!(offered, Offered::Unknown(_)), "a stopped peer");
     }
 }

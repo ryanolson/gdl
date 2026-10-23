@@ -571,6 +571,7 @@ impl Follow {
         CellTable {
             class: key.0.clone(),
             cell: key.1.clone(),
+            id: super::cell_id(&key.0, &key.1),
             generation: self.generation,
             region: self.region.clone(),
             state: self.state,

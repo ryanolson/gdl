@@ -666,6 +666,11 @@ where
     /// it; from here until it hands the request on, this stage owns the
     /// reply and must deliver any failure to it. For a streamed request the
     /// acknowledgement names the input anchor this stage minted.
+    ///
+    /// Every refusal returns before the request's task is spawned, and
+    /// after it only the acknowledgement does: a chooser takes an
+    /// `Overloaded` or `Placement` answer as its offer declined, and offers
+    /// the request to another cell.
     async fn accept_forward(self: &Arc<Self>, envelope: Forward) -> Result<Accepted> {
         let rt = &self.rt;
         let pos = usize::from(envelope.pos);

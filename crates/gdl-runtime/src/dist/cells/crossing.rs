@@ -53,33 +53,47 @@ impl Crossing {
         &self.within
     }
 
-    /// Choose a cell for one attempt, then an instance of it by `policy`:
-    /// one load of the table, two counter increments, and the policy's
-    /// pass over the followed cells, with no lock and no allocation.
-    pub(crate) fn pick(&self, policy: Policy, random: &RandomState) -> Result<InstanceId> {
+    /// Choose a cell for one attempt, then an instance of it by `policy`,
+    /// with the chosen cell's [`id`](CellTable::id), or `None` when no
+    /// cell but those in `excluded` may take it: one load of the table,
+    /// two counter increments, and the policy's pass over the followed
+    /// cells, with no lock and no allocation.
+    pub(crate) fn pick(
+        &self,
+        policy: Policy,
+        random: &RandomState,
+        excluded: &[u64],
+    ) -> Option<(InstanceId, u64)> {
         let table = self.target.table.load();
-        let cell = self.cell(&table)?;
+        let cell = self.cell(&table, excluded)?;
         let sequence = cell.turn.fetch_add(1, Ordering::Relaxed);
-        Ok(cell.eligible[turn(policy, sequence, cell.eligible.len(), random)])
+        Some((
+            cell.eligible[turn(policy, sequence, cell.eligible.len(), random)],
+            cell.id,
+        ))
     }
 
     /// Choose a cell for one attempt, then ask `selector` to choose among
-    /// that cell's eligible entry instances alone. A selector may wait, so
-    /// the choice is checked when it returns (ruling 154): if the cell's
-    /// table changed meanwhile and the instance is no longer eligible in
-    /// the cell's current table, the choice and its lease are dropped and
-    /// both the cell and the instance are chosen again. Boxed, as
+    /// that cell's eligible entry instances alone; `None` when no cell but
+    /// those in `excluded` may take it. A selector may wait, so the choice
+    /// is checked when it returns (ruling 154): if the cell's table changed
+    /// meanwhile and the instance is no longer eligible in the cell's
+    /// current table, the choice and its lease are dropped and both the
+    /// cell and the instance are chosen again. Boxed, as
     /// [`Live::choose`](crate::dist::roster::Live::choose) is.
     pub(crate) fn choose<'a>(
         &'a self,
         selector: &'a dyn Erased,
         cx: &'a Cx,
         head: &'a [u8],
-    ) -> BoxFuture<'a, Result<(InstanceId, Picked)>> {
+        excluded: &'a [u64],
+    ) -> BoxFuture<'a, Result<Option<(InstanceId, u64, Picked)>>> {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.target.table.load_full();
-                let cell = Arc::clone(self.cell(&table)?);
+                let Some(cell) = self.cell(&table, excluded).map(Arc::clone) else {
+                    return Ok(None);
+                };
                 let picked = selector
                     .select(
                         cx,
@@ -89,7 +103,7 @@ impl Crossing {
                     .await?;
                 let chosen = cell.eligible[picked.index];
                 if still_eligible(&self.target.table.load(), &cell, chosen) {
-                    return Ok((chosen, picked));
+                    return Ok(Some((chosen, cell.id, picked)));
                 }
             }
             Err(Error::routing(format!(
@@ -99,24 +113,31 @@ impl Crossing {
         })
     }
 
-    /// The cell the policy chooses from `table` for one attempt, or the
-    /// request's `Routing` error when none may take it: a request never
-    /// waits for a cell to appear.
-    fn cell<'t>(&self, table: &'t EntryTable) -> Result<&'t Arc<CellTable>> {
+    /// The request's `Routing` error when no cell of the class may take
+    /// it: a request never waits for a cell to appear.
+    pub(crate) fn no_cell(&self) -> Error {
+        Error::routing(format!(
+            "no ready cell of class `{}` has an instance of segment `{}`",
+            self.target.class, self.target.segment
+        ))
+    }
+
+    /// The class this hand-off enters.
+    pub(crate) fn class(&self) -> &str {
+        &self.target.class
+    }
+
+    /// The cell the policy chooses from `table` for one attempt, of those
+    /// not in `excluded`.
+    fn cell<'t>(&self, table: &'t EntryTable, excluded: &[u64]) -> Option<&'t Arc<CellTable>> {
         let draw = self
             .random
             .hash_one(self.draws.fetch_add(1, Ordering::Relaxed));
         let target = &self.target;
         target
             .policy
-            .choose(&table.cells, &target.region, draw)
+            .choose(&table.cells, &target.region, excluded, draw)
             .map(|at| &table.cells[at])
-            .ok_or_else(|| {
-                Error::routing(format!(
-                    "no ready cell of class `{}` has an instance of segment `{}`",
-                    target.class, target.segment
-                ))
-            })
     }
 }
 
@@ -221,6 +242,7 @@ mod tests {
         Arc::new(CellTable {
             class: "model_x".into(),
             cell: name.into(),
+            id: super::super::cell_id("model_x", name),
             generation: 1,
             region: "home".into(),
             state,
@@ -263,7 +285,12 @@ mod tests {
         let first = cell("m", CellState::Ready, &ids);
         let crossing = crossing(vec![Arc::clone(&first)], Router::Policy(Policy::RoundRobin));
         let random = RandomState::new();
-        let pick = || crossing.pick(Policy::RoundRobin, &random).expect("one");
+        let pick = || {
+            crossing
+                .pick(Policy::RoundRobin, &random, &[])
+                .expect("one")
+                .0
+        };
         assert_eq!([pick(), pick(), pick()], [ids[0], ids[1], ids[0]]);
         // The follower makes a new table for an event, carrying the turn.
         let again = cell_turning("m", CellState::Ready, &ids, Arc::clone(&first.turn));
@@ -279,11 +306,53 @@ mod tests {
             vec![cell("m", CellState::Unavailable, &[])],
             Router::Policy(Policy::RoundRobin),
         );
-        let error = crossing
-            .pick(Policy::RoundRobin, &RandomState::new())
-            .expect_err("nothing to choose");
+        assert!(
+            crossing
+                .pick(Policy::RoundRobin, &RandomState::new(), &[])
+                .is_none()
+        );
+        let error = crossing.no_cell();
         assert_eq!(error.kind(), gdl::ErrorKind::Routing);
         assert!(error.to_string().contains("`model_x`"), "{error}");
+    }
+
+    /// A cell the request excluded is passed over, by the policy and by a
+    /// selector alike, and with every cell excluded there is none.
+    #[tokio::test]
+    async fn an_excluded_cell_is_passed_over() {
+        let ids = ids(2);
+        let crossing = crossing(
+            vec![
+                cell("m1", CellState::Ready, &ids[..1]),
+                cell("m2", CellState::Degraded, &ids[1..]),
+            ],
+            Router::Policy(Policy::RoundRobin),
+        );
+        let random = RandomState::new();
+        let m1 = super::super::cell_id("model_x", "m1");
+        let m2 = super::super::cell_id("model_x", "m2");
+        assert_eq!(
+            crossing.pick(Policy::RoundRobin, &random, &[]),
+            Some((ids[0], m1))
+        );
+        assert_eq!(
+            crossing.pick(Policy::RoundRobin, &random, &[m1]),
+            Some((ids[1], m2))
+        );
+        assert_eq!(crossing.pick(Policy::RoundRobin, &random, &[m1, m2]), None);
+        let selector = gdl::__runtime::Typed(Arc::new(gdl::LeastLoaded::new()));
+        let cx = Cx::new();
+        let chosen = crossing
+            .choose(&selector, &cx, &[], &[m1])
+            .await
+            .expect("a choice")
+            .map(|(id, cell, _)| (id, cell));
+        assert_eq!(chosen, Some((ids[1], m2)));
+        let none = crossing
+            .choose(&selector, &cx, &[], &[m1, m2])
+            .await
+            .expect("no error");
+        assert!(none.is_none());
     }
 
     /// The first call waits at a gate, then takes `target`; later calls
@@ -348,9 +417,9 @@ mod tests {
                 let selector = gdl::__runtime::Typed(waiting);
                 let cx = Cx::new();
                 crossing
-                    .choose(&selector, &cx, &[])
+                    .choose(&selector, &cx, &[], &[])
                     .await
-                    .map(|(id, picked)| (id, picked.lease))
+                    .map(|chosen| chosen.map(|(id, _, picked)| (id, picked.lease)))
             }
         });
         tokio::time::timeout(WAIT, waiting.arrived.notified())
@@ -365,6 +434,7 @@ mod tests {
             .await
             .expect("chose in time")
             .expect("joined")
+            .expect("no error")
             .expect("a choice");
         assert_eq!(chosen, ids[1], "sent to an instance its cell no longer has");
         assert_eq!(waiting.calls.load(Ordering::SeqCst), 2);
@@ -432,7 +502,12 @@ mod tests {
                 live.pick("f", Picker::Request, Policy::RoundRobin, &random)
                     .expect("one")
             });
-            let boundary = time(&|| crossing.pick(Policy::RoundRobin, &random).expect("one"));
+            let boundary = time(&|| {
+                crossing
+                    .pick(Policy::RoundRobin, &random, &[])
+                    .expect("one")
+                    .0
+            });
             println!("round {round}: roster pick {roster:?}, boundary pick {boundary:?}");
         }
     }

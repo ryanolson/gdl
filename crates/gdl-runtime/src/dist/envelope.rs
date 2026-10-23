@@ -68,6 +68,33 @@ impl WireCx {
     pub(crate) fn add_meta(&mut self, meta: Vec<(String, String)>) {
         self.meta.extend(meta);
     }
+
+    /// [`WireCx::add_meta`] for a choice that may be declined, returning
+    /// what [`WireCx::undo_meta`] needs to take it back: each key added,
+    /// with the value it replaced. Allocates only for a choice with meta.
+    #[cfg(feature = "hub")]
+    pub(crate) fn add_meta_undoably(
+        &mut self,
+        meta: Vec<(String, String)>,
+    ) -> Vec<(String, Option<String>)> {
+        meta.into_iter()
+            .map(|(key, value)| {
+                let replaced = self.meta.insert(key.clone(), value);
+                (key, replaced)
+            })
+            .collect()
+    }
+
+    /// Take back what [`WireCx::add_meta_undoably`] added.
+    #[cfg(feature = "hub")]
+    pub(crate) fn undo_meta(&mut self, added: Vec<(String, Option<String>)>) {
+        for (key, replaced) in added.into_iter().rev() {
+            match replaced {
+                Some(value) => self.meta.insert(key, value),
+                None => self.meta.remove(&key),
+            };
+        }
+    }
 }
 
 /// A request handed to the next segment on a hop's forward path.
@@ -168,6 +195,23 @@ mod tests {
         let plain: Result<Accepted> = Ok(None);
         let back: Result<Accepted> = decode(&encode(&plain).expect("encode")).expect("decode");
         assert!(back.expect("accepted").is_none());
+    }
+
+    #[cfg(feature = "hub")]
+    #[test]
+    fn a_choices_meta_is_taken_back_whole() {
+        let mut cx = Cx::new();
+        cx.insert_meta("session", "s1");
+        let mut wire = WireCx::of(&cx);
+        let before = wire.meta.clone();
+        let added = wire.add_meta_undoably(vec![
+            ("session".into(), "chosen".into()),
+            ("worker".into(), "w1".into()),
+        ]);
+        assert_eq!(wire.meta.get("session").map(String::as_str), Some("chosen"));
+        assert_eq!(wire.meta.get("worker").map(String::as_str), Some("w1"));
+        wire.undo_meta(added);
+        assert_eq!(wire.meta, before);
     }
 
     #[test]

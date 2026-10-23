@@ -40,6 +40,11 @@ pub struct RuntimeConfig {
     /// The longest any setup step (a forward hand-off, a run opening, an
     /// attach) may take, on top of the request's own deadline.
     pub setup_timeout: Duration,
+    /// How many other cells a chooser offers a request to after the cell it
+    /// chose first declines it, or the hand-off to it provably never left
+    /// this instance: only for a hand-off into another class, from an
+    /// instance in a cell. 0 offers each request to one cell.
+    pub cell_failovers: usize,
     /// Override how long an ordinary anchor waits for its producer; `None` uses Velo defaults.
     pub anchor_timeout: Option<Duration>,
     /// Cadence for batching held reply reservations. Defaults to 30 seconds.
@@ -130,6 +135,7 @@ impl Default for RuntimeConfig {
             admission_wait: Duration::from_millis(100),
             attempt_limit: 16,
             setup_timeout: Duration::from_secs(10),
+            cell_failovers: 2,
             anchor_timeout: None,
             reservation_renew_interval: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
@@ -153,6 +159,7 @@ struct Settings {
     admission_wait_ms: u64,
     attempt_limit: usize,
     setup_timeout_ms: u64,
+    cell_failovers: usize,
     anchor_timeout_ms: Option<u64>,
     reservation_renew_interval_ms: u64,
     clock_skew_ms: u64,
@@ -171,6 +178,7 @@ impl Default for Settings {
             admission_wait_ms: ms(config.admission_wait),
             attempt_limit: config.attempt_limit,
             setup_timeout_ms: ms(config.setup_timeout),
+            cell_failovers: config.cell_failovers,
             anchor_timeout_ms: config.anchor_timeout.map(ms),
             reservation_renew_interval_ms: ms(config.reservation_renew_interval),
             clock_skew_ms: ms(config.clock_skew),
@@ -191,6 +199,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             admission_wait: Duration::from_millis(s.admission_wait_ms),
             attempt_limit: s.attempt_limit,
             setup_timeout: Duration::from_millis(s.setup_timeout_ms),
+            cell_failovers: s.cell_failovers,
             anchor_timeout: s.anchor_timeout_ms.map(Duration::from_millis),
             reservation_renew_interval: Duration::from_millis(s.reservation_renew_interval_ms),
             clock_skew: Duration::from_millis(s.clock_skew_ms),
@@ -441,6 +450,12 @@ impl Runtime {
         &self.names
     }
 
+    /// What the built-in routers draw from.
+    #[cfg(feature = "hub")]
+    pub(crate) fn random(&self) -> &RandomState {
+        &self.random
+    }
+
     /// Wait until the roster is released: every instance this one can
     /// route to is serving. One atomic read once it is: the timeout is
     /// built only for a held roster, since building one touches the
@@ -511,8 +526,9 @@ impl Runtime {
     /// selector is given `cx` and the head, and what it chose comes back
     /// with its lease, for the caller to hold while it holds the request.
     /// A chooser's hand-off into another class first chooses a cell, then
-    /// an instance of it the same way; which hand-offs those are was
-    /// settled when the runtime was built.
+    /// an instance of it the same way, and offers the request to another
+    /// cell when that one declines it ([`Runtime::offer`]); which
+    /// hand-offs those are was settled when the runtime was built.
     ///
     /// When the chosen instance is this one, the entry runs by a direct
     /// call: velo is not relied on to deliver a message to its own sender.
@@ -544,15 +560,7 @@ impl Runtime {
                 (instance, picked.lease)
             }
             #[cfg(feature = "hub")]
-            Router::Cells(crossing) => match crossing.within() {
-                Within::Policy(policy) => (crossing.pick(*policy, &self.random)?, None),
-                Within::Selector { selector, .. } => {
-                    let (instance, picked) =
-                        crossing.choose(&**selector, cx, &envelope.payload).await?;
-                    envelope.cx.add_meta(picked.meta);
-                    (instance, picked.lease)
-                }
-            },
+            Router::Cells(crossing) => return self.offer(crossing, cx, envelope, timed).await,
         };
         if instance == self.fabric.instance() {
             let entries = self.entries()?;
@@ -776,6 +784,14 @@ mod tests {
             };
             assert!(error.to_string().contains(key), "{error}");
         }
+    }
+
+    #[test]
+    fn cell_failovers_are_two_by_default_and_may_be_none() {
+        let defaults: RuntimeConfig = toml::from_str("").expect("defaults");
+        assert_eq!(defaults.cell_failovers, 2);
+        let none: RuntimeConfig = toml::from_str("cell_failovers = 0\n").expect("none");
+        assert_eq!(none.cell_failovers, 0);
     }
 
     #[test]
