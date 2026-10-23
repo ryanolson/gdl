@@ -35,6 +35,13 @@ pub const FOLLOWS_ROUTE: &str = "/follows";
 /// cell.
 pub const LOAD_ROUTE: &str = "/instances/{instance_id}/load";
 
+/// The drain's route, under the extension's, on the hub's control
+/// listener: `POST`, with no body, starts the cell's drain and answers
+/// `202 Accepted` with the cell's health once it shows the cell
+/// `draining`; a drain already started is answered the same way. A cell
+/// whose class no hop enters is refused with `409 Conflict`.
+pub const DRAIN_ROUTE: &str = "/drain";
+
 /// [`LOAD_ROUTE`]'s path for `instance`.
 pub fn load_path(instance: InstanceId) -> String {
     format!("/instances/{instance}/load")

@@ -12,7 +12,9 @@
 //! instances report their admission to it
 //! (`POST /v1/ext/gdl-cell/instances/{id}/load` on the control listener,
 //! a [`gdl_watch::LoadReport`]), from which it makes the cell's load
-//! summary, which its record and its watch carry. The hub of a cell whose
+//! summary, which its record and its watch carry. It drains the cell when
+//! asked (`POST /v1/ext/gdl-cell/drain` on the control listener): the cell
+//! is then `draining` whatever its quorum. The hub of a cell whose
 //! class sends to other classes is such a follower: it finds their home
 //! cells in the directory, follows each over its watch, and relays what it
 //! follows to its own instances (`GET /v1/ext/gdl-cell/follows`, as

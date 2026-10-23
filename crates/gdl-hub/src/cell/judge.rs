@@ -22,6 +22,9 @@ pub(super) struct Judge {
     pub(super) states: watch::Sender<CellState>,
     /// The cell's watchers, sent each change of state.
     pub(super) feed: Arc<Feed>,
+    /// Whether the cell drains: from then its state is `draining`,
+    /// whatever its quorum.
+    pub(super) draining: watch::Receiver<bool>,
 }
 
 impl Judge {
@@ -47,12 +50,18 @@ impl Judge {
                     None => std::future::pending().await,
                 }
             };
+            let draining = async {
+                if self.draining.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            };
             tokio::select! {
                 count = counts.recv() => {
                     let Some(count) = count else { return };
                     self.count(count);
                 }
                 () = hold => {}
+                () = draining => {}
             }
             self.judge();
         }
@@ -74,11 +83,24 @@ impl Judge {
         }
     }
 
-    /// Judge the state now, and show it: on the health endpoint, whose
-    /// body is updated in place so that a count costs no allocation, and
-    /// to the writer and the watchers when it changed.
+    /// Judge the state now, and show it: to the writer and the watchers
+    /// when it changed, and on the health endpoint, whose body is updated
+    /// in place so that a count costs no allocation. The endpoint is told
+    /// last, so that a drain, which is answered once the endpoint shows
+    /// it, is answered after the watchers were sent it.
     fn judge(&mut self) {
-        let state = self.quorum.state(Instant::now());
+        let state = match *self.draining.borrow_and_update() {
+            true => CellState::Draining,
+            false => self.quorum.state(Instant::now()),
+        };
+        let changed = self.states.send_if_modified(|current| {
+            let changed = *current != state;
+            *current = state;
+            changed
+        });
+        if changed {
+            self.feed.set_state(state);
+        }
         let quorum = &self.quorum;
         self.health.send_if_modified(|health| {
             let mut modified = health.state != state;
@@ -93,13 +115,5 @@ impl Judge {
             }
             modified
         });
-        let changed = self.states.send_if_modified(|current| {
-            let changed = *current != state;
-            *current = state;
-            changed
-        });
-        if changed {
-            self.feed.set_state(state);
-        }
     }
 }

@@ -96,3 +96,7 @@ required-features = ["hub"]
 [[test]]
 name = "load"
 required-features = ["hub"]
+
+[[test]]
+name = "draining"
+required-features = ["hub"]

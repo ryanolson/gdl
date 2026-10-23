@@ -22,6 +22,7 @@ use velo_hub::{
 
 use crate::follow::{Follower, FollowsWatch, Relay};
 use crate::{GraphAdmission, Quorum};
+use drain::Drain;
 use feed::Feed;
 use gdl_watch::{CellWatchError, CellWatcher, LoadReport};
 
@@ -31,6 +32,7 @@ use gdl_watch::{CellWatchError, CellWatcher, LoadReport};
 const SETTLE: Duration = Duration::from_secs(5);
 
 mod count;
+mod drain;
 mod feed;
 mod judge;
 mod load;
@@ -104,6 +106,12 @@ pub use feed::CellWatch;
 /// changed or not, so that a watcher's age of it says how fresh it is,
 /// and once when there is none; the record carries it on its next write.
 ///
+/// The cell drains when asked, on the control listener: `POST drain`, or
+/// [`CellReadiness::drain`] in process. From then its state is `draining`
+/// whatever its quorum, so its health endpoint answers 503, its record and
+/// its watch say so, and no chooser chooses it; a drain cannot be
+/// cancelled. A cell whose class no hop enters cannot be drained.
+///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,
 /// so that a slow directory never delays the judgment or the health
@@ -133,6 +141,8 @@ pub struct CellReadiness<D: CellDirectory> {
     summary: Option<Duration>,
     /// What the hub follows.
     relay: Arc<Relay>,
+    /// The cell's drain.
+    drain: Arc<Drain>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -230,6 +240,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             sends: sends.into_iter().collect(),
             summary: (!entries.is_empty()).then_some(cell.summary),
             relay,
+            drain: Arc::new(Drain::new()),
             tasks: Mutex::default(),
         })
     }
@@ -257,6 +268,33 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// serves, as typed events. It ends at once if the hub has stopped.
     pub fn follows(&self) -> FollowsWatch {
         self.relay.watch()
+    }
+
+    /// Start the cell's drain, as `POST drain` on the control listener
+    /// does, and return the cell's health once it shows the cell
+    /// `draining`: by then the cell's watchers have been sent the state,
+    /// and its writer has it to publish. From then the cell is `draining`
+    /// whatever its quorum, for the life of the hub process; a drain
+    /// already started is answered the same way. Refused for a cell whose
+    /// class no hop enters, which has no entry instances to stop taking
+    /// work at.
+    pub async fn drain(&self) -> Result<CellHealth, CellError> {
+        if self.summary.is_none() {
+            return Err(CellError::new(
+                "a cell whose class no hop enters cannot be drained",
+            ));
+        }
+        self.drain.start();
+        let mut shown = self.health.subscribe();
+        // The judgment takes the drain at once; the bound is for a hub
+        // whose judgment has ended, which answers with what it shows.
+        let _ = tokio::time::timeout(
+            SETTLE,
+            shown.wait_for(|health| health.state == CellState::Draining),
+        )
+        .await;
+        let health = shown.borrow().clone();
+        Ok(health)
     }
 
     /// How many watches of what the hub follows are open, as it changes.
@@ -311,6 +349,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 health: self.health.clone(),
                 states,
                 feed: Arc::clone(&self.feed),
+                draining: self.drain.started(),
             }
             .run(updates, cancel.clone()),
         );
@@ -419,24 +458,36 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
     }
 
     fn control_routes(self: Arc<Self>) -> Router {
-        Router::new().route(
-            gdl_watch::LOAD_ROUTE,
-            post(
-                move |authorized: Authorized, HubJson(load): HubJson<LoadReport>| async move {
-                    self.feed
-                        .report(
-                            authorized.owner,
-                            authorized.lease,
-                            load,
-                            std::time::Instant::now(),
-                        )
-                        .map(|()| StatusCode::NO_CONTENT)
-                        // Not 401 or 404: velo-hub's client drops its
-                        // registration on those.
-                        .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
-                },
-            ),
-        )
+        let draining = Arc::clone(&self);
+        Router::new()
+            .route(
+                gdl_watch::DRAIN_ROUTE,
+                post(move || async move {
+                    draining
+                        .drain()
+                        .await
+                        .map(|health| (StatusCode::ACCEPTED, Json(health)))
+                        .map_err(|refused| HubError::new(ErrorCode::Conflict, refused.to_string()))
+                }),
+            )
+            .route(
+                gdl_watch::LOAD_ROUTE,
+                post(
+                    move |authorized: Authorized, HubJson(load): HubJson<LoadReport>| async move {
+                        self.feed
+                            .report(
+                                authorized.owner,
+                                authorized.lease,
+                                load,
+                                std::time::Instant::now(),
+                            )
+                            .map(|()| StatusCode::NO_CONTENT)
+                            // Not 401 or 404: velo-hub's client drops its
+                            // registration on those.
+                            .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
+                    },
+                ),
+            )
     }
 
     fn descriptor(&self) -> serde_json::Value {
