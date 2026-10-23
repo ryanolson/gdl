@@ -13,12 +13,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
-use gdl_cells::{CellState, LoadSummary};
+use gdl_cells::CellState;
 use gdl_watch::FollowEvent;
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
 
-use super::{CellTable, Cells, Damping, EntryTable};
+use super::{CellTable, Cells, Damping, EntryTable, Load};
 use crate::dist::fabric::Registry;
 use crate::dist::roster::Live;
 
@@ -425,7 +425,7 @@ impl Followed {
                         generation,
                         region,
                         state,
-                        load.map(|load| (load, now)),
+                        load.map(|load| Load::new(load, now)),
                         segments,
                     ),
                 );
@@ -448,7 +448,7 @@ impl Followed {
                 load,
             } => {
                 let key = (class, cell);
-                self.current(&key, generation)?.load = load.map(|load| (load, now));
+                self.current(&key, generation)?.load = load.map(|load| Load::new(load, now));
                 Some((key, Change::Table))
             }
             FollowEvent::Exposed {
@@ -533,8 +533,8 @@ struct Follow {
     generation: u64,
     region: String,
     state: CellState,
-    /// The cell's load summary, and when it arrived.
-    load: Option<(LoadSummary, Instant)>,
+    /// The cell's load summary, as it arrived.
+    load: Option<Load>,
     /// Exposed entry instances that have not retired, with their segments.
     exposed: HashMap<InstanceId, (String, PeerInfo)>,
     /// Retired entry instances, with their segments: never exposed again.
@@ -549,7 +549,7 @@ impl Follow {
         generation: u64,
         region: String,
         state: CellState,
-        load: Option<(LoadSummary, Instant)>,
+        load: Option<Load>,
         segments: &BTreeSet<String>,
     ) -> Self {
         Self {

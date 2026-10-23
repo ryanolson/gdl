@@ -112,10 +112,10 @@ impl Cells {
                 generation: cell.generation,
                 region: cell.region.clone(),
                 state: cell.state,
-                load: cell.load.map(|(load, _)| load),
+                load: cell.load.map(|load| load.summary),
                 load_age: cell
                     .load
-                    .map(|(_, arrived)| now.saturating_duration_since(arrived)),
+                    .map(|load| now.saturating_duration_since(load.arrived)),
                 damped: cell
                     .damping
                     .is_damped()
@@ -297,8 +297,8 @@ pub(crate) struct CellTable {
     pub(crate) generation: u64,
     pub(crate) region: String,
     pub(crate) state: CellState,
-    /// The cell's load summary, and when it arrived.
-    pub(crate) load: Option<(LoadSummary, Instant)>,
+    /// The cell's load summary, as it arrived.
+    pub(crate) load: Option<Load>,
     pub(crate) eligible: Box<[InstanceId]>,
     /// `eligible` as a selector sees it, index for index, made with the
     /// table so that a selection borrows it rather than converting each
@@ -311,6 +311,36 @@ pub(crate) struct CellTable {
     /// The chooser's damping of the cell, shared by every table of the
     /// cell, of every follow of it.
     pub(crate) damping: Arc<Damping>,
+}
+
+/// A cell's load summary as its tables hold it: when it arrived, on the
+/// chooser's clock, and until when it is fresh, worked out once as it
+/// arrives so that a choice compares one instant rather than doing the
+/// arithmetic per cell and pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Load {
+    pub(crate) summary: LoadSummary,
+    pub(crate) arrived: Instant,
+    /// The last instant the summary is fresh at:
+    /// [`FRESH_PERIODS`](policy::FRESH_PERIODS) of its periods after it
+    /// arrived. `None` when it is never fresh: it names no period, or one
+    /// so long that the instant overflows the clock.
+    pub(crate) fresh_until: Option<Instant>,
+}
+
+impl Load {
+    /// `summary`, which arrived at `arrived`.
+    pub(crate) fn new(summary: LoadSummary, arrived: Instant) -> Self {
+        let fresh = std::time::Duration::from_millis(summary.period_ms)
+            .saturating_mul(policy::FRESH_PERIODS);
+        Self {
+            summary,
+            arrived,
+            fresh_until: (summary.period_ms > 0)
+                .then(|| arrived.checked_add(fresh))
+                .flatten(),
+        }
+    }
 }
 
 /// The number that names the cell `cell` of `class` in its tables: a hash

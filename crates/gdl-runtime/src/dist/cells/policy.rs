@@ -4,7 +4,6 @@
 //! `home_first`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use gdl::{Error, ErrorKind, Result};
 use gdl_cells::{CellState, LoadSummary};
@@ -117,11 +116,11 @@ impl HomeFirst {
             CellState::Degraded => 3,
             CellState::Draining | CellState::Unavailable => return None,
         };
-        let (load, arrived) = cell.load.as_ref()?;
-        let fresh = Duration::from_millis(load.period_ms).saturating_mul(FRESH_PERIODS);
-        if now.saturating_duration_since(*arrived) > fresh || load.period_ms == 0 {
+        let load = cell.load.as_ref()?;
+        if load.fresh_until.is_none_or(|until| now > until) {
             return None;
         }
+        let load = &load.summary;
         let share = |percent: u64| u128::from(load.limit) * u128::from(percent);
         let admitted = u128::from(load.admitted) * 100;
         let saturated = load.refusals > 0 || admitted >= share(SATURATED_PERCENT);
@@ -297,7 +296,7 @@ mod tests {
     use gdl_cells::LoadSummary;
     use velo::InstanceId;
 
-    use super::super::Damping;
+    use super::super::{Damping, Load};
     use super::*;
 
     const SECOND: Duration = Duration::from_secs(1);
@@ -319,7 +318,7 @@ mod tests {
     /// What a cell's table holds of its load: its summary and when it
     /// arrived, or nothing.
     #[derive(Clone, Copy)]
-    enum Load {
+    enum Loaded {
         /// `admitted` of [`LIMIT`] roots and `refusals` in the last
         /// period, arrived at the given time.
         At {
@@ -330,8 +329,8 @@ mod tests {
         None,
     }
 
-    fn load(admitted: u64, refusals: u64, arrived: Instant) -> Load {
-        Load::At {
+    fn load(admitted: u64, refusals: u64, arrived: Instant) -> Loaded {
+        Loaded::At {
             admitted,
             refusals,
             arrived,
@@ -343,15 +342,15 @@ mod tests {
         region: &str,
         state: CellState,
         entries: usize,
-        load: Load,
+        load: Loaded,
     ) -> Arc<CellTable> {
         let eligible: Box<[InstanceId]> = (0..entries).map(|_| InstanceId::new_v4()).collect();
         let load = match load {
-            Load::At {
+            Loaded::At {
                 admitted,
                 refusals,
                 arrived,
-            } => Some((
+            } => Some(Load::new(
                 LoadSummary {
                     admitted,
                     limit: LIMIT,
@@ -361,7 +360,7 @@ mod tests {
                 },
                 arrived,
             )),
-            Load::None => None,
+            Loaded::None => None,
         };
         Arc::new(CellTable {
             class: "model_x".into(),
@@ -495,7 +494,7 @@ mod tests {
         let now = origin();
         let stale = now - PERIOD * 3 - Duration::from_millis(1);
         let cells = [
-            cell_loaded("none", HOME, CellState::Ready, 1, Load::None),
+            cell_loaded("none", HOME, CellState::Ready, 1, Loaded::None),
             cell_loaded("stale", HOME, CellState::Ready, 1, load(0, 0, stale)),
             cell("away", AWAY, CellState::Degraded, 1, now),
         ];
@@ -512,8 +511,14 @@ mod tests {
         // A summary that says nothing of its period is never fresh.
         let mut table =
             Arc::try_unwrap(cell("unknown", HOME, CellState::Ready, 1, now)).expect("one owner");
-        if let Some((summary, _)) = &mut table.load {
-            summary.period_ms = 0;
+        if let Some(load) = &mut table.load {
+            *load = Load::new(
+                LoadSummary {
+                    period_ms: 0,
+                    ..load.summary
+                },
+                now,
+            );
         }
         assert_eq!(chosen_at(&[Arc::new(table)], now), names(&[]));
     }
@@ -730,7 +735,7 @@ mod tests {
         let cells = [
             cell("damped", HOME, CellState::Ready, 1, now),
             cell("draining", HOME, CellState::Draining, 1, now),
-            cell_loaded("unknown", HOME, CellState::Ready, 1, Load::None),
+            cell_loaded("unknown", HOME, CellState::Ready, 1, Loaded::None),
         ];
         cells[0].damping.decline(now);
         assert_eq!(chosen_at(&cells, now), names(&["damped"]));

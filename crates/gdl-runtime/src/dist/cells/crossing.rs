@@ -525,8 +525,9 @@ mod tests {
     }
 
     /// What a chooser's boundary pick costs over a pick in its own roster,
-    /// over the same instances: reported, not gated. Run it with
-    /// `--ignored --nocapture`.
+    /// over the same instances, and what of it is the read of the clock
+    /// that judges each summary's age and each cell's damping: reported,
+    /// not gated. Run it with `--ignored --nocapture`.
     #[test]
     #[ignore = "a measurement, not a check: run it with --ignored --nocapture"]
     fn the_cost_of_a_boundary_pick() {
@@ -563,7 +564,13 @@ mod tests {
                     .expect("one")
                     .0
             });
-            println!("round {round}: roster pick {roster:?}, boundary pick {boundary:?}");
+            let clock = time(&|| {
+                std::hint::black_box(tokio::time::Instant::now());
+                ids[0]
+            });
+            println!(
+                "round {round}: roster pick {roster:?}, boundary pick {boundary:?}, of which the clock {clock:?}"
+            );
         }
     }
 }
