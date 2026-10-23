@@ -18,7 +18,7 @@ use gdl_watch::FollowEvent;
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
 
-use super::{CellTable, Cells, EntryTable};
+use super::{CellTable, Cells, Damping, EntryTable};
 use crate::dist::fabric::Registry;
 use crate::dist::roster::Live;
 
@@ -53,6 +53,11 @@ pub(crate) struct Follows<R> {
     /// The latest unregistration due for each instance: an earlier entry
     /// in `forget` for one asked for again is passed over.
     due: HashMap<InstanceId, Instant>,
+    /// Each cell's damping, kept across its follows and snapshots: a cell
+    /// that declined is damped whatever generation it is followed in. One
+    /// is kept for each followed cell, and for a cell no longer followed
+    /// while it is damped.
+    dampings: HashMap<Key, Arc<Damping>>,
 }
 
 impl<R: Registry> Follows<R> {
@@ -75,6 +80,7 @@ impl<R: Registry> Follows<R> {
             registered: HashSet::new(),
             forget: VecDeque::new(),
             due: HashMap::new(),
+            dampings: HashMap::new(),
         }
     }
 
@@ -116,7 +122,7 @@ impl<R: Registry> Follows<R> {
             Change::Held(id) => self.hold(id),
             Change::Released(id) => self.unhold(id, now),
         }
-        self.publish(&key);
+        self.publish(&key, now);
     }
 
     /// A watch's snapshot is complete: it replaces everything this
@@ -168,13 +174,20 @@ impl<R: Registry> Follows<R> {
             }
         }
         self.followed = followed;
+        let follows = &self.followed.follows;
+        self.dampings
+            .retain(|key, damping| follows.contains_key(key) || damping.is_damped());
         let mut tables: BTreeMap<String, BTreeMap<Key, Arc<CellTable>>> = BTreeMap::new();
-        for (key, follow) in &self.followed.follows {
+        for (key, follow) in follows {
+            let damping = self
+                .dampings
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Damping::new(now)));
             for segment in &self.wanted[&key.0] {
                 tables
                     .entry(segment.clone())
                     .or_default()
-                    .insert(key.clone(), Arc::new(follow.table(key, segment)));
+                    .insert(key.clone(), Arc::new(follow.table(key, segment, damping)));
             }
         }
         self.tables = tables;
@@ -283,20 +296,37 @@ impl<R: Registry> Follows<R> {
         self.forget.push_back((at, id));
     }
 
-    /// Publish `key`'s cell, as its follow now is or without it, in the
-    /// table of each entry segment of its class.
-    fn publish(&mut self, key: &Key) {
+    /// Publish `key`'s cell, as its follow now is at `now` or without it,
+    /// in the table of each entry segment of its class.
+    fn publish(&mut self, key: &Key, now: Instant) {
         let Some(segments) = self.wanted.get(&key.0) else {
             return;
         };
         let follow = self.followed.follows.get(key);
+        let damping = match follow {
+            Some(_) => Some(Arc::clone(
+                self.dampings
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Damping::new(now))),
+            )),
+            None => {
+                if self
+                    .dampings
+                    .get(key)
+                    .is_some_and(|damping| !damping.is_damped())
+                {
+                    self.dampings.remove(key);
+                }
+                None
+            }
+        };
         for segment in segments {
             let cells = self.tables.entry(segment.clone()).or_default();
-            match follow {
-                Some(follow) => {
-                    cells.insert(key.clone(), Arc::new(follow.table(key, segment)));
+            match (follow, &damping) {
+                (Some(follow), Some(damping)) => {
+                    cells.insert(key.clone(), Arc::new(follow.table(key, segment, damping)));
                 }
-                None => {
+                _ => {
                     cells.remove(key);
                 }
             }
@@ -577,8 +607,9 @@ impl Follow {
         self.exposed.keys().chain(self.retired.keys()).copied()
     }
 
-    /// The follow's table for `segment`, its instances in id order.
-    fn table(&self, key: &Key, segment: &str) -> CellTable {
+    /// The follow's table for `segment`, its instances in id order, with
+    /// the cell's `damping`.
+    fn table(&self, key: &Key, segment: &str, damping: &Arc<Damping>) -> CellTable {
         #[cfg(test)]
         READ.with(|read| read.set(read.get() + self.exposed.len() + self.retired.len()));
         let mut eligible: Vec<InstanceId> = self
@@ -611,6 +642,7 @@ impl Follow {
             offered,
             retired: retired.into_boxed_slice(),
             turn: self.turns.get(segment).map(Arc::clone).unwrap_or_default(),
+            damping: Arc::clone(damping),
         }
     }
 }

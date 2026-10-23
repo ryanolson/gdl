@@ -11,13 +11,15 @@
 //! does: the cells already offered the request, and the failover's own
 //! state, are made only once a cell declined it ([`Runtime::fail_over`]).
 //! They are locals of that call: never on the wire, never kept per
-//! request, and gone when it returns.
+//! request, and gone when it returns. What outlives the request is the
+//! chooser's damping of a cell that declined ([`super::damping`]), written
+//! only when a cell declines, or when a damped cell accepts.
 
 use gdl::__runtime::Lease;
 use gdl::{Cx, Error, ErrorKind, Result};
 use velo::InstanceId;
 
-use super::{Crossing, Within};
+use super::{Chosen, Crossing, Within};
 use crate::dist::envelope::{self, Accepted, Forward, WireCx};
 use crate::dist::fabric::Offered;
 use crate::dist::runtime::{Handed, Runtime};
@@ -33,12 +35,21 @@ pub(crate) enum Answer {
     Failed(Error),
 }
 
-/// What became of an offer, as `crossing` sent it.
-pub(crate) fn answer(offered: Offered, crossing: &Crossing) -> Answer {
+/// What became of an offer, as `crossing` sent it to the cell `chosen`.
+/// A cell that declined it is damped, and a damped cell that accepted it
+/// is no longer; a hand-off that never left says nothing of the cell, and
+/// changes nothing.
+pub(crate) fn answer(offered: Offered, crossing: &Crossing, chosen: Chosen) -> Answer {
     match offered {
         Offered::Answered(reply) => match envelope::decode::<Result<Accepted, Error>>(&reply) {
-            Ok(Ok(accepted)) => Answer::Accepted(accepted),
-            Ok(Err(error)) if declines(&error) => Answer::Declined(error),
+            Ok(Ok(accepted)) => {
+                crossing.accepted(chosen);
+                Answer::Accepted(accepted)
+            }
+            Ok(Err(error)) if declines(&error) => {
+                crossing.declined(chosen);
+                Answer::Declined(error)
+            }
             Ok(Err(error)) | Err(error) => Answer::Failed(error),
         },
         Offered::Unsent(error) => Answer::Declined(error),
@@ -56,17 +67,16 @@ pub(crate) fn answer(offered: Offered, crossing: &Crossing) -> Answer {
 impl Runtime {
     /// Choose, for `envelope`, a cell of the class `crossing` enters that
     /// is not in `offered`, by the class's cell policy, then an instance
-    /// of it by the hop's router: the instance, the cell's
-    /// [`id`](super::CellTable::id), and a selector's lease, with the
-    /// selector's meta added to `envelope`. `None` when no such cell may
-    /// take it.
+    /// of it by the hop's router: the instance, the cell, and a selector's
+    /// lease, with the selector's meta added to `envelope`. `None` when no
+    /// such cell may take it.
     pub(crate) async fn choose_cell(
         &self,
         crossing: &Crossing,
         cx: &Cx,
         envelope: &mut Forward,
         offered: &[u64],
-    ) -> Result<Option<(InstanceId, u64, Option<Lease>)>> {
+    ) -> Result<Option<(InstanceId, Chosen, Option<Lease>)>> {
         match crossing.within() {
             Within::Policy(policy) => Ok(crossing
                 .pick(*policy, self.random(), offered)
@@ -83,7 +93,7 @@ impl Runtime {
         }
     }
 
-    /// After the cell `cell` declined `envelope` with `refusal`, offer it
+    /// After the cell `declined` declined `envelope` with `refusal`, offer it
     /// to the cells not yet offered it, as the first was chosen, until one
     /// takes it, the request fails, or `cell_failovers` more were offered
     /// it. When every cell that may take it declined, the request fails
@@ -100,10 +110,10 @@ impl Runtime {
         cx: &Cx,
         mut envelope: Forward,
         timed: bool,
-        cell: u64,
+        declined: Chosen,
         refusal: Error,
     ) -> Result<Handed> {
-        let mut offered = vec![cell];
+        let mut offered = vec![declined.id];
         let mut refusal = refusal;
         while offered.len() <= self.config.cell_failovers {
             if let Within::Selector { .. } = crossing.within() {
@@ -123,7 +133,7 @@ impl Runtime {
                 bytes,
                 self.config.setup_timeout,
             );
-            match answer(offer.await, crossing) {
+            match answer(offer.await, crossing, cell) {
                 Answer::Accepted(accepted) => {
                     return Ok(Handed {
                         accepted,
@@ -133,7 +143,7 @@ impl Runtime {
                 }
                 Answer::Failed(error) => return Err(error),
                 Answer::Declined(declined) => {
-                    offered.push(cell);
+                    offered.push(cell.id);
                     refusal = declined;
                 }
             }
@@ -361,6 +371,7 @@ mod tests {
                     offered: Box::new([gdl::InstanceId::from_u128(id.as_u128())]),
                     retired: Box::new([]),
                     turn: Arc::new(AtomicUsize::new(0)),
+                    damping: Arc::new(super::super::Damping::new(tokio::time::Instant::now())),
                 })]),
             },
         );
@@ -380,8 +391,82 @@ mod tests {
             selector.clone(),
             crossing(selector),
         ];
+        let writes = super::super::damping::WRITES.with(Cell::get);
         let made = allocations(&rt, &routers).await;
         assert_eq!(made[1], made[0], "with a policy: {made:?}");
         assert_eq!(made[3], made[2], "with a selector: {made:?}");
+        assert_eq!(
+            super::super::damping::WRITES.with(Cell::get),
+            writes,
+            "an accepted offer to an undamped cell wrote damping state"
+        );
+    }
+
+    /// The crossing into `model_x` of [`layout`], over `cells`, each with
+    /// one entry instance and an idle summary.
+    fn crossing_over(names: &[&str]) -> Crossing {
+        let cells = Cells::new("home", ["d"]);
+        let tables = names
+            .iter()
+            .map(|name| {
+                let id = velo::InstanceId::new_v4();
+                Arc::new(CellTable {
+                    class: "model_x".into(),
+                    cell: (*name).into(),
+                    id: cell_id("model_x", name),
+                    generation: 1,
+                    region: "home".into(),
+                    state: CellState::Ready,
+                    load: super::super::tests::idle(),
+                    eligible: Box::new([id]),
+                    offered: Box::new([gdl::InstanceId::from_u128(id.as_u128())]),
+                    retired: Box::new([]),
+                    turn: Arc::new(AtomicUsize::new(0)),
+                    damping: Arc::new(super::super::Damping::new(tokio::time::Instant::now())),
+                })
+            })
+            .collect();
+        cells.store("d", EntryTable { cells: tables });
+        let mut targets = targets(&layout(), "a", &cells).expect("targets");
+        let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
+        Crossing::new(target, Router::Policy(Policy::RoundRobin))
+    }
+
+    /// A pick whose cell accepts allocates nothing and, while the cell is
+    /// not damped, writes no damping state: an acceptance by an undamped
+    /// cell costs a branch. A decline writes, and so does the acceptance
+    /// that ends a cell's damping, once.
+    #[test]
+    fn an_accepted_pick_allocates_nothing_and_writes_no_damping() {
+        let writes = || super::super::damping::WRITES.with(Cell::get);
+        let random = std::hash::RandomState::new();
+        let crossing = crossing_over(&["m1", "m2", "m3"]);
+        let (before, wrote) = (COUNTED.load(Ordering::Relaxed), writes());
+        COUNTING.with(|counting| counting.set(true));
+        for _ in 0..1000 {
+            let (_, chosen) = crossing
+                .pick(Policy::RoundRobin, &random, &[])
+                .expect("a cell");
+            crossing.accepted(chosen);
+        }
+        COUNTING.with(|counting| counting.set(false));
+        assert_eq!(
+            COUNTED.load(Ordering::Relaxed) - before,
+            0,
+            "a pick allocated"
+        );
+        assert_eq!(writes() - wrote, 0, "an accepted pick wrote damping state");
+
+        let lone = crossing_over(&["m1"]);
+        let (_, chosen) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
+        lone.declined(chosen);
+        assert_eq!(writes() - wrote, 1, "a decline wrote nothing");
+        // A lone cell is never damped out of the choice.
+        let (_, chosen) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
+        lone.accepted(chosen);
+        assert_eq!(writes() - wrote, 2, "the acceptance kept the damping");
+        let (_, chosen) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
+        lone.accepted(chosen);
+        assert_eq!(writes() - wrote, 2, "an undamped cell's acceptance wrote");
     }
 }

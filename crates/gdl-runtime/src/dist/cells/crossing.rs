@@ -54,22 +54,22 @@ impl Crossing {
     }
 
     /// Choose a cell for one attempt, then an instance of it by `policy`,
-    /// with the chosen cell's [`id`](CellTable::id), or `None` when no
-    /// cell but those in `excluded` may take it: one load of the table,
-    /// a read of the clock, two counter increments, and the policy's
-    /// passes over the followed cells, with no lock and no allocation.
+    /// with the chosen cell, or `None` when no cell but those in
+    /// `excluded` may take it: one load of the table, a read of the clock,
+    /// two counter increments, and the policy's passes over the followed
+    /// cells, with no lock and no allocation.
     pub(crate) fn pick(
         &self,
         policy: Policy,
         random: &RandomState,
         excluded: &[u64],
-    ) -> Option<(InstanceId, u64)> {
+    ) -> Option<(InstanceId, Chosen)> {
         let table = self.target.table.load();
         let cell = self.cell(&table, excluded)?;
         let sequence = cell.turn.fetch_add(1, Ordering::Relaxed);
         Some((
             cell.eligible[turn(policy, sequence, cell.eligible.len(), random)],
-            cell.id,
+            Chosen::of(cell),
         ))
     }
 
@@ -87,7 +87,7 @@ impl Crossing {
         cx: &'a Cx,
         head: &'a [u8],
         excluded: &'a [u64],
-    ) -> BoxFuture<'a, Result<Option<(InstanceId, u64, Picked)>>> {
+    ) -> BoxFuture<'a, Result<Option<(InstanceId, Chosen, Picked)>>> {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.target.table.load_full();
@@ -103,7 +103,7 @@ impl Crossing {
                     .await?;
                 let chosen = cell.eligible[picked.index];
                 if still_eligible(&self.target.table.load(), &cell, chosen) {
-                    return Ok(Some((chosen, cell.id, picked)));
+                    return Ok(Some((chosen, Chosen::of(&cell), picked)));
                 }
             }
             Err(Error::routing(format!(
@@ -127,6 +127,36 @@ impl Crossing {
         &self.target.class
     }
 
+    /// The cell `chosen` declined an offer: it is damped, as its table now
+    /// holds it, unless it is no longer followed.
+    pub(crate) fn declined(&self, chosen: Chosen) {
+        if let Some(cell) = self.followed(chosen.id) {
+            cell.damping.decline(tokio::time::Instant::now());
+        }
+    }
+
+    /// The cell `chosen` accepted an offer: its damping ends, if it was
+    /// damped when it was chosen. A cell that was not writes nothing, so an
+    /// accepted offer costs a branch.
+    pub(crate) fn accepted(&self, chosen: Chosen) {
+        if chosen.damped
+            && let Some(cell) = self.followed(chosen.id)
+        {
+            cell.damping.accept();
+        }
+    }
+
+    /// The followed cell whose [`id`](CellTable::id) is `id`, in its table
+    /// now.
+    fn followed(&self, id: u64) -> Option<Arc<CellTable>> {
+        let table = self.target.table.load();
+        table
+            .cells
+            .iter()
+            .find(|cell| cell.id == id)
+            .map(Arc::clone)
+    }
+
     /// The cell the policy chooses from `table` for one attempt, of those
     /// not in `excluded`, by the summaries' ages now.
     fn cell<'t>(&self, table: &'t EntryTable, excluded: &[u64]) -> Option<&'t Arc<CellTable>> {
@@ -144,6 +174,24 @@ impl Crossing {
                 draw,
             )
             .map(|at| &table.cells[at])
+    }
+}
+
+/// The cell an attempt chose: its [`id`](CellTable::id), which a request
+/// that it declines excludes, and whether the chooser damped it when it
+/// was chosen. A copy, so that a request keeps no table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Chosen {
+    pub(crate) id: u64,
+    damped: bool,
+}
+
+impl Chosen {
+    fn of(cell: &CellTable) -> Self {
+        Self {
+            id: cell.id,
+            damped: cell.damping.is_damped(),
+        }
     }
 }
 
@@ -260,6 +308,7 @@ mod tests {
                 .collect(),
             retired: Box::new([]),
             turn,
+            damping: Arc::new(super::super::Damping::new(tokio::time::Instant::now())),
         })
     }
 
@@ -338,22 +387,21 @@ mod tests {
         let random = RandomState::new();
         let m1 = super::super::cell_id("model_x", "m1");
         let m2 = super::super::cell_id("model_x", "m2");
-        assert_eq!(
-            crossing.pick(Policy::RoundRobin, &random, &[]),
-            Some((ids[0], m1))
-        );
-        assert_eq!(
-            crossing.pick(Policy::RoundRobin, &random, &[m1]),
-            Some((ids[1], m2))
-        );
-        assert_eq!(crossing.pick(Policy::RoundRobin, &random, &[m1, m2]), None);
+        let pick = |excluded: &[u64]| {
+            crossing
+                .pick(Policy::RoundRobin, &random, excluded)
+                .map(|(id, chosen)| (id, chosen.id))
+        };
+        assert_eq!(pick(&[]), Some((ids[0], m1)));
+        assert_eq!(pick(&[m1]), Some((ids[1], m2)));
+        assert_eq!(pick(&[m1, m2]), None);
         let selector = gdl::__runtime::Typed(Arc::new(gdl::LeastLoaded::new()));
         let cx = Cx::new();
         let chosen = crossing
             .choose(&selector, &cx, &[], &[m1])
             .await
             .expect("a choice")
-            .map(|(id, cell, _)| (id, cell));
+            .map(|(id, cell, _)| (id, cell.id));
         assert_eq!(chosen, Some((ids[1], m2)));
         let none = crossing
             .choose(&selector, &cx, &[], &[m1, m2])

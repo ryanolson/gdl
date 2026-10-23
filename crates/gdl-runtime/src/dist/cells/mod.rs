@@ -8,9 +8,11 @@
 //! whole, as the roster's is. Each hand-off into the other class chooses
 //! a cell from its table by the class's cell policy, then an instance of
 //! that cell ([`Crossing`]), and offers the request to another cell when
-//! that one declines it (`Runtime::fail_over`).
+//! that one declines it (`Runtime::fail_over`), damping the cell that
+//! declined for the requests after it ([`damping`]).
 
 mod crossing;
+mod damping;
 mod follow;
 mod offer;
 mod policy;
@@ -18,7 +20,7 @@ mod task;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use crossing::{Crossing, Target, Within, targets};
+pub(crate) use crossing::{Chosen, Crossing, Target, Within, targets};
 pub(crate) use offer::{Answer, answer};
 pub(crate) use task::follow;
 // The membership's tests drive the follower beside their own.
@@ -30,6 +32,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
+use damping::Damping;
 use gdl_cells::{CellState, LoadSummary};
 use gdl_model::Layout;
 use tokio::sync::watch;
@@ -113,6 +116,10 @@ impl Cells {
                 load_age: cell
                     .load
                     .map(|(_, arrived)| now.saturating_duration_since(arrived)),
+                damped: cell
+                    .damping
+                    .is_damped()
+                    .then(|| std::time::Duration::from_millis(cell.damping.left(now))),
                 eligible: cell.eligible.to_vec(),
                 retired: cell.retired.to_vec(),
             })
@@ -260,6 +267,11 @@ pub struct FollowedCell {
     /// since the hub last made it, or since the follow was first shown.
     /// `None` with no summary.
     pub load_age: Option<std::time::Duration>,
+    /// Whether this chooser damps the cell, and how long its window still
+    /// lasts: `Some` from a decline of its offer until it accepts one,
+    /// and while the window lasts the cell is not chosen; `None` when it
+    /// is not damped.
+    pub damped: Option<std::time::Duration>,
     /// The entry instances of the segment that may be routed to, by id:
     /// none while the state is `draining` or `unavailable`.
     pub eligible: Vec<InstanceId>,
@@ -296,6 +308,9 @@ pub(crate) struct CellTable {
     /// The built-in routers' turn within the cell, shared by every table
     /// of the cell's follow, so that a new table keeps the turn.
     pub(crate) turn: Arc<AtomicUsize>,
+    /// The chooser's damping of the cell, shared by every table of the
+    /// cell, of every follow of it.
+    pub(crate) damping: Arc<Damping>,
 }
 
 /// The number that names the cell `cell` of `class` in its tables: a hash

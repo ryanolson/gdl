@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, ask, model_of, placement, run_graph, spec_of,
+    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, model_of, placement, run_graph, spec_of,
 };
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::streamed::{self, Script, replies, words};
@@ -550,6 +550,105 @@ async fn a_hand_off_that_never_left_is_tried_on_another_cell() {
     ask(&chooser.segment).await.expect("another cell answered");
     assert_eq!(offered(&[&m1, &m2]), [0, 1]);
     assert_eq!((started(&e1), started(&e2)), (0, 1));
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// The runtime settings of an entry that admits `limit` requests at once.
+fn admitting(limit: usize) -> impl Fn(RuntimeConfig) -> RuntimeConfig + Sync {
+    move |runtime| RuntimeConfig {
+        admission_limit: limit,
+        ..runtime
+    }
+}
+
+/// Two ready home cells: `M1` holds 3 of the 4 roots it admits, `M2` none
+/// of its 2. Requests go to the lighter, `M2`. Once `M2` is full, but
+/// before its summary says so, the request offered to it is declined and
+/// answered by `M1`, and the chooser damps `M2`: the next request is not
+/// offered to it at all. The test fills `M2` just after a summary of it
+/// arrived, so that the next, which would show it full, is a period
+/// (1 s) away. It runs for about 4 s: it waits for each cell's summaries,
+/// which come a period apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cell_that_declines_is_damped_and_the_lighter_cell_is_preferred() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub, "", Selectors::new(), &|deployment| {
+        reference_graph(deployment, &quiet)
+    })
+    .await;
+    let cells = tables(&chooser);
+    let m1 = reference_cell(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        &admitting(4),
+        &quiet,
+    )
+    .await;
+    following(&cells, &[(M1, CellState::Ready)]).await;
+    let mut held = Vec::new();
+    for text in ["m1-a", "m1-b", "m1-c"] {
+        held.push(hold(&chooser, text).await);
+    }
+    let m2 = reference_cell(
+        &spec,
+        &directory,
+        ready(M2, "m2-hub:1337"),
+        &admitting(2),
+        &quiet,
+    )
+    .await;
+    let admitted = |cells: &Cells, cell: &str| {
+        followed(cells, "f", cell).and_then(|m| m.load.map(|load| load.admitted))
+    };
+    until(
+        &cells,
+        "M1's summary of its held roots, and M2's",
+        |cells| admitted(cells, M1) == Some(3) && admitted(cells, M2).is_some(),
+    )
+    .await;
+
+    for _ in 0..10 {
+        ask(&chooser.segment).await.expect("answered");
+    }
+    assert_eq!((m1.forwards(), m2.forwards()), (3, 10), "not the lighter");
+
+    // A summary of M2 that has just arrived, with nothing admitted.
+    until(&cells, "a fresh summary of an idle M2", |cells| {
+        followed(cells, "f", M2).is_some_and(|m| {
+            m.load.is_some_and(|load| load.admitted == 0)
+                && m.load_age.is_some_and(|age| age < SUMMARY / 4)
+        })
+    })
+    .await;
+    for text in ["m2-a", "m2-b"] {
+        held.push(hold(&chooser, text).await);
+    }
+    assert_eq!((m1.forwards(), m2.forwards()), (3, 12), "not the lighter");
+    let before = offered(&[&m1, &m2]);
+    ask(&chooser.segment).await.expect("M1 answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (4, 12));
+    assert_eq!(
+        offered(&[&m1, &m2]),
+        [before[0] + 1, before[1] + 1],
+        "M2 was not offered the request first"
+    );
+    let m2_now = followed(&cells, "f", M2).expect("followed");
+    assert!(m2_now.damped.is_some(), "M2 was not damped: {m2_now:?}");
+
+    ask(&chooser.segment).await.expect("M1 answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (5, 12));
+    assert_eq!(
+        offered(&[&m1, &m2]),
+        [before[0] + 2, before[1] + 1],
+        "the damped cell was offered the next request"
+    );
+    drop(held);
     for hub in [hub, m1.hub, m2.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }

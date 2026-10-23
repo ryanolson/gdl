@@ -585,7 +585,7 @@ impl Runtime {
                     self.config.setup_timeout,
                 )
                 .await;
-            return match super::cells::answer(offered, crossing) {
+            return match super::cells::answer(offered, crossing, cell) {
                 Answer::Accepted(accepted) => Ok(Handed {
                     accepted,
                     sent,
@@ -714,7 +714,7 @@ impl Router {
 /// The cell a chooser's hand-off is offered to, and the crossing that
 /// chose it; never one without the `hub` feature, which has no cells.
 #[cfg(feature = "hub")]
-type Offering<'a> = Option<(&'a super::cells::Crossing, u64)>;
+type Offering<'a> = Option<(&'a super::cells::Crossing, super::cells::Chosen)>;
 #[cfg(not(feature = "hub"))]
 type Offering<'a> = Option<std::marker::PhantomData<&'a ()>>;
 
