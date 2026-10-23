@@ -20,7 +20,10 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use velo_hub::Hub;
 
-use super::cells::{Nothing, REGION, Resolving, cell_hub_timed, model_cell, settings, timing};
+use super::cells::{
+    Nothing, REGION, Resolving, cell_hub_proxied, cell_hub_timed, model_cell, settings, timing,
+};
+use super::proxy::Proxy;
 use super::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
 
 /// Every segment of [`placement`].
@@ -63,6 +66,9 @@ pub struct Running<H> {
     pub cells: Option<Cells>,
     /// The instance's velo node.
     pub node: Velo,
+    /// While true, the instance's serving body, once it is told to stop,
+    /// waits before it returns, as a body that finishes its own work does.
+    pub body: Arc<tokio::sync::watch::Sender<bool>>,
     serving: JoinHandle<gdl::Result<()>>,
 }
 
@@ -83,6 +89,15 @@ impl<H> Running<H> {
         let _ = tokio::time::timeout(WAIT * 2, self.serving)
             .await
             .expect("the instance left in time");
+    }
+
+    /// Wait until the instance has ended on its own, within `within`, and
+    /// return how its serving ended.
+    pub async fn ended(self, within: Duration) -> gdl::Result<()> {
+        tokio::time::timeout(within, self.serving)
+            .await
+            .expect("the instance ended in time")
+            .expect("the instance's task")
     }
 }
 
@@ -127,9 +142,13 @@ pub async fn run_graph<H: Register + Send + Sync + 'static>(
     let root = assemble(&deployment)?;
     let started = deployment.start(root)?;
     let (tx, rx) = oneshot::channel();
+    let body = Arc::new(tokio::sync::watch::Sender::new(false));
+    let held = body.subscribe();
     let serving = tokio::spawn(launch.serve(started, |segment, shutdown| async move {
         let _ = tx.send(segment);
         shutdown.cancelled().await;
+        let mut held = held;
+        let _ = held.wait_for(|held| !*held).await;
         Ok(())
     }));
     let segment = tokio::time::timeout(WAIT, rx)
@@ -141,6 +160,7 @@ pub async fn run_graph<H: Register + Send + Sync + 'static>(
         segment,
         cells,
         node,
+        body,
         serving,
     })
 }
@@ -247,20 +267,7 @@ pub async fn model_summarized<H: Register + Send + Sync + 'static>(
     entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> ModelCell<H> {
-    let hub = CellSettings {
-        summary: SUMMARY,
-        ..model_hub_needing(cell.name, cell.hub, cell.quorum)
-    };
-    let timing = CellTiming {
-        heartbeat: SUMMARY,
-        ..timing()
-    };
-    let extra = format!(
-        "{}summary_ms = {}
-{runtime}",
-        model_cell(cell.name),
-        SUMMARY.as_millis()
-    );
+    let (hub, timing, extra) = summarized(cell, runtime);
     start_model(
         spec,
         directory,
@@ -271,6 +278,40 @@ pub async fn model_summarized<H: Register + Send + Sync + 'static>(
         assemble,
     )
     .await
+}
+
+/// [`model_summarized`], with the cell's hub reached through a proxy by
+/// the hubs that follow it ([`cell_hub_proxied`]).
+pub async fn model_proxied<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    runtime: &str,
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> (ModelCell<H>, Proxy) {
+    let (settings_of_hub, timing, extra) = summarized(cell, runtime);
+    let (hub, readiness, proxy) = cell_hub_proxied(spec, settings_of_hub, directory, timing).await;
+    let cell = instances(spec, (hub, readiness), cell, &extra, &|_, r| r, assemble).await;
+    (cell, proxy)
+}
+
+/// The settings of [`model_summarized`]'s hub, its timing, and what it
+/// adds to every instance's settings.
+fn summarized(cell: Model<'_>, runtime: &str) -> (CellSettings, CellTiming, String) {
+    let hub = CellSettings {
+        summary: SUMMARY,
+        ..model_hub_needing(cell.name, cell.hub, cell.quorum)
+    };
+    let timing = CellTiming {
+        heartbeat: SUMMARY,
+        ..timing()
+    };
+    let extra = format!(
+        "{}summary_ms = {}\n{runtime}",
+        model_cell(cell.name),
+        SUMMARY.as_millis()
+    );
+    (hub, timing, extra)
 }
 
 /// Start the model cell `cell` with its hub's settings and timing, and
@@ -284,8 +325,39 @@ async fn start_model<H: Register + Send + Sync + 'static>(
     entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> ModelCell<H> {
+    let hub = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
+    let configure = |segment: &str, runtime| match segment {
+        "f" => entry(runtime),
+        _ => runtime,
+    };
+    instances(spec, hub, cell, extra, &configure, assemble).await
+}
+
+/// [`model_summarized`] with [`RUNTIME`], each instance's runtime
+/// settings changed by `configure`, given the instance's segment.
+pub async fn model_configured<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> ModelCell<H> {
+    let (settings_of_hub, timing, extra) = summarized(cell, RUNTIME);
+    let hub = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
+    instances(spec, hub, cell, &extra, configure, assemble).await
+}
+
+/// Start `cell`'s instances at its hub, each with `extra` added to its
+/// settings.
+async fn instances<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    (hub, readiness): (Hub, Arc<CellReadiness<Resolving>>),
+    cell: Model<'_>,
+    extra: &str,
+    configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> ModelCell<H> {
     let entries = cell.entries;
-    let (hub, readiness) = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
     let config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
@@ -298,10 +370,7 @@ async fn start_model<H: Register + Send + Sync + 'static>(
     let mut running = join_all(segments.into_iter().map(|segment| {
         let config = &config;
         async move {
-            let runtime = match segment {
-                "f" => entry(config.runtime.clone()),
-                _ => config.runtime.clone(),
-            };
+            let runtime = configure(segment, config.runtime.clone());
             run_graph(config, segment, spec, runtime, assemble)
                 .await
                 .expect("a model instance serves")

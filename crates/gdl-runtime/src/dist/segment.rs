@@ -231,6 +231,19 @@ impl<H> Segment<H> {
         self.rt.is_closed()
     }
 
+    /// Refuse every offer that arrives from now on, the forward hand-offs
+    /// from another class, and take the rest: an entry instance of a
+    /// draining cell stops taking new work, and still takes the hand-offs
+    /// inside its cell that carry the requests it took.
+    pub fn decline_offers(&self) {
+        self.rt.decline_offers();
+    }
+
+    /// Whether the instance declines offers.
+    pub fn declines_offers(&self) -> bool {
+        self.rt.declines_offers()
+    }
+
     /// Root requests with outstanding remote attempts started here.
     pub fn attempting(&self) -> usize {
         self.rt.admission.attempting()

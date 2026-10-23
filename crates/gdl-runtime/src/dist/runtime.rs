@@ -338,6 +338,12 @@ pub(crate) struct Runtime {
     random: RandomState,
     /// Set once a retiring instance stops taking hand-offs and openings.
     closed: AtomicBool,
+    /// Set once an entry instance of a draining cell stops taking offers,
+    /// the hand-offs from another class.
+    offers_declined: AtomicBool,
+    /// Whether each hop's hand-offs to this segment are offers, worked out
+    /// once.
+    offers: Vec<bool>,
     names: Names,
     /// Forward hand-offs, backward runs, and request streams this instance
     /// has taken on.
@@ -394,6 +400,12 @@ impl Runtime {
             placement: layout.placement_hash(),
         };
         let tag = format!("{:016x}-{:016x}", identity.contract, identity.placement);
+        let offers = super::offers::offered_hops(layout.boundaries(), layout.hops().len(), |hop| {
+            layout.hops()[hop]
+                .backward_runs
+                .first()
+                .is_some_and(|inner| inner.segment == segment)
+        });
         Ok(Self {
             admission: Admission::new(
                 config.admission_limit,
@@ -407,6 +419,8 @@ impl Runtime {
             crossings,
             random: RandomState::new(),
             closed: AtomicBool::new(false),
+            offers_declined: AtomicBool::new(false),
+            offers,
             names: Names {
                 forward: format!("gdl-fwd-{tag}"),
                 open: format!("gdl-open-{tag}"),
@@ -444,6 +458,38 @@ impl Runtime {
             ));
         }
         Ok(())
+    }
+
+    /// Refuse every offer admitted from now on: a forward hand-off on a
+    /// hop that crosses into this segment's class, which only another
+    /// class's instances send. The hand-offs inside the class, which carry
+    /// the requests already taken, are still taken. Ordered with the
+    /// ledger as [`Runtime::close`] is.
+    pub(crate) fn decline_offers(&self) {
+        self.offers_declined.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the instance declines offers.
+    pub(crate) fn declines_offers(&self) -> bool {
+        self.offers_declined.load(Ordering::SeqCst)
+    }
+
+    /// Refuse an offer the instance has admitted once it declines offers.
+    /// One atomic load per offer, and none for any other hand-off.
+    pub(crate) fn check_offer(&self) -> Result<()> {
+        if self.declines_offers() {
+            return Err(Error::new(
+                ErrorKind::Overloaded,
+                "the instance's cell is draining and takes no new work from another cell",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether the forward hand-offs of hop `hop` that reach this segment
+    /// are offers from another class ([`super::offers::offered_hops`]).
+    pub(crate) fn offered(&self, hop: usize) -> bool {
+        self.offers.get(hop).copied().unwrap_or(false)
     }
 
     pub(crate) fn names(&self) -> &Names {

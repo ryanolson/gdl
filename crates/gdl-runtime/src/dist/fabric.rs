@@ -7,6 +7,8 @@
 mod hub;
 mod renewal;
 #[cfg(feature = "hub")]
+pub(crate) use hub::CellDrain;
+#[cfg(feature = "hub")]
 pub use hub::HubSession;
 #[cfg(feature = "hub")]
 pub(crate) use hub::bind_under_hub;

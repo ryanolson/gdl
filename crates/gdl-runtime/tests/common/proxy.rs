@@ -17,7 +17,17 @@ pub enum Mode {
     /// passing it on: a hub that answers an announcement and then stops
     /// answering at the withdrawal that follows it.
     SilentAtDelete,
+    /// Forward, but give back the state `draining` as `ready`: a cell's
+    /// hub whose watch says nothing of the cell's drain to the hub that
+    /// follows it through the proxy, while its other events still come.
+    Undrained,
 }
+
+/// What [`Mode::Undrained`] replaces in what a hub sends, and with what:
+/// as long, so that the response's framing holds, and still JSON, with
+/// spaces after the string.
+const DRAINING: &[u8] = b"\"draining\"";
+const UNDRAINED: &[u8] = b"\"ready\"   ";
 
 /// A TCP proxy in front of one of a hub's ports, so that a test can make
 /// the hub fall silent or go away for a while under running instances.
@@ -85,7 +95,7 @@ async fn relay(
                     return;
                 }
             }
-            Mode::Forward | Mode::SilentAtDelete => break,
+            Mode::Forward | Mode::SilentAtDelete | Mode::Undrained => break,
         }
     }
     let Ok(mut server) = tokio::net::TcpStream::connect(target).await else {
@@ -97,6 +107,9 @@ async fn relay(
     // The last bytes sent upstream, so that a request line split across
     // two reads is still recognized.
     let mut tail: Vec<u8> = Vec::new();
+    // What a hub sent that may be the start of a state to replace, held
+    // until the bytes after it come.
+    let mut held_down: Vec<u8> = Vec::new();
     loop {
         let now = *mode.borrow_and_update();
         match now {
@@ -107,7 +120,7 @@ async fn relay(
                 }
                 continue;
             }
-            Mode::Forward | Mode::SilentAtDelete => {}
+            Mode::Forward | Mode::SilentAtDelete | Mode::Undrained => {}
         }
         tokio::select! {
             read = from_client.read(&mut up) => match read {
@@ -140,7 +153,12 @@ async fn relay(
             },
             read = from_server.read(&mut down) => match read {
                 Ok(n) if n > 0 => {
-                    if to_client.write_all(&down[..n]).await.is_err() {
+                    let mut out = std::mem::take(&mut held_down);
+                    out.extend_from_slice(&down[..n]);
+                    if now == Mode::Undrained {
+                        held_down = undrain(&mut out);
+                    }
+                    if to_client.write_all(&out).await.is_err() {
                         return;
                     }
                 }
@@ -151,4 +169,24 @@ async fn relay(
             },
         }
     }
+}
+
+/// Replace each [`DRAINING`] in `out` with [`UNDRAINED`], and take off the
+/// end of it, to be sent with what comes next, a part that may be the
+/// start of one.
+fn undrain(out: &mut Vec<u8>) -> Vec<u8> {
+    let mut at = 0;
+    while let Some(found) = out[at..]
+        .windows(DRAINING.len())
+        .position(|window| window == DRAINING)
+    {
+        let start = at + found;
+        out[start..start + DRAINING.len()].copy_from_slice(UNDRAINED);
+        at = start + DRAINING.len();
+    }
+    let partial = (1..DRAINING.len())
+        .rev()
+        .find(|len| out.len() >= *len && out.ends_with(&DRAINING[..*len]))
+        .unwrap_or(0);
+    out.split_off(out.len() - partial)
 }

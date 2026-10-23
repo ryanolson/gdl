@@ -5,6 +5,7 @@
 //! and tested here rather than in each generated crate.
 
 mod barrier;
+mod cell;
 mod system;
 
 use std::collections::BTreeMap;
@@ -64,7 +65,9 @@ use system::{Health, Phase, SystemSettings};
 /// follows its hub's relay of the cells the hub follows, into the tables
 /// [`Launch::cells`] reads. One whose segment is an entry segment of its
 /// class (it holds the inner end of a hop into the class) reports its
-/// admission to its hub once every `summary_ms` while it is ready.
+/// admission to its hub once every `summary_ms` while it is ready. Under
+/// a hub, an instance in a cell that a hop enters watches its hub for the
+/// cell's drain ([`Launch::serve`]).
 pub struct ProcessConfig<H> {
     listen: SocketAddr,
     roster: Option<PathBuf>,
@@ -424,6 +427,9 @@ impl<H> ProcessConfig<H> {
         // A chooser's follower of the cells it sends to, under a hub.
         #[cfg(feature = "hub")]
         let mut chooser = None;
+        // Under a hub, an instance in a cell watches for its cell's drain.
+        #[cfg(feature = "hub")]
+        let mut cell_drain = None;
         let (node, roster, peers, follower) = match discovery {
             Discovery::Files(dir) => {
                 ready.await?;
@@ -495,6 +501,14 @@ impl<H> ProcessConfig<H> {
                         drain,
                     )?
                     .map(|(cells, task)| (cells, Abort(task)));
+                    cell_drain = crate::dist::CellDrain::watch(
+                        &layout,
+                        cell,
+                        segment,
+                        host,
+                        *public_port,
+                        self.runtime.setup_timeout,
+                    )?;
                 }
                 // The membership leaves to the chooser what its tables hold.
                 let cells = chooser.as_ref().map(|(cells, _)| cells.clone());
@@ -556,6 +570,8 @@ impl<H> ProcessConfig<H> {
             _chooser: chooser.map(|(_, task)| task),
             #[cfg(feature = "hub")]
             reports,
+            #[cfg(feature = "hub")]
+            cell_drain,
             _leaving: leaving,
         })
     }
@@ -626,6 +642,10 @@ pub struct Launch {
     /// admission to its hub.
     #[cfg(feature = "hub")]
     reports: Option<Duration>,
+    /// For an instance in a cell under a hub, its part in its cell's
+    /// drain.
+    #[cfg(feature = "hub")]
+    cell_drain: Option<crate::dist::CellDrain>,
     /// Dropped last, on every way out: says the instance has left.
     _leaving: Leaving,
 }
@@ -692,6 +712,11 @@ pub trait Drains: Send + Sync + 'static {
     /// for a launch that serves no segment.
     fn close(&self) {}
 
+    /// Refuse the offers that arrive from now on, the hand-offs from
+    /// another class, and take the rest. Nothing by default, for a launch
+    /// that serves no segment.
+    fn decline_offers(&self) {}
+
     /// What its admission holds, for the load report of an entry instance
     /// in a cell. `None` by default, for a launch that serves no segment,
     /// which reports nothing.
@@ -711,6 +736,10 @@ impl<H: Send + Sync + 'static> Drains for Segment<H> {
 
     fn close(&self) {
         Segment::close(self);
+    }
+
+    fn decline_offers(&self) {
+        Segment::decline_offers(self);
     }
 }
 
@@ -775,6 +804,22 @@ impl Launch {
     /// since the hub that would answer it is gone, and gives the lease's
     /// error: the process is invisible to new peers and will be probed as
     /// dead, so the deployment must start it again.
+    ///
+    /// Under a hub, the drain of the instance's cell stops it too, once it
+    /// learns of it from its hub's cell watch. An entry instance keeps
+    /// taking new work, and stays ready, for a bound after it learns of the
+    /// drain: the setup timeout and twice the cell's `summary_ms`, so that
+    /// an offer from a chooser whose view of the cell is stale lands. Then
+    /// it stops without retiring, declines offers from other cells from
+    /// then, however long its serving body takes to finish, finishes the
+    /// requests it holds, and announces that it has drained. It takes the
+    /// hand-offs inside its cell, which carry the requests the cell's entry
+    /// instances took, until every entry instance has drained or left,
+    /// then closes and leaves. An
+    /// interior instance serves until every entry instance of its cell has
+    /// drained or left, then stops as above. While its cell drains, the
+    /// entry instances are an interior instance's drain sources, whatever
+    /// stopped it.
     pub async fn serve<S, F, Fut>(mut self, segment: S, serve: F) -> Result<()>
     where
         S: Drains,
@@ -872,10 +917,12 @@ impl Launch {
                         Peers::Hub(session) => session.maintain().await,
                     }
                 };
-                let (ended, stop) = tokio::select! {
-                    result = &mut body => (Some(result), Ok(())),
-                    () = process.stops(1) => (None, Ok(())),
-                    result = lease => (None, result),
+                // The cell's drain stops the instance in its own time.
+                let (ended, stop, retires) = tokio::select! {
+                    result = &mut body => (Some(result), Ok(()), true),
+                    () = process.stops(1) => (None, Ok(()), true),
+                    result = lease => (None, result, true),
+                    () = self.cell_drain_stops() => (None, Ok(()), self.cell_drain_retires()),
                 };
                 #[cfg(feature = "hub")]
                 drop(reporter);
@@ -898,17 +945,20 @@ impl Launch {
                         },
                     }
                 };
+                // An entry instance of a draining cell stops taking offers at
+                // its bound, however long the body takes to finish.
+                let closing = self.cell_drain_declines(segment.as_ref(), deadline);
                 // Peers hear of the retirement while the body finishes; a
                 // lost lease took the hub that would hear it.
                 let retiring = async {
-                    if stop.is_ok() {
+                    if stop.is_ok() && retires {
                         self.retire(deadline).await;
                     }
                 };
-                let (result, ()) = tokio::select! {
+                let (result, (), ()) = tokio::select! {
                     biased;
                     () = process.stops(2) => return Err(second()),
-                    both = async { tokio::join!(finished, retiring) } => both,
+                    all = async { tokio::join!(finished, retiring, closing) } => all,
                 };
                 (result, stop, deadline)
             }
@@ -960,16 +1010,23 @@ impl Launch {
     /// this one has drained or left. Then it closes its entries (ruling
     /// 150) and waits until it holds no request; a stream holds its share
     /// until velo has handed its output on. Each wait ends at `deadline`.
-    /// With `hub` false (its lease is lost), the hub is not asked. Polls;
-    /// nothing is added to a request's path.
+    /// While its cell drains, an entry instance first waits out its bound,
+    /// declines offers, waits until it holds no request, and announces
+    /// that it has drained; and every instance's sources in (B) are the
+    /// cell's entry instances, so that an entry instance too takes the
+    /// hand-offs inside the cell until no entry instance holds a request
+    /// that may make one. With `hub` false (its lease is lost), the hub is
+    /// not asked. Polls; nothing is added to a request's path.
     async fn drain(
         &mut self,
         segment: &dyn Drains,
         deadline: tokio::time::Instant,
         // Only a hub is asked; a roster directory has no lease to lose.
-        #[cfg_attr(not(feature = "hub"), allow(unused_variables))] hub: bool,
+        hub: bool,
     ) {
-        let reaching: Vec<&str> = self.reaching.iter().map(String::as_str).collect();
+        self.cell_drain_settles(segment, deadline, hub).await;
+        let sources = self.drain_sources();
+        let reaching: Vec<&str> = sources.iter().map(String::as_str).collect();
         let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
         let me = self.node.instance_id();
         let pause = |every: Duration| async move {

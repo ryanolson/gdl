@@ -144,6 +144,18 @@ impl Instance {
 
     /// Join as an instance of `segment` of the deployment `spec`.
     pub async fn join_spec(hub: &Hub, spec: &DeploymentSpec, segment: &'static str) -> Self {
+        Self::try_join(hub, spec, segment)
+            .await
+            .expect("the hub admits the instance")
+    }
+
+    /// Ask to join as an instance of `segment` of the deployment `spec`:
+    /// the instance, or the hub's refusal.
+    pub async fn try_join(
+        hub: &Hub,
+        spec: &DeploymentSpec,
+        segment: &'static str,
+    ) -> Result<Self, ClientError> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let tcp = velo_hub::velo::transports::tcp::TcpTransportBuilder::new()
             .from_listener(listener)
@@ -165,14 +177,13 @@ impl Instance {
         let payload = serde_json::to_value(&registration).expect("valid test fixture");
         client
             .register(&node, BTreeMap::from([("gdl".to_string(), payload)]))
-            .await
-            .expect("the hub admits the instance");
-        Self {
+            .await?;
+        Ok(Self {
             client,
             segment,
             phases: HashMap::new(),
             node,
-        }
+        })
     }
 
     pub fn id(&self) -> InstanceId {

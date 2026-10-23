@@ -5,7 +5,7 @@
 //! from which the hub makes the cell's load summary.
 //!
 //! The hub (`gdl-hub`) serves them and a segment instance reads the relay
-//! and sends the report, so the wire types, the routes, and the client
+//! and its own cell's watch, for the cell's drain, and sends the report, so the wire types, the routes, and the client
 //! live here, where both reach them without the runtime linking the hub's
 //! server.
 
@@ -34,6 +34,15 @@ pub const FOLLOWS_ROUTE: &str = "/follows";
 /// instance the path names, which must be a usable entry instance of the
 /// cell.
 pub const LOAD_ROUTE: &str = "/instances/{instance_id}/load";
+
+/// The drain's route, under the extension's, on the hub's control
+/// listener: `POST`, with no body, starts the cell's drain and answers
+/// `202 Accepted` with the cell's health once it shows the cell
+/// `draining` and the directory has stored a record that says so, or
+/// after 5 s without it; a drain already started is answered the same
+/// way. A cell
+/// whose class no hop enters is refused with `409 Conflict`.
+pub const DRAIN_ROUTE: &str = "/drain";
 
 /// [`LOAD_ROUTE`]'s path for `instance`.
 pub fn load_path(instance: InstanceId) -> String {

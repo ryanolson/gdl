@@ -1120,6 +1120,9 @@ mod tests {
     }
 }
 
+mod cell;
 #[cfg(test)]
 mod drains;
 mod load;
+
+pub(crate) use cell::CellDrain;
