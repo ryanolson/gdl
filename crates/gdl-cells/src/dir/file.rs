@@ -3,6 +3,7 @@
 
 use std::{
     collections::HashMap,
+    fs::Metadata,
     io::{self, ErrorKind},
     path::Path,
     sync::{
@@ -126,22 +127,51 @@ impl Held {
 /// The metadata a scan compares to tell that a file may have changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stamp {
-    modified: SystemTime,
     len: u64,
+    modified: SystemTime,
+    // On unix, the change time, which every write and rename sets and no
+    // call sets back: a copy that preserves times restores a file's
+    // modification time, but not this. Elsewhere, the modification time.
+    changed: SystemTime,
+    // On unix, the inode: a rename puts another in the cell's place.
+    inode: u64,
 }
 
-/// How long after a file's modification a scan still reads it, though its
-/// stamp is unchanged. A write in the same tick of the file system's clock
-/// as the one read before, with the same length, leaves the stamp as it
-/// was, and the file system's clock runs coarser than this host's and may
-/// lag it; past this, a later write cannot share the stamp.
+impl Stamp {
+    fn of(metadata: &Metadata) -> io::Result<Self> {
+        let modified = metadata.modified()?;
+        #[cfg(unix)]
+        let (changed, inode) = {
+            use std::os::unix::fs::MetadataExt;
+            let since = Duration::new(
+                u64::try_from(metadata.ctime()).unwrap_or(0),
+                u32::try_from(metadata.ctime_nsec()).unwrap_or(0),
+            );
+            (UNIX_EPOCH + since, metadata.ino())
+        };
+        #[cfg(not(unix))]
+        let (changed, inode) = (modified, 0);
+        Ok(Self {
+            len: metadata.len(),
+            modified,
+            changed,
+            inode,
+        })
+    }
+}
+
+/// How long after a file's last change a scan still reads it, though its
+/// stamp is unchanged. Two writes in one tick of the file system's clock,
+/// which runs coarser than this host's and may lag it, can leave the stamp
+/// as it was, since a freed inode is used again; past this, a later write
+/// cannot share the stamp.
 const SETTLED: Duration = Duration::from_secs(1);
 
 impl Seen {
     fn unchanged(&self, stamp: Stamp) -> bool {
         self.stamp == stamp
             && stamp
-                .modified
+                .changed
                 .checked_add(SETTLED)
                 .is_some_and(|settled| settled <= self.read)
     }
@@ -178,10 +208,7 @@ pub(super) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<File
         if !metadata.is_file() {
             continue;
         }
-        let stamp = Stamp {
-            modified: metadata.modified()?,
-            len: metadata.len(),
-        };
+        let stamp = Stamp::of(&metadata)?;
         if let Some(seen) = previous.get(cell).filter(|seen| seen.unchanged(stamp)) {
             files.insert(cell.to_owned(), seen.clone());
             continue;
@@ -270,4 +297,33 @@ fn next_order() -> u64 {
         })
         .expect("the update always succeeds");
     now.max(previous.saturating_add(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::{SETTLED, Seen, Stamp};
+
+    /// The settling is measured from the change time, which nothing sets
+    /// back, never from the modification time, which a copy restores.
+    #[test]
+    fn a_stamp_is_trusted_only_once_its_file_has_settled() {
+        let changed = SystemTime::now();
+        let stamp = Stamp {
+            len: 10,
+            modified: changed - Duration::from_secs(60),
+            changed,
+            inode: 7,
+        };
+        let read = |after: Duration| Seen {
+            stamp,
+            read: changed + after,
+            entry: None,
+        };
+        assert!(!read(SETTLED / 2).unchanged(stamp), "read again");
+        assert!(read(SETTLED).unchanged(stamp), "settled");
+        let replaced = Stamp { inode: 8, ..stamp };
+        assert!(!read(SETTLED * 60).unchanged(replaced), "another file");
+    }
 }

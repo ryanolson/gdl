@@ -363,6 +363,45 @@ async fn a_rewrite_that_keeps_the_files_stamp_is_seen() {
     put(&mut seen, "m1", 1, 2).await;
 }
 
+/// A rewrite that keeps the file's length and puts its modification time
+/// back, as a copy that preserves times does, is seen though the scan had
+/// taken the file as settled and stopped reading it.
+#[tokio::test]
+async fn a_rewrite_that_restores_the_files_time_is_seen() {
+    let temp = temp();
+    let (a, b) = (
+        DirDirectory::new(temp.path()),
+        DirDirectory::new(temp.path()),
+    );
+    let file = temp.path().join(MODEL).join("m1.json");
+    let past = std::time::SystemTime::now() - Duration::from_secs(60);
+    let set_back = || {
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .and_then(|written| written.set_modified(past))
+            .expect("m1's time set back");
+        std::fs::metadata(&file).expect("m1's file")
+    };
+    a.publish(record("m1", 1, 1)).await.expect("m1");
+    let stamp = set_back();
+    let mut seen = watch(&b, None);
+    assert_eq!(snapshot(&mut seen).await.0, [at("m1", 1, 1)]);
+    // A file is settled a second after the kernel last changed it, and only
+    // then does a scan stop reading it: the watch's polls go on meanwhile.
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+    a.publish(record("m1", 1, 2)).await.expect("m1's heartbeat");
+    let now = set_back();
+    assert_eq!(
+        (now.modified().ok(), now.len()),
+        (stamp.modified().ok(), stamp.len()),
+        "the time and length are as they were"
+    );
+    put(&mut seen, "m1", 1, 2).await;
+    assert_eq!(snapshot(&mut watch(&b, None)).await.0, [at("m1", 1, 2)]);
+}
+
 /// A cell's record that stops being readable while nothing watches its
 /// class is a change of the files: a token from before cannot say what
 /// followed it.
