@@ -247,3 +247,11 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Why:** an apply builds images and publishes ports, so it is opt-in, as local imports are. A wait for health holds the request for the start period of the segments (30 minutes, to cover the time to load models).
 - **Workaround:** for another Docker host, download the bundle and run it there. Follow a started project with `docker compose -p gdl-<graph> logs -f`, and stop it with `docker compose -p gdl-<graph> down`.
 - **See:** plan 13, the 2026-10-21 addendum.
+
+## Film production
+
+### Opening voice assembly requires sequential speaker segments
+
+- **What happens:** `tools/video/voices.mjs assemble` rejects overlapping or interleaved inputs. It also rejects a take that exceeds its editorial cue window. Raw responses remain available for listening and manual editing.
+- **Why:** ElevenLabs dialogue returns one mixed recording. Timestamp cuts cannot separate simultaneous voices. The assembly tool preserves the scheduled pauses and does not shorten speech to fit a cue.
+- **What lifts it:** isolated speaker stems or a performance with sequential inputs. A longer take needs a new editorial window or a new recording. Generation never retries automatically.

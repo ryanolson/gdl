@@ -14,7 +14,9 @@ Rehearsal addendum, 2026-10-22: the [published demo](https://github.com/ryanolso
 
 The actual public-spec Compose run fetched node revision `a6c607ba48b4edea33f684699c8701bbdd543207` and generated 22 files under `tools/video/work/deployment`: four Dockerfiles, four Cargo manifests, three runtime configs, seven Rust sources, and four root artifacts. Runtime and hub dependencies pin public GDL core `deefaa92f37ef3f6e4372c7c4c16eb1eccc1ac94`. The generated services are front, engine, accounting, and hub. The prepared public accounting overlay adds ledger. Docker build and apply remain untested. The [evidence ledger](evidence.md) records exact settings, ports, pins, and proof boundaries.
 
-The silent 80-second opening and 33.52-second real-composer tour are ready at 1080p. Voice takes remain at zero, and the portraits have neutral states only. The native request/accounting/metrics proof, Docker rehearsal, replication, and edge/backend captures remain pending.
+The silent 80-second opening and 33.52-second real-composer tour are ready at 1080p. The portraits have neutral states only. The native request/accounting/metrics proof, Docker rehearsal, replication, and edge/backend captures remain pending.
+
+Audition addendum, 2026-10-23: the 80-second opening now has nine ElevenLabs takes and an opening music cue from the [official StarWars.com source](music.md). Its music starts at source level, ducks by two seconds, and cuts at 24 seconds. The [voice brief](voices.md) records the stock cast, exact credit usage, and timestamp handling. Thirty technical turns, the remaining score, effects, and mouth states remain pending. The first audition retains the current editorial holds.
 
 Audio direction addendum, 2026-10-22: begin voice auditions with the settled 80-second opening while the remaining demonstrations take shape. The owner selected the Star Wars main-title opening for the private rehearsal. Hold its opening notes at source level, fade to a quiet bed by the narrator's entrance at two seconds, and cut on Kyle's first word at 24 seconds. The source recording remains an external local file. Record final technical narration after its proof shots settle.
 
@@ -163,7 +165,7 @@ Record a scratch narration before producing voices. Read GDL as “G D L” and 
 
 Use a restrained narrator for the technical sections. Save the full trailer delivery for the crawl and closing. Keep character dialogue short. Use six distinct character performances. The dialogue is dramatized and does not imply recordings of the historical exchanges.
 
-All 39 spoken turns in the [script](script.md) include ElevenLabs audio tags. The [voice brief](voices.md) specifies the explicit model, speaker assignment, and relative pause cues. Preserve the dialogue words during generation. Remove delivery tags from the visible crawl and captions. Time the exact holds in the edit after selecting the voice takes. No voice takes have been generated.
+All 39 spoken turns in the [script](script.md) include ElevenLabs audio tags. The [voice brief](voices.md) specifies the explicit model, speaker assignment, and relative pause cues. Preserve the dialogue words during generation. Remove delivery tags from the visible crawl and captions. Time the exact holds in the edit after selecting the voice takes. Nine opening takes exist as a first audition.
 
 Use stock cast and narrator voices. Ryan can supply a custom ElevenLabs voice for himself. Each cast introduction reserves at least one second for its name, face, and voice to register.
 
@@ -252,7 +254,7 @@ node tools/video/render.mjs --from 0 --to 80 --out tools/video/work/opening.mp4
 node tools/video/render.mjs --audio <full-film-audio> --out tools/video/work/film.mp4
 ```
 
-These commands describe the production route. The voice recordings and finished movie remain pending.
+These commands describe the production route. The opening has a voice-and-music audition. The remaining narration and finished full film remain pending.
 
 On supported macOS versions, OBS can capture application audio through its native capture sources. See the official [macOS audio guide](https://obsproject.com/kb/macos-desktop-audio-capture-guide). Record narration separately when practical.
 

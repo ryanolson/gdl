@@ -2,7 +2,25 @@
 
 The optional [Hard Fork tribute](script.md#optional-post-credits-tag--a-nod-to-hard-fork) uses original archive clips for Casey Newton and Kevin Roose. Exclude `source: "archive"` cues from ElevenLabs. Those cues have no TTS text and `model_id: null`. Their [source ledger](hardfork.md) records clip status.
 
-Production note, 2026-10-22. The [script](script.md) is the source of spoken words and delivery cues. Its 39 spoken turns cover the narrator and six cartoon characters across 8:25. The annotations are prepared for audition. No voice takes have been generated.
+Production note, 2026-10-22. The [script](script.md) is the source of spoken words and delivery cues. Its 39 spoken turns cover the narrator and six cartoon characters across 8:25.
+
+Audition addendum, 2026-10-23: the first nine turns are generated with `eleven_v4` and aligned to the 80-second opening. This is the first audition, not a final voice selection. All nine takes fit their cue windows without time stretching. Thirty technical turns remain unrecorded. Ryan uses a stock voice until his custom voice is supplied.
+
+The request used 936 character credits. The account reported 9,064 remaining from its 10,000-character allowance after the request. These are dated observations, not current quota promises. The key can list voices and generate dialogue. Model-list access returned HTTP 401; that optional lookup did not block generation with an explicit model.
+
+| Role | Stock voice in this audition |
+| --- | --- |
+| Narrator | Brian — Deep, Resonant and Comforting |
+| Kyle | Adam — Dominant, Firm |
+| Ishan | Liam — Energetic, Social Media Creator |
+| Ryan | Chris — Charming, Down-to-Earth |
+| John T | Eric — Smooth, Trustworthy |
+| Graham | Roger — Laid-Back, Casual, Resonant |
+| Alec | Will — Relaxed Optimist |
+
+The [cast map](cast.json) contains the public stock voice IDs. These are fictional performances, not voice likenesses of the cast. Raw MP3, timestamps, per-turn WAVs, and the aligned voice stem remain under `tools/video/work/`. The decoded MP3 ends about 82 milliseconds before the API's final timestamp. Assembly records that difference and pads the tail with silence. It preserves the earlier segment boundaries.
+
+Open [the audition stage](http://127.0.0.1:8088/?manifest=/media/opening.json). The manifest loads nine voice takes and the separate opening music bed. `tools/video/work/opening-audition.mp4` combines them with the current animation. Mouth and blink variants, final pronunciation checks, and the full-film soundtrack remain pending.
 
 ## Account setup
 
@@ -11,7 +29,7 @@ The first audition covers the 80-second opening: nine turns, seven voices, and 9
 - Use an ElevenLabs account with API access and available credits.
 - Create the key under Developers > API Keys. The [official setup guide](https://elevenlabs.io/docs/help-center/technical/how-do-i-authorize-myself-using-an-api-key) describes these controls.
 - Store a restricted API key in 1Password. Supply the item name or `op://` reference, not the key value.
-- Enable `text_to_speech`, `voices_read`, and `models_read`. The [official API schema](https://api.elevenlabs.io/openapi.json) defines these permissions. `user_read` is optional for a quota lookup.
+- Enable `text_to_speech` and `voices_read`. The [official API schema](https://api.elevenlabs.io/openapi.json) defines these permissions. `models_read` enables optional model discovery. `user_read` enables an optional quota lookup.
 - Supply Ryan's custom `voice_id` when it is ready. A stock voice can cover his rehearsal turns.
 - Select the other stock voices during audition. Shared-library imports need the optional `add_voice_from_voice_library` permission.
 

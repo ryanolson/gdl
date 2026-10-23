@@ -6,6 +6,8 @@ With the empty media manifest, the stage is a silent animatic. Missing demo clip
 
 Each first cast introduction has a first-name label and a face hold of at least one second. Ishan uses light slang. Ryan asks for a translation exactly once, in the opening. Kyle interrupts with friendly impatience. Stock cast and narrator voices are planned. Ryan can supply a custom ElevenLabs voice for himself.
 
+The first voice-and-music audition is available locally at `tools/video/work/opening-audition.mp4`. It runs 80 seconds at 1920×1080 and 24 fps, with AAC stereo audio. Open [the audition stage](http://127.0.0.1:8088/?manifest=/media/opening.json) for separate voice and music playback. Nine opening takes exist; the remaining thirty turns are unrecorded. The [voice brief](../../agent-docs/video/voices.md) records the stock cast and production status. The [music ledger](../../agent-docs/video/music.md) records the official source and exact excerpt.
+
 An optional seven-second Hard Fork tribute follows the main ending. Open [the tribute rehearsal](http://127.0.0.1:8088/?ending=hardfork&t=505). Casey Newton and Kevin Roose appear as cartoon bobbleheads, then the picture cuts to black. This cut ends at 8:32. The default cut stays at 8:25.
 
 The archive cue IDs are `hardfork-casey` and `hardfork-kevin`. Supply original audio through the manifest's `voices` map for browser playback. These cues have no TTS text and `model_id: null`. See the [source ledger](../../agent-docs/video/hardfork.md) for clip status. The final MP4 needs a full-film audio mix through `--audio`; manifest audio is for preview. An export that intersects the tribute's archive cues requires `--audio` or the explicit `--animatic` flag.
@@ -168,6 +170,37 @@ node tools/video/music.mjs --music '/absolute/path/to/main-title.m4a' --voice to
 ```
 
 For an already aligned dialogue stem, use `--voice-at 0`. The voice continues through the music cut. `--duration 505` or `--duration 512` prepares a full-film-length output, with silence after the supplied material. Export with `render.mjs --audio tools/video/work/opening.wav`. The mixer does not download recordings or generate voices.
+
+## Generate and align the opening voices
+
+The [cast map](../../agent-docs/video/cast.json) supplies the seven stock voice IDs used in the first audition. Print the nine tagged inputs without a network request:
+
+```bash
+node tools/video/voices.mjs plan --cast agent-docs/video/cast.json
+```
+
+Generation uses the injected `ELEVENLABS_API_KEY` and spends character credits. Choose a new, empty output directory. The command sends one request and never retries automatically. Retain the generated MP3 and response metadata.
+
+```bash
+openv fleet secret env 'ELEVENLABS_API_KEY=op://Fleet/ElevenLabs GDL/credential' -- node tools/video/voices.mjs generate --cast agent-docs/video/cast.json --out tools/video/work/eleven-take
+```
+
+Assemble a saved response without authentication:
+
+```bash
+node tools/video/voices.mjs assemble --cast agent-docs/video/cast.json --response tools/video/work/eleven-take/response.json --audio tools/video/work/eleven-take/dialogue.mp3 --out tools/video/work/media/voice-take
+```
+
+Assembly writes nine per-turn WAVs, an 80-second `opening-voice.wav`, a relative `media.json`, and `timeline.json`. It preserves input indices, internal pauses, and original audio. It rejects overlapping or interleaved inputs and takes that exceed their cue windows. It never shortens or accelerates speech. Up to 120 milliseconds of metadata beyond decoded MP3 EOF receives explicit silence padding; the timeline records the amount.
+
+The first audition used `work/eleven/` for raw inputs and `work/media/opening-voices/` for aligned output. Its final mix uses:
+
+```bash
+node tools/video/music.mjs --music tools/video/work/media/star-wars-opening-24s.wav --voice tools/video/work/media/opening-voices/opening-voice.wav --out tools/video/work/opening-audio.wav
+node tools/video/render.mjs --url 'http://127.0.0.1:8088/?manifest=/media/opening.json' --from 0 --to 80 --fps 24 --audio tools/video/work/opening-audio.wav --out tools/video/work/opening-audition.mp4
+```
+
+The music input above is the source excerpt before ducking. Use the ducked `opening-music.wav` only for the browser's `music` field. Feeding that bed into `music.mjs` again would apply the duck twice.
 
 ## Export an MP4
 

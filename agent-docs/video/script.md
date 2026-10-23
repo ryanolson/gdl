@@ -18,7 +18,7 @@ Production target: `eleven_v4`, selected explicitly in Text to Dialogue. The sam
 
 The narrator returns to a clear explanatory delivery during technical proof. The crawl and closing carry the cinematic performance. Character cues supply curiosity, dry sarcasm, surprise, and one theatrical reaction. These are proposed performances for the dramatization.
 
-Tags such as `[curious]` and `[short pause]` appear in official examples. Longer cues such as `[measured, cinematic delivery]` are custom natural-language directions. Audition them with the selected voices. Exact silence and scene timing belong in the edit. No speech has been generated for this draft.
+Tags such as `[curious]` and `[short pause]` appear in official examples. Longer cues such as `[measured, cinematic delivery]` are custom natural-language directions. Audition them with the selected voices. Exact silence and scene timing belong in the edit. The first nine turns have an [opening audition](voices.md), generated on 2026-10-23. The remaining thirty turns have no recording yet.
 
 ## 00:00–00:24 — The graph was already there
 

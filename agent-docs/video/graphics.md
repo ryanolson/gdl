@@ -6,6 +6,8 @@ Implementation status, 2026-10-22: the HTML stage and all six neutral masters ex
 
 Ending addendum, 2026-10-22: the owner requested a Hard Fork tribute with Casey Newton and Kevin Roose bobbleheads. Their transparent neutral heads are in `assets/casey/` and `assets/kevin/`. Each directory records the exact prompt and official photo sources. The optional HTML tag uses staggered spring entrances and a hard cut to black. Open `?ending=hardfork&t=505` to rehearse it. Original archive takes remain separate inputs. The [source ledger](hardfork.md) records their status.
 
+Audio addendum, 2026-10-23: the first opening audition combines the existing animation, nine generated voice takes, and the requested main-title music cue. See the [voice brief](voices.md) and [music sources](music.md). The portraits still use neutral heads with deterministic motion. Mouth and blink variants remain pending.
+
 ## Portrait inputs
 
 All six labeled reference photos are supplied. Preserve glasses, facial hair, hair shape, and other identifying features present in each reference.
@@ -107,7 +109,7 @@ Keep dialogue performances separate from the narrator, music, and effects. Use s
 
 Capture the actual `gdl-web` catalog, Graph, Segments, and Deploy views for the technical scenes. Preserve the actual UI and outputs in those takes. Synthetic screenshots do not satisfy these shots. Use the stage for animation, captions, transitions, and timed playback of captured footage.
 
-The movie route combines exact stage frames, recorded composer and terminal clips, and a separately mixed audio track into MP4. Voice recordings and the finished movie remain pending. Missing demo footage must stay visibly incomplete in an animatic.
+The movie route combines exact stage frames, recorded composer and terminal clips, and a separately mixed audio track into MP4. The opening has recorded voices and music for audition. Remaining narration and the finished full film remain pending. Missing demo footage must stay visibly incomplete in an animatic.
 
 ## Asset checks
 
