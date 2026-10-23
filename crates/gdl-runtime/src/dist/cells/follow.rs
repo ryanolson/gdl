@@ -284,7 +284,11 @@ impl<R: Registry> Follows<R> {
         self.cells.changed();
     }
 
-    /// Swap `segment`'s table for one of its cells as they are now.
+    /// Swap `segment`'s table for one of its cells as they are now: a new
+    /// list of the cells' tables, one pointer per followed cell. The follow
+    /// set bounds it (a region's home cells, and at most `max_near` near
+    /// ones, `agent-docs/cells.md` section 12.2); no other cell's instances
+    /// are read or copied.
     fn store(&self, segment: &str) {
         let cells = self
             .tables
@@ -515,6 +519,8 @@ impl Follow {
 
     /// The follow's table for `segment`, its instances in id order.
     fn table(&self, key: &Key, segment: &str) -> CellTable {
+        #[cfg(test)]
+        READ.with(|read| read.set(read.get() + self.exposed.len() + self.retired.len()));
         let mut eligible: Vec<InstanceId> = self
             .exposed
             .iter()
@@ -539,6 +545,13 @@ impl Follow {
             retired: retired.into_boxed_slice(),
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The instances the tables made on this thread have read, so that a
+    /// test counts an event's work rather than timing it.
+    pub(super) static READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The relay's snapshot as a watch delivers it, applied apart from what

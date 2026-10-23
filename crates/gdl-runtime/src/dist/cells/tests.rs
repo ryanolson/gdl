@@ -593,6 +593,38 @@ async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
     task.abort();
 }
 
+/// An event costs its own cell's table: it reads none of another cell's
+/// instances, however many that cell has. Building the segment's table
+/// copies one pointer per followed cell, which the follow set bounds.
+#[test]
+fn an_event_reads_only_its_own_cells_instances() {
+    let read = |others: usize| {
+        let (mut follows, _, _, _) = follower();
+        let now = Instant::now();
+        live(&mut follows, now, [follow(M1, 1, CellState::Ready)]);
+        live(&mut follows, now, [follow(M2, 1, CellState::Ready)]);
+        let crowd: Vec<PeerInfo> = (0..others).map(|_| peer()).collect();
+        live(&mut follows, now, crowd.iter().map(|p| exposed(M2, 1, p)));
+        super::follow::READ.with(|read| read.set(0));
+        live(
+            &mut follows,
+            now,
+            [state(M1, 1, CellState::Degraded), exposed(M1, 1, &peer())],
+        );
+        super::follow::READ.with(std::cell::Cell::get)
+    };
+    assert_eq!(
+        read(1),
+        read(1024),
+        "an event read another cell's instances"
+    );
+    assert_eq!(
+        read(1024),
+        1,
+        "the state read nothing, the exposure its one instance"
+    );
+}
+
 /// A watch that cannot begin, because the hub accepts the connection and
 /// does not answer, holds no unregistration past its drain: the deadlines
 /// are kept while the next watch is asked for.
