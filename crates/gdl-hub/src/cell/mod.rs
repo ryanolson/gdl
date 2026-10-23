@@ -35,11 +35,15 @@ mod publish;
 /// [`CellHealth`] body.
 ///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
-/// each change of state, and on every heartbeat, with an epoch fixed for
-/// the life of the hub process and later than any the directory held for
-/// the cell when it started, and a `seq` raised on every write. It does
-/// not withdraw the record when the hub stops: a cell that stops without
-/// draining leaves its record to expire on its readers' clocks.
+/// each change of state, and on every heartbeat, from a task of its own,
+/// so that a slow directory never delays the judgment or the health
+/// endpoint; a state that a later one replaces while a write is in flight
+/// is not written, since a reader keeps only the newest. The record's
+/// epoch is fixed for the life of the hub process and later than any the
+/// directory held for the cell when it started, and its `seq` rises with
+/// every write. It does not withdraw the record when the hub stops: a
+/// cell that stops without draining leaves its record to expire on its
+/// readers' clocks.
 pub struct CellReadiness<D: CellDirectory> {
     directory: Arc<D>,
     /// The record as published, but for its state and version.
