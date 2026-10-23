@@ -111,7 +111,8 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// The extension for the cell `cell` of the deployment `spec`,
     /// publishing through `directory`. Settings from which no well-formed
     /// record of this deployment's cell can be published are refused here:
-    /// a class the placement does not have, a `ready` key outside it, no
+    /// a class the placement does not have, a `ready` key outside it, a
+    /// `requires` key that is not a class it sends to or a count of 0, no
     /// hub address, a malformed name or region, a lease that is not whole
     /// milliseconds, a heartbeat of zero, a watch buffer of zero, or a
     /// refollow delay of zero.
