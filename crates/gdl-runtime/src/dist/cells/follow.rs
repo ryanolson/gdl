@@ -154,6 +154,19 @@ impl<R: Registry> Follows<R> {
         for id in released {
             self.schedule(id, now);
         }
+        // A follow shown again in its generation keeps its turns, so that
+        // a round robin within the cell goes on across rewatches rather
+        // than starting at its first instance each time. A restarted hub
+        // numbers its follows from 1 again, so the follow may be a new one
+        // under an old number; a turn is only where a round robin starts,
+        // so carrying it then costs nothing.
+        for (key, follow) in &mut followed.follows {
+            if let Some(held) = self.followed.follows.get(key)
+                && held.generation == follow.generation
+            {
+                follow.turns.clone_from(&held.turns);
+            }
+        }
         self.followed = followed;
         let mut tables: BTreeMap<String, BTreeMap<Key, Arc<CellTable>>> = BTreeMap::new();
         for (key, follow) in &self.followed.follows {

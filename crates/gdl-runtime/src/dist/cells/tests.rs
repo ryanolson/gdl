@@ -239,6 +239,51 @@ fn a_cells_tables_keep_its_turn_until_it_is_followed_again() {
     );
 }
 
+/// A watch's new snapshot that shows a cell's follow again in the same
+/// generation keeps the cell's turn: a round robin goes on where it was,
+/// rather than starting at the first instance after every rewatch, which
+/// would starve the others of a chooser whose watch keeps ending.
+#[test]
+fn a_snapshot_of_the_same_follow_keeps_its_turn() {
+    use std::sync::atomic::Ordering;
+
+    let (mut follows, cells, _, _) = follower();
+    let now = Instant::now();
+    let (x, y) = (peer(), peer());
+    let events = || {
+        [
+            follow(M1, 1, CellState::Ready),
+            exposed(M1, 1, &x),
+            exposed(M1, 1, &y),
+        ]
+    };
+    live(&mut follows, now, events());
+    let turn = |cells: &Cells| {
+        let table = cells.table("f").expect("kept");
+        Arc::clone(&table.cells[0].turn)
+    };
+    // One request took the first turn.
+    turn(&cells).fetch_add(1, Ordering::Relaxed);
+    let mut snapshot = follows.snapshot();
+    for event in events() {
+        snapshot.apply(event);
+    }
+    follows.resnapshot(snapshot, now);
+    assert_eq!(
+        turn(&cells).load(Ordering::Relaxed),
+        1,
+        "the snapshot started the cell's turns again"
+    );
+    // A snapshot of a newer generation is a new follow, with turns of its
+    // own.
+    let mut snapshot = follows.snapshot();
+    for event in [follow(M1, 2, CellState::Ready), exposed(M1, 2, &x)] {
+        snapshot.apply(event);
+    }
+    follows.resnapshot(snapshot, now);
+    assert_eq!(turn(&cells).load(Ordering::Relaxed), 0);
+}
+
 #[test]
 fn a_removed_entry_is_unregistered_after_the_drain() {
     let (mut follows, cells, recorded, _) = follower();
