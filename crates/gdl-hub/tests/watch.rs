@@ -482,8 +482,10 @@ async fn dropping_a_watch_releases_it() {
 }
 
 /// A watch that arrives before the hub has stored its cell's record waits
-/// for it, since until then the epoch it would send is not settled; then
-/// it carries the record's epoch.
+/// for it, in process and over a connection, since until then the epoch it
+/// would send is not settled; then it carries the record's epoch. The hub
+/// counts a waiting watch among its watchers, which is how the test knows
+/// the hub holds the request while the write is held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watch_waits_for_the_cells_first_record() {
     let gate = Gated::new();
@@ -491,16 +493,25 @@ async fn a_watch_waits_for_the_cells_first_record() {
     gate.close();
     let (hub, cell_readiness) = hub_of(settings(), gate.clone(), timing()).await;
     gate.holding().await;
+    let mut watchers = cell_readiness.watchers();
+    let mut count = async |n: usize, what: &str| {
+        tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == n))
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+            .expect("the extension lives");
+    };
     let mut inside = Box::pin(cell_readiness.watch());
     assert!(
         futures::poll!(inside.as_mut()).is_pending(),
         "no epoch while the write is held"
     );
+    count(1, "the watch in process to wait").await;
     let address = address(&hub);
     let outside = tokio::spawn(async move {
         let watcher = CellWatcher::new().expect("a client");
         watcher.watch(&address).await
     });
+    count(2, "the hub to hold the request").await;
     gate.open();
     let published = records.next().await;
     let expected = [

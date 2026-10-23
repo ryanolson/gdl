@@ -191,7 +191,8 @@ impl<D: CellDirectory> CellReadiness<D> {
         self.feed.watch().await
     }
 
-    /// How many watches of the cell are open, as it changes.
+    /// How many watches of the cell are open or waiting to begin, as it
+    /// changes.
     pub fn watchers(&self) -> watch::Receiver<usize> {
         self.feed.watchers()
     }

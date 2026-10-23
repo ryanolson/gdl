@@ -85,8 +85,10 @@ impl Feed {
 
     /// A watch of the cell: its snapshot, then each change. It begins once
     /// the cell's record is stored, since the epoch is settled only then;
-    /// refused if the hub stops first.
+    /// refused if the hub stops first. It counts among the watchers from
+    /// the moment it is asked for, so that one held waiting is seen.
     pub(super) async fn watch(&self) -> Result<CellWatch, CellWatchError> {
+        let counted = Counted::new(&self.watching);
         let mut settled = self.epoch.subscribe();
         let epoch = tokio::select! {
             biased;
@@ -103,12 +105,11 @@ impl Feed {
                 shared.events.subscribe(),
             )
         };
-        self.watching.send_modify(|watching| *watching += 1);
         let watch = Watch {
             snapshot: snapshot.into_iter(),
             events,
             closed: self.closed.clone(),
-            watching: self.watching.clone(),
+            _counted: counted,
         };
         let events = futures::stream::unfold(watch, |mut watch| async move {
             let event = watch.next().await?;
@@ -119,7 +120,7 @@ impl Feed {
         })
     }
 
-    /// How many watches are open, as it changes.
+    /// How many watches are open or waiting to begin, as it changes.
     pub(super) fn watchers(&self) -> watch::Receiver<usize> {
         self.watching.subscribe()
     }
@@ -463,7 +464,7 @@ struct Watch {
     snapshot: std::vec::IntoIter<CellWatchEvent>,
     events: broadcast::Receiver<CellWatchEvent>,
     closed: CancellationToken,
-    watching: watch::Sender<usize>,
+    _counted: Counted,
 }
 
 impl Watch {
@@ -488,9 +489,19 @@ impl Watch {
     }
 }
 
-impl Drop for Watch {
+/// One watch in the count of watchers, until it is dropped.
+struct Counted(watch::Sender<usize>);
+
+impl Counted {
+    fn new(watching: &watch::Sender<usize>) -> Self {
+        watching.send_modify(|watching| *watching += 1);
+        Self(watching.clone())
+    }
+}
+
+impl Drop for Counted {
     fn drop(&mut self) {
-        self.watching.send_modify(|watching| *watching -= 1);
+        self.0.send_modify(|watching| *watching -= 1);
     }
 }
 
