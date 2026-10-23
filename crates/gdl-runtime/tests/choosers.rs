@@ -7,7 +7,7 @@ mod common;
 use common::WAIT;
 use common::cells::{
     Instance, Resolving, cell_hub, followed, global_cell, global_hub, launch, model_hub, pings,
-    settings, sorted, until,
+    settings, sorted, unresolved_cell_hub, until,
 };
 use common::proxy::{Mode, Proxy};
 use futures::StreamExt;
@@ -166,6 +166,72 @@ async fn an_entry_is_registered_with_velo_while_a_table_holds_it() {
     })
     .await;
     assert!(!pings(&node, id).await, "velo still knows the entry");
+    drop(chooser);
+    for hub in [global, m1] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// When the hub's follow of a cell is cut and followed again, the new
+/// generation holds an entry the old one held, and the drain the old one's
+/// end started does not unregister it; an entry only the old generation
+/// held is unregistered at that drain's end. The drain is 3 s, so that
+/// the refollow is seen to come before it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_newer_generation_keeps_an_entry_registered() {
+    let directory = Resolving::new();
+    let (global, _) = cell_hub(global_hub(), &directory).await;
+    // The global hub reaches M1's hub through a proxy, so that the test can
+    // cut the follow; M1 counts its own instances over its own listener.
+    let (m1, _) = unresolved_cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let link = Proxy::new(m1.public_addr()).await;
+    directory.resolve("m1-hub:1337", &format!("127.0.0.1:{}", link.port));
+    let (f1, fx, _d1) = (
+        Instance::ready(&m1, "f").await,
+        Instance::ready(&m1, "f").await,
+        Instance::ready(&m1, "d").await,
+    );
+    let extra = format!("{}[runtime]\ndrain_ms = 3000\n", global_cell());
+    let config = settings(
+        global.public_addr().port(),
+        global.control_addr().port(),
+        5_000,
+        &extra,
+    );
+    let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
+    let node = chooser.node();
+    let cells = chooser.cells().expect("a chooser");
+    until(&cells, "both entries", |cells| {
+        followed(cells, "f", M1).is_some_and(|m| m.eligible == sorted(&[&f1, &fx]))
+    })
+    .await;
+    let first = followed(&cells, "f", M1).expect("followed").generation;
+
+    link.set(Mode::Refuse);
+    until(&cells, "the cut follow dropped", |cells| {
+        followed(cells, "f", M1).is_none()
+    })
+    .await;
+    let gone = fx.id();
+    let _kept = fx.leave().await;
+    link.set(Mode::Forward);
+    until(&cells, "the new generation", |cells| {
+        followed(cells, "f", M1).is_some_and(|m| m.generation > first && m.eligible == [f1.id()])
+    })
+    .await;
+    assert!(
+        cells.is_registered(gone),
+        "the drain the old generation's end started was over before the refollow"
+    );
+    until(&cells, "the drain's end", |cells| {
+        !cells.is_registered(gone)
+    })
+    .await;
+    assert!(
+        cells.is_registered(f1.id()),
+        "the old generation's drain unregistered an entry the new one holds"
+    );
+    assert!(pings(&node, f1.id()).await);
     drop(chooser);
     for hub in [global, m1] {
         hub.shutdown().await.expect("valid test fixture");

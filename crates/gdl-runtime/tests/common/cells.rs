@@ -177,6 +177,17 @@ pub async fn cell_hub(
     directory: &Resolving,
 ) -> (Hub, Arc<CellReadiness<Resolving>>) {
     let name = cell.hub.clone().expect("a cell's hub has a name");
+    let (hub, readiness) = unresolved_cell_hub(cell, directory).await;
+    directory.resolve(&name, &format!("127.0.0.1:{}", hub.public_addr().port()));
+    (hub, readiness)
+}
+
+/// [`cell_hub`], with its name left for the test to resolve: its record
+/// is published only once the test has.
+pub async fn unresolved_cell_hub(
+    cell: CellSettings,
+    directory: &Resolving,
+) -> (Hub, Arc<CellReadiness<Resolving>>) {
     let readiness = Arc::new(
         CellReadiness::new(&spec(), cell, directory.clone(), timing()).expect("valid test fixture"),
     );
@@ -186,7 +197,6 @@ pub async fn cell_hub(
         .serve()
         .await
         .expect("the hub serves");
-    directory.resolve(&name, &format!("127.0.0.1:{}", hub.public_addr().port()));
     (hub, readiness)
 }
 

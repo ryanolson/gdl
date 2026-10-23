@@ -56,7 +56,10 @@ use system::{Health, Phase, SystemSettings};
 /// ```
 ///
 /// An instance in a cell waits at its launch only for the segments of its
-/// own class: `[instances]` and `[min_replicas]` may name no other.
+/// own class: `[instances]` and `[min_replicas]` may name no other. Under a
+/// hub, one whose segment holds a hop into another class (a chooser) also
+/// follows its hub's relay of the cells the hub follows, into the tables
+/// [`Launch::cells`] reads.
 pub struct ProcessConfig<H> {
     listen: SocketAddr,
     roster: Option<PathBuf>,
@@ -324,7 +327,10 @@ impl<H> ProcessConfig<H> {
     /// are not part of its start. How many instances a segment has under a hub is not
     /// fixed: from just before it announces `loaded`, the instance follows
     /// membership, so that an instance that joins later is routed to once
-    /// it is ready, and one that retires or leaves is not.
+    /// it is ready, and one that retires or leaves is not. From the same
+    /// moment, a chooser in a cell follows its hub's relay of the cells of
+    /// the classes it sends to, for as long as the launch lives, without
+    /// waiting for any of them ([`Launch::cells`]).
     ///
     /// A stop that `process` takes before the launch is done, while the
     /// nodes load or the instances meet, ends it with `Cancelled`.
