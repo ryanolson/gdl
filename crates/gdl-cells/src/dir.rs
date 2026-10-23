@@ -43,7 +43,8 @@ pub use watch::DirWatch;
 /// A resume token is a place in what this process watched, shared by its
 /// clones: a token from another process, from before a restart, or from
 /// before a spell in which the class went unwatched and its files changed,
-/// yields [`CellEvent::Resnapshot`].
+/// a record going missing or bad among them, yields
+/// [`CellEvent::Resnapshot`].
 #[derive(Debug, Clone)]
 pub struct DirDirectory {
     shared: Arc<Shared>,
@@ -339,19 +340,25 @@ impl Class {
             .collect();
         changed.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
         let changed: Vec<_> = changed.into_iter().map(|(_, _, entry)| entry).collect();
-        self.files = Arc::new(files);
         if first {
+            // A record that went missing or bad is no change a watch can
+            // report, but it is one of the files all the same.
+            let lost = self.files.iter().any(|(cell, seen)| {
+                seen.entry.is_some() && files.get(cell).is_none_or(|now| now.entry.is_none())
+            });
+            self.files = Arc::new(files);
             // The files changed while nothing in this process watched them:
             // no token from before can say what followed it. A position is
             // skipped, so that the latest token is refused too. Every
             // watcher is waiting for its answer, so none is owed the
             // changes.
-            if !changed.is_empty() {
+            if lost || !changed.is_empty() {
                 self.history.clear();
                 self.head += 1;
             }
             return;
         }
+        self.files = Arc::new(files);
         for entry in changed {
             self.head += 1;
             let event = entry.event(name, ResumeToken::new(name, self.head));

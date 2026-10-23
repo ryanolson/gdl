@@ -363,6 +363,36 @@ async fn a_rewrite_that_keeps_the_files_stamp_is_seen() {
     put(&mut seen, "m1", 1, 2).await;
 }
 
+/// A cell's record that stops being readable while nothing watches its
+/// class is a change of the files: a token from before cannot say what
+/// followed it.
+#[tokio::test]
+async fn a_record_lost_while_unwatched_refuses_the_token() {
+    let temp = temp();
+    let a = DirDirectory::new(temp.path());
+    let file = |cell: &str| temp.path().join(MODEL).join(format!("{cell}.json"));
+    for cell in ["m1", "m2"] {
+        a.publish(record(cell, 1, 1)).await.expect("a cell");
+    }
+    let mut seen = watch(&a, None);
+    let (cells, token) = snapshot(&mut seen).await;
+    assert_eq!(cells, [at("m1", 1, 1), at("m2", 1, 1)]);
+    drop(seen);
+
+    // A record that no longer parses.
+    std::fs::write(file("m1"), "garbage").expect("m1 spoiled");
+    resnapshot(&mut watch(&a, Some(token))).await;
+    let mut seen = watch(&a, None);
+    let (cells, token) = snapshot(&mut seen).await;
+    assert_eq!(cells, [at("m2", 1, 1)]);
+    drop(seen);
+
+    // A record whose file is gone.
+    std::fs::remove_file(file("m2")).expect("m2 removed");
+    resnapshot(&mut watch(&a, Some(token))).await;
+    assert!(snapshot(&mut watch(&a, None)).await.0.is_empty());
+}
+
 /// A token is served across the latest `history` changes and no more,
 /// though the class was watched throughout.
 #[tokio::test]
