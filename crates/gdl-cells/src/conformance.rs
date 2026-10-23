@@ -146,6 +146,10 @@ async fn snapshot(watch: &mut impl Events) -> (Vec<(String, Version)>, ResumeTok
     within("the whole snapshot", async {
         let mut records = Vec::new();
         loop {
+            // A watch whose every event is ready at once would keep this
+            // loop in one poll, where the bound never gets to fire: spend
+            // the task's budget, so that the loop yields once it is spent.
+            tokio::task::consume_budget().await;
             match next(watch, "the snapshot").await {
                 CellEvent::Current(record) => records.push((record.name.clone(), record.version())),
                 CellEvent::Synced {
