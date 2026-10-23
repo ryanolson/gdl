@@ -43,7 +43,7 @@ impl Judge {
     async fn judge_until(&mut self, counts: &mut mpsc::Receiver<Count>) {
         self.judge();
         loop {
-            let held = self.quorum.next_change();
+            let held = self.wake();
             let hold = async {
                 match held {
                     Some(at) => tokio::time::sleep_until(at.into()).await,
@@ -64,6 +64,18 @@ impl Judge {
                 () = draining => {}
             }
             self.judge();
+        }
+    }
+
+    /// When the judgment must look again with no new count: when the
+    /// quorum's hold runs out, unless the cell drains. A draining cell's
+    /// state no longer follows its quorum, which is then not judged, so its
+    /// hold never moves on: once run out, it would wake the judgment at
+    /// once, again and again.
+    fn wake(&self) -> Option<Instant> {
+        match *self.draining.borrow() {
+            true => None,
+            false => self.quorum.next_change(),
         }
     }
 
@@ -115,5 +127,54 @@ impl Judge {
             }
             modified
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gdl_cells::CellState;
+    use tokio::sync::watch;
+
+    use super::super::CellHealth;
+    use super::super::count::Count;
+    use super::super::feed::Feed;
+    use super::Judge;
+    use crate::Quorum;
+
+    /// A cell drained while its quorum is held, short of `ready`, has no
+    /// hold to wait out: its state no longer follows the quorum, so a hold
+    /// that ran out would wake the judgment again and again, at once.
+    #[test]
+    fn a_draining_judgment_does_not_wake_for_the_hold() {
+        let quorum = Quorum::new([("d", 1)], Duration::from_secs(1));
+        let health = watch::Sender::new(CellHealth::of(
+            &quorum,
+            CellState::Unavailable,
+            &Default::default(),
+        ));
+        let (draining, drained) = watch::channel(false);
+        let mut judge = Judge {
+            quorum,
+            health,
+            states: watch::Sender::new(CellState::Unavailable),
+            feed: Arc::new(Feed::new(
+                "cell".into(),
+                "model_x".into(),
+                vec![("d".into(), false)],
+                Duration::from_secs(1),
+                16,
+            )),
+            draining: drained,
+        };
+        judge.count(Count::Synced(vec![1]));
+        judge.judge();
+        assert!(judge.wake().is_some(), "the hold is under way");
+        draining.send_replace(true);
+        judge.judge();
+        assert_eq!(*judge.states.borrow(), CellState::Draining);
+        assert_eq!(judge.wake(), None, "a draining judgment waits for a hold");
     }
 }
