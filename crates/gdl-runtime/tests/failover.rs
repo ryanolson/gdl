@@ -107,11 +107,12 @@ fn tables<H>(chooser: &Running<H>) -> Cells {
 }
 
 /// Wait until the chooser follows each of `cells` in its state, with one
-/// entry instance.
+/// entry instance and a load summary.
 async fn following(cells: &Cells, expected: &[(&str, CellState)]) {
     until(cells, "the model cells followed", |cells| {
         expected.iter().all(|(cell, state)| {
-            followed(cells, "f", cell).is_some_and(|m| m.state == *state && m.eligible.len() == 1)
+            followed(cells, "f", cell)
+                .is_some_and(|m| m.state == *state && m.eligible.len() == 1 && m.load.is_some())
         })
     })
     .await;

@@ -253,7 +253,7 @@ pub struct FollowedCell {
     /// The cell's state, as its hub last sent it.
     pub state: CellState,
     /// The cell's load summary, as its hub last sent it: `None` while it
-    /// has none. Nothing chooses by it yet.
+    /// has none. `home_first` chooses by it, and not at all without it.
     pub load: Option<LoadSummary>,
     /// How long ago, on this instance's clock, the summary arrived: a
     /// cell's hub sends its summary every period, so this is the time

@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::boundary::{ModelCell, RUNTIME, Running, ask, model, placement, run, spec_of};
+use common::boundary::{
+    Model, ModelCell, RUNTIME, Running, ask, model, model_unsummarized, placement, run, spec_of,
+};
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::{Events, WAIT};
 use futures::StreamExt;
@@ -59,9 +61,11 @@ fn tables<H>(chooser: &Running<H>) -> Cells {
         .expect("a global instance in a cell chooses")
 }
 
-/// Whether `cell` is followed in `state` with `entries` eligible.
+/// Whether `cell` is followed in `state` with `entries` eligible, and
+/// with a load summary: `home_first` chooses no cell without one.
 fn holds(cells: &Cells, cell: &str, state: CellState, entries: usize) -> bool {
-    followed(cells, "f", cell).is_some_and(|m| m.state == state && m.eligible.len() == entries)
+    followed(cells, "f", cell)
+        .is_some_and(|m| m.state == state && m.eligible.len() == entries && m.load.is_some())
 }
 
 /// The request failed with `Routing`, naming the class it could not
@@ -169,6 +173,41 @@ async fn a_ready_cell_before_a_degraded_one_and_never_an_unavailable_one() {
     .await;
     unplaced(ask(&chooser.segment).await);
     hub.shutdown().await.expect("valid test fixture");
+}
+
+/// A ready home cell whose hub has made no load summary yet is followed,
+/// with its entry instance, but not chosen: with no other cell, a request
+/// fails at once with `Routing`. Its hub's summary period is 10 s, which
+/// the test does not wait out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cell_without_a_load_summary_is_not_chosen() {
+    let spec = spec_of(placement());
+    let events = Events::new();
+    let directory = Resolving::new();
+    let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;
+    let cell = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 1,
+        entries: 1,
+    };
+    let m1 = model_unsummarized(&spec, &directory, cell, &events).await;
+    let cells = tables(&chooser);
+    until(&cells, "the cell ready with its entry", |cells| {
+        followed(cells, "f", M1)
+            .is_some_and(|m| m.state == CellState::Ready && m.eligible.len() == 1)
+    })
+    .await;
+    assert_eq!(followed(&cells, "f", M1).and_then(|m| m.load), None);
+    unplaced(ask(&chooser.segment).await);
+    assert_eq!(
+        m1.entries[0].offered(),
+        0,
+        "the cell was offered the request"
+    );
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
 }
 
 /// A model cell whose hub stops is dropped from the tables, and later

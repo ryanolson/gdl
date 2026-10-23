@@ -56,8 +56,8 @@ impl Crossing {
     /// Choose a cell for one attempt, then an instance of it by `policy`,
     /// with the chosen cell's [`id`](CellTable::id), or `None` when no
     /// cell but those in `excluded` may take it: one load of the table,
-    /// two counter increments, and the policy's pass over the followed
-    /// cells, with no lock and no allocation.
+    /// a read of the clock, two counter increments, and the policy's
+    /// passes over the followed cells, with no lock and no allocation.
     pub(crate) fn pick(
         &self,
         policy: Policy,
@@ -128,7 +128,7 @@ impl Crossing {
     }
 
     /// The cell the policy chooses from `table` for one attempt, of those
-    /// not in `excluded`.
+    /// not in `excluded`, by the summaries' ages now.
     fn cell<'t>(&self, table: &'t EntryTable, excluded: &[u64]) -> Option<&'t Arc<CellTable>> {
         let draw = self
             .random
@@ -136,7 +136,13 @@ impl Crossing {
         let target = &self.target;
         target
             .policy
-            .choose(&table.cells, &target.region, excluded, draw)
+            .choose(
+                &table.cells,
+                &target.region,
+                excluded,
+                tokio::time::Instant::now(),
+                draw,
+            )
             .map(|at| &table.cells[at])
     }
 }
@@ -246,7 +252,7 @@ mod tests {
             generation: 1,
             region: "home".into(),
             state,
-            load: None,
+            load: super::super::tests::idle(),
             eligible: eligible.into(),
             offered: eligible
                 .iter()

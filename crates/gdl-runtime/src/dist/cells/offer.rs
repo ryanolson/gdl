@@ -356,7 +356,7 @@ mod tests {
                     generation: 1,
                     region: "home".into(),
                     state: CellState::Ready,
-                    load: None,
+                    load: super::super::tests::idle(),
                     eligible: Box::new([id]),
                     offered: Box::new([gdl::InstanceId::from_u128(id.as_u128())]),
                     retired: Box::new([]),

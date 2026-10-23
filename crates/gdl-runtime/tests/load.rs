@@ -181,9 +181,10 @@ async fn the_entry_instances_load_reaches_the_choosers_table() {
     let mut relay = global.follows();
     let m1 = model(&spec, &directory, 2, RUNTIME).await;
     let cells = tables(&chooser);
-    until(&cells, "M1 followed", |cells| {
-        followed(cells, "f", M1)
-            .is_some_and(|m| m.state == CellState::Ready && m.eligible.len() == 2)
+    until(&cells, "M1 followed, with a summary", |cells| {
+        followed(cells, "f", M1).is_some_and(|m| {
+            m.state == CellState::Ready && m.eligible.len() == 2 && m.load.is_some()
+        })
     })
     .await;
     let mut watch = cell_watch(&m1).await;
@@ -252,8 +253,8 @@ async fn a_retiring_entry_instance_stops_counting_at_once() {
     let draining = "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 10000\n";
     let mut m1 = model(&spec, &directory, 2, draining).await;
     let cells = tables(&chooser);
-    until(&cells, "M1 followed", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.eligible.len() == 2)
+    until(&cells, "M1 followed, with a summary", |cells| {
+        followed(cells, "f", M1).is_some_and(|m| m.eligible.len() == 2 && m.load.is_some())
     })
     .await;
     let mut watch = cell_watch(&m1).await;
@@ -284,8 +285,8 @@ async fn an_entry_instances_refusals_are_in_the_summary() {
     let (global_hub, _, chooser) = chooser(&spec, &directory).await;
     let m1 = model(&spec, &directory, 1, RUNTIME).await;
     let cells = tables(&chooser);
-    until(&cells, "M1 followed", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.eligible.len() == 1)
+    until(&cells, "M1 followed, with a summary", |cells| {
+        followed(cells, "f", M1).is_some_and(|m| m.eligible.len() == 1 && m.load.is_some())
     })
     .await;
     let mut watch = cell_watch(&m1).await;

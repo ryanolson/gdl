@@ -811,6 +811,22 @@ fn loaded(cell: &str, generation: u64, load: Option<LoadSummary>) -> FollowEvent
     }
 }
 
+/// An idle cell's summary, arrived now, of a period long enough that it
+/// stays fresh through any test: for a table that a cell policy must be
+/// able to choose.
+pub(super) fn idle() -> Option<(LoadSummary, Instant)> {
+    Some((
+        LoadSummary {
+            admitted: 0,
+            limit: 16,
+            instances: 1,
+            refusals: 0,
+            period_ms: 60_000,
+        },
+        Instant::now(),
+    ))
+}
+
 fn summary(admitted: u64) -> LoadSummary {
     LoadSummary {
         admitted,

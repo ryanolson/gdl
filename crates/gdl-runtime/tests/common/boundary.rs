@@ -196,7 +196,9 @@ pub struct Model<'a> {
 }
 
 /// [`model`] for any graph of `spec`, whose root `assemble` builds, with
-/// each entry instance's runtime settings changed by `entry`.
+/// each entry instance's runtime settings changed by `entry`. Its load
+/// summary period is the shortest, [`SUMMARY`]: a chooser sends only to a
+/// cell whose summary it has.
 pub async fn model_of<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,
@@ -204,6 +206,18 @@ pub async fn model_of<H: Register + Send + Sync + 'static>(
     entry: &(dyn Fn(RuntimeConfig) -> RuntimeConfig + Sync),
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> ModelCell<H> {
+    model_summarized(spec, directory, cell, RUNTIME, entry, assemble).await
+}
+
+/// [`model`] with the default load summary period, 10 s, so that its
+/// hub makes no summary within a test, and a chooser has none to choose
+/// it by.
+pub async fn model_unsummarized(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    events: &Arc<Events>,
+) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
     let hub = model_hub_needing(cell.name, cell.hub, cell.quorum);
     let extra = format!("{}{RUNTIME}", model_cell(cell.name));
     start_model(
@@ -212,8 +226,8 @@ pub async fn model_of<H: Register + Send + Sync + 'static>(
         cell,
         (hub, timing()),
         &extra,
-        entry,
-        assemble,
+        &|runtime| runtime,
+        &|deployment| reference_graph(deployment, events),
     )
     .await
 }
