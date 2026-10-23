@@ -9,6 +9,8 @@ use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, DirectoryError}
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use super::feed::Feed;
+
 /// The longest the publisher reads the directory for the cell's last
 /// epoch before it starts: past it, the hub publishes from its clock
 /// alone, and a refusal shows it what the directory holds.
@@ -18,6 +20,8 @@ pub(super) struct Publisher<D> {
     pub(super) directory: Arc<D>,
     pub(super) record: CellRecord,
     pub(super) heartbeat: Duration,
+    /// Told the epoch once a write is stored under it.
+    pub(super) feed: Arc<Feed>,
 }
 
 impl<D: CellDirectory> Publisher<D> {
@@ -42,8 +46,9 @@ impl<D: CellDirectory> Publisher<D> {
     async fn publish_until(&self, states: &mut watch::Receiver<CellState>) {
         let directory = &*self.directory;
         let mut writer = Writer::start(directory, &self.record, self.heartbeat).await;
+        let feed = &*self.feed;
         let state = *states.borrow_and_update();
-        writer.publish(directory, &self.record, state).await;
+        writer.publish(directory, feed, &self.record, state).await;
         let mut heartbeat =
             tokio::time::interval_at(tokio::time::Instant::now() + self.heartbeat, self.heartbeat);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -58,7 +63,7 @@ impl<D: CellDirectory> Publisher<D> {
                 _ = heartbeat.tick() => {}
             }
             let state = *states.borrow_and_update();
-            writer.publish(directory, &self.record, state).await;
+            writer.publish(directory, feed, &self.record, state).await;
         }
     }
 }
@@ -103,6 +108,7 @@ impl Writer {
     async fn publish(
         &mut self,
         directory: &impl CellDirectory,
+        feed: &Feed,
         record: &CellRecord,
         state: CellState,
     ) {
@@ -118,7 +124,12 @@ impl Writer {
             return;
         };
         match written {
-            Ok(()) => self.stored = true,
+            Ok(()) => {
+                // The watch carries the record's epoch, which is settled
+                // once a write is stored under it.
+                feed.settle(self.epoch);
+                self.stored = true;
+            }
             Err(DirectoryError::NotNewer { held, offered, .. }) => {
                 tracing::warn!(%held, %offered, "the directory refused the cell's record as not newer");
                 if held.epoch == self.epoch {

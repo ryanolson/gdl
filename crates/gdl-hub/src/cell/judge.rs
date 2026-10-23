@@ -2,6 +2,7 @@
 //! out, and shown on the health endpoint. Nothing here waits for the
 //! directory: the writer takes the latest state from a watch.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use gdl_cells::CellState;
@@ -10,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::CellHealth;
 use super::count::Count;
+use super::feed::Feed;
 use crate::Quorum;
 
 pub(super) struct Judge {
@@ -18,6 +20,8 @@ pub(super) struct Judge {
     /// The state, for the writer: a change it has not written yet is
     /// replaced by the next, so a slow write never delays a judgment.
     pub(super) states: watch::Sender<CellState>,
+    /// The cell's watchers, sent each change of state.
+    pub(super) feed: Arc<Feed>,
 }
 
 impl Judge {
@@ -72,7 +76,7 @@ impl Judge {
 
     /// Judge the state now, and show it: on the health endpoint, whose
     /// body is updated in place so that a count costs no allocation, and
-    /// to the writer when it changed.
+    /// to the writer and the watchers when it changed.
     fn judge(&mut self) {
         let state = self.quorum.state(Instant::now());
         let quorum = &self.quorum;
@@ -89,10 +93,13 @@ impl Judge {
             }
             modified
         });
-        self.states.send_if_modified(|current| {
+        let changed = self.states.send_if_modified(|current| {
             let changed = *current != state;
             *current = state;
             changed
         });
+        if changed {
+            self.feed.set_state(state);
+        }
     }
 }

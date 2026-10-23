@@ -39,9 +39,10 @@ pub(crate) const ROUTE: &str = "/watch";
 /// that connects to the new process sees its epoch.
 ///
 /// Retirement is final: an instance that leaves `retired`, or withdraws
-/// `ready` without retiring, which the runtime never does, is not reported
-/// again until it leaves the hub. So a snapshot is always what an earlier
-/// snapshot and every event since it make.
+/// `ready` without retiring (the runtime does neither), changes nothing on
+/// the watch, and stays as it was sent until it leaves the hub. So a
+/// snapshot is always what an earlier snapshot and every event since it
+/// make.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum CellWatchEvent {

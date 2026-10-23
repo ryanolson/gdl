@@ -78,6 +78,12 @@ impl CellWatcher {
 #[derive(Clone, PartialEq, Eq)]
 pub struct CellWatchError(String);
 
+impl CellWatchError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
 impl std::fmt::Display for CellWatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)

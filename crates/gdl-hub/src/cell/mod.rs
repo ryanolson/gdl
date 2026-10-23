@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use gdl_cells::{CellDirectory, CellRecord, CellState};
@@ -7,15 +7,28 @@ use gdl_model::{CellSettings, DeploymentSpec};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use velo_hub::axum::response::sse::{Event, KeepAlive, Sse};
+use velo_hub::axum::response::{IntoResponse, Response};
 use velo_hub::axum::{Json, Router, http::StatusCode, routing::get};
 use velo_hub::store::Removal;
-use velo_hub::{Committed, Extension, RegistrationView, Rejection, StartContext, Txn};
+use velo_hub::{
+    AttachContext, Committed, Extension, RegistrationView, Rejection, StartContext, Txn,
+};
 
-use crate::Quorum;
+use crate::{CellWatchError, GraphAdmission, Quorum};
+use feed::Feed;
+
+/// How often a watch with nothing to say sends a keep-alive comment, as
+/// velo-hub's service watch does, so that a watcher's idle timeout tells a
+/// stalled connection from a quiet cell.
+const KEEP_ALIVE: Duration = Duration::from_secs(10);
 
 mod count;
+mod feed;
 mod judge;
 mod publish;
+
+pub use feed::CellWatch;
 
 /// Whether a cell can take work, judged and published by the cell's own
 /// hub: the `gdl-cell` extension, beside [`crate::GraphAdmission`].
@@ -32,7 +45,20 @@ mod publish;
 /// The state follows [`Quorum`]. Its routes, under `/v1/ext/gdl-cell/` on
 /// the public listener: `GET health`, the cell health endpoint, which
 /// answers 200 when the cell is `ready` and 503 otherwise, with a
-/// [`CellHealth`] body.
+/// [`CellHealth`] body; and `GET watch`, the cell's watch for the hubs that
+/// follow it: server-sent events, each one [`crate::CellWatchEvent`] as
+/// JSON, with a keep-alive every 10 s. The watch carries the cell's state
+/// and epoch and its entry instances, ready and retired, with their
+/// `PeerInfo` from [`GraphAdmission`]'s members, so the hub must run
+/// admission too ([`Extension::requires`]). Who an entry instance is, and when it
+/// leaves, comes from the hub's registration hooks; when it is ready or
+/// retires, from the same loopback watches as the counts. Each watcher
+/// holds only its place in a buffer of [`CellTiming::watch_buffer`] events
+/// shared by all: one that falls further behind has its watch ended, and
+/// watches again from a snapshot, so a slow watcher never slows the
+/// counting, the judgment, the record, or another watcher. The watch is
+/// refused (503) until the record is first stored, since its epoch is
+/// settled only then, and every watch ends when the hub stops.
 ///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,
@@ -52,6 +78,10 @@ pub struct CellReadiness<D: CellDirectory> {
     quorums: Vec<(String, u32)>,
     timing: CellTiming,
     health: watch::Sender<CellHealth>,
+    /// The cell's watchers.
+    feed: Arc<Feed>,
+    /// The hub's admission, whose members say who an entry instance is.
+    admission: OnceLock<Arc<GraphAdmission>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -61,7 +91,7 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// record of this deployment's cell can be published are refused here:
     /// a class the placement does not have, a `ready` key outside it, no
     /// hub address, a malformed name or region, a lease that is not whole
-    /// milliseconds, or a heartbeat of zero.
+    /// milliseconds, a heartbeat of zero, or a watch buffer of zero.
     pub fn new(
         spec: &DeploymentSpec,
         cell: CellSettings,
@@ -80,6 +110,9 @@ impl<D: CellDirectory> CellReadiness<D> {
         gdl_model::check_hub_address(&hub).map_err(CellError::new)?;
         if timing.heartbeat.is_zero() {
             return Err(CellError::new("the cell's heartbeat is zero"));
+        }
+        if timing.watch_buffer == 0 {
+            return Err(CellError::new("the cell's watch buffer is zero"));
         }
         let record = CellRecord {
             name: cell.name.clone(),
@@ -104,6 +137,25 @@ impl<D: CellDirectory> CellReadiness<D> {
             .iter()
             .map(|segment| (segment.clone(), cell.quorum(segment)))
             .collect();
+        // An entry segment holds the inner end of a hop that crosses into
+        // the class: it is all a chooser in another class reaches.
+        let entries: BTreeSet<&str> = layout
+            .boundaries()
+            .iter()
+            .filter(|boundary| boundary.into == cell.class)
+            .filter_map(|boundary| layout.hops()[boundary.hop].backward_runs.first())
+            .map(|inner| inner.segment.as_str())
+            .collect();
+        let segments = quorums
+            .iter()
+            .map(|(segment, _)| (segment.clone(), entries.contains(segment.as_str())))
+            .collect();
+        let feed = Feed::new(
+            record.name.clone(),
+            record.class.clone(),
+            segments,
+            timing.watch_buffer,
+        );
         let health = CellHealth::of(
             &Quorum::new(quorums.iter().cloned(), timing.hold),
             CellState::Unavailable,
@@ -114,6 +166,8 @@ impl<D: CellDirectory> CellReadiness<D> {
             quorums,
             timing,
             health: watch::Sender::new(health),
+            feed: Arc::new(feed),
+            admission: OnceLock::new(),
             tasks: Mutex::default(),
         })
     }
@@ -123,12 +177,33 @@ impl<D: CellDirectory> CellReadiness<D> {
     pub fn health(&self) -> watch::Receiver<CellHealth> {
         self.health.subscribe()
     }
+
+    /// A watch of the cell, in process: what `GET watch` serves, as typed
+    /// events. Refused until the cell's record is stored, since its epoch
+    /// is settled only then.
+    pub fn watch(&self) -> Result<CellWatch, CellWatchError> {
+        self.feed.watch()
+    }
+
+    /// How many watches of the cell are open, as it changes.
+    pub fn watchers(&self) -> watch::Receiver<usize> {
+        self.feed.watchers()
+    }
 }
 
 impl<D: CellDirectory> Extension for CellReadiness<D> {
     const NAME: &'static str = crate::watch::EXTENSION;
     type Registration = ();
     type Staged = ();
+
+    fn requires() -> &'static [&'static str] {
+        &[<GraphAdmission as Extension>::NAME]
+    }
+
+    async fn attach(&self, ctx: &AttachContext<'_>) -> anyhow::Result<()> {
+        let _ = self.admission.set(ctx.extension::<GraphAdmission>()?);
+        Ok(())
+    }
 
     fn start(&self, ctx: &StartContext<'_>) -> impl Future<Output = anyhow::Result<()>> + Send {
         // The hub serves only once every extension has started, so the
@@ -137,11 +212,13 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         let cancel = ctx.cancellation().clone();
         let (counts, updates) = tokio::sync::mpsc::channel(count::BUFFER);
         let segments = self.quorums.iter().map(|(name, _)| name.clone()).collect();
+        let feed = Arc::clone(&self.feed);
         let counting = tokio::spawn(count::run(
             count::loopback(ctx.public_addr()),
             ctx.control_addr().port(),
             segments,
             counts,
+            move |index, watched, event| feed.observe(index, watched, event),
             cancel.clone(),
         ));
         let (states, written) = watch::channel(CellState::Unavailable);
@@ -150,6 +227,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 quorum: Quorum::new(self.quorums.iter().cloned(), self.timing.hold),
                 health: self.health.clone(),
                 states,
+                feed: Arc::clone(&self.feed),
             }
             .run(updates, cancel.clone()),
         );
@@ -161,6 +239,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 directory: Arc::clone(&self.directory),
                 record: self.record.clone(),
                 heartbeat: self.timing.heartbeat,
+                feed: Arc::clone(&self.feed),
             }
             .run(written, cancel),
         );
@@ -172,6 +251,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
     }
 
     async fn shutdown(&self) {
+        self.feed.close();
         // The hub cancels the tasks before it shuts its extensions down;
         // what is left is to see them end.
         let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
@@ -182,19 +262,28 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
     }
 
     fn public_routes(self: Arc<Self>) -> Router {
-        Router::new().route(
-            "/health",
-            get(move || {
-                let health = self.health.borrow().clone();
-                async move {
-                    let status = match health.state {
-                        CellState::Ready => StatusCode::OK,
-                        _ => StatusCode::SERVICE_UNAVAILABLE,
-                    };
-                    (status, Json(health))
-                }
-            }),
-        )
+        let feed = Arc::clone(&self.feed);
+        Router::new()
+            .route(
+                "/health",
+                get(move || {
+                    let health = self.health.borrow().clone();
+                    async move {
+                        let status = match health.state {
+                            CellState::Ready => StatusCode::OK,
+                            _ => StatusCode::SERVICE_UNAVAILABLE,
+                        };
+                        (status, Json(health))
+                    }
+                }),
+            )
+            .route(
+                crate::watch::ROUTE,
+                get(move || {
+                    let watch = feed.watch();
+                    async move { serve(watch) }
+                }),
+            )
     }
 
     fn descriptor(&self) -> serde_json::Value {
@@ -213,12 +302,38 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         Ok(())
     }
 
-    fn commit(&self, (): (), _: &Committed<'_>) {}
+    fn commit(&self, (): (), committed: &Committed<'_>) {
+        // Admission committed first, as this extension requires it; its
+        // lock is released before the feed's is taken.
+        let member = self
+            .admission
+            .get()
+            .and_then(|admission| admission.member(committed.owner));
+        if let Some((segment, peer)) = member {
+            self.feed.joined(&segment, committed.incarnation, peer);
+        }
+    }
 
-    fn on_removed(&self, _: Removal) {}
+    fn on_removed(&self, removal: Removal) {
+        self.feed.removed(removal);
+    }
 }
 
-/// How a cell's hub paces its judgment and its record.
+/// The watch as server-sent events, each one JSON value; a hub that has
+/// not stored its record answers 503.
+fn serve(watch: Result<CellWatch, CellWatchError>) -> Response {
+    match watch {
+        Ok(watch) => {
+            let events = futures::StreamExt::map(watch, |event| Event::default().json_data(event));
+            Sse::new(events)
+                .keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
+                .into_response()
+        }
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
+}
+
+/// How a cell's hub paces its judgment, its record, and its watch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellTiming {
     /// How long the quorum must hold before the cell is `ready`.
@@ -228,6 +343,9 @@ pub struct CellTiming {
     /// How long a reader keeps the record without seeing it published
     /// again: three heartbeats by default.
     pub lease: Duration,
+    /// How many events a watcher of the cell may fall behind by before its
+    /// watch ends: at least this many, rounded up to a power of two.
+    pub watch_buffer: usize,
 }
 
 impl Default for CellTiming {
@@ -236,6 +354,7 @@ impl Default for CellTiming {
             hold: Quorum::DEFAULT_HOLD,
             heartbeat: Duration::from_secs(10),
             lease: CellRecord::DEFAULT_LEASE,
+            watch_buffer: 1024,
         }
     }
 }

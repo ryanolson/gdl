@@ -50,12 +50,15 @@ pub(super) fn loopback(public: SocketAddr) -> SocketAddr {
 }
 
 /// Count the usable instances of each of `segments` at the hub at
-/// `public`, sending each change to the publisher, until `cancel`.
+/// `public`, sending each change to the publisher, until `cancel`. Each
+/// event is shown to `observe` before it is counted, with its segment's
+/// index, so that what the counting has sent is never ahead of it.
 pub(super) async fn run(
     public: SocketAddr,
     control_port: u16,
     segments: Vec<String>,
     counts: mpsc::Sender<Count>,
+    observe: impl Fn(usize, Watched, &ServiceEvent) + Send,
     cancel: CancellationToken,
 ) {
     let client = match HubClient::builder()
@@ -73,7 +76,7 @@ pub(super) async fn run(
     let mut sets: Vec<Usable> = segments.iter().map(|_| Usable::default()).collect();
     let counting = async {
         loop {
-            if let Some(mut watches) = open(&client, &segments, &mut sets).await {
+            if let Some(mut watches) = open(&client, &segments, &mut sets, &observe).await {
                 let synced = sets.iter().map(|set| set.usable).collect();
                 if counts.send(Count::Synced(synced)).await.is_err() {
                     return;
@@ -82,6 +85,7 @@ pub(super) async fn run(
                     if event == ServiceEvent::Disconnected {
                         break;
                     }
+                    observe(index, watched, &event);
                     let set = &mut sets[index];
                     let before = set.usable;
                     set.apply(watched, event);
@@ -109,7 +113,7 @@ pub(super) async fn run(
 
 /// Which of a segment's services a watch follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Watched {
+pub(super) enum Watched {
     Ready,
     Retired,
 }
@@ -123,6 +127,7 @@ async fn open(
     client: &HubClient,
     segments: &[String],
     sets: &mut [Usable],
+    observe: &impl Fn(usize, Watched, &ServiceEvent),
 ) -> Option<SelectAll<Watch>> {
     let mut watches = SelectAll::new();
     for (index, segment) in segments.iter().enumerate() {
@@ -143,7 +148,9 @@ async fn open(
             let (stream, ids) = tokio::time::timeout(OPEN, first)
                 .unwrap_or_else(|_| None)
                 .await?;
-            set.apply(watched, ServiceEvent::Initial(ids));
+            let first = ServiceEvent::Initial(ids);
+            observe(index, watched, &first);
+            set.apply(watched, first);
             watches.push(stream.map(move |event| (index, watched, event)).boxed());
         }
         sets[index] = set;
@@ -238,6 +245,7 @@ mod tests {
             first.control_addr().port(),
             vec!["d".into()],
             sender,
+            |_, _, _| {},
             cancel.clone(),
         ));
         assert_eq!(next(&mut counts).await, Count::Synced(vec![0]));

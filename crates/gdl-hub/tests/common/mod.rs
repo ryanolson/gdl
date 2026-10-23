@@ -10,15 +10,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, MemoryDirectory, MemoryWatch};
+use gdl_cells::{
+    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryDirectory, MemoryWatch,
+    ResumeToken,
+};
 use gdl_hub::{CellHealth, CellReadiness, CellTiming, GraphAdmission};
 use gdl_model::{
     CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase,
     TypeInfo, segment_service,
 };
+use tokio::sync::watch;
 use velo_hub::client::{HubClient, HubServiceRegistration};
-use velo_hub::velo::Velo;
 use velo_hub::velo::discovery::ServiceRegistrationGuard;
+use velo_hub::velo::{InstanceId, Velo};
 use velo_hub::{Hub, HubConfig};
 
 /// How long any one observation may take before the test fails.
@@ -77,6 +81,7 @@ pub fn timing() -> CellTiming {
         hold: Duration::from_millis(300),
         heartbeat: Duration::from_secs(600),
         lease: Duration::from_secs(30),
+        ..CellTiming::default()
     }
 }
 
@@ -85,9 +90,17 @@ pub async fn cell_hub<D: CellDirectory>(
     directory: D,
     timing: CellTiming,
 ) -> (Hub, Arc<CellReadiness<D>>) {
-    let cell = Arc::new(
-        CellReadiness::new(&spec(), settings(), directory, timing).expect("valid test fixture"),
-    );
+    hub_of(settings(), directory, timing).await
+}
+
+/// A hub of the deployment with the extension of the cell `cell`.
+pub async fn hub_of<D: CellDirectory>(
+    cell: CellSettings,
+    directory: D,
+    timing: CellTiming,
+) -> (Hub, Arc<CellReadiness<D>>) {
+    let cell =
+        Arc::new(CellReadiness::new(&spec(), cell, directory, timing).expect("valid test fixture"));
     let hub = Hub::builder(config())
         .extension(GraphAdmission::new(spec()))
         .extension(Arc::clone(&cell))
@@ -110,7 +123,7 @@ pub struct Instance {
     client: HubClient,
     segment: &'static str,
     phases: HashMap<SegmentPhase, HubServiceRegistration>,
-    _node: Velo,
+    node: Velo,
 }
 
 impl Instance {
@@ -142,8 +155,12 @@ impl Instance {
             client,
             segment,
             phases: HashMap::new(),
-            _node: node,
+            node,
         }
+    }
+
+    pub fn id(&self) -> InstanceId {
+        self.node.instance_id()
     }
 
     pub async fn announce(&mut self, phase: SegmentPhase) {
@@ -197,12 +214,20 @@ pub fn usable(health: &CellHealth, segment: &str) -> u32 {
 /// The cell's records, as a reader of its class sees them.
 pub struct Records {
     watch: MemoryWatch,
+    cell: String,
 }
 
 impl Records {
+    /// The records of the model cell.
     pub fn new(directory: &MemoryDirectory) -> Self {
+        Self::of(directory, "model_x", CELL)
+    }
+
+    /// The records of the cell `cell` of `class`.
+    pub fn of(directory: &MemoryDirectory, class: &str, cell: &str) -> Self {
         Self {
-            watch: directory.watch("model_x", None),
+            watch: directory.watch(class, None),
+            cell: cell.into(),
         }
     }
 
@@ -212,7 +237,7 @@ impl Records {
             loop {
                 match self.watch.next().await {
                     Some(Ok(CellEvent::Current(record) | CellEvent::Put { record, .. }))
-                        if record.name == CELL =>
+                        if record.name == self.cell =>
                     {
                         return record;
                     }
@@ -272,4 +297,66 @@ pub async fn get(hub: &Hub, path: &str) -> (u16, String) {
         .expect("the hub answers");
     let status = response.status().as_u16();
     (status, response.text().await.expect("a body"))
+}
+
+/// A directory whose writes a test can hold: while it is closed, a
+/// publish waits, and the test sees how many wait.
+#[derive(Clone)]
+pub struct Gated {
+    pub inner: MemoryDirectory,
+    open: Arc<watch::Sender<bool>>,
+    held: Arc<watch::Sender<usize>>,
+}
+
+impl Gated {
+    pub fn new() -> Self {
+        Self {
+            inner: MemoryDirectory::new(),
+            open: Arc::new(watch::Sender::new(true)),
+            held: Arc::new(watch::Sender::new(0)),
+        }
+    }
+
+    pub fn close(&self) {
+        self.open.send_replace(false);
+    }
+
+    pub fn open(&self) {
+        self.open.send_replace(true);
+    }
+
+    /// Wait until a write is held at the gate.
+    pub async fn holding(&self) {
+        let mut held = self.held.subscribe();
+        tokio::time::timeout(WAIT, held.wait_for(|held| *held > 0))
+            .await
+            .expect("a write reached the gate in time")
+            .expect("the gate lives");
+    }
+
+    pub fn holds(&self) -> usize {
+        *self.held.borrow()
+    }
+}
+
+impl CellDirectory for Gated {
+    type Watch = MemoryWatch;
+
+    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+        let mut open = self.open.subscribe();
+        if !*open.borrow_and_update() {
+            self.held.send_modify(|held| *held += 1);
+            let _ = open.wait_for(|open| *open).await;
+            self.held.send_modify(|held| *held -= 1);
+        }
+        self.inner.publish(record).await
+    }
+
+    async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+        self.inner.withdraw(withdrawal).await
+    }
+
+    fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
+        self.inner.watch(class, from)
+    }
 }

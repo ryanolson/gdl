@@ -7,19 +7,15 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    CELL, Instance, Records, WAIT, cell_hub, config, get, health, meet_the_quorum, millis_now,
+    CELL, Gated, Instance, Records, cell_hub, config, get, health, meet_the_quorum, millis_now,
     settings, spec, timing, usable,
 };
-use gdl_cells::{
-    CellDirectory, CellRecord, CellState, DirectoryError, MemoryDirectory, MemoryWatch, ResumeToken,
-};
+use gdl_cells::{CellDirectory, CellRecord, CellState, MemoryDirectory};
 use gdl_hub::{CellHealth, CellReadiness, CellTiming, GraphAdmission, SegmentHealth};
 use gdl_model::{CellSettings, SegmentPhase};
-use tokio::sync::watch;
 use velo_hub::Hub;
 
 /// The usable instances of each segment, as the extension counts them,
@@ -276,7 +272,7 @@ async fn a_hub_without_a_cell_has_no_cell_endpoint() {
 #[test]
 fn settings_a_cells_hub_cannot_publish_are_refused() {
     type Change = fn(&mut CellSettings);
-    let cases: [(&str, Change, CellTiming); 7] = [
+    let cases: [(&str, Change, CellTiming); 8] = [
         ("[cell] hub", |cell| cell.hub = None, timing()),
         // Settings made in code, not read: the address is checked here too.
         (
@@ -317,6 +313,14 @@ fn settings_a_cells_hub_cannot_publish_are_refused() {
                 ..timing()
             },
         ),
+        (
+            "watch buffer",
+            |_| {},
+            CellTiming {
+                watch_buffer: 0,
+                ..timing()
+            },
+        ),
     ];
     for (expected, change, timing) in cases {
         let mut cell = settings();
@@ -325,68 +329,6 @@ fn settings_a_cells_hub_cannot_publish_are_refused() {
             panic!("accepted settings without {expected}");
         };
         assert!(error.to_string().contains(expected), "{error}");
-    }
-}
-
-/// A directory whose writes a test can hold: while it is closed, a
-/// publish waits, and the test sees how many wait.
-#[derive(Clone)]
-struct Gated {
-    inner: MemoryDirectory,
-    open: Arc<watch::Sender<bool>>,
-    held: Arc<watch::Sender<usize>>,
-}
-
-impl Gated {
-    fn new() -> Self {
-        Self {
-            inner: MemoryDirectory::new(),
-            open: Arc::new(watch::Sender::new(true)),
-            held: Arc::new(watch::Sender::new(0)),
-        }
-    }
-
-    fn close(&self) {
-        self.open.send_replace(false);
-    }
-
-    fn open(&self) {
-        self.open.send_replace(true);
-    }
-
-    /// Wait until a write is held at the gate.
-    async fn holding(&self) {
-        let mut held = self.held.subscribe();
-        tokio::time::timeout(WAIT, held.wait_for(|held| *held > 0))
-            .await
-            .expect("a write reached the gate in time")
-            .expect("the gate lives");
-    }
-
-    fn holds(&self) -> usize {
-        *self.held.borrow()
-    }
-}
-
-impl CellDirectory for Gated {
-    type Watch = MemoryWatch;
-
-    async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
-        let mut open = self.open.subscribe();
-        if !*open.borrow_and_update() {
-            self.held.send_modify(|held| *held += 1);
-            let _ = open.wait_for(|open| *open).await;
-            self.held.send_modify(|held| *held -= 1);
-        }
-        self.inner.publish(record).await
-    }
-
-    async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
-        self.inner.withdraw(withdrawal).await
-    }
-
-    fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
-        self.inner.watch(class, from)
     }
 }
 

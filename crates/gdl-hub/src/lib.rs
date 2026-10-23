@@ -4,16 +4,17 @@
 //! and placement. A cell's hub runs [`CellReadiness`] beside it: the
 //! `gdl-cell` extension, which judges from the cell's usable instances and
 //! its quorum ([`Quorum`]) whether the cell can take work, answers on the
-//! cell health endpoint (`GET /v1/ext/gdl-cell/health`), and publishes the
-//! cell's record through a [`gdl_cells::CellDirectory`]. A hub that
-//! follows a cell reads the cell's watch, [`CellWatchEvent`]s, with a
-//! [`CellWatcher`].
+//! cell health endpoint (`GET /v1/ext/gdl-cell/health`), publishes the
+//! cell's record through a [`gdl_cells::CellDirectory`], and serves the
+//! cell's watch (`GET /v1/ext/gdl-cell/watch`): the cell's state and epoch
+//! and its entry instances, as [`CellWatchEvent`]s, which a hub that
+//! follows the cell reads with a [`CellWatcher`].
 mod cell;
 mod quorum;
 mod setup;
 mod watch;
 
-pub use cell::{CellError, CellHealth, CellReadiness, CellTiming, SegmentHealth};
+pub use cell::{CellError, CellHealth, CellReadiness, CellTiming, CellWatch, SegmentHealth};
 pub use quorum::Quorum;
 pub use setup::{cell_from_env, hub_builder};
 pub use watch::{CellWatchError, CellWatchEvent, CellWatcher};
@@ -49,6 +50,14 @@ impl GraphAdmission {
             spec,
             members: Mutex::default(),
         }
+    }
+
+    /// The segment and the peer of the member `id`, as `/members` shows
+    /// them.
+    pub(crate) fn member(&self, id: InstanceId) -> Option<(String, PeerInfo)> {
+        let members = self.members.lock().expect("membership lock");
+        let (_, member) = members.get(&id)?;
+        Some((member.registration.segment.clone(), member.peer.clone()))
     }
 }
 
