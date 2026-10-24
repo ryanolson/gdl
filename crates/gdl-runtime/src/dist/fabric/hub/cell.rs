@@ -18,7 +18,7 @@ use futures::StreamExt;
 use gdl::{Error, ErrorKind, Result};
 use gdl_cells::CellState;
 use gdl_model::{CellSettings, Layout};
-use gdl_watch::{Backoff, CellWatchEvent, CellWatcher, Watched};
+use gdl_watch::{Backoff, CellWatchEvent, CellWatcher, WatchEnd, Watched};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -377,6 +377,9 @@ async fn run(
     let mut backoff = Backoff::new(REWATCH, REWATCH_CAP);
     loop {
         let mut synced = None;
+        // A watch the hub closes, or this instance lets go of to read the
+        // cell again, has not failed.
+        let mut end = WatchEnd::Closed;
         match watcher.watch(&address).await {
             Ok(mut events) => {
                 refused = None;
@@ -399,6 +402,7 @@ async fn run(
                         }
                         Err(failure) => {
                             tracing::info!(%failure, "this instance's cell watch failed; the cell is watched again");
+                            end = WatchEnd::Failed;
                             break;
                         }
                     };
@@ -427,9 +431,10 @@ async fn run(
                     tracing::info!(%error, "this instance's cell could not be watched for a drain");
                     refused = Some(error);
                 }
+                end = WatchEnd::Failed;
             }
         }
-        tokio::time::sleep(backoff.wait(synced, Instant::now())).await;
+        tokio::time::sleep(backoff.wait(synced, end, Instant::now())).await;
     }
 }
 

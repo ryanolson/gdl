@@ -31,7 +31,7 @@ use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, CellView};
 use tokio::task::{AbortHandle, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use gdl_watch::{Backoff, CellWatcher};
+use gdl_watch::{Backoff, CellWatcher, WatchEnd};
 
 use crate::CellTiming;
 
@@ -101,7 +101,7 @@ impl<D: CellDirectory> Follower<D> {
         loop {
             let mut watch = std::pin::pin!(self.directory.watch(&self.class, None));
             let mut synced = None;
-            loop {
+            let end = loop {
                 tokio::select! {
                     event = watch.next() => match event {
                         Some(Ok(event)) => {
@@ -112,19 +112,19 @@ impl<D: CellDirectory> Follower<D> {
                         }
                         Some(Err(error)) => {
                             tracing::warn!(class = self.class, %error, "the cell directory's watch failed");
-                            break;
+                            break WatchEnd::Failed;
                         }
-                        None => break,
+                        None => break WatchEnd::Closed,
                     },
                     Some(ended) = follows.links.join_next() => follows.ended(ended),
                 }
-            }
+            };
             // A watch that failed or ended may have been part way through
             // its snapshot: the cells it named so far must not count as
             // held when the next one's snapshot completes, or a cell
             // withdrawn meanwhile would be kept.
             follows.view.apply(CellEvent::Resnapshot, Instant::now());
-            let pause = tokio::time::sleep(backoff.wait(synced, tokio::time::Instant::now()));
+            let pause = tokio::time::sleep(backoff.wait(synced, end, tokio::time::Instant::now()));
             tokio::pin!(pause);
             loop {
                 tokio::select! {

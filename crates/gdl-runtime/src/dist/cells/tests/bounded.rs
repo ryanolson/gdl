@@ -12,7 +12,7 @@ use gdl_cells::CellState;
 use gdl_watch::{CellWatcher, FollowEvent, WatchLimits};
 
 use super::super::served::Server;
-use super::super::task::{REWATCH, Relayed, Source, relayed};
+use super::super::task::{REWATCH, Relaying, Source, relayed};
 use super::{M1, exposed, follow, follower, peer, run, table};
 
 const WITHIN: Duration = Duration::from_millis(300);
@@ -44,11 +44,11 @@ impl Served {
 }
 
 impl Source for Served {
-    async fn watch(&self) -> Result<BoxStream<'static, Relayed>, String> {
+    async fn watch(&self) -> Result<BoxStream<'static, Relaying>, String> {
         self.watcher
             .follows(&self.address)
             .await
-            .map(|events| relayed(events, "relay"))
+            .map(relayed)
             .map_err(|e| e.to_string())
     }
 
@@ -56,11 +56,11 @@ impl Source for Served {
         &self,
         class: &str,
         cell: &str,
-    ) -> Result<BoxStream<'static, Relayed>, String> {
+    ) -> Result<BoxStream<'static, Relaying>, String> {
         self.watcher
             .follows_of(&self.address, class, cell)
             .await
-            .map(|events| relayed(events, "one cell"))
+            .map(relayed)
             .map_err(|e| e.to_string())
     }
 

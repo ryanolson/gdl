@@ -7,7 +7,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use gdl_watch::{FollowEvent, Watched};
 
-use super::super::task::{Relayed, Source};
+use super::super::task::{Relayed, Relaying, Source};
 
 /// Watches scripted in order, each a list of items that ends the watch,
 /// or, for a relaying script, stays open after them; after the last, a
@@ -70,7 +70,7 @@ impl Source for Scripted {
         &self,
         class: &str,
         cell: &str,
-    ) -> Result<BoxStream<'static, Relayed>, String> {
+    ) -> Result<BoxStream<'static, Relaying>, String> {
         let mut asked = 0;
         self.asked.send_modify(|cells| {
             cells.push((class.to_string(), cell.to_string()));
@@ -87,12 +87,12 @@ impl Source for Scripted {
             .expect("lock")
             .pop_front()
             .ok_or_else(|| "no reading scripted".to_string())?;
-        Ok(futures::stream::iter(items)
+        Ok(futures::stream::iter(items.into_iter().map(Ok))
             .chain(futures::stream::pending())
             .boxed())
     }
 
-    async fn watch(&self) -> Result<BoxStream<'static, Relayed>, String> {
+    async fn watch(&self) -> Result<BoxStream<'static, Relaying>, String> {
         let mut opened = 0;
         self.opened.send_modify(|count| {
             *count += 1;
@@ -105,10 +105,10 @@ impl Source for Scripted {
             .map_err(|_| "the test ended".to_string())?;
         let next = self.watches.lock().expect("lock").pop_front();
         Ok(match next {
-            Some(events) if self.open => futures::stream::iter(events)
+            Some(events) if self.open => futures::stream::iter(events.into_iter().map(Ok))
                 .chain(futures::stream::pending())
                 .boxed(),
-            Some(events) => futures::stream::iter(events).boxed(),
+            Some(events) => futures::stream::iter(events.into_iter().map(Ok)).boxed(),
             None => futures::stream::pending().boxed(),
         })
     }

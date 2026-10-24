@@ -10,8 +10,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::relay::{Installed, Relay};
 use gdl_watch::{
-    Backoff, CellWatchEvent, CellWatcher, Follower, UnknownEvent, WatchStream, Watched,
+    Backoff, CellWatchEvent, CellWatcher, Follower, UnknownEvent, WatchEnd, WatchStream, Watched,
 };
+
+#[cfg(test)]
+mod tests;
 
 /// Follow the cell of `record` in `generation` until its watch ends or
 /// fails, or until the relay closes the follow (`close`), then end it in
@@ -32,15 +35,15 @@ pub(super) async fn run(
     mut backoff: Backoff,
 ) -> (String, u64, bool, Backoff) {
     let ended = tokio::select! {
-        synced = follow(&relay, &watcher, &me, &record, generation, &mut backoff) => Some(synced),
+        ended = follow(&relay, &watcher, &me, &record, generation, &mut backoff) => Some(ended),
         () = close.cancelled() => None,
     };
     relay.end(&record.class, &record.name, generation);
     // A follow the relay closed is followed again only from a later write
     // of the cell's record, which the follower should see from the moment
     // of the close; the delay is for a link that failed.
-    if let Some(synced) = ended {
-        tokio::time::sleep(backoff.wait(synced, Instant::now())).await;
+    if let Some((synced, end)) = ended {
+        tokio::time::sleep(backoff.wait(synced, end, Instant::now())).await;
     }
     (record.name, generation, ended.is_none(), backoff)
 }
@@ -61,7 +64,10 @@ type Events = WatchStream<CellWatchEvent, UnknownEvent>;
 /// fails does; one whose
 /// snapshot has an event of a kind this build does not know leaves the
 /// cell withheld, and the cell is read again after the wait `backoff`
-/// draws. Returns when the last snapshot read was complete, if one was.
+/// draws. Returns how the last watch ended, and when its snapshot was
+/// complete, if it was: a reading that fails had none, whatever the watch
+/// it replaced, so that the time spent waiting for it and opening it never
+/// counts as a healthy watch's.
 async fn follow(
     relay: &Relay,
     watcher: &CellWatcher,
@@ -69,7 +75,7 @@ async fn follow(
     record: &CellRecord,
     generation: u64,
     backoff: &mut Backoff,
-) -> Option<Instant> {
+) -> (Option<Instant>, WatchEnd) {
     let (class, cell) = (record.class.as_str(), record.name.as_str());
     let me = Follower {
         generation,
@@ -79,13 +85,16 @@ async fn follow(
         Ok(events) => events,
         Err(error) => {
             tracing::info!(cell, %error, "a followed cell's watch did not begin");
-            return None;
+            return (None, WatchEnd::Failed);
         }
     };
-    let Snapshot {
+    let Some(Snapshot {
         mut installed,
         unknown,
-    } = snapshot(&mut events, record).await?;
+    }) = snapshot(&mut events, record).await
+    else {
+        return (None, WatchEnd::Failed);
+    };
     let mut synced = Instant::now();
     // Withheld before it is installed, so that no watcher of the relay is
     // shown it otherwise.
@@ -93,7 +102,10 @@ async fn follow(
         installed.withhold(generation, |_| {});
     }
     relay.install(generation, installed);
-    let mut pause = unknown.then(|| backoff.wait(Some(synced), synced));
+    // A snapshot that needs reading again is let go of by its reader, and
+    // never ran: the wait advances, so that a hub that sends such an event
+    // in every snapshot is asked less and less often.
+    let mut pause = unknown.then(|| backoff.wait(Some(synced), WatchEnd::Closed, synced));
     loop {
         if let Some(wait) = pause.take() {
             // The watch that showed the cell cannot be read on: the cell is
@@ -101,27 +113,27 @@ async fn follow(
             drop(events);
             tokio::time::sleep(wait).await;
             let Some((fresh, read)) = reread(watcher, &me, record).await else {
-                return Some(synced);
+                return (None, WatchEnd::Failed);
             };
             events = read;
             synced = Instant::now();
             match fresh {
                 Some(fresh) => relay.restore(class, cell, generation, fresh),
                 None => {
-                    pause = Some(backoff.wait(Some(synced), synced));
+                    pause = Some(backoff.wait(Some(synced), WatchEnd::Closed, synced));
                     continue;
                 }
             }
         }
         match events.next().await {
-            None => return Some(synced),
+            None => return (Some(synced), WatchEnd::Closed),
             Some(Err(failure)) => {
                 tracing::info!(cell, %failure, "a followed cell's watch failed");
-                return Some(synced);
+                return (Some(synced), WatchEnd::Failed);
             }
             // A second snapshot in one watch is not the protocol.
             Some(Ok(Watched::Event(CellWatchEvent::Cell { .. } | CellWatchEvent::Synced))) => {
-                return Some(synced);
+                return (Some(synced), WatchEnd::Failed);
             }
             Some(Ok(Watched::Event(event))) => relay.apply(class, cell, generation, event),
             Some(Ok(Watched::Unknown(event))) => {
@@ -131,6 +143,7 @@ async fn follow(
                     "a followed cell's watch sent an event of a kind this build does not know; the cell is withheld until it is read again"
                 );
                 relay.withhold(class, cell, generation);
+                backoff.released(synced, Instant::now());
                 pause = Some(Duration::ZERO);
             }
         }

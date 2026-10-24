@@ -148,7 +148,7 @@ fn a_cell_read_from_its_own_watch_acknowledges_its_retirements() {
         retired(M1, 1, &x),
         FollowEvent::Synced,
     ] {
-        follows.own(key.clone(), watch, Some(Watched::Event(event)), now);
+        follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
     assert_eq!(follows.avoidances(now), [avoids(1, &x)]);
 }

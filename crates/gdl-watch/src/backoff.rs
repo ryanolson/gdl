@@ -20,8 +20,12 @@ mod tests;
 pub(crate) const HEALTHY: Duration = Duration::from_secs(30);
 
 /// The waits between one reader's watches: a base, doubled after each
-/// watch that ends before it has run for 30 s after its snapshot
-/// completed, up to a cap, and back to the base once one has. Each wait is drawn uniformly
+/// watch that fails, or ends before it has run for 30 s after its
+/// snapshot completed, up to a cap, and back to the base once one has run
+/// that long. A watch that ran that long and then failed returns the step
+/// to the base and doubles it, so that a hub that keeps failing its
+/// watchers late is still asked less often; only one that closed is not
+/// counted as a failure. Each wait is drawn uniformly
 /// between half its step and the whole step, so that the readers of one
 /// hub that fail at the same instant, as all of them do when it restarts,
 /// spread their next attempts over that window rather than arriving
@@ -60,18 +64,37 @@ impl Backoff {
         }
     }
 
-    /// The watch that completed its snapshot at `synced`, if it did, ended,
-    /// failed, or could not begin at `now`: how long to wait before the
-    /// next one is opened. Its end returns the step to the base if it ran
-    /// for 30 s after its snapshot, and advances it otherwise.
-    pub fn wait(&mut self, synced: Option<Instant>, now: Instant) -> Duration {
-        if synced.is_some_and(|at| now.saturating_duration_since(at) >= HEALTHY) {
-            self.step = self.base;
-            return self.draw(self.base);
-        }
+    /// The watch that completed its snapshot at `synced`, if it did, ended
+    /// as `end` says at `now`: how long to wait before the next one is
+    /// opened. If it ran for 30 s after its snapshot, the step returns to
+    /// the base; it then advances unless the watch ran that long and
+    /// closed. A watch that could not begin failed, with no snapshot.
+    pub fn wait(&mut self, synced: Option<Instant>, end: WatchEnd, now: Instant) -> Duration {
+        let healthy = self.healthy(synced, now);
         let wait = self.draw(self.step);
-        self.step = self.step.saturating_mul(2).min(self.cap);
+        if !healthy || end == WatchEnd::Failed {
+            self.step = self.step.saturating_mul(2).min(self.cap);
+        }
         wait
+    }
+
+    /// The reader let go of the watch whose snapshot completed at `synced`,
+    /// at `now`, to open the next at once: no wait is drawn, and the step
+    /// returns to the base if the watch ran for 30 s after its snapshot.
+    /// The next watch is a new one: its own end is told from its own
+    /// snapshot, so the time spent opening it never counts as this one's.
+    pub fn released(&mut self, synced: Instant, now: Instant) {
+        self.healthy(Some(synced), now);
+    }
+
+    /// Whether the watch whose snapshot completed at `synced` ran for the
+    /// healthy span by `now`, returning the step to the base if it did.
+    fn healthy(&mut self, synced: Option<Instant>, now: Instant) -> bool {
+        let healthy = synced.is_some_and(|at| now.saturating_duration_since(at) >= HEALTHY);
+        if healthy {
+            self.step = self.base;
+        }
+        healthy
     }
 
     /// A wait drawn uniformly from half of `step` to the whole of it.
@@ -90,4 +113,16 @@ impl Backoff {
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     }
+}
+
+/// How a watch ended, for [`Backoff::wait`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchEnd {
+    /// It ended without a failure: its hub closed it, or its reader let go
+    /// of it.
+    Closed,
+    /// It failed, was refused, or could not begin: a connection refused or
+    /// lost, a `503`, a [`crate::WatchFailure`], or what its reader takes
+    /// for a broken protocol.
+    Failed,
 }

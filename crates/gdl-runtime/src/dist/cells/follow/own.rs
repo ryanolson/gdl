@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gdl_watch::{Backoff, FollowEvent, UnknownFollowEvent, Watched};
+use gdl_watch::{Backoff, FollowEvent, UnknownFollowEvent, WatchEnd, Watched};
 use tokio::time::Instant;
 use velo::InstanceId;
 
@@ -52,19 +52,19 @@ impl<R: Registry> Follows<R> {
     }
 
     /// Read `key`'s cell from a new watch of its own, one that replaces
-    /// any it had: at once, or, if the one it replaces ended at `ended`,
-    /// after the wait the cell's backoff draws then. The backoff is kept
+    /// any it had: at once, or, if the one it replaces ended, as and when
+    /// `ended` says, after the wait the cell's backoff draws then. The backoff is kept
     /// across the cell's watches, so that a hub whose reading of the cell
     /// keeps failing, or keeps sending an event this build does not know,
     /// is asked less and less often, up to [`REWATCH_CAP`].
-    pub(super) fn watch_own(&mut self, key: Key, ended: Option<Instant>) {
+    pub(super) fn watch_own(&mut self, key: Key, ended: Option<(WatchEnd, Instant)>) {
         self.watches += 1;
         let watch = self.watches;
         let (mut backoff, synced) = match self.own.remove(&key) {
             Some(own) => (own.backoff, own.synced),
             None => (Backoff::new(REWATCH, REWATCH_CAP), None),
         };
-        let pause = ended.map_or(Duration::ZERO, |now| backoff.wait(synced, now));
+        let pause = ended.map_or(Duration::ZERO, |(end, now)| backoff.wait(synced, end, now));
         self.own.insert(
             key.clone(),
             Own {
@@ -90,8 +90,8 @@ impl<R: Registry> Follows<R> {
         self.own.get(key).is_some_and(|own| own.watch == watch)
     }
 
-    /// The watch `watch` of `key`'s own sent `item` at `now`, or ended
-    /// (`None`), as a watch that could not begin does. Its snapshot
+    /// The watch `watch` of `key`'s own sent `item` at `now`, or ended, as
+    /// the error says, as a watch that could not begin does, failed. Its snapshot
     /// replaces the cell's follow, the cell no longer unread, and each
     /// event after it is applied as any event is. The cell is unread
     /// again, and read from a new watch, when the watch ends, after a
@@ -105,21 +105,21 @@ impl<R: Registry> Follows<R> {
         &mut self,
         key: Key,
         watch: u64,
-        item: Option<Relayed>,
+        item: Result<Relayed, WatchEnd>,
         now: Instant,
     ) {
         let Some(own) = self.own.get_mut(&key).filter(|own| own.watch == watch) else {
             return;
         };
         match item {
-            None => {
+            Err(end) => {
                 self.unread_own(&key);
-                self.watch_own(key, Some(now));
+                self.watch_own(key, Some((end, now)));
             }
             // Fenced by its generation, as on the relay's watch: one that
             // names an earlier generation than the cell's, a closing one
             // the same watch carries, changes nothing.
-            Some(Watched::Unknown(event)) => {
+            Ok(Watched::Unknown(event)) => {
                 self.cells.unknown();
                 match own.filling.as_mut() {
                     Some(filling) => {
@@ -127,30 +127,35 @@ impl<R: Registry> Follows<R> {
                     }
                     None => {
                         if self.followed.unread(&self.wanted, &key, event.generation) {
+                            // Let go of to read the cell again at once: its
+                            // healthy life still counts.
+                            if let Some(synced) = own.synced {
+                                own.backoff.released(synced, now);
+                            }
                             self.withhold(&key);
                             self.watch_own(key, None);
                         }
                     }
                 }
             }
-            Some(Watched::Event(FollowEvent::Synced)) => {
+            Ok(Watched::Event(FollowEvent::Synced)) => {
                 let (filling, unknown) = (own.filling.take(), own.unknown);
                 match filling {
                     Some(filling) => {
                         own.synced = Some(now);
                         self.install_own(&key, filling, unknown, now);
                         if unknown {
-                            self.watch_own(key, Some(now));
+                            self.watch_own(key, Some((WatchEnd::Closed, now)));
                         }
                     }
                     // A second marker in one watch is not the protocol.
                     None => {
                         self.unread_own(&key);
-                        self.watch_own(key, Some(now));
+                        self.watch_own(key, Some((WatchEnd::Failed, now)));
                     }
                 }
             }
-            Some(Watched::Event(event)) => match own.filling.as_mut() {
+            Ok(Watched::Event(event)) => match own.filling.as_mut() {
                 Some(filling) => {
                     let _ = filling.apply(&self.wanted, event, now);
                 }

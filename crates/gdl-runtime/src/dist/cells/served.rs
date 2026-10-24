@@ -92,6 +92,11 @@ impl Served {
         self.write(format!("data: {data}\n\n").as_bytes()).await;
     }
 
+    /// Send one keep-alive: a comment, which no reader takes as an event.
+    pub(crate) async fn comment(&mut self) {
+        self.write(b":\n\n").await;
+    }
+
     async fn write(&mut self, bytes: &[u8]) {
         self.stream
             .write_all(bytes)

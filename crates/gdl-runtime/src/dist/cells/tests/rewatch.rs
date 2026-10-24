@@ -12,11 +12,12 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use gdl_cells::CellState;
-use gdl_watch::{FollowEvent, UnknownFollowEvent, Watched};
+use gdl_watch::{FollowEvent, UnknownFollowEvent, WatchEnd, Watched};
 use tokio::time::Instant;
 
 use super::super::follow::{ACK_RETRY, Asked};
-use super::super::task::{REWATCH, REWATCH_CAP, Relayed, Source};
+use super::super::served::Server;
+use super::super::task::{REWATCH, REWATCH_CAP, Relaying, Source};
 use super::bounded::Served;
 use super::{DRAIN, M1, exposed, follow, follower, left, peer, retired, run};
 
@@ -52,12 +53,12 @@ impl Timed {
 }
 
 impl Source for Timed {
-    async fn watch(&self) -> Result<BoxStream<'static, Relayed>, String> {
+    async fn watch(&self) -> Result<BoxStream<'static, Relaying>, String> {
         self.opened
             .send_modify(|opened| opened.push(Instant::now()));
         match self.script.lock().expect("lock").pop_front() {
             Some(Ok((events, lives))) => Ok(futures::stream::iter(events)
-                .map(Watched::Event)
+                .map(|event| Ok(Watched::Event(event)))
                 .chain(
                     futures::stream::once(tokio::time::sleep(lives))
                         .filter_map(|()| async { None }),
@@ -69,7 +70,7 @@ impl Source for Timed {
         }
     }
 
-    async fn watch_of(&self, _: &str, _: &str) -> Result<BoxStream<'static, Relayed>, String> {
+    async fn watch_of(&self, _: &str, _: &str) -> Result<BoxStream<'static, Relaying>, String> {
         Err("no reading".into())
     }
 
@@ -318,7 +319,7 @@ fn a_cells_own_watch_that_keeps_ending_waits_longer_each_time() {
     let mut watch = watch;
     let mut step = REWATCH;
     for n in 0..8 {
-        follows.own(key.clone(), watch, None, now);
+        follows.own(key.clone(), watch, Err(WatchEnd::Closed), now);
         let asked = follows.asked().pop().expect("a watch of its own again");
         assert!(
             asked.pause >= step / 2 && asked.pause <= step,
@@ -327,5 +328,50 @@ fn a_cells_own_watch_that_keeps_ending_waits_longer_each_time() {
         );
         watch = asked.watch;
         step = (step * 2).min(REWATCH_CAP);
+    }
+}
+
+/// A relay watch that ran for 30 s after its snapshot and then failed, at
+/// an event that does not parse, advances the backoff as any failure
+/// does: its healthy life returns the step to the base, and the failure
+/// doubles it, so the wait after the next watch, which is refused, is
+/// drawn from twice the base. The control: the same watch ended cleanly
+/// by its hub leaves the step at the base, so that wait is drawn from the
+/// base. On a paused clock: the server runs on this test's one thread, so
+/// what it writes is read before the clock moves.
+#[tokio::test(start_paused = true)]
+async fn a_failure_after_a_healthy_span_advances_the_backoff() {
+    for failed in [true, false] {
+        let (follows, _, _, _) = follower();
+        let mut server = Server::new().await;
+        let task = tokio::spawn(run(Served::at(&server.address), follows));
+        let mut first = server.next().await;
+        first.answer().await;
+        first.send(&FollowEvent::Synced).await;
+        // Within the watch's idle bound, for longer than the healthy span.
+        for _ in 0..7 {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            first.comment().await;
+        }
+        if failed {
+            first.raw("not json").await;
+        } else {
+            drop(first);
+        }
+        let refused = server.next().await;
+        let at = refused.at;
+        drop(refused);
+        let third = server.next().await;
+        let waited = third.at - at;
+        let (least, most) = if failed {
+            (REWATCH, REWATCH * 2)
+        } else {
+            (REWATCH / 2, REWATCH)
+        };
+        assert!(
+            waited >= least && waited <= most,
+            "failed: {failed}; after the refusal that followed, waited {waited:?}"
+        );
+        task.abort();
     }
 }

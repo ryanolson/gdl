@@ -37,7 +37,7 @@ mod follows;
 mod limits;
 mod watched;
 
-pub use backoff::Backoff;
+pub use backoff::{Backoff, WatchEnd};
 pub use client::{CellWatchError, CellWatcher, WatchItem, WatchStream};
 pub use follows::FollowEvent;
 pub use limits::{WatchFailure, WatchLimits};

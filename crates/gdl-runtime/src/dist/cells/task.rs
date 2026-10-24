@@ -13,7 +13,8 @@ use futures::{FutureExt, StreamExt};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::Layout;
 use gdl_watch::{
-    Avoids, Backoff, CellWatcher, FollowEvent, UnknownFollowEvent, Unoffered, WatchStream, Watched,
+    Avoids, Backoff, CellWatcher, FollowEvent, UnknownFollowEvent, Unoffered, WatchEnd,
+    WatchStream, Watched,
 };
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
@@ -98,6 +99,10 @@ pub(crate) fn hub_address(host: &str, port: u16) -> String {
 /// One item of the relay.
 pub(super) type Relayed = Watched<FollowEvent, UnknownFollowEvent>;
 
+/// One item of a watch of the relay as its reader takes it: an item, or
+/// the failure that ends the watch, which its backoff counts as one.
+pub(super) type Relaying = std::result::Result<Relayed, String>;
+
 /// Where the follower reads the relay from, and sends its
 /// acknowledgements to.
 pub(super) trait Source: Send + Sync + 'static {
@@ -105,7 +110,7 @@ pub(super) trait Source: Send + Sync + 'static {
     /// ends.
     fn watch(
         &self,
-    ) -> impl Future<Output = std::result::Result<BoxStream<'static, Relayed>, String>> + Send;
+    ) -> impl Future<Output = std::result::Result<BoxStream<'static, Relaying>, String>> + Send;
 
     /// One watch of the relay's follow of the cell `cell` of `class`
     /// alone: its snapshot, then each change of it, until it ends.
@@ -113,7 +118,7 @@ pub(super) trait Source: Send + Sync + 'static {
         &self,
         class: &str,
         cell: &str,
-    ) -> impl Future<Output = std::result::Result<BoxStream<'static, Relayed>, String>> + Send;
+    ) -> impl Future<Output = std::result::Result<BoxStream<'static, Relaying>, String>> + Send;
 
     /// Tell the hub that this instance runs a follower of its relay:
     /// whether the hub took it, or why not.
@@ -137,11 +142,11 @@ struct Hub {
 }
 
 impl Source for Hub {
-    async fn watch(&self) -> std::result::Result<BoxStream<'static, Relayed>, String> {
+    async fn watch(&self) -> std::result::Result<BoxStream<'static, Relaying>, String> {
         self.watcher
             .follows(&self.address)
             .await
-            .map(|events| relayed(events, "relay"))
+            .map(relayed)
             .map_err(|e| e.to_string())
     }
 
@@ -166,32 +171,22 @@ impl Source for Hub {
         &self,
         class: &str,
         cell: &str,
-    ) -> std::result::Result<BoxStream<'static, Relayed>, String> {
+    ) -> std::result::Result<BoxStream<'static, Relaying>, String> {
         self.watcher
             .follows_of(&self.address, class, cell)
             .await
-            .map(|events| relayed(events, "one cell"))
+            .map(relayed)
             .map_err(|e| e.to_string())
     }
 }
 
 /// The items of `events`, a watch of the relay, until it ends: one that
-/// fails ends there, and says why, since its reader handles every end
-/// alike, from a snapshot again.
+/// fails ends with why, its last item.
 pub(super) fn relayed(
     events: WatchStream<FollowEvent, UnknownFollowEvent>,
-    watch: &'static str,
-) -> BoxStream<'static, Relayed> {
+) -> BoxStream<'static, Relaying> {
     events
-        .scan((), move |(), item| {
-            futures::future::ready(match item {
-                Ok(item) => Some(item),
-                Err(failure) => {
-                    tracing::info!(watch, %failure, "a watch of the hub's relay failed");
-                    None
-                }
-            })
-        })
+        .map(|item| item.map_err(|failure| failure.to_string()))
         .boxed()
 }
 
@@ -225,7 +220,7 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
             tracing::warn!(%error, "the hub did not take that this instance follows its relay");
             refused = Some(error);
         }
-        tokio::time::sleep(backoff.wait(None, Instant::now())).await;
+        tokio::time::sleep(backoff.wait(None, WatchEnd::Failed, Instant::now())).await;
     }
     refused = None;
     loop {
@@ -244,7 +239,7 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
                 chore = chores.next(due, poll, avoid) => chores.run(chore, &mut follows, &source),
             }
         };
-        let synced = match opened {
+        let (synced, end) = match opened {
             Ok(events) => {
                 if refused.take().is_some() {
                     tracing::info!("the hub's relay of the cells it follows is watched again");
@@ -256,10 +251,10 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
                     tracing::warn!(%error, "the hub's relay of the cells it follows could not be watched");
                     refused = Some(error);
                 }
-                None
+                (None, WatchEnd::Failed)
             }
         };
-        let pause = tokio::time::sleep(backoff.wait(synced, Instant::now()));
+        let pause = tokio::time::sleep(backoff.wait(synced, end, Instant::now()));
         tokio::pin!(pause);
         loop {
             let (due, poll, avoid) = (
@@ -276,7 +271,7 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
 }
 
 /// Read one watch of the relay into `follows` until it ends, and return
-/// when its snapshot completed, if it did: its snapshot
+/// when its snapshot completed, if it did, and how it ended: its snapshot
 /// apart, applied whole at its `synced`, then each change. A second
 /// `synced` in one watch is not the protocol, and ends it. A cell that an
 /// event of a kind this build does not know names is read from a watch of
@@ -286,9 +281,9 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
 async fn read<S: Source, R: Registry>(
     source: &S,
     follows: &mut Follows<R>,
-    mut events: BoxStream<'static, Relayed>,
+    mut events: BoxStream<'static, Relaying>,
     chores: &mut Chores,
-) -> Option<Instant> {
+) -> (Option<Instant>, WatchEnd) {
     let mut snapshot = Some(follows.snapshot());
     let mut synced = None;
     let mut own = Own::default();
@@ -305,8 +300,13 @@ async fn read<S: Source, R: Registry>(
         );
         tokio::select! {
             item = events.next() => {
-                let Some(item) = item else {
-                    return synced;
+                let item = match item {
+                    Some(Ok(item)) => item,
+                    Some(Err(failure)) => {
+                        tracing::info!(%failure, "a watch of the hub's relay failed");
+                        return (synced, WatchEnd::Failed);
+                    }
+                    None => return (synced, WatchEnd::Closed),
                 };
                 let event = match item {
                     Watched::Event(event) => event,
@@ -330,7 +330,7 @@ async fn read<S: Source, R: Registry>(
                         filling.apply(event, Instant::now());
                         snapshot = Some(filling);
                     }
-                    None if marker => return synced,
+                    None if marker => return (synced, WatchEnd::Failed),
                     None => follows.take(event, Instant::now()),
                 }
             }
@@ -339,7 +339,7 @@ async fn read<S: Source, R: Registry>(
                 Ok(_) => {}
                 Err(error) => {
                     tracing::debug!(class = key.0, cell = key.1, %error, "a cell could not be read again");
-                    follows.own(key, watch, None, Instant::now());
+                    follows.own(key, watch, Err(WatchEnd::Failed), Instant::now());
                 }
             },
             Some((key, watch, item)) = own.reading.next() => {
@@ -463,12 +463,12 @@ type Opening<'a> = futures::future::BoxFuture<
     (
         Key,
         u64,
-        std::result::Result<BoxStream<'static, Relayed>, String>,
+        std::result::Result<BoxStream<'static, Relaying>, String>,
     ),
 >;
 
-/// One item of a cell's own watch, or its end (`None`).
-type OwnItem = (Key, u64, Option<Relayed>);
+/// One item of a cell's own watch, or its end, with how it ended.
+type OwnItem = (Key, u64, std::result::Result<Relayed, WatchEnd>);
 
 /// The cells' own watches: those being opened, those being read, and what
 /// lets go of each that is read.
@@ -508,14 +508,25 @@ impl<'a> Own<'a> {
     }
 
     /// Read `stream`, the cell `key`'s watch `watch`, until it ends or is
-    /// let go of: its end is an item too, unless it was let go of.
-    fn read(&mut self, key: Key, watch: u64, stream: BoxStream<'static, Relayed>) {
+    /// let go of: its end is an item too, with how it ended, unless it was
+    /// let go of. A failure is a watch's last item, and the cell then asks
+    /// for a new watch, so the end that follows it names a watch the
+    /// follower no longer reads, and changes nothing.
+    fn read(&mut self, key: Key, watch: u64, stream: BoxStream<'static, Relaying>) {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         self.stops.insert(key.clone(), stop);
         let ending = key.clone();
         let items = stream
-            .map(move |item| (key.clone(), watch, Some(item)))
-            .chain(futures::stream::once(async move { (ending, watch, None) }))
+            .map(move |item| {
+                let item = item.map_err(|failure| {
+                    tracing::info!(class = key.0, cell = key.1, %failure, "a watch of one cell of the hub's relay failed");
+                    WatchEnd::Failed
+                });
+                (key.clone(), watch, item)
+            })
+            .chain(futures::stream::once(async move {
+                (ending, watch, Err(WatchEnd::Closed))
+            }))
             .take_until(stopped)
             .boxed();
         self.reading.push(items);
