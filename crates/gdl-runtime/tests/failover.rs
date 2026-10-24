@@ -5,9 +5,10 @@
 //! A hand-off whose answer does not come is an unknown outcome: the
 //! request fails with `OutcomeUnknown` and no other cell is tried.
 //!
-//! Each test makes `M1` the only `ready` cell, so `home_first` always
-//! offers it first, and the other cells `degraded`, which take the
-//! request only once `M1` declined it.
+//! Each test but the one that names `home_first` makes `M1` the only
+//! `ready` cell, so the default policy, `round_robin`, always offers it
+//! first, and the other cells `degraded`, which take the request only once
+//! `M1` declined it.
 
 mod common;
 
@@ -16,7 +17,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, model_of, placement, run_graph, spec_of,
+    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, home_first, model_of, placement, run_graph,
+    spec_of,
 };
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::streamed::{self, Script, replies, words};
@@ -629,8 +631,9 @@ fn admitting(limit: usize) -> impl Fn(RuntimeConfig) -> RuntimeConfig + Sync {
     }
 }
 
-/// Two ready home cells: `M1` holds 3 of the 4 roots it admits, `M2` none
-/// of its 2. Requests go to the lighter, `M2`. Once `M2` is full, but
+/// Under `home_first`, which chooses by load: two ready cells, `M1`
+/// holding 3 of the 4 roots it admits, `M2` none of its 2. Requests go to
+/// the lighter, `M2`. Once `M2` is full, but
 /// before its summary says so, the request offered to it is declined and
 /// answered by `M1`, and the chooser damps `M2`: the next request is not
 /// offered to it at all. The test fills `M2` just after a summary of it
@@ -639,7 +642,7 @@ fn admitting(limit: usize) -> impl Fn(RuntimeConfig) -> RuntimeConfig + Sync {
 /// which come a period apart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cell_that_declines_is_damped_and_the_lighter_cell_is_preferred() {
-    let spec = spec_of(placement());
+    let spec = spec_of(home_first());
     let directory = Resolving::new();
     let quiet = Events::quiet();
     let hub = global_hub_of(&spec, &directory).await;

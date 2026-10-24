@@ -214,9 +214,9 @@ async fn chooser_through(
     .expect("the chooser serves")
 }
 
-/// `M1`, ready with one entry, and `M2`, degraded with one: `home_first`
-/// sends every request to `M1` while it may, and to `M2` only when it may
-/// not.
+/// `M1`, ready with one entry, and `M2`, degraded with one: the cell
+/// policy sends every request to `M1` while it may, and to `M2` only when
+/// it may not.
 fn cells_of(name: &'static str) -> Model<'static> {
     match name {
         M1 => Model {

@@ -451,12 +451,12 @@ fn a_bad_class_table_is_the_class_tables_error() {
 fn a_spec_sets_a_cell_policy() {
     let temp = contract_dir("cells");
     let dir = temp.path();
-    let text = format!("{CLASSED}    [cells.model_x]\n    max_near = 4\n");
+    let text = format!("{CLASSED}    [cells.model_x]\n    policy = 'home_first'\n");
     let spec = Spec::parse(&text, &dir.join("gdl.toml"), dir).expect("spec");
     let direct = gdl_model::Placement::from_toml(
         "[segment.front]\nnodes = ['A', 'B']\n[segment.engine]\nnodes = ['E']\n\
          [class.global]\nsegments = ['front']\n[class.model_x]\nsegments = ['engine']\n\
-         [cells.model_x]\nmax_near = 4\n",
+         [cells.model_x]\npolicy = 'home_first'\n",
     )
     .expect("a placement");
     assert_eq!(spec.placement, direct);

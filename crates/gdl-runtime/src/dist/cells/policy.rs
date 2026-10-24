@@ -971,7 +971,6 @@ mod tests {
             "model_x",
             CellPolicy {
                 policy: "nearest".into(),
-                ..CellPolicy::default()
             },
         );
         let layout = gdl_model::layout(&manifest, &placement).expect("valid test fixture");

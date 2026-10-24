@@ -721,7 +721,6 @@ mod tests {
         for name in ["home_first", "round_robin"] {
             let layout = layout_under(gdl_model::CellPolicy {
                 policy: name.into(),
-                ..gdl_model::CellPolicy::default()
             });
             let (crossing, cells) = followed_under(&layout, &["m1", "m2", "m3", "m4"]);
             let excluded = [cell_id("model_x", "m4")];

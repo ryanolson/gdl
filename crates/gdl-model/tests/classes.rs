@@ -95,10 +95,11 @@ fn the_order_of_segments_and_of_class_tables_does_not_change_the_hash() {
 }
 
 /// The hash of a classed placement, pinned, so that an encoding change is
-/// a decision rather than an accident.
+/// a decision rather than an accident. It covers each class's default cell
+/// policy.
 #[test]
 fn a_classed_placement_hash_is_pinned() {
-    assert_eq!(parsed(CLASSES).hash(), 0xf7ad_bcf6_e339_18fd);
+    assert_eq!(parsed(CLASSES).hash(), 0xdcf6_8ca1_8078_d0f8);
 }
 
 /// A class lists segments as a segment lists nodes, so an encoding that

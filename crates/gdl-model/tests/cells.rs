@@ -1,7 +1,9 @@
 //! A placement's cell policies: `[cells.<class>]`, how a chooser picks a
 //! cell of the class it sends to. A default is not recorded, so a placement
-//! that spells one out is the placement that leaves it unsaid. Each case is
-//! checked as parsed and as built in code.
+//! that spells one out is the placement that leaves it unsaid, and the hash
+//! covers each class's effective policy, the default included, so that a
+//! change of default changes the hash. Each case is checked as parsed and
+//! as built in code.
 
 use gdl_model::{
     CellPolicy, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, PlacementErrors,
@@ -50,8 +52,12 @@ const SEGMENTS: &str =
 
 const CLASSES: &str = "[class.global]\nsegments = ['a', 'b']\n[class.model_x]\nsegments = ['d']\n";
 
-/// The hash of `CLASSES` at the commit before cell policies existed.
-const CLASSED_HASH: u64 = 0xf7ad_bcf6_e339_18fd;
+/// The hash of `CLASSES`, whose classes have the default policy.
+const CLASSED_HASH: u64 = 0xdcf6_8ca1_8078_d0f8;
+
+/// The hash `CLASSES` had while a class with the default policy hashed as
+/// one with none, before a change of default changed the hash.
+const UNPOLICIED_HASH: u64 = 0xf7ad_bcf6_e339_18fd;
 
 fn parsed(extra: &str) -> Placement {
     Placement::from_toml(&format!("{SEGMENTS}{CLASSES}{extra}")).expect("a placement")
@@ -70,11 +76,9 @@ fn built() -> Placement {
         .class("model_x", ["d"])
 }
 
-fn policy(policy: &str, spill_rtt_ms: u64, max_near: u32) -> CellPolicy {
+fn policy(policy: &str) -> CellPolicy {
     CellPolicy {
         policy: policy.into(),
-        spill_rtt_ms,
-        max_near,
     }
 }
 
@@ -85,11 +89,38 @@ fn refusals(placement: &Placement) -> Vec<String> {
     }
 }
 
+/// The default is `round_robin`, and a classed placement that names no
+/// policy hashes as one that names it: the hash covers the effective
+/// policy, so it is not the hash a placement had while the default went
+/// unhashed, and `home_first`, no longer the default, hashes as itself.
 #[test]
-fn a_classed_placement_without_cells_keeps_its_hash() {
-    assert_eq!(parsed("").hash(), CLASSED_HASH);
-    assert_eq!(built().hash(), CLASSED_HASH);
+fn a_classed_placement_hashes_the_default_policy() {
+    assert_eq!(CellPolicy::default(), policy("round_robin"));
+    let named = parsed("[cells.model_x]\npolicy = 'round_robin'\n");
+    for placement in [parsed(""), built(), named] {
+        assert_eq!(placement.hash(), CLASSED_HASH);
+    }
+    assert_ne!(CLASSED_HASH, UNPOLICIED_HASH, "the default went unhashed");
+    let home_first = parsed("[cells.model_x]\npolicy = 'home_first'\n");
+    assert_ne!(home_first.hash(), CLASSED_HASH);
+    assert_ne!(home_first.hash(), UNPOLICIED_HASH);
+    assert_eq!(
+        home_first,
+        built().cell_policy("model_x", policy("home_first"))
+    );
 }
+
+/// A placement without classes writes nothing for cell policies, and keeps
+/// the hash it had before they existed.
+#[test]
+fn a_placement_without_classes_keeps_its_hash() {
+    let plain = Placement::from_toml(SEGMENTS).expect("a placement");
+    assert_eq!(plain.hash(), segments().hash());
+    assert_eq!(plain.hash(), PLAIN_HASH);
+}
+
+/// The hash of `SEGMENTS` at the commit before cell policies existed.
+const PLAIN_HASH: u64 = 0xe12f_e75a_992d_b590;
 
 /// Spelled-out defaults, and a table holding only defaults, are no table:
 /// the same placement, hash, and text, whatever class the table names.
@@ -98,13 +129,10 @@ fn defaults_are_not_recorded() {
     let plain = parsed("");
     let text = toml::to_string(&plain).expect("toml");
     for extra in [
-        "[cells.model_x]\npolicy = 'home_first'\n",
-        "[cells.model_x]\nspill_rtt_ms = 80\n",
-        "[cells.model_x]\nmax_near = 16\n",
-        "[cells.model_x]\npolicy = 'home_first'\nspill_rtt_ms = 80\nmax_near = 16\n",
+        "[cells.model_x]\npolicy = 'round_robin'\n",
         "[cells.model_x]\n",
-        "[cells.global]\nmax_near = 16\n",
-        "[cells.zz]\npolicy = 'home_first'\n",
+        "[cells.global]\npolicy = 'round_robin'\n",
+        "[cells.zz]\npolicy = 'round_robin'\n",
     ] {
         let spelled = parsed(extra);
         assert_eq!(spelled, plain, "{extra}");
@@ -119,55 +147,26 @@ fn defaults_are_not_recorded() {
     }
     // Setting a default removes what was set before, as `route` does.
     let reset = built()
-        .cell_policy("model_x", policy("nearest", 40, 2))
+        .cell_policy("model_x", policy("nearest"))
         .cell_policy("model_x", CellPolicy::default());
     assert_eq!(reset, plain);
-}
-
-/// A table that keeps one value records only that value.
-#[test]
-fn a_default_beside_a_value_is_dropped() {
-    let spelled = parsed("[cells.model_x]\npolicy = 'home_first'\nmax_near = 4\n");
-    let terse = parsed("[cells.model_x]\nmax_near = 4\n");
-    assert_eq!(spelled, terse);
-    assert_eq!(spelled.hash(), terse.hash());
-    assert_eq!(
-        spelled,
-        built().cell_policy("model_x", policy("home_first", 80, 4))
-    );
-    let text = toml::to_string(&spelled).expect("toml");
-    assert!(text.ends_with("[cells.model_x]\nmax_near = 4\n"), "{text}");
 }
 
 #[test]
 fn each_value_other_than_its_default_changes_the_hash() {
     let cases = [
+        ("[cells.model_x]\npolicy = 'nearest'\n", policy("nearest")),
         (
-            "[cells.model_x]\npolicy = 'nearest'\n",
-            policy("nearest", 80, 16),
-        ),
-        (
-            "[cells.model_x]\nspill_rtt_ms = 40\n",
-            policy("home_first", 40, 16),
-        ),
-        (
-            "[cells.model_x]\nmax_near = 0\n",
-            policy("home_first", 80, 0),
-        ),
-        (
-            "[cells.model_x]\npolicy = 'nearest'\nspill_rtt_ms = 0\nmax_near = 1\n",
-            policy("nearest", 0, 1),
+            "[cells.model_x]\npolicy = 'home_first'\n",
+            policy("home_first"),
         ),
         // The class the table names is part of the hash too.
         (
-            "[cells.global]\nmax_near = 0\n",
-            CellPolicy {
-                max_near: 0,
-                ..CellPolicy::default()
-            },
+            "[cells.global]\npolicy = 'home_first'\n",
+            policy("home_first"),
         ),
     ];
-    let mut hashes = vec![CLASSED_HASH];
+    let mut hashes = vec![CLASSED_HASH, UNPOLICIED_HASH];
     for (extra, value) in cases {
         let class = if extra.contains("global") {
             "global"
@@ -187,12 +186,12 @@ fn each_value_other_than_its_default_changes_the_hash() {
 #[test]
 fn a_cell_policy_hash_is_pinned() {
     assert_eq!(
-        parsed("[cells.model_x]\nmax_near = 4\n").hash(),
+        parsed("[cells.model_x]\npolicy = 'home_first'\n").hash(),
         CELL_POLICY_HASH
     );
 }
 
-const CELL_POLICY_HASH: u64 = 0xbae5_043d_824b_fb00;
+const CELL_POLICY_HASH: u64 = 0xb43b_f3b0_4ee5_02e6;
 
 /// The cells block starts where a class's name would, and a placement with
 /// no classes still hashes its cells, so neither reads as the other.
@@ -215,7 +214,7 @@ fn a_cell_policy_does_not_hash_as_a_class_or_a_router() {
 
 #[test]
 fn cell_policies_survive_toml_and_the_hubs_json() {
-    let placement = parsed("[cells.model_x]\npolicy = 'nearest'\nspill_rtt_ms = 40\n");
+    let placement = parsed("[cells.model_x]\npolicy = 'nearest'\n");
     let text = toml::to_string(&placement).expect("toml");
     assert!(text.contains("[cells.model_x]"), "{text}");
     let back = Placement::from_toml(&text).expect("reads what it wrote");
@@ -231,27 +230,56 @@ fn cell_policies_survive_toml_and_the_hubs_json() {
     // Defaults are dropped whichever way the placement is read.
     let plain = DeploymentSpec::new(manifest(), parsed("")).expect("a deployment");
     let mut json: serde_json::Value = serde_json::to_value(&plain).expect("json");
-    json["placement"]["cells"] = serde_json::json!({ "model_x": { "max_near": 16 } });
+    json["placement"]["cells"] = serde_json::json!({ "model_x": { "policy": "round_robin" } });
     let back: DeploymentSpec = serde_json::from_value(json).expect("a deployment");
     assert_eq!(back.placement, parsed(""));
     assert_eq!(back.placement.hash(), CLASSED_HASH);
 }
 
+/// `policy` is a table's one key. `spill_rtt_ms` and `max_near`, which
+/// chose near cells, are refused as unknown, from TOML and from the hub's
+/// JSON, naming the key.
 #[test]
-fn a_cells_table_has_only_its_three_keys() {
-    for bad in [
-        "[cells.model_x]\nmax_near = 4\nspill = 3\n",
+fn a_cells_table_has_only_its_policy_key() {
+    for (bad, key) in [
+        ("[cells.model_x]\nspill_rtt_ms = 80\n", "spill_rtt_ms"),
+        ("[cells.model_x]\nmax_near = 16\n", "max_near"),
         // Refused whatever the other values are.
-        "[cells.model_x]\npolicy = 'home_first'\nsegments = ['d']\n",
-        "[cells.model_x]\nmax_near = -1\n",
-        "[cells.model_x]\nspill_rtt_ms = -1\n",
-        "[cells.model_x]\nspill_rtt_ms = '80'\n",
+        (
+            "[cells.model_x]\npolicy = 'home_first'\nmax_near = 0\n",
+            "max_near",
+        ),
+        (
+            "[cells.model_x]\npolicy = 'home_first'\nsegments = ['d']\n",
+            "segments",
+        ),
+        ("[cells.model_x]\nspill = 3\n", "spill"),
+    ] {
+        let Err(error) = Placement::from_toml(&format!("{SEGMENTS}{CLASSES}{bad}")) else {
+            panic!("accepted {bad}");
+        };
+        assert!(
+            error.to_string().contains(&format!("`{key}`")),
+            "{bad}: {error}"
+        );
+    }
+    for bad in [
+        "[cells.model_x]\npolicy = 3\n",
         "[cells]\nmodel_x = 'home_first'\n",
     ] {
         assert!(
             Placement::from_toml(&format!("{SEGMENTS}{CLASSES}{bad}")).is_err(),
             "accepted {bad}"
         );
+    }
+    let plain = DeploymentSpec::new(manifest(), parsed("")).expect("a deployment");
+    for key in ["spill_rtt_ms", "max_near"] {
+        let mut json: serde_json::Value = serde_json::to_value(&plain).expect("json");
+        json["placement"]["cells"] = serde_json::json!({ "model_x": { key: 16 } });
+        let Err(error) = serde_json::from_value::<DeploymentSpec>(json) else {
+            panic!("accepted `{key}` from JSON");
+        };
+        assert!(error.to_string().contains(&format!("`{key}`")), "{error}");
     }
 }
 
@@ -265,31 +293,21 @@ fn a_layout_gives_each_entered_class_its_policy() {
         assert_eq!(laid.cell_policy("global"), None);
         assert_eq!(laid.cell_policy("zz"), None);
     }
-    assert_eq!(
-        CellPolicy::default(),
-        policy("home_first", 80, 16),
-        "the defaults"
-    );
+    assert_eq!(CellPolicy::default(), policy("round_robin"), "the default");
     let overridden = [
-        parsed("[cells.model_x]\nmax_near = 0\nspill_rtt_ms = 120\n"),
-        built().cell_policy("model_x", policy("home_first", 120, 0)),
+        parsed("[cells.model_x]\npolicy = 'home_first'\n"),
+        built().cell_policy("model_x", policy("home_first")),
     ];
     for placement in overridden {
         let laid = layout(&manifest(), &placement).expect("a layout");
-        assert_eq!(
-            laid.cell_policy("model_x"),
-            Some(&policy("home_first", 120, 0))
-        );
+        assert_eq!(laid.cell_policy("model_x"), Some(&policy("home_first")));
     }
     let laid = layout(
         &manifest(),
         &parsed("[cells.model_x]\npolicy = 'nearest'\n"),
     )
     .expect("a layout");
-    assert_eq!(
-        laid.cell_policy("model_x"),
-        Some(&policy("nearest", 80, 16))
-    );
+    assert_eq!(laid.cell_policy("model_x"), Some(&policy("nearest")));
     // Without classes, nothing is entered.
     let plain = Placement::from_toml(SEGMENTS).expect("a placement");
     let laid = layout(&manifest(), &plain).expect("a layout");
@@ -301,18 +319,18 @@ fn a_layout_gives_each_entered_class_its_policy() {
 fn a_misplaced_cells_table_is_refused_by_layout() {
     let cases = [
         (
-            format!("{SEGMENTS}[cells.model_x]\nmax_near = 4\n"),
-            segments().cell_policy("model_x", policy("home_first", 80, 4)),
+            format!("{SEGMENTS}[cells.model_x]\npolicy = 'home_first'\n"),
+            segments().cell_policy("model_x", policy("home_first")),
             "cell policy `[cells.model_x]`: the placement has no classes",
         ),
         (
-            format!("{SEGMENTS}{CLASSES}[cells.zz]\nmax_near = 4\n"),
-            built().cell_policy("zz", policy("home_first", 80, 4)),
+            format!("{SEGMENTS}{CLASSES}[cells.zz]\npolicy = 'home_first'\n"),
+            built().cell_policy("zz", policy("home_first")),
             "cell policy `[cells.zz]`: the placement has no class `zz`",
         ),
         (
-            format!("{SEGMENTS}{CLASSES}[cells.global]\nspill_rtt_ms = 10\n"),
-            built().cell_policy("global", policy("home_first", 10, 16)),
+            format!("{SEGMENTS}{CLASSES}[cells.global]\npolicy = 'home_first'\n"),
+            built().cell_policy("global", policy("home_first")),
             "cell policy `[cells.global]`: no class boundary enters class `global`; a cell policy picks a cell of a class that another class sends to",
         ),
     ];
@@ -342,7 +360,7 @@ fn a_policy_name_has_a_selector_names_shape() {
             panic!("accepted `{bad}`");
         };
         assert!(error.to_string().contains("[cells.model_x]"), "{error}");
-        let built = built().cell_policy("model_x", policy(bad, 80, 16));
+        let built = built().cell_policy("model_x", policy(bad));
         assert_eq!(
             refusals(&built),
             [format!(
@@ -363,9 +381,9 @@ fn every_cell_policy_problem_is_reported_together() {
     // `S` is the source: no request boundary enters it.
     let placement = built()
         .route("S", RequestRouter::Random)
-        .cell_policy("zz", policy("home_first", 80, 4))
-        .cell_policy("global", policy("home_first", 80, 4))
-        .cell_policy("model_x", policy("Bad", 80, 16));
+        .cell_policy("zz", policy("home_first"))
+        .cell_policy("global", policy("home_first"))
+        .cell_policy("model_x", policy("Bad"));
     let errors = refusals(&placement);
     for expected in [
         "request router `S` must target a request boundary",
@@ -382,7 +400,7 @@ fn every_cell_policy_problem_is_reported_together() {
 
     let plain = segments()
         .route("S", RequestRouter::Random)
-        .cell_policy("model_x", policy("home_first", 80, 4));
+        .cell_policy("model_x", policy("home_first"));
     assert_eq!(
         refusals(&plain),
         [
@@ -400,7 +418,7 @@ fn an_unplaced_node_does_not_make_a_class_unentered() {
     let placement = Placement::from_toml(
         "[segment.a]\nnodes = ['S']\n[segment.b]\nnodes = ['F']\n[segment.d]\nnodes = []\n\
          [class.global]\nsegments = ['a', 'b']\n[class.model_x]\nsegments = ['d']\n\
-         [cells.model_x]\nmax_near = 4\n",
+         [cells.model_x]\npolicy = 'home_first'\n",
     )
     .expect("a placement");
     let errors = refusals(&placement);
@@ -418,12 +436,12 @@ fn an_unplaced_node_does_not_make_a_class_unentered() {
 fn an_unplaced_node_does_not_hide_a_class_it_cannot_enter() {
     let text = "[segment.a]\nnodes = ['S']\n[segment.b]\nnodes = ['F']\n[segment.d]\nnodes = []\n\
                 [class.global]\nsegments = ['a', 'b']\n[class.model_x]\nsegments = ['d']\n\
-                [cells.global]\nmax_near = 0\n";
+                [cells.global]\npolicy = 'home_first'\n";
     let built = segments()
         .segment("d", Vec::<String>::new())
         .class("global", ["a", "b"])
         .class("model_x", ["d"])
-        .cell_policy("global", policy("home_first", 80, 0));
+        .cell_policy("global", policy("home_first"));
     let parsed = Placement::from_toml(text).expect("a placement");
     assert_eq!(parsed, built);
     for placement in [parsed, built] {
@@ -447,7 +465,7 @@ fn an_unplaced_outer_end_leaves_its_inner_class_undecided() {
     let placement = Placement::from_toml(
         "[segment.a]\nnodes = []\n[segment.b]\nnodes = ['F']\n[segment.d]\nnodes = ['D']\n\
          [class.global]\nsegments = ['a']\n[class.model_x]\nsegments = ['b', 'd']\n\
-         [cells.model_x]\nmax_near = 0\n",
+         [cells.model_x]\npolicy = 'home_first'\n",
     )
     .expect("a placement");
     let errors = refusals(&placement);
@@ -464,12 +482,12 @@ fn an_unplaced_outer_end_leaves_its_inner_class_undecided() {
 fn an_unclassed_shared_segment_cannot_make_a_class_entered() {
     let text = "[segment.a]\nnodes = ['S']\n[segment.m]\nnodes = ['F', 'D']\n\
                 [class.global]\nsegments = ['a']\n\
-                [cells.global]\nmax_near = 0\n";
+                [cells.global]\npolicy = 'home_first'\n";
     let built = Placement::new()
         .segment("a", ["S"])
         .segment("m", ["F", "D"])
         .class("global", ["a"])
-        .cell_policy("global", policy("home_first", 80, 0));
+        .cell_policy("global", policy("home_first"));
     let parsed = Placement::from_toml(text).expect("a placement");
     assert_eq!(parsed, built);
     for placement in [parsed, built] {
@@ -485,7 +503,7 @@ fn an_unclassed_shared_segment_cannot_make_a_class_entered() {
     // `m` a class could make `D`'s hop enter `global`.
     let apart = Placement::from_toml(
         "[segment.a]\nnodes = ['S']\n[segment.m]\nnodes = ['F']\n[segment.n]\nnodes = ['D']\n\
-         [class.global]\nsegments = ['a']\n[cells.global]\nmax_near = 0\n",
+         [class.global]\nsegments = ['a']\n[cells.global]\npolicy = 'home_first'\n",
     )
     .expect("a placement");
     let errors = refusals(&apart);

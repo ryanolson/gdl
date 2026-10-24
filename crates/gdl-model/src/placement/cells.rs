@@ -8,50 +8,32 @@ use crate::manifest::Manifest;
 use super::{ClassBoundary, Placement, PlacementError, check_name_shape};
 
 /// How a chooser picks a cell of a class it sends to: a placement's
-/// `[cells.<class>]` table. Each value is optional in the table, and a
-/// value equal to its default is not recorded.
+/// `[cells.<class>]` table. Its one key is optional in the table, and a
+/// value equal to its default is not recorded. Unknown keys are refused,
+/// `spill_rtt_ms` and `max_near` among them: they chose near cells, which
+/// a chooser does not follow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CellPolicy {
-    /// The policy's name, `home_first` by default. Named like a selector,
+    /// The policy's name, `round_robin` by default. Named like a selector,
     /// and not checked against a list, since a custom policy can be
     /// registered later.
     #[serde(skip_serializing_if = "is_default_policy")]
     pub policy: String,
-    /// Cells in other regions within this round trip, in milliseconds,
-    /// are near; 80 by default.
-    #[serde(skip_serializing_if = "is_default_spill_rtt_ms")]
-    pub spill_rtt_ms: u64,
-    /// At most this many near cells are offered; 16 by default. 0 offers
-    /// home cells only.
-    #[serde(skip_serializing_if = "is_default_max_near")]
-    pub max_near: u32,
 }
 
-const DEFAULT_POLICY: &str = "home_first";
-const DEFAULT_SPILL_RTT_MS: u64 = 80;
-const DEFAULT_MAX_NEAR: u32 = 16;
+const DEFAULT_POLICY: &str = "round_robin";
 
 impl Default for CellPolicy {
     fn default() -> Self {
         Self {
             policy: DEFAULT_POLICY.into(),
-            spill_rtt_ms: DEFAULT_SPILL_RTT_MS,
-            max_near: DEFAULT_MAX_NEAR,
         }
     }
 }
 
 fn is_default_policy(policy: &str) -> bool {
     policy == DEFAULT_POLICY
-}
-
-fn is_default_spill_rtt_ms(value: &u64) -> bool {
-    *value == DEFAULT_SPILL_RTT_MS
-}
-
-fn is_default_max_near(value: &u32) -> bool {
-    *value == DEFAULT_MAX_NEAR
 }
 
 /// The `[cells]` tables as read, without those that hold only defaults:
@@ -70,25 +52,57 @@ pub(super) fn check_policy_name(policy: &CellPolicy) -> Result<(), String> {
     check_name_shape("policy", &policy.policy)
 }
 
-/// Hash the cell policies after the classes. The marker starts them where
-/// a class's, a segment's, or a router's name would start, with a value no
-/// name's length can have and the classes' marker is not, so no cell
-/// policy hashes as any of them; every entry then has the same fields. The
-/// effective values are hashed, which is unambiguous because a table of
-/// defaults is never recorded. A placement without cell policies writes
-/// nothing and keeps the hash it had before they existed.
-pub(super) fn hash(h: &mut Fnv, cells: &BTreeMap<String, CellPolicy>) {
-    if cells.is_empty() {
+/// Hash the cell policies after the classes: each class's effective
+/// policy, the default included, so that a change of default changes the
+/// hash rather than what a placement means, and each table that names no
+/// class, which layout refuses. The marker starts them where a class's, a
+/// segment's, or a router's name would start, with a value no name's
+/// length can have and the classes' marker is not, so no cell policy
+/// hashes as any of them. A placement with neither classes nor tables
+/// writes nothing and keeps the hash it had before cell policies existed.
+pub(super) fn hash<'a>(
+    h: &mut Fnv,
+    classes: impl Iterator<Item = &'a String> + Clone,
+    cells: &'a BTreeMap<String, CellPolicy>,
+) {
+    let count = named(classes.clone(), cells).count();
+    if count == 0 {
         return;
     }
     h.u64(u64::MAX - 1);
-    h.u64(cells.len() as u64);
-    for (class, policy) in cells {
+    h.u64(count as u64);
+    for class in named(classes, cells) {
         h.str(class);
-        h.str(&policy.policy);
-        h.u64(policy.spill_rtt_ms);
-        h.u64(u64::from(policy.max_near));
+        h.str(
+            cells
+                .get(class)
+                .map_or(DEFAULT_POLICY, |policy| &policy.policy),
+        );
     }
+}
+
+/// The classes, and the classes the tables name, once each in name order:
+/// both are in name order, so they merge without a set, and hashing a
+/// class costs what hashing a segment's node does.
+fn named<'a>(
+    classes: impl Iterator<Item = &'a String>,
+    cells: &'a BTreeMap<String, CellPolicy>,
+) -> impl Iterator<Item = &'a str> {
+    let mut classes = classes.peekable();
+    let mut tables = cells.keys().peekable();
+    std::iter::from_fn(move || {
+        let next = match (classes.peek(), tables.peek()) {
+            (None, None) => None,
+            (Some(class), Some(table)) if class == table => {
+                tables.next();
+                classes.next()
+            }
+            (Some(class), Some(table)) if class < table => classes.next(),
+            (_, Some(_)) => tables.next(),
+            (Some(_), None) => classes.next(),
+        };
+        next.map(String::as_str)
+    })
 }
 
 /// The checks that need only the placement: each table's policy name, and
