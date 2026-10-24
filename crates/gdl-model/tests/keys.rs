@@ -161,3 +161,44 @@ fn a_cells_settings_refuse_an_unknown_key_and_name_it() {
         "the variable that sets a key"
     );
 }
+
+/// A syntax error's table and key are those of TOML's structure: a
+/// header inside a multi-line string is text, and a key's value that
+/// spans lines is still that key's.
+#[test]
+fn a_syntax_error_is_located_through_strings_and_arrays() {
+    for (text, expected, repaired) in [
+        (
+            "[config.A]\nnote = \"\"\"\n[cells.phantom]\n\"\"\"\nlimit = 3 x\n",
+            "line 5: [config.A] limit: ",
+            "[config.A]\nnote = \"\"\"\n[cells.phantom]\n\"\"\"\nlimit = 3\n",
+        ),
+        (
+            "[config.A]\nnote = '''\n[cells.phantom]\n'''\nlimit = 3 x\n",
+            "line 5: [config.A] limit: ",
+            "[config.A]\nnote = '''\n[cells.phantom]\n'''\nlimit = 3\n",
+        ),
+        (
+            "[segment.front]\nnodes = [\n  \"A\",\n  \"B\" x\n]\n",
+            "line 4: [segment.front] nodes: ",
+            "[segment.front]\nnodes = [\n  \"A\",\n  \"B\"\n]\n",
+        ),
+        (
+            "[segment.front]\nnodes = [\n  [\"A\"],\n]\n[segment.back]\nnodes = 3 x\n",
+            "line 6: [segment.back] nodes: ",
+            "[segment.front]\nnodes = [\n  [\"A\"],\n]\n[segment.back]\nnodes = 3\n",
+        ),
+        (
+            "[a]\nk = \"has # and [x] and \\\" quote\"\nm = 1 x\n",
+            "line 3: [a] m: ",
+            "[a]\nk = \"has # and [x] and \\\" quote\"\nm = 1\n",
+        ),
+    ] {
+        gdl_model::read_toml::<toml::Table>(repaired).expect("the repaired text parses");
+        let error = refused(text, gdl_model::read_toml::<toml::Table>(text));
+        assert!(
+            error.starts_with(expected),
+            "{expected}\nin: {error}\n{text}"
+        );
+    }
+}

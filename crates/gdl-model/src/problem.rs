@@ -124,44 +124,99 @@ pub fn read_toml<T: DeserializeOwned>(text: &str) -> Result<T, Problems> {
 }
 
 /// The table and the key that a syntax error at `offset` of `text` is in.
-/// The parser gives only the place, so they are read from the text: the
-/// last table header above the error's line, and the key that line
-/// assigns, when the error comes after its `=`. A line of a multi-line
-/// array that is itself a bracketed array can pass for a header; the
-/// line is right whatever the table.
+/// The parser gives only the place, so the text before it is scanned for
+/// TOML's structure: strings (a header inside a multi-line string is
+/// text), comments, and the brackets of a value that spans lines (an
+/// error inside a multi-line array is its key's). The table is the last
+/// header, and the key the one whose value is open at the error. Where the
+/// scan cannot tell, as inside a header or a string left open on its
+/// line, neither is named: a missing location is better than a wrong one.
 fn surroundings(text: &str, offset: usize) -> (Option<String>, Option<String>) {
-    let offset = offset.min(text.len());
-    let start = text[..offset].rfind('\n').map_or(0, |at| at + 1);
-    let uncommented = |line: &str| {
-        line.split('#')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    let line = text[start..].split('\n').next().unwrap_or_default();
-    // A broken header is no key of the table above it.
-    if line.trim_start().starts_with('[') {
-        return (None, None);
+    let mut end = offset.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
     }
-    let table = text[..start]
-        .lines()
-        .rev()
-        .map(uncommented)
-        .find(|line| line.starts_with('[') && line.ends_with(']') && !line.contains('='))
-        .map(|header| {
-            header
-                .trim_matches(|c| c == '[' || c == ']')
-                .trim()
-                .to_string()
-        })
-        .filter(|table| !table.is_empty());
-    let key = line
-        .split_once('=')
-        .filter(|(key, _)| start + key.len() < offset)
-        .map(|(key, _)| key.trim().to_string())
-        .filter(|key| !key.is_empty() && !key.starts_with('['));
-    (table, key)
+    let before = &text[..end];
+    let bytes = before.as_bytes();
+    let (mut table, mut key) = (None, None);
+    // Where the statement on the current line began, and whether a key's
+    // value is open, with how many brackets deep.
+    let (mut statement, mut value, mut depth) = (0, false, 0usize);
+    let mut at = 0;
+    while at < bytes.len() {
+        let rest = &before[at..];
+        match bytes[at] {
+            b'"' | b'\'' => {
+                let quote = bytes[at];
+                let triple = if quote == b'"' { "\"\"\"" } else { "'''" };
+                let (close, open) = match rest.starts_with(triple) {
+                    true => (triple, 3),
+                    false => (&triple[..1], 1),
+                };
+                let mut inner = at + open;
+                loop {
+                    let Some(&byte) = bytes.get(inner) else {
+                        // The error is inside this string: its key's, if
+                        // it is a value, and nothing certain otherwise.
+                        return match value {
+                            true => (table, key),
+                            false => (None, None),
+                        };
+                    };
+                    if quote == b'"' && byte == b'\\' {
+                        inner += 2;
+                    } else if before[inner..].starts_with(close) {
+                        break;
+                    } else if byte == b'\n' && open == 1 {
+                        return (None, None);
+                    } else {
+                        inner += 1;
+                    }
+                }
+                at = inner + close.len();
+                continue;
+            }
+            b'#' => {
+                at += rest.find('\n').unwrap_or(rest.len());
+                continue;
+            }
+            b'[' if !value && before[statement..at].trim().is_empty() => {
+                let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+                let header = line.split('#').next().unwrap_or_default().trim();
+                let Some(inner) = header
+                    .strip_prefix('[')
+                    .and_then(|header| header.strip_suffix(']'))
+                else {
+                    return (None, None);
+                };
+                let inner = inner.trim_start_matches('[').trim_end_matches(']').trim();
+                if inner.is_empty() || line.len() == rest.len() {
+                    // A header the error is in.
+                    return (None, None);
+                }
+                (table, key) = (Some(inner.to_string()), None);
+                at += line.len();
+                continue;
+            }
+            b'[' | b'{' if value => depth += 1,
+            b']' | b'}' if value => depth = depth.saturating_sub(1),
+            b'=' if !value => {
+                key = Some(before[statement..at].trim().to_string()).filter(|k| !k.is_empty());
+                value = true;
+            }
+            b'\n' => {
+                if value && depth == 0 {
+                    (value, key) = (false, None);
+                }
+                if !value {
+                    statement = at + 1;
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    (table, key.filter(|_| value))
 }
 
 /// The keys of a reader's path, each array element written after the key
