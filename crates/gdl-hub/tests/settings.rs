@@ -7,7 +7,7 @@ use std::time::Duration;
 use figment::Jail;
 use futures::StreamExt;
 use gdl_cells::{CellDirectory, CellEvent, CellState, DirDirectory};
-use gdl_hub::{cell_from_env, hub_builder};
+use gdl_hub::{cell_from_env, cell_from_vars, hub_builder};
 use gdl_model::{
     CellSettings, DeploymentSpec, DirectoryBackend, HopInfo, Manifest, NodeInfo, Placement, Role,
     TypeInfo,
@@ -102,6 +102,36 @@ fn a_cells_settings_are_read_from_the_environment() {
         );
         Ok(())
     });
+}
+
+/// Variables given to the reader are read as the same variables in the
+/// environment are, so that a generator can check what it writes for a
+/// hub without setting them in its own process.
+#[test]
+fn given_variables_are_read_as_the_environment_is() {
+    let given = [
+        ("GDL_CELL__NAME", "model-x-01-us-east-1"),
+        ("gdl_cell__class", "model_x"),
+        ("GDL_CELL__REGION", "us-east-1"),
+        ("GDL_CELL__HUB", "model-x-01-hub:1337"),
+        ("GDL_CELL__DIRECTORY", "dir"),
+        ("GDL_CELL__DIR", "/srv/cells"),
+        ("GDL_CELL__READY__D", "2"),
+        ("GDL_PROFILE", "release"),
+    ];
+    Jail::expect_with(|jail| {
+        for (name, value) in given {
+            jail.set_env(name, value);
+        }
+        let read = cell_from_vars(&spec(), given.map(|(n, v)| (n.into(), v.into())))
+            .map_err(|e| e.to_string())?;
+        assert!(read.is_some());
+        assert_eq!(read, cell_from_env(&spec()).map_err(|e| e.to_string())?);
+        Ok(())
+    });
+    let misspelled = [("GDL_CELL__HONE", "x")].map(|(n, v)| (n.into(), v.into()));
+    let refused = cell_from_vars(&spec(), misspelled).expect_err("a misspelled key");
+    assert!(refused.to_string().contains("GDL_CELL__HONE"), "{refused}");
 }
 
 /// An IPv6 hub address starts with `[`, as a list would: it is read as

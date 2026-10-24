@@ -1,6 +1,8 @@
 //! What the hub binary runs: admission for its deployment, and, for a
 //! cell's hub, the cell's extension with the directory its settings name.
 
+use std::ffi::OsString;
+
 use figment::value::{Dict, Map, Tag, Value};
 use figment::{Figment, Metadata, Profile, Provider, Source};
 use gdl_cells::DirDirectory;
@@ -20,9 +22,19 @@ use crate::{CellError, CellReadiness, CellTiming, GraphAdmission};
 /// The hub binary takes its deployment as its only argument and has no
 /// settings file, so the environment is the only source.
 pub fn cell_from_env(spec: &DeploymentSpec) -> Result<Option<CellSettings>, CellError> {
+    cell_from_vars(spec, std::env::vars_os())
+}
+
+/// [`cell_from_env`] from `vars`, names and values as the environment
+/// gives them, in its order, rather than from the process's environment:
+/// so that what a generator writes for a hub is read as the hub reads it.
+pub fn cell_from_vars(
+    spec: &DeploymentSpec,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<Option<CellSettings>, CellError> {
     // One provider to a variable, so that figment's provenance of a value
     // names the variable that gave it, whichever of several set it last.
-    let figment = variables().fold(Figment::new(), Figment::merge);
+    let figment = variables(vars).fold(Figment::new(), Figment::merge);
     let given = figment
         .extract::<Dict>()
         .map_err(|e| CellError::new(format!("GDL_CELL__*: {e}")))?;
@@ -86,13 +98,15 @@ pub fn hub_builder(
         .extension(readiness))
 }
 
-/// The `GDL_CELL__` variables, one provider to each, in the environment's
+/// The `GDL_CELL__` variables of `vars`, one provider to each, in their
 /// order, so that a later variable overrides an earlier one as within one
 /// provider: the keys after the prefix, matched without regard to case,
 /// with `__` between nested keys.
-fn variables() -> impl Iterator<Item = Variable> {
+fn variables(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> impl Iterator<Item = Variable> {
     const PREFIX: &str = "GDL_CELL__";
-    std::env::vars_os().filter_map(|(name, value)| {
+    vars.into_iter().filter_map(|(name, value)| {
         let name = name.to_string_lossy().trim().to_string();
         let key = name
             .get(..PREFIX.len())
