@@ -290,3 +290,46 @@ fn a_watch_of_one_follow_receives_its_changes_alone() {
     assert_eq!(received(8), 8);
     assert_eq!(received(64), 64);
 }
+
+/// A watch of one follow that closes releases its cell's channel, and the
+/// buffer the channel holds, at once: a cell that has left, and sends no
+/// change again, keeps none.
+#[test]
+fn a_closed_watch_of_one_follow_releases_its_channel() {
+    let relay = Relay::new(1024, tokio::sync::watch::Sender::new(health()));
+    for i in 0..128 {
+        let cell = format!("m{i}");
+        let generation = relay.begin("model_x", &cell);
+        relay.install(generation, installed(&cell, CellState::Ready));
+        let mut watch = relay.watch_of("model_x", &cell);
+        relay.end("model_x", &cell, generation);
+        relay.forget("model_x", &cell);
+        let events = pending(&mut watch);
+        assert_eq!(
+            events.last(),
+            Some(&FollowEvent::Dropped {
+                class: "model_x".into(),
+                cell: cell.clone(),
+                generation,
+            })
+        );
+        drop(watch);
+    }
+    assert_eq!(relay.channels(), 0);
+    // A channel watched twice is kept until its last watch closes.
+    let generation = relay.begin("model_x", "n");
+    relay.install(generation, installed("n", CellState::Ready));
+    let (first, second) = (
+        relay.watch_of("model_x", "n"),
+        relay.watch_of("model_x", "n"),
+    );
+    drop(first);
+    assert_eq!(relay.channels(), 1);
+    drop(second);
+    assert_eq!(relay.channels(), 0);
+    // So is one served as events, as the hub's route serves it.
+    let served = relay.watch_of("model_x", "n").into_events();
+    assert_eq!(relay.channels(), 1);
+    drop(served);
+    assert_eq!(relay.channels(), 0);
+}

@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
 use futures::Stream;
@@ -33,7 +33,9 @@ use gdl_watch::{CellWatchEvent, FollowEvent};
 
 /// The followed cells, and the relay's watchers.
 pub(crate) struct Relay {
-    shared: Mutex<Shared>,
+    /// Shared with each watch of one follow, which releases its cell's
+    /// channel when it closes.
+    shared: Arc<Mutex<Shared>>,
     watchers: Watchers,
     /// The watchers of one follow each: counted apart, so that the count of
     /// the relay's watchers is of its whole watches.
@@ -50,7 +52,7 @@ impl Relay {
     /// it follows in `health`.
     pub(crate) fn new(buffer: usize, health: watch::Sender<CellHealth>) -> Self {
         Self {
-            shared: Mutex::new(Shared {
+            shared: Arc::new(Mutex::new(Shared {
                 generations: HashMap::new(),
                 follows: HashMap::new(),
                 changes: Changes {
@@ -60,7 +62,7 @@ impl Relay {
                 },
                 ready: HashMap::new(),
                 health,
-            }),
+            })),
             watchers: Watchers::new(),
             one: Watchers::new(),
             following: watch::Sender::new(BTreeMap::new()),
@@ -212,7 +214,18 @@ impl Relay {
         };
         FollowsWatch {
             events: self.one.stream(counted, snapshot, events),
+            release: Some(Release {
+                shared: Arc::clone(&self.shared),
+                class: class.to_string(),
+                cell: cell.to_string(),
+            }),
         }
+    }
+
+    /// How many channels of cells watched alone the relay holds.
+    #[cfg(test)]
+    pub(crate) fn channels(&self) -> usize {
+        self.lock().changes.one.values().map(HashMap::len).sum()
     }
 
     /// A watch of the relay: its snapshot, then each change.
@@ -224,6 +237,7 @@ impl Relay {
         };
         FollowsWatch {
             events: self.watchers.stream(counted, snapshot, events),
+            release: None,
         }
     }
 
@@ -268,7 +282,7 @@ struct Changes {
     all: broadcast::Sender<FollowEvent>,
     /// By class, then by cell, so that finding a change's channel by the
     /// names it carries allocates nothing; a channel no watch reads any
-    /// more is dropped at its cell's next change.
+    /// more is dropped when its last watch closes.
     one: HashMap<String, HashMap<String, broadcast::Sender<FollowEvent>>>,
     buffer: usize,
 }
@@ -280,13 +294,23 @@ impl Changes {
             && let Some(cells) = self.one.get_mut(class)
             && let Some(channel) = cells.get(cell)
         {
-            if channel.receiver_count() == 0 {
-                cells.remove(cell);
-            } else {
-                let _ = channel.send(event.clone());
-            }
+            let _ = channel.send(event.clone());
         }
         let _ = self.all.send(event);
+    }
+
+    /// Drop the channel of the cell `cell` of `class` if no watch reads it.
+    fn release(&mut self, class: &str, cell: &str) {
+        if let Some(cells) = self.one.get_mut(class)
+            && cells
+                .get(cell)
+                .is_some_and(|channel| channel.receiver_count() == 0)
+        {
+            cells.remove(cell);
+            if cells.is_empty() {
+                self.one.remove(class);
+            }
+        }
     }
 
     /// Subscribe to the changes of the cell `cell` of `class` alone.
@@ -683,11 +707,39 @@ impl Installed {
 /// for it.
 pub struct FollowsWatch {
     events: BoxStream<'static, FollowEvent>,
+    /// For a watch of one follow: dropped after `events`, whose receiver is
+    /// then gone, so that the cell's channel, and its buffer, is released
+    /// as its last watch closes, not only at the cell's next change, which
+    /// a cell that left never sends.
+    release: Option<Release>,
+}
+
+/// Releases a cell's channel as a watch of its follow closes.
+struct Release {
+    shared: Arc<Mutex<Shared>>,
+    class: String,
+    cell: String,
+}
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .changes
+            .release(&self.class, &self.cell);
+    }
 }
 
 impl FollowsWatch {
     pub(crate) fn into_events(self) -> BoxStream<'static, FollowEvent> {
-        self.events
+        if self.release.is_none() {
+            self.events
+        } else {
+            // Boxed whole, so that its release still drops after its
+            // events.
+            Box::pin(self)
+        }
     }
 }
 
