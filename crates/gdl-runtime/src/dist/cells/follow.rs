@@ -560,7 +560,13 @@ impl Followed {
                     .get(&key)
                     .is_some_and(|follow| follow.generation == generation);
                 let follow = self.find_mut(&key, generation)?;
-                if revision <= follow.revision {
+                // A follow begins offered at revision 1, which its hub
+                // installs not offered for a cell that takes no work: a
+                // revision names one state, so only an older one, or the
+                // same one again, is ignored.
+                if revision < follow.revision
+                    || (revision == follow.revision && offered == follow.offered)
+                {
                     return None;
                 }
                 follow.revision = revision;

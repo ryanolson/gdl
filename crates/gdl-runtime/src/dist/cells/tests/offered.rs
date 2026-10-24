@@ -261,3 +261,34 @@ fn an_event_passes_over_no_follow_to_acknowledge() {
         "a poll looked at a follow twice"
     );
 }
+
+/// A follow the hub installs not offered, at revision 1, as it does a cell
+/// that already drains, is shown not offered and acknowledged at that
+/// revision, whether it arrives after a snapshot or in one: the revision
+/// a follow is installed at is not one this instance has applied yet.
+#[test]
+fn a_follow_installed_not_offered_is_acknowledged() {
+    let installed = [follow(M1, 1, CellState::Draining), offering(1, 1, false)];
+    let (mut follows, cells, _, _) = follower();
+    let now = Instant::now();
+    live(&mut follows, now, installed.clone());
+    assert!(!table(&cells, M1).expect("followed").offered);
+    assert_eq!(
+        follows.acknowledgements(now),
+        [unoffered(1, 1)],
+        "after a snapshot"
+    );
+
+    let (mut follows, cells, _, _) = follower();
+    let mut snapshot = follows.snapshot();
+    for event in installed {
+        snapshot.apply(event, now);
+    }
+    follows.resnapshot(snapshot, now);
+    assert!(!table(&cells, M1).expect("followed").offered);
+    assert_eq!(
+        follows.acknowledgements(now),
+        [unoffered(1, 1)],
+        "in a snapshot"
+    );
+}
