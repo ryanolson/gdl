@@ -377,8 +377,9 @@ async fn a_retiree_never_acknowledged_goes_on_at_its_bound() {
 /// A retiree whose cell starts to drain while it waits for its parent goes
 /// by the drain's rules from then: with no acknowledgement and no follower
 /// letting go of the cell, it keeps taking work until the drain's bound
-/// has passed since it learned of the drain, then the setup timeout, and
-/// only then refuses an offer, which the chooser offers to another cell.
+/// has passed since it learned of the drain, and then declines offers from
+/// other cells, as a draining entry does; the chooser offers the request to
+/// another cell.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_drain_while_the_retiree_waits_keeps_it_to_the_drains_bound() {
     let spec = spec_of(placement());
@@ -428,6 +429,12 @@ async fn a_drain_while_the_retiree_waits_keeps_it_to_the_drains_bound() {
     assert!(
         took >= BOUND,
         "stopped taking work {took:?} after its cell began to drain"
+    );
+    // Declined at the bound, as a draining entry declines: within the
+    // retiree's poll and this probe's, not a setup timeout later.
+    assert!(
+        took < BOUND + Duration::from_millis(400),
+        "took offers {took:?} after its cell began to drain"
     );
 
     assert!(other.forwards() > 0, "another cell answered");

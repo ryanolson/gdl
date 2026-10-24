@@ -1047,7 +1047,7 @@ impl Launch {
         let blind = sources.is_none();
         let reaching: Vec<&str> = sources.iter().flatten().map(String::as_str).collect();
         #[cfg(feature = "hub")]
-        let parent = self.cell_parent();
+        let (parent, declines) = (self.cell_parent(), self.cell_declines());
         let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
         let me = self.node.instance_id();
         let pause = |every: Duration| async move {
@@ -1135,6 +1135,9 @@ impl Launch {
                     };
                     if avoided.is_none() && avoiding {
                         avoided = Some(tokio::time::Instant::now());
+                    }
+                    if declines() {
+                        segment.decline_offers();
                     }
                     let done = drained || settled(avoided);
                     if done || !pause(crate::dist::HubSession::poll()).await {

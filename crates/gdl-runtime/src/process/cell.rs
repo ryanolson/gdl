@@ -70,6 +70,16 @@ impl Launch {
         move || parent.as_ref().is_none_or(crate::dist::Parent::avoids)
     }
 
+    /// Whether a retired entry instance declines offers from other cells
+    /// now, asked at each poll of (A): once a drain of its cell it learned
+    /// of while it waited reaches its bound, or no cell follows the cell.
+    /// Never for any other instance, whose stop decided that as it began.
+    #[cfg(feature = "hub")]
+    pub(super) fn cell_declines(&self) -> impl Fn() -> bool + use<> {
+        let parent = self.cell_drain.as_ref().and_then(|cell| cell.parent());
+        move || parent.as_ref().is_some_and(crate::dist::Parent::declines)
+    }
+
     /// For an entry instance of a draining cell, decline offers once its
     /// bound has passed or no other cell follows the cell, or at
     /// `deadline`; for any other, nothing. What it reads is taken now, so
