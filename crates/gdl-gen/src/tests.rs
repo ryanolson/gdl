@@ -828,15 +828,15 @@ fn a_segment_name_is_short_enough_for_its_hub_services() {
 fn defaults() -> Vec<(&'static str, String)> {
     use gdl_model::{CellPolicy, CellSettings, DirectoryBackend, RequestRouter};
     let millis = |d: std::time::Duration| d.as_millis().to_string();
-    let directory = match DirectoryBackend::default() {
+    let directory = match DirectoryBackend::DEFAULT {
         DirectoryBackend::Relay => "relay",
         DirectoryBackend::Memory => "memory",
         DirectoryBackend::Dir { .. } => "dir",
     };
     vec![
         (
-            "RequestRouter::default()",
-            serde_json::to_string(&RequestRouter::default()).expect("a name"),
+            "RequestRouter::DEFAULT",
+            serde_json::to_string(&RequestRouter::DEFAULT).expect("a name"),
         ),
         (
             "CellPolicy::DEFAULT_POLICY",
@@ -862,7 +862,7 @@ fn defaults() -> Vec<(&'static str, String)> {
             "CellSettings::DEFAULT_QUORUM",
             CellSettings::DEFAULT_QUORUM.to_string(),
         ),
-        ("DirectoryBackend::default()", format!("{directory:?}")),
+        ("DirectoryBackend::DEFAULT", format!("{directory:?}")),
         (
             "CellSettings::DEFAULT_SUMMARY",
             millis(CellSettings::DEFAULT_SUMMARY),
@@ -920,6 +920,19 @@ fn defaults_drift(readme: &str) -> Vec<String> {
 fn the_readme_names_every_default_with_its_value() {
     let readme = include_str!("../../../README.md");
     assert_eq!(defaults_drift(readme), Vec::<String>::new());
+    // Each is a constant, named as one: no function stands in for it.
+    for (constant, _) in defaults() {
+        let name = constant.rsplit("::").next().unwrap_or(constant);
+        assert!(
+            name.starts_with("DEFAULT") || name.starts_with("MIN_"),
+            "{constant}"
+        );
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+            "{constant}"
+        );
+    }
     // The control: a table that drifted is caught.
     let drifted = readme.replacen(
         "| `16` | `CellPolicy::DEFAULT_MAX_NEAR` |",

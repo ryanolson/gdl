@@ -291,14 +291,14 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 
 | Key | Default | Constant |
 |---|---|---|
-| spec `[routing] <node>` | `"round_robin"` | `RequestRouter::default()` |
+| spec `[routing] <node>` | `"round_robin"` | `RequestRouter::DEFAULT` |
 | spec `[cells.<class>] policy` | `"home_first"` | `CellPolicy::DEFAULT_POLICY` |
 | spec `[cells.<class>] spill_rtt_ms` | `80` | `CellPolicy::DEFAULT_SPILL_RTT_MS` |
 | spec `[cells.<class>] max_near` | `16` | `CellPolicy::DEFAULT_MAX_NEAR` |
 | spec `[deployment] base_image` | `"debian:bookworm-slim"` | `DEFAULT_BASE_IMAGE` |
 | spec `[deployment] build_image` | `"rust:1.93-slim-bookworm"` | `DEFAULT_BUILD_IMAGE` |
 | fleet `ready.<segment>`, `[cell] ready.<segment>` | `1` | `CellSettings::DEFAULT_QUORUM` |
-| `[cell] directory` | `"relay"` | `DirectoryBackend::default()` |
+| `[cell] directory` | `"relay"` | `DirectoryBackend::DEFAULT` |
 | `[cell] summary_ms` | `10000` | `CellSettings::DEFAULT_SUMMARY` |
 | `[cell] summary_ms`, its least | `1000` | `CellSettings::MIN_SUMMARY` |
 

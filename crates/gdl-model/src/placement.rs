@@ -69,18 +69,27 @@ struct ClassSpec {
 ///
 /// In a placement file a policy is a string (`"round_robin"`, `"random"`)
 /// and a selector a table (`{ selector = "affinity" }`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestRouter {
-    /// Cycle through replicas in roster order: the default, for a hop
-    /// that `[routing]` does not name.
-    #[default]
+    /// Cycle through replicas in roster order: [`RequestRouter::DEFAULT`].
     RoundRobin,
     /// Select a replica independently for each request hand-off.
     Random,
     /// The selector of this name, which the sending segment registers or
     /// gdl provides ([`SELECTORS`]).
     Selector(String),
+}
+
+impl RequestRouter {
+    /// The router of a hop that `[routing]` does not name: round robin.
+    pub const DEFAULT: Self = Self::RoundRobin;
+}
+
+impl Default for RequestRouter {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// One of gdl's own selectors: a crossing can name it without anything

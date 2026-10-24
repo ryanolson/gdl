@@ -46,7 +46,7 @@ pub struct CellSettings {
     pub home: Option<String>,
     /// Where the cell's record is published and the other cells are found:
     /// the `directory` key, with the `dir` key for [`DirectoryBackend::Dir`];
-    /// [`DirectoryBackend::Relay`] by default.
+    /// [`DirectoryBackend::DEFAULT`] when it is not set.
     pub directory: DirectoryBackend,
     /// Usable instances each segment of the class needs for the cell to be
     /// ready; see [`CellSettings::quorum`].
@@ -70,11 +70,11 @@ pub struct CellSettings {
 
 /// Where cell records are published and watched. Each backend's own
 /// settings arrive with the backend.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectoryBackend {
     /// Each cell reports to the global cells of its region, and the global
-    /// cells relay what they receive to each other.
-    #[default]
+    /// cells relay what they receive to each other:
+    /// [`DirectoryBackend::DEFAULT`].
     Relay,
     /// One directory in the process, shared by every hub in it: for tests
     /// that run several cells in one process.
@@ -86,6 +86,17 @@ pub enum DirectoryBackend {
         /// process's working directory's.
         path: PathBuf,
     },
+}
+
+impl DirectoryBackend {
+    /// The backend when `directory` is not set: the relay.
+    pub const DEFAULT: Self = Self::Relay;
+}
+
+impl Default for DirectoryBackend {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 impl CellSettings {
