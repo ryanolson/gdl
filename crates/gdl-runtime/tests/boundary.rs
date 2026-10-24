@@ -11,15 +11,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, ask, home_first, model, model_unsummarized, placement, run,
-    spec_of,
+    Model, ModelCell, RUNTIME, Running, ask, home_first, model, model_timed, model_unsummarized,
+    placement, run, spec_of,
 };
-use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
+use common::cells::{
+    Resolving, cell_hub_of, cell_hub_timed, followed, global_cell, global_hub, settings, timing,
+    until,
+};
 use common::{Events, WAIT};
 use futures::StreamExt;
 use gdl::{Choice, Encoded, ErrorKind, Instances, Request, Selector, Selectors};
+use gdl_hub::{CellTiming, WatchCaps};
 use gdl_model::CellPolicy;
 use gdl_runtime::{CellState, Cells, DeploymentSpec, RequestRouter, RuntimeConfig};
+use gdl_watch::CellWatcher;
 use velo_hub::Hub;
 
 const M1: &str = "model-x-01-us-east-1";
@@ -37,6 +42,18 @@ async fn global(
     Running<impl gdl::Next<common::Prompt, common::Chunk> + gdl_runtime::Register + use<>>,
 ) {
     let (hub, _) = cell_hub_of(spec, global_hub(), directory).await;
+    let chooser = chooser(&hub, spec, selectors, events).await;
+    (hub, chooser)
+}
+
+/// The global cell's chooser at `hub`, an instance of `a`, whose
+/// deployment registers `selectors`.
+async fn chooser(
+    hub: &Hub,
+    spec: &DeploymentSpec,
+    selectors: Selectors,
+    events: &Arc<Events>,
+) -> Running<impl gdl::Next<common::Prompt, common::Chunk> + gdl_runtime::Register + use<>> {
     let extra = format!("{}{RUNTIME}", global_cell());
     let config = settings(
         hub.public_addr().port(),
@@ -48,10 +65,9 @@ async fn global(
         selectors,
         ..config.runtime.clone()
     };
-    let chooser = run(&config, "a", spec, runtime, events)
+    run(&config, "a", spec, runtime, events)
         .await
-        .expect("the chooser serves");
-    (hub, chooser)
+        .expect("the chooser serves")
 }
 
 /// The chooser's tables.
@@ -522,4 +538,138 @@ async fn a_classed_placement_without_cells_under_a_hub_routes_as_before() {
     asks(&launched[0], 4).await;
     assert_eq!(launched[1].forwards(), 4);
     hub.shutdown().await.expect("valid test fixture");
+}
+
+/// Wait until `refused` counts `n` refusals: a client asked again after
+/// its first.
+async fn refused_twice(what: &str, refused: impl Fn() -> u64) {
+    let refusing = async {
+        while refused() < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(WAIT, refusing)
+        .await
+        .unwrap_or_else(|_| panic!("{what} was not refused twice in time"));
+}
+
+/// The address of `hub`'s public listener, as a cell's watches take it.
+fn address(hub: &Hub) -> String {
+    format!("127.0.0.1:{}", hub.public_addr().port())
+}
+
+/// Wait until `watching` shows `n` open watches.
+async fn open(watching: &mut tokio::sync::watch::Receiver<usize>, n: usize) {
+    tokio::time::timeout(WAIT, watching.wait_for(|open| *open == n))
+        .await
+        .unwrap_or_else(|_| panic!("{n} watches were not open in time"))
+        .expect("the hub lives");
+}
+
+/// The global's hub serves one watch of its relay, which the test holds:
+/// the chooser's own watch of it is refused, and asked for again, and a
+/// request into `model_x` fails with `Routing`, since the chooser follows
+/// no cell. Once the test lets go, the chooser's watch is served, and the
+/// model cell it now follows answers its requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chooser_refused_its_relay_routes_once_there_is_room() {
+    let spec = spec_of(placement());
+    let events = Events::new();
+    let directory = Resolving::new();
+    let capped = CellTiming {
+        watch_caps: WatchCaps {
+            relay: 1,
+            ..WatchCaps::default()
+        },
+        ..timing()
+    };
+    let (hub, relay) = cell_hub_timed(&spec, global_hub(), &directory, capped).await;
+    let m1 = model(&spec, &directory, M1, "m1-hub:1337", 1, 1, &events).await;
+    let watcher = CellWatcher::new().expect("a client");
+    let mut held = tokio::time::timeout(WAIT, watcher.follows(&address(&hub)))
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub serves the relay's one watch");
+    tokio::time::timeout(WAIT, held.next())
+        .await
+        .expect("the snapshot begins in time")
+        .expect("the watch is served")
+        .expect("the watch's first event is not a failure");
+    open(&mut relay.follows_watchers(), 1).await;
+
+    let chooser = chooser(&hub, &spec, Selectors::new(), &events).await;
+    refused_twice("the chooser's relay watch", || {
+        relay.refused_watches().relay
+    })
+    .await;
+    unplaced(ask(&chooser.segment).await);
+
+    drop(held);
+    let cells = tables(&chooser);
+    until(&cells, "the model cell ready in the tables", |cells| {
+        holds(cells, M1, CellState::Ready, 1)
+    })
+    .await;
+    let used = counted(&[&m1], asks(&chooser, 3)).await;
+    assert_eq!(used, [3], "the followed cell did not take the requests");
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// The model cell's hub serves as many watches of the cell as its own two
+/// instances hold and one more, which the test holds: the global's link is
+/// refused, and asked for again, and a request into `model_x` fails with
+/// `Routing`, since the global follows no cell. Once the test lets go, the
+/// global follows the cell, and the cell answers the chooser's requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parent_refused_its_childs_watch_routes_to_it_once_there_is_room() {
+    let spec = spec_of(placement());
+    let events = Events::new();
+    let directory = Resolving::new();
+    let capped = |timing| CellTiming {
+        watch_caps: WatchCaps {
+            cell: 3,
+            ..WatchCaps::default()
+        },
+        ..timing
+    };
+    let cell = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 1,
+        entries: 1,
+    };
+    let m1 = model_timed(&spec, &directory, cell, &capped, &events).await;
+    // Each of the cell's instances, its entry and its sink, watches the
+    // cell for its drain.
+    let mut watching = m1.readiness.watchers();
+    open(&mut watching, 2).await;
+    let watcher = CellWatcher::new().expect("a client");
+    let mut held = tokio::time::timeout(WAIT, watcher.watch(&address(&m1.hub)))
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub serves the cell's last watch");
+    tokio::time::timeout(WAIT, held.next())
+        .await
+        .expect("the snapshot begins in time")
+        .expect("the watch is served")
+        .expect("the watch's first event is not a failure");
+    open(&mut watching, 3).await;
+
+    let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;
+    refused_twice("the global's link", || m1.readiness.refused_watches().cell).await;
+    unplaced(ask(&chooser.segment).await);
+
+    drop(held);
+    let cells = tables(&chooser);
+    until(&cells, "the model cell ready in the tables", |cells| {
+        holds(cells, M1, CellState::Ready, 1)
+    })
+    .await;
+    let used = counted(&[&m1], asks(&chooser, 3)).await;
+    assert_eq!(used, [3], "the followed cell did not take the requests");
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
 }

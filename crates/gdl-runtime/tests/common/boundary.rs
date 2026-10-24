@@ -278,6 +278,27 @@ pub async fn model_changed(
     .await
 }
 
+/// [`model`], with its hub's timing changed by `change`.
+pub async fn model_timed(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    change: &dyn Fn(CellTiming) -> CellTiming,
+    events: &Arc<Events>,
+) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
+    let (hub, timing, extra) = summarized(cell, RUNTIME);
+    start_model(
+        spec,
+        directory,
+        cell,
+        (hub, change(timing)),
+        &extra,
+        &|runtime| runtime,
+        &|deployment| reference_graph(deployment, events),
+    )
+    .await
+}
+
 /// The load summary period of [`model_summarized`]: the shortest.
 pub const SUMMARY: Duration = Duration::from_secs(1);
 
