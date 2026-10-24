@@ -17,7 +17,7 @@ use crate::{Error, Layout};
 /// name = "model-x-01-us-east-1"
 /// class = "model_x"
 /// region = "us-east-1"
-/// home = "global-us-east-1"    # optional: the parent cell, whose hub follows this one
+/// home = "global-us-east-1"    # the parent, for a class that is sent to: the cell whose hub follows this one
 /// directory = "relay"          # optional: "relay" (the default), "memory", or "dir"
 /// # dir = "/var/lib/gdl/cells" # with "dir", and only with it: the shared directory
 /// seeds = ["hub-a:1337"]       # optional: hub addresses to join the relay mesh from

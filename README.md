@@ -261,7 +261,7 @@ region = "us-east-1"
 [cell.model-x-01-us-east-1]
 class = "model_x"
 region = "us-east-1"
-home = "global-us-east-1"         # optional: a cell of a class that sends to this one
+home = "global-us-east-1"         # the parent, for a class that is sent to: the cell whose hub follows this one
 ready = { engine = 8 }            # optional: overrides the class's default
 ```
 
@@ -652,7 +652,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-runtime` | The runtime: segments and crossings over velo, discovery, the segment binary, and `graph!`; under a hub, a chooser's tables of the cells its hub follows, and its routing across the class boundary by them, offering the request to another cell when one declines it, with a lease on each offer, by which it acknowledges a cell its hub no longer offers; it re-exports `gdl` and the model |
 | `crates/gdl-model` | The model without the runtime: manifest, placement, layout, diagrams, and the names of a segment's hub services, which segments and hubs share. It builds for wasm, so the composer can run the same rules in a browser |
 | `crates/gdl-cells` | The cell plane's shared types, without velo: the record each cell's hub publishes, the `CellDirectory` trait its backends implement, the `memory` backend (one process) and the `dir` backend (one file per cell under a directory shared by the hubs on one host, polled every 50 ms), the reader's view, which keeps each cell's newest record and enforces its lease on the reader's clock, and the conformance suite every backend runs (the `conformance` feature) |
-| `crates/gdl-hub` | The discovery hub: velo-hub with admission restricted to one deployment, and, for a cell's hub, the `gdl-cell` extension, which judges the cell's state from its quorum, serves the cell health endpoint (with the cells it requires of the classes it sends to), publishes the cell's record, sums its entry instances' load reports into the cell's load summary, serves the cell's watch, follows the home cells of the classes it sends to and relays them to its instances, and closes a follow once its choosers acknowledge that they hold no offer to it |
+| `crates/gdl-hub` | The discovery hub: velo-hub with admission restricted to one deployment, and, for a cell's hub, the `gdl-cell` extension, which judges the cell's state from its quorum, serves the cell health endpoint (with the cells it requires of the classes it sends to), publishes the cell's record, sums its entry instances' load reports into the cell's load summary, serves the cell's watch, follows its children, the cells of the classes it sends to whose record names its cell as their parent, and relays them to its instances, and closes a follow once its choosers acknowledge that they hold no offer to it |
 | `crates/gdl-watch` | The watches a cell's hub serves, the cell watch and the relay of what the hub follows, as typed events, and the client that reads them; the hub serves them and a segment instance reads the relay and its own cell's watch through it |
 | `crates/gdl-syntax` | The graph syntax: the parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract |
 | `crates/gdl-message` | `derive(Message)`, the `Message` and `Shape` traits, and the message catalogue, without the runtime |
