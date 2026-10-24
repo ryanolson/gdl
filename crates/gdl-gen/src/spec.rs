@@ -37,7 +37,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
@@ -245,48 +245,52 @@ pub(crate) struct Bind {
     pub(crate) ty: String,
 }
 
-#[derive(Deserialize)]
+/// The spec file as written: read with every unknown key refused, and
+/// written back as it was read, with what is not set left unsaid.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     deployment: Option<crate::deployment::Settings>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pipeline_names: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     entry: BTreeMap<String, crate::service::EntrySpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     config: BTreeMap<String, gdl_model::GraphConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     contract: Option<RawContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     graph: Option<RawGraph>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     messages: Option<RawMessages>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     nodes: Option<RawNodes>,
     gdl: RawGdl,
-    // The placement's tables, read by `Placement::from_toml` from the same
-    // text, so that its problems have their lines in the spec.
-    #[serde(default)]
-    #[allow(dead_code)]
-    segment: serde::de::IgnoredAny,
-    #[serde(default)]
-    #[allow(dead_code)]
-    routing: serde::de::IgnoredAny,
-    #[serde(default)]
-    #[allow(dead_code)]
-    class: serde::de::IgnoredAny,
-    #[serde(default)]
-    #[allow(dead_code)]
-    cells: serde::de::IgnoredAny,
-    #[serde(default)]
+    // The placement's tables, kept as written. The placement itself is
+    // read by `Placement::from_toml` from the same text, so that its
+    // problems have their lines in the spec.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    segment: toml::Table,
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    routing: toml::Table,
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    class: toml::Table,
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    cells: toml::Table,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     bind: BTreeMap<String, RawBind>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawContract {
     path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
     module: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawGraph {
     path: PathBuf,
@@ -294,22 +298,20 @@ struct RawGraph {
 
 /// A `[messages]` or `[nodes]` entry: a directory or `name@version`, or a
 /// Git package's table.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(untagged)]
 enum RawCrate {
     Named(String),
-    Git {
-        package: String,
-        git: String,
-        rev: String,
-        lib: Option<String>,
-    },
+    Git(RawGit),
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawGit {
     package: String,
     git: String,
     rev: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     lib: Option<String>,
 }
 
@@ -330,18 +332,8 @@ impl<'de> Deserialize<'de> for RawCrate {
             }
 
             fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<RawCrate, A::Error> {
-                let RawGit {
-                    package,
-                    git,
-                    rev,
-                    lib,
-                } = RawGit::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-                Ok(RawCrate::Git {
-                    package,
-                    git,
-                    rev,
-                    lib,
-                })
+                RawGit::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(RawCrate::Git)
             }
         }
         deserializer.deserialize_any(Entry)
@@ -352,12 +344,12 @@ impl RawCrate {
     fn resolve(self, dir: &Path) -> Result<(CrateNames, CrateSource), Error> {
         match self {
             Self::Named(entry) => CrateSource::parse(dir, &entry),
-            Self::Git {
+            Self::Git(RawGit {
                 package,
                 git,
                 rev,
                 lib,
-            } => {
+            }) => {
                 if package.is_empty() || git.is_empty() || rev.is_empty() {
                     return Err(Error::new("Git entries require package, git, and rev"));
                 }
@@ -373,32 +365,36 @@ impl RawCrate {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMessages {
     crates: Vec<RawCrate>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pin: BTreeMap<String, String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawNodes {
     crates: Vec<RawCrate>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pin: BTreeMap<String, String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawGdl {
+    #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     rev: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBind {
     #[serde(rename = "crate")]

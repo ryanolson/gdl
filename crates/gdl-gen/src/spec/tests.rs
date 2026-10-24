@@ -663,3 +663,59 @@ fn a_path_that_names_no_crate_names_its_table_and_key() {
     let error = error.to_string();
     assert!(error.starts_with("[contract] path: "), "{error}");
 }
+
+/// A spec reads back what it writes, with every table and every optional
+/// key set: written and read again, it is the same, and so is the
+/// placement it holds.
+#[test]
+fn a_spec_reads_back_what_it_writes() {
+    let graph = "[graph]\npath = \"chat.gdl\"\n\
+        [messages]\ncrates = [\"chat-protocols@0.1.0\", { package = \"p\", git = \"https://example.com/p\", rev = \"abc\", lib = \"p_lib\" }]\n\
+        pin = { Chunk = \"chat_protocols::Chunk\" }\n\
+        [nodes]\ncrates = [\"chat-nodes@0.1.0\"]\npin = { Engine = \"chat_nodes::Engine\" }\n\
+        [gdl]\ngit = \"https://example.com/gdl\"\nrev = \"def\"\n\
+        [segment.front]\nnodes = [\"A\", \"B\"]\n[segment.engine]\nnodes = [\"E\"]\n\
+        [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
+        [routing]\nE = { selector = \"affinity\" }\nB = \"random\"\n\
+        [cells.model_x]\npolicy = \"nearest\"\nspill_rtt_ms = 20\nmax_near = 2\n\
+        [deployment]\nbase_image = \"debian:trixie-slim\"\nbuild_image = \"rust:1.93\"\nhub_image = \"hub:1\"\n\
+        [deployment.segment.engine]\nbase_image = \"cuda:12\"\nports = [\"9000:9000\"]\n\
+        [deployment.segment.engine.config.runtime]\ndrain_ms = 90000\n\
+        [entry.chat]\ntarget = \"A\"\nforward = [\"x::In\"]\nbackward = [\"x::Out\"]\noperator = \"x::Op\"\nnested = { target = \"B\" }\n\
+        [config.A]\nenabled = true\nlimit = 3\nname = \"n\"\n\
+        [pipeline_names]\nA = \"chat\"\n";
+    let contract = "[contract]\npath = \"contract\"\nmodule = \"chat_contract::graph\"\n\
+        [gdl]\nversion = \"0.1\"\n[segment.front]\nnodes = [\"A\"]\n\
+        [bind.A]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::A\"\n";
+    let temp = contract_dir("round-trip");
+    let dir = temp.path();
+    let file = dir.join("gdl.toml");
+    for text in [graph, contract] {
+        let raw: Raw = gdl_model::read_toml(text).expect("a spec");
+        let written = toml::to_string(&raw).expect("toml");
+        let back: Raw = gdl_model::read_toml(&written).expect("reads what it wrote");
+        assert_eq!(back, raw, "{written}");
+        let first = Spec::parse(text, &file, dir).expect("a spec");
+        let again = Spec::parse(&written, &file, dir).expect("reads what it wrote");
+        assert_eq!(again.placement, first.placement, "{written}");
+        assert_eq!(again.placement.hash(), first.placement.hash(), "{written}");
+    }
+    // What is not set is not written.
+    let least: Raw = gdl_model::read_toml(
+        "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"p@1.0.0\"]\n[gdl]\nversion = \"0.1\"\n",
+    )
+    .expect("a spec");
+    let written = toml::to_string(&least).expect("toml");
+    for unsaid in [
+        "deployment",
+        "entry",
+        "config",
+        "pipeline_names",
+        "pin",
+        "bind",
+        "nodes",
+        "contract",
+    ] {
+        assert!(!written.contains(unsaid), "{unsaid} in:\n{written}");
+    }
+}

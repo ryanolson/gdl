@@ -1,12 +1,14 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     base_image: String,
     build_image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     hub_image: Option<String>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     segment: std::collections::BTreeMap<String, Image>,
 }
 /// `[deployment] base_image` when the spec does not set it: the image a
@@ -34,13 +36,14 @@ impl Default for Settings {
         }
     }
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Image {
+    #[serde(skip_serializing_if = "Option::is_none")]
     base_image: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ports: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     config: toml::Table,
 }
 fn validate_image(image: &str) -> Result<(), Error> {
