@@ -422,3 +422,41 @@ async fn the_follower_reads_an_unread_cell_from_its_own_watch() {
     assert_eq!(asked.borrow().len(), 1);
     task.abort();
 }
+
+/// A cell's own watch that ends, and is opened again to a hub that
+/// restarted, numbers the cell's follows from 1 again: its snapshot sets
+/// the cell's generation, whatever the ended watch had, so that the
+/// generations after it are taken. Whether that snapshot has the cell or
+/// not, a later follow of it is routable.
+#[test]
+fn a_cells_own_watch_to_a_restarted_hub_takes_its_generations() {
+    for empty in [false, true] {
+        let (mut follows, cells, _, _) = follower();
+        let now = Instant::now();
+        let (x, y, z) = (peer(), peer(), peer());
+        live(&mut follows, now, ready(M1, 5, &[&x]));
+        follows.unknown(unknown(M1, 5));
+        own_snapshot(&mut follows, M1, 1, ready(M1, 5, &[&x]), now);
+        follows.own(key(M1), 1, None, now);
+        let restarted = if empty {
+            Vec::new()
+        } else {
+            ready(M1, 1, &[&y])
+        };
+        own_snapshot(&mut follows, M1, 2, restarted, now);
+        for event in [super::dropped(M1, 1)]
+            .into_iter()
+            .filter(|_| !empty)
+            .chain(ready(M1, 2, &[&z]))
+        {
+            follows.own(key(M1), 2, Some(Watched::Event(event)), now);
+        }
+        let m1 = table(&cells, M1).unwrap_or_else(|| panic!("followed, empty: {empty}"));
+        assert_eq!(
+            (m1.generation, m1.eligible.clone()),
+            (2, vec![z.instance_id()]),
+            "empty: {empty}"
+        );
+        assert!(chosen(&cells, M1, now), "empty: {empty}");
+    }
+}

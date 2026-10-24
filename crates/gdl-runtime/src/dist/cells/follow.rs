@@ -262,8 +262,10 @@ impl<R: Registry> Follows<R> {
 
     /// `filling`, the snapshot of `key`'s own watch, is complete at `now`:
     /// it replaces the cell's follow, or ends it if the relay has none,
-    /// whatever its generation, since the watch the cell was read from
-    /// before can no longer fence it; the cell is unread if `unread`. Its
+    /// whatever its generation, and sets the generation the cell's later
+    /// events are fenced by, as a snapshot of the relay does: the watch
+    /// may be to a hub that restarted, which numbers its follows from 1
+    /// again. The cell is unread if `unread`. Its
     /// new instances are registered before a table shows them; one it no
     /// longer holds is unregistered after the drain.
     fn install_own(&mut self, key: &Key, mut filling: Followed, unread: bool, now: Instant) {
@@ -293,11 +295,13 @@ impl<R: Registry> Follows<R> {
                 {
                     follow.turns.clone_from(&held.turns);
                 }
-                let newest = self.followed.generations.entry(key.clone()).or_default();
-                *newest = (*newest).max(generation);
+                self.followed.generations.insert(key.clone(), generation);
                 self.followed.follows.insert(key.clone(), follow)
             }
-            None => self.followed.follows.remove(key),
+            None => {
+                self.followed.generations.remove(key);
+                self.followed.follows.remove(key)
+            }
         };
         if let Some(replaced) = replaced {
             self.release(&replaced, now);
