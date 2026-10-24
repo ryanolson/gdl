@@ -25,6 +25,8 @@ pub(super) struct Scripted {
     pub(super) answered: tokio::sync::watch::Receiver<usize>,
     /// Whether a watch stays open after its items.
     open: bool,
+    /// The acknowledgements of retirements sent, in order.
+    pub(super) avoided: tokio::sync::watch::Sender<Vec<gdl_watch::Avoids>>,
 }
 
 impl Scripted {
@@ -58,6 +60,7 @@ impl Scripted {
             asked: tokio::sync::watch::Sender::new(Vec::new()),
             answered: tokio::sync::watch::channel(0).1,
             open: true,
+            avoided: tokio::sync::watch::Sender::new(Vec::new()),
         }
     }
 }
@@ -123,8 +126,9 @@ impl Source for Scripted {
 
     fn avoid(
         &self,
-        _: gdl_watch::Avoids,
+        avoids: gdl_watch::Avoids,
     ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        self.avoided.send_modify(|avoided| avoided.push(avoids));
         Box::pin(async { Ok(()) })
     }
 }

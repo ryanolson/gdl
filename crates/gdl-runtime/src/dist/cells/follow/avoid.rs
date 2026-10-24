@@ -47,6 +47,14 @@ impl Avoiding {
 }
 
 impl<R: Registry> Follows<R> {
+    /// When the next acknowledgement of a retirement falls due: `None`
+    /// while none is queued. Kept apart from the look for a follow not
+    /// offered ([`Follows::next_poll`]), which passes over every follow:
+    /// a retirement's acknowledgement is found in its queue alone.
+    pub(in crate::dist::cells) fn next_avoid(&self) -> Option<Instant> {
+        self.avoiding.next()
+    }
+
     /// Acknowledge, from `now`, that this instance avoids `instance`, which
     /// `key`'s follow of `generation` holds retired in the tables just
     /// published.

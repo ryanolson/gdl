@@ -194,10 +194,14 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
         let opening = source.watch();
         tokio::pin!(opening);
         let opened = loop {
-            let (due, poll) = (follows.next_due(), follows.next_poll());
+            let (due, poll, avoid) = (
+                follows.next_due(),
+                follows.next_poll(),
+                follows.next_avoid(),
+            );
             tokio::select! {
                 opened = &mut opening => break opened,
-                chore = chores.next(due, poll) => chores.run(chore, &mut follows, &source),
+                chore = chores.next(due, poll, avoid) => chores.run(chore, &mut follows, &source),
             }
         };
         match opened {
@@ -217,10 +221,14 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
         let pause = tokio::time::sleep(REWATCH);
         tokio::pin!(pause);
         loop {
-            let (due, poll) = (follows.next_due(), follows.next_poll());
+            let (due, poll, avoid) = (
+                follows.next_due(),
+                follows.next_poll(),
+                follows.next_avoid(),
+            );
             tokio::select! {
                 () = &mut pause => break,
-                chore = chores.next(due, poll) => chores.run(chore, &mut follows, &source),
+                chore = chores.next(due, poll, avoid) => chores.run(chore, &mut follows, &source),
             }
         }
     }
@@ -247,7 +255,11 @@ async fn read<S: Source, R: Registry>(
                 own.open(source, asked);
             }
         }
-        let (due, poll) = (follows.next_due(), follows.next_poll());
+        let (due, poll, avoid) = (
+            follows.next_due(),
+            follows.next_poll(),
+            follows.next_avoid(),
+        );
         tokio::select! {
             item = events.next() => {
                 let Some(item) = item else {
@@ -288,7 +300,7 @@ async fn read<S: Source, R: Registry>(
             Some((key, watch, item)) = own.reading.next() => {
                 follows.own(key, watch, item, Instant::now());
             }
-            chore = chores.next(due, poll) => chores.run(chore, follows, source),
+            chore = chores.next(due, poll, avoid) => chores.run(chore, follows, source),
         }
     }
 }
@@ -314,6 +326,8 @@ enum Chore {
     Forget,
     /// Look for the acknowledgements due.
     Poll,
+    /// Send the acknowledgements of retirements due.
+    Avoid,
     /// The hub answered an acknowledgement.
     Answered(Unoffered, std::result::Result<(), String>),
     /// The hub answered an acknowledgement of a retirement.
@@ -326,11 +340,19 @@ type Acks = JoinSet<(Unoffered, std::result::Result<(), String>)>;
 
 impl Chores {
     /// The next chore: an unregistration due at `due`, a look for
-    /// acknowledgements at `poll`, or an answer.
-    async fn next(&mut self, due: Option<Instant>, poll: Option<Instant>) -> Chore {
+    /// acknowledgements at `poll`, acknowledgements of retirements due at
+    /// `avoid`, or an answer. The last apart from the look, which passes
+    /// over the follows: a retirement's acknowledgement needs no pass.
+    async fn next(
+        &mut self,
+        due: Option<Instant>,
+        poll: Option<Instant>,
+        avoid: Option<Instant>,
+    ) -> Chore {
         tokio::select! {
             () = until(due) => Chore::Forget,
             () = until(poll) => Chore::Poll,
+            () = until(avoid) => Chore::Avoid,
             Some(Ok((unoffered, answer))) = self.acks.join_next() => Chore::Answered(unoffered, answer),
             Some(Ok((avoids, answer))) = self.avoids.join_next() => Chore::Avoided(avoids, answer),
         }
@@ -345,6 +367,8 @@ impl Chores {
                     let sent = source.acknowledge(unoffered.clone());
                     self.acks.spawn(async move { (unoffered, sent.await) });
                 }
+            }
+            Chore::Avoid => {
                 for avoids in follows.avoidances(now) {
                     let sent = source.avoid(avoids.clone());
                     self.avoids.spawn(async move { (avoids, sent.await) });

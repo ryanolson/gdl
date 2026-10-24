@@ -9,7 +9,11 @@ use gdl_watch::{Avoids, FollowEvent, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::PeerInfo;
 
-use super::super::follow::{ACK_RETRY, Asked};
+use std::collections::VecDeque;
+
+use super::super::follow::{ACK_RETRY, Asked, SCANNED};
+use super::super::task::run;
+use super::scripted::Scripted;
 use super::{M1, exposed, follow, follower, left, live, peer, retired, table};
 
 fn avoids(generation: u64, peer: &PeerInfo) -> Avoids {
@@ -38,19 +42,20 @@ fn a_retirement_is_acknowledged_once_the_tables_hold_it() {
             exposed(M1, 1, &y),
         ],
     );
-    assert_eq!(follows.next_poll(), None, "nothing to acknowledge");
+    assert_eq!(follows.next_avoid(), None, "nothing to acknowledge");
     live(&mut follows, now, [retired(M1, 1, &x)]);
     let shown = table(&cells, M1).expect("followed");
     assert_eq!(
         (shown.eligible, shown.retired),
         (vec![y.instance_id()], vec![x.instance_id()])
     );
-    assert_eq!(follows.next_poll(), Some(now), "looked for at once");
+    assert_eq!(follows.next_avoid(), Some(now), "sent at once");
+    assert_eq!(follows.next_poll(), None, "no follow to look for");
     let due = follows.avoidances(now);
     assert_eq!(due, [avoids(1, &x)]);
     assert_eq!(follows.avoidances(now), [], "sent twice");
     follows.avoided(due[0].clone(), true, now);
-    assert_eq!(follows.next_poll(), None);
+    assert_eq!(follows.next_avoid(), None);
 }
 
 /// One its hub did not take is sent again after the retry, for as long as
@@ -71,7 +76,7 @@ fn a_retirement_its_hub_did_not_take_is_sent_again_while_it_is_held() {
     );
     let due = follows.avoidances(now);
     follows.avoided(due[0].clone(), false, now);
-    assert_eq!(follows.next_poll(), Some(now + ACK_RETRY));
+    assert_eq!(follows.next_avoid(), Some(now + ACK_RETRY));
     assert_eq!(follows.avoidances(now), [], "before the retry");
     let again = follows.avoidances(now + ACK_RETRY);
     assert_eq!(again, [avoids(1, &x)]);
@@ -170,6 +175,50 @@ fn a_retirement_of_a_segment_not_sent_to_owes_nothing() {
             },
         ],
     );
-    assert_eq!(follows.next_poll(), None);
+    assert_eq!(follows.next_avoid(), None);
     assert_eq!(follows.avoidances(now), []);
+}
+
+/// The task acknowledges a retirement without looking at any other
+/// follow: with 4 or 64 other cells followed, all offered, sending it
+/// passes over none of them, as a look for a follow not offered would.
+#[tokio::test]
+async fn a_retirement_is_acknowledged_without_a_pass_over_the_follows() {
+    for others in [4, 64] {
+        let (follows, _, _, _) = follower();
+        let x = peer();
+        let mut events = Vec::new();
+        for other in 0..others {
+            let name = format!("other-{other}");
+            events.push(follow(&name, 1, CellState::Ready));
+            events.push(exposed(&name, 1, &peer()));
+        }
+        events.extend([
+            follow(M1, 1, CellState::Ready),
+            exposed(M1, 1, &x),
+            FollowEvent::Synced,
+            retired(M1, 1, &x),
+        ]);
+        let watches = VecDeque::from([events.into_iter().map(Watched::Event).collect()]);
+        let (opened, _watching) = tokio::sync::watch::channel(0);
+        let (_release, released) = tokio::sync::watch::channel(1);
+        let scripted = Scripted::relaying(watches, opened, released);
+        let mut avoided = scripted.avoided.subscribe();
+        SCANNED.with(|scanned| scanned.set(0));
+        // On this test's one thread, as the count is.
+        let task = tokio::spawn(run(scripted, follows));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            avoided.wait_for(|avoided| *avoided == [avoids(1, &x)]),
+        )
+        .await
+        .expect("acknowledged in time")
+        .expect("the task runs");
+        assert_eq!(
+            SCANNED.with(std::cell::Cell::get),
+            0,
+            "a retirement passed over the follows, with {others} others"
+        );
+        task.abort();
+    }
 }
