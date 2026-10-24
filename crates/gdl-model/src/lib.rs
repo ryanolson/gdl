@@ -26,8 +26,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 pub use cell::{
-    CellSettings, DirectoryBackend, cell_variable, check_cell_name, check_hub_address,
-    check_region_name, check_summary,
+    CellSettings, DirectoryBackend, cell_variable, cell_variable_of, check_cell_name,
+    check_hub_address, check_region_name, check_summary,
 };
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{

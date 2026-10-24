@@ -5,7 +5,10 @@ use figment::Figment;
 use figment::providers::Env;
 use figment::value::{Dict, Tag, Value};
 use gdl_cells::DirDirectory;
-use gdl_model::{CellSettings, DeploymentSpec, DirectoryBackend, Origin, Problems, cell_variable};
+use gdl_model::{
+    CellSettings, DeploymentSpec, DirectoryBackend, Origin, Problems, cell_variable,
+    cell_variable_of,
+};
 use velo_hub::{Hub, HubBuilder, HubConfig};
 
 use crate::{CellError, CellReadiness, CellTiming, GraphAdmission};
@@ -28,7 +31,11 @@ pub fn cell_from_env(spec: &DeploymentSpec) -> Result<Option<CellSettings>, Cell
     if given.is_empty() {
         return Ok(None);
     }
-    // Every key came from the variable that spells it.
+    // Every key came from a variable: the one that set it, or, for a key
+    // that is missing, the one that would.
+    let variables: Vec<String> = std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .collect();
     let named = |problems: Problems| {
         let named = problems.0.into_iter().map(|mut problem| {
             if let Some(key) = problem
@@ -36,7 +43,9 @@ pub fn cell_from_env(spec: &DeploymentSpec) -> Result<Option<CellSettings>, Cell
                 .as_deref()
                 .and_then(|p| p.strip_prefix("cell."))
             {
-                problem.origin = Some(Origin::Variable(cell_variable(key)));
+                let set = cell_variable_of(key, variables.iter().map(String::as_str));
+                let variable = set.map_or_else(|| cell_variable(key), str::to_string);
+                problem.origin = Some(Origin::Variable(variable));
             }
             problem
         });

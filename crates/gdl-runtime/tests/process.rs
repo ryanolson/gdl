@@ -498,6 +498,36 @@ async fn a_cell_problem_names_its_file_or_its_variable() {
             Ok(())
         });
     }
+    // A table set whole in one variable is that variable's; a setting
+    // missing from a table set by variables is the variable's to set.
+    for (file, variables, expected) in [
+        (
+            CELL,
+            &[("GDL_CELL__READY", r#"{back="many"}"#)][..],
+            "GDL_CELL__READY: invalid type",
+        ),
+        (
+            "",
+            &[
+                ("GDL_CELL__CLASS", "global"),
+                ("GDL_CELL__REGION", "us-east-1"),
+            ][..],
+            "GDL_CELL__NAME: missing field `name`",
+        ),
+    ] {
+        Jail::expect_with(|jail| {
+            jail.create_file("config.toml", &format!("{BASE}{file}"))?;
+            for (name, value) in variables {
+                jail.set_env(name, value);
+            }
+            let Err(error) = Config::load(["config.toml"]) else {
+                return Err(format!("accepted {variables:?}").into());
+            };
+            let error = error.to_string();
+            assert!(error.contains(expected), "{expected}\nin: {error}");
+            Ok(())
+        });
+    }
     // Found when the instance launches, against its deployment.
     for (file, variable, expected) in [
         (

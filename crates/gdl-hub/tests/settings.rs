@@ -200,6 +200,20 @@ fn a_misspelled_or_malformed_cell_variable_is_refused_by_name() {
             Ok(())
         });
     }
+    // A table set whole in one variable is that variable's.
+    Jail::expect_with(|jail| {
+        model_cell(jail, "/srv/cells");
+        jail.set_env("GDL_CELL__READY", r#"{d="many"}"#);
+        let Err(error) = cell_from_env(&spec()) else {
+            return Err("a quorum of many was accepted".into());
+        };
+        let error = error.to_string();
+        assert!(
+            error.starts_with("GDL_CELL__READY: invalid type"),
+            "{error}"
+        );
+        Ok(())
+    });
     Jail::expect_with(|jail| {
         jail.set_env("GDL_CELL__CLASS", "model_x");
         jail.set_env("GDL_CELL__REGION", "us-east-1");

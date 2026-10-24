@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use figment::providers::Env;
 use figment::value::Value;
 use figment::{Figment, Provider, Source};
-use gdl_model::{CellSettings, Origin, Problems, cell_variable};
+use gdl_model::{CellSettings, Origin, Problems, cell_variable, cell_variable_of};
 
 /// The origin of each key of a `[cell]` table, by its path in the table
 /// (`ready.e`).
@@ -20,13 +20,21 @@ impl CellOrigins {
     /// of its keys came from. A problem in reading it names its origin.
     pub(super) fn read(figment: &Figment, cell: Value) -> Result<(CellSettings, Self), Problems> {
         let env = Env::prefixed("GDL_").metadata().name;
+        let variables: Vec<String> = std::env::vars_os()
+            .filter_map(|(name, _)| name.into_string().ok())
+            .collect();
+        // The variable that set the key, which may have set its whole table.
+        let variable = |key: &str| {
+            cell_variable_of(key, variables.iter().map(String::as_str))
+                .map_or_else(|| cell_variable(key), str::to_string)
+        };
         let mut origins = BTreeMap::new();
         let mut note = |key: String| {
             let origin = figment
                 .find_metadata(&format!("cell.{key}"))
                 .and_then(|metadata| match &metadata.source {
                     Some(Source::File(path)) => Some(Origin::File(path.display().to_string())),
-                    _ if metadata.name == env => Some(Origin::Variable(cell_variable(&key))),
+                    _ if metadata.name == env => Some(Origin::Variable(variable(&key))),
                     _ => None,
                 });
             if let Some(origin) = origin {
@@ -49,14 +57,26 @@ impl CellOrigins {
     }
 
     /// `problems`, each with the origin of its key. A key that was never
-    /// set (a missing one) takes the origin of the table's others, when
-    /// they all came from one place.
+    /// set, a missing one, is the variable's to set when every other key
+    /// came from a variable, and the file's when every other came from one
+    /// file; otherwise it is named by its key alone.
     pub(super) fn locate(&self, problems: Problems) -> Problems {
-        let shared = {
+        let variables = !self.0.is_empty()
+            && self
+                .0
+                .values()
+                .all(|origin| matches!(origin, Origin::Variable(_)));
+        let file = {
             let mut all = self.0.values();
             all.next()
-                .filter(|first| all.all(|other| other == *first))
+                .filter(|first| {
+                    matches!(first, Origin::File(_)) && all.all(|other| other == *first)
+                })
                 .cloned()
+        };
+        let unset = |key: &str| match variables {
+            true => Some(Origin::Variable(cell_variable(key))),
+            false => file.clone(),
         };
         Problems(
             problems
@@ -64,18 +84,11 @@ impl CellOrigins {
                 .into_iter()
                 .map(|mut problem| {
                     if problem.origin.is_none() {
-                        problem.origin = match problem
-                            .path()
-                            .as_deref()
-                            .and_then(|path| path.strip_prefix("cell."))
+                        let path = problem.path();
+                        problem.origin = match path.as_deref().and_then(|p| p.strip_prefix("cell."))
                         {
-                            Some(key) => self.0.get(key).cloned().or_else(|| match &shared {
-                                Some(Origin::Variable(_)) => {
-                                    Some(Origin::Variable(cell_variable(key)))
-                                }
-                                other => other.clone(),
-                            }),
-                            None => shared.clone(),
+                            Some(key) => self.0.get(key).cloned().or_else(|| unset(key)),
+                            None => file.clone(),
                         };
                     }
                     problem
