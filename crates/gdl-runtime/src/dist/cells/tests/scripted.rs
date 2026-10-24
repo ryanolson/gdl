@@ -1,4 +1,4 @@
-//! A relay scripted by a test: its watches, and its readings of one cell.
+//! A relay scripted by a test: its watches, and its watches of one cell.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -13,13 +13,14 @@ use super::super::task::{Relayed, Source};
 /// or, for a relaying script, stays open after them; after the last, a
 /// watch that never ends. Each watch asked for is
 /// counted, and begins only once the test has released that many. Each
-/// cell read again is recorded, and answered from `readings` in order
-/// once the test has released that many readings.
+/// watch of one cell asked for is recorded, and answered from `readings`
+/// in order, each open after its items, once the test has released that
+/// many.
 pub(super) struct Scripted {
     watches: Mutex<VecDeque<Vec<Relayed>>>,
     opened: tokio::sync::watch::Sender<usize>,
     released: tokio::sync::watch::Receiver<usize>,
-    pub(super) readings: Mutex<VecDeque<Vec<FollowEvent>>>,
+    pub(super) readings: Mutex<VecDeque<Vec<Relayed>>>,
     pub(super) asked: tokio::sync::watch::Sender<Vec<(String, String)>>,
     pub(super) answered: tokio::sync::watch::Receiver<usize>,
     /// Whether a watch stays open after its items.
@@ -62,7 +63,11 @@ impl Scripted {
 }
 
 impl Source for Scripted {
-    async fn followed(&self, class: &str, cell: &str) -> Result<Vec<FollowEvent>, String> {
+    async fn watch_of(
+        &self,
+        class: &str,
+        cell: &str,
+    ) -> Result<BoxStream<'static, Relayed>, String> {
         let mut asked = 0;
         self.asked.send_modify(|cells| {
             cells.push((class.to_string(), cell.to_string()));
@@ -73,11 +78,15 @@ impl Source for Scripted {
             .wait_for(|answered| *answered >= asked)
             .await
             .map_err(|_| "the test ended".to_string())?;
-        self.readings
+        let items = self
+            .readings
             .lock()
             .expect("lock")
             .pop_front()
-            .ok_or_else(|| "no reading scripted".to_string())
+            .ok_or_else(|| "no reading scripted".to_string())?;
+        Ok(futures::stream::iter(items)
+            .chain(futures::stream::pending())
+            .boxed())
     }
 
     async fn watch(&self) -> Result<BoxStream<'static, Relayed>, String> {

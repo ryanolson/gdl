@@ -21,8 +21,8 @@ use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
-use futures::Stream;
 use futures::stream::BoxStream;
+use futures::{Stream, StreamExt};
 use gdl_cells::{CellState, LoadSummary};
 use tokio::sync::{broadcast, watch};
 use velo_hub::velo::{InstanceId, PeerInfo};
@@ -35,6 +35,9 @@ use gdl_watch::{CellWatchEvent, FollowEvent};
 pub(crate) struct Relay {
     shared: Mutex<Shared>,
     watchers: Watchers,
+    /// The watchers of one follow each: counted apart, so that the count of
+    /// the relay's watchers is of its whole watches.
+    one: Watchers,
     /// The cells a follower has decided to follow, by class and name, with
     /// the generation of the follow under way or the last one, for whoever
     /// needs to see the follower's decisions.
@@ -55,6 +58,7 @@ impl Relay {
                 health,
             }),
             watchers: Watchers::new(),
+            one: Watchers::new(),
             following: watch::Sender::new(BTreeMap::new()),
         }
     }
@@ -189,17 +193,31 @@ impl Relay {
         }
     }
 
-    /// The follow of the cell `cell` of `class` as a watch of the relay
-    /// begins with it, then the marker; only the marker when it has no
-    /// installed follow.
-    pub(crate) fn followed(&self, class: &str, cell: &str) -> Vec<FollowEvent> {
-        let shared = self.lock();
-        let mut events = shared
-            .follow(class, cell)
-            .and_then(|follow| Some(follow.installed.as_ref()?.snapshot(follow.generation)))
-            .unwrap_or_default();
-        events.push(FollowEvent::Synced);
-        events
+    /// A watch of one follow: the follow of the cell `cell` of `class` as
+    /// a watch of the relay begins with it, then the marker, then each
+    /// change that names the cell, of whichever generation. The snapshot is
+    /// taken and the changes subscribed to under one hold of the lock, as
+    /// for a watch of the whole relay, so that no change falls between
+    /// them: a reader that reads the cell from this watch, rather than
+    /// from a watch it already had, depends on it.
+    pub(crate) fn watch_of(&self, class: &str, cell: &str) -> FollowsWatch {
+        let counted = self.one.count();
+        let (snapshot, events) = {
+            let shared = self.lock();
+            (shared.followed(class, cell), shared.events.subscribe())
+        };
+        let (class, cell) = (class.to_string(), cell.to_string());
+        let events = self
+            .one
+            .stream(counted, snapshot, events)
+            .filter(move |event| {
+                let named = event
+                    .cell()
+                    .is_none_or(|named| named == (class.as_str(), cell.as_str()));
+                std::future::ready(named)
+            })
+            .boxed();
+        FollowsWatch { events }
     }
 
     /// A watch of the relay: its snapshot, then each change.
@@ -227,6 +245,7 @@ impl Relay {
     /// End every watch: the hub stops.
     pub(crate) fn close(&self) {
         self.watchers.close();
+        self.one.close();
     }
 }
 
@@ -299,6 +318,18 @@ impl Shared {
                 }
                 _ => false,
             });
+    }
+
+    /// The follow of the cell `cell` of `class` as a watch of the relay
+    /// begins with it, then the marker; only the marker when it has no
+    /// installed follow.
+    fn followed(&self, class: &str, cell: &str) -> Vec<FollowEvent> {
+        let mut events = self
+            .follow(class, cell)
+            .and_then(|follow| Some(follow.installed.as_ref()?.snapshot(follow.generation)))
+            .unwrap_or_default();
+        events.push(FollowEvent::Synced);
+        events
     }
 
     /// Every installed follow, by class and cell, then the marker.

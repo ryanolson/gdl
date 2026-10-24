@@ -79,7 +79,7 @@ impl CellWatcher {
     /// do, and also at an event of a kind this build does not know that
     /// names no follow; one that names its follow is read as
     /// [`Watched::Unknown`], for the reader to fail closed for that cell
-    /// alone until it has read it again ([`CellWatcher::followed`]). A
+    /// alone until it has read it again ([`CellWatcher::follows_of`]). A
     /// consumer whose watch ended watches again from a snapshot.
     pub async fn follows(
         &self,
@@ -88,39 +88,22 @@ impl CellWatcher {
         self.open(hub, FOLLOWS_ROUTE).await
     }
 
-    /// Read one follow of the relay of the hub at `hub`, `host:port`, as it
-    /// is now: the follow of the cell `cell` of `class`, as a watch of the
-    /// relay begins with it, without its marker; empty when the hub follows
-    /// no such cell, or has not yet installed its follow. Refused when the
-    /// snapshot has an event of a kind this build does not know, since
-    /// the cell cannot be read whole then.
-    pub async fn followed(
+    /// Watch one follow of the relay of the hub at `hub`, `host:port`: the
+    /// follow of the cell `cell` of `class` as a watch of the relay begins
+    /// with it, then `synced`, then each event of the relay that names the
+    /// cell, as [`CellWatcher::follows`] reads them. A reader that met an
+    /// event of a kind it does not know for the cell reads the cell from
+    /// here: this watch's snapshot and the events after it are ordered as
+    /// the relay's are, which a reading beside another watch is not.
+    pub async fn follows_of(
         &self,
         hub: &str,
         class: &str,
         cell: &str,
-    ) -> Result<Vec<FollowEvent>, CellWatchError> {
+    ) -> Result<BoxStream<'static, Watched<FollowEvent, UnknownFollowEvent>>, CellWatchError> {
         gdl_model::check_class_name(class).map_err(CellWatchError)?;
         gdl_model::check_cell_name(cell).map_err(CellWatchError)?;
-        let mut events = self
-            .open::<FollowEvent>(hub, &super::followed_path(class, cell))
-            .await?;
-        let mut snapshot = Vec::new();
-        while let Some(item) = events.next().await {
-            match item {
-                Watched::Event(FollowEvent::Synced) => return Ok(snapshot),
-                Watched::Event(event) => snapshot.push(event),
-                Watched::Unknown(event) => {
-                    return Err(CellWatchError(format!(
-                        "the follow of {class} cell {cell} has an event of a kind this build does not know, `{}`",
-                        event.kind
-                    )));
-                }
-            }
-        }
-        Err(CellWatchError(format!(
-            "the follow of {class} cell {cell} ended before its snapshot was complete"
-        )))
+        self.open(hub, &super::followed_path(class, cell)).await
     }
 
     async fn open<T: Classify>(

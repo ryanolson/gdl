@@ -141,3 +141,20 @@ pub enum FollowEvent {
         generation: u64,
     },
 }
+
+impl FollowEvent {
+    /// The class and the cell of the follow the event names; `None` for
+    /// the marker.
+    pub fn cell(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Follow { class, cell, .. }
+            | Self::State { class, cell, .. }
+            | Self::Load { class, cell, .. }
+            | Self::Exposed { class, cell, .. }
+            | Self::Retired { class, cell, .. }
+            | Self::Left { class, cell, .. }
+            | Self::Dropped { class, cell, .. } => Some((class, cell)),
+            Self::Synced => None,
+        }
+    }
+}

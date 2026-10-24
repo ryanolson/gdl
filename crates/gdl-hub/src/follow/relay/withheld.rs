@@ -131,10 +131,11 @@ fn a_withheld_cell_is_unavailable_until_it_is_read_again() {
         },
     );
     assert_eq!(pending(&mut watch), []);
+    let mut alone = relay.watch_of("model_x", "m");
     assert_eq!(
-        relay.followed("model_x", "m"),
+        pending(&mut alone),
         [follow("m", m, CellState::Unavailable), FollowEvent::Synced],
-        "read alone, it is withheld, its instances hidden"
+        "watched alone, it is withheld, its instances hidden"
     );
     let mut late = relay.watch();
     let snapshot = pending(&mut late);

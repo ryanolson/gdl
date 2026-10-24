@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use futures::StreamExt;
 use gdl_cells::{CellDirectory, CellRecord, CellState, LoadSummary};
 use gdl_model::{CellSettings, DeploymentSpec};
 use serde::{Deserialize, Serialize};
@@ -508,8 +507,8 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             .route(
                 gdl_watch::FOLLOWED_ROUTE,
                 get(move |Path((class, cell)): Path<(String, String)>| {
-                    let events = relay.followed(&class, &cell);
-                    async move { crate::fanout::serve(futures::stream::iter(events).boxed()) }
+                    let watch = relay.watch_of(&class, &cell);
+                    async move { crate::fanout::serve(watch.into_events()) }
                 }),
             )
     }

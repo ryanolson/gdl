@@ -19,7 +19,7 @@
 //! cells in the directory, follows each over its watch, and relays what it
 //! follows to its own instances (`GET /v1/ext/gdl-cell/follows`, as
 //! [`gdl_watch::FollowEvent`]s, which a [`gdl_watch::CellWatcher`] reads
-//! too), and one follow of it alone, as a watch of it begins with it
+//! too), and a watch of one follow of it alone, ordered as the relay is
 //! (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`). A followed cell whose
 //! watch sends an event of a kind the hub does not know is withheld: the
 //! relay shows it `unavailable`, its instances hidden, until the hub has

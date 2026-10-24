@@ -42,12 +42,15 @@ pub const WATCH_ROUTE: &str = "/watch";
 /// The relay's route, under the extension's.
 pub const FOLLOWS_ROUTE: &str = "/follows";
 
-/// The route of one follow of the relay, under the extension's: `GET`
-/// answers with the follow of the cell `cell` of `class` as a watch of the
-/// relay begins with it, then `synced`, as server-sent events, and ends;
-/// only `synced` when the hub has no such follow installed. A reader
-/// that met an event of a kind it does not know for the cell reads the
-/// cell again from it ([`CellWatcher::followed`]).
+/// The route of a watch of one follow of the relay, under the extension's:
+/// `GET` answers with the follow of the cell `cell` of `class` as a watch
+/// of the relay begins with it, then `synced`, then each event of the
+/// relay that names the cell, of whichever generation, as server-sent
+/// events, until the hub stops or the watcher falls behind; only `synced`
+/// first when the hub has no such follow installed. Its snapshot and the
+/// events after it are ordered as the relay's are, so a reader that met
+/// an event of a kind it does not know for the cell reads the cell from
+/// it from then ([`CellWatcher::follows_of`]).
 pub const FOLLOWED_ROUTE: &str = "/follows/{class}/{cell}";
 
 /// [`FOLLOWED_ROUTE`]'s path for the cell `cell` of `class`.

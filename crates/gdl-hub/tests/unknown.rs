@@ -268,14 +268,26 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
         state(generation, CellState::Unavailable)
     );
     met(&global, 1).await;
-    // Read alone over its route, the follow is withheld too.
+    // Watched alone over its route, the follow is withheld too.
     let watcher = gdl_watch::CellWatcher::new().expect("a client");
     let relay = format!("127.0.0.1:{}", global_hub.public_addr().port());
-    assert_eq!(
-        watcher
-            .followed(&relay, "model_x", M)
+    let mut alone = tokio::time::timeout(WAIT, watcher.follows_of(&relay, "model_x", M))
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub serves the follow");
+    let mut snapshot = Vec::new();
+    loop {
+        let item = tokio::time::timeout(WAIT, alone.next())
             .await
-            .expect("the hub serves the follow"),
+            .expect("an event in time")
+            .expect("the watch goes on");
+        match item.event().expect("a known event") {
+            FollowEvent::Synced => break,
+            event => snapshot.push(event),
+        }
+    }
+    assert_eq!(
+        snapshot,
         [FollowEvent::Follow {
             class: "model_x".into(),
             cell: M.into(),
@@ -285,12 +297,19 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
             load: None,
         }]
     );
+    let mut none = tokio::time::timeout(
+        WAIT,
+        watcher.follows_of(&relay, "model_x", "model-x-99-us-east-1"),
+    )
+    .await
+    .expect("the hub answers in time")
+    .expect("the hub serves the follow");
     assert_eq!(
-        watcher
-            .followed(&relay, "model_x", "model-x-99-us-east-1")
+        tokio::time::timeout(WAIT, none.next())
             .await
-            .expect("the hub answers"),
-        [],
+            .expect("an event in time")
+            .and_then(gdl_watch::Watched::event),
+        Some(FollowEvent::Synced),
         "a cell the hub does not follow"
     );
     let mut second = server.next().await;
@@ -360,6 +379,22 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
         state(generation, CellState::Degraded)
     );
     met(&global, 1).await;
+    // The watch of M alone had the same changes, and none of N's.
+    let mut alone_seen = Vec::new();
+    while alone_seen.last() != Some(&state(generation, CellState::Degraded)) {
+        let item = tokio::time::timeout(WAIT, alone.next())
+            .await
+            .expect("an event in time")
+            .expect("the watch goes on");
+        alone_seen.push(item.event().expect("a known event"));
+    }
+    assert_eq!(
+        alone_seen,
+        read.iter()
+            .cloned()
+            .chain([state(generation, CellState::Degraded)])
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         global.following().borrow()[&("model_x".to_string(), M.to_string())],
         generation,

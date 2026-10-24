@@ -16,7 +16,7 @@ use tokio::time::Instant;
 use velo::Velo;
 
 use super::Cells;
-use super::follow::{Follows, Key};
+use super::follow::{Asked, Follows, Key};
 use crate::dist::fabric::Registry;
 use crate::dist::roster::Live;
 
@@ -81,13 +81,13 @@ pub(super) trait Source: Send + Sync + 'static {
         &self,
     ) -> impl Future<Output = std::result::Result<BoxStream<'static, Relayed>, String>> + Send;
 
-    /// The relay's follow of the cell `cell` of `class` alone, as a watch
-    /// begins with it, without the marker.
-    fn followed(
+    /// One watch of the relay's follow of the cell `cell` of `class`
+    /// alone: its snapshot, then each change of it, until it ends.
+    fn watch_of(
         &self,
         class: &str,
         cell: &str,
-    ) -> impl Future<Output = std::result::Result<Vec<FollowEvent>, String>> + Send;
+    ) -> impl Future<Output = std::result::Result<BoxStream<'static, Relayed>, String>> + Send;
 }
 
 /// The instance's own hub.
@@ -104,13 +104,13 @@ impl Source for Hub {
             .map_err(|e| e.to_string())
     }
 
-    async fn followed(
+    async fn watch_of(
         &self,
         class: &str,
         cell: &str,
-    ) -> std::result::Result<Vec<FollowEvent>, String> {
+    ) -> std::result::Result<BoxStream<'static, Relayed>, String> {
         self.watcher
-            .followed(&self.address, class, cell)
+            .follows_of(&self.address, class, cell)
             .await
             .map_err(|e| e.to_string())
     }
@@ -164,20 +164,23 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
 
 /// Read one watch of the relay into `follows` until it ends: its snapshot
 /// apart, applied whole at its `synced`, then each change. A second
-/// `synced` in one watch is not the protocol, and ends it. A cell an
-/// event of a kind this build does not know names is read again from
-/// `source` beside the watch, which goes on; a reading that fails is tried
-/// again after [`REWATCH`].
+/// `synced` in one watch is not the protocol, and ends it. A cell that an
+/// event of a kind this build does not know names is read from a watch of
+/// its own, from `source`, beside this one, which goes on: each such watch
+/// is let go of when the cell asks for another, and all of them when this
+/// one ends or its snapshot is complete.
 async fn read<S: Source, R: Registry>(
     source: &S,
     follows: &mut Follows<R>,
     mut events: BoxStream<'static, Relayed>,
 ) {
     let mut snapshot = Some(follows.snapshot());
-    let mut reading = FuturesUnordered::new();
+    let mut own = Own::default();
     loop {
-        for key in follows.asked() {
-            reading.push(reread(source, key).boxed());
+        if snapshot.is_none() {
+            for asked in follows.asked() {
+                own.open(source, asked);
+            }
         }
         let due = follows.next_due();
         tokio::select! {
@@ -197,45 +200,96 @@ async fn read<S: Source, R: Registry>(
                 };
                 let synced = matches!(event, FollowEvent::Synced);
                 match snapshot.take() {
-                    Some(complete) if synced => follows.resnapshot(complete, Instant::now()),
+                    Some(complete) if synced => {
+                        follows.resnapshot(complete, Instant::now());
+                        own = Own::default();
+                    }
                     Some(mut filling) => {
                         filling.apply(event, Instant::now());
                         snapshot = Some(filling);
                     }
                     None if synced => return,
-                    None => {
-                        if !follows.take(event, Instant::now()) {
-                            tracing::info!("the relay sent too much while a cell was read again; it is watched again");
-                            return;
-                        }
-                    }
+                    None => follows.take(event, Instant::now()),
                 }
             }
-            Some((key, read)) = reading.next() => {
-                if !follows.reread(key, read, Instant::now()) {
-                    tracing::info!("the relay sent too much while a cell was read again; it is watched again");
-                    return;
+            Some((key, watch, opened)) = own.opening.next() => match opened {
+                Ok(stream) if follows.wants(&key, watch) => own.read(key, watch, stream),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(class = key.0, cell = key.1, %error, "a cell could not be read again");
+                    follows.own(key, watch, None, Instant::now());
                 }
+            },
+            Some((key, watch, item)) = own.reading.next() => {
+                follows.own(key, watch, item, Instant::now());
             }
             () = until(due) => follows.forget(Instant::now()),
         }
     }
 }
 
-/// Read the cell `key` again from `source`, until a reading succeeds.
-async fn reread<S: Source>(source: &S, key: Key) -> (Key, Vec<FollowEvent>) {
-    let mut refused: Option<String> = None;
-    loop {
-        match source.followed(&key.0, &key.1).await {
-            Ok(events) => return (key, events),
-            Err(error) => {
-                if refused.as_deref() != Some(error.as_str()) {
-                    tracing::info!(class = key.0, cell = key.1, %error, "a cell could not be read again");
-                    refused = Some(error);
-                }
-            }
+/// The cells' own watches, as the task holds them.
+type Opening<'a> = futures::future::BoxFuture<
+    'a,
+    (
+        Key,
+        u64,
+        std::result::Result<BoxStream<'static, Relayed>, String>,
+    ),
+>;
+
+/// One item of a cell's own watch, or its end (`None`).
+type OwnItem = (Key, u64, Option<Relayed>);
+
+/// The cells' own watches: those being opened, those being read, and what
+/// lets go of each that is read.
+struct Own<'a> {
+    opening: FuturesUnordered<Opening<'a>>,
+    reading: futures::stream::SelectAll<BoxStream<'static, OwnItem>>,
+    /// Dropped to let go of the cell's watch being read.
+    stops: std::collections::HashMap<Key, tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Default for Own<'_> {
+    fn default() -> Self {
+        Self {
+            opening: FuturesUnordered::new(),
+            reading: futures::stream::SelectAll::new(),
+            stops: std::collections::HashMap::new(),
         }
-        tokio::time::sleep(REWATCH).await;
+    }
+}
+
+impl<'a> Own<'a> {
+    /// Open the watch `asked` names, letting go of the one its cell is read
+    /// from now.
+    fn open<S: Source>(&mut self, source: &'a S, asked: Asked) {
+        let Asked { key, watch, pause } = asked;
+        self.stops.remove(&key);
+        self.opening.push(
+            async move {
+                if pause {
+                    tokio::time::sleep(REWATCH).await;
+                }
+                let opened = source.watch_of(&key.0, &key.1).await;
+                (key, watch, opened)
+            }
+            .boxed(),
+        );
+    }
+
+    /// Read `stream`, the cell `key`'s watch `watch`, until it ends or is
+    /// let go of: its end is an item too, unless it was let go of.
+    fn read(&mut self, key: Key, watch: u64, stream: BoxStream<'static, Relayed>) {
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        self.stops.insert(key.clone(), stop);
+        let ending = key.clone();
+        let items = stream
+            .map(move |item| (key.clone(), watch, Some(item)))
+            .chain(futures::stream::once(async move { (ending, watch, None) }))
+            .take_until(stopped)
+            .boxed();
+        self.reading.push(items);
     }
 }
 
