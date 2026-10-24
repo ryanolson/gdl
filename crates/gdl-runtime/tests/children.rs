@@ -375,7 +375,10 @@ async fn only_children_are_followed_and_chosen() {
 }
 
 /// A `degraded` child is chosen only while no child is `ready`, and never
-/// one that is `draining`, or `unavailable`, which are not offered.
+/// one that is `draining`, or `unavailable`, which are not offered. No
+/// child here is damped. Damping comes before the rank: a damped `ready`
+/// child that the damping cap passes over would leave its turns to a
+/// `degraded` one, as the policy's own tests show.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_degraded_child_only_while_no_child_is_ready() {
     let spec = spec_of(placement());

@@ -15,20 +15,31 @@ use super::CellChooser;
 ///
 /// A cell is eligible only while it is `ready` or `degraded`, has an entry
 /// instance to route to (a cell that is not offered, or unread, has none),
-/// and has not declined the request. Of the eligible, the `ready` ones
-/// take every turn while any is choosable, and the `degraded` ones only
-/// when none is (ruling Q9). A cell the chooser damps is passed over as
-/// `home_first` passes it over: at most half of the eligible cells,
-/// rounded down, are passed over at once, those whose windows end soonest
-/// being chosen as if they were not, so a lone cell is never damped out.
+/// and has not declined the request. Damping comes first, then the rank:
+///
+/// 1. A cell the chooser damps is passed over as `home_first` passes it
+///    over: at most half of the eligible cells, `ready` and `degraded`
+///    together, rounded down, are passed over at once, those whose windows
+///    end soonest being chosen as if they were not, so a lone cell is
+///    never damped out.
+/// 2. Of the cells left, the `ready` ones take every turn while any is
+///    left, and the `degraded` ones only when none is.
+///
+/// So a damped `ready` cell that is passed over leaves its turns to a
+/// `degraded` one: a cell that just declined does not fit (ruling Q9), and
+/// damping stays as it is for every policy.
 ///
 /// The attempt's turn is the crossing's count of the attempts before it:
 /// the `turn`-th choosable cell, modulo how many there are, in the order
 /// of the table, which is by class and cell. So the turns of one chooser's
 /// hand-off go round its cells one by one, and a turn needs no lock and no
-/// shared position but that count. A cell that leaves or joins shifts
-/// which cell the next turn lands on, which a rotation does not need to
-/// avoid.
+/// shared position but that count. "The next cell" is the next turn among
+/// the cells still eligible, not the cell after the last one chosen: every
+/// attempt takes a turn, a failover after a decline included, and a cell
+/// the request excluded no longer counts. With cells A, B, and C, if A
+/// declines the request at turn 0, its failover's turn 1 among B and C
+/// goes to C. A cell that leaves or joins shifts which cell the next turn
+/// lands on, which a rotation does not need to avoid.
 pub(crate) struct RoundRobin;
 
 impl RoundRobin {

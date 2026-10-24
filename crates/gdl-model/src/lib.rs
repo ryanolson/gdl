@@ -19,14 +19,15 @@ mod hash;
 mod manifest;
 mod metrics;
 mod placement;
+mod problem;
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 pub use cell::{
-    CellSettings, DirectoryBackend, check_cell_name, check_hub_address, check_region_name,
-    check_summary,
+    CellSettings, DirectoryBackend, cell_variable, check_cell_name, check_hub_address,
+    check_region_name, check_summary,
 };
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{
@@ -45,6 +46,7 @@ pub use placement::{
     PlacementErrors, RequestRouter, Run, SELECTORS, SelectorInfo, WireReason, check_class_name,
     check_selector_name, layout,
 };
+pub use problem::{Origin, Problem, Problems, read_toml};
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.
 #[doc(hidden)]

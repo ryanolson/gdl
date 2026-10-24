@@ -111,7 +111,7 @@ fn a_gdl_path_names_the_runtime_crate() {
             .expect_err("the definitions")
             .to_string(),
         format!(
-            "[gdl] path {} is the package `gdl`; it must name `gdl-runtime`",
+            "[gdl] path: {} is the package `gdl`; it must name `gdl-runtime`",
             dir.join("definitions").display()
         )
     );
@@ -122,7 +122,7 @@ fn a_gdl_path_names_the_runtime_crate() {
             .expect_err("no crate")
             .to_string()
             .starts_with(&format!(
-                "reading {}",
+                "[gdl] path: reading {}",
                 dir.join("missing/Cargo.toml").display()
             ))
     );
@@ -427,12 +427,17 @@ fn a_spec_groups_its_segments_into_classes() {
 fn a_bad_class_table_is_the_class_tables_error() {
     let temp = contract_dir("bad-classes");
     let dir = temp.path();
-    for (bad, expected) in [
-        ("[class.global]", "[class.Global]"),
-        ("segments = [\"front\"]", "segments = 3"),
+    for (bad, expected, table) in [
+        ("[class.global]", "[class.Global]", "[class.Global]: "),
+        (
+            "segments = [\"front\"]",
+            "segments = 3",
+            "[class.global] segments: ",
+        ),
         (
             "segments = [\"front\"]",
             "segments = [\"front\"]\npolicy = \"home_first\"",
+            "[class.global] policy: ",
         ),
     ] {
         let text = CLASSED.replacen(bad, expected, 1);
@@ -441,8 +446,8 @@ fn a_bad_class_table_is_the_class_tables_error() {
             panic!("parsed:\n{text}");
         };
         let error = error.to_string();
-        assert!(error.contains("[class]: "), "{error}");
-        assert!(!error.contains("[segment]"), "{error}");
+        assert!(error.contains(table), "{error}");
+        assert!(!error.contains("[segment"), "{error}");
     }
 }
 
@@ -474,16 +479,243 @@ fn a_spec_sets_a_cell_policy() {
 fn a_bad_cells_table_is_the_cells_tables_error() {
     let temp = contract_dir("bad-cells");
     let dir = temp.path();
-    for bad in [
-        "    [cells.model_x]\n    spill = 3\n",
-        "    [cells.model_x]\n    policy = \"Home\"\n",
+    for (bad, table) in [
+        (
+            "    [cells.model_x]\n    spill = 3\n",
+            "[cells.model_x] spill: ",
+        ),
+        (
+            "    [cells.model_x]\n    policy = \"Home\"\n",
+            "[cells.model_x] policy: ",
+        ),
     ] {
         let text = format!("{CLASSED}{bad}");
         let Err(error) = Spec::parse(&text, &dir.join("gdl.toml"), dir) else {
             panic!("parsed:\n{text}");
         };
         let error = error.to_string();
-        assert!(error.contains("[cells]: "), "{error}");
-        assert!(!error.contains("[class]"), "{error}");
+        assert!(error.contains(table), "{error}");
+        assert!(!error.contains("[class"), "{error}");
+    }
+}
+
+/// The line of `text` that holds `needle`, from 1.
+fn line_of(text: &str, needle: &str) -> usize {
+    text.lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no `{needle}` in:\n{text}"))
+        + 1
+}
+
+const CONTRACT: &str = "[contract]\npath = \"contract\"\n[gdl]\npath = \"runtime\"\n\
+    [segment.front]\nnodes = [\"A\", \"B\"]\n[segment.engine]\nnodes = [\"E\"]\n\
+    [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n";
+
+const GRAPH: &str = "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"chat-protocols@0.1.0\"]\n\
+    [nodes]\ncrates = [\"chat-nodes@0.1.0\"]\n[gdl]\nversion = \"0.1\"\n\
+    [segment.front]\nnodes = [\"A\"]\n";
+
+/// Every table of a spec refuses a key it does not know, nested tables
+/// included, and the refusal names the file, the line, the table, and the
+/// key: `<file>:<line>: [<table>] <key>: ...`.
+#[test]
+fn every_spec_table_refuses_an_unknown_key_where_it_is() {
+    let temp = contract_dir("unknown-keys");
+    let dir = temp.path();
+    let file = dir.join("gdl.toml");
+    let git =
+        "{ package = \"p\", git = \"https://example.com/p\", rev = \"abc\", branch = \"main\" }";
+    let cases: Vec<(String, &str, &str)> = vec![
+        (format!("colour = 1\n{CONTRACT}"), "colour", "colour"),
+        (
+            CONTRACT.replacen(
+                "path = \"contract\"",
+                "path = \"contract\"\nmodul = \"m\"",
+                1,
+            ),
+            "modul",
+            "[contract] modul",
+        ),
+        (
+            CONTRACT.replacen(
+                "path = \"runtime\"",
+                "path = \"runtime\"\nbranch = \"main\"",
+                1,
+            ),
+            "branch",
+            "[gdl] branch",
+        ),
+        (
+            CONTRACT.replacen("nodes = [\"E\"]", "nodes = [\"E\"]\nnode = \"F\"", 1),
+            "node =",
+            "[segment.engine] node",
+        ),
+        (
+            format!("{CONTRACT}[bind.B]\ncrate = \"b\"\npath = \"b\"\ntyp = \"b::B\"\n"),
+            "typ",
+            "[bind.B] typ",
+        ),
+        (
+            format!("{CONTRACT}[deployment]\nbase = \"x\"\n"),
+            "base",
+            "[deployment] base",
+        ),
+        (
+            format!("{CONTRACT}[deployment.segment.front]\nport = []\n"),
+            "port",
+            "[deployment.segment.front] port",
+        ),
+        (
+            format!("{CONTRACT}[entry.ask]\nnested = {{ target = \"A\", extra = 1 }}\n"),
+            "nested",
+            "[entry.ask.nested] extra",
+        ),
+        (
+            format!("{CONTRACT}[entry.ask]\nforwards = []\n"),
+            "forwards",
+            "[entry.ask] forwards",
+        ),
+        (
+            CONTRACT.replacen(
+                "segments = [\"engine\"]",
+                "segments = [\"engine\"]\nsegment = \"engine\"",
+                1,
+            ),
+            "segment =",
+            "[class.model_x] segment",
+        ),
+        (
+            format!("{CONTRACT}[cells.model_x]\nspill = 3\n"),
+            "spill",
+            "[cells.model_x] spill",
+        ),
+        (
+            format!("{CONTRACT}[routing]\nE = {{ selector = \"affinity\", key = \"k\" }}\n"),
+            "selector",
+            "[routing.E] key",
+        ),
+        (
+            GRAPH.replacen(
+                "path = \"chat.gdl\"",
+                "path = \"chat.gdl\"\npaht = \"x\"",
+                1,
+            ),
+            "paht",
+            "[graph] paht",
+        ),
+        (
+            GRAPH.replacen("[messages]", "[messages]\ncrate = []", 1),
+            "crate = []",
+            "[messages] crate",
+        ),
+        (
+            GRAPH.replacen("[\"chat-protocols@0.1.0\"]", &format!("[{git}]"), 1),
+            "branch",
+            "[messages] crates[0].branch",
+        ),
+        (
+            GRAPH.replacen(
+                "[\"chat-nodes@0.1.0\"]",
+                &format!("[\"chat-nodes@0.1.0\", {git}]"),
+                1,
+            ),
+            "branch",
+            "[nodes] crates[1].branch",
+        ),
+        (
+            GRAPH.replacen("[nodes]", "[nodes]\npins = {}", 1),
+            "pins",
+            "[nodes] pins",
+        ),
+    ];
+    for (text, needle, expected) in cases {
+        let Err(error) = Spec::parse(&text, &file, dir) else {
+            panic!("parsed:\n{text}");
+        };
+        let expected = format!(
+            "{}:{}: {expected}: ",
+            file.display(),
+            line_of(&text, needle)
+        );
+        let error = error.to_string();
+        assert!(
+            error.starts_with(&expected),
+            "{expected}\nin: {error}\n{text}"
+        );
+        assert_eq!(error.lines().count(), 1, "one problem: {error}");
+    }
+}
+
+/// A path that names no crate is refused where it is written.
+#[test]
+fn a_path_that_names_no_crate_names_its_table_and_key() {
+    let temp = contract_dir("no-crate");
+    let dir = temp.path();
+    let file = dir.join("gdl.toml");
+    let gdl = CONTRACT.replacen("path = \"runtime\"", "path = \"nowhere\"", 1);
+    let spec = Spec::parse(&gdl, &file, dir).expect("a spec");
+    let error = spec.gdl.check().expect_err("no runtime there").to_string();
+    assert!(error.starts_with("[gdl] path: "), "{error}");
+    let contract = CONTRACT.replacen("path = \"contract\"", "path = \"nowhere\"", 1);
+    let Err(error) = Spec::parse(&contract, &file, dir) else {
+        panic!("a contract that is not there");
+    };
+    let error = error.to_string();
+    assert!(error.starts_with("[contract] path: "), "{error}");
+}
+
+/// A spec reads back what it writes, with every table and every optional
+/// key set: written and read again, it is the same, and so is the
+/// placement it holds.
+#[test]
+fn a_spec_reads_back_what_it_writes() {
+    let graph = "[graph]\npath = \"chat.gdl\"\n\
+        [messages]\ncrates = [\"chat-protocols@0.1.0\", { package = \"p\", git = \"https://example.com/p\", rev = \"abc\", lib = \"p_lib\" }]\n\
+        pin = { Chunk = \"chat_protocols::Chunk\" }\n\
+        [nodes]\ncrates = [\"chat-nodes@0.1.0\"]\npin = { Engine = \"chat_nodes::Engine\" }\n\
+        [gdl]\ngit = \"https://example.com/gdl\"\nrev = \"def\"\n\
+        [segment.front]\nnodes = [\"A\", \"B\"]\n[segment.engine]\nnodes = [\"E\"]\n\
+        [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
+        [routing]\nE = { selector = \"affinity\" }\nB = \"random\"\n\
+        [cells.model_x]\npolicy = \"nearest\"\n\
+        [deployment]\nbase_image = \"debian:trixie-slim\"\nbuild_image = \"rust:1.93\"\nhub_image = \"hub:1\"\n\
+        [deployment.segment.engine]\nbase_image = \"cuda:12\"\nports = [\"9000:9000\"]\n\
+        [deployment.segment.engine.config.runtime]\ndrain_ms = 90000\n\
+        [entry.chat]\ntarget = \"A\"\nforward = [\"x::In\"]\nbackward = [\"x::Out\"]\noperator = \"x::Op\"\nnested = { target = \"B\" }\n\
+        [config.A]\nenabled = true\nlimit = 3\nname = \"n\"\n\
+        [pipeline_names]\nA = \"chat\"\n";
+    let contract = "[contract]\npath = \"contract\"\nmodule = \"chat_contract::graph\"\n\
+        [gdl]\nversion = \"0.1\"\n[segment.front]\nnodes = [\"A\"]\n\
+        [bind.A]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::A\"\n";
+    let temp = contract_dir("round-trip");
+    let dir = temp.path();
+    let file = dir.join("gdl.toml");
+    for text in [graph, contract] {
+        let raw: Raw = gdl_model::read_toml(text).expect("a spec");
+        let written = toml::to_string(&raw).expect("toml");
+        let back: Raw = gdl_model::read_toml(&written).expect("reads what it wrote");
+        assert_eq!(back, raw, "{written}");
+        let first = Spec::parse(text, &file, dir).expect("a spec");
+        let again = Spec::parse(&written, &file, dir).expect("reads what it wrote");
+        assert_eq!(again.placement, first.placement, "{written}");
+        assert_eq!(again.placement.hash(), first.placement.hash(), "{written}");
+    }
+    // What is not set is not written.
+    let least: Raw = gdl_model::read_toml(
+        "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"p@1.0.0\"]\n[gdl]\nversion = \"0.1\"\n",
+    )
+    .expect("a spec");
+    let written = toml::to_string(&least).expect("toml");
+    for unsaid in [
+        "deployment",
+        "entry",
+        "config",
+        "pipeline_names",
+        "pin",
+        "bind",
+        "nodes",
+        "contract",
+    ] {
+        assert!(!written.contains(unsaid), "{unsaid} in:\n{written}");
     }
 }

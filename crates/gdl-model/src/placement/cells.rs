@@ -15,25 +15,28 @@ use super::{ClassBoundary, Placement, PlacementError, check_name_shape};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CellPolicy {
-    /// The policy's name, `round_robin` by default. Named like a selector,
-    /// and not checked against a list, since a custom policy can be
-    /// registered later.
+    /// The policy's name, [`CellPolicy::DEFAULT_POLICY`] by default. Named
+    /// like a selector, and not checked against a list, since a custom
+    /// policy can be registered later.
     #[serde(skip_serializing_if = "is_default_policy")]
     pub policy: String,
 }
 
-const DEFAULT_POLICY: &str = "round_robin";
+impl CellPolicy {
+    /// `policy` when the table does not set it: `round_robin`.
+    pub const DEFAULT_POLICY: &'static str = "round_robin";
+}
 
 impl Default for CellPolicy {
     fn default() -> Self {
         Self {
-            policy: DEFAULT_POLICY.into(),
+            policy: Self::DEFAULT_POLICY.into(),
         }
     }
 }
 
 fn is_default_policy(policy: &str) -> bool {
-    policy == DEFAULT_POLICY
+    policy == CellPolicy::DEFAULT_POLICY
 }
 
 /// The `[cells]` tables as read, without those that hold only defaults:
@@ -65,26 +68,29 @@ pub(super) fn hash<'a>(
     classes: impl Iterator<Item = &'a String> + Clone,
     cells: &'a BTreeMap<String, CellPolicy>,
 ) {
-    let count = named(classes.clone(), cells).count();
+    let count = hashed(classes.clone(), cells).count();
     if count == 0 {
         return;
     }
     h.u64(u64::MAX - 1);
     h.u64(count as u64);
-    for class in named(classes, cells) {
+    for class in hashed(classes, cells) {
         h.str(class);
         h.str(
             cells
                 .get(class)
-                .map_or(DEFAULT_POLICY, |policy| &policy.policy),
+                .map_or(CellPolicy::DEFAULT_POLICY, |policy| &policy.policy),
         );
     }
 }
 
-/// The classes, and the classes the tables name, once each in name order:
-/// both are in name order, so they merge without a set, and hashing a
-/// class costs what hashing a segment's node does.
-fn named<'a>(
+/// The classes, and the classes the tables recorded with a value name,
+/// once each in name order: both are in name order, so they merge without
+/// a set, and hashing a class costs what hashing a segment's node does. A
+/// table spelled with the default only is not among them: its class, if
+/// the placement has it, hashes the default as every class does, and if
+/// not, layout refuses it.
+fn hashed<'a>(
     classes: impl Iterator<Item = &'a String>,
     cells: &'a BTreeMap<String, CellPolicy>,
 ) -> impl Iterator<Item = &'a str> {
@@ -105,6 +111,15 @@ fn named<'a>(
     })
 }
 
+/// Every class a `[cells]` table names, with a value or with defaults only.
+fn named(placement: &Placement) -> BTreeSet<&String> {
+    placement
+        .cells
+        .keys()
+        .chain(&placement.spelled.cells)
+        .collect()
+}
+
 /// The checks that need only the placement: each table's policy name, and
 /// that it names a class the placement has.
 pub(super) fn judge(placement: &Placement, errors: &mut Vec<PlacementError>) {
@@ -115,6 +130,8 @@ pub(super) fn judge(placement: &Placement, errors: &mut Vec<PlacementError>) {
                 reason,
             });
         }
+    }
+    for class in named(placement) {
         if placement.classes.is_empty() {
             errors.push(PlacementError::CellPolicyWithoutClasses {
                 class: class.clone(),
@@ -138,7 +155,7 @@ pub(super) fn entered(
     errors: &mut Vec<PlacementError>,
 ) -> BTreeMap<String, CellPolicy> {
     let into: BTreeSet<&str> = boundaries.iter().map(|b| b.into.as_str()).collect();
-    for class in placement.cells.keys() {
+    for class in named(placement) {
         if placement.classes.contains_key(class)
             && !into.contains(class.as_str())
             && !undecided.may_enter(class)

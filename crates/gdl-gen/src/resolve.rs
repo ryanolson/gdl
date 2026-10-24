@@ -89,7 +89,7 @@ pub(crate) fn resolve(
     for name in pins.keys() {
         if !uses.contains_key(name) {
             problems.push(format!(
-                "[messages] pin `{name}`: the graph has no message `{name}`"
+                "[messages] pin.{name}: the graph has no message `{name}`"
             ));
         }
     }
@@ -105,7 +105,7 @@ pub(crate) fn resolve(
                     .map(|c| format!("`{}`", c.path))
                     .collect();
                 problems.push(format!(
-                    "[messages] pin `{name}`: no listed crate offers `{path}`{}",
+                    "[messages] pin.{name}: no listed crate offers `{path}`{}",
                     if named.is_empty() {
                         String::new()
                     } else {
@@ -116,7 +116,7 @@ pub(crate) fn resolve(
             };
             if !pinned.public {
                 problems.push(format!(
-                    "[messages] pin `{name}`: `{path}` is not public: a module above it is private"
+                    "[messages] pin.{name}: `{path}` is not public: a module above it is private"
                 ));
                 continue;
             }
@@ -488,8 +488,8 @@ pub(crate) mod tests {
         assert_eq!(
             problems,
             [
-                "[messages] pin `Other`: the graph has no message `Other`",
-                "[messages] pin `Chunk`: no listed crate offers `a::Chunck`; `Chunk` is `a::Chunk`",
+                "[messages] pin.Other: the graph has no message `Other`",
+                "[messages] pin.Chunk: no listed crate offers `a::Chunck`; `Chunk` is `a::Chunk`",
             ]
         );
     }

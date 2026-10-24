@@ -1,31 +1,49 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     base_image: String,
     build_image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     hub_image: Option<String>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     segment: std::collections::BTreeMap<String, Image>,
 }
+/// `[deployment] base_image` when the spec does not set it: the image a
+/// segment, and the hub unless `hub_image` says otherwise, runs in.
+pub(crate) const DEFAULT_BASE_IMAGE: &str = "debian:bookworm-slim";
+
+/// `[deployment] build_image` when the spec does not set it: the image
+/// every binary is built in.
+pub(crate) const DEFAULT_BUILD_IMAGE: &str = "rust:1.93-slim-bookworm";
+
+impl Settings {
+    /// The segments that `[deployment.segment.<name>]` tables name.
+    pub(crate) fn segments(&self) -> impl Iterator<Item = &str> {
+        self.segment.keys().map(String::as_str)
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            base_image: "debian:bookworm-slim".into(),
-            build_image: "rust:1.93-slim-bookworm".into(),
+            base_image: DEFAULT_BASE_IMAGE.into(),
+            build_image: DEFAULT_BUILD_IMAGE.into(),
             hub_image: None,
             segment: Default::default(),
         }
     }
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Image {
+    #[serde(skip_serializing_if = "Option::is_none")]
     base_image: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ports: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     config: toml::Table,
 }
 fn validate_image(image: &str) -> Result<(), Error> {
@@ -124,17 +142,6 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
         )
     {
         validate_image(image)?;
-    }
-    for name in settings.segment.keys() {
-        if !spec
-            .placement
-            .segments()
-            .any(|(segment, _)| segment == name)
-        {
-            return Err(Error::new(format!(
-                "image override names unknown segment `{name}`"
-            )));
-        }
     }
     let mut services = serde_json::Map::new();
     services.insert("hub".into(),json!({"build":{"context":".","dockerfile":"hub/Dockerfile"},"healthcheck":{"test":["CMD","/usr/local/bin/segment","--healthcheck"],"interval":"2s","timeout":"2s","retries":30}}));

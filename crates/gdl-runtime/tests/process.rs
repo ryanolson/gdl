@@ -326,7 +326,7 @@ fn a_cell_table_is_read_from_a_file() {
     let config = load(&[
         BASE,
         CELL,
-        "[cell]\nhome = \"g\"\nseeds = [\"hub-a:1337\"]\n[cell.ready]\nfront = 3\n",
+        "[cell]\nhome = \"g\"\n[cell.ready]\nfront = 3\n",
     ])
     .expect("a cell");
     assert_eq!(
@@ -337,7 +337,6 @@ fn a_cell_table_is_read_from_a_file() {
             region: "us-east-1".into(),
             home: Some("g".into()),
             directory: DirectoryBackend::Relay,
-            seeds: vec!["hub-a:1337".into()],
             ready: BTreeMap::from([("front".into(), 3)]),
             requires: BTreeMap::new(),
             hub: None,
@@ -349,7 +348,7 @@ fn a_cell_table_is_read_from_a_file() {
 }
 
 /// `GDL_CELL__*` reaches `[cell]` as any other setting does, joining the
-/// file's table: a quorum by segment, a list of seeds, and the load
+/// file's table: a quorum by segment, a backend, and the load
 /// summary's period.
 #[test]
 fn a_cell_table_is_read_from_the_environment() {
@@ -361,7 +360,6 @@ fn a_cell_table_is_read_from_the_environment() {
         jail.set_env("GDL_CELL__REGION", "us-west-2");
         jail.set_env("GDL_CELL__DIRECTORY", "memory");
         jail.set_env("GDL_CELL__READY__BACK", "4");
-        jail.set_env("GDL_CELL__SEEDS", r#"["hub-a:1337", "hub-b:1337"]"#);
         jail.set_env("GDL_CELL__SUMMARY_MS", "1500");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
         assert_eq!(
@@ -372,7 +370,6 @@ fn a_cell_table_is_read_from_the_environment() {
                 region: "us-west-2".into(),
                 home: None,
                 directory: DirectoryBackend::Memory,
-                seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
                 ready: BTreeMap::from([("back".into(), 4), ("front".into(), 3)]),
                 requires: BTreeMap::new(),
                 hub: None,
@@ -419,6 +416,11 @@ fn a_misspelled_cell_key_is_refused() {
         panic!("a misspelled key under [cell]")
     };
     assert!(error.to_string().contains("hone"), "{error}");
+    // Nothing reads seeds: the relay mesh among global hubs is not built.
+    let Err(error) = load(&[BASE, CELL, "[cell]\nseeds = [\"hub-a:1337\"]\n"]) else {
+        panic!("seeds under [cell]")
+    };
+    assert!(error.to_string().contains("seeds"), "{error}");
     let Err(error) = load(&[BASE, CELL, "[cell]\ndirectory = \"store\"\n"]) else {
         panic!("an unknown directory backend")
     };
@@ -448,6 +450,156 @@ fn a_misspelled_cell_key_is_refused() {
             return Err("a misspelled variable under [cell]".into());
         };
         assert!(error.to_string().contains("hone"), "{error}");
+        Ok(())
+    });
+}
+
+/// A `[cell]` problem names where it was read from: the file and its key,
+/// or the variable.
+#[tokio::test]
+async fn a_cell_problem_names_its_file_or_its_variable() {
+    for (file, variable, expected) in [
+        (
+            "hone = \"g\"\n",
+            None,
+            "config.toml: [cell] hone: unknown field",
+        ),
+        (
+            "",
+            Some(("GDL_CELL__HONE", "g")),
+            "GDL_CELL__HONE: unknown field",
+        ),
+        (
+            "summary_ms = 500\n",
+            None,
+            "config.toml: [cell] summary_ms: is 500",
+        ),
+        (
+            "",
+            Some(("GDL_CELL__SUMMARY_MS", "500")),
+            "GDL_CELL__SUMMARY_MS: is 500",
+        ),
+        (
+            "",
+            Some(("GDL_CELL__READY__FRONT", "many")),
+            "GDL_CELL__READY__FRONT: invalid type",
+        ),
+    ] {
+        Jail::expect_with(|jail| {
+            jail.create_file("config.toml", &format!("{BASE}{CELL}{file}"))?;
+            if let Some((name, value)) = variable {
+                jail.set_env(name, value);
+            }
+            let Err(error) = Config::load(["config.toml"]) else {
+                return Err(format!("accepted {file} {variable:?}").into());
+            };
+            let error = error.to_string();
+            assert!(error.contains(expected), "{expected}\nin: {error}");
+            Ok(())
+        });
+    }
+    // A table set whole in one variable is that variable's; a setting
+    // missing from a table set by variables is the variable's to set.
+    for (file, variables, expected) in [
+        (
+            CELL,
+            &[("GDL_CELL__READY", r#"{back="many"}"#)][..],
+            "GDL_CELL__READY: invalid type",
+        ),
+        (
+            "",
+            &[
+                ("GDL_CELL__CLASS", "global"),
+                ("GDL_CELL__REGION", "us-east-1"),
+            ][..],
+            "GDL_CELL__NAME: missing field `name`",
+        ),
+        (
+            CELL,
+            &[
+                ("GDL_CELL__READY__BACK", "1"),
+                ("GDL_CELL__READY", r#"{back="many"}"#),
+            ][..],
+            "GDL_CELL__READY: invalid type",
+        ),
+        (
+            CELL,
+            &[("GDL_CELL__SUMMARY_MS__EXTRA", "1")][..],
+            "GDL_CELL__SUMMARY_MS__EXTRA: invalid type",
+        ),
+        // Set from a file and a variable: the file holds the table.
+        (
+            "[cell]\nclass = \"global\"\n",
+            &[("GDL_CELL__REGION", "us-east-1")][..],
+            "config.toml: [cell] name: missing field `name`",
+        ),
+    ] {
+        Jail::expect_with(|jail| {
+            jail.create_file("config.toml", &format!("{BASE}{file}"))?;
+            for (name, value) in variables {
+                jail.set_env(name, value);
+            }
+            let Err(error) = Config::load(["config.toml"]) else {
+                return Err(format!("accepted {variables:?}").into());
+            };
+            let error = error.to_string();
+            assert!(error.contains(expected), "{expected}\nin: {error}");
+            Ok(())
+        });
+    }
+    // Found when the instance launches, against its deployment.
+    for (file, variable, expected) in [
+        (
+            "[cell.ready]\nback = 1\n",
+            None,
+            "config.toml: [cell] ready.back: not a segment of class `global`",
+        ),
+        (
+            "",
+            Some(("GDL_CELL__READY__BACK", "1")),
+            "GDL_CELL__READY__BACK: not a segment of class `global`",
+        ),
+        (
+            "",
+            Some(("GDL_CELL__CLASS", "model_y")),
+            "GDL_CELL__CLASS: the placement has no class `model_y`",
+        ),
+    ] {
+        let mut config = None;
+        Jail::expect_with(|jail| {
+            jail.create_file("config.toml", &format!("{BASE}{CELL}{file}"))?;
+            if let Some((name, value)) = variable {
+                jail.set_env(name, value);
+            }
+            config = Some(Config::load(["config.toml"]).map_err(|e| e.to_string())?);
+            Ok(())
+        });
+        let config = config.expect("parses");
+        // The check refuses before the roster directory is written.
+        let (launched, _) = launch_cell(&config, "front", &classed()).await;
+        let Err(error) = launched else {
+            panic!("launched with {file} {variable:?}")
+        };
+        let error = error.to_string();
+        assert!(error.contains(expected), "{expected}\nin: {error}");
+    }
+}
+
+/// The environment overrides the files as a whole, as one provider would:
+/// a variable that a later one supersedes does not erase what a file set
+/// beside the later one's key.
+#[test]
+fn the_environment_overrides_the_files_as_a_whole() {
+    Jail::expect_with(|jail| {
+        jail.create_file(
+            "config.toml",
+            &format!("{BASE}{CELL}ready = {{ front = 2, back = 3 }}\n"),
+        )?;
+        jail.set_env("GDL_CELL__READY", "[]");
+        jail.set_env("GDL_CELL__READY__FRONT", "1");
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        let cell = config.cell().expect("a cell");
+        assert_eq!((cell.quorum("front"), cell.quorum("back")), (1, 3));
         Ok(())
     });
 }
@@ -486,7 +638,7 @@ async fn a_cell_that_does_not_fit_the_deployment_stops_the_launch() {
             deployment(),
             "front",
             CELL.to_string(),
-            "[cell] class = \"global\", but the placement has no classes",
+            "[cell] class: the placement has no classes, and so no class `global`",
         ),
         (
             classed(),
@@ -504,7 +656,7 @@ async fn a_cell_that_does_not_fit_the_deployment_stops_the_launch() {
             classed(),
             "front",
             format!("{CELL}[cell.ready]\nback = 1\n"),
-            "[cell] ready: `back` is not a segment of class `global`",
+            "[cell] ready.back: not a segment of class `global`",
         ),
     ];
     for (deployment, segment, cell, expected) in cases {

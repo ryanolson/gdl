@@ -56,7 +56,7 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
     }
     let problems = refusals(spec, &graph);
     if !problems.is_empty() {
-        return Err(Error::new(problems.join("\n")));
+        return Err(Error::all(problems));
     }
     if portable(spec) {
         for segment in &segments {

@@ -300,7 +300,7 @@ fn settings_a_cells_hub_cannot_publish_are_refused() {
         ("[cell] hub", |cell| cell.hub = None, timing()),
         // Settings made in code, not read: the address is checked here too.
         (
-            "[cell] hub = \"http://hub:1337\"",
+            "[cell] hub: \"http://hub:1337\"",
             |cell| cell.hub = Some("http://hub:1337".into()),
             timing(),
         ),
@@ -310,7 +310,7 @@ fn settings_a_cells_hub_cannot_publish_are_refused() {
             timing(),
         ),
         (
-            "`a` is not a segment of class `model_x`",
+            "[cell] ready.a: not a segment of class `model_x`",
             |cell| {
                 cell.ready.insert("a".into(), 1);
             },

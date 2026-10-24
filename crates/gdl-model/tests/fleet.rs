@@ -128,7 +128,7 @@ fn fleet(text: &str) -> Fleet {
 
 /// Each problem the check reports, in its order.
 fn problems(text: &str) -> Vec<String> {
-    match fleet(text).check(&laid()) {
+    match fleet(text).check(Some(&laid())) {
         Ok(()) => panic!("accepted:\n{text}"),
         Err(errors) => errors.0.iter().map(ToString::to_string).collect(),
     }
@@ -136,7 +136,7 @@ fn problems(text: &str) -> Vec<String> {
 
 #[test]
 fn the_fleet_of_the_design_checks_clean() {
-    fleet(FLEET).check(&laid()).expect("a sound fleet");
+    fleet(FLEET).check(Some(&laid())).expect("a sound fleet");
 }
 
 #[test]
@@ -166,7 +166,6 @@ fn a_cells_settings_have_its_quorum_resolved() {
             region: "us-east-1".into(),
             home: Some("global-us-east-1".into()),
             directory: DirectoryBackend::Relay,
-            seeds: vec![],
             // The cell's own `e`; the class's `d` and `f`.
             ready: BTreeMap::from([("d".into(), 1), ("e".into(), 8), ("f".into(), 2)]),
             requires: BTreeMap::new(),
@@ -190,10 +189,10 @@ fn a_cells_settings_have_its_quorum_resolved() {
     let sparse = Fleet::from_toml(
         "[class.global]\nready = { a = 3 }\n\
          [cell.g]\nclass = 'global'\nregion = 'r'\nready = { b = 5 }\n\
-         [cell.m]\nclass = 'model_x'\nregion = 'r'\n",
+         [cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\n",
     )
     .expect("a fleet");
-    sparse.check(&laid()).expect("a sound fleet");
+    sparse.check(Some(&laid())).expect("a sound fleet");
     let g = sparse.cell("g").expect("a cell");
     assert_eq!(g.ready, BTreeMap::from([("a".into(), 3), ("b".into(), 5)]));
     assert_eq!((g.quorum("a"), g.quorum("b"), g.quorum("c")), (3, 5, 1));
@@ -211,7 +210,7 @@ fn classes_and_cells_are_optional() {
         "[cell.g]\nclass = 'global'\nregion = 'us-east-1'\n",
         "[class.global]\n",
     ] {
-        fleet(text).check(&laid()).expect("a sound fleet");
+        fleet(text).check(Some(&laid())).expect("a sound fleet");
     }
 }
 
@@ -222,7 +221,7 @@ fn a_home_may_be_in_another_region() {
         "[cell.g]\nclass = 'global'\nregion = 'us-east-1'\n\
          [cell.m]\nclass = 'model_x'\nregion = 'eu-west-1'\nhome = 'g'\n",
     )
-    .check(&laid())
+    .check(Some(&laid()))
     .expect("a sound fleet");
 }
 
@@ -237,31 +236,35 @@ fn each_refusal_names_its_table_and_key() {
         ),
         (
             "[class.global]\nready = { d = 1 }\n".into(),
-            "[class.global] ready: `d` is not a segment of class `global`",
+            "[class.global] ready.d: not a segment of class `global`",
         ),
         (
             "[class.global]\nready = { a = 0 }\n".into(),
-            "[class.global] ready: `a` is 0; a quorum is at least 1",
+            "[class.global] ready.a: is 0; a quorum is at least 1",
         ),
         (
             "[class.global]\nrequires = { global = 1 }\n".into(),
-            "[class.global] requires: `global` is not a class that `global` sends to",
+            "[class.global] requires.global: not a class that `global` sends to",
         ),
         (
             "[class.model_x]\nrequires = { global = 1 }\n".into(),
-            "[class.model_x] requires: `global` is not a class that `model_x` sends to",
+            "[class.model_x] requires.global: not a class that `model_x` sends to",
         ),
         (
             "[class.global]\nrequires = { model_x = 0 }\n".into(),
-            "[class.global] requires: `model_x` is 0; a requirement is at least 1",
+            "[class.global] requires.model_x: is 0; a requirement is at least 1",
         ),
         (
-            format!("{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nready = {{ a = 1 }}\n"),
-            "[cell.m] ready: `a` is not a segment of class `model_x`",
+            format!(
+                "{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\nready = {{ a = 1 }}\n"
+            ),
+            "[cell.m] ready.a: not a segment of class `model_x`",
         ),
         (
-            format!("{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nready = {{ e = 0 }}\n"),
-            "[cell.m] ready: `e` is 0; a quorum is at least 1",
+            format!(
+                "{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\nready = {{ e = 0 }}\n"
+            ),
+            "[cell.m] ready.e: is 0; a quorum is at least 1",
         ),
         (
             "[cell.m]\nclass = 'zz'\nregion = 'r'\n".into(),
@@ -273,13 +276,13 @@ fn each_refusal_names_its_table_and_key() {
         ),
         (
             format!(
-                "{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'n'\n[cell.n]\nclass = 'model_x'\nregion = 'r'\n"
+                "{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'n'\n[cell.n]\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\n"
             ),
             "[cell.m] home: cell `n` is of class `model_x`, which does not send to `model_x`; a home is a cell of a class that sends to the cell's",
         ),
         (
             format!("{G}[cell.h]\nclass = 'global'\nregion = 'r'\nhome = 'g'\n"),
-            "[cell.h] home: cell `g` is of class `global`, which does not send to `global`; a home is a cell of a class that sends to the cell's",
+            "[cell.h] home: no class sends to `global`, so its cells have no parent",
         ),
     ];
     for (text, expected) in cases {
@@ -318,12 +321,12 @@ fn every_problem_is_reported_together() {
     );
     for expected in [
         "[class.zz]: the placement has no class `zz`",
-        "[class.global] ready: `d` is not a segment of class `global`",
-        "[class.global] requires: `model_x` is 0",
+        "[class.global] ready.d: not a segment of class `global`",
+        "[class.global] requires.model_x: is 0",
         "[cell.Global]: cell name `Global` must be",
         "[cell.Global] region: region name `US` must be",
         "[cell.m] home: the fleet has no cell `nope`",
-        "[cell.m] ready: `e` is 0",
+        "[cell.m] ready.e: is 0",
     ] {
         assert!(
             errors.iter().any(|e| e.starts_with(expected)),
@@ -364,7 +367,7 @@ fn cell_and_region_names_are_dns_labels() {
         longest.as_str(),
     ] {
         let text = format!("[cell.{good}]\nclass = 'global'\nregion = '{good}'\n");
-        fleet(&text).check(&laid()).expect("a usable name");
+        fleet(&text).check(Some(&laid())).expect("a usable name");
     }
     let too_long = format!("{longest}0");
     for bad in [
@@ -406,4 +409,64 @@ fn an_unknown_class_does_not_hide_a_missing_home() {
         problems("[cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'missing'\n"),
         ["[cell.m] home: the fleet has no cell `missing`"]
     );
+}
+
+/// A cell's `home` is its parent: a cell of a class that sends to its
+/// own. A cell of a class that another sends to has one; a cell of a
+/// class that nothing sends to has none.
+#[test]
+fn home_is_the_cells_parent() {
+    let cases = [
+        (
+            format!("{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\n"),
+            "[cell.m] home: missing; a cell of class `model_x` names its parent, a cell of a class that sends to it: `global`",
+        ),
+        (
+            format!("{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'nope'\n"),
+            "[cell.m] home: the fleet has no cell `nope`",
+        ),
+        (
+            format!(
+                "{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'n'\n\
+                 [cell.n]\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\n"
+            ),
+            "[cell.m] home: cell `n` is of class `model_x`, which does not send to `model_x`; a home is a cell of a class that sends to the cell's",
+        ),
+        (
+            format!("{G}[cell.h]\nclass = 'global'\nregion = 'r'\nhome = 'g'\n"),
+            "[cell.h] home: no class sends to `global`, so its cells have no parent",
+        ),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(problems(&text), [expected], "{text}");
+    }
+}
+
+/// Without a layout, as when the spec does not read, the fleet is still
+/// checked for what needs none: its names, its regions, that each home is
+/// one of its cells, and that no count is 0. Which classes and segments
+/// there are waits for a layout.
+#[test]
+fn without_a_layout_only_what_needs_none_is_judged() {
+    let text = "[class.zz]\nready = { q = 0 }\n\
+                [cell.Bad]\nclass = 'zz'\nregion = 'US'\nhome = 'nope'\nready = { q = 0 }\n\
+                [cell.m]\nclass = 'model_x'\nregion = 'r'\n";
+    let Err(errors) = fleet(text).check(None) else {
+        panic!("accepted:\n{text}");
+    };
+    let errors: Vec<String> = errors.0.iter().map(ToString::to_string).collect();
+    assert_eq!(errors.len(), 5, "{errors:?}");
+    for expected in [
+        "[class.zz] ready.q: is 0; a quorum is at least 1",
+        "[cell.Bad] ready.q: is 0; a quorum is at least 1",
+        "[cell.Bad]: cell name `Bad` must be",
+        "[cell.Bad] region: region name `US` must be",
+        "[cell.Bad] home: the fleet has no cell `nope`",
+    ] {
+        assert!(
+            errors.iter().any(|e| e.starts_with(expected)),
+            "{expected} in: {errors:?}"
+        );
+    }
+    fleet(FLEET).check(None).expect("the design's fleet");
 }

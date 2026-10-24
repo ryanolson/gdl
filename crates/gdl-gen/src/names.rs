@@ -107,32 +107,32 @@ impl GraphFile {
         if problems.is_empty() {
             Ok(Self { graph, uses })
         } else {
-            Err(Error::new(problems.join("\n")))
+            Err(Error::all(problems))
         }
     }
 }
 
-/// `message` at `span` of `file`, as `file:line:column: message`.
-pub(crate) fn at(file: &Path, span: Span, message: &dyn std::fmt::Display) -> String {
+/// `message` at `span` of `file`, which prints as `file:line:column:
+/// message`.
+pub(crate) fn at(file: &Path, span: Span, message: &dyn std::fmt::Display) -> gdl_model::Problem {
     let start = span.start();
-    format!(
-        "{}:{}:{}: {message}",
-        file.display(),
-        start.line,
-        start.column + 1
-    )
+    gdl_model::Problem {
+        origin: Some(gdl_model::Origin::File(file.display().to_string())),
+        line: Some(start.line),
+        column: Some(start.column + 1),
+        ..gdl_model::Problem::at(None, None, message.to_string())
+    }
 }
 
 /// The tokens of `text`, read from `file`.
 pub(crate) fn tokens(text: &str, file: &Path) -> Result<TokenStream, Error> {
     text.parse()
-        .map_err(|e: proc_macro2::LexError| Error::new(at(file, e.span(), &e)))
+        .map_err(|e: proc_macro2::LexError| Error::all([at(file, e.span(), &e)]))
 }
 
 /// Each error of `error` at its place in `file`.
 pub(crate) fn located(error: syn::Error, file: &Path) -> Error {
-    let lines: Vec<String> = error.into_iter().map(|e| at(file, e.span(), &e)).collect();
-    Error::new(lines.join("\n"))
+    Error::all(error.into_iter().map(|e| at(file, e.span(), &e)))
 }
 
 /// The message name at a position of a checked graph file, or `None` for

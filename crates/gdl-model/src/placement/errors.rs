@@ -1,7 +1,7 @@
 use std::fmt;
 
-use crate::Error;
 use crate::Role;
+use crate::{Error, Problem, Problems};
 
 /// Why a placement was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +185,50 @@ pub enum WireReason {
     AnchorCarried,
 }
 
+impl PlacementError {
+    /// The problem, with the table and the key of the placement to change;
+    /// its reader adds the file. A problem of the graph and the placement
+    /// together names the table whose tables it is about (`[segment]`,
+    /// `[class]`), and a problem of the graph alone names none.
+    pub fn problem(&self) -> Problem {
+        let at = |table: String, key: Option<&str>| (Some(table), key.map(str::to_string));
+        let (table, key) = match self {
+            Self::InvalidRouter(node) | Self::InvalidSelector { node, .. } => {
+                at("routing".into(), Some(node))
+            }
+            // A message type that cannot cross is the graph's to change.
+            Self::InvalidManifest(_) | Self::NotWire { .. } => (None, None),
+            Self::UnknownNode { segment, .. } | Self::EmptySegment { segment } => {
+                at(format!("segment.{segment}"), Some("nodes"))
+            }
+            Self::Unplaced { .. } | Self::PlacedTwice { .. } => at("segment".into(), None),
+            Self::InvalidClassName { class, .. } => at(format!("class.{class}"), None),
+            Self::UnknownSegment { class, .. }
+            | Self::EmptyClass { class }
+            | Self::SegmentRepeated { class, .. } => at(format!("class.{class}"), Some("segments")),
+            Self::Unclassed { .. } | Self::ClassedTwice { .. } | Self::ClassCycle { .. } => {
+                at("class".into(), None)
+            }
+            // The stage that breaks the boundary rule moves to another
+            // segment, or its segment to another class.
+            Self::InnerEndInOuterClass { into, .. } => {
+                at(format!("class.{into}"), Some("segments"))
+            }
+            Self::StageOffOuterSegment { segment, .. } => {
+                at(format!("segment.{segment}"), Some("nodes"))
+            }
+            Self::NestedOutsideClass { class, .. } => {
+                at(format!("class.{class}"), Some("segments"))
+            }
+            Self::InvalidCellPolicy { class, .. } => at(format!("cells.{class}"), Some("policy")),
+            Self::CellPolicyWithoutClasses { class }
+            | Self::CellPolicyUnknownClass { class }
+            | Self::CellPolicyNotEntered { class } => at(format!("cells.{class}"), None),
+        };
+        Problem::at(table, key, self.to_string())
+    }
+}
+
 impl fmt::Display for PlacementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -310,6 +354,12 @@ impl fmt::Display for PlacementErrors {
 }
 
 impl std::error::Error for PlacementErrors {}
+
+impl From<PlacementErrors> for Problems {
+    fn from(errors: PlacementErrors) -> Self {
+        Problems(errors.0.iter().map(PlacementError::problem).collect())
+    }
+}
 
 impl From<PlacementErrors> for Error {
     fn from(errors: PlacementErrors) -> Self {
