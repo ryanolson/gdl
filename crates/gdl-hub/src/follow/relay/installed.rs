@@ -81,9 +81,9 @@ impl Installed {
     /// has been read again ([`Installed::restore`]). The relay shows a
     /// withheld cell as `unavailable`, which hides its instances, keeps
     /// every chooser from it, and leaves it out of what a requirement of
-    /// its class meets: the nearest the relay's events come to saying
-    /// that the cell is not to be offered work. Its watchers are sent the
-    /// state, if they were shown another.
+    /// its class meets, and so makes its follow not offered, at its next
+    /// revision; the relay keeps the follow open meanwhile. Its watchers
+    /// are sent the state, if they were shown another.
     pub(crate) fn withhold(&mut self, generation: u64, mut send: impl FnMut(FollowEvent)) {
         if self.withheld {
             return;

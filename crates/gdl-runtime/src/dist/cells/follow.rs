@@ -746,9 +746,9 @@ struct Follow {
     offered: bool,
     ack: Ack,
     /// Whether the relay sent an event of a kind this build does not know
-    /// for the follow, which the follower has not read again since: its
-    /// tables then offer none of its instances, so that it is not chosen.
-    /// The one place a cell is kept from choosers for it.
+    /// for the follow, which the follower has not read again since: the
+    /// follow is then not offered ([`Follow::offers`]), so it is not
+    /// chosen and refuses leases, though nothing is acknowledged for it.
     unread: bool,
 }
 
