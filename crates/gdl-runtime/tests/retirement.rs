@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::boundary::{
-    Model, ModelCell, Running, ask, model_summarized, placement, run_graph, spec_of,
+    Model, ModelCell, Running, ask, model_fronted, model_summarized, placement, run_graph, spec_of,
 };
 use common::cells::{
     Instance, Resolving, cell_hub, cell_hub_of, followed, global_cell, global_hub, launch,
@@ -438,6 +438,95 @@ async fn a_drain_while_the_retiree_waits_keeps_it_to_the_drains_bound() {
     );
 
     assert!(other.forwards() > 0, "another cell answered");
+    events.record("test:release:held");
+    holding
+        .await
+        .expect("the held request's task")
+        .expect("the held request answered");
+    ended.await.expect("the retiree's task");
+    proxy.set(Mode::Forward);
+}
+
+/// A question the retiree asks its hub that stalls, as one to a hub that
+/// takes the connection and does not answer, does not hold off the drain's
+/// cutoff: the retiree still declines offers from other cells once the
+/// drain's bound has passed, and takes none after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_question_to_the_hub_does_not_hold_off_the_drains_cutoff() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, global) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let proxy = Proxy::new(hub.public_addr()).await;
+    let held = chooser(&spec, &hub, proxy.port).await;
+    let assemble = |deployment: &Deployment| reference_graph(deployment, &events);
+    let (m1, front1) = model_fronted(
+        &spec,
+        &directory,
+        cell(M1, "m1-hub:1337", 1),
+        RUNTIME,
+        &assemble,
+    )
+    .await;
+    let (m2, front2) = model_fronted(
+        &spec,
+        &directory,
+        cell(M2, "m2-hub:1337", 1),
+        RUNTIME,
+        &assemble,
+    )
+    .await;
+    following(&tables(&held), M1, 1).await;
+    following(&tables(&held), M2, 1).await;
+    let holding = gated(&held, &events, "held").await;
+    let ((mut holder, front), other) = if m1.forwards() == 1 {
+        ((m1, front1), m2)
+    } else {
+        ((m2, front2), m1)
+    };
+    proxy.set(Mode::Silent);
+    let retiree = holder.entries.remove(0);
+    let (id, taken) = (retiree.node.instance_id(), Arc::clone(&retiree.segment));
+    let (_, ended) = stop(retiree);
+    let mut retirements = global.retirements();
+    tokio::time::timeout(
+        WAIT,
+        retirements.wait_for(|waiting| waiting.iter().any(|(_, _, _, of)| *of == id)),
+    )
+    .await
+    .expect("the global's hub waits for its chooser in time")
+    .expect("the hub lives");
+    withdrawn(&holder.hub, id).await;
+    // The retiree's questions about its hub's members go unanswered from
+    // here; its cell watch, open already, goes on.
+    front.hold(b"/v1/ext/gdl/members");
+    let drained = Instant::now();
+    holder.readiness.drain().await.expect("the cell drains");
+    let refused = || taken.offered() - taken.served().forwards;
+    while refused() == 0 {
+        assert!(
+            drained.elapsed() < BOUND + SETUP + WAIT,
+            "the retiree never refused"
+        );
+        ask(&held.segment).await.expect("answered by a cell");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let took = drained.elapsed();
+    assert!(
+        took < BOUND + Duration::from_millis(400),
+        "took offers {took:?} after its cell began to drain"
+    );
+    let taken_then = taken.served().forwards;
+    for _ in 0..4 {
+        ask(&held.segment).await.expect("answered by a cell");
+    }
+    assert_eq!(
+        taken.served().forwards,
+        taken_then,
+        "took an offer after it declined"
+    );
+    assert!(other.forwards() > 0, "another cell answered");
+    front.release();
     events.record("test:release:held");
     holding
         .await

@@ -70,14 +70,29 @@ impl Launch {
         move || parent.as_ref().is_none_or(crate::dist::Parent::avoids)
     }
 
-    /// Whether a retired entry instance declines offers from other cells
-    /// now, asked at each poll of (A): once a drain of its cell it learned
-    /// of while it waited reaches its bound, or no cell follows the cell.
-    /// Never for any other instance, whose stop decided that as it began.
-    #[cfg(feature = "hub")]
-    pub(super) fn cell_declines(&self) -> impl Fn() -> bool + use<> {
+    /// For a retired entry instance, decline offers from `segment` from
+    /// other cells once a drain of its cell it learned of while it waits
+    /// reaches its bound, or no cell follows the cell; then, and for any
+    /// other instance, whose stop decided that as it began, never resolve.
+    /// It runs beside the drain's waiting rather than between its
+    /// questions to the hub, which may stall. What it reads is taken now,
+    /// so that it borrows nothing of the launch.
+    pub(super) fn cell_declining<'a>(
+        &self,
+        segment: &'a dyn Drains,
+    ) -> impl Future<Output = ()> + use<'a> {
+        #[cfg(feature = "hub")]
         let parent = self.cell_drain.as_ref().and_then(|cell| cell.parent());
-        move || parent.as_ref().is_some_and(crate::dist::Parent::declines)
+        #[cfg(not(feature = "hub"))]
+        let _ = segment;
+        async move {
+            #[cfg(feature = "hub")]
+            if let Some(parent) = parent {
+                parent.declining().await;
+                segment.decline_offers();
+            }
+            std::future::pending::<()>().await;
+        }
     }
 
     /// For an entry instance of a draining cell, decline offers once its

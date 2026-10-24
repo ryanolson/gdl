@@ -120,16 +120,38 @@ impl Parent {
         learned.acknowledged || learned.unfollowed || Instant::now() >= until
     }
 
-    /// Whether the instance declines offers from other cells now, as an
+    /// Resolves when the instance declines offers from other cells, as an
     /// entry instance of a draining cell does once its bound has passed
     /// since it learned of the drain, or no cell follows the cell: a drain
     /// learned while the instance waits here was learned after its stop
-    /// decided not to decline, so only this asks again.
-    pub(crate) fn declines(&self) -> bool {
-        let learned = *self.learned.borrow();
-        learned
-            .drain
-            .is_some_and(|drain| learned.unfollowed || Instant::now() >= drain + self.bound)
+    /// decided not to decline, so only this decides again. Never, while
+    /// its cell does not drain.
+    pub(crate) async fn declining(&self) {
+        let mut learned = self.learned.clone();
+        // The watch's task ends once it has said that no cell follows the
+        // cell, or with the instance: a sender gone without a drain is no
+        // signal.
+        let drain = learned
+            .wait_for(|learned| learned.drain.is_some())
+            .await
+            .ok()
+            .and_then(|learned| learned.drain);
+        let Some(drain) = drain else {
+            return std::future::pending().await;
+        };
+        let unfollowed = async {
+            if learned
+                .wait_for(|learned| learned.unfollowed)
+                .await
+                .is_err()
+            {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            () = tokio::time::sleep_until(drain + self.bound) => {}
+            () = unfollowed => {}
+        }
     }
 }
 

@@ -1047,7 +1047,8 @@ impl Launch {
         let blind = sources.is_none();
         let reaching: Vec<&str> = sources.iter().flatten().map(String::as_str).collect();
         #[cfg(feature = "hub")]
-        let (parent, declines) = (self.cell_parent(), self.cell_declines());
+        let parent = self.cell_parent();
+        let declining = self.cell_declining(segment);
         let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
         let me = self.node.instance_id();
         let pause = |every: Duration| async move {
@@ -1064,89 +1065,94 @@ impl Launch {
         let settled = move |avoided: Option<tokio::time::Instant>| {
             unsent || avoided.is_some_and(|at| tokio::time::Instant::now() >= at + setup)
         };
-        match &mut self.peers {
-            Peers::Files(dir) => {
-                if self.source {
-                    let _ = announce(dir, "drained", self.segment, &self.node);
-                }
-                // A roster directory's rosters are the same everywhere, so
-                // this one names every instance to wait for. Reading a
-                // local directory every 50 ms blocks the runtime for
-                // microseconds; a roster directory is for local runs.
-                let ids = |segments: &[&str]| -> std::collections::BTreeSet<String> {
-                    self.roster
-                        .segments()
-                        .filter(|(segment, _)| segments.contains(segment))
-                        .flat_map(|(_, peers)| peers)
-                        .map(|peer| peer.instance_id().to_string())
-                        .filter(|id| *id != me.to_string())
-                        .collect()
-                };
-                let (sources, sending) = (ids(&reaching), ids(&senders));
-                let avoiding = format!("avoids/{me}");
-                loop {
-                    let left = announced(dir, "left").unwrap_or_default();
-                    let done = |phase: &str, want: &std::collections::BTreeSet<String>| {
-                        announced(dir, phase).is_ok_and(|mut done| {
-                            done.extend(left.iter().cloned());
-                            want.is_subset(&done)
-                        })
+        let waiting = async {
+            match &mut self.peers {
+                Peers::Files(dir) => {
+                    if self.source {
+                        let _ = announce(dir, "drained", self.segment, &self.node);
+                    }
+                    // A roster directory's rosters are the same everywhere, so
+                    // this one names every instance to wait for. Reading a
+                    // local directory every 50 ms blocks the runtime for
+                    // microseconds; a roster directory is for local runs.
+                    let ids = |segments: &[&str]| -> std::collections::BTreeSet<String> {
+                        self.roster
+                            .segments()
+                            .filter(|(segment, _)| segments.contains(segment))
+                            .flat_map(|(_, peers)| peers)
+                            .map(|peer| peer.instance_id().to_string())
+                            .filter(|id| *id != me.to_string())
+                            .collect()
                     };
-                    let drained = !blind && done("drained", &sources);
-                    if avoided.is_none() && done(&avoiding, &sending) {
-                        avoided = Some(tokio::time::Instant::now());
-                    }
-                    if drained || settled(avoided) || !pause(DRAIN_POLL).await {
-                        break;
+                    let (sources, sending) = (ids(&reaching), ids(&senders));
+                    let avoiding = format!("avoids/{me}");
+                    loop {
+                        let left = announced(dir, "left").unwrap_or_default();
+                        let done = |phase: &str, want: &std::collections::BTreeSet<String>| {
+                            announced(dir, phase).is_ok_and(|mut done| {
+                                done.extend(left.iter().cloned());
+                                want.is_subset(&done)
+                            })
+                        };
+                        let drained = !blind && done("drained", &sources);
+                        if avoided.is_none() && done(&avoiding, &sending) {
+                            avoided = Some(tokio::time::Instant::now());
+                        }
+                        if drained || settled(avoided) || !pause(DRAIN_POLL).await {
+                            break;
+                        }
                     }
                 }
+                #[cfg(feature = "hub")]
+                Peers::Hub(session) if hub => {
+                    if self.source {
+                        let _ = session.drained(deadline).await;
+                    }
+                    // Rosters differ under a hub, so the hub's members are
+                    // asked, not this instance's roster: one that joined later
+                    // may route here too. Each question is bounded by the
+                    // deadline, since a hub can stop answering without closing
+                    // its connections; a lease lost meanwhile ends the wait.
+                    loop {
+                        // A lost lease is looked at first, and ends a question
+                        // in flight: the hub that would answer it is gone.
+                        if session.is_lost() || settled(avoided) {
+                            break;
+                        }
+                        let ask = async {
+                            let drained = !blind
+                                && (reaching.is_empty() || session.all_drained(&reaching).await?);
+                            let avoiding = avoided.is_some()
+                                || (parent() && session.all_avoid(me, &senders).await?);
+                            Ok::<_, Error>((drained, avoiding))
+                        };
+                        let asked = tokio::select! {
+                            biased;
+                            _ = session.maintain() => break,
+                            asked = tokio::time::timeout_at(deadline, ask) => asked,
+                        };
+                        let (drained, avoiding) = match asked {
+                            Ok(Ok(answer)) => answer,
+                            _ => (false, false),
+                        };
+                        if avoided.is_none() && avoiding {
+                            avoided = Some(tokio::time::Instant::now());
+                        }
+                        let done = drained || settled(avoided);
+                        if done || !pause(crate::dist::HubSession::poll()).await {
+                            break;
+                        }
+                    }
+                }
+                #[cfg(feature = "hub")]
+                Peers::Hub(_) => {}
             }
-            #[cfg(feature = "hub")]
-            Peers::Hub(session) if hub => {
-                if self.source {
-                    let _ = session.drained(deadline).await;
-                }
-                // Rosters differ under a hub, so the hub's members are
-                // asked, not this instance's roster: one that joined later
-                // may route here too. Each question is bounded by the
-                // deadline, since a hub can stop answering without closing
-                // its connections; a lease lost meanwhile ends the wait.
-                loop {
-                    // A lost lease is looked at first, and ends a question
-                    // in flight: the hub that would answer it is gone.
-                    if session.is_lost() || settled(avoided) {
-                        break;
-                    }
-                    let ask = async {
-                        let drained = !blind
-                            && (reaching.is_empty() || session.all_drained(&reaching).await?);
-                        let avoiding = avoided.is_some()
-                            || (parent() && session.all_avoid(me, &senders).await?);
-                        Ok::<_, Error>((drained, avoiding))
-                    };
-                    let asked = tokio::select! {
-                        biased;
-                        _ = session.maintain() => break,
-                        asked = tokio::time::timeout_at(deadline, ask) => asked,
-                    };
-                    let (drained, avoiding) = match asked {
-                        Ok(Ok(answer)) => answer,
-                        _ => (false, false),
-                    };
-                    if avoided.is_none() && avoiding {
-                        avoided = Some(tokio::time::Instant::now());
-                    }
-                    if declines() {
-                        segment.decline_offers();
-                    }
-                    let done = drained || settled(avoided);
-                    if done || !pause(crate::dist::HubSession::poll()).await {
-                        break;
-                    }
-                }
-            }
-            #[cfg(feature = "hub")]
-            Peers::Hub(_) => {}
+        };
+        // The cutoff runs beside the waiting, whose questions to the hub
+        // may stall up to the deadline; it never ends.
+        tokio::select! {
+            () = waiting => {}
+            () = declining => {}
         }
         segment.close();
         while segment.admitted() > 0 {
