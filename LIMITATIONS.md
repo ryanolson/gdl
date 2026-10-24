@@ -304,6 +304,13 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Would lift it:** option (b) of Q1: every segment selected from outside its class exported to the other class's hub, with their retirement acknowledgements, cell-filtered selection for openings, the cell pin carried in the request context, and peer lookup across hubs.
 - **See:** `agent-docs/cells.md`, section 3.1, section 8 (Q1), and section 11 (rulings Q1 and Q6); review `cells-r2`, finding 1.
 
+### A spec of several layouts is generated and checked, but not composed, exported, drawn, or edited in the composer
+
+- **What happens:** `cargo gdl generate` writes every layout's segments, and `cargo gdl check` checks every layout, but `cargo gdl compose`, `cargo gdl export`, and `cargo gdl diagram` refuse a spec with more than one layout: ``gdl.toml: `compose` takes a spec of one layout; this one has layouts `compact`, `regional` ``. The composer refuses one as well, rather than save it with one layout and drop the others, and its page places a graph in one layout only.
+- **Why:** a Compose bundle, an archive, and a diagram each hold one placement: a bundle's hub admits one placement hash, and an archive's `build-all.sh` and images name one layout's segments. Choosing among layouts needs a way to say which, and the composer's page edits one placement.
+- **Workaround:** keep each layout that is deployed in a spec of its own as well: a spec of one layout, in a `[layout]` table or not, composes, exports, and draws, and its placement hash is the same as the layout's in the spec of several.
+- **Would lift it:** a `--layout <name>` for `compose`, `export`, and `diagram`, and layouts in the composer's draft and page.
+
 ### Only Docker Compose is generated
 
 - **What happens:** `cargo gdl compose` writes a Compose bundle. Kubernetes manifests are not generated. The composer's Deploy tab reports whether the server's host has `kubectl`, a kubeconfig, and a current context, but offers nothing to apply there.

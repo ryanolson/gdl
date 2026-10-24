@@ -77,19 +77,23 @@ struct Survey {
     foreign: Vec<PathBuf>,
 }
 
-/// Walk `out`. The one directory skipped is a crate's own build directory,
-/// `<crate>/target` holding a `CACHEDIR.TAG`, which is what building the
-/// crate on its own leaves. Neither the name alone (a segment may be called
-/// `target`) nor a tag alone (Cargo still builds a tagged `src/bin`) marks a
-/// directory as build output. Likewise a crate's `Cargo.lock` is left to
-/// whoever builds the crate on its own: it changes no source and pins only
-/// what that build resolved.
+/// Walk `out`. A generated crate is a directory the generator writes a
+/// `Cargo.toml` in: a segment's or the contract's at the top of the output,
+/// or a segment's in its layout's directory. The one directory skipped is a
+/// crate's own build directory, `<crate>/target` holding a `CACHEDIR.TAG`,
+/// which is what building the crate on its own leaves. Neither the name
+/// alone (a segment may be called `target`) nor a tag alone (Cargo still
+/// builds a tagged `src/bin`) marks a directory as build output. Likewise a
+/// crate's `Cargo.lock` is left to whoever builds the crate on its own: it
+/// changes no source and pins only what that build resolved.
 fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
     let crates: BTreeSet<&Path> = files
         .keys()
-        .filter(|path| path.components().count() > 1)
-        .filter_map(|path| path.iter().next().map(Path::new))
+        .filter(|path| path.file_name().is_some_and(|name| name == "Cargo.toml"))
+        .filter_map(|path| path.parent())
+        .filter(|dir| !dir.as_os_str().is_empty())
         .collect();
+    let in_crate = |path: &Path| path.ancestors().skip(1).any(|dir| crates.contains(dir));
     let mut survey = Survey {
         stale: Vec::new(),
         foreign: Vec::new(),
@@ -97,13 +101,8 @@ fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
     let mut dirs = vec![PathBuf::new()];
     while let Some(dir) = dirs.pop() {
         let full = out.join(&dir);
-        let mut parts = dir.iter();
-        let build_dir = match (parts.next(), parts.next(), parts.next()) {
-            (Some(krate), Some(name), None) => {
-                crates.contains(Path::new(krate)) && name == "target"
-            }
-            _ => false,
-        };
+        let build_dir = dir.file_name().is_some_and(|name| name == "target")
+            && dir.parent().is_some_and(|krate| crates.contains(krate));
         if build_dir && full.join("CACHEDIR.TAG").exists() {
             continue;
         }
@@ -121,7 +120,6 @@ fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
                 continue;
             }
             let lockfile = path.file_name().is_some_and(|name| name == "Cargo.lock")
-                && dir.components().count() == 1
                 && crates.contains(dir.as_path());
             if lockfile {
                 continue;
@@ -139,13 +137,9 @@ fn survey(out: &Path, files: &Files) -> Result<Survey, Error> {
                 }
                 continue;
             }
-            let in_crate = path
-                .iter()
-                .next()
-                .is_some_and(|first| crates.contains(Path::new(first)));
             if marked {
                 survey.stale.push(path);
-            } else if in_crate {
+            } else if in_crate(&path) {
                 survey.foreign.push(path);
             }
         }

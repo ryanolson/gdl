@@ -28,6 +28,10 @@
 //! [class.global]                 # optional: segments that deploy together;
 //! segments = ["front"]           # with classes, each segment is in one
 //!
+//! # Or, instead of [segment.*], [routing], [class.*], and [cells.*], one
+//! # [layout.<name>] table of them for each way the graph is placed:
+//! # [layout.compact.segment.front], [layout.compact.class.global], ...
+//!
 //! [bind.B]
 //! crate = "front-nodes"          # the implementation's package
 //! path = "front-nodes"           # relative to this file
@@ -61,8 +65,9 @@ pub struct Spec {
     pub(crate) source: Source,
     /// How generated crates depend on gdl.
     pub(crate) gdl: GdlDep,
-    /// Segment placement, request-boundary routing policies, and classes.
-    pub(crate) placement: gdl_model::Placement,
+    /// Each layout's placement: its segments, request-boundary routing
+    /// policies, classes, and cell policies.
+    pub(crate) placements: gdl_model::Placements,
     /// Node name to implementation.
     pub(crate) bind: BTreeMap<String, Bind>,
     /// What inspecting the bound crates found wrong. Reported with every
@@ -267,9 +272,11 @@ struct Raw {
     #[serde(skip_serializing_if = "Option::is_none")]
     nodes: Option<RawNodes>,
     gdl: RawGdl,
-    // The placement's tables, kept as written. The placement itself is
-    // read by `Placement::from_toml` from the same text, so that its
-    // problems have their lines in the spec.
+    // The placement's tables, or the layouts', kept as written. The
+    // placements themselves are read by `Placements::from_toml` from the
+    // same text, so that their problems have their lines in the spec.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    layout: toml::Table,
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     segment: toml::Table,
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
@@ -410,6 +417,18 @@ impl Spec {
         &self.dir
     }
 
+    /// The names of the spec's layouts, in name order: `default` alone for
+    /// a spec without `[layout]` tables.
+    pub fn layout_names(&self) -> impl Iterator<Item = &str> {
+        self.placements.names()
+    }
+
+    /// The placement of a spec of one layout.
+    #[cfg(test)]
+    pub(crate) fn placement(&self) -> &gdl_model::Placement {
+        self.only_layout("a test").expect("one layout").placement
+    }
+
     /// The contract crate a `[contract]` spec names.
     #[cfg(test)]
     pub(crate) fn contract(&self) -> Option<&Contract> {
@@ -531,7 +550,7 @@ impl Spec {
                 ));
             }
         };
-        let placement = gdl_model::Placement::from_toml(text).map_err(located)?;
+        let placements = gdl_model::Placements::from_toml(text).map_err(located)?;
         let bind = raw
             .bind
             .into_iter()
@@ -557,7 +576,7 @@ impl Spec {
             dir: dir.to_path_buf(),
             source,
             gdl,
-            placement,
+            placements,
             bind,
             problems: Vec::new(),
         })

@@ -1,0 +1,16 @@
+// The chat graph's nodes in two roots, so that one layout can place them
+// in three classes (each root crosses into another class once at most)
+// and another can make the classes cross into each other. Spare is the
+// chat engine again, bound by a pin.
+name = "trio", schema = 1;
+source Ask: Prompt -> stream Chunk;
+source Tell: Words -> stream Token;
+operator Preprocess: (Prompt -> stream Chunk) over (Words -> stream Text);
+forward Truncate: Words -> Words;
+sink Engine: Words -> stream Token;
+sink Spare: Words -> stream Token;
+backward Detokenize: Token -> Piece;
+backward Format: Piece -> Text;
+backward Number: Chunk -> Chunk;
+topology: Ask => Preprocess { Truncate => Engine => Detokenize => Format } => Number;
+topology: Tell => Spare;

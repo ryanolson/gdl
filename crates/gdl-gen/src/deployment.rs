@@ -66,6 +66,9 @@ use crate::{
 
 /// Render a Docker Compose deployment from Git or registry dependencies.
 pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
+    // A bundle deploys one placement, and its hub admits only that one.
+    let laid = spec.only_layout("`compose`")?;
+    let placement = laid.placement;
     // A deployment discovers its segments through the hub, whether or not
     // the spec says anything else about it.
     let mut spec = spec.clone();
@@ -124,7 +127,7 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
             "Deploy requires a frontend pinned on a source: without one, the source segment reads requests from stdin, which a container does not provide",
         ));
     }
-    let deployment = gdl_model::DeploymentSpec::new(checked.manifest, spec.placement.clone())
+    let deployment = gdl_model::DeploymentSpec::new(checked.manifest, placement.clone())
         .map_err(|e| Error::new(e.to_string()))?;
     files.insert(
         "deployment.json".into(),
@@ -156,7 +159,7 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
             settings.hub_image.as_ref().unwrap_or(&settings.base_image),
         ),
     );
-    for (segment, _) in spec.placement.segments() {
+    for (segment, _) in placement.segments() {
         if segment == "hub" {
             return Err(Error::new("segment name `hub` is reserved by Compose"));
         }

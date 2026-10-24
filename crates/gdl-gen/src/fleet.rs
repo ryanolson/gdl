@@ -21,11 +21,16 @@ pub fn check_files(spec: &Path, fleet: Option<&Path>, target: &Path) -> Problems
             None
         }
         Ok(loaded) => {
-            let (checked, layout) = crate::checked(&loaded, target, Offers::Read);
+            let (checked, layouts) = crate::checked(&loaded, target, Offers::Read);
             if let Err(error) = checked {
                 problems.extend(error.in_file(spec.display()).0);
             }
-            layout
+            // A fleet deploys one layout.
+            let mut layouts = layouts.into_values();
+            match (layouts.next(), layouts.next()) {
+                (Some(only), None) => only,
+                _ => None,
+            }
         }
     };
     if let Some(fleet) = fleet {
