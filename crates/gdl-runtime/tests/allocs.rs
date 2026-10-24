@@ -66,31 +66,37 @@ fn main() {
 }
 
 /// Reading an error of a kind this build knows allocates its message
-/// alone, in each encoding it crosses in: the kind is matched where it
-/// lies.
+/// alone, in each encoding it crosses in, for every kind: the kind is
+/// matched where it lies.
 fn errors() {
-    let error = gdl::Error::new(gdl::ErrorKind::OutcomeUnknown, "no answer");
-    let mut named = Vec::new();
-    rmp_serde::encode::write_named(&mut named, &error).expect("encode");
-    let array = rmp_serde::to_vec(&error).expect("encode");
-    let json = serde_json::to_vec(&error).expect("encode");
     type Decode = fn(&[u8]) -> gdl::Error;
-    let decoders: [(&str, &[u8], Decode); 3] = [
-        ("msgpack array", &array, |bytes| {
-            rmp_serde::from_slice(bytes).expect("decode")
-        }),
-        ("msgpack map", &named, |bytes| {
-            rmp_serde::from_slice(bytes).expect("decode")
-        }),
-        ("json", &json, |bytes| {
-            serde_json::from_slice(bytes).expect("decode")
-        }),
-    ];
-    for (encoding, bytes, decode) in decoders {
-        let before = ALLOCATIONS.load(Ordering::Relaxed);
-        let back = decode(bytes);
-        let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
-        assert_eq!(allocations, 1, "reading an error in {encoding}");
-        assert_eq!(back, error);
+    let kinds: Vec<gdl::ErrorKind> = (0u8..=127)
+        .map_while(|index| rmp_serde::from_slice(&[index]).ok())
+        .collect();
+    assert!(kinds.contains(&gdl::ErrorKind::OutcomeUnknown));
+    for kind in kinds {
+        let error = gdl::Error::new(kind, "no answer");
+        let mut named = Vec::new();
+        rmp_serde::encode::write_named(&mut named, &error).expect("encode");
+        let array = rmp_serde::to_vec(&error).expect("encode");
+        let json = serde_json::to_vec(&error).expect("encode");
+        let decoders: [(&str, &[u8], Decode); 3] = [
+            ("msgpack array", &array, |bytes| {
+                rmp_serde::from_slice(bytes).expect("decode")
+            }),
+            ("msgpack map", &named, |bytes| {
+                rmp_serde::from_slice(bytes).expect("decode")
+            }),
+            ("json", &json, |bytes| {
+                serde_json::from_slice(bytes).expect("decode")
+            }),
+        ];
+        for (encoding, bytes, decode) in decoders {
+            let before = ALLOCATIONS.load(Ordering::Relaxed);
+            let back = decode(bytes);
+            let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
+            assert_eq!(allocations, 1, "reading a {kind:?} error in {encoding}");
+            assert_eq!(back, error);
+        }
     }
 }

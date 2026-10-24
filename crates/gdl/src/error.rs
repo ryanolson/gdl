@@ -667,6 +667,27 @@ mod tests {
         assert_eq!(unknown.message(), "why");
     }
 
+    /// The table an error's kind is read from holds every kind declared,
+    /// at its index, under its name: a kind declared and left out of it
+    /// would be read back from a peer of this build as unknown. The kinds
+    /// are found from the derived encoding, by index, not from the table.
+    #[test]
+    fn the_kinds_read_are_every_kind_declared() {
+        let declared: Vec<ErrorKind> = (0u8..=127)
+            .map_while(|index| rmp_serde::from_slice::<ErrorKind>(&[index]).ok())
+            .collect();
+        assert_eq!(declared.len(), KINDS.len());
+        for (index, kind) in declared.iter().enumerate() {
+            assert_eq!(KINDS[index].1, *kind);
+            assert_eq!(
+                serde_json::to_value(kind).expect("encode"),
+                serde_json::json!(KINDS[index].0)
+            );
+        }
+        // JSON never read a kind by its index, and does not now.
+        assert!(serde_json::from_str::<Error>(r#"{"kind":10,"message":"m"}"#).is_err());
+    }
+
     /// Every kind is sent under its name, which is its declared name, and
     /// read back.
     #[test]
