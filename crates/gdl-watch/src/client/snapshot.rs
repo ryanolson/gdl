@@ -183,3 +183,57 @@ async fn a_hub_that_never_answers_is_bounded_too() {
     );
     drop(listener);
 }
+
+/// An event that arrived in time but is read after the bound, as a slow
+/// reader reads one it has buffered, is read only once the bound has
+/// passed: the watch ends there, and a `synced` buffered with the
+/// snapshot's first event does not complete it.
+#[tokio::test(start_paused = true)]
+async fn a_buffered_event_read_after_the_bound_ends_the_watch() {
+    for then in [CellWatchEvent::Synced, ready()] {
+        let chunk = [sent(&cell()), sent(&then)].concat();
+        let bytes =
+            futures::stream::iter([Ok::<_, String>(chunk)]).chain(futures::stream::pending());
+        let start = Instant::now();
+        let mut items = std::pin::pin!(events::<CellWatchEvent, _, _, _>(
+            bytes,
+            Arc::default(),
+            limits(),
+            start + WITHIN,
+        ));
+        assert_eq!(items.next().await, Some(Ok(Watched::Event(cell()))));
+        tokio::time::advance(WITHIN * 2).await;
+        assert_eq!(
+            items.next().await,
+            Some(Err(WatchFailure::SnapshotLate { within: WITHIN })),
+            "{then:?} read after the bound"
+        );
+        assert_eq!(items.next().await, None);
+    }
+}
+
+/// The bytes of an event not yet ended count toward the snapshot's limit:
+/// complete events and an unfinished one past it end the watch at once,
+/// not at the bound.
+#[tokio::test(start_paused = true)]
+async fn an_unfinished_event_counts_toward_the_snapshot() {
+    let limits = limits();
+    let mut chunk = sent(&cell());
+    let one = sent(&ready()).len();
+    while chunk.len() + one <= limits.snapshot {
+        chunk.extend(sent(&ready()));
+    }
+    let tail = limits.snapshot + 1 - chunk.len();
+    assert!(tail < limits.event, "{tail}");
+    chunk.extend(b"data: ");
+    chunk.resize(limits.snapshot + 1, b'x');
+    let bytes = futures::stream::iter([Ok::<_, String>(chunk)]).chain(futures::stream::pending());
+    let (items, ended) = read(bytes, limits, WITHIN * 10).await;
+    assert_eq!(
+        items.last(),
+        Some(&Err(WatchFailure::SnapshotTooLarge {
+            limit: limits.snapshot
+        }))
+    );
+    assert!(ended < WITHIN, "ended after {ended:?}");
+}

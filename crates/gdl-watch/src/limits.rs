@@ -15,7 +15,9 @@ pub struct WatchLimits {
     /// end of its `synced`.
     pub snapshot: usize,
     /// How long from when a watch is asked for its snapshot may take to
-    /// complete, its `synced` read, whatever bytes come meanwhile.
+    /// complete, its `synced` read, whatever bytes come meanwhile. An
+    /// event is timed as it is read: one that came in time but is read
+    /// after the bound, from the reader's buffer, is late.
     pub synced_within: Duration,
 }
 

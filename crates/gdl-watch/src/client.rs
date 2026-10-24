@@ -281,6 +281,7 @@ where
         limits,
         snapshot: Some(Snapshot {
             by: Box::pin(tokio::time::sleep_until(synced_by)),
+            until: synced_by,
             bytes: 0,
         }),
         unknown,
@@ -315,6 +316,9 @@ struct Reader<T, S> {
 /// watch, and its bytes so far.
 struct Snapshot {
     by: std::pin::Pin<Box<tokio::time::Sleep>>,
+    /// The timer's deadline, for events already buffered: the timer is
+    /// raced only while bytes are awaited.
+    until: tokio::time::Instant,
     bytes: usize,
 }
 
@@ -342,11 +346,15 @@ where
                     return Some(Err(self.too_large()));
                 }
                 if let Some(snapshot) = &mut self.snapshot {
+                    // An event that came in time but is read after the
+                    // bound, from the buffer, is late too: a `synced` read
+                    // then completes nothing.
+                    if tokio::time::Instant::now() >= snapshot.until {
+                        return Some(Err(self.late()));
+                    }
                     snapshot.bytes += len;
                     if snapshot.bytes > self.limits.snapshot {
-                        return Some(Err(WatchFailure::SnapshotTooLarge {
-                            limit: self.limits.snapshot,
-                        }));
+                        return Some(Err(self.snapshot_too_large()));
                     }
                 }
                 let raw = &self.buffer[self.start..end];
@@ -373,23 +381,24 @@ where
             if self.buffer.len() - self.start >= self.limits.event {
                 return Some(Err(self.too_large()));
             }
+            // The event not yet ended counts toward the snapshot too, so
+            // that a snapshot past its limit ends at once.
+            if let Some(snapshot) = &self.snapshot
+                && snapshot.bytes + (self.buffer.len() - self.start) > self.limits.snapshot
+            {
+                return Some(Err(self.snapshot_too_large()));
+            }
             // What is read is kept only from the event being read, moved
             // once a chunk rather than once an event.
             self.buffer.drain(..self.start);
             self.scanned -= self.start;
             self.start = 0;
             // Until the snapshot is complete, its bound is kept whatever
-            // bytes come: a keep-alive resets only the idle timeout. Events
-            // already buffered are read first, as many as the snapshot's
-            // limit allows.
+            // bytes come: a keep-alive resets only the idle timeout.
             let next = match &mut self.snapshot {
                 Some(snapshot) => tokio::select! {
                     biased;
-                    () = &mut snapshot.by => {
-                        return Some(Err(WatchFailure::SnapshotLate {
-                            within: self.limits.synced_within,
-                        }));
-                    }
+                    () = &mut snapshot.by => return Some(Err(self.late())),
                     next = self.bytes.next() => next,
                 },
                 None => self.bytes.next().await,
@@ -405,6 +414,18 @@ where
     fn too_large(&self) -> WatchFailure {
         WatchFailure::EventTooLarge {
             limit: self.limits.event,
+        }
+    }
+
+    fn snapshot_too_large(&self) -> WatchFailure {
+        WatchFailure::SnapshotTooLarge {
+            limit: self.limits.snapshot,
+        }
+    }
+
+    fn late(&self) -> WatchFailure {
+        WatchFailure::SnapshotLate {
+            within: self.limits.synced_within,
         }
     }
 
