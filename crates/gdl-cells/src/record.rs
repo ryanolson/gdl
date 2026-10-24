@@ -18,6 +18,12 @@ pub struct CellRecord {
     pub class: String,
     /// The region the cell runs in, a DNS label.
     pub region: String,
+    /// The parent cell: the cell of the class that sends to this one whose
+    /// hub follows it, and whose choosers alone offer it work. `None` for a
+    /// cell of a class that nothing sends to. Optional on the wire, so that
+    /// a reader of an earlier build ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
     /// The contract hash of the graph the cell serves. A reader follows
     /// only a cell whose hashes equal its own.
     pub contract: u64,
@@ -58,13 +64,16 @@ impl CellRecord {
         }
     }
 
-    /// Whether the record can be published: its cell, region, and class
-    /// names have their shapes, and its lease is a whole number of
+    /// Whether the record can be published: its cell, parent, region, and
+    /// class names have their shapes, and its lease is a whole number of
     /// milliseconds, at least one: the unit it is stored in, so that a
     /// stored record expires when the published one would. Every problem is
     /// reported.
     pub fn check(&self) -> Result<(), DirectoryError> {
         let mut problems = names(&self.class, &self.name);
+        if let Some(Err(problem)) = self.home.as_deref().map(gdl_model::check_cell_name) {
+            problems.push(problem);
+        }
         if let Err(problem) = gdl_model::check_region_name(&self.region) {
             problems.push(problem);
         }

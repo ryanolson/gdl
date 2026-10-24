@@ -81,6 +81,7 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
         name: "model-x-07-us-east-1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
+        home: None,
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
         state: CellState::Ready,

@@ -10,6 +10,7 @@ fn record() -> CellRecord {
         name: "model-x-01-us-east-1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
+        home: Some("global-01-us-east-1".into()),
         contract: 0xdead_beef_0000_0001,
         placement: u64::MAX,
         state: CellState::Degraded,
@@ -39,17 +40,37 @@ fn a_record_round_trips_through_json() {
     let value: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(value["lease_ms"], 12_500, "{text}");
     assert_eq!(value["state"], "degraded", "{text}");
+    assert_eq!(value["home"], "global-01-us-east-1", "{text}");
 
     let bare = CellRecord {
         load: None,
+        home: None,
         state: CellState::Draining,
         ..record()
     };
     let text = serde_json::to_string(&bare).expect("json");
     assert!(!text.contains("load"), "{text}");
+    assert!(!text.contains("home"), "{text}");
     assert_eq!(
         serde_json::from_str::<CellRecord>(&text).expect("a record"),
         bare
+    );
+}
+
+/// A record without a parent, as a build from before the record named one
+/// writes it, reads as a cell with none.
+#[test]
+fn a_record_without_a_home_reads_as_having_none() {
+    let mut value = serde_json::to_value(record()).expect("json");
+    value.as_object_mut().expect("an object").remove("home");
+    let read: CellRecord = serde_json::from_value(value).expect("a record");
+    assert_eq!(read.home, None);
+    assert_eq!(
+        read,
+        CellRecord {
+            home: None,
+            ..record()
+        }
     );
 }
 
@@ -109,6 +130,13 @@ fn a_malformed_name_or_a_zero_lease_is_refused() {
                 ..record()
             },
             "class name `model-x`",
+        ),
+        (
+            CellRecord {
+                home: Some("Global".into()),
+                ..record()
+            },
+            "cell name `Global`",
         ),
         (
             CellRecord {

@@ -55,7 +55,9 @@ pub use feed::CellWatch;
 /// directory to itself; one watch per service, whatever the number of
 /// instances.
 ///
-/// The state follows [`Quorum`]. Its routes, under `/v1/ext/gdl-cell/` on
+/// The state follows [`Quorum`], and the cell's record carries it, with
+/// the cell's parent (`[cell] home`) unless no class sends to the cell's
+/// class. Its routes, under `/v1/ext/gdl-cell/` on
 /// the public listener: `GET health`, the cell health endpoint, which
 /// answers 200 when the cell is `ready` and, for each class its settings
 /// require cells of, at least that many followed cells of the class have
@@ -233,10 +235,16 @@ impl<D: CellDirectory> CellReadiness<D> {
             // A hub that refuses at once would be dialled in a loop.
             return Err(CellError::new("the cell's refollow delay is zero"));
         }
+        // A cell of a class that nothing sends to has no parent to name.
+        let entered = layout
+            .boundaries()
+            .iter()
+            .any(|boundary| boundary.into == cell.class);
         let record = CellRecord {
             name: cell.name.clone(),
             class: cell.class.clone(),
             region: cell.region.clone(),
+            home: cell.home.clone().filter(|_| entered),
             contract: layout.contract_hash(),
             placement: layout.placement_hash(),
             state: CellState::Unavailable,

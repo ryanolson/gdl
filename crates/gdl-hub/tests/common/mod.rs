@@ -66,11 +66,12 @@ pub fn spec() -> DeploymentSpec {
 
 pub const CELL: &str = "model-x-01-us-east-1";
 
-/// The model cell: `d` needs two usable instances, `f` one.
+/// The model cell, a child of [`GLOBAL`]: `d` needs two usable instances,
+/// `f` one.
 pub fn settings() -> CellSettings {
     toml::from_str(&format!(
-        "name = '{CELL}'\nclass = 'model_x'\nregion = 'us-east-1'\nhub = 'model-x-01-hub:1337'\n\
-         directory = 'memory'\n[ready]\nd = 2\n"
+        "name = '{CELL}'\nclass = 'model_x'\nregion = 'us-east-1'\nhome = '{GLOBAL}'\n\
+         hub = 'model-x-01-hub:1337'\ndirectory = 'memory'\n[ready]\nd = 2\n"
     ))
     .expect("valid test fixture")
 }

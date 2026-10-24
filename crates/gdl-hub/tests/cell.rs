@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use common::{
-    CELL, Gated, Instance, Records, cell_hub, config, get, health, meet_the_quorum, millis_now,
-    settings, spec, timing, usable,
+    CELL, GLOBAL, Gated, Instance, Records, cell_hub, config, get, global_requiring, health,
+    hub_of, meet_the_quorum, millis_now, settings, spec, timing, usable,
 };
 use gdl_cells::{CellDirectory, CellRecord, CellState, MemoryDirectory};
 use gdl_hub::{CellHealth, CellReadiness, CellTiming, GraphAdmission, SegmentHealth};
@@ -92,6 +92,7 @@ async fn the_cell_publishes_its_record_and_each_change_of_state() {
             name: CELL.into(),
             class: "model_x".into(),
             region: "us-east-1".into(),
+            home: Some(GLOBAL.into()),
             contract: layout.contract_hash(),
             placement: layout.placement_hash(),
             state: CellState::Unavailable,
@@ -114,6 +115,11 @@ async fn the_cell_publishes_its_record_and_each_change_of_state() {
         at.duration_since(began)
     );
     assert_eq!(ready.epoch, first.epoch, "one epoch for the hub's life");
+    assert_eq!(
+        ready.home.as_deref(),
+        Some(GLOBAL),
+        "every write names the parent"
+    );
     assert!(ready.seq > held.seq && held.seq > first.seq);
     assert_eq!(
         health(&cell, "ready", |h| h.state == CellState::Ready)
@@ -144,6 +150,24 @@ async fn the_cell_publishes_its_record_and_each_change_of_state() {
     let f = instances.remove(0);
     f.leave().await;
     assert_eq!(records.next().await.state, CellState::Unavailable);
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// A cell of a class that nothing sends to names no parent, even when its
+/// settings give one: no chooser of another class offers it work, so it
+/// has none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cell_of_a_class_nothing_sends_to_names_no_parent() {
+    let directory = MemoryDirectory::new();
+    let mut records = Records::of(&directory, "global", GLOBAL);
+    let settings = CellSettings {
+        home: Some("global-02-us-east-1".into()),
+        ..global_requiring(0)
+    };
+    let (hub, _cell) = hub_of(settings, directory.clone(), timing()).await;
+    let record = records.next().await;
+    assert_eq!(record.class, "global");
+    assert_eq!(record.home, None, "{record:?}");
     hub.shutdown().await.expect("the hub stops");
 }
 
