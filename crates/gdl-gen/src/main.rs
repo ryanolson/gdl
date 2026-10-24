@@ -25,9 +25,11 @@
 //! as `generate` does, and with `--fleet` the fleet file against it,
 //! writing nothing; it prints every problem in both files, each with its
 //! file, table, and key, and fails if there is any. `diagram` prints the
-//! placed graph. `compose`, `export`, and `diagram` take a spec of one
-//! layout. `compose` with `--fleet` runs the same check first, and
-//! writes nothing if it fails. `export` writes the generated crates as a `.tar.gz` with
+//! placed graph. `export` and `diagram` take a spec of one layout.
+//! `compose` writes a Docker Compose bundle; a spec with classes or several
+//! layouts it deploys only by cell, with `--fleet`: one hub per cell, and
+//! each cell's segments. With `--fleet` it runs the same check as `check`
+//! first, and writes nothing if it fails. `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.
 
@@ -228,16 +230,26 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             return Ok(report(&problems));
         }
         Command::Compose { out, fleet } => {
-            if let Some(fleet) = fleet {
-                let file = args.spec.as_ref().ok_or(USAGE)?;
-                let problems = gdl_gen::check_files(file, Some(fleet), &target(beside(file)));
-                if !problems.is_empty() {
-                    return Ok(report(&problems));
+            let fleet = match fleet {
+                None => None,
+                Some(path) => {
+                    let file = args.spec.as_ref().ok_or(USAGE)?;
+                    let problems = gdl_gen::check_files(file, Some(path), &target(beside(file)));
+                    if !problems.is_empty() {
+                        return Ok(report(&problems));
+                    }
+                    // The check read it.
+                    let text = std::fs::read_to_string(path)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    Some(
+                        gdl_model::Fleet::from_toml(&text)
+                            .map_err(|problems| problems.in_file(path.display()).to_string())?,
+                    )
                 }
-            }
+            };
             let spec = spec()?;
             let target = target(spec.dir());
-            gdl_gen::compose(&spec, out, &target)?;
+            gdl_gen::compose(&spec, fleet.as_ref(), out, &target)?;
         }
         Command::Export { out } => {
             let spec = spec()?;

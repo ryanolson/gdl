@@ -1,3 +1,4 @@
+use gdl_model::Fleet;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
@@ -64,120 +65,158 @@ use crate::{
     spec::{CrateSource, GdlDep, Source},
 };
 
+mod cells;
+mod variables;
+
 /// Render a Docker Compose deployment from Git or registry dependencies.
-pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
-    // A bundle deploys one placement, and its hub admits only that one.
-    let laid = spec.only_layout("`compose`")?;
-    let placement = laid.placement;
-    // A deployment discovers its segments through the hub, whether or not
-    // the spec says anything else about it.
-    let mut spec = spec.clone();
-    let settings = spec.deployment.get_or_insert_with(Default::default).clone();
-    let spec = &spec;
-    let Source::Graph(source) = &spec.source else {
-        return Err(Error::new(
-            "Deploy requires a graph definition with Git or crates.io packages, not a local contract crate",
-        ));
-    };
-    let local: Vec<_> = source
-        .crates
-        .iter()
-        .chain(&source.nodes)
-        .filter(|listed| matches!(listed.source, CrateSource::Path(_)))
-        .map(|listed| listed.package.as_str())
-        .chain(
-            spec.bind
-                .values()
-                .filter(|binding| matches!(binding.source, CrateSource::Path(_)))
-                .map(|binding| binding.package.as_str()),
-        )
-        .collect();
-    if !local.is_empty() {
+/// Without `fleet`, it deploys the spec's one placement with one hub. With
+/// it, it deploys by cell: one hub per cell, and each cell's segments of
+/// its class in its layout ([`cells`]). A spec with classes or several
+/// layouts deploys only by cell, and a fleet is checked against the spec
+/// first; a fleet for a spec without classes can have no cell, and the
+/// spec deploys as without one.
+pub fn compose_files(
+    spec: &Spec,
+    fleet: Option<&Fleet>,
+    out: &Path,
+    target: &Path,
+) -> Result<Files, Error> {
+    let by_cell = cells::by_cell(spec);
+    if let (None, Some(why)) = (fleet, &by_cell) {
         return Err(Error::new(format!(
-            "Deploy requires Git or crates.io node and message packages. Re-import these local packages from Git or crates.io: {}",
-            local.join(", ")
+            "`compose` deploys a spec {why} by cell, as its fleet file says: give it `--fleet <fleet.toml>`"
         )));
     }
-    let hub_install = match &spec.gdl {
-        GdlDep::Git { url, rev } => format!("--git {} --rev {}", quote(url), quote(rev)),
-        GdlDep::Version(version) => format!("--version {}", quote(version)),
-        GdlDep::Path(_) => {
+    let (spec, bundle) = Bundle::prepare(spec, out, target)?;
+    let Some(fleet) = fleet else {
+        return single(&spec, bundle, target);
+    };
+    let (checked, layouts) = crate::checked(&spec, target, Offers::Read);
+    let checked = checked?;
+    fleet
+        .check(Some(&layouts))
+        .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
+    if by_cell.is_none() {
+        return single(&spec, bundle, target);
+    }
+    frontend(&spec, &checked.manifest)?;
+    cells::bundle(&spec, fleet, bundle, &checked.manifest, &layouts)
+}
+
+/// What every bundle of a spec starts from: its deployment settings, how
+/// its hub is installed, its generated crates, and its graph's name.
+struct Bundle {
+    settings: Settings,
+    hub_install: String,
+    files: Files,
+    graph: String,
+}
+
+impl Bundle {
+    /// `spec` as a bundle deploys it, and what its bundle starts from:
+    /// refused unless every crate it builds can be fetched.
+    fn prepare(spec: &Spec, out: &Path, target: &Path) -> Result<(Spec, Self), Error> {
+        // A deployment discovers its segments through the hub, whether or
+        // not the spec says anything else about it.
+        let mut spec = spec.clone();
+        let settings = spec.deployment.get_or_insert_with(Default::default).clone();
+        let Source::Graph(source) = &spec.source else {
             return Err(Error::new(
-                "Deploy requires GDL from Git or crates.io; start the server with --gdl-git and --gdl-rev",
+                "Deploy requires a graph definition with Git or crates.io packages, not a local contract crate",
             ));
+        };
+        let local: Vec<_> = source
+            .crates
+            .iter()
+            .chain(&source.nodes)
+            .filter(|listed| matches!(listed.source, CrateSource::Path(_)))
+            .map(|listed| listed.package.as_str())
+            .chain(
+                spec.bind
+                    .values()
+                    .filter(|binding| matches!(binding.source, CrateSource::Path(_)))
+                    .map(|binding| binding.package.as_str()),
+            )
+            .collect();
+        if !local.is_empty() {
+            return Err(Error::new(format!(
+                "Deploy requires Git or crates.io node and message packages. Re-import these local packages from Git or crates.io: {}",
+                local.join(", ")
+            )));
         }
-    };
-    let (mut files, graph) =
-        crate::render_with(spec, out, target, emit::Deps::Exported, Offers::Read)?;
-    let checked = crate::check(spec, target, Offers::Read)?;
-    // A source without a frontend is served on stdin, which a container
-    // has none of: the segment would read end of file and stop, ready.
-    // A graph spec pins in its `[nodes]` table, a contract spec in `[bind]`.
-    let pinned = |name: &str| {
-        spec.bind.contains_key(name)
-            || matches!(&spec.source, Source::Graph(g) if g.node_pins.contains_key(name))
-    };
-    if !checked
-        .manifest
-        .nodes
-        .iter()
-        .any(|n| n.role == gdl_model::Role::Source && pinned(&n.name))
-    {
-        return Err(Error::new(
-            "Deploy requires a frontend pinned on a source: without one, the source segment reads requests from stdin, which a container does not provide",
-        ));
+        let hub_install = match &spec.gdl {
+            GdlDep::Git { url, rev } => format!("--git {} --rev {}", quote(url), quote(rev)),
+            GdlDep::Version(version) => format!("--version {}", quote(version)),
+            GdlDep::Path(_) => {
+                return Err(Error::new(
+                    "Deploy requires GDL from Git or crates.io; start the server with --gdl-git and --gdl-rev",
+                ));
+            }
+        };
+        let (files, graph) =
+            crate::render_with(&spec, out, target, emit::Deps::Exported, Offers::Read)?;
+        let bundle = Self {
+            settings,
+            hub_install,
+            files,
+            graph,
+        };
+        Ok((spec, bundle))
     }
-    let deployment = gdl_model::DeploymentSpec::new(checked.manifest, placement.clone())
-        .map_err(|e| Error::new(e.to_string()))?;
-    files.insert(
-        "deployment.json".into(),
-        serde_json::to_string_pretty(&deployment).map_err(|e| Error::new(e.to_string()))?,
-    );
-    let settings = &settings;
-    for image in [&settings.base_image, &settings.build_image]
-        .into_iter()
-        .chain(settings.hub_image.iter())
-        .chain(
-            settings
-                .segment
-                .values()
-                .filter_map(|s| s.base_image.as_ref()),
-        )
-    {
-        validate_image(image)?;
+
+    /// Every image the settings name, checked.
+    fn validate_images(&self) -> Result<(), Error> {
+        let settings = &self.settings;
+        for image in [&settings.base_image, &settings.build_image]
+            .into_iter()
+            .chain(settings.hub_image.iter())
+            .chain(
+                settings
+                    .segment
+                    .values()
+                    .filter_map(|s| s.base_image.as_ref()),
+            )
+        {
+            validate_image(image)?;
+        }
+        Ok(())
     }
-    let mut services = serde_json::Map::new();
-    services.insert("hub".into(),json!({"build":{"context":".","dockerfile":"hub/Dockerfile"},"healthcheck":{"test":["CMD","/usr/local/bin/segment","--healthcheck"],"interval":"2s","timeout":"2s","retries":30}}));
-    files.insert(
-        "hub/Dockerfile".into(),
+
+    /// The Dockerfile of a hub that admits the deployment in
+    /// `deployment`, a path in the bundle.
+    fn hub_dockerfile(&self, deployment: &str) -> String {
+        let settings = &self.settings;
         dockerfile(
-            &hub_install,
+            &self.hub_install,
             "gdl-hub",
-            "deployment.json",
+            deployment,
             true,
             &settings.build_image,
             settings.hub_image.as_ref().unwrap_or(&settings.base_image),
-        ),
-    );
-    for (segment, _) in placement.segments() {
-        if segment == "hub" {
-            return Err(Error::new("segment name `hub` is reserved by Compose"));
-        }
-        if !segment
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
-            return Err(Error::new(format!(
-                "segment `{segment}` cannot be a Compose service name"
-            )));
-        }
-        let package = emit::package_name(&graph, segment);
+        )
+    }
+
+    /// Segment `segment`'s image, from its crate in `dir`, which builds
+    /// package `package`: its Dockerfile and its settings, with `[hub]
+    /// host` when `hub` names it. Returns how long Docker must let a
+    /// container of it stop, in seconds.
+    fn segment_image(
+        &mut self,
+        dir: &Path,
+        segment: &str,
+        package: &str,
+        hub: Option<&str>,
+    ) -> Result<u64, Error> {
+        let settings = &self.settings;
+        let files = &mut self.files;
+        let crate_dir = dir.join(segment);
+        let path = crate_dir.join("config.toml");
         files.insert(
-            Path::new(segment).join("Dockerfile"),
+            crate_dir.join("Dockerfile"),
             dockerfile(
-                &format!("/app/{segment}/Cargo.toml"),
-                &package,
-                &format!("{segment}/config.toml"),
+                &format!("/app/{}/Cargo.toml", crate_dir.display()),
+                package,
+                &path.display().to_string(),
                 false,
                 &settings.build_image,
                 settings
@@ -187,35 +226,75 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
                     .unwrap_or(&settings.base_image),
             ),
         );
+        let hub = hub.map_or(String::new(), |host| {
+            format!("[hub]\nhost = \"{host}\"\n\n")
+        });
         files.insert(
-            Path::new(segment).join("config.toml"),
+            path.clone(),
             format!(
-                "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n[hub]\nhost = \"hub\"\n\n[system]\nport = 9090\n",
+                "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n{hub}[system]\nport = 9090\n",
                 emit::MARKER
             ),
         );
         if let Some(image) = settings.segment.get(segment) {
-            let path = Path::new(segment).join("config.toml");
             let mut config: toml::Table = toml::from_str(&files[&path]).map_err(io)?;
             for (key, value) in &image.config {
-                if ["hub", "roster", "instances"].contains(&key.as_str()) {
+                // Where a segment finds its peers is the bundle's, and its
+                // cell the fleet's.
+                if ["hub", "roster", "instances", "cell"].contains(&key.as_str()) {
                     return Err(Error::new(format!("deployment cannot override `{key}`")));
                 }
                 config.insert(key.clone(), value.clone());
             }
-            files.insert(path, toml::to_string_pretty(&config).map_err(io)?);
+            files.insert(path.clone(), toml::to_string_pretty(&config).map_err(io)?);
         }
         // Docker kills a container 10 s after it stops it unless told otherwise; a segment may
         // drain for its bound, read here from its settings as generated (an environment
         // override at run time is not seen).
-        let config: toml::Table =
-            toml::from_str(&files[&Path::new(segment).join("config.toml")]).map_err(io)?;
-        let grace = drain_bound(&config).as_secs() + 30;
+        let config: toml::Table = toml::from_str(&files[&path]).map_err(io)?;
+        Ok(drain_bound(&config).as_secs() + 30)
+    }
+
+    /// The ports segment `segment` publishes.
+    fn ports(&self, segment: &str) -> &[String] {
+        self.settings
+            .segment
+            .get(segment)
+            .map_or(&[], |s| s.ports.as_slice())
+    }
+}
+
+/// The bundle of a spec's one placement: one hub, and each segment.
+fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error> {
+    // A bundle deploys one placement, and its hub admits only that one.
+    let laid = spec.only_layout("`compose`")?;
+    let placement = laid.placement;
+    let checked = crate::check(spec, target, Offers::Read)?;
+    frontend(spec, &checked.manifest)?;
+    let deployment = gdl_model::DeploymentSpec::new(checked.manifest, placement.clone())
+        .map_err(|e| Error::new(e.to_string()))?;
+    bundle.files.insert(
+        "deployment.json".into(),
+        serde_json::to_string_pretty(&deployment).map_err(|e| Error::new(e.to_string()))?,
+    );
+    bundle.validate_images()?;
+    let mut services = serde_json::Map::new();
+    services.insert(
+        "hub".into(),
+        json!({"build":{"context":".","dockerfile":"hub/Dockerfile"},"healthcheck":hub_healthcheck()}),
+    );
+    let hub = bundle.hub_dockerfile("deployment.json");
+    bundle.files.insert("hub/Dockerfile".into(), hub);
+    for (segment, _) in placement.segments() {
+        check_segment_name(segment)?;
+        let package = emit::package_name(&bundle.graph, segment);
+        let grace = bundle.segment_image(Path::new(""), segment, &package, Some("hub"))?;
         // Health is reported, never waited on: no segment depends on another's, since segments
         // whose paths return wait for each other, and an order over them deadlocks. The start
         // period covers loading models.
-        services.insert(segment.into(),json!({"build":{"context":".","dockerfile":format!("{segment}/Dockerfile")},"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"stop_grace_period":format!("{grace}s"),"healthcheck":{"test":["CMD","/usr/local/bin/segment","--healthcheck","/etc/gdl/config"],"interval":"5s","timeout":"3s","retries":3,"start_period":"1800s"},"ports":settings.segment.get(segment).map(|s| s.ports.clone()).unwrap_or_default()}));
+        services.insert(segment.into(),json!({"build":{"context":".","dockerfile":format!("{segment}/Dockerfile")},"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"stop_grace_period":format!("{grace}s"),"healthcheck":segment_healthcheck(),"ports":bundle.ports(segment)}));
     }
+    let mut files = bundle.files;
     files.insert(
         "compose.yaml".into(),
         serde_json::to_string_pretty(&json!({"services":services}))
@@ -223,6 +302,54 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
     );
     files.insert("README.md".into(), "# Docker Compose deployment\n\nRun `docker compose up --build` from this directory. The hub starts first; every segment registers its compiled contract and waits for all handlers to be ready.\n\nConfigure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.\n\nEach segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that starts later joins: once it is ready, the segments already running route to it, so `docker compose up --scale <segment>=N` adds instances. Scaling works only for a segment that publishes no host port: two containers cannot bind one port. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.\n".into());
     Ok(files)
+}
+
+/// A source without a frontend is served on stdin, which a container has
+/// none of: the segment would read end of file and stop, ready. A graph
+/// spec pins in its `[nodes]` table, a contract spec in `[bind]`.
+fn frontend(spec: &Spec, manifest: &gdl_model::Manifest) -> Result<(), Error> {
+    let pinned = |name: &str| {
+        spec.bind.contains_key(name)
+            || matches!(&spec.source, Source::Graph(g) if g.node_pins.contains_key(name))
+    };
+    if !manifest
+        .nodes
+        .iter()
+        .any(|n| n.role == gdl_model::Role::Source && pinned(&n.name))
+    {
+        return Err(Error::new(
+            "Deploy requires a frontend pinned on a source: without one, the source segment reads requests from stdin, which a container does not provide",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `segment` can name a segment's directory and service.
+fn check_segment_name(segment: &str) -> Result<(), Error> {
+    if segment == "hub" {
+        return Err(Error::new("segment name `hub` is reserved by Compose"));
+    }
+    if !segment
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(Error::new(format!(
+            "segment `{segment}` cannot be a Compose service name"
+        )));
+    }
+    Ok(())
+}
+
+/// A hub's health check: its own liveness, answered by its binary. Never
+/// a cell's health, which a parent cell answers 503 until its children are
+/// ready: a wait on it would deadlock a fleet that starts together.
+fn hub_healthcheck() -> serde_json::Value {
+    json!({"test":["CMD","/usr/local/bin/segment","--healthcheck"],"interval":"2s","timeout":"2s","retries":30})
+}
+
+/// A segment's health check, which its binary answers from its settings.
+fn segment_healthcheck() -> serde_json::Value {
+    json!({"test":["CMD","/usr/local/bin/segment","--healthcheck","/etc/gdl/config"],"interval":"5s","timeout":"3s","retries":3,"start_period":"1800s"})
 }
 
 /// How long a segment with these settings may drain: `runtime.drain_ms`,
@@ -269,14 +396,14 @@ fn quote(s: &str) -> String {
 }
 
 /// Write a Compose build context whose dependencies are fetched by Cargo.
-pub fn compose(spec: &Spec, out: &Path, target: &Path) -> Result<(), Error> {
+pub fn compose(spec: &Spec, fleet: Option<&Fleet>, out: &Path, target: &Path) -> Result<(), Error> {
     if out.exists() {
         return Err(Error::new(
             "Compose output already exists; choose a fresh directory",
         ));
     }
     let out = crate::dump::absolute(out)?;
-    let files = compose_files(spec, &out, target)?;
+    let files = compose_files(spec, fleet, &out, target)?;
     crate::write(&out, &files)?;
     Ok(())
 }
@@ -299,7 +426,7 @@ pub fn compose_bundle(spec: &Spec, target: &Path) -> Result<ComposeBundle, Error
         .tempdir()
         .map_err(io)?;
     let out = temp.path().join("deployment");
-    compose(spec, &out, target)?;
+    compose(spec, None, &out, target)?;
     let mut files = Files::new();
     let mut pending = vec![out.clone()];
     while let Some(dir) = pending.pop() {

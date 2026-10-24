@@ -44,7 +44,7 @@ pub use cell::{
 };
 pub use follow::FollowsWatch;
 pub use quorum::Quorum;
-pub use setup::{cell_from_env, hub_builder};
+pub use setup::{cell_from_env, cell_from_vars, hub_builder};
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};
 use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};

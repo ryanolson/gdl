@@ -345,30 +345,35 @@ fn deployment_settings_name_a_segment_of_some_layout() {
     );
 }
 
-/// `compose`, `export`, and `diagram` take one layout, and refuse a spec
-/// with several rather than choose one.
+/// `export` and `diagram` take one layout, and refuse a spec with several
+/// rather than choose one. `compose` deploys several only by cell, and
+/// without a fleet file says that it needs one.
 #[test]
 fn the_commands_of_one_layout_refuse_several() {
     let dir = Dir::new(&two_layouts());
     let out = dir.dir.path().join("bundle");
     let archive = dir.dir.path().join("archive.tar.gz");
-    for (command, more) in [
+    for (command, more, refusal) in [
         (
             "compose",
             vec![std::ffi::OsStr::new("--out"), out.as_os_str()],
+            "`compose` deploys a spec of several layouts, `compact` and `regional`, by cell, as its fleet file says: give it `--fleet <fleet.toml>`",
         ),
-        ("export", vec!["--out".as_ref(), archive.as_os_str()]),
-        ("diagram", vec!["--format".as_ref(), "mermaid".as_ref()]),
+        (
+            "export",
+            vec!["--out".as_ref(), archive.as_os_str()],
+            "`export` takes a spec of one layout; this one has layouts `compact`, `regional`",
+        ),
+        (
+            "diagram",
+            vec!["--format".as_ref(), "mermaid".as_ref()],
+            "`diagram` takes a spec of one layout; this one has layouts `compact`, `regional`",
+        ),
     ] {
         let output = dir.run(command, &more);
         assert!(!output.status.success(), "{command}: {output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains(&format!(
-                "`{command}` takes a spec of one layout; this one has layouts `compact`, `regional`"
-            )),
-            "{command}: {stderr}"
-        );
+        assert!(stderr.contains(refusal), "{command}: {stderr}");
     }
     assert!(!out.exists());
     assert!(!archive.exists());

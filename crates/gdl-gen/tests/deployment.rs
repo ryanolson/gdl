@@ -8,7 +8,7 @@ fn compose_starts_segments_only_after_hub_health() {
         .prefix("gdl-compose-test-")
         .tempdir()
         .expect("valid test fixture");
-    let files = gdl_gen::compose_files(&spec, temp.path(), &root.join("target"))
+    let files = gdl_gen::compose_files(&spec, None, temp.path(), &root.join("target"))
         .expect("valid test fixture");
     let compose: serde_json::Value =
         serde_json::from_str(&files[Path::new("compose.yaml")]).expect("valid test fixture");
@@ -81,6 +81,7 @@ fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
         .expect("valid test fixture");
     let files = gdl_gen::compose_files(
         &spec,
+        None,
         &root.join("target/deployment-test"),
         &root.join("target"),
     )
@@ -133,7 +134,12 @@ fn preview_files_are_the_exact_downloaded_snapshot() {
 fn deployment_rejects_local_node_and_message_crates() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let spec = gdl_gen::Spec::load(&root.join("examples/api/gdl.toml")).expect("fixture");
-    let result = gdl_gen::compose_files(&spec, &root.join("target/rejected"), &root.join("target"));
+    let result = gdl_gen::compose_files(
+        &spec,
+        None,
+        &root.join("target/rejected"),
+        &root.join("target"),
+    );
     assert!(result.is_err(), "local packages must not be deployable");
     assert!(
         result
@@ -194,8 +200,9 @@ fn portable_spec(root: &Path) -> Result<gdl_gen::Spec, gdl_gen::Error> {
     gdl_gen::Spec::from_text(&portable_text(&text), &graph, &root.join("examples/api"))
 }
 
-/// A spec's classes reach the hub's `deployment.json` and every segment's
-/// embedded placement, so all of them agree on the classed hash.
+/// A spec's classes reach the hubs' `deployment.json` and every segment's
+/// embedded placement, so all of them agree on the classed hash. A spec
+/// with classes is composed with its fleet.
 #[test]
 fn a_classed_bundle_agrees_on_the_placement_hash() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -218,9 +225,11 @@ fn a_classed_bundle_agrees_on_the_placement_hash() {
         .prefix("gdl-compose-classes-")
         .tempdir()
         .expect("a directory");
-    let files = gdl_gen::compose_files(&spec, temp.path(), &root.join("target")).expect("a bundle");
+    let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
+    let files = gdl_gen::compose_files(&spec, Some(&fleet), temp.path(), &root.join("target"))
+        .expect("a bundle");
     let deployment: gdl_model::DeploymentSpec =
-        serde_json::from_str(&files[Path::new("deployment.json")]).expect("the hub's spec");
+        serde_json::from_str(&files[Path::new("deployment.json")]).expect("the hubs' spec");
     assert_eq!(deployment.placement.hash(), expected);
     let mut embedded = 0;
     for (path, text) in &files {
@@ -233,4 +242,685 @@ fn a_classed_bundle_agrees_on_the_placement_hash() {
         embedded += 1;
     }
     assert_eq!(embedded, 2, "one embedded placement per segment");
+}
+
+/// `files`, every file of a bundle, as one text: each file under a line
+/// that names it, with the pinned commit, which moves, as `<rev>`.
+fn pinned(files: &gdl_gen::Files) -> String {
+    let rev = pinned_rev();
+    files
+        .iter()
+        .map(|(path, text)| {
+            format!(
+                "==> {} <==\n{}\n",
+                path.display(),
+                text.replace(&rev, "<rev>")
+            )
+        })
+        .collect()
+}
+
+/// A spec without classes composes as it always has, byte for byte: every
+/// file of the bundle is pinned, so that a bundle for cells changes
+/// nothing of one without them.
+#[test]
+fn a_bundle_without_classes_is_pinned() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spec = portable_spec(&root).expect("valid test fixture");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-pin-")
+        .tempdir()
+        .expect("a directory");
+    let files =
+        gdl_gen::compose_files(&spec, None, temp.path(), &root.join("target")).expect("a bundle");
+    let expected = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bundle/api.txt"),
+    )
+    .expect("the pinned bundle");
+    let found = pinned(&files);
+    for (found, expected) in found.lines().zip(expected.lines()) {
+        assert_eq!(found, expected, "the bundle differs from the pin");
+    }
+    assert_eq!(found, expected, "the bundle differs from the pin");
+}
+
+/// Every hub's health check is its own liveness, never the cell health
+/// endpoint, and every service waits only for its own cell's hub, given by
+/// `hub_of`, which names a hub for itself. A parent cell's health answers 503 until its children are
+/// ready, so a wait on it, or on another cell, would deadlock a fleet that
+/// starts together.
+fn assert_liveness(compose: &serde_json::Value, hub_of: impl Fn(&str) -> String) {
+    let text = compose.to_string();
+    assert!(!text.contains("/v1/ext/gdl-cell/health"), "{text}");
+    let services = compose["services"].as_object().expect("services");
+    // A hub waits for nothing: it is its own cell's hub.
+    let hubs: Vec<&String> = services
+        .keys()
+        .filter(|name| hub_of(name) == **name)
+        .collect();
+    for (name, service) in services {
+        if hubs.contains(&name) {
+            assert_eq!(
+                service["healthcheck"]["test"],
+                serde_json::json!(["CMD", "/usr/local/bin/segment", "--healthcheck"]),
+                "{name}"
+            );
+            assert!(service.get("depends_on").is_none(), "{name}: {service}");
+            continue;
+        }
+        let depends = service["depends_on"].as_object().expect("depends_on");
+        assert_eq!(
+            depends.keys().collect::<Vec<_>>(),
+            [&hub_of(name)],
+            "{name} waits only for its own cell's hub"
+        );
+        assert_eq!(depends[&hub_of(name)]["condition"], "service_healthy");
+    }
+}
+
+#[test]
+fn a_bundle_without_classes_waits_only_on_liveness() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spec = portable_spec(&root).expect("valid test fixture");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-live-")
+        .tempdir()
+        .expect("a directory");
+    let files =
+        gdl_gen::compose_files(&spec, None, temp.path(), &root.join("target")).expect("a bundle");
+    let compose: serde_json::Value =
+        serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
+    assert_liveness(&compose, |_| "hub".into());
+}
+
+/// The api graph's two segments, as `examples/api/gdl.toml` places them.
+const SEGMENTS: &str =
+    "[segment.front]\nnodes = [\"Http\"]\n[segment.engine]\nnodes = [\"Engine\"]\n";
+
+/// The api graph in two classes: `global` runs the frontend, and sends to
+/// `model_x`, which runs the engine.
+const SPLIT: &str = "[segment.front]\nnodes = [\"Http\"]\n[segment.engine]\nnodes = [\"Engine\"]\n\
+    [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n";
+
+/// The api graph in one segment and one class, which sends to none.
+const WHOLE: &str = "[segment.front]\nnodes = [\"Http\", \"Engine\"]\n\
+    [class.global]\nsegments = [\"front\"]\n";
+
+/// A global cell and two model cells of [`SPLIT`], the second larger.
+const ONE_FLEET: &str = "[class.global]\nready = { front = 1 }\n[class.model_x]\nready = { engine = 1 }\n\
+    [cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+    [cell.model-x-01]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
+    [cell.model-x-02]\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\nready = { engine = 2 }\n";
+
+/// Three cells of layout `split` and one of `whole`.
+const TWO_FLEET: &str = "[cell.global-us]\nlayout = \"split\"\nclass = \"global\"\nregion = \"us-east-1\"\n\
+    [cell.model-x-us]\nlayout = \"split\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
+    [cell.model-x-us-2]\nlayout = \"split\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\nready = { engine = 3 }\n\
+    [cell.global-eu]\nlayout = \"whole\"\nclass = \"global\"\nregion = \"eu-west-1\"\n";
+
+/// `text`, a placement, as the tables of layout `name`.
+fn nest(name: &str, text: &str) -> String {
+    text.lines()
+        .map(|line| match line.strip_prefix('[') {
+            Some(header) => format!("[layout.{name}.{header}\n"),
+            None => format!("{line}\n"),
+        })
+        .collect()
+}
+
+/// The api example on the pinned commit, placed as `placement` says.
+fn placed(placement: &str) -> gdl_gen::Spec {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
+    let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
+    let text = portable_text(&text);
+    assert!(text.contains(SEGMENTS), "{text}");
+    gdl_gen::Spec::from_text(
+        &text.replace(SEGMENTS, placement),
+        &graph,
+        &root.join("examples/api"),
+    )
+    .expect("a spec")
+}
+
+/// [`SPLIT`] as layout `split` and [`WHOLE`] as layout `whole`.
+fn two_layouts() -> gdl_gen::Spec {
+    placed(&(nest("split", SPLIT) + &nest("whole", WHOLE)))
+}
+
+/// The bundle of `spec` for `fleet`: its files and its `compose.yaml`.
+fn fleet_bundle(
+    spec: &gdl_gen::Spec,
+    fleet: &gdl_model::Fleet,
+) -> (gdl_gen::Files, serde_json::Value) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-fleet-")
+        .tempdir()
+        .expect("a directory");
+    let files = gdl_gen::compose_files(spec, Some(fleet), temp.path(), &root.join("target"))
+        .expect("a bundle");
+    let compose = serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
+    (files, compose)
+}
+
+/// The hub that `service` of a fleet's bundle waits for: its cell's, the
+/// service named for the cell.
+fn cell_hub(service: &str) -> String {
+    service
+        .split_once('_')
+        .map_or(service, |(cell, _)| cell)
+        .into()
+}
+
+/// The paths of a bundle's Dockerfiles.
+fn dockerfiles(files: &gdl_gen::Files) -> Vec<String> {
+    files
+        .keys()
+        .filter(|path| path.ends_with("Dockerfile"))
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+/// The services of `compose` that run `image`, and those of them that
+/// build it.
+fn running<'a>(compose: &'a serde_json::Value, image: &str) -> (Vec<&'a str>, Vec<&'a str>) {
+    let services = compose["services"].as_object().expect("services");
+    let run: Vec<&str> = services
+        .iter()
+        .filter(|(_, service)| service["image"] == image)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let build = run
+        .iter()
+        .copied()
+        .filter(|name| services[*name].get("build").is_some())
+        .collect();
+    (run, build)
+}
+
+/// The directory every hub of a fleet's bundle publishes to.
+const CELLS: &str = "/var/lib/gdl/cells";
+
+/// A fleet of one layout: a hub per cell, and each cell's segments of its
+/// class, configured as that cell and waiting only for its hub; one
+/// directory, shared by every hub; one image per segment, which both
+/// model cells run.
+#[test]
+fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
+    let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
+    let (files, compose) = fleet_bundle(&placed(SPLIT), &fleet);
+    let services = compose["services"].as_object().expect("services");
+    assert_eq!(
+        services.keys().collect::<Vec<_>>(),
+        [
+            "global-us",
+            "global-us_front",
+            "model-x-01",
+            "model-x-01_engine",
+            "model-x-02",
+            "model-x-02_engine"
+        ]
+    );
+    for cell in fleet.cells() {
+        let hub = &services[&cell.name];
+        assert_eq!(hub["image"], "api-hub", "{}", cell.name);
+        assert_eq!(
+            hub["volumes"],
+            serde_json::json!([format!("cells:{CELLS}")])
+        );
+        let env = hub["environment"].as_object().expect("the hub's variables");
+        assert_eq!(env["GDL_CELL__NAME"], cell.name.as_str());
+        assert_eq!(env["GDL_CELL__CLASS"], cell.class.as_str());
+        assert_eq!(env["GDL_CELL__DIRECTORY"], "dir");
+        assert_eq!(env["GDL_CELL__DIR"], CELLS);
+        assert_eq!(env["GDL_CELL__HUB"], format!("{}:1337", cell.name));
+        let segment = if cell.class == "global" {
+            "front"
+        } else {
+            "engine"
+        };
+        let service = &services[&format!("{}_{segment}", cell.name)];
+        assert_eq!(service["image"], format!("api-{segment}"));
+        assert!(service.get("volumes").is_none(), "{service}");
+        let own = service["environment"]
+            .as_object()
+            .expect("the segment's variables");
+        assert_eq!(own["GDL_HUB__HOST"], cell.name.as_str());
+        // A segment's `[cell]` is its hub's.
+        let cell_vars = |vars: &serde_json::Map<String, serde_json::Value>| {
+            vars.iter()
+                .filter(|(name, _)| name.starts_with("GDL_CELL__"))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cell_vars(own), cell_vars(env), "{}", cell.name);
+    }
+    let env = |cell: &str, key: &str| services[cell]["environment"][key].clone();
+    assert_eq!(env("model-x-01", "GDL_CELL__READY__ENGINE"), "1");
+    assert_eq!(env("model-x-02", "GDL_CELL__READY__ENGINE"), "2");
+    assert_eq!(env("model-x-02", "GDL_CELL__HOME"), "global-us");
+    assert_eq!(env("global-us", "GDL_CELL__HOME"), serde_json::Value::Null);
+    // One directory, on one volume.
+    assert_eq!(compose["volumes"], serde_json::json!({ "cells": {} }));
+    // One image per segment, built once, which both model cells run.
+    assert_eq!(
+        dockerfiles(&files),
+        ["engine/Dockerfile", "front/Dockerfile", "hub/Dockerfile"]
+    );
+    assert_eq!(
+        running(&compose, "api-engine"),
+        (
+            vec!["model-x-01_engine", "model-x-02_engine"],
+            vec!["model-x-01_engine"]
+        )
+    );
+    assert_eq!(
+        services["model-x-01_engine"]["build"]["dockerfile"],
+        "engine/Dockerfile"
+    );
+    assert_eq!(running(&compose, "api-hub").1, ["global-us"]);
+    assert!(files.contains_key(Path::new("deployment.json")));
+    // An image's settings are every cell's: its cell comes from the
+    // service's variables.
+    for segment in ["front", "engine"] {
+        let config = &files[&Path::new(segment).join("config.toml")];
+        assert!(
+            !config.contains("[hub]") && !config.contains("[cell]"),
+            "{config}"
+        );
+    }
+    assert_liveness(&compose, cell_hub);
+}
+
+/// A fleet whose cells run two layouts builds each layout's images once,
+/// each from its own layout's crates, and each cell runs its own layout's
+/// segments and its own layout's hub.
+#[test]
+fn a_fleet_of_two_layouts_builds_each_layouts_images_once() {
+    let fleet = gdl_model::Fleet::from_toml(TWO_FLEET).expect("a fleet");
+    let (files, compose) = fleet_bundle(&two_layouts(), &fleet);
+    let services = compose["services"].as_object().expect("services");
+    assert_eq!(
+        services.keys().collect::<Vec<_>>(),
+        [
+            "global-eu",
+            "global-eu_front",
+            "global-us",
+            "global-us_front",
+            "model-x-us",
+            "model-x-us-2",
+            "model-x-us-2_engine",
+            "model-x-us_engine"
+        ]
+    );
+    assert_eq!(
+        dockerfiles(&files),
+        [
+            "split/engine/Dockerfile",
+            "split/front/Dockerfile",
+            "split/hub/Dockerfile",
+            "whole/front/Dockerfile",
+            "whole/hub/Dockerfile"
+        ]
+    );
+    for (image, run, dockerfile) in [
+        (
+            "api-hub:split",
+            &["global-us", "model-x-us", "model-x-us-2"][..],
+            "split/hub/Dockerfile",
+        ),
+        ("api-hub:whole", &["global-eu"], "whole/hub/Dockerfile"),
+        (
+            "api-split-front",
+            &["global-us_front"],
+            "split/front/Dockerfile",
+        ),
+        (
+            "api-split-engine",
+            &["model-x-us-2_engine", "model-x-us_engine"],
+            "split/engine/Dockerfile",
+        ),
+        (
+            "api-whole-front",
+            &["global-eu_front"],
+            "whole/front/Dockerfile",
+        ),
+    ] {
+        let (running, building) = running(&compose, image);
+        assert_eq!(running, run, "{image}");
+        assert_eq!(building.len(), 1, "{image} is built once");
+        assert_eq!(services[building[0]]["build"]["dockerfile"], dockerfile);
+    }
+    // Each image builds its own layout's crate, with its own settings.
+    for (layout, segment) in [("split", "front"), ("split", "engine"), ("whole", "front")] {
+        let dockerfile = &files[&Path::new(layout).join(segment).join("Dockerfile")];
+        for needle in [
+            format!("--manifest-path '/app/{layout}/{segment}/Cargo.toml'"),
+            format!("COPY --from=build /build/release/api-{layout}-{segment} "),
+            format!("COPY {layout}/{segment}/config.toml /etc/gdl/config"),
+        ] {
+            assert!(dockerfile.contains(&needle), "{needle}\nin:\n{dockerfile}");
+        }
+    }
+    // Each layout's hub admits its own layout's placement.
+    for (layout, placement) in [("split", SPLIT), ("whole", WHOLE)] {
+        let hub = &files[&Path::new(layout).join("hub/Dockerfile")];
+        assert!(
+            hub.contains(&format!("COPY {layout}/deployment.json /etc/gdl/config")),
+            "{hub}"
+        );
+        let deployment: gdl_model::DeploymentSpec =
+            serde_json::from_str(&files[&Path::new(layout).join("deployment.json")])
+                .expect("the hub's spec");
+        let expected = gdl_model::Placement::from_toml(placement)
+            .expect("a placement")
+            .hash();
+        assert_eq!(deployment.placement.hash(), expected, "{layout}");
+    }
+    assert!(!files.contains_key(Path::new("deployment.json")));
+    assert_eq!(
+        services["global-eu"]["environment"]["GDL_CELL__LAYOUT"],
+        "whole"
+    );
+    assert_liveness(&compose, cell_hub);
+}
+
+/// No hub can be scaled, and the bundle's README says why: a cell's record
+/// has one writer.
+#[test]
+fn no_hub_can_be_scaled() {
+    for (spec, fleet) in [(placed(SPLIT), ONE_FLEET), (two_layouts(), TWO_FLEET)] {
+        let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
+        let (files, compose) = fleet_bundle(&spec, &fleet);
+        let services = compose["services"].as_object().expect("services");
+        let mut names = Vec::new();
+        for (name, service) in services {
+            let fixed = service.get("container_name");
+            if fleet.cell(name).is_some() {
+                // Compose refuses to scale a service whose container is named.
+                names.push(fixed.expect("a hub's container name").clone());
+                assert!(service.get("deploy").is_none() && service.get("scale").is_none());
+            } else {
+                assert!(fixed.is_none(), "{name} can be scaled");
+            }
+        }
+        let count = names.len();
+        names.dedup();
+        assert_eq!(names.len(), count, "{names:?}");
+        assert_eq!(count, fleet.cells().count());
+        let readme = &files[Path::new("README.md")];
+        for needle in [
+            "must never run as two at once",
+            "a cell's record has one writer",
+            "stops the old container before it starts the new one",
+            "for one host",
+            "`relay`",
+            "docker compose down -v",
+        ] {
+            assert!(readme.contains(needle), "{needle}\nin:\n{readme}");
+        }
+    }
+}
+
+/// Each hub's `GDL_CELL__*` variables, read as the hub reads them against
+/// its layout's deployment, are its cell's settings as the fleet gives
+/// them, with the shared directory and the address other hubs reach it at.
+#[test]
+fn each_hub_reads_its_cells_settings_as_the_fleet_gives_them() {
+    assert_each_hub_reads_its_cell(&placed(SPLIT), ONE_FLEET);
+    assert_each_hub_reads_its_cell(&two_layouts(), TWO_FLEET);
+}
+
+/// A segment's name may hold `__`, which the environment's keys use
+/// between nested keys: its quorum still reads back as the fleet gives it.
+#[test]
+fn a_quorum_of_a_segment_whose_name_holds_a_separator_reads_back() {
+    let split = SPLIT
+        .replace("[segment.engine]", "[segment.engine__work]")
+        .replace("\"engine\"", "\"engine__work\"");
+    let fleet = ONE_FLEET.replace("engine =", "engine__work =");
+    assert!(split.contains("engine__work") && fleet.contains("engine__work"));
+    assert_each_hub_reads_its_cell(&placed(&split), &fleet);
+}
+
+/// A name that reads as another type when it is written bare, such as a
+/// cell named `true`, reads back as the name it is, in the hub's
+/// variables and in its segments' `GDL_HUB__HOST`.
+#[test]
+fn a_name_that_reads_as_another_type_reads_back_as_written() {
+    let fleet = ONE_FLEET.replace("global-us", "true");
+    assert!(fleet.contains("[cell.true]") && fleet.contains("home = \"true\""));
+    assert_each_hub_reads_its_cell(&placed(SPLIT), &fleet);
+}
+
+/// The check of [`each_hub_reads_its_cells_settings_as_the_fleet_gives_them`]
+/// for `spec` and the fleet `fleet`. A segment's `GDL_HUB__HOST` is its
+/// hub's name, written as the hub's own `GDL_CELL__NAME` is.
+fn assert_each_hub_reads_its_cell(spec: &gdl_gen::Spec, fleet: &str) {
+    let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
+    let (files, compose) = fleet_bundle(spec, &fleet);
+    for cell in fleet.cells() {
+        let deployment = cell
+            .layout
+            .as_ref()
+            .map_or("deployment.json".into(), |layout| {
+                format!("{layout}/deployment.json")
+            });
+        let deployment: gdl_model::DeploymentSpec =
+            serde_json::from_str(&files[Path::new(&deployment)]).expect("the hub's spec");
+        let env = compose["services"][&cell.name]["environment"]
+            .as_object()
+            .expect("the hub's variables");
+        let vars = env
+            .iter()
+            .map(|(name, value)| (name.into(), value.as_str().expect("a string").into()));
+        let read = gdl_hub::cell_from_vars(&deployment, vars)
+            .unwrap_or_else(|error| panic!("{}: {error}", cell.name))
+            .expect("a cell");
+        let mut expected = cell.clone();
+        expected.directory = gdl_model::DirectoryBackend::Dir { path: CELLS.into() };
+        expected.hub = Some(format!("{}:1337", cell.name));
+        assert_eq!(read, expected);
+        // Each of its segments reads the same `[cell]`, which fits an
+        // instance of the segment, as the instance checks at its launch.
+        let layout =
+            gdl_model::layout(&deployment.graph, &deployment.placement).expect("the layout");
+        let services = compose["services"].as_object().expect("services");
+        let mut segments = 0;
+        for (name, service) in services {
+            let Some(segment) = name.strip_prefix(&format!("{}_", cell.name)) else {
+                continue;
+            };
+            read.check(&layout, segment)
+                .unwrap_or_else(|problems| panic!("{name}: {problems}"));
+            assert_eq!(
+                service["environment"]["GDL_HUB__HOST"], env["GDL_CELL__NAME"],
+                "{name}"
+            );
+            segments += 1;
+        }
+        assert!(segments > 0, "{}", cell.name);
+    }
+}
+
+/// `compose` without a fleet refuses a spec that deploys by cell, one with
+/// classes or with several layouts, and says that it needs the fleet.
+#[test]
+fn compose_without_a_fleet_refuses_a_spec_that_deploys_by_cell() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (spec, why) in [
+        (placed(SPLIT), "with classes"),
+        (two_layouts(), "of several layouts, `split` and `whole`,"),
+    ] {
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-compose-unfleeted-")
+            .tempdir()
+            .expect("a directory");
+        let out = temp.path().join("bundle");
+        let error = gdl_gen::compose(&spec, None, &out, &root.join("target"))
+            .expect_err("a spec that deploys by cell")
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "`compose` deploys a spec {why} by cell, as its fleet file says: give it `--fleet <fleet.toml>`"
+            )
+        );
+        assert!(!out.exists());
+    }
+}
+
+/// A fleet that `check` refuses, or that has no cells, deploys nothing,
+/// and `compose` writes nothing.
+#[test]
+fn compose_refuses_a_fleet_that_check_refuses_and_writes_nothing() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-refused-")
+        .tempdir()
+        .expect("a directory");
+    let out = temp.path().join("bundle");
+    let childless = "[cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n";
+    for (fleet, expected) in [
+        (
+            childless,
+            "[cell.global-us]: no child of class `model_x` in layout `default`",
+        ),
+        ("", "the fleet has no cells, so there is nothing to deploy"),
+    ] {
+        let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
+        let error = gdl_gen::compose(&placed(SPLIT), Some(&fleet), &out, &root.join("target"))
+            .expect_err("a refused fleet")
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+        assert!(!out.exists());
+    }
+}
+
+/// A segment that publishes host ports cannot run in two cells on one
+/// host: the second container could not bind them.
+#[test]
+fn a_segment_that_publishes_ports_runs_in_one_cell() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ports = "[deployment.segment.front]\nports = [\"8082:8082\"]\n";
+    let spec = placed(&(nest("split", SPLIT) + &nest("whole", WHOLE) + ports));
+    let fleet = gdl_model::Fleet::from_toml(TWO_FLEET).expect("a fleet");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-ports-")
+        .tempdir()
+        .expect("a directory");
+    let error = gdl_gen::compose_files(&spec, Some(&fleet), temp.path(), &root.join("target"))
+        .expect_err("two cells publish one port")
+        .to_string();
+    assert!(
+        error.contains(
+            "segment `front` publishes host port `8082:8082`, and runs in cells `global-eu`, `global-us`"
+        ),
+        "{error}"
+    );
+    // In one cell it publishes them.
+    let one = gdl_model::Fleet::from_toml(
+        "[cell.global-eu]\nlayout = \"whole\"\nclass = \"global\"\nregion = \"eu-west-1\"\n",
+    )
+    .expect("a fleet");
+    let (_, compose) = fleet_bundle(&spec, &one);
+    assert_eq!(
+        compose["services"]["global-eu_front"]["ports"],
+        serde_json::json!(["8082:8082"])
+    );
+}
+
+/// A port that Docker gives a host port of its own choosing binds nothing
+/// fixed, so a segment that publishes only such ports runs in several
+/// cells, each container with its own host port.
+#[test]
+fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
+    let ports =
+        "[deployment.segment.engine]\nports = [\"9000\", \"127.0.0.1::9001\", \"9002/udp\"]\n";
+    let spec = placed(&format!("{SPLIT}{ports}"));
+    let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
+    let (_, compose) = fleet_bundle(&spec, &fleet);
+    for service in ["model-x-01_engine", "model-x-02_engine"] {
+        assert_eq!(
+            compose["services"][service]["ports"],
+            serde_json::json!(["9000", "127.0.0.1::9001", "9002/udp"]),
+            "{service}"
+        );
+    }
+    // A fixed host port among them is still refused.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for fixed in ["9000:9000", "127.0.0.1:9000:9000", "[::1]:9000:9000/tcp"] {
+        let ports = format!("[deployment.segment.engine]\nports = [\"9001\", \"{fixed}\"]\n");
+        let spec = placed(&format!("{SPLIT}{ports}"));
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-compose-ports-")
+            .tempdir()
+            .expect("a directory");
+        let error = gdl_gen::compose_files(&spec, Some(&fleet), temp.path(), &root.join("target"))
+            .expect_err("two cells bind one host port")
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "segment `engine` publishes host port `{fixed}`, and runs in cells `model-x-01`, `model-x-02`"
+            )),
+            "{error}"
+        );
+    }
+}
+
+/// A host port of 0 asks Docker for a free one, as a port without a host
+/// port does, so it too runs in several cells.
+#[test]
+fn a_host_port_of_zero_lets_docker_choose() {
+    let ports = "[deployment.segment.engine]\nports = [\"0:9000\", \"127.0.0.1:0:9000\", \"[::1]:0:9000/tcp\"]\n";
+    let spec = placed(&format!("{SPLIT}{ports}"));
+    let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
+    let (_, compose) = fleet_bundle(&spec, &fleet);
+    for service in ["model-x-01_engine", "model-x-02_engine"] {
+        assert_eq!(
+            compose["services"][service]["ports"],
+            serde_json::json!(["0:9000", "127.0.0.1:0:9000", "[::1]:0:9000/tcp"]),
+            "{service}"
+        );
+    }
+}
+
+/// `cargo gdl compose --fleet` checks the fleet, then writes its bundle.
+#[test]
+fn the_cli_composes_a_fleet() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-cli-")
+        .tempdir()
+        .expect("a directory");
+    let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
+    let text = portable_text(&text).replace(SEGMENTS, SPLIT);
+    std::fs::write(temp.path().join("gdl.toml"), text).expect("the spec");
+    std::fs::copy(
+        root.join("examples/api/api.gdl"),
+        temp.path().join("api.gdl"),
+    )
+    .expect("graph");
+    std::fs::write(temp.path().join("fleet.toml"), ONE_FLEET).expect("the fleet");
+    let out = temp.path().join("bundle");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .args(["gdl", "compose", "--spec"])
+        .arg(temp.path().join("gdl.toml"))
+        .arg("--fleet")
+        .arg(temp.path().join("fleet.toml"))
+        .arg("--out")
+        .arg(&out)
+        .arg("--target-dir")
+        .arg(root.join("target"))
+        .output()
+        .expect("cargo gdl");
+    assert!(output.status.success(), "{output:?}");
+    let compose: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("compose.yaml")).expect("compose.yaml"),
+    )
+    .expect("compose.yaml");
+    for cell in ["global-us", "model-x-01", "model-x-02"] {
+        assert!(compose["services"][cell].is_object(), "{compose}");
+    }
 }
