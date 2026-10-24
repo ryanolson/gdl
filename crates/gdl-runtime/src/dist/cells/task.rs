@@ -13,7 +13,7 @@ use futures::{FutureExt, StreamExt};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::Layout;
 use gdl_watch::{
-    Avoids, CellWatcher, FollowEvent, UnknownFollowEvent, Unoffered, WatchStream, Watched,
+    Avoids, Backoff, CellWatcher, FollowEvent, UnknownFollowEvent, Unoffered, WatchStream, Watched,
 };
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
@@ -24,9 +24,19 @@ use super::follow::{Asked, Follows, Key};
 use crate::dist::fabric::{ChooserHub, Registry};
 use crate::dist::roster::Live;
 
-/// How long to wait before watching the relay again after a watch ended
-/// or could not begin, as the membership follower waits.
-pub(super) const REWATCH: Duration = Duration::from_millis(100);
+/// The first wait before an instance watches its own hub again, after a
+/// watch ended or could not begin: the relay, a cell read alone, and the
+/// cell's watch for its drain. Kept as short as it always was, so that a
+/// hub that restarts once is watched again as quickly.
+pub(crate) const REWATCH: Duration = Duration::from_millis(100);
+
+/// The longest an instance waits before it watches its own hub again,
+/// however often its watches failed. Short, because what those watches
+/// carry bounds how late the instance learns that its cell drains, that
+/// its retirement is acknowledged, and what its tables route to; long
+/// enough that a hub that is down is asked about once a second by each of
+/// its instances, rather than ten times.
+pub(crate) const REWATCH_CAP: Duration = Duration::from_secs(1);
 
 /// Start following the cells of the classes `segment` sends to, for an
 /// instance in a cell of `region` at the hub `host`, whose public
@@ -187,12 +197,14 @@ pub(super) fn relayed(
 
 /// Follow `source` into `follows` until aborted: watch, read the snapshot
 /// and then each change, and when the watch ends or cannot begin, watch
-/// again after [`REWATCH`]. What the tables hold stays until a new
+/// again after a wait from [`REWATCH`] that grows to [`REWATCH_CAP`] while
+/// watches fail ([`Backoff`]). What the tables hold stays until a new
 /// snapshot is complete. A watch refused again for the same reason is
 /// not logged again, since a hub without the cell's extension refuses
 /// every one. Unregistrations and acknowledgements go on throughout, a
 /// watch's absence included. Before the first watch, the follower tells
-/// the hub that it runs, and asks again until the hub takes it: from then
+/// the hub that it runs, and asks again, after the same waits, until the
+/// hub takes it: from then
 /// the hub waits for this instance before it closes a follow, and nothing
 /// is offered to a cell before it, since the tables fill only from a
 /// watch.
@@ -204,12 +216,16 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
         avoid_refused: None,
     };
     let mut refused: Option<String> = None;
+    // The declaration opens the follower's first watch: a hub that refuses
+    // it, as one without the cell's extension refuses every one, is asked
+    // as a hub that refuses the watch is.
+    let mut backoff = Backoff::new(REWATCH, REWATCH_CAP);
     while let Err(error) = source.declare().await {
         if refused.as_deref() != Some(error.as_str()) {
             tracing::warn!(%error, "the hub did not take that this instance follows its relay");
             refused = Some(error);
         }
-        tokio::time::sleep(REWATCH).await;
+        tokio::time::sleep(backoff.wait(None, Instant::now())).await;
     }
     refused = None;
     loop {
@@ -228,21 +244,22 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
                 chore = chores.next(due, poll, avoid) => chores.run(chore, &mut follows, &source),
             }
         };
-        match opened {
+        let synced = match opened {
             Ok(events) => {
                 if refused.take().is_some() {
                     tracing::info!("the hub's relay of the cells it follows is watched again");
                 }
-                read(&source, &mut follows, events, &mut chores).await;
+                read(&source, &mut follows, events, &mut chores).await
             }
             Err(error) => {
                 if refused.as_deref() != Some(error.as_str()) {
                     tracing::warn!(%error, "the hub's relay of the cells it follows could not be watched");
                     refused = Some(error);
                 }
+                None
             }
-        }
-        let pause = tokio::time::sleep(REWATCH);
+        };
+        let pause = tokio::time::sleep(backoff.wait(synced, Instant::now()));
         tokio::pin!(pause);
         loop {
             let (due, poll, avoid) = (
@@ -258,7 +275,8 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
     }
 }
 
-/// Read one watch of the relay into `follows` until it ends: its snapshot
+/// Read one watch of the relay into `follows` until it ends, and return
+/// when its snapshot completed, if it did: its snapshot
 /// apart, applied whole at its `synced`, then each change. A second
 /// `synced` in one watch is not the protocol, and ends it. A cell that an
 /// event of a kind this build does not know names is read from a watch of
@@ -270,8 +288,9 @@ async fn read<S: Source, R: Registry>(
     follows: &mut Follows<R>,
     mut events: BoxStream<'static, Relayed>,
     chores: &mut Chores,
-) {
+) -> Option<Instant> {
     let mut snapshot = Some(follows.snapshot());
+    let mut synced = None;
     let mut own = Own::default();
     loop {
         if snapshot.is_none() {
@@ -287,7 +306,7 @@ async fn read<S: Source, R: Registry>(
         tokio::select! {
             item = events.next() => {
                 let Some(item) = item else {
-                    return;
+                    return synced;
                 };
                 let event = match item {
                     Watched::Event(event) => event,
@@ -299,17 +318,19 @@ async fn read<S: Source, R: Registry>(
                         continue;
                     }
                 };
-                let synced = matches!(event, FollowEvent::Synced);
+                let marker = matches!(event, FollowEvent::Synced);
                 match snapshot.take() {
-                    Some(complete) if synced => {
-                        follows.resnapshot(complete, Instant::now());
+                    Some(complete) if marker => {
+                        let now = Instant::now();
+                        follows.resnapshot(complete, now);
+                        synced = Some(now);
                         own = Own::default();
                     }
                     Some(mut filling) => {
                         filling.apply(event, Instant::now());
                         snapshot = Some(filling);
                     }
-                    None if synced => return,
+                    None if marker => return synced,
                     None => follows.take(event, Instant::now()),
                 }
             }
@@ -476,8 +497,8 @@ impl<'a> Own<'a> {
         self.stops.remove(&key);
         self.opening.push(
             async move {
-                if pause {
-                    tokio::time::sleep(REWATCH).await;
+                if !pause.is_zero() {
+                    tokio::time::sleep(pause).await;
                 }
                 let opened = source.watch_of(&key.0, &key.1).await;
                 (key, watch, opened)

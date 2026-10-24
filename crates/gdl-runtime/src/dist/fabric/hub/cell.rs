@@ -18,23 +18,17 @@ use futures::StreamExt;
 use gdl::{Error, ErrorKind, Result};
 use gdl_cells::CellState;
 use gdl_model::{CellSettings, Layout};
-use gdl_watch::{CellWatchEvent, CellWatcher, Watched};
+use gdl_watch::{Backoff, CellWatchEvent, CellWatcher, Watched};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use velo::InstanceId;
 
 use super::HubSession;
+use crate::dist::cells::{REWATCH, REWATCH_CAP};
 
 #[cfg(test)]
 mod tests;
-
-/// How long to wait before watching the cell again after a watch ended.
-const REWATCH: Duration = Duration::from_millis(100);
-
-/// How long to wait before asking again a hub that refused the watch: one
-/// without the cell's extension refuses every one.
-const REFUSED: Duration = Duration::from_secs(1);
 
 /// An instance's view of its cell's drain, for an instance in a cell under
 /// a hub whose class a hop enters. The watch ends when this is dropped.
@@ -366,8 +360,10 @@ impl Drop for CellDrain {
 /// `draining`, then say when on `learns`, and go on until it says that no
 /// other cell follows it, and say so too. For the entry instance
 /// `retiree`, say too once its retirement is acknowledged. A watch that
-/// ends or is refused is asked for again; a refusal is logged once, until
-/// a watch begins, and one that fails is logged. What a watch's snapshot
+/// ends or is refused is asked for again, after a wait that grows to
+/// [`REWATCH_CAP`] while watches fail, as from a hub without the cell's
+/// extension, which refuses every one; a refusal is logged once, until a
+/// watch begins, and one that fails is logged. What a watch's snapshot
 /// says is learned only once it is complete. An event of a kind this
 /// build does not know ends the watch too, so that the next one's first event says what the cell's
 /// state is.
@@ -378,8 +374,10 @@ async fn run(
     learns: watch::Sender<Learned>,
 ) {
     let mut refused: Option<String> = None;
+    let mut backoff = Backoff::new(REWATCH, REWATCH_CAP);
     loop {
-        let pause = match watcher.watch(&address).await {
+        let mut synced = None;
+        match watcher.watch(&address).await {
             Ok(mut events) => {
                 refused = None;
                 // A snapshot is learned from only once it is complete: one
@@ -409,6 +407,7 @@ async fn run(
                         (Some(filling), CellWatchEvent::Synced) => {
                             let complete = filling.with(heard);
                             snapshot = None;
+                            synced = Some(Instant::now());
                             complete.learn(&learns)
                         }
                         (Some(filling), _) => {
@@ -421,7 +420,6 @@ async fn run(
                         return;
                     }
                 }
-                REWATCH
             }
             Err(error) => {
                 let error = error.to_string();
@@ -429,10 +427,9 @@ async fn run(
                     tracing::info!(%error, "this instance's cell could not be watched for a drain");
                     refused = Some(error);
                 }
-                REFUSED
             }
-        };
-        tokio::time::sleep(pause).await;
+        }
+        tokio::time::sleep(backoff.wait(synced, Instant::now())).await;
     }
 }
 

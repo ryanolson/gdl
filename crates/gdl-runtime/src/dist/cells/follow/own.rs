@@ -4,12 +4,14 @@
 //! holds of the cell.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use gdl_watch::{FollowEvent, UnknownFollowEvent, Watched};
+use gdl_watch::{Backoff, FollowEvent, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::InstanceId;
 
 use super::super::lease::Leases;
+use super::super::task::{REWATCH, REWATCH_CAP};
 use super::{Follow, Followed, Follows, Key, Relayed};
 use crate::dist::fabric::Registry;
 
@@ -35,7 +37,7 @@ impl<R: Registry> Follows<R> {
             "the relay sent an event of a kind this build does not know; the cell is not chosen until it is read again"
         );
         self.withhold(&key);
-        self.watch_own(key, false);
+        self.watch_own(key, None);
     }
 
     /// `key`'s cell became unread: its tables, which no longer offer it,
@@ -49,17 +51,28 @@ impl<R: Registry> Follows<R> {
         }
     }
 
-    /// Read `key`'s cell from a new watch of its own, after a pause if
-    /// `pause`: one that replaces any it had.
-    pub(super) fn watch_own(&mut self, key: Key, pause: bool) {
+    /// Read `key`'s cell from a new watch of its own, one that replaces
+    /// any it had: at once, or, if the one it replaces ended at `ended`,
+    /// after the wait the cell's backoff draws then. The backoff is kept
+    /// across the cell's watches, so that a hub whose reading of the cell
+    /// keeps failing, or keeps sending an event this build does not know,
+    /// is asked less and less often, up to [`REWATCH_CAP`].
+    pub(super) fn watch_own(&mut self, key: Key, ended: Option<Instant>) {
         self.watches += 1;
         let watch = self.watches;
+        let (mut backoff, synced) = match self.own.remove(&key) {
+            Some(own) => (own.backoff, own.synced),
+            None => (Backoff::new(REWATCH, REWATCH_CAP), None),
+        };
+        let pause = ended.map_or(Duration::ZERO, |now| backoff.wait(synced, now));
         self.own.insert(
             key.clone(),
             Own {
                 watch,
                 filling: Some(Followed::default()),
                 unknown: false,
+                backoff,
+                synced: None,
             },
         );
         self.asked.push(Asked { key, watch, pause });
@@ -101,7 +114,7 @@ impl<R: Registry> Follows<R> {
         match item {
             None => {
                 self.unread_own(&key);
-                self.watch_own(key, true);
+                self.watch_own(key, Some(now));
             }
             // Fenced by its generation, as on the relay's watch: one that
             // names an earlier generation than the cell's, a closing one
@@ -115,7 +128,7 @@ impl<R: Registry> Follows<R> {
                     None => {
                         if self.followed.unread(&self.wanted, &key, event.generation) {
                             self.withhold(&key);
-                            self.watch_own(key, false);
+                            self.watch_own(key, None);
                         }
                     }
                 }
@@ -124,15 +137,16 @@ impl<R: Registry> Follows<R> {
                 let (filling, unknown) = (own.filling.take(), own.unknown);
                 match filling {
                     Some(filling) => {
+                        own.synced = Some(now);
                         self.install_own(&key, filling, unknown, now);
                         if unknown {
-                            self.watch_own(key, true);
+                            self.watch_own(key, Some(now));
                         }
                     }
                     // A second marker in one watch is not the protocol.
                     None => {
                         self.unread_own(&key);
-                        self.watch_own(key, true);
+                        self.watch_own(key, Some(now));
                     }
                 }
             }
@@ -265,12 +279,16 @@ pub(super) struct Own {
     /// Whether the snapshot had an event of a kind this build does not
     /// know.
     unknown: bool,
+    /// The waits between the cell's watches of its own.
+    backoff: Backoff,
+    /// When this watch's snapshot completed, once it has.
+    synced: Option<Instant>,
 }
 
 /// A watch of its own for the task to open: the cell's, with its number,
-/// after a pause if `pause`.
+/// after `pause`.
 pub(in crate::dist::cells) struct Asked {
     pub(in crate::dist::cells) key: Key,
     pub(in crate::dist::cells) watch: u64,
-    pub(in crate::dist::cells) pause: bool,
+    pub(in crate::dist::cells) pause: Duration,
 }

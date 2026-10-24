@@ -68,12 +68,12 @@ fn chosen(cells: &Cells, cell: &str, now: Instant) -> bool {
         .is_some_and(|table| HomeFirst.eligible(table, "r", &[], now))
 }
 
-/// The cells and watches asked for, as `(cell, watch, pause)`.
+/// The cells and watches asked for, as `(cell, watch, paused)`.
 fn asked(follows: &mut Follows<Recorded>) -> Vec<(String, u64, bool)> {
     follows
         .asked()
         .into_iter()
-        .map(|Asked { key, watch, pause }| (key.1, watch, pause))
+        .map(|Asked { key, watch, pause }| (key.1, watch, !pause.is_zero()))
         .collect()
 }
 

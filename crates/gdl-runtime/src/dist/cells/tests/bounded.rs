@@ -19,13 +19,18 @@ const WITHIN: Duration = Duration::from_millis(300);
 
 /// The relay at `address`, read by the watch client within [`WITHIN`],
 /// whose acknowledgements are all taken.
-struct Served {
+pub(super) struct Served {
     watcher: CellWatcher,
     address: String,
 }
 
 impl Served {
     fn new(server: &Server) -> Self {
+        Self::at(&server.address)
+    }
+
+    /// The relay at `address`.
+    pub(super) fn at(address: &str) -> Self {
         let watcher = CellWatcher::with_limits(WatchLimits {
             synced_within: WITHIN,
             ..WatchLimits::default()
@@ -33,7 +38,7 @@ impl Served {
         .expect("a client");
         Self {
             watcher,
-            address: server.address.clone(),
+            address: address.to_string(),
         }
     }
 }
@@ -94,7 +99,7 @@ async fn a_relay_snapshot_that_never_completes_is_not_installed() {
     let mut second = server.next().await;
     assert_eq!(second.path, "/v1/ext/gdl-cell/follows");
     assert!(
-        second.at - began >= WITHIN + REWATCH,
+        second.at - began >= WITHIN + REWATCH / 2,
         "watched again after {:?}",
         second.at - began
     );
@@ -154,7 +159,7 @@ async fn a_cells_reading_that_never_completes_leaves_it_unread() {
     let again = server.next().await;
     assert_eq!(again.path, own_path, "the cell is read again");
     assert!(
-        again.at - began >= WITHIN + REWATCH,
+        again.at - began >= WITHIN + REWATCH / 2,
         "read again after {:?}",
         again.at - began
     );

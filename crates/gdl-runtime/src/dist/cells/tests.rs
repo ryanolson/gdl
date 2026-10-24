@@ -5,6 +5,7 @@ mod avoided;
 mod bounded;
 mod offered;
 mod reread;
+mod rewatch;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
