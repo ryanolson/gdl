@@ -389,6 +389,7 @@ mod tests {
                 .collect(),
             eligible,
             retired: Box::new([]),
+            unread: false,
             turn: Arc::new(AtomicUsize::new(0)),
         })
     }

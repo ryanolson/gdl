@@ -7,6 +7,7 @@ use gdl_model::{CellSettings, DeploymentSpec};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use velo_hub::axum::extract::Path;
 use velo_hub::axum::response::{IntoResponse, Response};
 use velo_hub::axum::{
     Json, Router,
@@ -150,6 +151,9 @@ pub struct CellReadiness<D: CellDirectory> {
     summary: Option<Duration>,
     /// What the hub follows.
     relay: Arc<Relay>,
+    /// The client of the followed cells' watches, once the hub follows
+    /// any.
+    watcher: OnceLock<CellWatcher>,
     /// The cell's drain.
     drain: Arc<Drain>,
     /// The state of the cell's record last stored in the directory.
@@ -253,6 +257,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             sends: sends.into_iter().collect(),
             summary: (!entries.is_empty()).then_some(cell.summary),
             relay,
+            watcher: OnceLock::new(),
             drain: Arc::new(Drain::new(class_segments)),
             stored: watch::Sender::new(None),
             tasks: Mutex::default(),
@@ -324,6 +329,13 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// How many watches of what the hub follows are open, as it changes.
     pub fn follows_watchers(&self) -> watch::Receiver<usize> {
         self.relay.watchers()
+    }
+
+    /// How many events of a kind this build does not know the watches of
+    /// the cells the hub follows have sent: each withheld its cell in the
+    /// relay until the hub read the cell again.
+    pub fn unknown_events(&self) -> u64 {
+        self.watcher.get().map_or(0, CellWatcher::unknown_events)
     }
 
     /// The cells the hub has decided to follow, by class and name, each
@@ -407,7 +419,13 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         let follows = if self.sends.is_empty() {
             Ok(())
         } else {
-            CellWatcher::new().map(|watcher| {
+            match self.watcher.get() {
+                Some(watcher) => Ok(watcher.clone()),
+                None => {
+                    CellWatcher::new().map(|watcher| self.watcher.get_or_init(|| watcher).clone())
+                }
+            }
+            .map(|watcher| {
                 for class in &self.sends {
                     let follower = Follower {
                         directory: Arc::clone(&self.directory),
@@ -478,8 +496,18 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             )
             .route(
                 gdl_watch::FOLLOWS_ROUTE,
-                get(move || {
-                    let watch = relay.watch();
+                get({
+                    let relay = Arc::clone(&relay);
+                    move || {
+                        let watch = relay.watch();
+                        async move { crate::fanout::serve(watch.into_events()) }
+                    }
+                }),
+            )
+            .route(
+                gdl_watch::FOLLOWED_ROUTE,
+                get(move |Path((class, cell)): Path<(String, String)>| {
+                    let watch = relay.watch_of(&class, &cell);
                     async move { crate::fanout::serve(watch.into_events()) }
                 }),
             )

@@ -7,6 +7,13 @@
 //! segment's table is a new list of the cells' tables, one pointer per
 //! cell, so no event reads another cell's instances. Only a new snapshot
 //! makes every table again.
+//!
+//! An event of a kind this build does not know leaves the cell it names
+//! unread: its tables offer none of its instances until the follower has
+//! read the cell again, from a watch of the cell's follow alone, whose
+//! snapshot and events after it are ordered with each other
+//! ([`Follows::own`]). What the relay's watch sends of the cell from then
+//! is not applied: it is not ordered with the cell's own watch.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -14,7 +21,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use gdl_cells::CellState;
-use gdl_watch::FollowEvent;
+use gdl_watch::{FollowEvent, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
 
@@ -24,7 +31,10 @@ use crate::dist::roster::Live;
 
 /// A followed cell, by its class and its name within the class: two
 /// classes may each have a cell of one name.
-type Key = (String, String);
+pub(super) type Key = (String, String);
+
+/// An item of a watch of the relay.
+type Relayed = Watched<FollowEvent, UnknownFollowEvent>;
 
 /// The follower's state: each followed cell's current follow, the tables
 /// made from them, and the instances it registered with velo.
@@ -53,6 +63,35 @@ pub(crate) struct Follows<R> {
     /// The latest unregistration due for each instance: an earlier entry
     /// in `forget` for one asked for again is passed over.
     due: HashMap<InstanceId, Instant>,
+    /// The cells read from a watch of their own since an event of a kind
+    /// this build does not know named them: what the relay's watch sends
+    /// of them is not applied, since that watch and a cell's own are not
+    /// ordered with each other, until a new snapshot of the relay.
+    own: HashMap<Key, Own>,
+    /// The watches of their own asked for that the task has not yet
+    /// opened.
+    asked: Vec<Asked>,
+    /// The number of the last watch of its own asked for.
+    watches: u64,
+}
+
+/// A watch of its own a cell is read from.
+struct Own {
+    /// Its number: an item of an earlier one is ignored.
+    watch: u64,
+    /// Its snapshot as it is filled; `None` once it is complete.
+    filling: Option<Followed>,
+    /// Whether the snapshot had an event of a kind this build does not
+    /// know.
+    unknown: bool,
+}
+
+/// A watch of its own for the task to open: the cell's, with its number,
+/// after a pause if `pause`.
+pub(super) struct Asked {
+    pub(super) key: Key,
+    pub(super) watch: u64,
+    pub(super) pause: bool,
 }
 
 impl<R: Registry> Follows<R> {
@@ -75,6 +114,9 @@ impl<R: Registry> Follows<R> {
             registered: HashSet::new(),
             forget: VecDeque::new(),
             due: HashMap::new(),
+            own: HashMap::new(),
+            asked: Vec::new(),
+            watches: 0,
         }
     }
 
@@ -83,7 +125,188 @@ impl<R: Registry> Follows<R> {
         Snapshot {
             wanted: Arc::clone(&self.wanted),
             followed: Followed::default(),
+            unread: BTreeSet::new(),
+            unknown: 0,
         }
+    }
+
+    /// Take one event of the relay's watch after its snapshot, at `now`:
+    /// applied, unless its cell is read from a watch of its own.
+    pub(super) fn take(&mut self, event: FollowEvent, now: Instant) {
+        // Looked up only while a cell has a watch of its own, which is rare.
+        if !self.own.is_empty()
+            && let Some((class, cell)) = event.cell()
+            && self
+                .own
+                .contains_key(&(class.to_string(), cell.to_string()))
+        {
+            return;
+        }
+        self.apply(event, now);
+    }
+
+    /// The relay's watch sent an event of a kind this build does not know
+    /// after its snapshot: the cell it names is unread, and read from a
+    /// watch of its own from then, unless the event is of a class not sent
+    /// to, or of an earlier generation than the cell's, which changes
+    /// nothing, as a known event of it would not, or the cell is already
+    /// read from its own watch, which carries the event too.
+    pub(super) fn unknown(&mut self, event: UnknownFollowEvent) {
+        self.cells.unknown();
+        let key = (event.class, event.cell);
+        if self.own.contains_key(&key)
+            || !self.followed.unread(&self.wanted, &key, event.generation)
+        {
+            return;
+        }
+        tracing::info!(
+            class = key.0,
+            cell = key.1,
+            kind = event.kind,
+            "the relay sent an event of a kind this build does not know; the cell is not chosen until it is read again"
+        );
+        self.publish(&key);
+        self.watch_own(key, false);
+    }
+
+    /// Read `key`'s cell from a new watch of its own, after a pause if
+    /// `pause`: one that replaces any it had.
+    fn watch_own(&mut self, key: Key, pause: bool) {
+        self.watches += 1;
+        let watch = self.watches;
+        self.own.insert(
+            key.clone(),
+            Own {
+                watch,
+                filling: Some(Followed::default()),
+                unknown: false,
+            },
+        );
+        self.asked.push(Asked { key, watch, pause });
+    }
+
+    /// The watches of their own that cells were asked to be read from, and
+    /// that the task has not yet opened.
+    pub(super) fn asked(&mut self) -> Vec<Asked> {
+        std::mem::take(&mut self.asked)
+    }
+
+    /// Whether `watch` is the one `key`'s cell is read from: an older one
+    /// is let go of.
+    pub(super) fn wants(&self, key: &Key, watch: u64) -> bool {
+        self.own.get(key).is_some_and(|own| own.watch == watch)
+    }
+
+    /// The watch `watch` of `key`'s own sent `item` at `now`, or ended
+    /// (`None`), as a watch that could not begin does. Its snapshot
+    /// replaces the cell's follow, the cell no longer unread, and each
+    /// event after it is applied as any event is. The cell is unread
+    /// again, and read from a new watch, when the watch ends, after a
+    /// pause; at an event of a kind this build does not know after its
+    /// snapshot, at once; and once a snapshot with one is complete, after
+    /// a pause, the cell never shown read meanwhile, so that a hub that
+    /// sends such an event in each snapshot is not asked again and again
+    /// at once. An item of a watch it no longer reads from is ignored.
+    pub(super) fn own(&mut self, key: Key, watch: u64, item: Option<Relayed>, now: Instant) {
+        let Some(own) = self.own.get_mut(&key).filter(|own| own.watch == watch) else {
+            return;
+        };
+        match item {
+            None => {
+                self.unread_own(&key);
+                self.watch_own(key, true);
+            }
+            Some(Watched::Unknown(_)) => {
+                let filling = own.filling.is_some();
+                own.unknown |= filling;
+                self.cells.unknown();
+                if !filling {
+                    self.unread_own(&key);
+                    self.watch_own(key, false);
+                }
+            }
+            Some(Watched::Event(FollowEvent::Synced)) => {
+                let (filling, unknown) = (own.filling.take(), own.unknown);
+                match filling {
+                    Some(filling) => {
+                        self.install_own(&key, filling, unknown, now);
+                        if unknown {
+                            self.watch_own(key, true);
+                        }
+                    }
+                    // A second marker in one watch is not the protocol.
+                    None => {
+                        self.unread_own(&key);
+                        self.watch_own(key, true);
+                    }
+                }
+            }
+            Some(Watched::Event(event)) => match own.filling.as_mut() {
+                Some(filling) => {
+                    let _ = filling.apply(&self.wanted, event, now);
+                }
+                None => self.apply(event, now),
+            },
+        }
+    }
+
+    /// Leave `key`'s cell unread, if it is followed.
+    fn unread_own(&mut self, key: &Key) {
+        if let Some(follow) = self.followed.follows.get_mut(key)
+            && !follow.unread
+        {
+            follow.unread = true;
+            self.publish(key);
+        }
+    }
+
+    /// `filling`, the snapshot of `key`'s own watch, is complete at `now`:
+    /// it replaces the cell's follow, or ends it if the relay has none,
+    /// whatever its generation, and sets the generation the cell's later
+    /// events are fenced by, as a snapshot of the relay does: the watch
+    /// may be to a hub that restarted, which numbers its follows from 1
+    /// again. The cell is unread if `unread`. Its
+    /// new instances are registered before a table shows them; one it no
+    /// longer holds is unregistered after the drain.
+    fn install_own(&mut self, key: &Key, mut filling: Followed, unread: bool, now: Instant) {
+        let mut fresh = filling.follows.remove(key);
+        if let Some(follow) = &mut fresh {
+            follow.unread = unread;
+            let unreachable: Vec<InstanceId> = follow
+                .exposed
+                .iter()
+                .filter(|(_, (_, peer))| !self.register(peer))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in unreachable {
+                follow.exposed.remove(&id);
+            }
+            // Held before the follow it replaces lets go, so that an
+            // instance in both is never unregistered.
+            for id in follow.held().collect::<Vec<_>>() {
+                self.hold(id);
+            }
+        }
+        let replaced = match fresh {
+            Some(mut follow) => {
+                let generation = follow.generation;
+                if let Some(held) = self.followed.follows.get(key)
+                    && held.generation == generation
+                {
+                    follow.turns.clone_from(&held.turns);
+                }
+                self.followed.generations.insert(key.clone(), generation);
+                self.followed.follows.insert(key.clone(), follow)
+            }
+            None => {
+                self.followed.generations.remove(key);
+                self.followed.follows.remove(key)
+            }
+        };
+        if let Some(replaced) = replaced {
+            self.release(&replaced, now);
+        }
+        self.publish(key);
     }
 
     /// Apply one event of the relay after its snapshot, at `now`, by
@@ -126,7 +349,25 @@ impl<R: Registry> Follows<R> {
     /// registered before any table shows them; an instance that no table
     /// holds any more is unregistered after the drain.
     pub(super) fn resnapshot(&mut self, snapshot: Snapshot, now: Instant) {
-        let Snapshot { mut followed, .. } = snapshot;
+        let Snapshot {
+            mut followed,
+            unread,
+            unknown,
+            ..
+        } = snapshot;
+        // The relay's new watch carries every cell again; the task lets go
+        // of the cells' own watches.
+        self.own.clear();
+        self.asked.clear();
+        for _ in 0..unknown {
+            self.cells.unknown();
+        }
+        for key in unread {
+            if let Some(follow) = followed.follows.get_mut(&key) {
+                follow.unread = true;
+            }
+            self.watch_own(key, false);
+        }
         for follow in followed.follows.values_mut() {
             let mut unreachable = Vec::new();
             for (id, (_, peer)) in &follow.exposed {
@@ -489,6 +730,27 @@ impl Followed {
         }
     }
 
+    /// An event of a kind this build does not know names `key`'s follow of
+    /// `generation`: whether the cell is to be read again, left unread
+    /// meanwhile. Not for a class not sent to, or a generation earlier
+    /// than the cell's current or newest one.
+    fn unread(&mut self, wanted: &Wanted, key: &Key, generation: u64) -> bool {
+        if !wanted.contains_key(&key.0) {
+            return false;
+        }
+        match self.follows.get_mut(key) {
+            Some(follow) if follow.generation > generation => false,
+            Some(follow) => {
+                follow.unread = true;
+                true
+            }
+            None => self
+                .generations
+                .get(key)
+                .is_none_or(|newest| *newest < generation),
+        }
+    }
+
     /// `key`'s follow, if `generation` is its current one.
     fn current(&mut self, key: &Key, generation: u64) -> Option<&mut Follow> {
         self.follows
@@ -512,6 +774,11 @@ struct Follow {
     /// The built-in routers' turn per entry segment, carried into each
     /// table the follow makes.
     turns: BTreeMap<String, Arc<AtomicUsize>>,
+    /// Whether the relay sent an event of a kind this build does not know
+    /// for the follow, which the follower has not read again since: its
+    /// tables then offer none of its instances, so that it is not chosen.
+    /// The one place a cell is kept from choosers for it.
+    unread: bool,
 }
 
 impl Follow {
@@ -533,6 +800,7 @@ impl Follow {
                 .iter()
                 .map(|segment| (segment.clone(), Arc::default()))
                 .collect(),
+            unread: false,
         }
     }
 
@@ -584,7 +852,7 @@ impl Follow {
         let mut eligible: Vec<InstanceId> = self
             .exposed
             .iter()
-            .filter(|(_, (of, _))| of == segment)
+            .filter(|(_, (of, _))| !self.unread && of == segment)
             .map(|(id, _)| *id)
             .collect();
         eligible.sort_by_key(InstanceId::as_u128);
@@ -610,6 +878,7 @@ impl Follow {
             eligible: eligible.into_boxed_slice(),
             offered,
             retired: retired.into_boxed_slice(),
+            unread: self.unread,
             turn: self.turns.get(segment).map(Arc::clone).unwrap_or_default(),
         }
     }
@@ -628,6 +897,11 @@ thread_local! {
 pub(super) struct Snapshot {
     wanted: Arc<Wanted>,
     followed: Followed,
+    /// The cells an event of a kind this build does not know named, to
+    /// read again once the snapshot is complete.
+    unread: BTreeSet<Key>,
+    /// How many such events it had.
+    unknown: u64,
 }
 
 impl Snapshot {
@@ -636,5 +910,15 @@ impl Snapshot {
     /// it is complete.
     pub(super) fn apply(&mut self, event: FollowEvent, now: Instant) {
         let _ = self.followed.apply(&self.wanted, event, now);
+    }
+
+    /// An event of a kind this build does not know, before the snapshot's
+    /// `synced`: its cell is read again once the snapshot is complete.
+    pub(super) fn unknown(&mut self, event: UnknownFollowEvent) {
+        self.unknown += 1;
+        let key = (event.class, event.cell);
+        if self.followed.unread(&self.wanted, &key, event.generation) {
+            self.unread.insert(key);
+        }
     }
 }

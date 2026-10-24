@@ -5,18 +5,20 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures::StreamExt;
-use futures::stream::BoxStream;
 use gdl_cells::{CellState, LoadSummary};
 use gdl_watch::FollowEvent;
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo, WorkerAddress};
 
 use super::follow::Follows;
-use super::task::{Source, run};
+use super::task::run;
 use super::{Cells, FollowedCell};
 use crate::dist::fabric::Registry;
 use crate::dist::roster::Roster;
+use scripted::Scripted;
+
+mod scripted;
+mod unread;
 
 const DRAIN: Duration = Duration::from_secs(10);
 const M1: &str = "m1";
@@ -587,35 +589,6 @@ fn a_snapshot_replaces_what_was_held() {
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
 }
 
-/// Watches scripted in order, each a list of events that ends the watch;
-/// after the last, a watch that never ends. Each watch asked for is
-/// counted, and begins only once the test has released that many.
-struct Scripted {
-    watches: Mutex<VecDeque<Vec<FollowEvent>>>,
-    opened: tokio::sync::watch::Sender<usize>,
-    released: tokio::sync::watch::Receiver<usize>,
-}
-
-impl Source for Scripted {
-    async fn watch(&self) -> Result<BoxStream<'static, FollowEvent>, String> {
-        let mut opened = 0;
-        self.opened.send_modify(|count| {
-            *count += 1;
-            opened = *count;
-        });
-        let mut released = self.released.clone();
-        released
-            .wait_for(|released| *released >= opened)
-            .await
-            .map_err(|_| "the test ended".to_string())?;
-        let next = self.watches.lock().expect("lock").pop_front();
-        Ok(match next {
-            Some(events) => futures::stream::iter(events).boxed(),
-            None => futures::stream::pending().boxed(),
-        })
-    }
-}
-
 /// A watch that ends part way through its snapshot changes nothing: the
 /// tables stay as the last complete snapshot and its changes made them,
 /// until a complete one replaces them.
@@ -640,14 +613,7 @@ async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
     ]);
     let (opened, mut watching) = tokio::sync::watch::channel(0);
     let (release, released) = tokio::sync::watch::channel(2);
-    let task = tokio::spawn(run(
-        Scripted {
-            watches: Mutex::new(watches),
-            opened,
-            released,
-        },
-        follows,
-    ));
+    let task = tokio::spawn(run(Scripted::new(watches, opened, released), follows));
     // The third watch is asked for once the second has ended.
     watching
         .wait_for(|opened| *opened >= 3)
@@ -735,14 +701,7 @@ async fn a_stalled_watch_holds_no_unregistration() {
     let (opened, mut watching) = tokio::sync::watch::channel(0);
     // The second watch is asked for and never begins.
     let (_release, released) = tokio::sync::watch::channel(1);
-    let task = tokio::spawn(run(
-        Scripted {
-            watches: Mutex::new(watches),
-            opened,
-            released,
-        },
-        follows,
-    ));
+    let task = tokio::spawn(run(Scripted::new(watches, opened, released), follows));
     watching
         .wait_for(|opened| *opened >= 2)
         .await

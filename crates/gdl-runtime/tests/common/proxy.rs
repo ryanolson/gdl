@@ -36,6 +36,19 @@ pub struct Proxy {
     mode: Arc<tokio::sync::watch::Sender<Mode>>,
     /// Signalled when `SilentAtDelete` held a `DELETE`.
     pub intercepted: Arc<tokio::sync::Notify>,
+    tamper: Arc<Tamper>,
+}
+
+/// What a proxy changes of what passes through it, whatever its mode.
+#[derive(Default)]
+struct Tamper {
+    /// What the next hub's bytes that hold the first are sent with in its
+    /// place, once: as long, so that the response's framing holds.
+    rewrite: std::sync::Mutex<Option<(Vec<u8>, Vec<u8>)>>,
+    /// While set, a request that holds it is not passed on.
+    hold: tokio::sync::watch::Sender<Option<Vec<u8>>>,
+    /// Signalled when a request is held.
+    held: tokio::sync::Notify,
 }
 
 impl Proxy {
@@ -47,12 +60,18 @@ impl Proxy {
         let (mode, modes) = tokio::sync::watch::channel(Mode::Forward);
         let mode = Arc::new(mode);
         let intercepted = Arc::new(tokio::sync::Notify::new());
-        let (setter, seen) = (Arc::clone(&mode), Arc::clone(&intercepted));
+        let tamper = Arc::new(Tamper::default());
+        let (setter, seen, tampering) = (
+            Arc::clone(&mode),
+            Arc::clone(&intercepted),
+            Arc::clone(&tamper),
+        );
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
                 let held = Held {
                     set: Arc::clone(&setter),
                     seen: Arc::clone(&seen),
+                    tamper: Arc::clone(&tampering),
                 };
                 tokio::spawn(relay(client, target, modes.clone(), held));
             }
@@ -61,7 +80,30 @@ impl Proxy {
             port,
             mode,
             intercepted,
+            tamper,
         }
+    }
+
+    /// Send the first bytes the hub sends next that are `from` as `to`,
+    /// once, on whichever connection they come.
+    pub fn rewrite_once(&self, from: &[u8], to: &[u8]) {
+        assert_eq!(from.len(), to.len(), "a rewrite keeps the framing");
+        *self.tamper.rewrite.lock().expect("lock") = Some((from.to_vec(), to.to_vec()));
+    }
+
+    /// Hold every request that holds `pattern` until [`Proxy::release`].
+    pub fn hold(&self, pattern: &[u8]) {
+        self.tamper.hold.send_replace(Some(pattern.to_vec()));
+    }
+
+    /// Pass the held requests on.
+    pub fn release(&self) {
+        self.tamper.hold.send_replace(None);
+    }
+
+    /// Resolves once a request is held.
+    pub async fn holding(&self) {
+        self.tamper.held.notified().await;
     }
 
     pub fn set(&self, mode: Mode) {
@@ -74,6 +116,7 @@ impl Proxy {
 struct Held {
     set: Arc<tokio::sync::watch::Sender<Mode>>,
     seen: Arc<tokio::sync::Notify>,
+    tamper: Arc<Tamper>,
 }
 
 /// Relay one connection while the mode forwards; hold it while silent;
@@ -143,6 +186,14 @@ async fn relay(
                         let _ = mode.changed().await;
                         return;
                     }
+                    let pattern = held.tamper.hold.borrow().clone();
+                    if let Some(pattern) = pattern
+                        && seen.windows(pattern.len()).any(|w| w == pattern.as_slice())
+                    {
+                        held.tamper.held.notify_one();
+                        let mut hold = held.tamper.hold.subscribe();
+                        let _ = hold.wait_for(Option::is_none).await;
+                    }
                     if to_server.write_all(&up[..n]).await.is_err() {
                         return;
                     }
@@ -157,6 +208,12 @@ async fn relay(
                     out.extend_from_slice(&down[..n]);
                     if now == Mode::Undrained {
                         held_down = undrain(&mut out);
+                    }
+                    let rewrite = held.tamper.rewrite.lock().expect("lock").clone();
+                    if let Some((from, to)) = rewrite {
+                        let mut rest = std::mem::take(&mut held_down);
+                        out.append(&mut rest);
+                        held_down = rewrite_once(&held.tamper, &mut out, &from, &to);
                     }
                     if to_client.write_all(&out).await.is_err() {
                         return;
@@ -187,6 +244,26 @@ fn undrain(out: &mut Vec<u8>) -> Vec<u8> {
     let partial = (1..DRAINING.len())
         .rev()
         .find(|len| out.len() >= *len && out.ends_with(&DRAINING[..*len]))
+        .unwrap_or(0);
+    out.split_off(out.len() - partial)
+}
+
+/// Replace the first `from` in `out` with `to`, and end the rewrite, if
+/// another connection has not already; take off the end of `out`, to be
+/// sent with what comes next, a part that may be the start of `from`.
+fn rewrite_once(tamper: &Tamper, out: &mut Vec<u8>, from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut rewrite = tamper.rewrite.lock().expect("lock");
+    if rewrite.is_none() {
+        return Vec::new();
+    }
+    if let Some(start) = out.windows(from.len()).position(|window| window == from) {
+        out[start..start + from.len()].copy_from_slice(to);
+        *rewrite = None;
+        return Vec::new();
+    }
+    let partial = (1..from.len())
+        .rev()
+        .find(|len| out.len() >= *len && out.ends_with(&from[..*len]))
         .unwrap_or(0);
     out.split_off(out.len() - partial)
 }

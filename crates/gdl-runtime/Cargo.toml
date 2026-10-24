@@ -106,5 +106,9 @@ name = "draining"
 required-features = ["hub"]
 
 [[test]]
+name = "unknown"
+required-features = ["hub"]
+
+[[test]]
 name = "allocs"
 harness = false
