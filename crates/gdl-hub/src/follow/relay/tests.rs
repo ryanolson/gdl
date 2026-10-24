@@ -99,8 +99,8 @@ fn a_retired_instance_is_never_exposed() {
 
 /// A state that exposes nothing sends the state alone; one that exposes
 /// again sends each ready instance after it, including one that became
-/// ready meanwhile. An instance hidden when it leaves is sent no `left`,
-/// since a consumer dropped it with the state.
+/// ready meanwhile. An instance hidden when it leaves is still sent its
+/// `left`, since a consumer keeps it reachable while the follow lives.
 #[test]
 fn a_state_hides_and_exposes_the_ready_instances() {
     let mut cell = installed(CellState::Degraded);
@@ -114,7 +114,7 @@ fn a_state_hides_and_exposes_the_ready_instances() {
         segment: "f".into(),
         instance: gone.instance_id(),
     };
-    assert_eq!(sent(&mut cell, left), []);
+    assert_eq!(sent(&mut cell, left).len(), 1, "its `left` was not sent");
     let mut again = sent(&mut cell, state(CellState::Ready));
     assert_eq!(
         again.remove(0),
@@ -286,4 +286,32 @@ fn a_class_counts_its_installed_ready_cells() {
     relay.install(later, installed_cell("n", CellState::Ready));
     assert_eq!(met(), 1);
     assert!(!shown.borrow().healthy(), "and the cell is unavailable");
+}
+
+/// An instance that leaves while a state hides it is sent `left`, if the
+/// relay had sent it as exposed, so that a consumer, which keeps such an
+/// instance reachable while its follow lives, lets go of it. One that
+/// became ready only while hidden was never sent, and is sent nothing.
+#[test]
+fn an_instance_that_leaves_while_hidden_is_sent_left() {
+    let mut cell = installed(CellState::Ready);
+    let (shown, unseen) = (peer(), peer());
+    assert_eq!(sent(&mut cell, ready(&shown)), [exposed(&shown)]);
+    assert_eq!(sent(&mut cell, state(CellState::Unavailable)).len(), 1);
+    assert_eq!(sent(&mut cell, ready(&unseen)), []);
+    let left = |peer: &PeerInfo| CellWatchEvent::Left {
+        segment: "f".into(),
+        instance: peer.instance_id(),
+    };
+    assert_eq!(
+        sent(&mut cell, left(&shown)),
+        [FollowEvent::Left {
+            class: "model_x".into(),
+            cell: "m".into(),
+            generation: 1,
+            segment: "f".into(),
+            instance: shown.instance_id(),
+        }]
+    );
+    assert_eq!(sent(&mut cell, left(&unseen)), [], "never sent");
 }

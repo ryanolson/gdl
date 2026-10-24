@@ -292,3 +292,31 @@ fn a_follow_installed_not_offered_is_acknowledged() {
         "in a snapshot"
     );
 }
+
+/// An instance a state hid that then leaves its cell is let go of: it is
+/// unregistered after the drain, though its follow lives on.
+#[test]
+fn a_hidden_instance_that_leaves_is_let_go() {
+    let (mut follows, cells, recorded, _) = follower();
+    let now = Instant::now();
+    let gone = peer();
+    live(
+        &mut follows,
+        now,
+        [
+            follow(M1, 1, CellState::Ready),
+            exposed(M1, 1, &gone),
+            state(M1, 1, CellState::Unavailable),
+            super::left(M1, 1, &gone),
+        ],
+    );
+    follows.forget(now + DRAIN);
+    assert_eq!(
+        recorded.take(),
+        [
+            Call::Register(gone.instance_id()),
+            Call::Unregister(gone.instance_id())
+        ]
+    );
+    assert!(table(&cells, M1).is_some(), "the follow lives on");
+}

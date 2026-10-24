@@ -46,7 +46,11 @@ use velo::{InstanceId, PeerInfo};
 /// followed by an `exposed` event for each ready instance. A consumer
 /// keeps every instance a follow has exposed reachable until the follow
 /// is dropped or the instance leaves, whatever the state, since what it
-/// offered to the cell may still be under way.
+/// offered to the cell may still be under way: an instance the relay sent
+/// as exposed is sent its [`FollowEvent::Left`] also while a state hides
+/// it. A watch begun while a state hides instances does not show them, so
+/// a consumer may be sent `left` for an instance it does not hold, and
+/// ignores it.
 ///
 /// A follow is offered (its cell may be chosen) while its link lives and
 /// its cell's state exposes its instances: [`FollowEvent::Follow`] is

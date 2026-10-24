@@ -154,6 +154,9 @@ struct Followed {
     state: CellState,
     retired: HashSet<InstanceId>,
     exposed: HashMap<InstanceId, PeerInfo>,
+    /// Instances a state hid, which a consumer keeps until they leave or
+    /// are exposed again.
+    hidden: HashSet<InstanceId>,
 }
 
 fn exposes(state: CellState) -> bool {
@@ -198,6 +201,7 @@ impl Relay {
                         state: *state,
                         retired: HashSet::new(),
                         exposed: HashMap::new(),
+                        hidden: HashSet::new(),
                     },
                 );
                 assert!(installed.is_none(), "{cell} installed twice");
@@ -220,7 +224,9 @@ impl Relay {
                 let followed = self.current(cell, *generation);
                 followed.state = *state;
                 if !exposes(*state) {
-                    followed.exposed.clear();
+                    let hidden: Vec<InstanceId> =
+                        followed.exposed.drain().map(|(id, _)| id).collect();
+                    followed.hidden.extend(hidden);
                 }
             }
             FollowEvent::Exposed {
@@ -240,6 +246,7 @@ impl Relay {
                     !followed.retired.contains(&id),
                     "a retired instance exposed"
                 );
+                followed.hidden.remove(&id);
                 let known = followed.exposed.insert(id, peer.clone());
                 assert!(known.is_none(), "an instance exposed twice");
             }
@@ -251,6 +258,7 @@ impl Relay {
             } => {
                 let followed = self.current(cell, *generation);
                 followed.exposed.remove(instance);
+                followed.hidden.remove(instance);
                 assert!(followed.retired.insert(*instance), "retired twice");
             }
             FollowEvent::Left {
@@ -260,8 +268,9 @@ impl Relay {
                 ..
             } => {
                 let followed = self.current(cell, *generation);
-                let known =
-                    followed.exposed.remove(instance).is_some() | followed.retired.remove(instance);
+                let known = followed.exposed.remove(instance).is_some()
+                    | followed.hidden.remove(instance)
+                    | followed.retired.remove(instance);
                 assert!(known, "an instance that left was never sent");
             }
             FollowEvent::Dropped {

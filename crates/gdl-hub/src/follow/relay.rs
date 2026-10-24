@@ -27,7 +27,7 @@
 //! an older one. A change costs one count, never a pass over the
 //! follows.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
@@ -521,6 +521,10 @@ pub(crate) struct Installed {
     /// Ready entry instances that have not retired, with their segments:
     /// exposed while the state allows.
     ready: HashMap<InstanceId, (String, PeerInfo)>,
+    /// The ready instances the relay has sent as exposed in this follow: a
+    /// consumer keeps them reachable while the follow lives, so each is
+    /// sent `left` when it leaves, whatever the state is by then.
+    shown: HashSet<InstanceId>,
 }
 
 impl Installed {
@@ -540,6 +544,7 @@ impl Installed {
             load,
             retired: HashMap::new(),
             ready: HashMap::new(),
+            shown: HashSet::new(),
         }
     }
 
@@ -578,6 +583,7 @@ impl Installed {
                     for event in self.exposed(generation) {
                         send(event);
                     }
+                    self.shown.extend(self.ready.keys().copied());
                 }
             }
             CellWatchEvent::Load { load } => {
@@ -596,6 +602,7 @@ impl Installed {
                 }
                 self.ready.insert(id, (segment.clone(), peer.clone()));
                 if self.exposes() {
+                    self.shown.insert(id);
                     send(FollowEvent::Exposed {
                         class,
                         cell,
@@ -607,6 +614,7 @@ impl Installed {
             }
             CellWatchEvent::Retired { segment, instance } => {
                 self.ready.remove(&instance);
+                self.shown.remove(&instance);
                 if self.retired.insert(instance, segment.clone()).is_none() {
                     send(FollowEvent::Retired {
                         class,
@@ -618,10 +626,11 @@ impl Installed {
                 }
             }
             CellWatchEvent::Left { segment, instance } => {
-                // A consumer holds an instance it was sent as retired, or
-                // as exposed while the state still exposes it; one the
-                // state hid it has dropped already.
-                let exposed = self.ready.remove(&instance).is_some() && self.exposes();
+                // A consumer holds an instance it was sent as retired or as
+                // exposed, also while a state hides it; one that was ready
+                // only while hidden was never sent.
+                let exposed =
+                    self.ready.remove(&instance).is_some() && self.shown.remove(&instance);
                 let retired = self.retired.remove(&instance).is_some();
                 if exposed || retired {
                     send(FollowEvent::Left {
