@@ -76,14 +76,12 @@ fn a_hub_without_cell_variables_has_no_cell() {
     });
 }
 
-/// Keys are matched without regard to case, `__` nests them, and a list
-/// is written as one.
+/// Keys are matched without regard to case, and `__` nests them.
 #[test]
 fn a_cells_settings_are_read_from_the_environment() {
     Jail::expect_with(|jail| {
         model_cell(jail, "/srv/cells");
         jail.set_env("GDL_CELL__READY__D", "2");
-        jail.set_env("GDL_CELL__SEEDS", r#"["hub-a:1337"]"#);
         jail.set_env("GDL_CELL__SUMMARY_MS", "2500");
         assert_eq!(
             cell_from_env().map_err(|e| e.to_string())?,
@@ -95,7 +93,6 @@ fn a_cells_settings_are_read_from_the_environment() {
                 directory: DirectoryBackend::Dir {
                     path: "/srv/cells".into()
                 },
-                seeds: vec!["hub-a:1337".into()],
                 ready: BTreeMap::from([("d".into(), 2)]),
                 requires: BTreeMap::new(),
                 hub: Some("model-x-01-hub:1337".into()),
@@ -147,6 +144,8 @@ fn a_misspelled_or_malformed_cell_variable_is_refused() {
         ("GDL_CELL__HUB", "http://hub:1337", "[cell] hub"),
         ("GDL_CELL__DIRECTORY", "store", "store"),
         ("GDL_CELL__SUMMARY_MS", "999", "summary_ms"),
+        // Nothing reads seeds: the relay mesh among global hubs is not built.
+        ("GDL_CELL__SEEDS", r#"["hub-a:1337"]"#, "seeds"),
     ] {
         Jail::expect_with(|jail| {
             model_cell(jail, "/srv/cells");
@@ -178,7 +177,6 @@ fn settings(directory: DirectoryBackend) -> CellSettings {
         region: "us-east-1".into(),
         home: None,
         directory,
-        seeds: vec![],
         ready: BTreeMap::new(),
         requires: BTreeMap::new(),
         hub: Some("model-x-01-hub:1337".into()),

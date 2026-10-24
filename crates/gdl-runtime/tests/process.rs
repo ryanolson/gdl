@@ -326,7 +326,7 @@ fn a_cell_table_is_read_from_a_file() {
     let config = load(&[
         BASE,
         CELL,
-        "[cell]\nhome = \"g\"\nseeds = [\"hub-a:1337\"]\n[cell.ready]\nfront = 3\n",
+        "[cell]\nhome = \"g\"\n[cell.ready]\nfront = 3\n",
     ])
     .expect("a cell");
     assert_eq!(
@@ -337,7 +337,6 @@ fn a_cell_table_is_read_from_a_file() {
             region: "us-east-1".into(),
             home: Some("g".into()),
             directory: DirectoryBackend::Relay,
-            seeds: vec!["hub-a:1337".into()],
             ready: BTreeMap::from([("front".into(), 3)]),
             requires: BTreeMap::new(),
             hub: None,
@@ -349,7 +348,7 @@ fn a_cell_table_is_read_from_a_file() {
 }
 
 /// `GDL_CELL__*` reaches `[cell]` as any other setting does, joining the
-/// file's table: a quorum by segment, a list of seeds, and the load
+/// file's table: a quorum by segment, a backend, and the load
 /// summary's period.
 #[test]
 fn a_cell_table_is_read_from_the_environment() {
@@ -361,7 +360,6 @@ fn a_cell_table_is_read_from_the_environment() {
         jail.set_env("GDL_CELL__REGION", "us-west-2");
         jail.set_env("GDL_CELL__DIRECTORY", "memory");
         jail.set_env("GDL_CELL__READY__BACK", "4");
-        jail.set_env("GDL_CELL__SEEDS", r#"["hub-a:1337", "hub-b:1337"]"#);
         jail.set_env("GDL_CELL__SUMMARY_MS", "1500");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
         assert_eq!(
@@ -372,7 +370,6 @@ fn a_cell_table_is_read_from_the_environment() {
                 region: "us-west-2".into(),
                 home: None,
                 directory: DirectoryBackend::Memory,
-                seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
                 ready: BTreeMap::from([("back".into(), 4), ("front".into(), 3)]),
                 requires: BTreeMap::new(),
                 hub: None,
@@ -419,6 +416,11 @@ fn a_misspelled_cell_key_is_refused() {
         panic!("a misspelled key under [cell]")
     };
     assert!(error.to_string().contains("hone"), "{error}");
+    // Nothing reads seeds: the relay mesh among global hubs is not built.
+    let Err(error) = load(&[BASE, CELL, "[cell]\nseeds = [\"hub-a:1337\"]\n"]) else {
+        panic!("seeds under [cell]")
+    };
+    assert!(error.to_string().contains("seeds"), "{error}");
     let Err(error) = load(&[BASE, CELL, "[cell]\ndirectory = \"store\"\n"]) else {
         panic!("an unknown directory backend")
     };

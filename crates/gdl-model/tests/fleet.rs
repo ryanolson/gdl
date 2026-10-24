@@ -166,7 +166,6 @@ fn a_cells_settings_have_its_quorum_resolved() {
             region: "us-east-1".into(),
             home: Some("global-us-east-1".into()),
             directory: DirectoryBackend::Relay,
-            seeds: vec![],
             // The cell's own `e`; the class's `d` and `f`.
             ready: BTreeMap::from([("d".into(), 1), ("e".into(), 8), ("f".into(), 2)]),
             requires: BTreeMap::new(),

@@ -20,7 +20,6 @@ use crate::{Error, Layout};
 /// home = "global-us-east-1"    # optional: the cell of a parent class the policy prefers
 /// directory = "relay"          # optional: "relay" (the default), "memory", or "dir"
 /// # dir = "/var/lib/gdl/cells" # with "dir", and only with it: the shared directory
-/// seeds = ["hub-a:1337"]       # optional: hub addresses to join the relay mesh from
 /// hub = "model-x-01-hub:1337"  # optional: where other cells' hubs reach this cell's hub
 /// summary_ms = 10000           # optional: the load summary's period, at least 1000
 /// [ready]                      # optional: the quorum of each segment of the class
@@ -44,9 +43,6 @@ pub struct CellSettings {
     /// Where the cell's record is published and the other cells are found:
     /// the `directory` key, with the `dir` key for [`DirectoryBackend::Dir`].
     pub directory: DirectoryBackend,
-    /// Hub addresses, `host:port`, to join the relay mesh from; kept as
-    /// given.
-    pub seeds: Vec<String>,
     /// Usable instances each segment of the class needs for the cell to be
     /// ready; see [`CellSettings::quorum`].
     pub ready: BTreeMap<String, u32>,
@@ -271,8 +267,6 @@ struct Table {
     directory: Backend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dir: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    seeds: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ready: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -345,7 +339,6 @@ impl TryFrom<Table> for CellSettings {
             region: table.region,
             home: table.home,
             directory,
-            seeds: table.seeds,
             ready: table.ready,
             requires: table.requires,
             hub: table.hub,
@@ -368,7 +361,6 @@ impl From<CellSettings> for Table {
             home: settings.home,
             directory,
             dir,
-            seeds: settings.seeds,
             ready: settings.ready,
             requires: settings.requires,
             hub: settings.hub,

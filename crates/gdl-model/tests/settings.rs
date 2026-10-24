@@ -64,7 +64,6 @@ class = "model_x"
 region = "us-east-1"
 home = "global-us-east-1"
 directory = "memory"
-seeds = ["hub-a:1337", "hub-b:1337"]
 hub = "model-x-01-hub:1337"
 [ready]
 d = 4
@@ -80,7 +79,6 @@ fn a_cells_settings_are_read_whole() {
             region: "us-east-1".into(),
             home: Some("global-us-east-1".into()),
             directory: DirectoryBackend::Memory,
-            seeds: vec!["hub-a:1337".into(), "hub-b:1337".into()],
             ready: BTreeMap::from([("d".into(), 4)]),
             requires: BTreeMap::new(),
             hub: Some("model-x-01-hub:1337".into()),
@@ -96,7 +94,6 @@ fn only_name_class_and_region_are_required() {
     let least = settings("name = 'g'\nclass = 'global'\nregion = 'r'\n");
     assert_eq!(least.home, None);
     assert_eq!(least.directory, DirectoryBackend::Relay);
-    assert!(least.seeds.is_empty());
     assert!(least.ready.is_empty());
     assert_eq!(least.hub, None);
     for missing in [
@@ -118,7 +115,8 @@ fn a_misspelled_key_or_an_unknown_backend_is_refused() {
         "name = 'g'\nclass = 'global'\nregion = 'r'\ndirectory = 'store'\n",
         // A fleet file has no live state, so it is not a backend.
         "name = 'g'\nclass = 'global'\nregion = 'r'\ndirectory = 'static'\n",
-        "name = 'g'\nclass = 'global'\nregion = 'r'\nseeds = 'hub-a:1337'\n",
+        // Nothing reads seeds: the relay mesh among global hubs is not built.
+        "name = 'g'\nclass = 'global'\nregion = 'r'\nseeds = ['hub-a:1337']\n",
         "name = 'g'\nclass = 'global'\nregion = 'r'\nready = { a = -1 }\n",
     ] {
         assert!(toml::from_str::<CellSettings>(bad).is_err(), "{bad}");
