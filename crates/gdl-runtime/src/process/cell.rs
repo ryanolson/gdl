@@ -60,8 +60,9 @@ impl Launch {
 
     /// Whether the cells that follow this instance's cell may be taken to
     /// avoid it, asked by (A) at each poll: for an entry instance that
-    /// retired, once its hub says they do, its cell drains, or the bound
-    /// has passed since it retired; for any other, always. What it reads
+    /// retired, once its hub says they do, or, while its cell drains, that
+    /// none follows it, or the bound has passed since it retired and since
+    /// it learned of a drain; for any other, always. What it reads
     /// is taken now, so that the question borrows nothing of the launch.
     #[cfg(feature = "hub")]
     pub(super) fn cell_parent(&self) -> impl Fn() -> bool + use<> {

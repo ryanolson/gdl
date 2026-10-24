@@ -94,18 +94,30 @@ pub(crate) fn bound(setup: Duration, summary: Duration) -> Duration {
 /// when the drain asks, so that the wait borrows nothing of the launch.
 pub(crate) struct Parent {
     learned: watch::Receiver<Learned>,
-    /// When the instance goes on as if they did: its retirement and the
-    /// bound.
-    until: Instant,
+    /// When the instance retired.
+    retired: Instant,
+    bound: Duration,
 }
 
 impl Parent {
     /// Whether the instance may go on: its hub said that the cells that
-    /// follow its cell avoid it, or its cell drains, whose rules govern
-    /// from then, or the bound has passed since it retired.
+    /// follow its cell avoid it, or, once its cell drains, that none
+    /// follows it any more, or the bound has passed since it retired and,
+    /// once its cell drains, since it learned of the drain too. A drain
+    /// learned while the instance waits here governs from then, as it does
+    /// one learned before: an entry instance of a draining cell takes work
+    /// until its bound has passed since it learned of the drain, or no
+    /// cell follows the cell, whatever stopped it, since a chooser whose
+    /// view of the cell is stale may still offer to it. Taking the drain
+    /// itself as an answer would close the instance a setup timeout after
+    /// the drain began.
     pub(crate) fn avoids(&self) -> bool {
         let learned = *self.learned.borrow();
-        learned.acknowledged || learned.drain.is_some() || Instant::now() >= self.until
+        let until = learned
+            .drain
+            .map_or(self.retired, |drain| drain.max(self.retired))
+            + self.bound;
+        learned.acknowledged || learned.unfollowed || Instant::now() >= until
     }
 }
 
@@ -174,7 +186,8 @@ impl CellDrain {
         };
         Some(Parent {
             learned: self.learned.clone(),
-            until: retired + *bound,
+            retired,
+            bound: *bound,
         })
     }
 

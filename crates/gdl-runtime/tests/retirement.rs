@@ -374,6 +374,72 @@ async fn a_retiree_never_acknowledged_goes_on_at_its_bound() {
     proxy.set(Mode::Forward);
 }
 
+/// A retiree whose cell starts to drain while it waits for its parent goes
+/// by the drain's rules from then: with no acknowledgement and no follower
+/// letting go of the cell, it keeps taking work until the drain's bound
+/// has passed since it learned of the drain, then the setup timeout, and
+/// only then refuses an offer, which the chooser offers to another cell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_while_the_retiree_waits_keeps_it_to_the_drains_bound() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, global) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let proxy = Proxy::new(hub.public_addr()).await;
+    let held = chooser(&spec, &hub, proxy.port).await;
+    let m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &events).await;
+    let m2 = model(&spec, &directory, cell(M2, "m2-hub:1337", 1), &events).await;
+    following(&tables(&held), M1, 1).await;
+    following(&tables(&held), M2, 1).await;
+    let holding = gated(&held, &events, "held").await;
+    let (mut holder, other) = if m1.forwards() == 1 {
+        (m1, m2)
+    } else {
+        (m2, m1)
+    };
+    proxy.set(Mode::Silent);
+    let retiree = holder.entries.remove(0);
+    let (id, taken) = (retiree.node.instance_id(), Arc::clone(&retiree.segment));
+    let (_, ended) = stop(retiree);
+    let mut retirements = global.retirements();
+    tokio::time::timeout(
+        WAIT,
+        retirements.wait_for(|waiting| waiting.iter().any(|(_, _, _, of)| *of == id)),
+    )
+    .await
+    .expect("the global's hub waits for its chooser in time")
+    .expect("the hub lives");
+    // Its retirement's last step is to withdraw `loaded`: from then it
+    // waits for its parent in its drain, which the cell's drain must find
+    // it in.
+    withdrawn(&holder.hub, id).await;
+    let drained = Instant::now();
+    holder.readiness.drain().await.expect("the cell drains");
+    let refused = || taken.offered() - taken.served().forwards;
+    while refused() == 0 {
+        assert!(
+            drained.elapsed() < BOUND + SETUP + WAIT,
+            "the retiree never refused"
+        );
+        ask(&held.segment).await.expect("answered by a cell");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let took = drained.elapsed();
+    assert!(
+        took >= BOUND,
+        "stopped taking work {took:?} after its cell began to drain"
+    );
+
+    assert!(other.forwards() > 0, "another cell answered");
+    events.record("test:release:held");
+    holding
+        .await
+        .expect("the held request's task")
+        .expect("the held request answered");
+    ended.await.expect("the retiree's task");
+    proxy.set(Mode::Forward);
+}
+
 /// A model cell no global cell follows: its retiree is told at once that
 /// it is acknowledged, and waits out the setup timeout alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -442,4 +508,30 @@ async fn gated<H: Next<Prompt, Chunk> + Send + Sync + 'static>(
     });
     events.wait_for(&format!("C:{text}"), WAIT).await;
     answer
+}
+
+/// Wait until `instance` no longer announces `loaded` at `hub`.
+async fn withdrawn(hub: &Hub, instance: InstanceId) {
+    use velo::discovery::ServiceDiscovery as _;
+    let client = velo_hub::client::HubClient::builder()
+        .host("127.0.0.1")
+        .public_port(hub.public_addr().port())
+        .control_port(hub.control_addr().port())
+        .build()
+        .expect("valid test fixture");
+    let loaded = gdl_model::segment_service("f", SegmentPhase::Loaded);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let instances = client
+            .services()
+            .get_instances(&loaded)
+            .await
+            .expect("the hub answers");
+        if !instances.contains(&instance) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "`loaded` not withdrawn in time");
+        // The hub is asked again a poll later, as an instance asks it.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
