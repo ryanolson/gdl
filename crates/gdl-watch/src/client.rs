@@ -88,7 +88,10 @@ impl CellWatcher {
     /// it has read the cell again. A hub that has not yet published its
     /// cell's record holds the watch until it has, since the epoch it
     /// would send is not settled before, and refuses it after 5 s; a peer
-    /// that does not answer within the snapshot's bound is refused too.
+    /// that does not answer within the snapshot's bound is refused too. A
+    /// hub that serves as many watches of a route as its cap refuses one
+    /// more at once, with 503 and a `Retry-After`, as an error like any
+    /// other.
     pub async fn watch(
         &self,
         hub: &str,

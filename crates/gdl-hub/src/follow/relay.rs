@@ -41,15 +41,18 @@ use std::task::{Context, Poll};
 
 use futures::Stream;
 use futures::stream::BoxStream;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use velo_hub::protocol::RegistrationEpoch;
 use velo_hub::store::{Incarnation, Removal};
 use velo_hub::velo::InstanceId;
 
+mod changes;
 mod installed;
 
 pub(crate) use installed::Installed;
+
+use changes::Changes;
 
 use super::avoid::Avoiding;
 use super::offer::{Choosers, Offer};
@@ -96,11 +99,7 @@ impl Relay {
                 generations: HashMap::new(),
                 follows: HashMap::new(),
                 closing: HashMap::new(),
-                changes: Changes {
-                    all: broadcast::channel(buffer).0,
-                    one: HashMap::new(),
-                    buffer,
-                },
+                changes: Changes::new(buffer),
                 ready: HashMap::new(),
                 health,
                 choosers,
@@ -473,7 +472,7 @@ impl Relay {
     /// How many channels of cells watched alone the relay holds.
     #[cfg(test)]
     pub(crate) fn channels(&self) -> usize {
-        self.lock().changes.one.values().map(HashMap::len).sum()
+        self.lock().changes.channels()
     }
 
     /// A watch of the relay: its snapshot, then each change.
@@ -481,7 +480,7 @@ impl Relay {
         let counted = self.watchers.count();
         let (snapshot, events) = {
             let shared = self.lock();
-            (shared.snapshot(), shared.changes.all.subscribe())
+            (shared.snapshot(), shared.changes.subscribe_all())
         };
         FollowsWatch {
             events: self.watchers.stream(counted, snapshot, events),
@@ -497,6 +496,19 @@ impl Relay {
     /// The cells the follower follows, by class and name, as it changes.
     pub(crate) fn following(&self) -> watch::Receiver<BTreeMap<(String, String), u64>> {
         self.following.subscribe()
+    }
+
+    /// The snapshots built and the subscriptions taken for watches of the
+    /// relay and of one follow.
+    #[cfg(test)]
+    pub(crate) fn work(&self) -> (usize, usize) {
+        self.lock().changes.work.counted()
+    }
+
+    /// How many watches of one follow are open, as it changes.
+    #[cfg(test)]
+    pub(crate) fn one_watchers(&self) -> watch::Receiver<usize> {
+        self.one.watchers()
     }
 
     /// End every watch: the hub stops.
@@ -529,58 +541,6 @@ struct Shared {
     releases: mpsc::UnboundedSender<Release>,
     /// The retirements waited for, for whoever needs to see them.
     retirements: watch::Sender<HashSet<Retirement>>,
-}
-
-/// Where the relay's changes are sent: to the watches of the whole relay,
-/// and to the watches of the one follow each names, on a channel of the
-/// cell's own, so that such a watch is sent its cell's changes alone
-/// rather than every change, to drop all but its own: with a watch of
-/// each cell, that would cost each change a copy per cell.
-struct Changes {
-    all: broadcast::Sender<FollowEvent>,
-    /// By class, then by cell, so that finding a change's channel by the
-    /// names it carries allocates nothing; a channel no watch reads any
-    /// more is dropped when its last watch closes.
-    one: HashMap<String, HashMap<String, broadcast::Sender<FollowEvent>>>,
-    buffer: usize,
-}
-
-impl Changes {
-    fn send(&mut self, event: FollowEvent) {
-        if !self.one.is_empty()
-            && let Some((class, cell)) = event.cell()
-            && let Some(cells) = self.one.get_mut(class)
-            && let Some(channel) = cells.get(cell)
-        {
-            let _ = channel.send(event.clone());
-        }
-        let _ = self.all.send(event);
-    }
-
-    /// Drop the channel of the cell `cell` of `class` if no watch reads it.
-    fn release(&mut self, class: &str, cell: &str) {
-        if let Some(cells) = self.one.get_mut(class)
-            && cells
-                .get(cell)
-                .is_some_and(|channel| channel.receiver_count() == 0)
-        {
-            cells.remove(cell);
-            if cells.is_empty() {
-                self.one.remove(class);
-            }
-        }
-    }
-
-    /// Subscribe to the changes of the cell `cell` of `class` alone.
-    fn subscribe_one(&mut self, class: &str, cell: &str) -> broadcast::Receiver<FollowEvent> {
-        let buffer = self.buffer;
-        self.one
-            .entry(class.to_string())
-            .or_default()
-            .entry(cell.to_string())
-            .or_insert_with(|| broadcast::channel(buffer).0)
-            .subscribe()
-    }
 }
 
 /// One cell's current follow: its generation, what it exposes once its
@@ -834,6 +794,8 @@ impl Shared {
     /// begins with them, its closing ones included, then the marker; only
     /// the marker when it has none.
     fn followed(&self, class: &str, cell: &str) -> Vec<FollowEvent> {
+        #[cfg(test)]
+        self.changes.work.snapshot();
         let mut events = Vec::new();
         self.snapshot_of(class, cell, &mut events);
         events.push(FollowEvent::Synced);
@@ -843,6 +805,8 @@ impl Shared {
     /// Every installed follow, by class and cell, each cell's closing
     /// follows before its current one, then the marker.
     fn snapshot(&self) -> Vec<FollowEvent> {
+        #[cfg(test)]
+        self.changes.work.snapshot();
         let mut cells: BTreeSet<(&str, &str)> = BTreeSet::new();
         for (class, follows) in &self.follows {
             for (cell, follow) in follows {
