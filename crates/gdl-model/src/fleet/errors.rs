@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::Error;
+use crate::{Error, Problem, Problems};
 
 /// Why a fleet file does not fit the placement it deploys.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +65,22 @@ pub enum FleetError {
         /// Its home.
         home: String,
     },
+    /// A cell of a class that another class sends to has no home.
+    MissingHome {
+        /// The cell.
+        cell: String,
+        /// Its class.
+        class: String,
+        /// The classes that send to it.
+        parents: Vec<String>,
+    },
+    /// A cell of a class that nothing sends to has a home.
+    HomeOfTopClass {
+        /// The cell.
+        cell: String,
+        /// Its class.
+        class: String,
+    },
     /// A cell's home is of a class that does not send to the cell's class.
     HomeNotParent {
         /// The cell.
@@ -87,61 +103,122 @@ pub enum FleetTable {
     Cell(String),
 }
 
-impl fmt::Display for FleetTable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl FleetTable {
+    /// The table's path, without its brackets.
+    fn path(&self) -> String {
         match self {
-            Self::Class(name) => write!(f, "[class.{name}]"),
-            Self::Cell(name) => write!(f, "[cell.{name}]"),
+            Self::Class(name) => format!("class.{name}"),
+            Self::Cell(name) => format!("cell.{name}"),
         }
     }
 }
 
-impl fmt::Display for FleetError {
+impl fmt::Display for FleetTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        write!(f, "[{}]", self.path())
+    }
+}
+
+impl FleetError {
+    /// The problem, with the table and the key it is in; its reader adds
+    /// the file.
+    pub fn problem(&self) -> Problem {
+        let class = |name: &str| Some(format!("class.{name}"));
+        let cell = |name: &str| Some(format!("cell.{name}"));
+        let key = |key: &str| Some(key.to_string());
+        let (table, key, message) = match self {
             Self::UnknownClass { table, class } => {
                 // A class table's own name is the class; a cell names it
                 // with its `class` key.
                 let key = match table {
-                    FleetTable::Class(_) => "",
-                    FleetTable::Cell(_) => " class",
+                    FleetTable::Class(_) => None,
+                    FleetTable::Cell(_) => key("class"),
                 };
-                write!(f, "{table}{key}: the placement has no class `{class}`")
+                (
+                    Some(table.path()),
+                    key,
+                    format!("the placement has no class `{class}`"),
+                )
             }
             Self::ReadyNotInClass {
                 table,
                 segment,
                 class,
-            } => write!(
-                f,
-                "{table} ready: `{segment}` is not a segment of class `{class}`"
+            } => (
+                Some(table.path()),
+                Some(format!("ready.{segment}")),
+                format!("not a segment of class `{class}`"),
             ),
-            Self::ZeroReady { table, segment } => {
-                write!(f, "{table} ready: `{segment}` is 0; a quorum is at least 1")
+            Self::ZeroReady { table, segment } => (
+                Some(table.path()),
+                Some(format!("ready.{segment}")),
+                "is 0; a quorum is at least 1".into(),
+            ),
+            Self::RequiresNotSent {
+                class: name,
+                required,
+            } => (
+                class(name),
+                Some(format!("requires.{required}")),
+                format!("not a class that `{name}` sends to"),
+            ),
+            Self::ZeroRequires {
+                class: name,
+                required,
+            } => (
+                class(name),
+                Some(format!("requires.{required}")),
+                "is 0; a requirement is at least 1".into(),
+            ),
+            Self::InvalidCellName { cell: name, reason } => (cell(name), None, reason.clone()),
+            Self::InvalidRegion { cell: name, reason } => {
+                (cell(name), key("region"), reason.clone())
             }
-            Self::RequiresNotSent { class, required } => write!(
-                f,
-                "[class.{class}] requires: `{required}` is not a class that `{class}` sends to"
+            Self::UnknownHome { cell: name, home } => (
+                cell(name),
+                key("home"),
+                format!("the fleet has no cell `{home}`"),
             ),
-            Self::ZeroRequires { class, required } => write!(
-                f,
-                "[class.{class}] requires: `{required}` is 0; a requirement is at least 1"
-            ),
-            Self::InvalidCellName { cell, reason } => write!(f, "[cell.{cell}]: {reason}"),
-            Self::InvalidRegion { cell, reason } => write!(f, "[cell.{cell}] region: {reason}"),
-            Self::UnknownHome { cell, home } => {
-                write!(f, "[cell.{cell}] home: the fleet has no cell `{home}`")
+            Self::MissingHome {
+                cell: name,
+                class,
+                parents,
+            } => {
+                let parents: Vec<String> = parents.iter().map(|p| format!("`{p}`")).collect();
+                (
+                    cell(name),
+                    key("home"),
+                    format!(
+                        "missing; a cell of class `{class}` names its parent, a cell of a class that sends to it: {}",
+                        parents.join(", ")
+                    ),
+                )
             }
+            Self::HomeOfTopClass { cell: name, class } => (
+                cell(name),
+                key("home"),
+                format!("no class sends to `{class}`, so its cells have no parent"),
+            ),
             Self::HomeNotParent {
-                cell,
+                cell: name,
                 home,
                 home_class,
                 class,
-            } => write!(
-                f,
-                "[cell.{cell}] home: cell `{home}` is of class `{home_class}`, which does not send to `{class}`; a home is a cell of a class that sends to the cell's"
+            } => (
+                cell(name),
+                key("home"),
+                format!(
+                    "cell `{home}` is of class `{home_class}`, which does not send to `{class}`; a home is a cell of a class that sends to the cell's"
+                ),
             ),
-        }
+        };
+        Problem::at(table, key, message)
+    }
+}
+
+impl fmt::Display for FleetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.problem().fmt(f)
     }
 }
 
@@ -162,6 +239,12 @@ impl fmt::Display for FleetErrors {
 }
 
 impl std::error::Error for FleetErrors {}
+
+impl From<FleetErrors> for Problems {
+    fn from(errors: FleetErrors) -> Self {
+        Problems(errors.0.iter().map(FleetError::problem).collect())
+    }
+}
 
 impl From<FleetErrors> for Error {
     fn from(errors: FleetErrors) -> Self {

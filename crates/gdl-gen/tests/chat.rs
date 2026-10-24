@@ -380,7 +380,7 @@ fn every_problem_in_a_spec_is_reported_at_once() {
     let error = error.to_string();
     for expected in [
         // A pin to a type no node crate declares.
-        "[nodes] pin `Engine`: no [nodes] crate offers `chat_engine_mock::Engin`",
+        "[nodes] pin.Engine: no [nodes] crate offers `chat_engine_mock::Engin`",
         // Nodes whose crate is not listed.
         "node `Detokenize`: no [nodes] crate offers it",
         "node `Format`: no [nodes] crate offers it",

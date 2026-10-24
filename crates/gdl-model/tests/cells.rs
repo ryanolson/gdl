@@ -93,6 +93,8 @@ fn a_classed_placement_without_cells_keeps_its_hash() {
 
 /// Spelled-out defaults, and a table holding only defaults, are no table:
 /// the same placement, hash, and text, whatever class the table names.
+/// Its name is still checked: see
+/// `a_spelled_default_for_a_missing_name_is_refused`.
 #[test]
 fn defaults_are_not_recorded() {
     let plain = parsed("");
@@ -110,7 +112,11 @@ fn defaults_are_not_recorded() {
         assert_eq!(spelled, plain, "{extra}");
         assert_eq!(spelled.hash(), CLASSED_HASH, "{extra}");
         assert_eq!(toml::to_string(&spelled).expect("toml"), text, "{extra}");
-        layout(&manifest(), &spelled).expect("a layout");
+        // A class that no boundary enters, or that the placement lacks, is
+        // still refused by name (below).
+        if extra.starts_with("[cells.model_x]") {
+            layout(&manifest(), &spelled).expect("a layout");
+        }
     }
     for class in ["model_x", "global", "zz"] {
         let spelled = built().cell_policy(class, CellPolicy::default());
@@ -490,4 +496,33 @@ fn an_unclassed_shared_segment_cannot_make_a_class_entered() {
     .expect("a placement");
     let errors = refusals(&apart);
     assert!(!errors.iter().any(|e| e.contains("[cells.")), "{errors:?}");
+}
+
+/// A table that spells out only defaults is the placement that leaves it
+/// unsaid, with its hash, but its name is still checked: a default for a
+/// class or a node the placement lacks is refused as any value is.
+#[test]
+fn a_spelled_default_for_a_missing_name_is_refused() {
+    for (extra, expected) in [
+        (
+            "[cells.zz]\npolicy = 'home_first'\n",
+            "cell policy `[cells.zz]`: the placement has no class `zz`",
+        ),
+        (
+            "[cells.global]\nmax_near = 16\n",
+            "cell policy `[cells.global]`: no class boundary enters class `global`; a cell policy picks a cell of a class that another class sends to",
+        ),
+        (
+            "[routing]\nGhost = 'round_robin'\n",
+            "request router `Ghost` must target a request boundary",
+        ),
+    ] {
+        let spelled = parsed(extra);
+        assert_eq!(spelled, built(), "{extra}");
+        assert_eq!(spelled.hash(), CLASSED_HASH, "{extra}");
+        assert_eq!(refusals(&spelled), [expected], "{extra}");
+    }
+    // The control: a default spelled for a class a boundary enters.
+    let entered = parsed("[cells.model_x]\npolicy = 'home_first'\n");
+    layout(&manifest(), &entered).expect("a layout");
 }

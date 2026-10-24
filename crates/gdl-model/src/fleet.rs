@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::cell::{check_cell_name, check_region_name};
-use crate::{CellSettings, DirectoryBackend, Error, Layout};
+use crate::{CellSettings, DirectoryBackend, Layout, Problems, read_toml};
 
 mod errors;
 
@@ -23,7 +23,7 @@ pub use errors::{FleetError, FleetErrors, FleetTable};
 /// [cell.model-x-01-us-east-1]
 /// class = "model_x"
 /// region = "us-east-1"
-/// home = "global-us-east-1"          # optional: a cell of a class that sends to this one
+/// home = "global-us-east-1"          # the parent cell: required when another class sends to this one
 /// ready = { e = 8 }                  # optional: overrides the class's default
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,27 +51,44 @@ struct ClassDefaults {
 struct CellSpec {
     class: String,
     region: String,
+    /// The parent cell: the cell of a class that sends to this one that
+    /// follows this cell and offers it work. Required for a cell of a
+    /// class that another class sends to, and refused for one of a class
+    /// that nothing sends to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     home: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ready: BTreeMap<String, u32>,
 }
 
+impl CellSpec {
+    /// Whether this cell can be `child`'s parent: its class sends to the
+    /// child's. Every cell of the fleet deploys one layout, so the classes
+    /// alone decide.
+    fn sends_to(&self, child: &CellSpec, sends: &Names<'_>) -> bool {
+        sends
+            .get(self.class.as_str())
+            .is_some_and(|into| into.contains(child.class.as_str()))
+    }
+}
+
 impl Fleet {
     /// Parse a fleet file. An unknown key anywhere is refused; what the
     /// values mean is checked against a layout by [`Fleet::check`].
-    pub fn from_toml(text: &str) -> Result<Self, Error> {
-        toml::from_str(text).map_err(|e| Error::new(e.to_string()))
+    pub fn from_toml(text: &str) -> Result<Self, Problems> {
+        read_toml(text)
     }
 
     /// Check the fleet against the layout of the placement it deploys,
     /// reporting every problem. A cell whose class the placement does not
-    /// have is reported once: its quorum, and whether its home is of a
-    /// parent class, are not judged against it.
-    pub fn check(&self, layout: &Layout) -> Result<(), FleetErrors> {
-        let segments = layout.class_segments();
-        let mut sends: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for boundary in layout.boundaries() {
+    /// have is reported once: its quorum, and its home, are not judged
+    /// against it. Without a layout (the spec did not read), only what
+    /// needs none is judged: the cells' names and regions, that each home
+    /// is a cell of the fleet, and that no count is 0.
+    pub fn check(&self, layout: Option<&Layout>) -> Result<(), FleetErrors> {
+        let segments = layout.map(Layout::class_segments).unwrap_or_default();
+        let mut sends = Names::new();
+        for boundary in layout.map(Layout::boundaries).unwrap_or_default() {
             sends
                 .entry(boundary.from.as_str())
                 .or_default()
@@ -80,6 +97,17 @@ impl Fleet {
         let mut errors = Vec::new();
         for (class, defaults) in &self.classes {
             let table = || FleetTable::Class(class.clone());
+            // A count of 0 is wrong whatever the classes are.
+            if layout.is_none() {
+                zero_ready(table, &defaults.ready, &mut errors);
+                for (required, _) in defaults.requires.iter().filter(|(_, n)| **n == 0) {
+                    errors.push(FleetError::ZeroRequires {
+                        class: class.clone(),
+                        required: required.clone(),
+                    });
+                }
+                continue;
+            }
             let Some(members) = segments.get(class.as_str()) else {
                 errors.push(FleetError::UnknownClass {
                     table: table(),
@@ -117,38 +145,21 @@ impl Fleet {
                     reason,
                 });
             }
-            let members = segments.get(cell.class.as_str());
-            match members {
-                Some(members) => check_ready(table, &cell.class, members, &cell.ready, &mut errors),
-                None => errors.push(FleetError::UnknownClass {
-                    table: table(),
-                    class: cell.class.clone(),
-                }),
+            if layout.is_none() {
+                zero_ready(table, &cell.ready, &mut errors);
+            } else {
+                match segments.get(cell.class.as_str()) {
+                    Some(members) => {
+                        check_ready(table, &cell.class, members, &cell.ready, &mut errors)
+                    }
+                    None => errors.push(FleetError::UnknownClass {
+                        table: table(),
+                        class: cell.class.clone(),
+                    }),
+                }
             }
-            let Some(home) = &cell.home else {
-                continue;
-            };
-            // Whether the home is a cell of the fleet needs no class; whether
-            // it is a parent needs both classes, and an unknown one is
-            // reported as its own cell's problem.
-            let Some(parent) = self.cells.get(home) else {
-                errors.push(FleetError::UnknownHome {
-                    cell: name.clone(),
-                    home: home.clone(),
-                });
-                continue;
-            };
-            let sends_here = sends
-                .get(parent.class.as_str())
-                .is_some_and(|into| into.contains(cell.class.as_str()));
-            if members.is_some() && segments.contains_key(parent.class.as_str()) && !sends_here {
-                errors.push(FleetError::HomeNotParent {
-                    cell: name.clone(),
-                    home: home.clone(),
-                    home_class: parent.class.clone(),
-                    class: cell.class.clone(),
-                });
-            }
+            let placed = layout.map(|_| (&segments, &sends));
+            errors.extend(self.home_problem(name, cell, placed));
         }
         if errors.is_empty() {
             Ok(())
@@ -157,10 +168,61 @@ impl Fleet {
         }
     }
 
+    /// What is wrong with `cell`'s home, if anything. Whether it names a
+    /// cell of the fleet needs no layout; whether a cell needs one, and
+    /// whether it names a parent, need the classes, and a cell of a class
+    /// the placement does not have is reported as that cell's problem.
+    fn home_problem(
+        &self,
+        name: &str,
+        cell: &CellSpec,
+        placed: Option<(&Names<'_>, &Names<'_>)>,
+    ) -> Option<FleetError> {
+        if let Some(home) = &cell.home
+            && !self.cells.contains_key(home)
+        {
+            return Some(FleetError::UnknownHome {
+                cell: name.into(),
+                home: home.clone(),
+            });
+        }
+        let (segments, sends) = placed?;
+        if !segments.contains_key(cell.class.as_str()) {
+            return None;
+        }
+        let parents: Vec<String> = sends
+            .iter()
+            .filter(|(_, into)| into.contains(cell.class.as_str()))
+            .map(|(from, _)| from.to_string())
+            .collect();
+        match &cell.home {
+            None if parents.is_empty() => None,
+            None => Some(FleetError::MissingHome {
+                cell: name.into(),
+                class: cell.class.clone(),
+                parents,
+            }),
+            Some(_) if parents.is_empty() => Some(FleetError::HomeOfTopClass {
+                cell: name.into(),
+                class: cell.class.clone(),
+            }),
+            Some(home) => {
+                let parent = &self.cells[home];
+                (segments.contains_key(parent.class.as_str()) && !parent.sends_to(cell, sends))
+                    .then(|| FleetError::HomeNotParent {
+                        cell: name.into(),
+                        home: home.clone(),
+                        home_class: parent.class.clone(),
+                        class: cell.class.clone(),
+                    })
+            }
+        }
+    }
+
     /// The settings of the cell `name`, with its quorum resolved: for each
     /// segment, the cell's own `ready` if it sets that segment, else its
     /// class's default; a segment with neither is left to
-    /// [`CellSettings::quorum`]'s fallback. Its `requires` is its class's. The directory, seeds, hub
+    /// [`CellSettings::quorum`]'s fallback. Its `requires` is its class's. The directory, hub
     /// address, and summary period are not in the fleet file and take their defaults. Meant for a fleet that
     /// [`Fleet::check`] accepted, whose `ready` keys are all segments of
     /// the cell's class.
@@ -177,7 +239,6 @@ impl Fleet {
             region: cell.region.clone(),
             home: cell.home.clone(),
             directory: DirectoryBackend::default(),
-            seeds: Vec::new(),
             ready,
             requires: defaults
                 .map(|class| class.requires.clone())
@@ -185,6 +246,24 @@ impl Fleet {
             hub: None,
             summary: CellSettings::DEFAULT_SUMMARY,
         })
+    }
+}
+
+/// Names by a class: its segments, or the classes it sends to.
+type Names<'a> = BTreeMap<&'a str, BTreeSet<&'a str>>;
+
+/// Every `ready` count is at least 1: what can be judged of `ready`
+/// without the classes.
+fn zero_ready(
+    table: impl Fn() -> FleetTable,
+    ready: &BTreeMap<String, u32>,
+    errors: &mut Vec<FleetError>,
+) {
+    for (segment, _) in ready.iter().filter(|(_, count)| **count == 0) {
+        errors.push(FleetError::ZeroReady {
+            table: table(),
+            segment: segment.clone(),
+        });
     }
 }
 

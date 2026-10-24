@@ -23,15 +23,18 @@ impl ServiceBinding {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EntrySpec {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) forward: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) operator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) nested: Option<Box<EntrySpec>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) backward: Vec<String>,
 }
 #[derive(Debug, Clone)]

@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let spec: DeploymentSpec = serde_json::from_slice(&std::fs::read(path)?)?;
     let spec = DeploymentSpec::new(spec.graph, spec.placement)?;
-    let cell = gdl_hub::cell_from_env()?;
+    let cell = gdl_hub::cell_from_env(&spec)?;
     let mut config = HubConfig::default();
     config.server.public_port = HUB_PUBLIC_PORT;
     config.server.control_port = HUB_CONTROL_PORT;

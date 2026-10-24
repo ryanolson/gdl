@@ -13,45 +13,51 @@ use super::{ClassBoundary, Placement, PlacementError, check_name_shape};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CellPolicy {
-    /// The policy's name, `home_first` by default. Named like a selector,
+    /// The policy's name, [`CellPolicy::DEFAULT_POLICY`] by default. Named like a selector,
     /// and not checked against a list, since a custom policy can be
     /// registered later.
     #[serde(skip_serializing_if = "is_default_policy")]
     pub policy: String,
     /// Cells in other regions within this round trip, in milliseconds,
-    /// are near; 80 by default.
+    /// are near; [`CellPolicy::DEFAULT_SPILL_RTT_MS`] by default.
     #[serde(skip_serializing_if = "is_default_spill_rtt_ms")]
     pub spill_rtt_ms: u64,
-    /// At most this many near cells are offered; 16 by default. 0 offers
-    /// home cells only.
+    /// At most this many near cells are offered;
+    /// [`CellPolicy::DEFAULT_MAX_NEAR`] by default. 0 offers home cells
+    /// only.
     #[serde(skip_serializing_if = "is_default_max_near")]
     pub max_near: u32,
 }
 
-const DEFAULT_POLICY: &str = "home_first";
-const DEFAULT_SPILL_RTT_MS: u64 = 80;
-const DEFAULT_MAX_NEAR: u32 = 16;
+impl CellPolicy {
+    /// `policy` when the table does not set it: `home_first`.
+    pub const DEFAULT_POLICY: &'static str = "home_first";
+    /// `spill_rtt_ms` when the table does not set it: 80.
+    pub const DEFAULT_SPILL_RTT_MS: u64 = 80;
+    /// `max_near` when the table does not set it: 16.
+    pub const DEFAULT_MAX_NEAR: u32 = 16;
+}
 
 impl Default for CellPolicy {
     fn default() -> Self {
         Self {
-            policy: DEFAULT_POLICY.into(),
-            spill_rtt_ms: DEFAULT_SPILL_RTT_MS,
-            max_near: DEFAULT_MAX_NEAR,
+            policy: Self::DEFAULT_POLICY.into(),
+            spill_rtt_ms: Self::DEFAULT_SPILL_RTT_MS,
+            max_near: Self::DEFAULT_MAX_NEAR,
         }
     }
 }
 
 fn is_default_policy(policy: &str) -> bool {
-    policy == DEFAULT_POLICY
+    policy == CellPolicy::DEFAULT_POLICY
 }
 
 fn is_default_spill_rtt_ms(value: &u64) -> bool {
-    *value == DEFAULT_SPILL_RTT_MS
+    *value == CellPolicy::DEFAULT_SPILL_RTT_MS
 }
 
 fn is_default_max_near(value: &u32) -> bool {
-    *value == DEFAULT_MAX_NEAR
+    *value == CellPolicy::DEFAULT_MAX_NEAR
 }
 
 /// The `[cells]` tables as read, without those that hold only defaults:
@@ -91,6 +97,15 @@ pub(super) fn hash(h: &mut Fnv, cells: &BTreeMap<String, CellPolicy>) {
     }
 }
 
+/// Every class a `[cells]` table names, with a value or with defaults only.
+fn named(placement: &Placement) -> BTreeSet<&String> {
+    placement
+        .cells
+        .keys()
+        .chain(&placement.spelled.cells)
+        .collect()
+}
+
 /// The checks that need only the placement: each table's policy name, and
 /// that it names a class the placement has.
 pub(super) fn judge(placement: &Placement, errors: &mut Vec<PlacementError>) {
@@ -101,6 +116,8 @@ pub(super) fn judge(placement: &Placement, errors: &mut Vec<PlacementError>) {
                 reason,
             });
         }
+    }
+    for class in named(placement) {
         if placement.classes.is_empty() {
             errors.push(PlacementError::CellPolicyWithoutClasses {
                 class: class.clone(),
@@ -124,7 +141,7 @@ pub(super) fn entered(
     errors: &mut Vec<PlacementError>,
 ) -> BTreeMap<String, CellPolicy> {
     let into: BTreeSet<&str> = boundaries.iter().map(|b| b.into.as_str()).collect();
-    for class in placement.cells.keys() {
+    for class in named(placement) {
         if placement.classes.contains_key(class)
             && !into.contains(class.as_str())
             && !undecided.may_enter(class)

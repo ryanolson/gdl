@@ -6,6 +6,7 @@
 
 mod barrier;
 mod cell;
+mod origins;
 mod system;
 
 use std::collections::BTreeMap;
@@ -79,6 +80,7 @@ pub struct ProcessConfig<H> {
     /// Each routing selector's table, by the selector's name.
     selector: BTreeMap<String, toml::Table>,
     cell: Option<CellSettings>,
+    cell_origins: origins::CellOrigins,
     /// The runtime's own settings.
     pub runtime: RuntimeConfig,
     /// The tables of the hosted implementations.
@@ -106,7 +108,6 @@ struct Settings {
     system: SystemSettings,
     #[serde(default)]
     selector: BTreeMap<String, toml::Table>,
-    cell: Option<CellSettings>,
 }
 
 /// What a segment hosts, as its binary declares it: the settings type's
@@ -189,7 +190,10 @@ impl<H: Hosted> ProcessConfig<H> {
         for path in paths {
             figment = figment.merge(Toml::file_exact(path.as_ref()));
         }
-        Self::from_figment(figment.merge(Self::dynamo_env()).merge(Self::env()))
+        let figment = figment
+            .merge(Self::dynamo_env())
+            .merge(origins::environment::<H>());
+        Self::from_figment(figment)
     }
 
     /// dynamo's system-port variables, as `[system]` keys.
@@ -226,6 +230,16 @@ impl<H: Hosted> ProcessConfig<H> {
                 )));
             }
         }
+        // Read apart, so that a problem with it names its file or its
+        // variable.
+        let (cell, cell_origins) = match settings.remove("cell") {
+            Some(cell) => {
+                let (cell, origins) = origins::CellOrigins::read(&figment, cell)
+                    .map_err(|problems| placement(problems.to_string()))?;
+                (Some(cell), origins)
+            }
+            None => (None, origins::CellOrigins::default()),
+        };
         let settings = Settings::deserialize(&Value::Dict(Tag::Default, settings))
             .map_err(|e| placement(e.to_string()))?;
         let hosted = H::deserialize(&Value::Dict(Tag::Default, hosted))
@@ -239,7 +253,8 @@ impl<H: Hosted> ProcessConfig<H> {
             min_replicas: settings.min_replicas,
             system: settings.system,
             selector: settings.selector,
-            cell: settings.cell,
+            cell,
+            cell_origins,
             runtime: settings.runtime,
             hosted,
         };
@@ -251,18 +266,6 @@ impl<H: Hosted> ProcessConfig<H> {
             ));
         }
         Ok(config)
-    }
-
-    /// The `GDL_` environment, as this type reads it. The case flag comes
-    /// last: figment's `map` and `filter` reset it.
-    fn env() -> Env {
-        Env::prefixed("GDL_")
-            .map(|key| canonical::<H>(key.as_str()).into())
-            .filter(|key| {
-                let first = key.as_str().split('.').next().unwrap_or_default();
-                KEYS.contains(&first) || H::KEYS.contains(&first)
-            })
-            .lowercase(false)
     }
 
     /// The settings without the hosted tables, and the tables: a binary
@@ -278,6 +281,7 @@ impl<H: Hosted> ProcessConfig<H> {
             system,
             selector,
             cell,
+            cell_origins,
             runtime,
             hosted,
         } = self;
@@ -291,6 +295,7 @@ impl<H: Hosted> ProcessConfig<H> {
             system,
             selector,
             cell,
+            cell_origins,
             runtime,
             hosted: (),
         };
@@ -372,7 +377,7 @@ impl<H> ProcessConfig<H> {
         // cell would otherwise be counted toward that cell's quorum.
         if let Some(cell) = &self.cell {
             cell.check(&layout, segment)
-                .map_err(|e| placement(e.to_string()))?;
+                .map_err(|problems| placement(self.cell_origins.locate(problems).to_string()))?;
             // A chooser that cannot run its cell policy refuses before it
             // registers or loads.
             #[cfg(feature = "hub")]
