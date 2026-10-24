@@ -481,6 +481,7 @@ async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::Followe
                     offered: true,
                     revision: 1,
                     leases: 0,
+                    unread: false,
                 });
             }
             FollowEvent::Exposed { cell, peer, .. } => {

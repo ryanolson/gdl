@@ -19,12 +19,19 @@
 //! cells in the directory, follows each over its watch, and relays what it
 //! follows to its own instances (`GET /v1/ext/gdl-cell/follows`, as
 //! [`gdl_watch::FollowEvent`]s, which a [`gdl_watch::CellWatcher`] reads
-//! too). A follow whose cell takes no work, or whose link is lost, is not
-//! offered to its choosers, and closes once each has acknowledged that it
-//! holds no offer to it (`POST /v1/ext/gdl-cell/instances/{id}/unoffered`
-//! on the control listener, a [`gdl_watch::Unoffered`]). The watches'
-//! events and their client are `gdl-watch`'s, so that a segment instance
-//! reads the relay without linking the hub.
+//! too), and a watch of one follow of it alone, ordered as the relay is
+//! (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`). A followed cell whose
+//! watch sends an event of a kind the hub does not know is withheld: the
+//! relay shows it `unavailable`, its instances hidden, and not offered,
+//! until the hub has read it again from a new watch of it, which replaces
+//! the first. A follow whose cell takes no work, or whose link is lost, is
+//! not offered to its choosers either, and closes once each has
+//! acknowledged that it holds no offer to it
+//! (`POST /v1/ext/gdl-cell/instances/{id}/unoffered` on the control
+//! listener, a [`gdl_watch::Unoffered`]); a withheld follow does not close
+//! while its link reads it again. The watches' events and their client are
+//! `gdl-watch`'s, so that a segment instance reads the relay without
+//! linking the hub.
 mod cell;
 mod fanout;
 mod follow;

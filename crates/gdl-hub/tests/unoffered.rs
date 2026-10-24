@@ -387,6 +387,8 @@ fn global_hub_relay(hub: &Hub) -> impl Stream<Item = FollowEvent> + Unpin {
             .expect("the hub serves the relay")
     })
     .flatten()
+    // A relay of this build sends no kind this build does not know.
+    .map(|item| item.event().expect("an event of a known kind"))
     .boxed()
 }
 

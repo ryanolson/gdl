@@ -674,3 +674,70 @@ async fn a_lost_watch_past_its_lease_is_no_release() {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
+
+/// A follow link that replaces its watch of the model cell, at an event of
+/// a kind the global's hub does not know, opens the new watch under the
+/// same follow: the model cell's hub counts the follower on through the
+/// replacement, never as a watch closed without a release, so that well
+/// past the cell's lease (2 s here) it still lists the global; and once
+/// the cell drains and the global lets go, its entry declines offers well
+/// before its bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replaced_watch_is_not_a_lost_follower() {
+    const LONGER: &str = "[runtime]\nsetup_timeout_ms = 20000\ndrain_ms = 2000\n";
+    // A setup timeout of 20 s and twice the summary period.
+    const LONGER_BOUND: Duration = Duration::from_secs(22);
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, global) = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let (m1, proxy) = common::boundary::model_proxied_leased(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        LONGER,
+        Duration::from_secs(2),
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    let cells = tables(&chooser);
+    offered(&cells).await;
+    let mut followers = m1.readiness.followers();
+    tokio::time::timeout(WAIT, followers.wait_for(|cells| cells.len() == 1))
+        .await
+        .expect("the global follows the cell in time")
+        .expect("the extension runs");
+
+    // The next load summary, sent once a second, comes as a kind the
+    // global's hub does not know.
+    proxy.rewrite_once(br#""event":"load""#, br#""event":"xoad""#);
+    tokio::time::timeout(WAIT, async {
+        while global.unknown_events() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the global's hub read an unknown event in time");
+    offered(&cells).await;
+    // Past the lease, and a summary period after it, when a lost watch
+    // would have been marked lost.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(
+        m1.readiness.followers().borrow().len(),
+        1,
+        "the replaced watch was counted as closed without a release"
+    );
+
+    let started = std::time::Instant::now();
+    m1.readiness.drain().await.expect("the cell drains");
+    declining(&m1.entries[0], LONGER_BOUND).await;
+    assert!(
+        started.elapsed() < LONGER_BOUND / 2,
+        "declined only at the bound, {:?} after the drain began",
+        started.elapsed()
+    );
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}

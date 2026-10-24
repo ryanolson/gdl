@@ -10,6 +10,17 @@
 //! and its own cell's watch, for the cell's drain, and sends the report, so the wire types, the routes, and the client
 //! live here, where both reach them without the runtime linking the hub's
 //! server.
+//!
+//! A reader ignores the fields of a known event that it does not know, and
+//! fails closed for the cell that an event of a kind it does not know
+//! concerns ([`Watched`]): it does not route to the cell until it has read
+//! it again from a snapshot. So a later build adds what it has to say to
+//! a known event as an optional field, which needs no lockstep, and adds
+//! a kind of event only rarely, since on an earlier reader each one costs
+//! its cell's eligibility until the cell is read again. An event of the
+//! relay names its follow, by class, cell, and generation, so that a
+//! reader knows which cell to fail closed for; one of a kind a reader does
+//! not know that names none ends the relay's watch.
 
 use gdl_cells::{CellState, LoadSummary};
 use serde::{Deserialize, Serialize};
@@ -17,9 +28,11 @@ use velo::{InstanceId, PeerInfo};
 
 mod client;
 mod follows;
+mod watched;
 
 pub use client::{CellWatchError, CellWatcher};
 pub use follows::FollowEvent;
+pub use watched::{UnknownEvent, UnknownFollowEvent, Watched};
 
 /// The name the cell's extension mounts its routes under, at
 /// `/v1/ext/{EXTENSION}`.
@@ -65,6 +78,22 @@ pub struct Follower {
 
 /// The relay's route, under the extension's.
 pub const FOLLOWS_ROUTE: &str = "/follows";
+
+/// The route of a watch of one follow of the relay, under the extension's:
+/// `GET` answers with the follow of the cell `cell` of `class` as a watch
+/// of the relay begins with it, then `synced`, then each event of the
+/// relay that names the cell, of whichever generation, as server-sent
+/// events, until the hub stops or the watcher falls behind; only `synced`
+/// first when the hub has no such follow installed. Its snapshot and the
+/// events after it are ordered as the relay's are, so a reader that met
+/// an event of a kind it does not know for the cell reads the cell from
+/// it from then ([`CellWatcher::follows_of`]).
+pub const FOLLOWED_ROUTE: &str = "/follows/{class}/{cell}";
+
+/// [`FOLLOWED_ROUTE`]'s path for the cell `cell` of `class`.
+pub fn followed_path(class: &str, cell: &str) -> String {
+    format!("/follows/{class}/{cell}")
+}
 
 /// The load report's route, under the extension's, on the hub's control
 /// listener: `POST` with a [`LoadReport`], carrying the credential of the
@@ -175,6 +204,11 @@ pub struct LoadReport {
 /// the watch, and stays as it was sent until it leaves the hub. So a
 /// snapshot is always what an earlier snapshot and every event since it
 /// make.
+///
+/// Every event concerns the watched cell. A field a later build adds to
+/// one is optional, and a reader of this build ignores it; an event of a
+/// kind a reader does not know makes it fail closed for the cell until it
+/// has read the cell again ([`Watched`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum CellWatchEvent {

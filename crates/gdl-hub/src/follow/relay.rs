@@ -29,7 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
 use futures::Stream;
@@ -49,8 +49,13 @@ use gdl_watch::{CellWatchEvent, FollowEvent, Unoffered};
 
 /// The followed cells, and the relay's watchers.
 pub(crate) struct Relay {
-    shared: Mutex<Shared>,
+    /// Shared with each watch of one follow, which releases its cell's
+    /// channel when it closes.
+    shared: Arc<Mutex<Shared>>,
     watchers: Watchers,
+    /// The watchers of one follow each: counted apart, so that the count of
+    /// the relay's watchers is of its whole watches.
+    one: Watchers,
     /// The cells a follower has decided to follow, by class and name, with
     /// the generation of the follow under way or the last one, for whoever
     /// needs to see the follower's decisions.
@@ -72,17 +77,22 @@ impl Relay {
         releases: mpsc::UnboundedSender<Release>,
     ) -> Self {
         Self {
-            shared: Mutex::new(Shared {
+            shared: Arc::new(Mutex::new(Shared {
                 generations: HashMap::new(),
                 follows: HashMap::new(),
                 closing: HashMap::new(),
-                events: broadcast::channel(buffer).0,
+                changes: Changes {
+                    all: broadcast::channel(buffer).0,
+                    one: HashMap::new(),
+                    buffer,
+                },
                 ready: HashMap::new(),
                 health,
                 choosers,
                 releases,
-            }),
+            })),
             watchers: Watchers::new(),
+            one: Watchers::new(),
             following: watch::Sender::new(BTreeMap::new()),
         }
     }
@@ -152,7 +162,7 @@ impl Relay {
     pub(crate) fn install(&self, generation: u64, installed: Installed) {
         let mut shared = self.lock();
         let Shared {
-            follows, events, ..
+            follows, changes, ..
         } = &mut *shared;
         let Some(follow) = follows
             .get_mut(&installed.class)
@@ -168,7 +178,7 @@ impl Relay {
                 .event(&installed.class, &installed.cell, generation)
         });
         for event in installed.snapshot(generation, offering) {
-            let _ = events.send(event);
+            changes.send(event);
         }
         let counted = installed.counted();
         let (class, cell) = (installed.class.clone(), installed.cell.clone());
@@ -184,9 +194,42 @@ impl Relay {
     /// makes the follow offered or not offered is sent after it, at the
     /// next revision.
     pub(crate) fn apply(&self, class: &str, cell: &str, generation: u64, event: CellWatchEvent) {
+        self.change(class, cell, generation, |installed, send| {
+            installed.apply(generation, event, send);
+        });
+    }
+
+    /// The cell watch of the follow `generation` of the cell `cell` of
+    /// `class` sent an event of a kind this build does not know: withhold
+    /// the cell until [`Relay::restore`] (see [`Installed::withhold`]).
+    pub(crate) fn withhold(&self, class: &str, cell: &str, generation: u64) {
+        self.change(class, cell, generation, |installed, send| {
+            installed.withhold(generation, send);
+        });
+    }
+
+    /// The cell of the follow `generation` of the cell `cell` of `class`
+    /// was read again, as `fresh`: it is what the relay shows of the cell,
+    /// which is no longer withheld.
+    pub(crate) fn restore(&self, class: &str, cell: &str, generation: u64, fresh: Installed) {
+        self.change(class, cell, generation, |installed, send| {
+            installed.restore(fresh, generation, send);
+        });
+    }
+
+    /// Change the installed follow `generation` of the cell `cell` of
+    /// `class` by `change`, sending what it sends to the watchers and
+    /// counting the cell again, under the lock.
+    fn change(
+        &self,
+        class: &str,
+        cell: &str,
+        generation: u64,
+        change: impl FnOnce(&mut Installed, &mut dyn FnMut(FollowEvent)),
+    ) {
         let mut shared = self.lock();
         let Shared {
-            follows, events, ..
+            follows, changes, ..
         } = &mut *shared;
         let Some(follow) = follows
             .get_mut(class)
@@ -197,12 +240,10 @@ impl Relay {
         };
         let installed = follow.installed.as_mut().expect("the follow is installed");
         let counted = installed.counted();
-        installed.apply(generation, event, |event| {
-            let _ = events.send(event);
-        });
+        change(installed, &mut |event| changes.send(event));
         let (offered, recounted) = (installed.exposes(), installed.counted());
         if follow.offer.set(offered) {
-            let _ = events.send(follow.offer.event(class, cell, generation));
+            changes.send(follow.offer.event(class, cell, generation));
         }
         if recounted != counted {
             shared.count(class, recounted);
@@ -291,15 +332,47 @@ impl Relay {
         shared.settle_left(&classes, removal.id);
     }
 
+    /// A watch of one follow: the follow of the cell `cell` of `class` as
+    /// a watch of the relay begins with it, then the marker, then each
+    /// change that names the cell, of whichever generation, from the cell's
+    /// own channel ([`Changes`]). The snapshot is taken and the changes
+    /// subscribed to under one hold of the lock, as for a watch of the
+    /// whole relay, so that no change falls between them: a reader that
+    /// reads the cell from this watch, rather than from a watch it already
+    /// had, depends on it.
+    pub(crate) fn watch_of(&self, class: &str, cell: &str) -> FollowsWatch {
+        let counted = self.one.count();
+        let (snapshot, events) = {
+            let mut shared = self.lock();
+            let snapshot = shared.followed(class, cell);
+            (snapshot, shared.changes.subscribe_one(class, cell))
+        };
+        FollowsWatch {
+            events: self.one.stream(counted, snapshot, events),
+            release: Some(ChannelRelease {
+                shared: Arc::clone(&self.shared),
+                class: class.to_string(),
+                cell: cell.to_string(),
+            }),
+        }
+    }
+
+    /// How many channels of cells watched alone the relay holds.
+    #[cfg(test)]
+    pub(crate) fn channels(&self) -> usize {
+        self.lock().changes.one.values().map(HashMap::len).sum()
+    }
+
     /// A watch of the relay: its snapshot, then each change.
     pub(crate) fn watch(&self) -> FollowsWatch {
         let counted = self.watchers.count();
         let (snapshot, events) = {
             let shared = self.lock();
-            (shared.snapshot(), shared.events.subscribe())
+            (shared.snapshot(), shared.changes.all.subscribe())
         };
         FollowsWatch {
             events: self.watchers.stream(counted, snapshot, events),
+            release: None,
         }
     }
 
@@ -316,6 +389,7 @@ impl Relay {
     /// End every watch: the hub stops.
     pub(crate) fn close(&self) {
         self.watchers.close();
+        self.one.close();
     }
 }
 
@@ -331,7 +405,7 @@ struct Shared {
     /// Each cell's earlier follows, by generation, whose links ended and
     /// that have yet to close.
     closing: HashMap<String, HashMap<String, BTreeMap<u64, Closing>>>,
-    events: broadcast::Sender<FollowEvent>,
+    changes: Changes,
     /// Per class, the installed follows whose link last said `ready`.
     ready: HashMap<String, u32>,
     health: watch::Sender<CellHealth>,
@@ -339,6 +413,58 @@ struct Shared {
     choosers: Choosers,
     /// Where each follow the relay closes is sent, for its cell's hub.
     releases: mpsc::UnboundedSender<Release>,
+}
+
+/// Where the relay's changes are sent: to the watches of the whole relay,
+/// and to the watches of the one follow each names, on a channel of the
+/// cell's own, so that such a watch is sent its cell's changes alone
+/// rather than every change, to drop all but its own: with a watch of
+/// each cell, that would cost each change a copy per cell.
+struct Changes {
+    all: broadcast::Sender<FollowEvent>,
+    /// By class, then by cell, so that finding a change's channel by the
+    /// names it carries allocates nothing; a channel no watch reads any
+    /// more is dropped when its last watch closes.
+    one: HashMap<String, HashMap<String, broadcast::Sender<FollowEvent>>>,
+    buffer: usize,
+}
+
+impl Changes {
+    fn send(&mut self, event: FollowEvent) {
+        if !self.one.is_empty()
+            && let Some((class, cell)) = event.cell()
+            && let Some(cells) = self.one.get_mut(class)
+            && let Some(channel) = cells.get(cell)
+        {
+            let _ = channel.send(event.clone());
+        }
+        let _ = self.all.send(event);
+    }
+
+    /// Drop the channel of the cell `cell` of `class` if no watch reads it.
+    fn release(&mut self, class: &str, cell: &str) {
+        if let Some(cells) = self.one.get_mut(class)
+            && cells
+                .get(cell)
+                .is_some_and(|channel| channel.receiver_count() == 0)
+        {
+            cells.remove(cell);
+            if cells.is_empty() {
+                self.one.remove(class);
+            }
+        }
+    }
+
+    /// Subscribe to the changes of the cell `cell` of `class` alone.
+    fn subscribe_one(&mut self, class: &str, cell: &str) -> broadcast::Receiver<FollowEvent> {
+        let buffer = self.buffer;
+        self.one
+            .entry(class.to_string())
+            .or_default()
+            .entry(cell.to_string())
+            .or_insert_with(|| broadcast::channel(buffer).0)
+            .subscribe()
+    }
 }
 
 /// One cell's current follow: its generation, what it exposes once its
@@ -404,7 +530,7 @@ impl Shared {
             self.count(class, false);
         }
         if offer.set(false) {
-            let _ = self.events.send(offer.event(class, cell, generation));
+            self.changes.send(offer.event(class, cell, generation));
         }
         self.closing
             .entry(class.to_string())
@@ -425,17 +551,23 @@ impl Shared {
             cell: cell.to_string(),
             generation,
         };
+        // A withheld cell is not offered while its link reads it again, but
+        // its follow lives on: the link holds it, and it closes only once
+        // the cell, read again, still takes no work, or the link ends.
         if let Some(cells) = self.follows.get_mut(class)
             && cells.get(cell).is_some_and(|follow| {
                 follow.generation == generation
-                    && follow.installed.is_some()
+                    && follow
+                        .installed
+                        .as_ref()
+                        .is_some_and(|installed| !installed.withheld)
                     && follow.offer.closes(choosers)
             })
         {
             let follow = cells.remove(cell).expect("the follow was just found");
             // Not offered, so not ready, and not counted.
             follow.close.cancel();
-            let _ = self.events.send(dropped());
+            self.changes.send(dropped());
             if let Some(installed) = follow.installed {
                 self.release(&installed, generation);
             }
@@ -457,7 +589,7 @@ impl Shared {
             if generations.is_empty() {
                 cells.remove(cell);
             }
-            let _ = self.events.send(dropped());
+            self.changes.send(dropped());
             self.release(&closing.installed, generation);
         }
     }
@@ -524,6 +656,16 @@ impl Shared {
             });
     }
 
+    /// The follows of the cell `cell` of `class` as a watch of the relay
+    /// begins with them, its closing ones included, then the marker; only
+    /// the marker when it has none.
+    fn followed(&self, class: &str, cell: &str) -> Vec<FollowEvent> {
+        let mut events = Vec::new();
+        self.snapshot_of(class, cell, &mut events);
+        events.push(FollowEvent::Synced);
+        events
+    }
+
     /// Every installed follow, by class and cell, each cell's closing
     /// follows before its current one, then the marker.
     fn snapshot(&self) -> Vec<FollowEvent> {
@@ -540,23 +682,30 @@ impl Shared {
         }
         let mut events = Vec::new();
         for (class, cell) in cells {
-            let closing = self.closing.get(class).and_then(|cells| cells.get(cell));
-            for (generation, closing) in closing.into_iter().flatten() {
-                let offering = closing.offer.event(class, cell, *generation);
-                events.extend(closing.installed.snapshot(*generation, Some(offering)));
-            }
-            if let Some(follow) = self.follow(class, cell)
-                && let Some(installed) = &follow.installed
-            {
-                let offering = follow
-                    .offer
-                    .shown()
-                    .then(|| follow.offer.event(class, cell, follow.generation));
-                events.extend(installed.snapshot(follow.generation, offering));
-            }
+            self.snapshot_of(class, cell, &mut events);
         }
         events.push(FollowEvent::Synced);
         events
+    }
+
+    /// The follows of the cell `cell` of `class` as a watch of the relay
+    /// begins with them, into `events`: its closing follows, then its
+    /// current one, if installed.
+    fn snapshot_of(&self, class: &str, cell: &str, events: &mut Vec<FollowEvent>) {
+        let closing = self.closing.get(class).and_then(|cells| cells.get(cell));
+        for (generation, closing) in closing.into_iter().flatten() {
+            let offering = closing.offer.event(class, cell, *generation);
+            events.extend(closing.installed.snapshot(*generation, Some(offering)));
+        }
+        if let Some(follow) = self.follow(class, cell)
+            && let Some(installed) = &follow.installed
+        {
+            let offering = follow
+                .offer
+                .shown()
+                .then(|| follow.offer.event(class, cell, follow.generation));
+            events.extend(installed.snapshot(follow.generation, offering));
+        }
     }
 }
 
@@ -578,7 +727,10 @@ pub(crate) struct Installed {
     /// The ready instances the relay has sent as exposed in this follow: a
     /// consumer keeps them reachable while the follow lives, so each is
     /// sent `left` when it leaves, whatever the state is by then.
-    shown: HashSet<InstanceId>,
+    sent: HashSet<InstanceId>,
+    /// Whether the cell is withheld: its watch sent an event of a kind
+    /// this build does not know, and it has not been read again since.
+    withheld: bool,
 }
 
 impl Installed {
@@ -600,20 +752,123 @@ impl Installed {
             load,
             retired: HashMap::new(),
             ready: HashMap::new(),
-            shown: HashSet::new(),
+            sent: HashSet::new(),
+            withheld: false,
+        }
+    }
+
+    /// The state the relay shows: the one the cell last sent, or
+    /// `unavailable` while the cell is withheld.
+    fn shown(&self) -> CellState {
+        if self.withheld {
+            CellState::Unavailable
+        } else {
+            self.state
         }
     }
 
     /// Whether the cell counts toward what a requirement of its class
-    /// meets: its link last said it is `ready`.
+    /// meets: its link last said it is `ready`, and it is not withheld.
     fn counted(&self) -> bool {
-        self.state == CellState::Ready
+        self.shown() == CellState::Ready
     }
 
-    /// Whether the state the cell last sent lets its instances be routed
-    /// to.
+    /// Whether the state shown lets the cell's instances be routed to.
     fn exposes(&self) -> bool {
-        matches!(self.state, CellState::Ready | CellState::Degraded)
+        matches!(self.shown(), CellState::Ready | CellState::Degraded)
+    }
+
+    /// The cell's watch sent an event of a kind this build does not know,
+    /// so the relay cannot tell what the cell is: it is withheld until it
+    /// has been read again ([`Installed::restore`]). The relay shows a
+    /// withheld cell as `unavailable`, which hides its instances, keeps
+    /// every chooser from it, and leaves it out of what a requirement of
+    /// its class meets: the nearest the relay's events come to saying
+    /// that the cell is not to be offered work. Its watchers are sent the
+    /// state, if they were shown another.
+    pub(crate) fn withhold(&mut self, generation: u64, mut send: impl FnMut(FollowEvent)) {
+        if self.withheld {
+            return;
+        }
+        let shown = self.shown();
+        self.withheld = true;
+        if shown != CellState::Unavailable {
+            send(FollowEvent::State {
+                class: self.class.clone(),
+                cell: self.cell.clone(),
+                generation,
+                state: CellState::Unavailable,
+            });
+        }
+    }
+
+    /// The cell, withheld, was read again, as `fresh`: send its watchers
+    /// what changed while it was withheld, then its state, and, if that
+    /// exposes them, its ready instances, as for a state that exposes
+    /// them again. An instance that `fresh` does not have left; one it
+    /// shows ready that has retired here stays retired.
+    pub(crate) fn restore(
+        &mut self,
+        fresh: Installed,
+        generation: u64,
+        mut send: impl FnMut(FollowEvent),
+    ) {
+        let gone: Vec<(InstanceId, String)> = self
+            .ready
+            .iter()
+            .map(|(id, (segment, _))| (*id, segment.clone()))
+            .chain(
+                self.retired
+                    .iter()
+                    .map(|(id, segment)| (*id, segment.clone())),
+            )
+            .filter(|(id, _)| !fresh.ready.contains_key(id) && !fresh.retired.contains_key(id))
+            .collect();
+        // While the cell is withheld, these send only what its watchers
+        // still hold: retirements, and the instances retired that left.
+        self.withheld = true;
+        for (instance, segment) in gone {
+            self.apply(
+                generation,
+                CellWatchEvent::Left { segment, instance },
+                &mut send,
+            );
+        }
+        for (instance, segment) in fresh.retired {
+            self.apply(
+                generation,
+                CellWatchEvent::Retired { segment, instance },
+                &mut send,
+            );
+        }
+        for (segment, peer) in fresh.ready.into_values() {
+            self.apply(
+                generation,
+                CellWatchEvent::Ready { segment, peer },
+                &mut send,
+            );
+        }
+        if self.load != fresh.load {
+            self.apply(
+                generation,
+                CellWatchEvent::Load { load: fresh.load },
+                &mut send,
+            );
+        }
+        self.withheld = false;
+        self.state = fresh.state;
+        send(FollowEvent::State {
+            class: self.class.clone(),
+            cell: self.cell.clone(),
+            generation,
+            state: self.state,
+        });
+        if self.exposes() {
+            for event in self.exposed(generation) {
+                send(event);
+            }
+            self.sent.extend(self.ready.keys().copied());
+        }
     }
 
     /// Apply one event of the cell's watch after its first, sending what
@@ -629,6 +884,11 @@ impl Installed {
             CellWatchEvent::State { state } => {
                 let hidden = !self.exposes();
                 self.state = state;
+                // A withheld cell's watchers are shown it `unavailable`
+                // until it is read again.
+                if self.withheld {
+                    return;
+                }
                 send(FollowEvent::State {
                     class,
                     cell,
@@ -639,7 +899,7 @@ impl Installed {
                     for event in self.exposed(generation) {
                         send(event);
                     }
-                    self.shown.extend(self.ready.keys().copied());
+                    self.sent.extend(self.ready.keys().copied());
                 }
             }
             CellWatchEvent::Load { load } => {
@@ -658,7 +918,7 @@ impl Installed {
                 }
                 self.ready.insert(id, (segment.clone(), peer.clone()));
                 if self.exposes() {
-                    self.shown.insert(id);
+                    self.sent.insert(id);
                     send(FollowEvent::Exposed {
                         class,
                         cell,
@@ -670,7 +930,7 @@ impl Installed {
             }
             CellWatchEvent::Retired { segment, instance } => {
                 self.ready.remove(&instance);
-                self.shown.remove(&instance);
+                self.sent.remove(&instance);
                 if self.retired.insert(instance, segment.clone()).is_none() {
                     send(FollowEvent::Retired {
                         class,
@@ -685,8 +945,7 @@ impl Installed {
                 // A consumer holds an instance it was sent as retired or as
                 // exposed, also while a state hides it; one that was ready
                 // only while hidden was never sent.
-                let exposed =
-                    self.ready.remove(&instance).is_some() && self.shown.remove(&instance);
+                let exposed = self.ready.remove(&instance).is_some() && self.sent.remove(&instance);
                 let retired = self.retired.remove(&instance).is_some();
                 if exposed || retired {
                     send(FollowEvent::Left {
@@ -716,7 +975,7 @@ impl Installed {
             cell: self.cell.clone(),
             generation,
             region: self.region.clone(),
-            state: self.state,
+            state: self.shown(),
             load: self.load,
         });
         events.extend(offering);
@@ -761,11 +1020,39 @@ impl Installed {
 /// for it.
 pub struct FollowsWatch {
     events: BoxStream<'static, FollowEvent>,
+    /// For a watch of one follow: dropped after `events`, whose receiver is
+    /// then gone, so that the cell's channel, and its buffer, is released
+    /// as its last watch closes, not only at the cell's next change, which
+    /// a cell that left never sends.
+    release: Option<ChannelRelease>,
+}
+
+/// Releases a cell's channel as a watch of its follow closes.
+struct ChannelRelease {
+    shared: Arc<Mutex<Shared>>,
+    class: String,
+    cell: String,
+}
+
+impl Drop for ChannelRelease {
+    fn drop(&mut self) {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .changes
+            .release(&self.class, &self.cell);
+    }
 }
 
 impl FollowsWatch {
     pub(crate) fn into_events(self) -> BoxStream<'static, FollowEvent> {
-        self.events
+        if self.release.is_none() {
+            self.events
+        } else {
+            // Boxed whole, so that its release still drops after its
+            // events.
+            Box::pin(self)
+        }
     }
 }
 
@@ -776,6 +1063,9 @@ impl Stream for FollowsWatch {
         self.events.as_mut().poll_next(cx)
     }
 }
+
+#[cfg(test)]
+mod withheld;
 
 #[cfg(test)]
 mod tests;

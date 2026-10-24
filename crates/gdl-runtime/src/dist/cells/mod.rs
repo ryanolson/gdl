@@ -80,6 +80,8 @@ struct Shared {
     /// unregistered: until its own drain ends, the follower leaves them
     /// registered. Changed and read only under `registered`'s lock.
     draining: Mutex<HashSet<InstanceId>>,
+    /// The events of a kind this build does not know the relay has sent.
+    unknown: std::sync::atomic::AtomicU64,
 }
 
 impl Cells {
@@ -97,6 +99,7 @@ impl Cells {
                 damping: Arc::default(),
                 registered: watch::Sender::new(HashSet::new()),
                 draining: Mutex::default(),
+                unknown: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -135,8 +138,18 @@ impl Cells {
                 offered: cell.offering,
                 revision: cell.revision,
                 leases: cell.leases.held(),
+                unread: cell.unread,
             })
             .collect()
+    }
+
+    /// How many events of a kind this build does not know the relay has
+    /// sent this chooser: each left its cell unread until the chooser read
+    /// it again.
+    pub fn unknown_events(&self) -> u64 {
+        self.shared
+            .unknown
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether the follower holds `instance` registered with velo: from
@@ -170,6 +183,13 @@ impl Cells {
     /// The cells this chooser damps.
     pub(crate) fn damping(&self) -> Arc<Damping> {
         Arc::clone(&self.shared.damping)
+    }
+
+    /// Count one event of a kind this build does not know.
+    fn unknown(&self) {
+        self.shared
+            .unknown
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Replace `segment`'s table.
@@ -291,7 +311,8 @@ pub struct FollowedCell {
     /// is not damped.
     pub damped: Option<std::time::Duration>,
     /// The entry instances of the segment that may be routed to, by id:
-    /// none while the state is `draining` or `unavailable`.
+    /// none while the state is `draining` or `unavailable`, or the cell is
+    /// unread.
     pub eligible: Vec<InstanceId>,
     /// The entry instances of the segment that retired: never routed to.
     pub retired: Vec<InstanceId>,
@@ -306,6 +327,11 @@ pub struct FollowedCell {
     /// How many offers this chooser holds to the follow: requests it sent
     /// to the cell whose response has yet to end.
     pub leases: usize,
+    /// Whether the cell is unread: the relay sent an event of a kind this
+    /// build does not know for its follow, and the chooser has not read
+    /// the follow again since. While it has not, no instance of it is
+    /// eligible, so it is not chosen.
+    pub unread: bool,
 }
 
 /// One entry segment's table: each followed cell of its class, ordered by
@@ -334,6 +360,9 @@ pub(crate) struct CellTable {
     /// id per request.
     pub(crate) offered: Box<[gdl::InstanceId]>,
     pub(crate) retired: Box<[InstanceId]>,
+    /// Whether the cell is unread ([`FollowedCell::unread`]): `eligible`
+    /// is then empty.
+    pub(crate) unread: bool,
     /// The built-in routers' turn within the cell, shared by every table
     /// of the cell's follow, so that a new table keeps the turn.
     pub(crate) turn: Arc<AtomicUsize>,

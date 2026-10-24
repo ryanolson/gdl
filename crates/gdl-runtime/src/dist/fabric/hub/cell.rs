@@ -16,7 +16,7 @@ use futures::StreamExt;
 use gdl::{Error, ErrorKind, Result};
 use gdl_cells::CellState;
 use gdl_model::{CellSettings, Layout};
-use gdl_watch::{CellWatchEvent, CellWatcher};
+use gdl_watch::{CellWatchEvent, CellWatcher, Watched};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -238,18 +238,20 @@ impl Drop for CellDrain {
 /// Watch the cell at the hub at `address` until it says it is
 /// `draining`, then say when on `learns`, and go on until it says that no
 /// other cell follows it, and say so too. A watch that ends or is refused
-/// is asked for again; a refusal is logged once, until a watch begins.
+/// is asked for again; a refusal is logged once, until a watch begins. An
+/// event of a kind this build does not know ends the watch too, so that
+/// the next one's first event says what the cell's state is.
 async fn run(watcher: CellWatcher, address: String, learns: watch::Sender<Learned>) {
     let mut refused: Option<String> = None;
     loop {
         let pause = match watcher.watch(&address).await {
             Ok(mut events) => {
                 refused = None;
-                while let Some(event) = events.next().await {
-                    match event {
-                        CellWatchEvent::Cell { state, .. } | CellWatchEvent::State { state }
-                            if state == CellState::Draining =>
-                        {
+                while let Some(item) = events.next().await {
+                    match item {
+                        Watched::Event(
+                            CellWatchEvent::Cell { state, .. } | CellWatchEvent::State { state },
+                        ) if state == CellState::Draining => {
                             // The first time only: a watch begun again says so
                             // again.
                             learns.send_if_modified(|learned| {
@@ -258,11 +260,21 @@ async fn run(watcher: CellWatcher, address: String, learns: watch::Sender<Learne
                                 first
                             });
                         }
-                        CellWatchEvent::Unfollowed => {
+                        Watched::Event(CellWatchEvent::Unfollowed) => {
                             learns.send_modify(|learned| learned.unfollowed = true);
                             return;
                         }
-                        _ => {}
+                        // An event of a kind this build does not know may
+                        // have said that the cell drains: the cell is read
+                        // again, from the next watch's first event.
+                        Watched::Unknown(event) => {
+                            tracing::info!(
+                                kind = event.kind,
+                                "this instance's cell watch sent an event of a kind this build does not know; the cell is watched again"
+                            );
+                            break;
+                        }
+                        Watched::Event(_) => {}
                     }
                 }
                 REWATCH

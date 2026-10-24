@@ -101,7 +101,11 @@ impl<E: Clone> Watch<E> {
             biased;
             () = self.closed.cancelled() => None,
             received = self.events.recv() => match received {
-                Ok(event) => Some(event),
+                Ok(event) => {
+                    #[cfg(test)]
+                    RECEIVED.with(|received| received.set(received.get() + 1));
+                    Some(event)
+                }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     // What it holds is stale: it watches again from a
                     // snapshot.
@@ -112,6 +116,14 @@ impl<E: Clone> Watch<E> {
             },
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The changes the watches polled on this thread have received, each
+    /// a copy of the change: so that a test counts a watch's work rather
+    /// than timing it.
+    pub(crate) static RECEIVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// One watch in the count of watchers, until it is dropped.

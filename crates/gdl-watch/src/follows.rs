@@ -61,6 +61,13 @@ use velo::{InstanceId, PeerInfo};
 /// applied once it holds no offer to the follow
 /// ([`crate::Unoffered`]); the follow closes once every chooser of its
 /// class has acknowledged its current revision, and the relay drops it.
+///
+/// Every event but [`FollowEvent::Synced`] names its follow by its class,
+/// cell, and generation, and an event a later build adds must too: a
+/// reader that does not know its kind fails closed for that cell until it
+/// has read it again (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`), and
+/// ends its watch at one that names no follow. A field a later build adds
+/// to a known event is optional, and a reader of this build ignores it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum FollowEvent {
@@ -174,4 +181,22 @@ pub enum FollowEvent {
         /// The follow's generation.
         generation: u64,
     },
+}
+
+impl FollowEvent {
+    /// The class and the cell of the follow the event names; `None` for
+    /// the marker.
+    pub fn cell(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Follow { class, cell, .. }
+            | Self::State { class, cell, .. }
+            | Self::Load { class, cell, .. }
+            | Self::Exposed { class, cell, .. }
+            | Self::Retired { class, cell, .. }
+            | Self::Left { class, cell, .. }
+            | Self::Offering { class, cell, .. }
+            | Self::Dropped { class, cell, .. } => Some((class, cell)),
+            Self::Synced => None,
+        }
+    }
 }

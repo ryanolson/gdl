@@ -18,7 +18,7 @@ use common::{
 use futures::{FutureExt, Stream, StreamExt};
 use gdl_cells::{CellDirectory, CellRecord, CellState, DirectoryError, MemoryWatch, ResumeToken};
 use gdl_hub::{CellReadiness, CellWatch};
-use gdl_watch::{CellWatchEvent, FollowEvent, Unoffered};
+use gdl_watch::{CellWatchEvent, FollowEvent, Unoffered, Watched};
 use tokio::sync::watch;
 
 async fn next<T>(watch: &mut (impl Stream<Item = T> + Unpin)) -> T {
@@ -406,9 +406,15 @@ async fn an_earlier_watchs_close_leaves_a_follower_with_a_later_one() {
         generation: 1,
     };
     let mut earlier = watcher.follow(&address, &run(1)).await.expect("a watch");
-    through(&mut earlier, |event| *event == CellWatchEvent::Synced).await;
+    through(&mut earlier, |event| {
+        *event == Watched::Event(CellWatchEvent::Synced)
+    })
+    .await;
     let mut later = watcher.follow(&address, &run(2)).await.expect("a watch");
-    through(&mut later, |event| *event == CellWatchEvent::Synced).await;
+    through(&mut later, |event| {
+        *event == Watched::Event(CellWatchEvent::Synced)
+    })
+    .await;
     followers(&model_cell, [global()].into()).await;
     let mut watch = watching(&model_cell).await;
     let mut watchers = model_cell.watchers();
@@ -483,7 +489,10 @@ async fn a_released_watch_no_longer_counts() {
         generation: 1,
     };
     let mut follow = watcher.follow(&address, &follower).await.expect("a watch");
-    through(&mut follow, |event| *event == CellWatchEvent::Synced).await;
+    through(&mut follow, |event| {
+        *event == Watched::Event(CellWatchEvent::Synced)
+    })
+    .await;
     let mut watch = watching(&model_cell).await;
     model_cell.drain().await.expect("the cell drains");
     through(&mut watch, |event| {
@@ -524,7 +533,10 @@ async fn a_lost_watch_is_never_taken_as_a_release() {
             generation: 1,
         };
         let mut follow = watcher.follow(&address, &follower).await.expect("a watch");
-        through(&mut follow, |event| *event == CellWatchEvent::Synced).await;
+        through(&mut follow, |event| {
+            *event == Watched::Event(CellWatchEvent::Synced)
+        })
+        .await;
         let mut watch = watching(&model_cell).await;
         let mut watchers = model_cell.watchers();
         if drain_first {
