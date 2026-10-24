@@ -410,6 +410,70 @@ async fn when_every_cell_declines_the_request_is_overloaded() {
     }
 }
 
+/// The request fails with the last refusal, not the first: the ready cell
+/// is full and declines with admission's refusal, then the degraded
+/// cell's only entry instance has retired and declines with its own.
+/// Both are `Overloaded`, so only their messages tell which the request
+/// kept. M1 refuses once its entry's wait for an admission permit passes,
+/// so the test takes about 2 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_request_fails_with_the_last_refusal_not_the_first() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub, "", Selectors::new(), &|deployment| {
+        reference_graph(deployment, &quiet)
+    })
+    .await;
+    let m1 = reference_cell(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        &one_at_a_time,
+        &quiet,
+    )
+    .await;
+    let m2 = reference_cell(
+        &spec,
+        &directory,
+        degraded(M2, "m2-hub:1337"),
+        &|r| r,
+        &quiet,
+    )
+    .await;
+    following(
+        &tables(&chooser),
+        &[(M1, CellState::Ready), (M2, CellState::Degraded)],
+    )
+    .await;
+    let held = hold(&chooser, "held").await;
+    assert_eq!((m1.forwards(), m2.forwards()), (1, 0), "held in M1");
+    m2.entries[0].segment.close();
+
+    let before = offered(&[&m1, &m2]);
+    let error = ask(&chooser.segment).await.expect_err("both cells decline");
+    let now: Vec<usize> = offered(&[&m1, &m2])
+        .iter()
+        .zip(&before)
+        .map(|(now, before)| now - before)
+        .collect();
+    assert_eq!(now, [1, 1], "M1, then M2, was offered the request");
+    assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
+    assert!(
+        error.to_string().contains("retired"),
+        "not M2's refusal, the last: {error}"
+    );
+    assert!(
+        !error.to_string().contains("admission"),
+        "M1's refusal, the first: {error}"
+    );
+    drop(held);
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
 /// A hand-off that never left is not a refusal: when a full cell has
 /// declined the request and the next cell's hand-off never left, the
 /// request fails with the full cell's `Overloaded`, whether its
