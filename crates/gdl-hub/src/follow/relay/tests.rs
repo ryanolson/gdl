@@ -151,7 +151,11 @@ fn a_state_hides_and_exposes_the_ready_instances() {
 /// A relay with one chooser of `model_x` among its hub's members, which
 /// never acknowledges: no follow closes.
 fn held() -> Relay {
-    let choosers = super::Choosers::new([("a".to_string(), vec!["model_x".to_string()])]);
+    let choosers = super::Choosers::new([(
+        "a".to_string(),
+        vec!["model_x".to_string()],
+        vec!["f".to_string()],
+    )]);
     let relay = Relay::new(
         16,
         tokio::sync::watch::Sender::new(health()),
@@ -254,7 +258,11 @@ fn only_the_current_generation_writes() {
 /// is not offered: no one can hold an offer to it.
 #[test]
 fn with_no_chooser_a_follow_closes_as_it_is_not_offered() {
-    let choosers = super::Choosers::new([("a".to_string(), vec!["model_x".to_string()])]);
+    let choosers = super::Choosers::new([(
+        "a".to_string(),
+        vec!["model_x".to_string()],
+        vec!["f".to_string()],
+    )]);
     let relay = Relay::new(
         16,
         tokio::sync::watch::Sender::new(health()),

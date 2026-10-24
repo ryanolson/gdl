@@ -19,7 +19,7 @@ use gdl_model::{
     CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase,
     TypeInfo, segment_service,
 };
-use gdl_watch::{LoadReport, Unoffered};
+use gdl_watch::{Avoids, LoadReport, Unoffered};
 use tokio::sync::watch;
 use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
 use velo_hub::velo::discovery::ServiceRegistrationGuard;
@@ -238,6 +238,15 @@ impl Instance {
         self.client
             .ext(gdl_watch::EXTENSION)
             .control_post(&gdl_watch::unoffered_path(self.id()), unoffered)
+            .await
+    }
+
+    /// Tell the hub, as this instance, that it avoids the retired entry
+    /// instance `avoids` names.
+    pub async fn avoid(&self, avoids: &Avoids) -> Result<(), ClientError> {
+        self.client
+            .ext(gdl_watch::EXTENSION)
+            .control_post(&gdl_watch::avoids_path(self.id()), avoids)
             .await
     }
 

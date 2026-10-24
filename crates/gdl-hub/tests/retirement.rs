@@ -3,21 +3,26 @@
 //! each follower's hub acknowledges the retirement once its choosers have,
 //! or lets go of the cell. A watch lost without a release is never taken
 //! for either; a cell that starts to follow after the retirement is not
-//! waited for, since it is shown the instance retired. Here a test stands
-//! in for the follower's hub. Every hub runs in process on OS-assigned
-//! ports; every wait is for something observed.
+//! waited for, since it is shown the instance retired. In the first tests
+//! a test stands in for the follower's hub; in the last, a global cell's
+//! hub follows the cell, and tests stand in for its choosers. Every hub
+//! runs in process on OS-assigned ports; every wait is for something
+//! observed.
 
 mod common;
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use common::{GLOBAL, Instance, WAIT, meet_the_quorum, settings, timing};
+use common::{
+    CELL, GLOBAL, Instance, Resolving, WAIT, global_requiring, meet_the_quorum, serve_cell,
+    settings, timing,
+};
 use futures::{FutureExt, Stream, StreamExt};
 use gdl_cells::MemoryDirectory;
 use gdl_hub::{CellReadiness, CellTiming, CellWatch};
 use gdl_model::{CellSettings, SegmentPhase};
-use gdl_watch::{Avoided, CellWatchEvent, CellWatcher, Follower};
+use gdl_watch::{Avoided, Avoids, CellWatchEvent, CellWatcher, FollowEvent, Follower};
 use velo_hub::Hub;
 use velo_hub::velo::InstanceId;
 
@@ -50,7 +55,7 @@ async fn next_change(watch: &mut CellWatch) -> CellWatchEvent {
 }
 
 /// A watch of the model cell past its snapshot.
-async fn watching(cell: &CellReadiness<MemoryDirectory>) -> CellWatch {
+async fn watching<D: gdl_cells::CellDirectory>(cell: &CellReadiness<D>) -> CellWatch {
     let mut watch = cell.watch().await.expect("the watch begins");
     while next(&mut watch).await != CellWatchEvent::Synced {}
     watch
@@ -368,4 +373,191 @@ async fn a_follower_that_starts_after_the_retirement_is_not_waited_for() {
     avoid(&watcher, &hub, &parent, retiring.id()).await;
     assert_eq!(next_change(&mut watch).await, retired(retiring.id(), true));
     hub.shutdown().await.expect("the hub stops");
+}
+
+/// A model cell followed by a global cell's hub: the model cell's hub and
+/// extension, its entry instance `retiring`, ready and exposed by the
+/// global's relay, and the global's hub and extension, with the follow's
+/// generation.
+struct Followed {
+    model: (Hub, std::sync::Arc<CellReadiness<Resolving>>),
+    retiring: Instance,
+    _others: Vec<Instance>,
+    global: (Hub, std::sync::Arc<CellReadiness<Resolving>>),
+    generation: u64,
+}
+
+/// [`Followed`], with `choosers` choosers of the global cell, each of
+/// which has said it runs a follower before the model cell is followed.
+async fn followed(choosers: usize) -> (Followed, Vec<Instance>) {
+    let directory = Resolving::new();
+    let global_settings = global_requiring(0);
+    let name = global_settings.hub.clone().expect("a hub name");
+    let (global_hub, global_cell) =
+        common::hub_of(global_settings, directory.clone(), timing()).await;
+    directory.resolve(&name, &global_hub);
+    let mut joined = Vec::new();
+    for _ in 0..choosers {
+        joined.push(Instance::chooser(&global_hub).await);
+    }
+    let mut relay = global_cell.follows();
+    let (model_hub, model_cell) = serve_cell(
+        common::model(CELL, "us-east-1", "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (others, _) = meet_the_quorum(&model_hub).await;
+    let retiring = entry(&model_hub).await;
+    let mut generation = None;
+    loop {
+        match next(&mut relay).await {
+            FollowEvent::Follow { generation: g, .. } => generation = Some(g),
+            FollowEvent::Exposed { peer, .. } if peer.instance_id() == retiring.id() => break,
+            _ => {}
+        }
+    }
+    let followed = Followed {
+        model: (model_hub, model_cell),
+        retiring,
+        _others: others,
+        global: (global_hub, global_cell),
+        generation: generation.expect("a follow before its instances"),
+    };
+    (followed, joined)
+}
+
+impl Followed {
+    /// What a chooser says once its tables hold `retiring` retired.
+    fn avoids(&self) -> Avoids {
+        Avoids {
+            class: "model_x".into(),
+            cell: CELL.into(),
+            generation: self.generation,
+            instance: self.retiring.id(),
+        }
+    }
+
+    /// Retire `retiring`, and wait until the global's hub waits for its
+    /// choosers to avoid it, or, with `waits` false, does not: the model
+    /// cell's watch from before the retirement, past it.
+    async fn retire(&mut self, waits: bool) -> CellWatch {
+        let mut watch = watching(&self.model.1).await;
+        self.retiring.announce(SegmentPhase::Retired).await;
+        assert_eq!(
+            next_change(&mut watch).await,
+            retired(self.retiring.id(), false),
+            "the global's follow is waited for"
+        );
+        if waits {
+            let waited = self.retirement();
+            let mut retirements = self.global.1.retirements();
+            tokio::time::timeout(WAIT, retirements.wait_for(|now| now.contains(&waited)))
+                .await
+                .expect("the global's hub waits for its choosers in time")
+                .expect("the hub lives");
+        }
+        watch
+    }
+
+    fn retirement(&self) -> (String, String, u64, InstanceId) {
+        (
+            "model_x".into(),
+            CELL.into(),
+            self.generation,
+            self.retiring.id(),
+        )
+    }
+
+    /// Whether the global's hub still waits for its choosers to avoid
+    /// `retiring`.
+    fn waiting(&self) -> bool {
+        self.global
+            .1
+            .retirements()
+            .borrow()
+            .contains(&self.retirement())
+    }
+
+    async fn shutdown(self) {
+        self.global.0.shutdown().await.expect("the hub stops");
+        self.model.0.shutdown().await.expect("the hub stops");
+    }
+}
+
+/// The global's hub waits for each of its choosers to avoid the retired
+/// instance, and refuses an acknowledgement from a member that is not a
+/// chooser; once both have, it tells the model cell's hub, which says so
+/// on the cell's watch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_acknowledges_once_every_chooser_avoids_the_retiree() {
+    let (mut cell, choosers) = followed(2).await;
+    let mut watch = cell.retire(true).await;
+    let undeclared = Instance::join(&cell.global.0, "a").await;
+    undeclared
+        .avoid(&cell.avoids())
+        .await
+        .expect_err("not a chooser");
+    choosers[0].avoid(&cell.avoids()).await.expect("taken");
+    assert!(cell.waiting(), "one of two choosers");
+    choosers[0]
+        .avoid(&cell.avoids())
+        .await
+        .expect("taken twice");
+    assert!(cell.waiting(), "the same chooser twice");
+    choosers[1].avoid(&cell.avoids()).await.expect("taken");
+    assert!(!cell.waiting());
+    assert_eq!(
+        next_change(&mut watch).await,
+        retired(cell.retiring.id(), true)
+    );
+    cell.shutdown().await;
+}
+
+/// A chooser that leaves the global's hub counts as one that avoids the
+/// retired instance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chooser_that_leaves_counts_as_having_avoided_the_retiree() {
+    let (mut cell, mut choosers) = followed(2).await;
+    let mut watch = cell.retire(true).await;
+    choosers[0].avoid(&cell.avoids()).await.expect("taken");
+    assert!(cell.waiting());
+    choosers.pop().expect("a chooser").leave().await;
+    assert_eq!(
+        next_change(&mut watch).await,
+        retired(cell.retiring.id(), true)
+    );
+    assert!(!cell.waiting());
+    cell.shutdown().await;
+}
+
+/// A chooser that says it runs a follower after the retirement was applied
+/// is shown the instance retired by the relay's snapshot, and is not
+/// waited for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chooser_that_joins_after_the_retirement_is_not_waited_for() {
+    let (mut cell, choosers) = followed(1).await;
+    let mut watch = cell.retire(true).await;
+    let _late = Instance::chooser(&cell.global.0).await;
+    choosers[0].avoid(&cell.avoids()).await.expect("taken");
+    assert!(!cell.waiting());
+    assert_eq!(
+        next_change(&mut watch).await,
+        retired(cell.retiring.id(), true)
+    );
+    cell.shutdown().await;
+}
+
+/// A global cell without a chooser avoids the retired instance at once,
+/// and tells the model cell's hub so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_without_a_chooser_acknowledges_at_once() {
+    let (mut cell, _) = followed(0).await;
+    let mut watch = cell.retire(false).await;
+    assert_eq!(
+        next_change(&mut watch).await,
+        retired(cell.retiring.id(), true)
+    );
+    assert!(!cell.waiting());
+    cell.shutdown().await;
 }

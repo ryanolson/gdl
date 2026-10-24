@@ -452,7 +452,11 @@ fn a_watch_of_one_follow_shows_its_closing_generations() {
     let relay = Relay::new(
         64,
         tokio::sync::watch::Sender::new(health()),
-        super::Choosers::new([("a".to_string(), vec!["model_x".to_string()])]),
+        super::Choosers::new([(
+            "a".to_string(),
+            vec!["model_x".to_string()],
+            vec!["f".to_string()],
+        )]),
         tokio::sync::mpsc::unbounded_channel().0,
     );
     let earlier = relay.begin("model_x", "m").0;
