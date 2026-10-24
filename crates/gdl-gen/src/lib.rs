@@ -225,7 +225,8 @@ pub fn check(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Check, Erro
     Ok(check)
 }
 
-/// `spec` checked as [`render`] checks it, and its layout whenever its
+/// `spec` checked as [`render`] checks it, every problem at once where
+/// one stage does not need the other's result, and its layout whenever its
 /// placement fits its graph, whatever else is wrong with it: a fleet file
 /// is checked against the layout even when a binding is not.
 pub(crate) fn checked(
@@ -239,10 +240,19 @@ pub(crate) fn checked(
         .ok()
         .and_then(|prepared| gdl_model::layout(&prepared.manifest, &spec.placement).ok());
     let check = || {
-        spec.gdl.check()?;
-        let prepared = prepared?;
-        let spec = bound(spec, &prepared, target, from)?;
-        let layout = validate(&spec, &prepared.contract, &prepared.manifest)?;
+        // A runtime that is not where `[gdl]` says hides nothing else: it is
+        // reported with what validation finds.
+        let runtime = spec.gdl.check().err();
+        let with = |error: Error| match &runtime {
+            Some(runtime) => Error::all(runtime.0.iter().cloned().chain(error.0)),
+            None => error,
+        };
+        let prepared = prepared.map_err(with)?;
+        let spec = bound(spec, &prepared, target, from).map_err(with)?;
+        let layout = validate(&spec, &prepared.contract, &prepared.manifest).map_err(with)?;
+        if let Some(runtime) = runtime {
+            return Err(runtime);
+        }
         let mermaid = prepared
             .manifest
             .to_mermaid(Some(&layout))

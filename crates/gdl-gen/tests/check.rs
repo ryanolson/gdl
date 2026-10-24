@@ -245,6 +245,29 @@ fn a_default_for_a_name_the_spec_lacks_is_refused() {
     }
 }
 
+/// A runtime path that names no crate is one problem among the others,
+/// not the end of the check.
+#[test]
+fn a_bad_runtime_path_hides_no_other_problem() {
+    let gdl = format!(
+        "{:?}",
+        root().join("crates/gdl-runtime").display().to_string()
+    );
+    let spec = spec("[pipeline_names]\nGhost = \"ghost\"\n")
+        .replacen(&gdl, "\"/nonexistent/gdl-runtime\"", 1)
+        .replacen("\"Engine\"]", "\"Engine\", \"Ghost\"]", 1);
+    let files = Files::new(&spec, FLEET);
+    let s = files.spec().display().to_string();
+    assert_problems(
+        &problems(&files.check()),
+        &[
+            format!("{s}: [gdl] path: "),
+            format!("{s}: [segment.engine] nodes: segment `engine` lists unknown node `Ghost`"),
+            format!("{s}: [pipeline_names] Ghost: the graph has no source `Ghost`"),
+        ],
+    );
+}
+
 /// A count of 0 is wrong whatever the classes are, so a fleet file whose
 /// spec does not read has its counts checked too.
 #[test]
