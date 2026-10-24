@@ -16,6 +16,7 @@ use gdl_model::Layout;
 use velo::InstanceId;
 
 use super::damping::Damping;
+use super::lease::CellLease;
 use super::policy::{self, CellChooser};
 use super::{CellTable, Cells, EntryTable};
 use crate::dist::roster::{CHOICES, Policy, turn};
@@ -63,23 +64,33 @@ impl Crossing {
     }
 
     /// Choose a cell for one attempt, then an instance of it by `policy`,
-    /// with the chosen cell's [`id`](CellTable::id), or `None` when no
-    /// cell but those in `excluded` may take it: one load of the table, a read of the clock,
-    /// two counter increments, and the policy's passes over the followed
-    /// cells, with no lock and no allocation.
+    /// with the chosen cell's [`id`](CellTable::id) and a lease on its
+    /// follow, or `None` when no cell but those in `excluded` may take it:
+    /// one load of the table, a read of the clock, two counter increments,
+    /// the policy's passes over the followed cells, and the lease, with no
+    /// lock and no allocation. A cell whose follow became not offered
+    /// since the table was loaded refuses the lease, and the table, which
+    /// then no longer offers it, is loaded again.
     pub(crate) fn pick(
         &self,
         policy: Policy,
         random: &RandomState,
         excluded: &[u64],
-    ) -> Option<(InstanceId, u64)> {
-        let table = self.target.table.load();
-        let cell = self.cell(&table, excluded)?;
-        let sequence = cell.turn.fetch_add(1, Ordering::Relaxed);
-        Some((
-            cell.eligible[turn(policy, sequence, cell.eligible.len(), random)],
-            cell.id,
-        ))
+    ) -> Option<(InstanceId, u64, CellLease)> {
+        for _ in 0..CHOICES {
+            let table = self.target.table.load();
+            let cell = self.cell(&table, excluded)?;
+            let Some(lease) = CellLease::take(&cell.leases) else {
+                continue;
+            };
+            let sequence = cell.turn.fetch_add(1, Ordering::Relaxed);
+            return Some((
+                cell.eligible[turn(policy, sequence, cell.eligible.len(), random)],
+                cell.id,
+                lease,
+            ));
+        }
+        None
     }
 
     /// Choose a cell for one attempt, then ask `selector` to choose among
@@ -87,7 +98,8 @@ impl Crossing {
     /// those in `excluded` may take it. A selector may wait, so the choice
     /// is checked when it returns (ruling 154): if the instance is no
     /// longer eligible in the cell's current table, or the cell itself no
-    /// longer is by the cell policy (its summary went, or went stale), the
+    /// longer is by the cell policy (its summary went, or went stale), or
+    /// its follow refuses the lease because it is no longer offered, the
     /// choice and its lease are dropped and both the cell and the instance
     /// are chosen again. A request that ended while its selector chose
     /// is not handed on. Boxed, as
@@ -99,7 +111,7 @@ impl Crossing {
         head: &'a [u8],
         encoding: gdl_model::Encoding,
         excluded: &'a [u64],
-    ) -> BoxFuture<'a, Result<Option<(InstanceId, u64, Picked)>>> {
+    ) -> BoxFuture<'a, Result<Option<Chosen>>> {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.target.table.load_full();
@@ -127,8 +139,11 @@ impl Crossing {
                         .policy
                         .eligible(current, &target.region, excluded, now)
                 };
-                if still_eligible(&target.table.load(), &cell, chosen, policy) {
-                    return Ok(Some((chosen, cell.id, picked)));
+                let current = target.table.load();
+                let lease = still_eligible(&current, &cell, chosen, policy)
+                    .and_then(|now| CellLease::take(&now.leases));
+                if let Some(lease) = lease {
+                    return Ok(Some((chosen, cell.id, picked, lease)));
                 }
             }
             Err(Error::routing(format!(
@@ -189,23 +204,28 @@ impl Crossing {
     }
 }
 
-/// Whether `chosen`, an instance of `cell`, is still eligible in `table`,
-/// which may be newer: the cell's current table, of whatever generation,
-/// is `cell` itself or still offers it, and `policy` still takes it.
-fn still_eligible(
-    table: &EntryTable,
+/// The cell's current table in `table`, which may be newer, if `chosen`,
+/// an instance of `cell`, is still eligible in it: the cell's current
+/// table, of whatever generation, is `cell` itself or still offers it, and
+/// `policy` still takes it. The lease is taken from it, since it is the
+/// follow the offer is made under.
+fn still_eligible<'t>(
+    table: &'t EntryTable,
     cell: &Arc<CellTable>,
     chosen: InstanceId,
     policy: impl Fn(&CellTable) -> bool,
-) -> bool {
+) -> Option<&'t Arc<CellTable>> {
     table
         .cells
         .iter()
         .find(|now| now.class == cell.class && now.cell == cell.cell)
-        .is_some_and(|now| {
-            (Arc::ptr_eq(now, cell) || now.eligible.contains(&chosen)) && policy(now)
-        })
+        .filter(|now| (Arc::ptr_eq(now, cell) || now.eligible.contains(&chosen)) && policy(now))
 }
+
+/// A selector's choice within a cell: the instance, the cell's
+/// [`id`](CellTable::id), what the selector picked, and the lease on the
+/// cell's follow.
+pub(crate) type Chosen = (InstanceId, u64, Picked, CellLease);
 
 /// How the instance within the chosen cell is chosen: the hand-off's own
 /// router.
@@ -312,7 +332,11 @@ mod tests {
                 .map(|id| gdl::InstanceId::from_u128(id.as_u128()))
                 .collect(),
             retired: Box::new([]),
+            unread: false,
             turn,
+            offering: true,
+            revision: 1,
+            leases: Arc::default(),
         })
     }
 
@@ -392,7 +416,11 @@ mod tests {
         let random = RandomState::new();
         let m1 = super::super::cell_id("model_x", "m1");
         let m2 = super::super::cell_id("model_x", "m2");
-        let pick = |excluded: &[u64]| crossing.pick(Policy::RoundRobin, &random, excluded);
+        let pick = |excluded: &[u64]| {
+            crossing
+                .pick(Policy::RoundRobin, &random, excluded)
+                .map(|(id, cell, _)| (id, cell))
+        };
         assert_eq!(pick(&[]), Some((ids[0], m1)));
         assert_eq!(pick(&[m1]), Some((ids[1], m2)));
         assert_eq!(pick(&[m1, m2]), None);
@@ -402,7 +430,7 @@ mod tests {
             .choose(&selector, &cx, &[], Default::default(), &[m1])
             .await
             .expect("a choice")
-            .map(|(id, cell, _)| (id, cell));
+            .map(|(id, cell, _, _)| (id, cell));
         assert_eq!(chosen, Some((ids[1], m2)));
         let none = crossing
             .choose(&selector, &cx, &[], Default::default(), &[m1, m2])
@@ -475,7 +503,7 @@ mod tests {
                 crossing
                     .choose(&selector, &cx, &[], Default::default(), &[])
                     .await
-                    .map(|chosen| chosen.map(|(id, _, picked)| (id, picked.lease)))
+                    .map(|chosen| chosen.map(|(id, _, picked, _)| (id, picked.lease)))
             }
         });
         tokio::time::timeout(WAIT, waiting.arrived.notified())
@@ -530,7 +558,7 @@ mod tests {
                 crossing
                     .choose(&selector, &cx, &[], Default::default(), &[])
                     .await
-                    .map(|chosen| chosen.map(|(id, cell, _)| (id, cell)))
+                    .map(|chosen| chosen.map(|(id, cell, _, _)| (id, cell)))
             }
         });
         tokio::time::timeout(WAIT, waiting.arrived.notified())
@@ -605,10 +633,15 @@ mod tests {
         let error = crossing
             .choose(&selector, &cx, &[], Default::default(), &[])
             .await
-            .map(|chosen| chosen.map(|(id, _, _)| id))
+            .map(|chosen| chosen.map(|(id, ..)| id))
             .expect_err("a cancelled request was given an instance");
         assert_eq!(error.kind(), gdl::ErrorKind::Cancelled, "{error}");
         assert_eq!(leases.load(Ordering::SeqCst), 0, "the lease was kept");
+        assert_eq!(
+            crossing.target.table.load().cells[0].leases.held(),
+            0,
+            "the lease on the cell's follow was kept"
+        );
     }
 
     #[derive(serde::Serialize, serde::Deserialize)]
@@ -644,7 +677,7 @@ mod tests {
             text: "hello".into(),
         })
         .expect("encoded");
-        let (chosen, _, _) = crossing
+        let (chosen, ..) = crossing
             .choose(&selector, &Cx::new(), &head, gdl_model::Encoding::Json, &[])
             .await
             .expect("the selector read a JSON head")
@@ -663,21 +696,22 @@ mod tests {
         let newer = EntryTable {
             cells: Box::new([cell("m", CellState::Ready, &ids)]),
         };
-        assert!(still_eligible(&newer, chosen, ids[0], |_| true));
+        assert!(still_eligible(&newer, chosen, ids[0], |_| true).is_some());
         let fewer = EntryTable {
             cells: Box::new([cell("m", CellState::Ready, &ids[1..])]),
         };
-        assert!(!still_eligible(&fewer, chosen, ids[0], |_| true));
+        assert!(still_eligible(&fewer, chosen, ids[0], |_| true).is_none());
         let gone = EntryTable {
             cells: Box::new([]),
         };
-        assert!(!still_eligible(&gone, chosen, ids[1], |_| true));
+        assert!(still_eligible(&gone, chosen, ids[1], |_| true).is_none());
     }
 
     /// What a chooser's boundary pick costs over a pick in its own roster,
     /// over the same instances, what of it is the read of the clock that
-    /// judges each summary's age and each cell's damping, and a pick with
-    /// the acceptance that follows it: reported, not gated. Run it with
+    /// judges each summary's age and each cell's damping, and what is the
+    /// lease on the cell's follow, taken and let go, and a pick with the
+    /// acceptance that follows it: reported, not gated. Run it with
     /// `--ignored --nocapture`.
     #[test]
     #[ignore = "a measurement, not a check: run it with --ignored --nocapture"]
@@ -719,15 +753,20 @@ mod tests {
                 std::hint::black_box(tokio::time::Instant::now());
                 ids[0]
             });
+            let leases = Arc::clone(&crossing.target.table.load().cells[0].leases);
+            let lease = time(&|| {
+                drop(std::hint::black_box(CellLease::take(&leases)));
+                ids[0]
+            });
             let accepted = time(&|| {
-                let (id, cell) = crossing
+                let (id, cell, _) = crossing
                     .pick(Policy::RoundRobin, &random, &[])
                     .expect("one");
                 crossing.accepted(cell);
                 id
             });
             println!(
-                "round {round}: roster pick {roster:?}, boundary pick {boundary:?}, of which the clock {clock:?}; pick and acceptance {accepted:?}"
+                "round {round}: roster pick {roster:?}, boundary pick {boundary:?}, of which the clock {clock:?} and the lease {lease:?}; pick and acceptance {accepted:?}"
             );
         }
     }

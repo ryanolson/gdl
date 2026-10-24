@@ -9,11 +9,15 @@
 //! a cell from its table by the class's cell policy, then an instance of
 //! that cell ([`Crossing`]), and offers the request to another cell when
 //! that one declines it (`Runtime::fail_over`), damping the cell that
-//! declined for the requests after it ([`damping`]).
+//! declined for the requests after it ([`damping`]). Each offer holds a
+//! lease on the cell's follow until its response ends ([`CellLease`]), so
+//! that the follower can tell its hub when it no longer holds an offer to
+//! a cell the hub stopped offering.
 
 mod crossing;
 mod damping;
 mod follow;
+mod lease;
 mod offer;
 mod policy;
 mod task;
@@ -21,6 +25,7 @@ mod task;
 mod tests;
 
 pub(crate) use crossing::{Crossing, Target, Within, targets};
+pub(crate) use lease::CellLease;
 pub(crate) use offer::{Answer, answer};
 pub(crate) use task::{follow, hub_address};
 // The membership's tests drive the follower beside their own.
@@ -35,6 +40,7 @@ use arc_swap::ArcSwap;
 use damping::Damping;
 use gdl_cells::{CellState, LoadSummary};
 use gdl_model::Layout;
+use lease::Leases;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use velo::InstanceId;
@@ -45,8 +51,8 @@ use velo::InstanceId;
 /// Per entry segment, one table of every followed cell of the segment's
 /// class that the chooser's hub relays: the cell's current follow (its
 /// generation), its state, its region, its load summary with the time it
-/// arrived, the entry instances it exposes, and those that retired, which
-/// are never routed to. A table changes
+/// arrived, whether it is offered, the entry instances it exposes while it
+/// is, and those that retired, which are never routed to. A table changes
 /// only when the relay says so, and is replaced whole. The chooser's own
 /// region is kept with them, for the cell policy.
 #[derive(Clone)]
@@ -74,6 +80,8 @@ struct Shared {
     /// unregistered: until its own drain ends, the follower leaves them
     /// registered. Changed and read only under `registered`'s lock.
     draining: Mutex<HashSet<InstanceId>>,
+    /// The events of a kind this build does not know the relay has sent.
+    unknown: std::sync::atomic::AtomicU64,
 }
 
 impl Cells {
@@ -91,6 +99,7 @@ impl Cells {
                 damping: Arc::default(),
                 registered: watch::Sender::new(HashSet::new()),
                 draining: Mutex::default(),
+                unknown: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -126,8 +135,21 @@ impl Cells {
                     .then(|| std::time::Duration::from_millis(damped.left(cell.id, now))),
                 eligible: cell.eligible.to_vec(),
                 retired: cell.retired.to_vec(),
+                offered: cell.offering,
+                revision: cell.revision,
+                leases: cell.leases.held(),
+                unread: cell.unread,
             })
             .collect()
+    }
+
+    /// How many events of a kind this build does not know the relay has
+    /// sent this chooser: each left its cell unread until the chooser read
+    /// it again.
+    pub fn unknown_events(&self) -> u64 {
+        self.shared
+            .unknown
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether the follower holds `instance` registered with velo: from
@@ -161,6 +183,13 @@ impl Cells {
     /// The cells this chooser damps.
     pub(crate) fn damping(&self) -> Arc<Damping> {
         Arc::clone(&self.shared.damping)
+    }
+
+    /// Count one event of a kind this build does not know.
+    fn unknown(&self) {
+        self.shared
+            .unknown
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Replace `segment`'s table.
@@ -282,10 +311,27 @@ pub struct FollowedCell {
     /// is not damped.
     pub damped: Option<std::time::Duration>,
     /// The entry instances of the segment that may be routed to, by id:
-    /// none while the state is `draining` or `unavailable`.
+    /// none while the state is `draining` or `unavailable`, or the cell is
+    /// unread.
     pub eligible: Vec<InstanceId>,
     /// The entry instances of the segment that retired: never routed to.
     pub retired: Vec<InstanceId>,
+    /// Whether the chooser's hub offers the cell to its choosers: its link
+    /// lives and its state takes work. A cell that is not offered has no
+    /// eligible instance, and is never chosen.
+    pub offered: bool,
+    /// The revision of the follow's offered state, as the hub numbers its
+    /// changes: 1 as the follow is installed, and one more for each change
+    /// between offered and not offered.
+    pub revision: u64,
+    /// How many offers this chooser holds to the follow: requests it sent
+    /// to the cell whose response has yet to end.
+    pub leases: usize,
+    /// Whether the cell is unread: the relay sent an event of a kind this
+    /// build does not know for its follow, and the chooser has not read
+    /// the follow again since. While it has not, no instance of it is
+    /// eligible, so it is not chosen.
+    pub unread: bool,
 }
 
 /// One entry segment's table: each followed cell of its class, ordered by
@@ -314,9 +360,20 @@ pub(crate) struct CellTable {
     /// id per request.
     pub(crate) offered: Box<[gdl::InstanceId]>,
     pub(crate) retired: Box<[InstanceId]>,
+    /// Whether the cell is unread ([`FollowedCell::unread`]): `eligible`
+    /// is then empty.
+    pub(crate) unread: bool,
     /// The built-in routers' turn within the cell, shared by every table
     /// of the cell's follow, so that a new table keeps the turn.
     pub(crate) turn: Arc<AtomicUsize>,
+    /// Whether the follow is offered: `eligible` is empty when it is not.
+    pub(crate) offering: bool,
+    /// The revision of the follow's offered state.
+    pub(crate) revision: u64,
+    /// The offers this chooser holds to the follow, shared by every table
+    /// of the follow: an offer takes a lease from the table it was chosen
+    /// from, and is refused one once the follow is not offered.
+    pub(crate) leases: Arc<Leases>,
 }
 
 /// A cell's load summary as its tables hold it: when it arrived, on the

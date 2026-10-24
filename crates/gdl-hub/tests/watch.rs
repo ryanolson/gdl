@@ -33,6 +33,8 @@ async fn watching(hub: &Hub) -> BoxStream<'static, CellWatchEvent> {
         .await
         .expect("the hub answers in time")
         .expect("the hub serves the watch")
+        .map(|item| item.event().expect("an event of a kind this build knows"))
+        .boxed()
 }
 
 async fn next(watch: &mut (impl Stream<Item = CellWatchEvent> + Unpin)) -> CellWatchEvent {
@@ -83,7 +85,10 @@ fn ready(peer: PeerInfo) -> CellWatchEvent {
 }
 
 fn state(state: CellState) -> CellWatchEvent {
-    CellWatchEvent::State { state }
+    CellWatchEvent::State {
+        state,
+        unfollowed: false,
+    }
 }
 
 /// The model cell's first event, in `state`, under `epoch`.
@@ -121,7 +126,7 @@ impl View {
                 self.epoch = *epoch;
                 self.state = Some(*state);
             }
-            CellWatchEvent::State { state } => self.state = Some(*state),
+            CellWatchEvent::State { state, .. } => self.state = Some(*state),
             CellWatchEvent::Ready { peer, .. } => {
                 assert!(
                     !self.retired.contains(&peer.instance_id()),
@@ -510,7 +515,9 @@ async fn a_watch_waits_for_the_cells_first_record() {
     let address = address(&hub);
     let outside = tokio::spawn(async move {
         let watcher = CellWatcher::new().expect("a client");
-        watcher.watch(&address).await
+        watcher.watch(&address).await.map(|events| {
+            events.map(|item| item.event().expect("an event of a kind this build knows"))
+        })
     });
     count(2, "the hub to hold the request").await;
     gate.open();

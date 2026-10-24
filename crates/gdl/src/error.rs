@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,12 +8,25 @@ use serde::{Deserialize, Serialize};
 /// It is serializable so that a failure raised in one segment reaches the
 /// consumer in another segment with its kind intact. An `Err` item in a
 /// response stream is terminal: the runtime ends the stream after it.
-#[derive(Clone, Deserialize, thiserror::Error)]
-#[serde(from = "Wire<String>")]
-#[error("{kind}: {message}")]
+///
+/// It crosses as a struct of two fields, `kind` and `message`, with the
+/// kind sent by its name, as serde sends a unit variant: in msgpack, as
+/// velo and the `msgpack` edges send it, and in JSON alike. A kind a
+/// later build added is read as [`ErrorKind::Transport`] and keeps the
+/// name it was sent under: [`Error::unknown_kind`] returns it, `Display`
+/// shows it, and a segment that sends the error on sends it under that
+/// name, so that a peer that knows the kind reads it as itself.
+#[derive(Clone, Deserialize)]
+#[serde(try_from = "Wire<Received, String>")]
 pub struct Error {
     kind: ErrorKind,
-    message: String,
+    /// The message, after the name of the kind it was sent under when this
+    /// build does not know that kind: one buffer, so that keeping the name
+    /// adds nothing to the size of every `Result` that holds an error.
+    text: String,
+    /// The length of that name at the start of `text`, plus one; `None`
+    /// for a kind this build knows.
+    unknown: Option<NonZeroU32>,
     /// Whether this segment received the error from another one, as a
     /// failure on a response stream, rather than raising it: the runtime
     /// counts an error once, where it was raised. It is not sent: the
@@ -20,11 +34,12 @@ pub struct Error {
     relayed: bool,
 }
 
-/// Two errors are equal when their kind and message are: whether one was
-/// relayed is the runtime's bookkeeping, not part of the error.
+/// Two errors are equal when their kind, the name of a kind this build
+/// does not know, and message are: whether one was relayed is the
+/// runtime's bookkeeping, not part of the error.
 impl PartialEq for Error {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.message == other.message
+        self.kind == other.kind && self.unknown == other.unknown && self.text == other.text
     }
 }
 
@@ -32,19 +47,33 @@ impl Eq for Error {}
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Error")
-            .field("kind", &self.kind)
-            .field("message", &self.message)
-            .finish()
+        let mut debug = f.debug_struct("Error");
+        debug.field("kind", &self.kind);
+        if let Some(name) = self.unknown_kind() {
+            debug.field("unknown_kind", &name);
+        }
+        debug.field("message", &self.message()).finish()
     }
 }
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.unknown_kind() {
+            Some(name) => write!(f, "{} (unknown kind {name}): {}", self.kind, self.message()),
+            None => write!(f, "{}: {}", self.kind, self.message()),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 impl Error {
     /// Create an error of the given kind.
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
-            message: message.into(),
+            text: message.into(),
+            unknown: None,
             relayed: false,
         }
     }
@@ -77,14 +106,28 @@ impl Error {
         )
     }
 
-    /// The kind of this error.
+    /// The kind of this error: [`ErrorKind::Transport`] for one received
+    /// under a kind this build does not know.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
 
     /// The human-readable message.
     pub fn message(&self) -> &str {
-        &self.message
+        &self.text[self.split()..]
+    }
+
+    /// The name of the kind the error was received under, when this build
+    /// does not know it: a kind a later build added, as its sender named
+    /// it, or, for one sent as its index, the index in decimal. `None` for
+    /// every kind this build knows.
+    pub fn unknown_kind(&self) -> Option<&str> {
+        self.unknown.map(|_| &self.text[..self.split()])
+    }
+
+    /// Where the message starts in `text`.
+    fn split(&self) -> usize {
+        self.unknown.map_or(0, |length| length.get() as usize - 1)
     }
 
     /// The error, marked as received from another segment.
@@ -102,6 +145,12 @@ impl Error {
 }
 
 /// What failed. Callers branch on the kind; the message is for people.
+///
+/// A kind is sent by its name. A peer of a build that does not know a
+/// kind reads it as `Transport`, keeping its name ([`Error::unknown_kind`]),
+/// so that a kind added later rolls out one cell at a time; a build from
+/// before `OutcomeUnknown` refuses an unknown kind, and with it the stream
+/// item that carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -117,7 +166,8 @@ pub enum ErrorKind {
     NotHosted,
     /// An instance refused work because it is at capacity.
     Overloaded,
-    /// The network or the messaging layer failed.
+    /// The network or the messaging layer failed, or the error came from a
+    /// peer under a kind this build does not know.
     Transport,
     /// A message could not be encoded or decoded.
     Codec,
@@ -132,6 +182,22 @@ pub enum ErrorKind {
     /// unanswered fails with `Transport`.
     OutcomeUnknown,
 }
+
+/// Every kind by the name it is sent under, in the order it is declared,
+/// which is its index: what an error's kind is read from.
+const KINDS: [(&str, ErrorKind); 11] = [
+    ("Node", ErrorKind::Node),
+    ("Cancelled", ErrorKind::Cancelled),
+    ("DeadlineExceeded", ErrorKind::DeadlineExceeded),
+    ("Truncated", ErrorKind::Truncated),
+    ("NotHosted", ErrorKind::NotHosted),
+    ("Overloaded", ErrorKind::Overloaded),
+    ("Transport", ErrorKind::Transport),
+    ("Codec", ErrorKind::Codec),
+    ("Placement", ErrorKind::Placement),
+    ("Routing", ErrorKind::Routing),
+    ("OutcomeUnknown", ErrorKind::OutcomeUnknown),
+];
 
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -151,100 +217,138 @@ impl fmt::Display for ErrorKind {
     }
 }
 
-/// An error as it crosses: its kind, among those every peer can read, and
-/// its message. A peer of an earlier build refuses a kind it does not know,
-/// and with it the whole item that carries the error, so a kind added
-/// since is sent as the earlier kind nearest it, with its own name at the
-/// start of the message ([`OUTCOME_UNKNOWN`]), and read back here; a
-/// message of the earlier kind that begins the same way is escaped
-/// ([`TRANSPORT`]). An extra
-/// field would not do: such a peer refuses an error of three fields too.
+/// An error as it crosses: its kind and its message.
 #[derive(Serialize, Deserialize)]
-struct Wire<M> {
-    kind: WireKind,
+struct Wire<K, M> {
+    kind: K,
     message: M,
 }
 
-/// The kinds every peer reads. Never add to it: a new kind is sent as one
-/// of these.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum WireKind {
-    Node,
-    Cancelled,
-    DeadlineExceeded,
-    Truncated,
-    NotHosted,
-    Overloaded,
-    Transport,
-    Codec,
-    Placement,
-    Routing,
+/// A kind as it is sent: a known one as the enum's variant, so that every
+/// kind encodes as it always has, and an unknown one by the name it came
+/// under, which a unit variant's encoding is in msgpack and JSON alike.
+enum Sent<'a> {
+    Known(ErrorKind),
+    Unknown(&'a str),
 }
 
-/// What starts the message of an [`ErrorKind::OutcomeUnknown`] sent as a
-/// `Transport` error. A peer of an earlier build shows it as written.
-const OUTCOME_UNKNOWN: &str = "[outcome unknown] ";
-
-/// What starts the message of a `Transport` error whose own message
-/// begins with [`OUTCOME_UNKNOWN`] or with this, so that it is not read
-/// back as another kind or with its message cut. Only such a message pays
-/// for it.
-const TRANSPORT: &str = "[transport] ";
-
-impl Serialize for Error {
+impl Serialize for Sent<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let message = std::borrow::Cow::Borrowed(self.message.as_str());
-        let (kind, message) = match self.kind {
-            ErrorKind::Node => (WireKind::Node, message),
-            ErrorKind::Cancelled => (WireKind::Cancelled, message),
-            ErrorKind::DeadlineExceeded => (WireKind::DeadlineExceeded, message),
-            ErrorKind::Truncated => (WireKind::Truncated, message),
-            ErrorKind::NotHosted => (WireKind::NotHosted, message),
-            ErrorKind::Overloaded => (WireKind::Overloaded, message),
-            ErrorKind::Transport
-                if message.starts_with(OUTCOME_UNKNOWN) || message.starts_with(TRANSPORT) =>
-            {
-                (
-                    WireKind::Transport,
-                    std::borrow::Cow::Owned(format!("{TRANSPORT}{message}")),
-                )
-            }
-            ErrorKind::Transport => (WireKind::Transport, message),
-            ErrorKind::Codec => (WireKind::Codec, message),
-            ErrorKind::Placement => (WireKind::Placement, message),
-            ErrorKind::Routing => (WireKind::Routing, message),
-            ErrorKind::OutcomeUnknown => (
-                WireKind::Transport,
-                std::borrow::Cow::Owned(format!("{OUTCOME_UNKNOWN}{message}")),
-            ),
-        };
-        Wire { kind, message }.serialize(serializer)
+        match self {
+            Self::Known(kind) => kind.serialize(serializer),
+            Self::Unknown(name) => serializer.serialize_str(name),
+        }
     }
 }
 
-impl From<Wire<String>> for Error {
-    fn from(Wire { kind, message }: Wire<String>) -> Self {
-        let kind = match kind {
-            WireKind::Node => ErrorKind::Node,
-            WireKind::Cancelled => ErrorKind::Cancelled,
-            WireKind::DeadlineExceeded => ErrorKind::DeadlineExceeded,
-            WireKind::Truncated => ErrorKind::Truncated,
-            WireKind::NotHosted => ErrorKind::NotHosted,
-            WireKind::Overloaded => ErrorKind::Overloaded,
-            WireKind::Transport => {
-                if let Some(rest) = message.strip_prefix(TRANSPORT) {
-                    return Self::new(ErrorKind::Transport, rest);
-                }
-                if let Some(rest) = message.strip_prefix(OUTCOME_UNKNOWN) {
-                    return Self::new(ErrorKind::OutcomeUnknown, rest);
-                }
-                ErrorKind::Transport
-            }
-            WireKind::Codec => ErrorKind::Codec,
-            WireKind::Placement => ErrorKind::Placement,
-            WireKind::Routing => ErrorKind::Routing,
+impl Serialize for Error {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let kind = match self.unknown_kind() {
+            Some(name) => Sent::Unknown(name),
+            None => Sent::Known(self.kind),
         };
-        Self::new(kind, message)
+        Wire {
+            kind,
+            message: self.message(),
+        }
+        .serialize(serializer)
+    }
+}
+
+/// A kind as it is read: one this build knows, or the name of one it does
+/// not.
+enum Received {
+    Known(ErrorKind),
+    Unknown(String),
+}
+
+/// Read as an enum, as the derived `ErrorKind` is, so that every form a
+/// kind was read from before is read the same way; only a name or an
+/// index this build does not know is read where it was refused.
+impl<'de> Deserialize<'de> for Received {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Kind;
+        impl<'de> serde::de::Visitor<'de> for Kind {
+            type Value = Received;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an error kind")
+            }
+            fn visit_enum<A: serde::de::EnumAccess<'de>>(
+                self,
+                data: A,
+            ) -> Result<Received, A::Error> {
+                let (kind, variant) = data.variant_seed(Name)?;
+                serde::de::VariantAccess::unit_variant(variant)?;
+                Ok(kind)
+            }
+        }
+        // The variant's name, as its identifier.
+        struct Name;
+        impl serde::de::Visitor<'_> for Name {
+            type Value = Received;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an error kind's name or index")
+            }
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<Received, E> {
+                // A known name is matched where it lies: reading it
+                // allocates nothing.
+                Ok(KINDS.iter().find(|(known, _)| *known == name).map_or_else(
+                    || Received::Unknown(name.to_string()),
+                    |(_, kind)| Received::Known(*kind),
+                ))
+            }
+            fn visit_bytes<E: serde::de::Error>(self, name: &[u8]) -> Result<Received, E> {
+                match std::str::from_utf8(name) {
+                    Ok(name) => self.visit_str(name),
+                    Err(_) => Ok(Received::Unknown(
+                        String::from_utf8_lossy(name).into_owned(),
+                    )),
+                }
+            }
+            fn visit_u64<E: serde::de::Error>(self, index: u64) -> Result<Received, E> {
+                Ok(usize::try_from(index)
+                    .ok()
+                    .and_then(|index| KINDS.get(index))
+                    .map_or_else(
+                        || Received::Unknown(index.to_string()),
+                        |(_, kind)| Received::Known(*kind),
+                    ))
+            }
+        }
+        // The variant's identifier is read through this.
+        impl<'de> serde::de::DeserializeSeed<'de> for Name {
+            type Value = Received;
+            fn deserialize<D: serde::Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Received, D::Error> {
+                deserializer.deserialize_identifier(self)
+            }
+        }
+        deserializer.deserialize_enum("ErrorKind", &[], Kind)
+    }
+}
+
+impl TryFrom<Wire<Received, String>> for Error {
+    type Error = String;
+
+    fn try_from(Wire { kind, message }: Wire<Received, String>) -> Result<Self, String> {
+        match kind {
+            Received::Known(kind) => Ok(Self::new(kind, message)),
+            Received::Unknown(mut text) => {
+                let length = u32::try_from(text.len() + 1)
+                    .ok()
+                    .and_then(NonZeroU32::new)
+                    .ok_or_else(|| "an error kind's name is too long".to_string())?;
+                text.push_str(&message);
+                Ok(Self {
+                    kind: ErrorKind::Transport,
+                    text,
+                    unknown: Some(length),
+                    relayed: false,
+                })
+            }
+        }
     }
 }
 
@@ -273,6 +377,38 @@ impl From<gdl_model::PlacementErrors> for Error {
 mod tests {
     use super::*;
 
+    /// The error as velo sends it in a stream item, a struct as an array.
+    fn array<T: Serialize>(value: &T) -> Vec<u8> {
+        rmp_serde::to_vec(value).expect("encode")
+    }
+
+    /// The error as a `msgpack` edge sends it, a struct as a map.
+    fn named<T: Serialize>(value: &T) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        rmp_serde::encode::write_named(&mut bytes, value).expect("encode");
+        bytes
+    }
+
+    fn json<T: Serialize>(value: &T) -> Vec<u8> {
+        serde_json::to_vec(value).expect("encode")
+    }
+
+    /// Each encoding an error crosses in, with its decoder.
+    type Encode<T> = fn(&T) -> Vec<u8>;
+    type Decode<T> = fn(&[u8]) -> T;
+
+    fn encodings<T: Serialize, U: serde::de::DeserializeOwned>()
+    -> [(&'static str, Encode<T>, Decode<U>); 3] {
+        let msgpack: Decode<U> = |bytes| rmp_serde::from_slice(bytes).expect("decode");
+        [
+            ("msgpack array", array::<T>, msgpack),
+            ("msgpack map", named::<T>, msgpack),
+            ("json", json::<T>, |bytes| {
+                serde_json::from_slice(bytes).expect("decode")
+            }),
+        ]
+    }
+
     /// The flag stays in the segment that set it, and two errors that
     /// differ only in it are equal.
     #[test]
@@ -282,41 +418,20 @@ mod tests {
         assert!(error.clone().is_relayed());
         assert_eq!(error, Error::node("x"));
         assert_eq!(format!("{error:?}"), format!("{:?}", Error::node("x")));
-        let bytes = rmp_serde::to_vec(&error).expect("encode");
-        let received: Error = rmp_serde::from_slice(&bytes).expect("decode");
+        let received: Error = rmp_serde::from_slice(&array(&error)).expect("decode");
         assert!(!received.is_relayed());
         assert_eq!(received, error);
     }
 
-    /// Every error crosses as it was, whatever its message begins with:
-    /// a transport error whose message looks like the wire's marker, or its
-    /// escape, is not read as another kind or with its message changed.
+    /// An error is in every stream item's result and every hop's future:
+    /// keeping an unknown kind's name costs it no size.
     #[test]
-    fn a_message_that_looks_like_the_marker_crosses_as_it_was() {
-        let messages = [
-            "",
-            "peer refused",
-            "[outcome unknown] peer refused before send",
-            "[outcome unknown] ",
-            "[transport] peer refused",
-            "[transport] [outcome unknown] peer refused",
-            "[outcome unknown] [transport] peer refused",
-        ];
-        for kind in [
-            ErrorKind::Transport,
-            ErrorKind::OutcomeUnknown,
-            ErrorKind::Node,
-        ] {
-            for message in messages {
-                let error = Error::new(kind, message);
-                let bytes = rmp_serde::to_vec(&error).expect("encode");
-                let back: Error = rmp_serde::from_slice(&bytes).expect("decode");
-                assert_eq!(back, error, "{kind:?} {message:?}");
-            }
-        }
+    fn an_error_is_as_large_as_it_was() {
+        assert_eq!(std::mem::size_of::<Error>(), 32);
     }
 
-    /// The error and its kinds as the previous build declares them.
+    /// The error and its kinds as the build before `OutcomeUnknown`
+    /// declares them.
     mod previous {
         use serde::{Deserialize, Serialize};
 
@@ -341,55 +456,264 @@ mod tests {
         }
     }
 
-    const EARLIER: [(ErrorKind, previous::ErrorKind); 10] = [
-        (ErrorKind::Node, previous::ErrorKind::Node),
-        (ErrorKind::Cancelled, previous::ErrorKind::Cancelled),
+    /// The error as a later build declares it, with a kind this build
+    /// does not know.
+    mod later {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        pub struct Error {
+            pub kind: ErrorKind,
+            pub message: String,
+        }
+
+        #[derive(Serialize)]
+        pub enum ErrorKind {
+            Throttled,
+        }
+    }
+
+    /// Each kind the previous build has, with the bytes velo sends for it
+    /// with the message `why`, as that build sent them.
+    const EARLIER: [(ErrorKind, previous::ErrorKind, &[u8]); 10] = [
+        (
+            ErrorKind::Node,
+            previous::ErrorKind::Node,
+            b"\x92\xa4Node\xa3why",
+        ),
+        (
+            ErrorKind::Cancelled,
+            previous::ErrorKind::Cancelled,
+            b"\x92\xa9Cancelled\xa3why",
+        ),
         (
             ErrorKind::DeadlineExceeded,
             previous::ErrorKind::DeadlineExceeded,
+            b"\x92\xb0DeadlineExceeded\xa3why",
         ),
-        (ErrorKind::Truncated, previous::ErrorKind::Truncated),
-        (ErrorKind::NotHosted, previous::ErrorKind::NotHosted),
-        (ErrorKind::Overloaded, previous::ErrorKind::Overloaded),
-        (ErrorKind::Transport, previous::ErrorKind::Transport),
-        (ErrorKind::Codec, previous::ErrorKind::Codec),
-        (ErrorKind::Placement, previous::ErrorKind::Placement),
-        (ErrorKind::Routing, previous::ErrorKind::Routing),
+        (
+            ErrorKind::Truncated,
+            previous::ErrorKind::Truncated,
+            b"\x92\xa9Truncated\xa3why",
+        ),
+        (
+            ErrorKind::NotHosted,
+            previous::ErrorKind::NotHosted,
+            b"\x92\xa9NotHosted\xa3why",
+        ),
+        (
+            ErrorKind::Overloaded,
+            previous::ErrorKind::Overloaded,
+            b"\x92\xaaOverloaded\xa3why",
+        ),
+        (
+            ErrorKind::Transport,
+            previous::ErrorKind::Transport,
+            b"\x92\xa9Transport\xa3why",
+        ),
+        (
+            ErrorKind::Codec,
+            previous::ErrorKind::Codec,
+            b"\x92\xa5Codec\xa3why",
+        ),
+        (
+            ErrorKind::Placement,
+            previous::ErrorKind::Placement,
+            b"\x92\xa9Placement\xa3why",
+        ),
+        (
+            ErrorKind::Routing,
+            previous::ErrorKind::Routing,
+            b"\x92\xa7Routing\xa3why",
+        ),
     ];
 
-    /// Every kind the previous build has crosses in both directions as it
-    /// did, byte for byte.
+    /// Every kind the previous build has is sent byte for byte as that
+    /// build sent it, in each encoding, and read back.
     #[test]
     fn the_earlier_kinds_cross_as_they_did() {
-        for (kind, earlier) in EARLIER {
+        for (kind, earlier, pinned) in EARLIER {
             let error = Error::new(kind, "why");
-            let bytes = rmp_serde::to_vec(&error).expect("encode");
+            assert_eq!(array(&error), pinned, "{kind}");
+            // As a map, the kind and the message are each keyed by name.
+            let name = &pinned[1..pinned.len() - 4];
+            let mut map = b"\x82\xa4kind".to_vec();
+            map.extend_from_slice(name);
+            map.extend_from_slice(b"\xa7message\xa3why");
+            assert_eq!(named(&error), map, "{kind}");
             let then = previous::Error {
                 kind: earlier,
                 message: "why".into(),
             };
-            assert_eq!(bytes, rmp_serde::to_vec(&then).expect("encode"), "{kind}");
-            let back: Error = rmp_serde::from_slice(&bytes).expect("decode");
-            assert_eq!(back, error);
+            for (encoding, encode, decode) in encodings::<Error, Error>() {
+                assert_eq!(
+                    encode(&error),
+                    encode_previous(encoding, &then),
+                    "{kind} {encoding}"
+                );
+                assert_eq!(decode(&encode(&error)), error, "{kind} {encoding}");
+            }
+        }
+        assert_eq!(
+            json(&Error::node("why")),
+            br#"{"kind":"Node","message":"why"}"#
+        );
+    }
+
+    fn encode_previous(encoding: &str, error: &previous::Error) -> Vec<u8> {
+        encodings::<previous::Error, previous::Error>()
+            .into_iter()
+            .find(|(name, _, _)| *name == encoding)
+            .map(|(_, encode, _)| encode(error))
+            .expect("an encoding")
+    }
+
+    /// An unknown outcome is sent as its own kind, its message as written,
+    /// and read back as it was between two peers of this build.
+    #[test]
+    fn an_unknown_outcome_crosses_as_itself() {
+        let error = Error::new(ErrorKind::OutcomeUnknown, "no answer");
+        assert_eq!(array(&error), b"\x92\xaeOutcomeUnknown\xa9no answer");
+        assert_eq!(
+            named(&error),
+            b"\x82\xa4kind\xaeOutcomeUnknown\xa7message\xa9no answer"
+        );
+        assert_eq!(
+            json(&error),
+            br#"{"kind":"OutcomeUnknown","message":"no answer"}"#
+        );
+        for (encoding, encode, decode) in encodings::<Error, Error>() {
+            let back = decode(&encode(&error));
+            assert_eq!(back, error, "{encoding}");
+            assert_eq!(back.kind(), ErrorKind::OutcomeUnknown, "{encoding}");
+            assert_eq!(back.message(), "no answer", "{encoding}");
+            assert_eq!(back.unknown_kind(), None, "{encoding}");
         }
     }
 
-    /// A peer of the previous build reads an unknown outcome as the
-    /// transport error it would have raised itself, with the message
-    /// saying what it was; this build reads it back whole.
+    /// A peer of the previous build refuses the kind: this build cannot
+    /// roll cell by cell from it.
     #[test]
-    fn an_unknown_outcome_crosses_to_a_peer_that_does_not_know_the_kind() {
-        let error = Error::new(ErrorKind::OutcomeUnknown, "no answer from cell m1");
-        let bytes = rmp_serde::to_vec(&error).expect("encode");
-        let then: previous::Error =
-            rmp_serde::from_slice(&bytes).expect("the previous build reads it");
-        assert_eq!(then.kind, previous::ErrorKind::Transport);
-        assert_eq!(then.message, "[outcome unknown] no answer from cell m1");
-        let back: Error = rmp_serde::from_slice(&bytes).expect("decode");
-        assert_eq!(back, error);
-        assert_eq!(back.kind(), ErrorKind::OutcomeUnknown);
-        assert_eq!(back.message(), "no answer from cell m1");
-        let json = serde_json::to_string(&error).expect("encode");
-        assert_eq!(serde_json::from_str::<Error>(&json).expect("decode"), error);
+    fn the_previous_build_refuses_an_unknown_outcome() {
+        let error = Error::new(ErrorKind::OutcomeUnknown, "no answer");
+        assert!(rmp_serde::from_slice::<previous::Error>(&array(&error)).is_err());
+        assert!(rmp_serde::from_slice::<previous::Error>(&named(&error)).is_err());
+        assert!(serde_json::from_slice::<previous::Error>(&json(&error)).is_err());
+    }
+
+    /// A transport error's message is sent as written, whatever it begins
+    /// with.
+    #[test]
+    fn a_transport_message_is_sent_as_written() {
+        for message in [
+            "[outcome unknown] peer refused",
+            "[outcome unknown] ",
+            "[transport] peer refused",
+        ] {
+            let error = Error::new(ErrorKind::Transport, message);
+            let then = previous::Error {
+                kind: previous::ErrorKind::Transport,
+                message: message.into(),
+            };
+            for (encoding, encode, decode) in encodings::<Error, Error>() {
+                let bytes = encode(&error);
+                assert_eq!(
+                    bytes,
+                    encode_previous(encoding, &then),
+                    "{message:?} {encoding}"
+                );
+                let back = decode(&bytes);
+                assert_eq!(back.kind(), ErrorKind::Transport, "{message:?} {encoding}");
+                assert_eq!(back.message(), message, "{encoding}");
+            }
+        }
+    }
+
+    /// A kind a later build added is read as a transport error that keeps
+    /// the kind's name, shown and sent on as it came, in each encoding.
+    #[test]
+    fn a_kind_this_build_does_not_know_is_a_transport_error_with_its_name() {
+        let sent = later::Error {
+            kind: later::ErrorKind::Throttled,
+            message: "slow down".into(),
+        };
+        for (encoding, encode, decode) in encodings::<later::Error, Error>() {
+            let bytes = encode(&sent);
+            let error = decode(&bytes);
+            assert_eq!(error.kind(), ErrorKind::Transport, "{encoding}");
+            assert_eq!(error.unknown_kind(), Some("Throttled"), "{encoding}");
+            assert_eq!(error.message(), "slow down", "{encoding}");
+            assert_eq!(
+                error.to_string(),
+                "transport error (unknown kind Throttled): slow down",
+                "{encoding}"
+            );
+            // A segment that relays it sends it on under its own name, for
+            // a peer that knows it.
+            let relayed = encodings::<Error, Error>()
+                .into_iter()
+                .find(|(name, _, _)| *name == encoding)
+                .map(|(_, encode, _)| encode(&error.clone().relayed()))
+                .expect("an encoding");
+            assert_eq!(relayed, bytes, "{encoding}");
+            assert_ne!(error, Error::new(ErrorKind::Transport, "slow down"));
+        }
+    }
+
+    /// msgpack also reads a kind sent as its index, as serde's own enums
+    /// do: a known index is its kind, and an unknown one a transport error
+    /// named by the index.
+    #[test]
+    fn a_kind_sent_as_its_index_is_read() {
+        let known: Error = rmp_serde::from_slice(b"\x92\x0a\xa3why").expect("decode");
+        assert_eq!(known, Error::new(ErrorKind::OutcomeUnknown, "why"));
+        let unknown: Error = rmp_serde::from_slice(b"\x92\x0b\xa3why").expect("decode");
+        assert_eq!(unknown.kind(), ErrorKind::Transport);
+        assert_eq!(unknown.unknown_kind(), Some("11"));
+        assert_eq!(unknown.message(), "why");
+    }
+
+    /// The table an error's kind is read from holds every kind declared,
+    /// at its index, under its name: a kind declared and left out of it
+    /// would be read back from a peer of this build as unknown. The kinds
+    /// are found from the derived encoding, by index, not from the table.
+    #[test]
+    fn the_kinds_read_are_every_kind_declared() {
+        let declared: Vec<ErrorKind> = (0u8..=127)
+            .map_while(|index| rmp_serde::from_slice::<ErrorKind>(&[index]).ok())
+            .collect();
+        assert_eq!(declared.len(), KINDS.len());
+        for (index, kind) in declared.iter().enumerate() {
+            assert_eq!(KINDS[index].1, *kind);
+            assert_eq!(
+                serde_json::to_value(kind).expect("encode"),
+                serde_json::json!(KINDS[index].0)
+            );
+        }
+        // JSON never read a kind by its index, and does not now.
+        assert!(serde_json::from_str::<Error>(r#"{"kind":10,"message":"m"}"#).is_err());
+    }
+
+    /// Every kind is sent under its name, which is its declared name, and
+    /// read back.
+    #[test]
+    fn every_kind_crosses_under_its_name() {
+        for (index, (name, kind)) in KINDS.iter().enumerate() {
+            assert_eq!(
+                serde_json::to_value(kind).expect("encode"),
+                serde_json::json!(name)
+            );
+            let error = Error::new(*kind, "m");
+            assert_eq!(
+                rmp_serde::from_slice::<Error>(&array(&error)).expect("decode"),
+                error
+            );
+            let mut by_index = vec![0x92, u8::try_from(index).expect("a fixint")];
+            by_index.extend_from_slice(b"\xa1m");
+            assert_eq!(
+                rmp_serde::from_slice::<Error>(&by_index).expect("decode"),
+                error
+            );
+        }
     }
 }

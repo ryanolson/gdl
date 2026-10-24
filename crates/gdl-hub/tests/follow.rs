@@ -31,6 +31,8 @@ async fn follows(hub: &Hub) -> BoxStream<'static, FollowEvent> {
         .await
         .expect("the hub answers in time")
         .expect("the hub serves the relay")
+        .map(|item| item.event().expect("an event of a kind this build knows"))
+        .boxed()
 }
 
 async fn next(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> FollowEvent {
@@ -98,6 +100,18 @@ async fn following(
     }
 }
 
+/// The follow `generation` of [`CELL`], marked not offered at its first
+/// change.
+fn unoffered(generation: u64) -> FollowEvent {
+    FollowEvent::Offering {
+        class: "model_x".into(),
+        cell: CELL.into(),
+        generation,
+        revision: 2,
+        offered: false,
+    }
+}
+
 /// The `PeerInfo` of `id`, as the hub's members name it.
 async fn peer(hub: &Hub, id: InstanceId) -> PeerInfo {
     let (status, body) = common::get(hub, "/v1/ext/gdl/members").await;
@@ -142,6 +156,9 @@ struct Followed {
     state: CellState,
     retired: HashSet<InstanceId>,
     exposed: HashMap<InstanceId, PeerInfo>,
+    /// Instances a state hid, which a consumer keeps until they leave or
+    /// are exposed again.
+    hidden: HashSet<InstanceId>,
 }
 
 fn exposes(state: CellState) -> bool {
@@ -186,12 +203,16 @@ impl Relay {
                         state: *state,
                         retired: HashSet::new(),
                         exposed: HashMap::new(),
+                        hidden: HashSet::new(),
                     },
                 );
                 assert!(installed.is_none(), "{cell} installed twice");
             }
             FollowEvent::Synced => {}
             FollowEvent::Load {
+                cell, generation, ..
+            }
+            | FollowEvent::Offering {
                 cell, generation, ..
             } => {
                 self.current(cell, *generation);
@@ -205,7 +226,9 @@ impl Relay {
                 let followed = self.current(cell, *generation);
                 followed.state = *state;
                 if !exposes(*state) {
-                    followed.exposed.clear();
+                    let hidden: Vec<InstanceId> =
+                        followed.exposed.drain().map(|(id, _)| id).collect();
+                    followed.hidden.extend(hidden);
                 }
             }
             FollowEvent::Exposed {
@@ -225,6 +248,7 @@ impl Relay {
                     !followed.retired.contains(&id),
                     "a retired instance exposed"
                 );
+                followed.hidden.remove(&id);
                 let known = followed.exposed.insert(id, peer.clone());
                 assert!(known.is_none(), "an instance exposed twice");
             }
@@ -236,6 +260,7 @@ impl Relay {
             } => {
                 let followed = self.current(cell, *generation);
                 followed.exposed.remove(instance);
+                followed.hidden.remove(instance);
                 assert!(followed.retired.insert(*instance), "retired twice");
             }
             FollowEvent::Left {
@@ -245,8 +270,9 @@ impl Relay {
                 ..
             } => {
                 let followed = self.current(cell, *generation);
-                let known =
-                    followed.exposed.remove(instance).is_some() | followed.retired.remove(instance);
+                let known = followed.exposed.remove(instance).is_some()
+                    | followed.hidden.remove(instance)
+                    | followed.retired.remove(instance);
                 assert!(known, "an instance that left was never sent");
             }
             FollowEvent::Dropped {
@@ -359,6 +385,9 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
     records.until(CellState::Ready).await;
 
     let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    // A chooser that never acknowledges that the cell is not offered, so
+    // that the follow lives through the states that take no work.
+    let _chooser = Instance::chooser(&global_hub).await;
     let mut inner = global_cell.follows();
     let mut relay = Relay::of(&snapshot(&mut inner).await);
     until(
@@ -417,6 +446,7 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
         assert_eq!(event, state(expected));
         relay.apply(&event);
     }
+    assert_eq!(next(&mut watch).await, unoffered(generation));
     records.until(CellState::Unavailable).await;
 
     let mut joining = Instance::join(&model_hub, "f").await;
@@ -495,6 +525,10 @@ async fn a_cell_whose_hub_stops_is_dropped_and_its_successor_followed_anew() {
     let first = relay.follows[CELL].generation;
 
     first_hub.shutdown().await.expect("the hub stops");
+    // Not offered at once, and, with no chooser to wait for, closed.
+    let event = next(&mut watch).await;
+    assert_eq!(event, unoffered(first));
+    relay.apply(&event);
     let event = next(&mut watch).await;
     assert_eq!(
         event,
@@ -580,6 +614,7 @@ async fn a_hub_serving_another_cell_or_epoch_is_not_installed() {
         ..record.clone()
     };
     directory.inner.publish(later).await.expect("stored");
+    assert_eq!(next(&mut watch).await, unoffered(generation));
     let event = next(&mut watch).await;
     assert_eq!(
         event,
@@ -669,10 +704,12 @@ async fn a_withdrawn_record_does_not_end_a_live_follow() {
     model_hub.shutdown().await.expect("the hub stops");
 }
 
-/// A followed cell that drains stays followed, exposing nothing, while
-/// any of its instances is a member of its hub. Once the last leaves, its
-/// hub withdraws its record and ends its watch, and the global drops the
-/// follow and does not follow the cell again.
+/// A followed cell that drains stays followed, exposing nothing and not
+/// offered, while a chooser of the global has yet to acknowledge it, and
+/// while any of its instances is a member of its hub. Once the last
+/// leaves, its hub withdraws its record and ends its watch, and the global
+/// does not follow the cell again; it drops the follow once the chooser
+/// acknowledges.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
     let directory = Resolving::new();
@@ -686,6 +723,7 @@ async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
     let (instances, _) = meet_the_quorum(&model_hub).await;
     let (record, _) = records.until(CellState::Ready).await;
     let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let chooser = Instance::chooser(&global_hub).await;
     let mut watch = global_cell.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
@@ -700,18 +738,32 @@ async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
     })
     .await;
     assert!(relay.exposed(CELL).is_empty());
+    assert_eq!(next(&mut watch).await, unoffered(generation));
     for instance in instances {
         instance.leave().await;
     }
-    until(&mut watch, &mut relay, "the follow dropped", |relay| {
-        !relay.follows.contains_key(CELL)
-    })
-    .await;
     following(
         &global_cell,
         "the drained cell no longer followed",
         |cells| !cells.contains_key(CELL),
     )
+    .await;
+    for event in pending(&mut watch) {
+        relay.apply(&event);
+    }
+    assert!(relay.follows.contains_key(CELL), "dropped unacknowledged");
+    chooser
+        .acknowledge(&gdl_watch::Unoffered {
+            class: "model_x".into(),
+            cell: CELL.into(),
+            generation,
+            revision: 2,
+        })
+        .await
+        .expect("the hub takes the acknowledgement");
+    until(&mut watch, &mut relay, "the follow dropped", |relay| {
+        !relay.follows.contains_key(CELL)
+    })
     .await;
     // Once the directory has shown it a later write, the global has
     // decided on every record before it, and not followed the cell again.

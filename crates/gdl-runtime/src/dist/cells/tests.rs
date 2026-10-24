@@ -1,22 +1,27 @@
 //! The follower's rules, without a hub: its state machine driven by
 //! events and an explicit clock, and its task driven by scripted watches.
 
+mod offered;
+mod reread;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures::StreamExt;
-use futures::stream::BoxStream;
 use gdl_cells::{CellState, LoadSummary};
 use gdl_watch::FollowEvent;
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo, WorkerAddress};
 
 use super::follow::Follows;
-use super::task::{Source, run};
+use super::task::run;
 use super::{Cells, FollowedCell};
 use crate::dist::fabric::Registry;
 use crate::dist::roster::Roster;
+use scripted::Scripted;
+
+mod scripted;
+mod unread;
 
 const DRAIN: Duration = Duration::from_secs(10);
 const M1: &str = "m1";
@@ -420,9 +425,10 @@ fn a_retired_entry_is_marked_and_never_eligible_again() {
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
 }
 
-/// A state that exposes nothing takes every entry out of the table, since
-/// the relay sends no `left` for an instance hidden when it leaves; a
-/// state that exposes them again is followed by an `exposed` for each.
+/// A state that exposes nothing takes every entry out of the table, and a
+/// state that exposes them again is followed by an `exposed` for each. A
+/// hidden entry stays registered until the follow is dropped, since what
+/// was offered to it may still be under way.
 #[test]
 fn a_state_that_exposes_nothing_empties_the_table() {
     let (mut follows, cells, recorded, _) = follower();
@@ -457,7 +463,17 @@ fn a_state_that_exposes_nothing_empties_the_table() {
     let draining = now + DRAIN;
     live(&mut follows, draining, [state(M1, 1, CellState::Draining)]);
     follows.forget(draining + DRAIN);
-    assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
+    assert_eq!(recorded.take(), [], "unregistered while its follow lives");
+    let closed = draining + DRAIN;
+    live(&mut follows, closed, [dropped(M1, 1)]);
+    follows.forget(closed + DRAIN);
+    assert_eq!(
+        recorded.take(),
+        [
+            Call::Unregister(x.instance_id()),
+            Call::Unregister(y.instance_id())
+        ]
+    );
 }
 
 /// Only the entry segments of the chooser's own hops are kept: another
@@ -587,35 +603,6 @@ fn a_snapshot_replaces_what_was_held() {
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
 }
 
-/// Watches scripted in order, each a list of events that ends the watch;
-/// after the last, a watch that never ends. Each watch asked for is
-/// counted, and begins only once the test has released that many.
-struct Scripted {
-    watches: Mutex<VecDeque<Vec<FollowEvent>>>,
-    opened: tokio::sync::watch::Sender<usize>,
-    released: tokio::sync::watch::Receiver<usize>,
-}
-
-impl Source for Scripted {
-    async fn watch(&self) -> Result<BoxStream<'static, FollowEvent>, String> {
-        let mut opened = 0;
-        self.opened.send_modify(|count| {
-            *count += 1;
-            opened = *count;
-        });
-        let mut released = self.released.clone();
-        released
-            .wait_for(|released| *released >= opened)
-            .await
-            .map_err(|_| "the test ended".to_string())?;
-        let next = self.watches.lock().expect("lock").pop_front();
-        Ok(match next {
-            Some(events) => futures::stream::iter(events).boxed(),
-            None => futures::stream::pending().boxed(),
-        })
-    }
-}
-
 /// A watch that ends part way through its snapshot changes nothing: the
 /// tables stay as the last complete snapshot and its changes made them,
 /// until a complete one replaces them.
@@ -640,14 +627,7 @@ async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
     ]);
     let (opened, mut watching) = tokio::sync::watch::channel(0);
     let (release, released) = tokio::sync::watch::channel(2);
-    let task = tokio::spawn(run(
-        Scripted {
-            watches: Mutex::new(watches),
-            opened,
-            released,
-        },
-        follows,
-    ));
+    let task = tokio::spawn(run(Scripted::new(watches, opened, released), follows));
     // The third watch is asked for once the second has ended.
     watching
         .wait_for(|opened| *opened >= 3)
@@ -735,14 +715,7 @@ async fn a_stalled_watch_holds_no_unregistration() {
     let (opened, mut watching) = tokio::sync::watch::channel(0);
     // The second watch is asked for and never begins.
     let (_release, released) = tokio::sync::watch::channel(1);
-    let task = tokio::spawn(run(
-        Scripted {
-            watches: Mutex::new(watches),
-            opened,
-            released,
-        },
-        follows,
-    ));
+    let task = tokio::spawn(run(Scripted::new(watches, opened, released), follows));
     watching
         .wait_for(|opened| *opened >= 2)
         .await

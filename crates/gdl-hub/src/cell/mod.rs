@@ -7,9 +7,11 @@ use gdl_model::{CellSettings, DeploymentSpec};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use velo_hub::axum::extract::Path;
 use velo_hub::axum::response::{IntoResponse, Response};
 use velo_hub::axum::{
     Json, Router,
+    extract::Query,
     http::StatusCode,
     routing::{get, post},
 };
@@ -20,11 +22,11 @@ use velo_hub::{
     Rejection, StartContext, Txn,
 };
 
-use crate::follow::{Follower, FollowsWatch, Relay};
+use crate::follow::{Choosers, Follower, FollowsWatch, Relay};
 use crate::{GraphAdmission, Quorum};
 use drain::Drain;
 use feed::Feed;
-use gdl_watch::{CellWatchError, CellWatcher, LoadReport};
+use gdl_watch::{CellWatchError, CellWatcher, LoadReport, Unoffered};
 
 /// How long a watch that arrives before the cell's record is first stored
 /// waits for it: a follower finds the cell by its record, so it can ask
@@ -34,6 +36,7 @@ const SETTLE: Duration = Duration::from_secs(5);
 mod count;
 mod drain;
 mod feed;
+mod followers;
 mod judge;
 mod load;
 mod publish;
@@ -83,12 +86,25 @@ pub use feed::CellWatch;
 /// [`gdl_watch::FollowEvent`] as JSON, with the same keep-alive and buffer as
 /// the cell's watch: each followed cell's state, then its retired entry
 /// instances, then those it exposes, the ready ones that have not retired
-/// while its state is `ready` or `degraded`. A follow is dropped as soon
-/// as its link ends, and followed again, as a new generation, while the
-/// cell is still a home cell that takes work; a record that expires or is
-/// withdrawn ends no follow, and a newer epoch in the directory ends the
-/// follow of the hub it replaces. A follow is never closed while its link
-/// lives.
+/// while its state is `ready` or `degraded`. A follow is offered to the
+/// hub's choosers while its link lives and its state is one of those, and
+/// each change between offered and not offered is its next revision, which
+/// the relay carries. One that is not offered closes once every chooser of
+/// its class among the hub's members, the instances of the segments that
+/// hold the outer end of a hop into the class, has acknowledged its
+/// current revision or left: a member counts as a chooser once it says
+/// that it runs a follower of the relay (`POST instances/{instance_id}/chooser`
+/// on the control listener, with its own credential), since one that runs
+/// none, as an instance without `[cell]`, never offers and never
+/// acknowledges; and it acknowledges with `POST instances/{instance_id}/unoffered` on
+/// the control listener, a [`gdl_watch::Unoffered`] with the chooser's own
+/// credential, refused with 409 from any other instance. Then the relay
+/// drops it and its link ends. A follow whose link ends, or that a newer
+/// epoch in the directory replaces, is not offered from then, and is kept
+/// beside the cell's later follows until it closes the same way; the cell
+/// is followed again, as a new generation, while it is still a home cell
+/// that takes work, and, after a follow closed, only from a later write
+/// of its record. A record that expires or is withdrawn ends no follow.
 ///
 /// Each usable entry instance of the cell reports its admission to the
 /// hub once a load summary period (`[cell] summary_ms`), on the control
@@ -112,7 +128,21 @@ pub use feed::CellWatch;
 /// [`CellReadiness::drain`] in process. From then its state is `draining`
 /// whatever its quorum, so its health endpoint answers 503, its record and
 /// its watch say so, and no chooser chooses it; a drain cannot be
-/// cancelled. A cell whose class no hop enters cannot be drained.
+/// cancelled. A cell whose class no hop enters cannot be drained. A hub
+/// that follows the cell names its watch in the query, its own cell and
+/// the follow (`?class=<class>&cell=<cell>&run=<run>&generation=<generation>`,
+/// [`gdl_watch::Follower`]), and the watch counts among the cell's
+/// followers ([`CellReadiness::followers`]) until the follower releases it
+/// (`POST release` on the public listener, with the same
+/// [`gdl_watch::Follower`]), which it does once none of its choosers holds
+/// an offer to the cell in that follow. A watch that closes without a
+/// release still counts; once the cell's lease has passed since it closed,
+/// looked at once a summary period, it no longer shows as a follower, but
+/// it is never taken as a release. Once the cell drains and every watch
+/// that counted has been released, or none did, its watch says so, once
+/// (its [`gdl_watch::CellWatchEvent::State`] again, with `unfollowed`),
+/// and its entry instances
+/// stop taking work from other cells then rather than at their bound.
 ///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,
@@ -150,10 +180,20 @@ pub struct CellReadiness<D: CellDirectory> {
     summary: Option<Duration>,
     /// What the hub follows.
     relay: Arc<Relay>,
+    /// The client of the followed cells' watches, once the hub follows
+    /// any.
+    watcher: OnceLock<CellWatcher>,
     /// The cell's drain.
     drain: Arc<Drain>,
     /// The state of the cell's record last stored in the directory.
     stored: watch::Sender<Option<CellState>>,
+    /// A number drawn as the hub starts, which the watches it follows
+    /// cells by carry, so that a cell's hub tells them from those of an
+    /// earlier run of this hub.
+    run: u64,
+    /// The follows the relay closed, for their cells' hubs to be told,
+    /// until the hub starts and takes them.
+    released: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<crate::follow::Release>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -234,6 +274,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             segments,
             cell.summary,
             timing.watch_buffer,
+            timing.lease,
         );
         let sends: BTreeSet<String> = layout
             .boundaries()
@@ -246,7 +287,13 @@ impl<D: CellDirectory> CellReadiness<D> {
             CellState::Unavailable,
             &cell.requires,
         ));
-        let relay = Arc::new(Relay::new(timing.watch_buffer, health.clone()));
+        let (releases, released) = tokio::sync::mpsc::unbounded_channel();
+        let relay = Arc::new(Relay::new(
+            timing.watch_buffer,
+            health.clone(),
+            choosers(&layout, &cell.class),
+            releases,
+        ));
         Ok(Self {
             directory: Arc::new(directory),
             record,
@@ -258,8 +305,11 @@ impl<D: CellDirectory> CellReadiness<D> {
             sends: sends.into_iter().collect(),
             summary: (!entries.is_empty()).then_some(cell.summary),
             relay,
+            watcher: OnceLock::new(),
             drain: Arc::new(Drain::new(class_segments)),
             stored: watch::Sender::new(None),
+            run: velo_hub::velo::InstanceId::new_v4().as_u128() as u64,
+            released: Mutex::new(Some(released)),
             tasks: Mutex::default(),
         })
     }
@@ -282,6 +332,12 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// changes.
     pub fn watchers(&self) -> watch::Receiver<usize> {
         self.feed.watchers()
+    }
+
+    /// The cells that follow this one, by class and name, as their open
+    /// watches name them, as it changes.
+    pub fn followers(&self) -> watch::Receiver<BTreeSet<(String, String)>> {
+        self.feed.followers()
     }
 
     /// A watch of what the hub follows, in process: what `GET follows`
@@ -329,6 +385,13 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// How many watches of what the hub follows are open, as it changes.
     pub fn follows_watchers(&self) -> watch::Receiver<usize> {
         self.relay.watchers()
+    }
+
+    /// How many events of a kind this build does not know the watches of
+    /// the cells the hub follows have sent: each withheld its cell in the
+    /// relay until the hub read the cell again.
+    pub fn unknown_events(&self) -> u64 {
+        self.watcher.get().map_or(0, CellWatcher::unknown_events)
     }
 
     /// The cells the hub has decided to follow, by class and name, each
@@ -412,13 +475,40 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         let follows = if self.sends.is_empty() {
             Ok(())
         } else {
-            CellWatcher::new().map(|watcher| {
+            match self.watcher.get() {
+                Some(watcher) => Ok(watcher.clone()),
+                None => {
+                    CellWatcher::new().map(|watcher| self.watcher.get_or_init(|| watcher).clone())
+                }
+            }
+            .map(|watcher| {
+                let me = gdl_watch::Follower {
+                    class: self.record.class.clone(),
+                    cell: self.record.name.clone(),
+                    run: self.run,
+                    generation: 0,
+                };
+                let released = self
+                    .released
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                if let Some(released) = released {
+                    tasks.push(tokio::spawn(crate::follow::release(
+                        released,
+                        watcher.clone(),
+                        me.clone(),
+                        self.timing.lease,
+                        ctx.cancellation().clone(),
+                    )));
+                }
                 for class in &self.sends {
                     let follower = Follower {
                         directory: Arc::clone(&self.directory),
                         relay: Arc::clone(&self.relay),
                         watcher: watcher.clone(),
                         refollow: self.timing.refollow,
+                        me: me.clone(),
                         class: class.clone(),
                         region: self.record.region.clone(),
                         contract: self.record.contract,
@@ -449,8 +539,22 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 
     fn public_routes(self: Arc<Self>) -> Router {
         let feed = Arc::clone(&self.feed);
+        let releasing = Arc::clone(&self.feed);
         let relay = Arc::clone(&self.relay);
         Router::new()
+            .route(
+                gdl_watch::RELEASE_ROUTE,
+                post(move |Json(follower): Json<gdl_watch::Follower>| async move {
+                    let gdl_watch::Follower {
+                        class,
+                        cell,
+                        run,
+                        generation,
+                    } = follower;
+                    releasing.release(&((class, cell), run, generation));
+                    StatusCode::NO_CONTENT
+                }),
+            )
             .route(
                 "/health",
                 get(move || {
@@ -467,11 +571,18 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             )
             .route(
                 gdl_watch::WATCH_ROUTE,
-                get(move || {
+                get(move |Query(query): Query<WatchQuery>| {
                     let feed = Arc::clone(&feed);
                     async move {
-                        let watch = tokio::time::timeout(SETTLE, feed.watch())
-                            .await
+                        let follower = (query.class, query.cell, query.run, query.generation);
+                        let watch = match follower {
+                            (Some(class), Some(cell), Some(run), Some(generation)) => {
+                                let key = ((class, cell), run, generation);
+                                tokio::time::timeout(SETTLE, feed.follow(key)).await
+                            }
+                            _ => tokio::time::timeout(SETTLE, feed.watch()).await,
+                        };
+                        let watch = watch
                             .unwrap_or_else(|_| {
                                 Err(CellWatchError::new(
                                     "the cell has not published its record yet, so its epoch is not settled",
@@ -483,8 +594,18 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             )
             .route(
                 gdl_watch::FOLLOWS_ROUTE,
-                get(move || {
-                    let watch = relay.watch();
+                get({
+                    let relay = Arc::clone(&relay);
+                    move || {
+                        let watch = relay.watch();
+                        async move { crate::fanout::serve(watch.into_events()) }
+                    }
+                }),
+            )
+            .route(
+                gdl_watch::FOLLOWED_ROUTE,
+                get(move |Path((class, cell)): Path<(String, String)>| {
+                    let watch = relay.watch_of(&class, &cell);
                     async move { crate::fanout::serve(watch.into_events()) }
                 }),
             )
@@ -492,7 +613,31 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 
     fn control_routes(self: Arc<Self>) -> Router {
         let draining = Arc::clone(&self);
+        let relay = Arc::clone(&self.relay);
+        let declared = Arc::clone(&self.relay);
         Router::new()
+            .route(
+                gdl_watch::CHOOSER_ROUTE,
+                post(move |authorized: Authorized| async move {
+                    declared
+                        .declare(authorized.owner, authorized.lease.epoch)
+                        .map(|()| StatusCode::NO_CONTENT)
+                        .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
+                }),
+            )
+            .route(
+                gdl_watch::UNOFFERED_ROUTE,
+                post(
+                    move |authorized: Authorized, HubJson(unoffered): HubJson<Unoffered>| async move {
+                        relay
+                            .acknowledge(authorized.owner, authorized.lease.epoch, &unoffered)
+                            .map(|()| StatusCode::NO_CONTENT)
+                            // Not 401 or 404: velo-hub's client drops its
+                            // registration on those.
+                            .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
+                    },
+                ),
+            )
             .route(
                 gdl_watch::DRAIN_ROUTE,
                 post(move || async move {
@@ -549,6 +694,12 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         if let Some((segment, peer)) = member {
             self.drain
                 .joined(&segment, committed.owner, committed.incarnation);
+            self.relay.joined(
+                &segment,
+                committed.owner,
+                committed.incarnation,
+                committed.epoch,
+            );
             self.feed
                 .joined(&segment, committed.incarnation, committed.epoch, peer);
         }
@@ -559,8 +710,45 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 
     fn on_removed(&self, removal: Removal) {
         self.drain.removed(&removal);
+        self.relay.removed(&removal);
         self.feed.removed(removal);
     }
+}
+
+/// The segments of `class` that choose cells of the classes it sends to,
+/// each with those classes: the segments holding the outer end of a hop
+/// that crosses out of the class, whose instances offer requests to the
+/// cells this hub follows.
+fn choosers(layout: &gdl_model::Layout, class: &str) -> Choosers {
+    let mut segments: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for boundary in layout.boundaries() {
+        if boundary.from != class {
+            continue;
+        }
+        let hop = &layout.hops()[boundary.hop];
+        if let Some(outer) = hop.forward_runs.first() {
+            segments
+                .entry(outer.segment.clone())
+                .or_default()
+                .insert(boundary.into.clone());
+        }
+    }
+    Choosers::new(
+        segments
+            .into_iter()
+            .map(|(segment, classes)| (segment, classes.into_iter().collect())),
+    )
+}
+
+/// The query of a watch: the follower's watch it names, if it names one
+/// ([`gdl_watch::Follower`]); one that leaves out any of its parts names
+/// none.
+#[derive(Deserialize)]
+struct WatchQuery {
+    class: Option<String>,
+    cell: Option<String>,
+    run: Option<u64>,
+    generation: Option<u64>,
 }
 
 /// The watch as server-sent events, each one JSON value; a hub that has
