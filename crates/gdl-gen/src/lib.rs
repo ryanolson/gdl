@@ -216,12 +216,18 @@ pub struct Check {
 /// Check `spec` as [`render`] and [`export`] check it, with offers from
 /// `from`, and write nothing. A spec that passes generates.
 pub fn check(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Check, Error> {
-    checked(spec, target, from).0
+    let check = checked(spec, target, from).0?;
+    // What an export of it would refuse.
+    let problems = export::refusals(spec, &check.manifest.name);
+    if !problems.is_empty() {
+        return Err(Error::all(problems));
+    }
+    Ok(check)
 }
 
-/// [`check`], and the spec's layout whenever its placement fits its
-/// graph, whatever else is wrong with it: a fleet file is checked against
-/// the layout even when a binding is not.
+/// `spec` checked as [`render`] checks it, and its layout whenever its
+/// placement fits its graph, whatever else is wrong with it: a fleet file
+/// is checked against the layout even when a binding is not.
 pub(crate) fn checked(
     spec: &Spec,
     target: &Path,
@@ -237,11 +243,6 @@ pub(crate) fn checked(
         let prepared = prepared?;
         let spec = bound(spec, &prepared, target, from)?;
         let layout = validate(&spec, &prepared.contract, &prepared.manifest)?;
-        // What an export of it would refuse.
-        let problems = export::refusals(&spec, &prepared.manifest.name);
-        if !problems.is_empty() {
-            return Err(Error::all(problems));
-        }
         let mermaid = prepared
             .manifest
             .to_mermaid(Some(&layout))

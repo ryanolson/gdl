@@ -173,6 +173,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             .or_else(|| std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from))
             .unwrap_or_else(|| beside.join("target"))
     };
+    // A problem of the spec's that names no file is the spec's own.
+    let located = |error: gdl_gen::Error| match &args.spec {
+        Some(file) => error.in_file(file.display()),
+        None => gdl_model::Problems::from(gdl_model::Problem::from(error.to_string())),
+    };
     let spec = || -> Result<gdl_gen::Spec, Box<dyn std::error::Error>> {
         let file = args.spec.as_ref().ok_or(USAGE)?;
         Ok(gdl_gen::Spec::load(file)?)
@@ -205,12 +210,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Resolve => {
             let spec = spec()?;
             let target = target(spec.dir());
-            print!("{}", gdl_gen::resolve(&spec, &target)?);
+            print!("{}", gdl_gen::resolve(&spec, &target).map_err(located)?);
         }
         Command::Diagram(format) => {
             let spec = spec()?;
             let target = target(spec.dir());
-            print!("{}", gdl_gen::diagram(&spec, &target, *format)?);
+            print!(
+                "{}",
+                gdl_gen::diagram(&spec, &target, *format).map_err(located)?
+            );
         }
         Command::Check { fleet } => {
             let file = args.spec.as_ref().ok_or(USAGE)?;
@@ -232,13 +240,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Export { out } => {
             let spec = spec()?;
             let target = target(spec.dir());
-            let bytes = gdl_gen::export(&spec, &target, gdl_gen::Offers::Read)?;
+            let bytes = gdl_gen::export(&spec, &target, gdl_gen::Offers::Read).map_err(located)?;
             std::fs::write(out, bytes).map_err(|e| format!("{}: {e}", out.display()))?;
         }
         Command::Generate { out, check } => {
             let spec = spec()?;
             let target = target(spec.dir());
-            let files = gdl_gen::render(&spec, out, &target)?;
+            let files = gdl_gen::render(&spec, out, &target).map_err(located)?;
             if *check {
                 let drift = gdl_gen::drift(out, &files)?;
                 if drift.is_empty() {

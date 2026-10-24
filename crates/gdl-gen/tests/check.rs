@@ -188,11 +188,17 @@ fn every_problem_of_both_files_is_reported() {
     let spec = spec("[pipeline_names]\nGhost = \"ghost\"\n[config.Nobody]\nx = 1\n");
     let fleet = format!(
         "{}[cell.model-x-02-us-east-1]\nclass = \"model_x\"\nregion = \"us-east-1\"\n",
-        FLEET.replacen(
-            "ready = { engine = 1 }",
-            "ready = { engine = 1, front = 1 }",
-            1
-        )
+        FLEET
+            .replacen(
+                "ready = { engine = 1 }",
+                "ready = { engine = 1, front = 1 }",
+                1
+            )
+            .replacen(
+                "requires = { model_x = 1 }",
+                "requires = { model_x = 1, global = 1 }",
+                1
+            )
     );
     let files = Files::new(&spec, &fleet);
     let (s, f) = (
@@ -202,6 +208,7 @@ fn every_problem_of_both_files_is_reported() {
     let expected = [
         format!("{s}: [pipeline_names] Ghost: the graph has no source `Ghost`"),
         format!("{s}: [config.Nobody]: the graph has no bound node `Nobody`"),
+        format!("{f}: [class.global] requires.global: not a class that `global` sends to"),
         format!("{f}: [class.model_x] ready.front: not a segment of class `model_x`"),
         format!("{f}: [cell.model-x-02-us-east-1] home: missing"),
     ];

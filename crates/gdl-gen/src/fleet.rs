@@ -7,8 +7,8 @@ use gdl_model::{Fleet, Layout, Problem, Problems};
 
 use crate::{Offers, Spec};
 
-/// Every problem with the spec at `spec`, as [`crate::check`] finds them
-/// with nothing written, and, with `fleet`, every problem with that fleet
+/// Every problem with the spec at `spec`, as [`crate::render`] finds
+/// them, with nothing written, and, with `fleet`, every problem with that fleet
 /// file against the spec's layout. Each names its file, and its table and
 /// key where it has them. A file that does not read is one problem, and
 /// the other is still checked: a fleet file without the spec's layout for

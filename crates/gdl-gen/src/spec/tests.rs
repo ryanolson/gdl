@@ -566,6 +566,11 @@ fn every_spec_table_refuses_an_unknown_key_where_it_is() {
             "[deployment.segment.front] port",
         ),
         (
+            format!("{CONTRACT}[entry.ask]\nnested = {{ target = \"A\", extra = 1 }}\n"),
+            "nested",
+            "[entry.ask.nested] extra",
+        ),
+        (
             format!("{CONTRACT}[entry.ask]\nforwards = []\n"),
             "forwards",
             "[entry.ask] forwards",

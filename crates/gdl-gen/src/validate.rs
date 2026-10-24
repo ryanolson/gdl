@@ -149,12 +149,12 @@ pub(crate) fn validate(
         // package is called; case is folded for file systems that fold it.
         if graph_spec && segment.eq_ignore_ascii_case("contract") {
             problems.push(format!(
-                "segment `{segment}`: the generated contract crate is `contract/`; rename the segment"
+                "[segment.{segment}]: segment `{segment}`: the generated contract crate is `contract/`; rename the segment"
             ));
             continue;
         }
         if let Some(problem) = gdl_model::segment_name_problem(segment) {
-            problems.push(problem);
+            problems.push(format!("[segment.{segment}]: {problem}"));
             continue;
         }
         let package = emit::package(manifest, segment);
@@ -162,7 +162,7 @@ pub(crate) fn validate(
         // by package name; Cargo cannot hold two path packages of one name.
         if package == contract.package {
             problems.push(format!(
-                "segment `{segment}` becomes package `{package}`, the contract's name"
+                "[segment.{segment}]: segment `{segment}` becomes package `{package}`, the contract's name"
             ));
         }
         for (node, bind) in &bindings {
@@ -173,7 +173,7 @@ pub(crate) fn validate(
                     format!("[bind.{node}]'s crate")
                 };
                 problems.push(format!(
-                    "segment `{segment}` becomes package `{package}`, the name of {whose}"
+                    "[segment.{segment}]: segment `{segment}` becomes package `{package}`, the name of {whose}"
                 ));
             }
         }
@@ -184,7 +184,7 @@ pub(crate) fn validate(
             if let Some(first) = seen.get(lib) {
                 if *first != what {
                     problems.push(format!(
-                        "segment `{segment}`: crate name `{lib}` is both {first} and {what}"
+                        "[segment.{segment}]: segment `{segment}`: crate name `{lib}` is both {first} and {what}"
                     ));
                 }
             } else {
@@ -218,14 +218,16 @@ pub(crate) fn validate(
         // Cargo names dependencies by package: each key in the generated
         // manifest must be distinct too, whatever the libraries are called.
         let mut keys: BTreeMap<String, String> = BTreeMap::new();
-        let mut key = |name: &str, what: String, problems: &mut Vec<String>| match keys.get(name) {
+        let mut key = |name: &str, what: String, problems: &mut Vec<String>| {
+            match keys.get(name) {
             Some(first) if *first != what => problems.push(format!(
-                "segment `{segment}`: dependency `{name}` is both {first} and {what}"
+                "[segment.{segment}]: segment `{segment}`: dependency `{name}` is both {first} and {what}"
             )),
             Some(_) => {}
             None => {
                 keys.insert(name.to_string(), what);
             }
+        }
         };
         for fixed in ["gdl-runtime", "serde", "tokio", "toml"] {
             key(fixed, format!("the `{fixed}` dependency"), &mut problems);
@@ -246,7 +248,7 @@ pub(crate) fn validate(
         }
         if let Some(other) = packages.insert(package.clone(), segment) {
             problems.push(format!(
-                "segments `{other}` and `{segment}` both become package `{package}`"
+                "[segment.{segment}]: segments `{other}` and `{segment}` both become package `{package}`"
             ));
         }
     }

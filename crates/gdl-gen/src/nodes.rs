@@ -47,7 +47,7 @@ pub(crate) fn bind(
         let bindable = graph.nodes.iter().any(|n| n.ident == name);
         if !bindable {
             problems.push(format!(
-                "[nodes] pin `{name}`: the graph has no node `{name}` that takes an implementation"
+                "[nodes] pin.{name}: the graph has no node `{name}` that takes an implementation"
             ));
         }
     }
@@ -80,7 +80,7 @@ pub(crate) fn bind(
             ([one], _) => **one,
             ([], Some(path)) => {
                 problems.push(format!(
-                    "[nodes] pin `{name}`: no [nodes] crate offers `{path}`"
+                    "[nodes] pin.{name}: no [nodes] crate offers `{path}`"
                 ));
                 continue;
             }
@@ -544,9 +544,9 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "[nodes] pin `Frontend`: no [nodes] crate offers `front::Frontend`",
+                "[nodes] pin.Frontend: no [nodes] crate offers `front::Frontend`",
                 "node `Engine`: no [nodes] crate offers it; they offer `Detokenize`, `Number`, `Preprocess`, `Truncate`",
-                "[nodes] pin `Detokenize`: no [nodes] crate offers `post::Detokeniser`",
+                "[nodes] pin.Detokenize: no [nodes] crate offers `post::Detokeniser`",
                 "node `Format`: no [nodes] crate offers it; they offer `Detokenize`, `Number`, `Preprocess`, `Truncate`",
             ]
         );

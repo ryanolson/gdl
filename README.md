@@ -273,7 +273,7 @@ A cell's `home` is its parent cell: the cell of a class that sends to this one t
 
 ### Check a spec and a fleet file
 
-`cargo gdl check --spec gdl.toml --fleet fleet.toml` checks the spec as `generate` does (the graph, the placement, the classes, the boundary rule, and the bindings) and the fleet file against the spec's layout, and writes nothing. It prints every problem in both files on its own line, then their count, and exits non-zero when there is any; with none, it prints `cargo gdl: no problems`. `--fleet` is optional. Each problem names its file, the table and key it is in, and the line when the parser gives one:
+`cargo gdl check --spec gdl.toml --fleet fleet.toml` checks the spec as `generate` does (the graph, the placement, the classes, the boundary rule, and the bindings) and the fleet file against the spec's layout, and writes nothing. It prints every problem in both files on its own line, then their count, and exits non-zero when there is any; with none, it prints `cargo gdl: no problems`. `--fleet` is optional. Each problem names its file, the table and key it is in, and the line when the parser gives one; `generate`, `resolve`, `diagram`, and `export` name the spec's problems the same way:
 
 ```text
 gdl.toml:14: [segment.engine] node: unknown field `node`, expected `nodes`
@@ -283,7 +283,7 @@ fleet.toml: [cell.model-x-02-us-east-1] home: missing; a cell of class `model_x`
 cargo gdl: 4 problems
 ```
 
-Every table of the spec, the fleet file, and a cell's settings refuses a key it does not know, and a table whose keys are names (a segment's in `ready`, a class's in `requires`, a node's in `[config]`) refuses a name that is not one of the spec's. A file that does not parse is one problem, and the other file is still checked: a fleet file whose spec does not read is checked for what needs no layout (its cell names, regions, and that each `home` is one of its cells). `cargo gdl compose --fleet fleet.toml` runs the same check first, and writes nothing when it finds a problem.
+Every table of the spec, the fleet file, and a cell's settings refuses a key it does not know, and a table whose keys are names (a segment's in `ready`, a class's in `requires`, a node's in `[config]` and `[nodes] pin`, a message's in `[messages] pin`) refuses a name that is not one of the spec's. A file that does not parse is one problem, and the other file is still checked: a fleet file whose spec does not read is checked for what needs no layout (its cell names, regions, and that each `home` is one of its cells). `cargo gdl compose --fleet fleet.toml` runs the same check first, and writes nothing when it finds a problem.
 
 ### Defaults
 
