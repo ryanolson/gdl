@@ -692,6 +692,21 @@ fn each_hub_reads_its_cells_settings_as_the_fleet_gives_them() {
             expected.directory = gdl_model::DirectoryBackend::Dir { path: CELLS.into() };
             expected.hub = Some(format!("{}:1337", cell.name));
             assert_eq!(read, expected);
+            // Each of its segments reads the same `[cell]`, which fits an
+            // instance of the segment, as the instance checks at its launch.
+            let layout =
+                gdl_model::layout(&deployment.graph, &deployment.placement).expect("the layout");
+            let services = compose["services"].as_object().expect("services");
+            let mut segments = 0;
+            for name in services.keys() {
+                let Some(segment) = name.strip_prefix(&format!("{}_", cell.name)) else {
+                    continue;
+                };
+                read.check(&layout, segment)
+                    .unwrap_or_else(|problems| panic!("{name}: {problems}"));
+                segments += 1;
+            }
+            assert!(segments > 0, "{}", cell.name);
         }
     }
 }

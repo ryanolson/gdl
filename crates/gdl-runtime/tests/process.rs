@@ -413,6 +413,57 @@ fn a_cell_table_is_read_from_the_environment() {
     });
 }
 
+/// A segment of a fleet's Compose bundle: its image's settings name no
+/// hub and no cell, which every cell running the image differs in, and
+/// its cell's variables give both. The settings need a hub or a roster,
+/// so they load only with `GDL_HUB__HOST`.
+#[test]
+fn a_fleet_bundles_variables_give_a_segment_its_hub_and_cell() {
+    const IMAGE: &str =
+        "listen = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n[system]\nport = 9090\n";
+    let cell = [
+        ("GDL_CELL__CLASS", "model_x"),
+        ("GDL_CELL__DIR", "/var/lib/gdl/cells"),
+        ("GDL_CELL__DIRECTORY", "dir"),
+        ("GDL_CELL__HOME", "global-us-east-1"),
+        ("GDL_CELL__HUB", "model-x-02-us-east-1:1337"),
+        ("GDL_CELL__NAME", "model-x-02-us-east-1"),
+        ("GDL_CELL__READY__ENGINE", "2"),
+        ("GDL_CELL__REGION", "us-east-1"),
+        ("GDL_CELL__SUMMARY_MS", "10000"),
+    ];
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", IMAGE)?;
+        for (name, value) in cell {
+            jail.set_env(name, value);
+        }
+        assert!(
+            Config::load(["config.toml"]).is_err(),
+            "neither a hub nor a roster"
+        );
+        jail.set_env("GDL_HUB__HOST", "model-x-02-us-east-1");
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        assert_eq!(
+            config.cell(),
+            Some(&CellSettings {
+                name: "model-x-02-us-east-1".into(),
+                layout: None,
+                class: "model_x".into(),
+                region: "us-east-1".into(),
+                home: Some("global-us-east-1".into()),
+                directory: DirectoryBackend::Dir {
+                    path: "/var/lib/gdl/cells".into()
+                },
+                ready: BTreeMap::from([("engine".into(), 2)]),
+                requires: BTreeMap::new(),
+                hub: Some("model-x-02-us-east-1:1337".into()),
+                summary: CellSettings::DEFAULT_SUMMARY,
+            })
+        );
+        Ok(())
+    });
+}
+
 #[test]
 fn a_misspelled_cell_key_is_refused() {
     let Err(error) = load(&[BASE, CELL, "[cell]\nhone = \"g\"\n"]) else {
