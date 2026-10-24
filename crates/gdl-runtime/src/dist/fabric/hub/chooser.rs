@@ -1,13 +1,13 @@
 //! What a chooser tells its own hub, through velo-hub's extension client
 //! with the instance's own credential: that it runs a follower of the
 //! hub's relay, so that the hub waits for it before it closes a follow,
-//! and that it holds no offer to a followed cell the hub marked not
-//! offered. Both are sent from the chooser's follower, never from a
-//! request's path.
+//! that it holds no offer to a followed cell the hub marked not offered,
+//! and that it avoids a followed cell's retired entry instance. Each is
+//! sent from the chooser's follower, never from a request's path.
 
 use std::time::Duration;
 
-use gdl_watch::Unoffered;
+use gdl_watch::{Avoids, Unoffered};
 use velo::InstanceId;
 use velo_hub::client::{ClientError, ExtClient};
 
@@ -47,6 +47,12 @@ impl ChooserHub {
     /// Tell the hub `unoffered`: whether it took it, or why not.
     pub(crate) async fn acknowledge(&self, unoffered: &Unoffered) -> Result<(), String> {
         self.post(&gdl_watch::unoffered_path(self.instance), unoffered)
+            .await
+    }
+
+    /// Tell the hub `avoids`: whether it took it, or why not.
+    pub(crate) async fn avoid(&self, avoids: &Avoids) -> Result<(), String> {
+        self.post(&gdl_watch::avoids_path(self.instance), avoids)
             .await
     }
 

@@ -120,4 +120,11 @@ impl Source for Scripted {
     ) -> futures::future::BoxFuture<'static, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }
+
+    fn avoid(
+        &self,
+        _: gdl_watch::Avoids,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
 }

@@ -19,13 +19,14 @@ pub(in crate::dist::cells) const ACK_POLL: Duration = Duration::from_millis(50);
 pub(in crate::dist::cells) const ACK_RETRY: Duration = Duration::from_millis(500);
 
 impl<R: Registry> Follows<R> {
-    /// When the follower looks again for a follow to acknowledge: `None`
-    /// while it has none. It is set where a follow may come to need one,
-    /// as a change makes it not offered or a snapshot shows it so, and by
-    /// each look that leaves one waiting, so that an event never passes
-    /// over the follows to find out.
+    /// When the follower looks again for a follow to acknowledge, or a
+    /// retirement ([`super::avoid`]): `None` while it has none. It is set
+    /// where a follow may come to need one, as a change makes it not
+    /// offered or a snapshot shows it so, and by each look that leaves one
+    /// waiting, so that an event never passes over the follows to find
+    /// out.
     pub(in crate::dist::cells) fn next_poll(&self) -> Option<Instant> {
-        self.poll
+        self.poll.into_iter().chain(self.avoiding.next()).min()
     }
 
     /// The acknowledgements due at `now`, each of a follow, current or
