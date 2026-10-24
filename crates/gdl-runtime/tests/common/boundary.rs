@@ -339,6 +339,7 @@ pub async fn model_proxied_leased<H: Register + Send + Sync + 'static>(
 /// adds to every instance's settings.
 fn summarized(cell: Model<'_>, runtime: &str) -> (CellSettings, CellTiming, String) {
     let hub = CellSettings {
+        layout: None,
         summary: SUMMARY,
         ..model_hub_needing(cell.name, cell.hub, cell.quorum)
     };

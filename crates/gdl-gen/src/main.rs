@@ -19,12 +19,14 @@
 //! builds the crate as well and fails if what its markers register differs
 //! from what was read. `resolve` prints the message each name of a spec's
 //! graph file resolves to. `generate` writes one crate per segment, and the
-//! contract crate of a graph file, into `--out`; with `--check` it writes
+//! contract crate of a graph file, into `--out`, each layout's segments in
+//! a directory of their own when the spec has several; with `--check` it writes
 //! nothing and fails if the files there differ. `check` checks the spec
 //! as `generate` does, and with `--fleet` the fleet file against it,
 //! writing nothing; it prints every problem in both files, each with its
 //! file, table, and key, and fails if there is any. `diagram` prints the
-//! placed graph. `compose` with `--fleet` runs the same check first, and
+//! placed graph. `compose`, `export`, and `diagram` take a spec of one
+//! layout. `compose` with `--fleet` runs the same check first, and
 //! writes nothing if it fails. `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.

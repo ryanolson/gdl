@@ -27,6 +27,7 @@ const PERIOD: Duration = Duration::from_secs(1);
 /// The model cell with the shortest summary period.
 fn cell(name: &str, hub: &str) -> CellSettings {
     CellSettings {
+        layout: None,
         summary: PERIOD,
         ..model(name, "us-east-1", hub)
     }
@@ -292,6 +293,7 @@ async fn a_report_from_anything_but_a_usable_entry_instance_is_refused() {
 async fn a_cell_no_hop_enters_has_no_summary() {
     let directory = MemoryDirectory::new();
     let global = CellSettings {
+        layout: None,
         summary: PERIOD,
         ..global_requiring(0)
     };

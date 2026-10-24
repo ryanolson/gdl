@@ -1,8 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Deserialize;
-use serde::de::IgnoredAny;
-
 /// The names of the `[routing]` entries and `[cells.<class>]` tables that
 /// a placement was given with default values only. A default is not
 /// recorded, so that a placement that spells one out is the placement, and
@@ -30,30 +27,27 @@ impl PartialEq for Spelled {
 impl Eq for Spelled {}
 
 impl Spelled {
-    /// The names `text`, a placement file that has been read, gives in
+    /// The names `written`, the table a placement was read from, gives in
     /// `[routing]` and `[cells]`, less those recorded with a value.
     pub(super) fn read(
-        text: &str,
+        written: &toml::Table,
         routing: &BTreeMap<String, super::RequestRouter>,
         cells: &BTreeMap<String, super::CellPolicy>,
     ) -> Self {
-        #[derive(Default, Deserialize)]
-        struct Written {
-            #[serde(default)]
-            routing: BTreeMap<String, IgnoredAny>,
-            #[serde(default)]
-            cells: BTreeMap<String, IgnoredAny>,
-        }
-        let written: Written = toml::from_str(text).unwrap_or_default();
+        let keys = |table: &str| -> Vec<String> {
+            written
+                .get(table)
+                .and_then(toml::Value::as_table)
+                .map(|table| table.keys().cloned().collect())
+                .unwrap_or_default()
+        };
         Self {
-            routing: written
-                .routing
-                .into_keys()
+            routing: keys("routing")
+                .into_iter()
                 .filter(|node| !routing.contains_key(node))
                 .collect(),
-            cells: written
-                .cells
-                .into_keys()
+            cells: keys("cells")
+                .into_iter()
                 .filter(|class| !cells.contains_key(class))
                 .collect(),
         }

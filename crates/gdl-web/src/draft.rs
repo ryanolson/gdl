@@ -9,8 +9,12 @@ use gdl_extract::{Catalog, Entry, NodeEntry, Origin, PortEntry};
 use gdl_model::Role;
 use serde::Deserialize;
 
-/// The graph the page builds.
+/// The graph the page builds. A key it does not know is refused, never
+/// dropped: a draft is the whole of what the composer saves, so a key it
+/// left unread (a spec's `[layout]` tables, say) would be lost from the
+/// spec without a word.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Draft {
     /// Container images, published ports and runtime configuration.
     #[serde(default)]

@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Error, Spec, dump, emit, paths, spec};
+use crate::{Error, Spec, dump, paths, spec};
 
 /// `a`, `b`, and `c`: names in backquotes.
 fn list(names: &[String]) -> String {
@@ -32,15 +32,21 @@ pub(crate) fn library_clashes(contract: &str, crates: &[spec::ListedCrate]) -> V
         .collect()
 }
 
-/// The checks of `spec` that need none of its bindings: its placement
-/// against the graph, each with the table and key it is about, the
-/// pipeline names, and the deployment's segment names. They are made with
-/// the bindings, and without them when the bindings cannot be read, so
-/// that a node crate that does not read hides none of them.
+/// Each layout's placement checked against the graph, by layout name:
+/// `None` for a layout whose placement does not fit it.
+pub(crate) type Layouts = BTreeMap<String, Option<gdl_model::Layout>>;
+
+/// The checks of `spec` that need none of its bindings: each layout's
+/// placement against the graph, each problem with the table and key it is
+/// about, the pipeline names, and the deployment's segment names. They are
+/// made with the bindings, and without them when the bindings cannot be
+/// read, so that a node crate that does not read hides none of them. A
+/// problem that every layout finds, one of the graph's own, is reported
+/// once.
 pub(crate) fn unbound(
     spec: &Spec,
     manifest: &gdl_model::Manifest,
-) -> (Option<gdl_model::Layout>, Vec<gdl_model::Problem>) {
+) -> (Layouts, Vec<gdl_model::Problem>) {
     let mut problems = Vec::new();
     let mut labels = BTreeSet::new();
     for (root, name) in &spec.pipeline_names {
@@ -58,37 +64,53 @@ pub(crate) fn unbound(
             ));
         }
     }
+    // One segment's settings serve it in every layout that has it.
     for name in spec.deployment.iter().flat_map(|d| d.segments()) {
-        if !spec
-            .placement
-            .segments()
-            .any(|(segment, _)| segment == name)
-        {
-            problems.push(format!(
-                "[deployment.segment.{name}]: the placement has no segment `{name}`"
-            ));
+        let placed = spec.layouts().any(|laid| {
+            laid.placement
+                .segments()
+                .any(|(segment, _)| segment == name)
+        });
+        if !placed {
+            let why = match spec.placements.tabled() {
+                true => format!("no layout has a segment `{name}`"),
+                false => format!("the placement has no segment `{name}`"),
+            };
+            problems.push(format!("[deployment.segment.{name}]: {why}"));
         }
     }
-    let (layout, placed) = match gdl_model::layout(manifest, &spec.placement) {
-        Ok(layout) => (Some(layout), Vec::new()),
-        Err(errors) => (None, gdl_model::Problems::from(errors).0),
-    };
+    let mut layouts = Layouts::new();
+    let mut placed: Vec<gdl_model::Problem> = Vec::new();
+    for laid in spec.layouts() {
+        let layout = match gdl_model::layout(manifest, laid.placement) {
+            Ok(layout) => Some(layout),
+            Err(errors) => {
+                for problem in laid.problems(&errors) {
+                    if !placed.contains(&problem) {
+                        placed.push(problem);
+                    }
+                }
+                None
+            }
+        };
+        layouts.insert(laid.name.to_string(), layout);
+    }
     let found = placed
         .into_iter()
         .chain(problems.into_iter().map(Into::into))
         .collect();
-    (layout, found)
+    (layouts, found)
 }
 
-/// Check the placement and the bindings against the manifest, reporting
-/// every problem found.
+/// Check each layout's placement, and the bindings, against the manifest,
+/// reporting every problem found, and give each layout by its name.
 pub(crate) fn validate(
     spec: &Spec,
     contract: &spec::Contract,
     manifest: &gdl_model::Manifest,
-) -> Result<gdl_model::Layout, Error> {
+) -> Result<BTreeMap<String, gdl_model::Layout>, Error> {
     let mut problems = spec.problems.clone();
-    let (layout, placed) = unbound(spec, manifest);
+    let (layouts, placed) = unbound(spec, manifest);
     let entry_nodes = spec.service.as_ref().map(|s| s.nodes()).unwrap_or_default();
     let entry_names: BTreeSet<_> = entry_nodes.iter().map(|n| n.name.as_str()).collect();
     let bindings: BTreeMap<_, _> = spec
@@ -144,140 +166,157 @@ pub(crate) fn validate(
             manifest.name
         ));
     }
-    if spec.service.is_some() {
-        let host = spec
-            .placement
-            .segments()
-            .find(|(_, nodes)| nodes.iter().any(|n| n == source_name))
-            .map(|(name, _)| name);
-        for root in manifest
-            .nodes
-            .iter()
-            .filter(|n| n.role == gdl_model::Role::Source)
-        {
-            let placement = spec
+    // Package names are what Cargo sees: two segments that differ only in
+    // case or in `-` against `_` would build one package twice, and so
+    // would two layouts whose names and segments' run together alike.
+    let mut packages: BTreeMap<String, (&str, &str)> = BTreeMap::new();
+    for laid in spec.layouts() {
+        // Its crates are in a directory named for it, beside the
+        // generated contract's.
+        if graph_spec && laid.among_several() && laid.name.eq_ignore_ascii_case("contract") {
+            problems.push(format!(
+                "[layout.{}]: the generated contract crate is `contract/`; rename the layout",
+                laid.name
+            ));
+            continue;
+        }
+        if spec.service.is_some() {
+            let host = laid
                 .placement
                 .segments()
-                .find(|(_, nodes)| nodes.contains(&root.name))
+                .find(|(_, nodes)| nodes.iter().any(|n| n == source_name))
                 .map(|(name, _)| name);
-            if placement != host {
-                problems.push(format!("pipeline entry `{}` must be hosted with its frontend; place its processing nodes independently", root.name));
+            for root in manifest
+                .nodes
+                .iter()
+                .filter(|n| n.role == gdl_model::Role::Source)
+            {
+                let placement = laid
+                    .placement
+                    .segments()
+                    .find(|(_, nodes)| nodes.contains(&root.name))
+                    .map(|(name, _)| name);
+                if placement != host {
+                    problems.push(laid.named(format!("pipeline entry `{}` must be hosted with its frontend; place its processing nodes independently", root.name)));
+                }
             }
         }
-    }
-    // Package names are what Cargo sees: two segments that differ only in
-    // case or in `-` against `_` would build one package twice.
-    let mut packages: BTreeMap<String, &str> = BTreeMap::new();
-    for (segment, nodes) in spec.placement.segments() {
-        let mut hosted: BTreeSet<&str> = nodes.iter().map(String::as_str).collect();
-        if hosted.contains(source_name) {
-            hosted.extend(entry_names.iter().copied());
-        }
-        // The generated contract is written to `contract/`, whatever its
-        // package is called; case is folded for file systems that fold it.
-        if graph_spec && segment.eq_ignore_ascii_case("contract") {
-            problems.push(format!(
-                "[segment.{segment}]: segment `{segment}`: the generated contract crate is `contract/`; rename the segment"
-            ));
-            continue;
-        }
-        if let Some(problem) = gdl_model::segment_name_problem(segment) {
-            problems.push(format!("[segment.{segment}]: {problem}"));
-            continue;
-        }
-        let package = emit::package(manifest, segment);
-        // A generated crate depends on the contract and on implementations
-        // by package name; Cargo cannot hold two path packages of one name.
-        if package == contract.package {
-            problems.push(format!(
-                "[segment.{segment}]: segment `{segment}` becomes package `{package}`, the contract's name"
-            ));
-        }
-        for (node, bind) in &bindings {
-            if package == bind.package {
-                let whose = if graph_spec {
-                    format!("node `{node}`'s [nodes] crate")
-                } else {
-                    format!("[bind.{node}]'s crate")
-                };
+        for (segment, nodes) in laid.placement.segments() {
+            let at = laid.table(&format!("segment.{segment}"));
+            let mut hosted: BTreeSet<&str> = nodes.iter().map(String::as_str).collect();
+            if hosted.contains(source_name) {
+                hosted.extend(entry_names.iter().copied());
+            }
+            // The generated contract is written to `contract/`, whatever its
+            // package is called; case is folded for file systems that fold it.
+            if graph_spec && !laid.among_several() && segment.eq_ignore_ascii_case("contract") {
                 problems.push(format!(
-                    "[segment.{segment}]: segment `{segment}` becomes package `{package}`, the name of {whose}"
+                    "[{at}]: segment `{segment}`: the generated contract crate is `contract/`; rename the segment"
+                ));
+                continue;
+            }
+            if let Some(problem) = gdl_model::segment_name_problem(segment) {
+                problems.push(format!("[{at}]: {problem}"));
+                continue;
+            }
+            let package = laid.package(&manifest.name, segment);
+            // A generated crate depends on the contract and on implementations
+            // by package name; Cargo cannot hold two path packages of one name.
+            if package == contract.package {
+                problems.push(format!(
+                    "[{at}]: segment `{segment}` becomes package `{package}`, the contract's name"
                 ));
             }
-        }
-        // Rust code names crates by library name; each crate the segment's
-        // code sees must have its own.
-        let mut seen: BTreeMap<String, String> = BTreeMap::new();
-        let mut see = |lib: &str, what: String, problems: &mut Vec<String>| {
-            if let Some(first) = seen.get(lib) {
-                if *first != what {
+            for (node, bind) in &bindings {
+                if package == bind.package {
+                    let whose = if graph_spec {
+                        format!("node `{node}`'s [nodes] crate")
+                    } else {
+                        format!("[bind.{node}]'s crate")
+                    };
                     problems.push(format!(
-                        "[segment.{segment}]: segment `{segment}`: crate name `{lib}` is both {first} and {what}"
+                        "[{at}]: segment `{segment}` becomes package `{package}`, the name of {whose}"
                     ));
                 }
-            } else {
-                seen.insert(lib.to_string(), what);
             }
-        };
-        see(
-            &package.replace('-', "_"),
-            "the segment's library".into(),
-            &mut problems,
-        );
-        see(&contract.lib, "the contract".into(), &mut problems);
-        for fixed in ["gdl_runtime", "serde", "tokio", "toml"] {
-            see(fixed, format!("the `{fixed}` dependency"), &mut problems);
-        }
-        // Every crate sees these; a dependency of the same name would
-        // shadow the standard library in the generated code.
-        for builtin in ["std", "core", "alloc"] {
-            see(builtin, "the standard library".into(), &mut problems);
-        }
-        // One package may implement several nodes: it is one crate.
-        for (node, bind) in &bindings {
-            if hosted.contains(node.as_str()) {
-                see(
-                    &bind.lib,
-                    format!("package `{}`", bind.package),
-                    &mut problems,
-                );
+            // Rust code names crates by library name; each crate the segment's
+            // code sees must have its own.
+            let mut seen: BTreeMap<String, String> = BTreeMap::new();
+            let mut see = |lib: &str, what: String, problems: &mut Vec<String>| {
+                if let Some(first) = seen.get(lib) {
+                    if *first != what {
+                        problems.push(format!(
+                            "[{at}]: segment `{segment}`: crate name `{lib}` is both {first} and {what}"
+                        ));
+                    }
+                } else {
+                    seen.insert(lib.to_string(), what);
+                }
+            };
+            see(
+                &package.replace('-', "_"),
+                "the segment's library".into(),
+                &mut problems,
+            );
+            see(&contract.lib, "the contract".into(), &mut problems);
+            for fixed in ["gdl_runtime", "serde", "tokio", "toml"] {
+                see(fixed, format!("the `{fixed}` dependency"), &mut problems);
             }
-        }
-        // Cargo names dependencies by package: each key in the generated
-        // manifest must be distinct too, whatever the libraries are called.
-        let mut keys: BTreeMap<String, String> = BTreeMap::new();
-        let mut key = |name: &str, what: String, problems: &mut Vec<String>| {
-            match keys.get(name) {
-            Some(first) if *first != what => problems.push(format!(
-                "[segment.{segment}]: segment `{segment}`: dependency `{name}` is both {first} and {what}"
-            )),
-            Some(_) => {}
-            None => {
-                keys.insert(name.to_string(), what);
+            // Every crate sees these; a dependency of the same name would
+            // shadow the standard library in the generated code.
+            for builtin in ["std", "core", "alloc"] {
+                see(builtin, "the standard library".into(), &mut problems);
             }
-        }
-        };
-        for fixed in ["gdl-runtime", "serde", "tokio", "toml"] {
-            key(fixed, format!("the `{fixed}` dependency"), &mut problems);
-        }
-        key(&contract.package, "the contract".into(), &mut problems);
-        for (node, bind) in &bindings {
-            if hosted.contains(node.as_str()) {
-                let first = bindings
-                    .iter()
-                    .find(|(n, b)| hosted.contains(n.as_str()) && b.package == bind.package)
-                    .map_or(node.as_str(), |(n, _)| n.as_str());
-                key(
-                    &bind.package,
-                    format!("{}'s package", bound_by(first)),
-                    &mut problems,
-                );
+            // One package may implement several nodes: it is one crate.
+            for (node, bind) in &bindings {
+                if hosted.contains(node.as_str()) {
+                    see(
+                        &bind.lib,
+                        format!("package `{}`", bind.package),
+                        &mut problems,
+                    );
+                }
             }
-        }
-        if let Some(other) = packages.insert(package.clone(), segment) {
-            problems.push(format!(
-                "[segment.{segment}]: segments `{other}` and `{segment}` both become package `{package}`"
-            ));
+            // Cargo names dependencies by package: each key in the generated
+            // manifest must be distinct too, whatever the libraries are called.
+            let mut keys: BTreeMap<String, String> = BTreeMap::new();
+            let mut key = |name: &str, what: String, problems: &mut Vec<String>| match keys
+                .get(name)
+            {
+                Some(first) if *first != what => problems.push(format!(
+                    "[{at}]: segment `{segment}`: dependency `{name}` is both {first} and {what}"
+                )),
+                Some(_) => {}
+                None => {
+                    keys.insert(name.to_string(), what);
+                }
+            };
+            for fixed in ["gdl-runtime", "serde", "tokio", "toml"] {
+                key(fixed, format!("the `{fixed}` dependency"), &mut problems);
+            }
+            key(&contract.package, "the contract".into(), &mut problems);
+            for (node, bind) in &bindings {
+                if hosted.contains(node.as_str()) {
+                    let first = bindings
+                        .iter()
+                        .find(|(n, b)| hosted.contains(n.as_str()) && b.package == bind.package)
+                        .map_or(node.as_str(), |(n, _)| n.as_str());
+                    key(
+                        &bind.package,
+                        format!("{}'s package", bound_by(first)),
+                        &mut problems,
+                    );
+                }
+            }
+            match packages.insert(package.clone(), (laid.name, segment)) {
+                Some((layout, other)) if layout == laid.name => problems.push(format!(
+                    "[{at}]: segments `{other}` and `{segment}` both become package `{package}`"
+                )),
+                Some((layout, other)) => problems.push(format!(
+                    "[{at}]: segment `{segment}` becomes package `{package}`, as segment `{other}` of layout `{layout}` does"
+                )),
+                None => {}
+            }
         }
     }
     let mut sources: BTreeMap<&str, (spec::CrateSource, &str)> = BTreeMap::new();
@@ -345,8 +384,12 @@ pub(crate) fn validate(
             ));
         }
     }
-    match (layout, placed.is_empty() && problems.is_empty()) {
-        (Some(layout), true) => Ok(layout),
+    let laid: Option<BTreeMap<String, gdl_model::Layout>> = layouts
+        .into_iter()
+        .map(|(name, layout)| Some((name, layout?)))
+        .collect();
+    match (laid, placed.is_empty() && problems.is_empty()) {
+        (Some(layouts), true) => Ok(layouts),
         _ => Err(Error::all(
             placed
                 .into_iter()

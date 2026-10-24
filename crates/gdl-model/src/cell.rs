@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Layout, Problem, Problems};
+use crate::{Layout, Problem, Problems, check_layout_name};
 
 /// A cell's own settings: the `[cell]` table of a segment's settings
 /// (`GDL_CELL__NAME`, `GDL_CELL__READY__<SEGMENT>`, and so on), which tells
@@ -15,6 +15,7 @@ use crate::{Layout, Problem, Problems};
 ///
 /// ```toml
 /// name = "model-x-01-us-east-1"
+/// layout = "regional"          # the spec's layout the cell runs, when it has several
 /// class = "model_x"
 /// region = "us-east-1"
 /// home = "global-us-east-1"    # the parent cell, for a class that another sends to: whose hub follows this one
@@ -32,6 +33,14 @@ use crate::{Layout, Problem, Problems};
 pub struct CellSettings {
     /// The cell's name.
     pub name: String,
+    /// The layout the cell runs: one of its spec's `[layout.<name>]`
+    /// tables, or `default` for a spec without them. The fleet file
+    /// requires it when the spec has more than one layout. Nothing in an
+    /// instance or a hub reads it: a cell's placement hash is its layout's,
+    /// and a hub follows only cells whose placement hash is its own, so
+    /// cells of different layouts never follow or offer to each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
     /// The class the cell deploys.
     pub class: String,
     /// The region the cell runs in.
@@ -323,6 +332,8 @@ fn check_label(kind: &str, name: &str) -> Result<(), String> {
 #[serde(deny_unknown_fields)]
 struct Table {
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout: Option<String>,
     class: String,
     region: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,6 +409,9 @@ impl TryFrom<Table> for CellSettings {
                 ));
             }
         };
+        if let Some(layout) = &table.layout {
+            check_layout_name(layout).map_err(|why| at("layout", why))?;
+        }
         if let Some(hub) = &table.hub {
             check_hub_address(hub).map_err(|why| at("hub", why))?;
         }
@@ -405,6 +419,7 @@ impl TryFrom<Table> for CellSettings {
         check_summary(summary).map_err(|why| at("summary_ms", why))?;
         Ok(Self {
             name: table.name,
+            layout: table.layout,
             class: table.class,
             region: table.region,
             home: table.home,
@@ -426,6 +441,7 @@ impl From<CellSettings> for Table {
         };
         Self {
             name: settings.name,
+            layout: settings.layout,
             class: settings.class,
             region: settings.region,
             home: settings.home,

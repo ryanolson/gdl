@@ -470,6 +470,7 @@ async fn an_earlier_watchs_close_leaves_a_follower_with_a_later_one() {
 /// comes every second, and whose lease is 2 s.
 async fn quick_cell(directory: &Resolving) -> (velo_hub::Hub, Arc<CellReadiness<Resolving>>) {
     let settings = gdl_model::CellSettings {
+        layout: None,
         summary: std::time::Duration::from_secs(1),
         ..model(CELL, "us-east-1", "model-x-01-hub:1337")
     };
