@@ -177,6 +177,7 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
         acks: JoinSet::new(),
         avoids: JoinSet::new(),
         refused: None,
+        avoid_refused: None,
     };
     let mut refused: Option<String> = None;
     while let Err(error) = source.declare().await {
@@ -303,6 +304,8 @@ struct Chores {
     /// The last reason an acknowledgement was not taken, logged once until
     /// one is taken again.
     refused: Option<String>,
+    /// The same, for the acknowledgements of retirements.
+    avoid_refused: Option<String>,
 }
 
 /// One thing for [`Chores::run`] to do.
@@ -348,8 +351,20 @@ impl Chores {
                 }
             }
             Chore::Avoided(avoids, answer) => {
-                if let Err(error) = &answer {
-                    tracing::info!(%error, "the hub did not take that this instance avoids a followed cell's retired entry instance");
+                match &answer {
+                    Ok(()) => {
+                        if self.avoid_refused.take().is_some() {
+                            tracing::info!(
+                                "the hub takes this instance's acknowledgements of retirements again"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        if self.avoid_refused.as_deref() != Some(error.as_str()) {
+                            tracing::warn!(%error, "the hub did not take that this instance avoids a followed cell's retired entry instance");
+                            self.avoid_refused = Some(error.clone());
+                        }
+                    }
                 }
                 follows.avoided(avoids, answer.is_ok(), now);
             }
