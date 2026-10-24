@@ -419,7 +419,7 @@ impl Spec {
 
     /// The names of the spec's layouts, in name order: `default` alone for
     /// a spec without `[layout]` tables.
-    pub fn layout_names(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn layout_names(&self) -> impl Iterator<Item = &str> {
         self.placements.names()
     }
 

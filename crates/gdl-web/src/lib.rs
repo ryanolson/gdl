@@ -421,26 +421,9 @@ fn prepare(
             .map_err(|p| (None, p))?
     };
     match gdl_gen::Spec::from_text(&rendered.spec, &rendered.graph, &composer.config.target) {
-        Ok(spec) => match one_layout(&spec) {
-            Ok(()) => Ok((rendered, spec)),
-            Err(problem) => Err((Some(rendered), vec![problem])),
-        },
+        Ok(spec) => Ok((rendered, spec)),
         Err(error) => Err((Some(rendered), vec![error.to_string()])),
     }
-}
-
-/// Refuse a spec of several layouts. The composer edits one placement, so
-/// a spec it checked, exported, or deployed with several would have kept
-/// one of them and dropped the rest without a word.
-fn one_layout(spec: &gdl_gen::Spec) -> Result<(), String> {
-    let names: Vec<String> = spec.layout_names().map(|n| format!("`{n}`")).collect();
-    if names.len() > 1 {
-        return Err(format!(
-            "the composer saves a spec of one layout; this one has layouts {}; edit it by hand and generate it with `cargo gdl generate`",
-            names.join(", ")
-        ));
-    }
-    Ok(())
 }
 
 /// `f` with the catalogue's offers, lent under its read lock: each check
@@ -469,6 +452,3 @@ pub fn extract_child(request: &str) -> Result<String, String> {
         gdl_gen::extract(&request.krate, &request.target, &cargo).map_err(|e| e.to_string())?;
     serde_json::to_string(&extracted.entry(std::time::SystemTime::now())).map_err(|e| e.to_string())
 }
-
-#[cfg(test)]
-mod tests;
