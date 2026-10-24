@@ -142,14 +142,22 @@ fn surroundings(text: &str, offset: usize) -> (Option<String>, Option<String>) {
     // Where the statement on the current line began, and whether a key's
     // value is open, with how many brackets deep.
     let (mut statement, mut value, mut depth) = (0, false, 0usize);
+    // Only bytes are compared, and text is sliced only at an ASCII byte (a
+    // newline, `=`, or `[`), so that no character is split.
+    let line_end = |from: usize| {
+        bytes[from..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(bytes.len(), |at| from + at)
+    };
     let mut at = 0;
     while at < bytes.len() {
-        let rest = &before[at..];
+        let rest = &bytes[at..];
         match bytes[at] {
             b'"' | b'\'' => {
                 let quote = bytes[at];
                 let triple = if quote == b'"' { "\"\"\"" } else { "'''" };
-                let (close, open) = match rest.starts_with(triple) {
+                let (close, open) = match rest.starts_with(triple.as_bytes()) {
                     true => (triple, 3),
                     false => (&triple[..1], 1),
                 };
@@ -165,7 +173,7 @@ fn surroundings(text: &str, offset: usize) -> (Option<String>, Option<String>) {
                     };
                     if quote == b'"' && byte == b'\\' {
                         inner += 2;
-                    } else if before[inner..].starts_with(close) {
+                    } else if bytes[inner..].starts_with(close.as_bytes()) {
                         break;
                     } else if byte == b'\n' && open == 1 {
                         return (None, None);
@@ -177,11 +185,12 @@ fn surroundings(text: &str, offset: usize) -> (Option<String>, Option<String>) {
                 continue;
             }
             b'#' => {
-                at += rest.find('\n').unwrap_or(rest.len());
+                at = line_end(at);
                 continue;
             }
             b'[' if !value && before[statement..at].trim().is_empty() => {
-                let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+                let end = line_end(at);
+                let line = &before[at..end];
                 let header = line.split('#').next().unwrap_or_default().trim();
                 let Some(inner) = header
                     .strip_prefix('[')
@@ -190,12 +199,12 @@ fn surroundings(text: &str, offset: usize) -> (Option<String>, Option<String>) {
                     return (None, None);
                 };
                 let inner = inner.trim_start_matches('[').trim_end_matches(']').trim();
-                if inner.is_empty() || line.len() == rest.len() {
+                if inner.is_empty() || end == bytes.len() {
                     // A header the error is in.
                     return (None, None);
                 }
                 (table, key) = (Some(inner.to_string()), None);
-                at += line.len();
+                at = end;
                 continue;
             }
             b'[' | b'{' if value => depth += 1,

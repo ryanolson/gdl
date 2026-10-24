@@ -202,3 +202,66 @@ fn a_syntax_error_is_located_through_strings_and_arrays() {
         );
     }
 }
+
+/// Text that is not ASCII, in each kind of string, in a comment, and in a
+/// string the error is in, is scanned as text: the locator never splits
+/// a character, and the error is reported, not a panic.
+#[test]
+fn a_syntax_error_after_text_that_is_not_ascii_is_located() {
+    for (text, expected, repaired) in [
+        (
+            "[config.A]\nnote = \"café\"\nlimit = 3 x\n",
+            "line 3: [config.A] limit: ",
+            "[config.A]\nnote = \"café\"\nlimit = 3\n",
+        ),
+        (
+            r#"[config.A] # é
+note = '''
+naïve ☃
+'''
+other = 'ü'
+limit = 3 x
+"#,
+            "line 6: [config.A] limit: ",
+            r#"[config.A] # é
+note = '''
+naïve ☃
+'''
+other = 'ü'
+limit = 3
+"#,
+        ),
+        (
+            "[config.A]\nnote = \"\"\"\ncafé\n\"\"\"\nlimit = 3 x\n",
+            "line 5: [config.A] limit: ",
+            "[config.A]\nnote = \"\"\"\ncafé\n\"\"\"\nlimit = 3\n",
+        ),
+        (
+            "[config.A]\nlimit = \"café x\n",
+            "line 2: ",
+            "[config.A]\nlimit = \"café x\"\n",
+        ),
+    ] {
+        gdl_model::read_toml::<toml::Table>(repaired).expect("the repaired text parses");
+        let error = refused(text, gdl_model::read_toml::<toml::Table>(text));
+        assert!(
+            error.starts_with(expected),
+            "{expected}\nin: {error}\n{text}"
+        );
+    }
+}
+
+/// An error at any place in text that is not ASCII is reported: a control
+/// character, which TOML refuses everywhere, is put at each character
+/// boundary of a file with such text in every kind of string, a comment,
+/// and a key.
+#[test]
+fn an_error_anywhere_in_text_that_is_not_ascii_is_reported() {
+    let sample = "[config.\"ä\"] # é\nnote = '''\nnaïve ☃\n'''\nother = \"ü\\\"ß\"\nlist = [\"ö\",\n  'å']\n\"ключ\" = 1\n";
+    gdl_model::read_toml::<toml::Table>(sample).expect("the sample parses");
+    for (at, _) in sample.char_indices() {
+        let text = format!("{}\u{1}{}", &sample[..at], &sample[at..]);
+        let error = refused(&text, gdl_model::read_toml::<toml::Table>(&text));
+        assert!(error.starts_with("line "), "{error}");
+    }
+}

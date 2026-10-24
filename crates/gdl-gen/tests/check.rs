@@ -366,3 +366,28 @@ fn generate_names_the_spec_in_a_problem_of_its_own() {
         "{check:?}"
     );
 }
+
+/// A spec whose text is not ASCII and does not parse is one problem, and
+/// the fleet file is still checked: the check reports, it does not panic.
+#[test]
+fn a_spec_with_text_that_is_not_ascii_is_checked_whole() {
+    let spec = spec("[config.Frontend]\nnote = \"café\"\nlimit = 3 x\n");
+    let fleet = "[cell.Global]\nclass = \"global\"\nregion = \"r\"\n";
+    let files = Files::new(&spec, fleet);
+    let output = files.check();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let (s, f) = (
+        files.spec().display().to_string(),
+        files.fleet().display().to_string(),
+    );
+    assert_problems(
+        &problems(&output),
+        &[
+            format!(
+                "{s}:{}: [config.Frontend] limit: ",
+                line_of(&spec, "limit = 3 x")
+            ),
+            format!("{f}: [cell.Global]: cell name `Global` must be"),
+        ],
+    );
+}
