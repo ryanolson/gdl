@@ -135,9 +135,10 @@ pub use feed::CellWatch;
 /// (`POST release` on the public listener, with the same
 /// [`gdl_watch::Follower`]), which it does once none of its choosers holds
 /// an offer to the cell in that follow. A watch that closes without a
-/// release still counts until the cell's lease has passed since it closed,
-/// looked at once a summary period. Once the cell drains and no watch
-/// counts, its watch says so, once
+/// release still counts; once the cell's lease has passed since it closed,
+/// looked at once a summary period, it no longer shows as a follower, but
+/// it is never taken as a release. Once the cell drains and every watch
+/// that counted has been released, or none did, its watch says so, once
 /// ([`gdl_watch::CellWatchEvent::Unfollowed`]), and its entry instances
 /// stop taking work from other cells then rather than at their bound.
 ///

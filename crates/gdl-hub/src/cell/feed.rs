@@ -112,8 +112,8 @@ impl Feed {
     }
 
     /// [`Feed::watch`], as the watch `key` of a follower, which counts
-    /// among the cell's followers from its snapshot until it is released,
-    /// or its lease passes after it is dropped.
+    /// among the cell's followers from its snapshot until it is released
+    /// ([`super::followers`]).
     pub(super) async fn follow(
         self: &Arc<Self>,
         key: WatchKey,
@@ -160,7 +160,8 @@ impl Feed {
     }
 
     /// A connection of the follower's watch `key` closed: the watch still
-    /// counts, until it is released or its lease passes.
+    /// counts until it is released, and is lost, never released, once its
+    /// lease passes.
     pub(super) fn unfollow(&self, key: &WatchKey) {
         self.lock().followers.left(key, Instant::now());
     }
@@ -332,12 +333,10 @@ impl Feed {
         if changed || load.is_some() {
             shared.send(CellWatchEvent::Load { load });
         }
-        // The summary's period paces the followers' leases too, so a lost
-        // watch stops counting up to a period after its lease.
-        let state = shared.state;
-        if shared.followers.expire(now, state) {
-            shared.send(CellWatchEvent::Unfollowed);
-        }
+        // The summary's period paces the followers' leases too, so a watch
+        // is marked lost up to a period after its lease; that is never a
+        // release, and sends nothing.
+        shared.followers.expire(now);
         load
     }
 

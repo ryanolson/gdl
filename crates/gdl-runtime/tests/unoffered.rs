@@ -608,3 +608,69 @@ async fn a_lost_watch_is_no_release() {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
+
+/// A follower whose watch is lost while its chooser holds an offer, and
+/// whose watch then outlives the model cell's lease (2 s here) without a
+/// release, is still no release: the draining cell's entry keeps taking
+/// work, as its bound allows, though the cell no longer shows the follower.
+/// Once the offer ends and the global's hub can reach the cell's hub
+/// again, its release comes, and the entry declines offers well before its
+/// bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_watch_past_its_lease_is_no_release() {
+    const LONGER: &str = "[runtime]\nsetup_timeout_ms = 20000\ndrain_ms = 2000\n";
+    // A setup timeout of 20 s and twice the summary period.
+    const LONGER_BOUND: Duration = Duration::from_secs(22);
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, _global) = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let (m1, proxy) = common::boundary::model_proxied_leased(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        LONGER,
+        Duration::from_secs(2),
+        &|deployment| reference_graph(deployment, &events),
+    )
+    .await;
+    let cells = tables(&chooser);
+    offered(&cells).await;
+    let held = gated(&chooser, &events, "held").await;
+
+    proxy.set(Mode::Refuse);
+    until(&cells, "the cell not offered, its lease held", |cells| {
+        followed(cells, "f", M1).is_some_and(|m| !m.offered && m.leases == 1)
+    })
+    .await;
+    let mut followers = m1.readiness.followers();
+    tokio::time::timeout(WAIT, followers.wait_for(|cells| cells.is_empty()))
+        .await
+        .expect("the lost watch's lease passed in time")
+        .expect("the extension runs");
+    let started = std::time::Instant::now();
+    m1.readiness.drain().await.expect("the cell drains");
+    let early = tokio::time::timeout(Duration::from_secs(4), declining(&m1.entries[0], WAIT));
+    assert!(
+        early.await.is_err(),
+        "the entry declined on a lost watch's lease, while its follower holds an offer"
+    );
+
+    release(&events, "held");
+    tokio::time::timeout(WAIT, held)
+        .await
+        .expect("the held request answered in time")
+        .expect("the request's task")
+        .expect("the held request answered");
+    proxy.set(Mode::Forward);
+    declining(&m1.entries[0], LONGER_BOUND).await;
+    assert!(
+        started.elapsed() < LONGER_BOUND - Duration::from_secs(5),
+        "declined only at the bound, {:?} after the drain began",
+        started.elapsed()
+    );
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}

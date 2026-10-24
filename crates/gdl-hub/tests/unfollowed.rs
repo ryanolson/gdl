@@ -389,7 +389,7 @@ async fn a_late_follow_of_a_draining_cell_is_never_offered_and_let_go_at_once() 
 /// while its earlier watch is still half open, the earlier watch's close
 /// leaves the follower counted, and a draining cell does not say it is
 /// unfollowed then. Once the later run releases its watch, the earlier
-/// one, closed without a release, still counts until its lease passes.
+/// one, closed without a release, is still no release, whatever its lease.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_earlier_watchs_close_leaves_a_follower_with_a_later_one() {
     let directory = Resolving::new();
@@ -432,17 +432,24 @@ async fn an_earlier_watchs_close_leaves_a_follower_with_a_later_one() {
         "unfollowed while a later watch of the follower is open"
     );
     // The later run lets go; the earlier one never did, and its watch
-    // counts until its lease has passed since it closed.
+    // counts until its lease has passed since it closed, then no longer
+    // shows as a follower, but is no release: the cell still does not say
+    // it is unfollowed, until that watch is released too.
     watcher
         .release(&address, &run(2))
         .await
         .expect("the hub takes the release");
     drop(later);
+    followers(&model_cell, BTreeSet::new()).await;
     assert!(
         !pending(&mut watch).contains(&CellWatchEvent::Unfollowed),
-        "unfollowed while a watch closed without a release counts"
+        "a watch lost without a release was taken as one"
     );
-    through(&mut watch, |event| *event == CellWatchEvent::Unfollowed).await;
+    watcher
+        .release(&address, &run(1))
+        .await
+        .expect("the hub takes the release");
+    assert_eq!(next(&mut watch).await, CellWatchEvent::Unfollowed);
     model_hub.shutdown().await.expect("the hub stops");
 }
 
@@ -497,46 +504,61 @@ async fn a_released_watch_no_longer_counts() {
 }
 
 /// A follower's watch that closes without a release, as a lost connection
-/// closes it, still counts: its follower may still hold offers to the cell.
-/// It stops counting once the cell's lease has passed since it closed.
+/// closes it, is never taken as a release: its follower may still hold
+/// offers to the cell. Once the cell's lease has passed since it closed,
+/// its record goes and it no longer shows as a follower, but a draining
+/// cell does not say it is unfollowed, whether the watch was lost before
+/// the drain began or while it drained, until the watch is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lost_watch_counts_until_its_lease_passes() {
-    let directory = Resolving::new();
-    let (model_hub, model_cell) = quick_cell(&directory).await;
-    let (_instances, _) = meet_the_quorum(&model_hub).await;
-    let address = format!("127.0.0.1:{}", model_hub.public_addr().port());
-    let watcher = gdl_watch::CellWatcher::new().expect("a client");
-    let follower = gdl_watch::Follower {
-        class: "global".into(),
-        cell: GLOBAL.into(),
-        run: 7,
-        generation: 1,
-    };
-    let mut follow = watcher.follow(&address, &follower).await.expect("a watch");
-    through(&mut follow, |event| *event == CellWatchEvent::Synced).await;
-    let mut watch = watching(&model_cell).await;
-    let mut watchers = model_cell.watchers();
-    drop(follow);
-    tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == 1))
-        .await
-        .expect("the follower's watch closed in time")
-        .expect("the extension runs");
-    let lost = std::time::Instant::now();
-    model_cell.drain().await.expect("the cell drains");
-    let drained = through(&mut watch, |event| {
-        *event
-            == CellWatchEvent::State {
-                state: CellState::Draining,
-            }
-    })
-    .await;
-    assert!(!drained.contains(&CellWatchEvent::Unfollowed));
-    assert_eq!(*model_cell.followers().borrow(), [global()].into());
-    through(&mut watch, |event| *event == CellWatchEvent::Unfollowed).await;
-    assert!(
-        lost.elapsed() >= std::time::Duration::from_secs(2),
-        "a lost watch stopped counting {:?} after it closed, within its lease",
-        lost.elapsed()
-    );
-    model_hub.shutdown().await.expect("the hub stops");
+async fn a_lost_watch_is_never_taken_as_a_release() {
+    for drain_first in [false, true] {
+        let directory = Resolving::new();
+        let (model_hub, model_cell) = quick_cell(&directory).await;
+        let (_instances, _) = meet_the_quorum(&model_hub).await;
+        let address = format!("127.0.0.1:{}", model_hub.public_addr().port());
+        let watcher = gdl_watch::CellWatcher::new().expect("a client");
+        let follower = gdl_watch::Follower {
+            class: "global".into(),
+            cell: GLOBAL.into(),
+            run: 7,
+            generation: 1,
+        };
+        let mut follow = watcher.follow(&address, &follower).await.expect("a watch");
+        through(&mut follow, |event| *event == CellWatchEvent::Synced).await;
+        let mut watch = watching(&model_cell).await;
+        let mut watchers = model_cell.watchers();
+        if drain_first {
+            model_cell.drain().await.expect("the cell drains");
+        }
+        drop(follow);
+        tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == 1))
+            .await
+            .expect("the follower's watch closed in time")
+            .expect("the extension runs");
+        assert_eq!(*model_cell.followers().borrow(), [global()].into());
+        // Its lease passes: it no longer shows as a follower.
+        followers(&model_cell, BTreeSet::new()).await;
+        if !drain_first {
+            model_cell.drain().await.expect("the cell drains");
+        }
+        let seen = through(&mut watch, |event| {
+            *event
+                == CellWatchEvent::State {
+                    state: CellState::Draining,
+                }
+        })
+        .await;
+        let mut seen = [seen, pending(&mut watch)].concat();
+        assert!(
+            !seen.contains(&CellWatchEvent::Unfollowed),
+            "a watch lost without a release was taken as one (drained first: {drain_first})"
+        );
+        watcher
+            .release(&address, &follower)
+            .await
+            .expect("the hub takes the release");
+        seen = through(&mut watch, |event| *event == CellWatchEvent::Unfollowed).await;
+        assert_eq!(seen.last(), Some(&CellWatchEvent::Unfollowed));
+        model_hub.shutdown().await.expect("the hub stops");
+    }
 }

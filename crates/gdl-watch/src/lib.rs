@@ -28,10 +28,11 @@ pub const EXTENSION: &str = "gdl-cell";
 /// The cell watch's route, under the extension's. A follower names its
 /// watch in the query, `?class=<class>&cell=<cell>&run=<run>&generation=<generation>`
 /// ([`Follower`]), and the watch counts among the cell's followers from
-/// then until the follower releases it ([`RELEASE_ROUTE`]): a watch that
-/// closes without a release still counts, until the cell's lease has
-/// passed since it closed. A watch that names no follower counts for
-/// nothing.
+/// then until the follower releases it ([`RELEASE_ROUTE`]). A watch that
+/// closes without a release still counts; once the cell's lease has passed
+/// since it closed it no longer shows as a follower, but it is never taken
+/// as a release, so a draining cell does not say it is unfollowed while
+/// it is unreleased. A watch that names no follower counts for nothing.
 pub const WATCH_ROUTE: &str = "/watch";
 
 /// The route by which a follower lets go of a cell, under the

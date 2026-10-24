@@ -289,7 +289,21 @@ pub async fn model_proxied<H: Register + Send + Sync + 'static>(
     runtime: &str,
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> (ModelCell<H>, Proxy) {
+    model_proxied_leased(spec, directory, cell, runtime, timing().lease, assemble).await
+}
+
+/// [`model_proxied`], whose hub's lease, its record's and its followers'
+/// watches', is `lease`.
+pub async fn model_proxied_leased<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    runtime: &str,
+    lease: Duration,
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> (ModelCell<H>, Proxy) {
     let (settings_of_hub, timing, extra) = summarized(cell, runtime);
+    let timing = CellTiming { lease, ..timing };
     let (hub, readiness, proxy) = cell_hub_proxied(spec, settings_of_hub, directory, timing).await;
     let cell = instances(spec, (hub, readiness), cell, &extra, &|_, r| r, assemble).await;
     (cell, proxy)
