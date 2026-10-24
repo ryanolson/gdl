@@ -312,6 +312,7 @@ mod tests {
                 .map(|id| gdl::InstanceId::from_u128(id.as_u128()))
                 .collect(),
             retired: Box::new([]),
+            unread: false,
             turn,
         })
     }

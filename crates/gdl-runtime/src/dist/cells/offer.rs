@@ -418,6 +418,7 @@ mod tests {
                     eligible: Box::new([id]),
                     offered: Box::new([gdl::InstanceId::from_u128(id.as_u128())]),
                     retired: Box::new([]),
+                    unread: false,
                     turn: Arc::new(AtomicUsize::new(0)),
                 })]),
             },
@@ -541,6 +542,7 @@ mod tests {
                     eligible: Box::new([id]),
                     offered: Box::new([gdl::InstanceId::from_u128(id.as_u128())]),
                     retired: Box::new([]),
+                    unread: false,
                     turn: Arc::new(AtomicUsize::new(0)),
                 })
             })
@@ -605,6 +607,7 @@ mod tests {
                     eligible: Box::new([id]),
                     offered: Box::new([gdl::InstanceId::from_u128(id.as_u128())]),
                     retired: Box::new([]),
+                    unread: false,
                     turn: Arc::new(AtomicUsize::new(0)),
                 })
             })
