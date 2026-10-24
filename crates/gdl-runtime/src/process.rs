@@ -190,8 +190,9 @@ impl<H: Hosted> ProcessConfig<H> {
         for path in paths {
             figment = figment.merge(Toml::file_exact(path.as_ref()));
         }
-        let figment =
-            origins::variables::<H>().fold(figment.merge(Self::dynamo_env()), Figment::merge);
+        let figment = figment
+            .merge(Self::dynamo_env())
+            .merge(origins::environment::<H>());
         Self::from_figment(figment)
     }
 

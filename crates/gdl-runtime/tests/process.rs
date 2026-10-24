@@ -585,6 +585,25 @@ async fn a_cell_problem_names_its_file_or_its_variable() {
     }
 }
 
+/// The environment overrides the files as a whole, as one provider would:
+/// a variable that a later one supersedes does not erase what a file set
+/// beside the later one's key.
+#[test]
+fn the_environment_overrides_the_files_as_a_whole() {
+    Jail::expect_with(|jail| {
+        jail.create_file(
+            "config.toml",
+            &format!("{BASE}{CELL}ready = {{ front = 2, back = 3 }}\n"),
+        )?;
+        jail.set_env("GDL_CELL__READY", "[]");
+        jail.set_env("GDL_CELL__READY__FRONT", "1");
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        let cell = config.cell().expect("a cell");
+        assert_eq!((cell.quorum("front"), cell.quorum("back")), (1, 3));
+        Ok(())
+    });
+}
+
 /// Launch `config` as an instance of `segment` in `deployment`, recording
 /// whether it went on to await its nodes' readiness, which comes after the
 /// cell check and before every registration and rendezvous.

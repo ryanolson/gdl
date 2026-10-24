@@ -13,13 +13,24 @@ use gdl_model::{CellSettings, Origin, Problems, cell_variable};
 
 use super::{Hosted, KEYS, canonical};
 
-/// The `GDL_` environment as a segment of `H` reads it, one provider to a
+/// The `GDL_` environment as a segment of `H` reads it: one layer, which
+/// overrides the files as a whole. Within it each variable is a provider
+/// of its own, so that a value's provenance names its variable; the
+/// variables are merged with each other first, so that one a later one
+/// supersedes (`GDL_CELL__READY=[]` before `GDL_CELL__READY__FRONT=1`)
+/// replaces nothing of a file's beside the later one's key, as within one
+/// provider. figment keeps a layer's own provenance when it is merged.
+pub(super) fn environment<H: Hosted>() -> Figment {
+    variables::<H>().fold(Figment::new(), Figment::merge)
+}
+
+/// The `GDL_` variables a segment of `H` reads, one provider to a
 /// variable, in the environment's order, so that a later variable
 /// overrides an earlier one as within one provider. A key is matched
 /// without regard to case (`canonical`), and only the settings' own keys
 /// are read: the build scripts' `GDL_PROFILE` and `GDL_IMAGE_PREFIX` are
 /// not settings.
-pub(super) fn variables<H: Hosted>() -> impl Iterator<Item = Variable> {
+fn variables<H: Hosted>() -> impl Iterator<Item = Variable> {
     const PREFIX: &str = "GDL_";
     std::env::vars_os().filter_map(|(name, value)| {
         let name = name.to_string_lossy().trim().to_string();
@@ -39,7 +50,7 @@ pub(super) fn variables<H: Hosted>() -> impl Iterator<Item = Variable> {
 }
 
 /// One environment variable, as a provider named for it.
-pub(super) struct Variable {
+struct Variable {
     name: String,
     key: String,
     value: String,
