@@ -561,3 +561,36 @@ async fn a_parent_without_a_chooser_acknowledges_at_once() {
     assert!(!cell.waiting());
     cell.shutdown().await;
 }
+
+/// A retiree that leaves its cell's hub while a chooser has yet to avoid
+/// it is waited for no more: once the relay sends its `left`, the global's
+/// hub holds nothing of its retirement, and a recovered chooser, which is
+/// never shown it again, need not settle it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retiree_that_leaves_is_waited_for_no_more() {
+    let (mut cell, _choosers) = followed(1).await;
+    let _watch = cell.retire(true).await;
+    let mut relay = cell.global.1.follows();
+    while next(&mut relay).await != FollowEvent::Synced {}
+    let id = cell.retiring.id();
+    let Followed {
+        retiring, global, ..
+    } = cell;
+    retiring.leave().await;
+    loop {
+        if let FollowEvent::Left { instance, .. } = next(&mut relay).await
+            && instance == id
+        {
+            break;
+        }
+    }
+    assert!(
+        !global
+            .1
+            .retirements()
+            .borrow()
+            .iter()
+            .any(|(_, _, _, of)| *of == id),
+        "the retirement of an instance that left is still waited for"
+    );
+}

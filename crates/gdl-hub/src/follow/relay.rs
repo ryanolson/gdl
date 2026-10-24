@@ -25,7 +25,8 @@
 //! waits for the choosers that route to the instance's segment to avoid
 //! it ([`super::avoid`]); once they have, or left, the relay says so to the
 //! cell's hub, once for the whole cell. A follow that closes forgets what
-//! it waited for: its release tells the cell's hub more.
+//! it waited for: its release tells the cell's hub more. So does one whose
+//! retiree left, which its cell's hub has forgotten too.
 //!
 //! The relay also counts, per class, the installed follows whose link
 //! last said `ready`, and shows each count in the cell's health as it
@@ -261,16 +262,24 @@ impl Relay {
         };
         let installed = follow.installed.as_mut().expect("the follow is installed");
         let counted = installed.counted();
-        let mut retired = Vec::new();
+        let (mut retired, mut left) = (Vec::new(), Vec::new());
         change(installed, &mut |event| {
-            if let FollowEvent::Retired {
-                segment, instance, ..
-            } = &event
-            {
-                retired.push((*instance, segment.clone()));
+            match &event {
+                FollowEvent::Retired {
+                    segment, instance, ..
+                } => retired.push((*instance, segment.clone())),
+                FollowEvent::Left { instance, .. } => left.push(*instance),
+                _ => {}
             }
             changes.send(event);
         });
+        // A retiree that left is forgotten by its cell's hub, and no
+        // chooser is shown it again: what it waited for would stay.
+        let gone: Vec<InstanceId> = left
+            .into_iter()
+            .filter(|instance| follow.avoiding.gone(*instance))
+            .collect();
+        unwait(retirements, class, cell, generation, gone);
         for (instance, segment) in retired {
             if follow
                 .avoiding

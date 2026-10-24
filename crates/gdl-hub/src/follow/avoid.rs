@@ -63,6 +63,13 @@ impl Avoiding {
         avoided
     }
 
+    /// `instance` left its cell's hub: whether its retirement was waited
+    /// for, which it is no more. Its cell's hub forgot it as it left, and a
+    /// chooser never shown it again could not answer it.
+    pub(super) fn gone(&mut self, instance: InstanceId) -> bool {
+        self.waiting.remove(&instance).is_some()
+    }
+
     /// The retirements waited for.
     pub(super) fn waiting(&self) -> impl Iterator<Item = InstanceId> + '_ {
         self.waiting.keys().copied()
@@ -99,6 +106,19 @@ mod tests {
         both.sort_by_key(|id| id.as_u128());
         assert_eq!(avoided, both, "the one that left avoids both");
         assert!(avoiding.left(second).is_empty(), "left twice");
+        assert_eq!(avoiding.waiting().count(), 0);
+    }
+
+    /// A retiree that leaves is waited for no more, and an answer for it
+    /// after that changes nothing.
+    #[test]
+    fn a_retiree_that_leaves_is_forgotten() {
+        let (retired, chooser) = (InstanceId::new_v4(), InstanceId::new_v4());
+        let mut avoiding = Avoiding::default();
+        assert!(!avoiding.retire(retired, HashSet::from([chooser])));
+        assert!(avoiding.gone(retired));
+        assert!(!avoiding.gone(retired), "gone twice");
+        assert!(!avoiding.avoids(retired, chooser));
         assert_eq!(avoiding.waiting().count(), 0);
     }
 }
