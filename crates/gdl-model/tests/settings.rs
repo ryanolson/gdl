@@ -181,7 +181,7 @@ fn a_hub_address_is_host_and_port() {
             panic!("{bad}: accepted");
         };
         assert!(
-            error.to_string().contains(&format!("[cell] hub = {bad:?}")),
+            error.to_string().contains(&format!("[cell] hub: {bad:?}")),
             "{bad}: {error}"
         );
     }
@@ -197,7 +197,7 @@ fn a_cells_hub_checks_its_settings_against_the_class() {
         (
             laid(SEGMENTS),
             MODEL,
-            "[cell] class = \"model_x\", but the placement has no classes",
+            "[cell] class: the placement has no classes, and so no class `model_x`",
         ),
         (
             classed(),
@@ -207,8 +207,8 @@ fn a_cells_hub_checks_its_settings_against_the_class() {
         (
             classed(),
             "name = 'm'\nclass = 'model_x'\nregion = 'r'\nready = { d = 1, a = 2, b = 1 }\n",
-            "[cell] ready: `a` is not a segment of class `model_x`; \
-             [cell] ready: `b` is not a segment of class `model_x`",
+            "[cell] ready.a: not a segment of class `model_x`\n\
+             [cell] ready.b: not a segment of class `model_x`",
         ),
     ];
     for (layout, text, expected) in cases {
@@ -244,7 +244,7 @@ fn settings_that_do_not_fit_the_deployment_are_refused() {
             laid(SEGMENTS),
             MODEL,
             "d",
-            "[cell] class = \"model_x\", but the placement has no classes",
+            "[cell] class: the placement has no classes, and so no class `model_x`",
         ),
         (
             classed(),
@@ -262,7 +262,7 @@ fn settings_that_do_not_fit_the_deployment_are_refused() {
             classed(),
             "name = 'm'\nclass = 'model_x'\nregion = 'r'\nready = { d = 1, a = 2 }\n",
             "d",
-            "[cell] ready: `a` is not a segment of class `model_x`",
+            "[cell] ready.a: not a segment of class `model_x`",
         ),
     ];
     for (layout, text, segment, expected) in cases {
@@ -280,9 +280,9 @@ fn settings_that_do_not_fit_the_deployment_are_refused() {
     };
     assert_eq!(
         error.to_string(),
-        "[cell] class: this instance's segment `a` is in class `global`, not `model_x`; \
-         [cell] ready: `a` is not a segment of class `model_x`; \
-         [cell] ready: `b` is not a segment of class `model_x`"
+        "[cell] class: this instance's segment `a` is in class `global`, not `model_x`\n\
+         [cell] ready.a: not a segment of class `model_x`\n\
+         [cell] ready.b: not a segment of class `model_x`"
     );
 }
 
@@ -323,22 +323,22 @@ fn a_requirement_of_a_class_not_sent_to_or_of_zero_is_refused() {
         (
             format!("{GLOBAL}[requires]\nglobal = 1\n"),
             "b",
-            "[cell] requires: `global` is not a class that `global` sends to",
+            "[cell] requires.global: not a class that `global` sends to",
         ),
         (
             format!("{GLOBAL}[requires]\nmodel_y = 1\n"),
             "b",
-            "[cell] requires: `model_y` is not a class that `global` sends to",
+            "[cell] requires.model_y: not a class that `global` sends to",
         ),
         (
             format!("{GLOBAL}[requires]\nmodel_x = 0\n"),
             "b",
-            "[cell] requires: `model_x` is 0; a requirement is at least 1",
+            "[cell] requires.model_x: is 0; a requirement is at least 1",
         ),
         (
             "name = 'm'\nclass = 'model_x'\nregion = 'r'\n[requires]\nglobal = 1\n".to_string(),
             "d",
-            "[cell] requires: `global` is not a class that `model_x` sends to",
+            "[cell] requires.global: not a class that `model_x` sends to",
         ),
     ];
     for (text, segment, expected) in cases {

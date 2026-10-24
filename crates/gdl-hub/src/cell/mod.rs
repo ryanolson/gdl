@@ -181,8 +181,13 @@ impl<D: CellDirectory> CellReadiness<D> {
                 "[cell] hub: a cell's hub publishes the address other cells' hubs reach it at, and none is set",
             )
         })?;
-        gdl_model::check_hub_address(&hub).map_err(CellError::new)?;
-        gdl_model::check_summary(cell.summary).map_err(CellError::new)?;
+        let at = |key: &str, why: String| {
+            CellError::new(
+                gdl_model::Problem::at(Some("cell".into()), Some(key.into()), why).to_string(),
+            )
+        };
+        gdl_model::check_hub_address(&hub).map_err(|why| at("hub", why))?;
+        gdl_model::check_summary(cell.summary).map_err(|why| at("summary_ms", why))?;
         if timing.heartbeat.is_zero() {
             return Err(CellError::new("the cell's heartbeat is zero"));
         }

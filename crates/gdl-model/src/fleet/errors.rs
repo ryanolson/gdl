@@ -130,29 +130,29 @@ impl FleetError {
                 class,
             } => (
                 Some(table.path()),
-                key("ready"),
-                format!("`{segment}` is not a segment of class `{class}`"),
+                Some(format!("ready.{segment}")),
+                format!("not a segment of class `{class}`"),
             ),
             Self::ZeroReady { table, segment } => (
                 Some(table.path()),
-                key("ready"),
-                format!("`{segment}` is 0; a quorum is at least 1"),
+                Some(format!("ready.{segment}")),
+                "is 0; a quorum is at least 1".into(),
             ),
             Self::RequiresNotSent {
                 class: name,
                 required,
             } => (
                 class(name),
-                key("requires"),
-                format!("`{required}` is not a class that `{name}` sends to"),
+                Some(format!("requires.{required}")),
+                format!("not a class that `{name}` sends to"),
             ),
             Self::ZeroRequires {
                 class: name,
                 required,
             } => (
                 class(name),
-                key("requires"),
-                format!("`{required}` is 0; a requirement is at least 1"),
+                Some(format!("requires.{required}")),
+                "is 0; a requirement is at least 1".into(),
             ),
             Self::InvalidCellName { cell: name, reason } => (cell(name), None, reason.clone()),
             Self::InvalidRegion { cell: name, reason } => {

@@ -236,31 +236,31 @@ fn each_refusal_names_its_table_and_key() {
         ),
         (
             "[class.global]\nready = { d = 1 }\n".into(),
-            "[class.global] ready: `d` is not a segment of class `global`",
+            "[class.global] ready.d: not a segment of class `global`",
         ),
         (
             "[class.global]\nready = { a = 0 }\n".into(),
-            "[class.global] ready: `a` is 0; a quorum is at least 1",
+            "[class.global] ready.a: is 0; a quorum is at least 1",
         ),
         (
             "[class.global]\nrequires = { global = 1 }\n".into(),
-            "[class.global] requires: `global` is not a class that `global` sends to",
+            "[class.global] requires.global: not a class that `global` sends to",
         ),
         (
             "[class.model_x]\nrequires = { global = 1 }\n".into(),
-            "[class.model_x] requires: `global` is not a class that `model_x` sends to",
+            "[class.model_x] requires.global: not a class that `model_x` sends to",
         ),
         (
             "[class.global]\nrequires = { model_x = 0 }\n".into(),
-            "[class.global] requires: `model_x` is 0; a requirement is at least 1",
+            "[class.global] requires.model_x: is 0; a requirement is at least 1",
         ),
         (
             format!("{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nready = {{ a = 1 }}\n"),
-            "[cell.m] ready: `a` is not a segment of class `model_x`",
+            "[cell.m] ready.a: not a segment of class `model_x`",
         ),
         (
             format!("{G}[cell.m]\nclass = 'model_x'\nregion = 'r'\nready = {{ e = 0 }}\n"),
-            "[cell.m] ready: `e` is 0; a quorum is at least 1",
+            "[cell.m] ready.e: is 0; a quorum is at least 1",
         ),
         (
             "[cell.m]\nclass = 'zz'\nregion = 'r'\n".into(),
@@ -317,12 +317,12 @@ fn every_problem_is_reported_together() {
     );
     for expected in [
         "[class.zz]: the placement has no class `zz`",
-        "[class.global] ready: `d` is not a segment of class `global`",
-        "[class.global] requires: `model_x` is 0",
+        "[class.global] ready.d: not a segment of class `global`",
+        "[class.global] requires.model_x: is 0",
         "[cell.Global]: cell name `Global` must be",
         "[cell.Global] region: region name `US` must be",
         "[cell.m] home: the fleet has no cell `nope`",
-        "[cell.m] ready: `e` is 0",
+        "[cell.m] ready.e: is 0",
     ] {
         assert!(
             errors.iter().any(|e| e.starts_with(expected)),

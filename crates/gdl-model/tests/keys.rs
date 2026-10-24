@@ -90,7 +90,7 @@ fn a_fleet_refuses_an_unknown_key_in_every_table() {
         ),
         (
             "[cell.g]\nclass = 'global'\n",
-            "line 1: [cell.g]: missing field `region`",
+            "line 1: [cell.g] region: missing field `region`",
         ),
         (
             "[class.global]\nready = { a = 'two' }\n",
@@ -106,4 +106,52 @@ fn a_fleet_refuses_an_unknown_key_in_every_table() {
         assert!(error.starts_with(expected), "{expected}\nin: {error}");
         assert_eq!(error.lines().count(), 1, "one line: {error}");
     }
+}
+
+/// A `[cell]` table refuses a key it does not know, and every problem in
+/// reading one has its key in table `cell`, which its reader turns into
+/// the file or the variable.
+#[test]
+fn a_cells_settings_refuse_an_unknown_key_and_name_it() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    for (extra, expected) in [
+        ("hone = 'h'\n", "[cell] hone: unknown field `hone`"),
+        (
+            "seeds = ['hub-a:1337']\n",
+            "[cell] seeds: unknown field `seeds`",
+        ),
+        ("[ready]\ne = 'x'\n", "[cell.ready] e: invalid type"),
+        (
+            "summary_ms = 500\n",
+            "[cell] summary_ms: is 500; the period is at least 1000 ms",
+        ),
+        (
+            "hub = 'http://h:1'\n",
+            "[cell] hub: \"http://h:1\" must be `host:port`",
+        ),
+        (
+            "directory = 'dir'\n",
+            "[cell] directory: is \"dir\", which needs `dir`",
+        ),
+        (
+            "dir = '/srv'\n",
+            "[cell] dir: \"/srv\" is read only by the `dir` backend",
+        ),
+    ] {
+        let text = format!("{LEAST}{extra}");
+        let value: toml::Value = toml::from_str(&text).expect("toml");
+        let error = refused(&text, gdl_model::CellSettings::read(value));
+        assert!(error.starts_with(expected), "{expected}\nin: {error}");
+    }
+    let value: toml::Value = toml::from_str("class = 'global'\nregion = 'r'\n").expect("toml");
+    let error = refused("no name", gdl_model::CellSettings::read(value));
+    assert!(
+        error.starts_with("[cell] name: missing field `name`"),
+        "{error}"
+    );
+    assert_eq!(
+        gdl_model::cell_variable("ready.e"),
+        "GDL_CELL__READY__E",
+        "the variable that sets a key"
+    );
 }

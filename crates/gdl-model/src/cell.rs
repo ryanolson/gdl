@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Layout};
+use crate::{Layout, Problem, Problems};
 
 /// A cell's own settings: the `[cell]` table of a segment's settings
 /// (`GDL_CELL__NAME`, `GDL_CELL__READY__<SEGMENT>`, and so on), which tells
@@ -104,44 +104,79 @@ impl CellSettings {
     /// placement has classes, the cell's class is one of them, the segment
     /// is in it, every `ready` key is a segment of it, and every `requires`
     /// key is a class it sends to, with a count of at least 1. Every
-    /// problem is reported.
-    pub fn check(&self, layout: &Layout, segment: &str) -> Result<(), Error> {
+    /// problem is reported, each with its key in `[cell]`; its reader adds
+    /// the file or the variable.
+    pub fn check(&self, layout: &Layout, segment: &str) -> Result<(), Problems> {
         refuse(self.problems(layout, Some(segment)))
     }
 
     /// Whether these settings fit the cell's hub in `layout`: the rule of
     /// [`CellSettings::check`] without an instance's own segment, since a
     /// hub has none. Every problem is reported.
-    pub fn check_hub(&self, layout: &Layout) -> Result<(), Error> {
+    pub fn check_hub(&self, layout: &Layout) -> Result<(), Problems> {
         refuse(self.problems(layout, None))
     }
 
-    fn problems(&self, layout: &Layout, segment: Option<&str>) -> Vec<String> {
+    /// Read a `[cell]` table from `deserializer`, a TOML table or a
+    /// figment value. A table that does not read is one problem, with the
+    /// key it is about (`ready.e`, say) in table `cell`; its reader adds
+    /// the file or the variable, which [`cell_variable`] names.
+    pub fn read<'de, D>(deserializer: D) -> Result<Self, Problems>
+    where
+        D: serde::Deserializer<'de>,
+        D::Error: std::fmt::Display,
+    {
+        let table: Table = serde_path_to_error::deserialize(deserializer).map_err(|error| {
+            let path = error.path().clone();
+            let mut problem = Problem::from_path(&path, error.into_inner().to_string());
+            problem.table = Some(match problem.table.take() {
+                Some(table) => format!("cell.{table}"),
+                None => "cell".into(),
+            });
+            Problems::from(problem)
+        })?;
+        Ok(Self::try_from(table)?)
+    }
+
+    fn problems(&self, layout: &Layout, segment: Option<&str>) -> Vec<Problem> {
         let class = self.class.as_str();
+        let at =
+            |key: String, message: String| Problem::at(Some("cell".into()), Some(key), message);
         let classes = layout.class_segments();
         if classes.is_empty() {
-            vec![format!(
-                "[cell] class = {class:?}, but the placement has no classes"
+            vec![at(
+                "class".into(),
+                format!("the placement has no classes, and so no class `{class}`"),
             )]
         } else if !classes.contains_key(class) {
-            vec![format!(
-                "[cell] class: the placement has no class `{class}`"
+            vec![at(
+                "class".into(),
+                format!("the placement has no class `{class}`"),
             )]
         } else {
             let own = segment.and_then(|segment| match layout.class_of(segment) {
                 Some(own) if own == class => None,
-                Some(own) => Some(format!(
-                    "[cell] class: this instance's segment `{segment}` is in class `{own}`, not `{class}`"
+                Some(own) => Some(at(
+                    "class".into(),
+                    format!(
+                        "this instance's segment `{segment}` is in class `{own}`, not `{class}`"
+                    ),
                 )),
-                None => Some(format!(
-                    "[cell] class: this instance's segment `{segment}` is not in class `{class}`"
+                None => Some(at(
+                    "class".into(),
+                    format!("this instance's segment `{segment}` is not in class `{class}`"),
                 )),
             });
             let strays = self
                 .ready
                 .keys()
                 .filter(|key| layout.class_of(key) != Some(class))
-                .map(|key| format!("[cell] ready: `{key}` is not a segment of class `{class}`"));
+                .map(|key| {
+                    at(
+                        format!("ready.{key}"),
+                        format!("not a segment of class `{class}`"),
+                    )
+                });
             let sent: BTreeSet<&str> = layout
                 .boundaries()
                 .iter()
@@ -149,14 +184,11 @@ impl CellSettings {
                 .map(|boundary| boundary.into.as_str())
                 .collect();
             let requires = self.requires.iter().filter_map(|(required, &count)| {
+                let key = format!("requires.{required}");
                 if !sent.contains(required.as_str()) {
-                    Some(format!(
-                        "[cell] requires: `{required}` is not a class that `{class}` sends to"
-                    ))
+                    Some(at(key, format!("not a class that `{class}` sends to")))
                 } else if count == 0 {
-                    Some(format!(
-                        "[cell] requires: `{required}` is 0; a requirement is at least 1"
-                    ))
+                    Some(at(key, "is 0; a requirement is at least 1".into()))
                 } else {
                     None
                 }
@@ -166,12 +198,19 @@ impl CellSettings {
     }
 }
 
-fn refuse(problems: Vec<String>) -> Result<(), Error> {
+fn refuse(problems: Vec<Problem>) -> Result<(), Problems> {
     if problems.is_empty() {
         Ok(())
     } else {
-        Err(Error::new(problems.join("; ")))
+        Err(Problems(problems))
     }
+}
+
+/// The variable that sets `key` of a cell's settings: `GDL_CELL__READY__E`
+/// for `ready.e`. A variable is matched without regard to case, so this is
+/// the spelling, not the only one.
+pub fn cell_variable(key: &str) -> String {
+    format!("GDL_CELL__{}", key.replace('.', "__").to_ascii_uppercase())
 }
 
 /// Whether `address` is `host:port` as a hub's address must be: a host
@@ -201,7 +240,7 @@ pub fn check_hub_address(address: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "[cell] hub = {address:?} must be `host:port`: a host name, an IPv4 address, or a bracketed IPv6 address, and a port from 1 to 65535"
+            "{address:?} must be `host:port`: a host name, an IPv4 address, or a bracketed IPv6 address, and a port from 1 to 65535"
         ))
     }
 }
@@ -212,7 +251,7 @@ pub fn check_hub_address(address: &str) -> Result<(), String> {
 pub fn check_summary(summary: Duration) -> Result<(), String> {
     if summary < CellSettings::MIN_SUMMARY {
         return Err(format!(
-            "[cell] summary_ms = {} must be at least {}",
+            "is {}; the period is at least {} ms",
             summary.as_millis(),
             CellSettings::MIN_SUMMARY.as_millis()
         ));
@@ -306,9 +345,12 @@ impl Backend {
 }
 
 impl TryFrom<Table> for CellSettings {
-    type Error = String;
+    type Error = Problem;
 
-    fn try_from(table: Table) -> Result<Self, String> {
+    fn try_from(table: Table) -> Result<Self, Problem> {
+        let at = |key: &str, message: String| {
+            Problem::at(Some("cell".into()), Some(key.into()), message)
+        };
         let directory = match (table.directory, table.dir) {
             (Backend::Relay, None) => DirectoryBackend::Relay,
             (Backend::Memory, None) => DirectoryBackend::Memory,
@@ -316,23 +358,26 @@ impl TryFrom<Table> for CellSettings {
                 DirectoryBackend::Dir { path }
             }
             (Backend::Dir, _) => {
-                return Err(
-                    "[cell] directory = \"dir\" needs `dir`, the path of the shared directory"
-                        .into(),
-                );
+                return Err(at(
+                    "directory",
+                    "is \"dir\", which needs `dir`, the path of the shared directory".into(),
+                ));
             }
             (backend, Some(path)) => {
-                return Err(format!(
-                    "[cell] dir = {path:?} is read only by the `dir` backend, not by directory = \"{}\"",
-                    backend.name()
+                return Err(at(
+                    "dir",
+                    format!(
+                        "{path:?} is read only by the `dir` backend, not by directory = \"{}\"",
+                        backend.name()
+                    ),
                 ));
             }
         };
         if let Some(hub) = &table.hub {
-            check_hub_address(hub)?;
+            check_hub_address(hub).map_err(|why| at("hub", why))?;
         }
         let summary = Duration::from_millis(table.summary_ms);
-        check_summary(summary)?;
+        check_summary(summary).map_err(|why| at("summary_ms", why))?;
         Ok(Self {
             name: table.name,
             class: table.class,

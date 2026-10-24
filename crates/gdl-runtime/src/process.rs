@@ -6,6 +6,7 @@
 
 mod barrier;
 mod cell;
+mod origins;
 mod system;
 
 use std::collections::BTreeMap;
@@ -79,6 +80,7 @@ pub struct ProcessConfig<H> {
     /// Each routing selector's table, by the selector's name.
     selector: BTreeMap<String, toml::Table>,
     cell: Option<CellSettings>,
+    cell_origins: origins::CellOrigins,
     /// The runtime's own settings.
     pub runtime: RuntimeConfig,
     /// The tables of the hosted implementations.
@@ -106,7 +108,6 @@ struct Settings {
     system: SystemSettings,
     #[serde(default)]
     selector: BTreeMap<String, toml::Table>,
-    cell: Option<CellSettings>,
 }
 
 /// What a segment hosts, as its binary declares it: the settings type's
@@ -226,6 +227,16 @@ impl<H: Hosted> ProcessConfig<H> {
                 )));
             }
         }
+        // Read apart, so that a problem with it names its file or its
+        // variable.
+        let (cell, cell_origins) = match settings.remove("cell") {
+            Some(cell) => {
+                let (cell, origins) = origins::CellOrigins::read(&figment, cell)
+                    .map_err(|problems| placement(problems.to_string()))?;
+                (Some(cell), origins)
+            }
+            None => (None, origins::CellOrigins::default()),
+        };
         let settings = Settings::deserialize(&Value::Dict(Tag::Default, settings))
             .map_err(|e| placement(e.to_string()))?;
         let hosted = H::deserialize(&Value::Dict(Tag::Default, hosted))
@@ -239,7 +250,8 @@ impl<H: Hosted> ProcessConfig<H> {
             min_replicas: settings.min_replicas,
             system: settings.system,
             selector: settings.selector,
-            cell: settings.cell,
+            cell,
+            cell_origins,
             runtime: settings.runtime,
             hosted,
         };
@@ -278,6 +290,7 @@ impl<H: Hosted> ProcessConfig<H> {
             system,
             selector,
             cell,
+            cell_origins,
             runtime,
             hosted,
         } = self;
@@ -291,6 +304,7 @@ impl<H: Hosted> ProcessConfig<H> {
             system,
             selector,
             cell,
+            cell_origins,
             runtime,
             hosted: (),
         };
@@ -372,7 +386,7 @@ impl<H> ProcessConfig<H> {
         // cell would otherwise be counted toward that cell's quorum.
         if let Some(cell) = &self.cell {
             cell.check(&layout, segment)
-                .map_err(|e| placement(e.to_string()))?;
+                .map_err(|problems| placement(self.cell_origins.locate(problems).to_string()))?;
             // A chooser that cannot run its cell policy refuses before it
             // registers or loads.
             #[cfg(feature = "hub")]

@@ -52,18 +52,36 @@ impl Problem {
         }
     }
 
+    /// The key's whole dotted path, its table's included (`cell.ready.e`):
+    /// `None` for a problem of a table or of no key.
+    pub fn path(&self) -> Option<String> {
+        let key = self.key.as_deref()?;
+        Some(match &self.table {
+            Some(table) => format!("{table}.{key}"),
+            None => key.to_string(),
+        })
+    }
+
     /// The problem a reader met at `path`: the table and the key from the
-    /// path it had reached. An unknown key's path ends with that key, and a
-    /// missing one's at its table, whose message names the key. The table
-    /// ends where an array begins, since TOML addresses an array's
-    /// elements from the key that holds it (`[messages] crates[0].rev`).
+    /// path it had reached. An unknown key's path ends with that key; a
+    /// missing one's ends at its table, and the key is the one serde's
+    /// message names. The table ends where an array begins, since TOML
+    /// addresses an array's elements from the key that holds it
+    /// (`[messages] crates[0].rev`).
     pub(crate) fn from_path(path: &serde_path_to_error::Path, message: String) -> Self {
-        let keys = segments(path);
+        let mut keys = segments(path);
+        let missing = message
+            .strip_prefix("missing field `")
+            .and_then(|rest| rest.split_once('`'))
+            .map(|(key, _)| key.to_string());
         let array = keys.iter().position(|key| key.contains('['));
-        let split = match (array, message.starts_with("missing field")) {
+        let split = match (array, &missing) {
             (Some(array), _) => array,
-            (None, true) => keys.len(),
-            (None, false) => keys.len().saturating_sub(1),
+            (None, Some(missing)) => {
+                keys.push(missing.clone());
+                keys.len() - 1
+            }
+            (None, None) => keys.len().saturating_sub(1),
         };
         let (table, key) = keys.split_at(split);
         Self::at(

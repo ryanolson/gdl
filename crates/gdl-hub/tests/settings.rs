@@ -71,7 +71,7 @@ fn a_hub_without_cell_variables_has_no_cell() {
         // The build scripts' variables are not a cell's.
         jail.set_env("GDL_PROFILE", "release");
         jail.set_env("GDL_RUNTIME__ADMISSION_LIMIT", "4");
-        assert_eq!(cell_from_env().map_err(|e| e.to_string())?, None);
+        assert_eq!(cell_from_env(&spec()).map_err(|e| e.to_string())?, None);
         Ok(())
     });
 }
@@ -84,7 +84,7 @@ fn a_cells_settings_are_read_from_the_environment() {
         jail.set_env("GDL_CELL__READY__D", "2");
         jail.set_env("GDL_CELL__SUMMARY_MS", "2500");
         assert_eq!(
-            cell_from_env().map_err(|e| e.to_string())?,
+            cell_from_env(&spec()).map_err(|e| e.to_string())?,
             Some(CellSettings {
                 name: "model-x-01-us-east-1".into(),
                 class: "model_x".into(),
@@ -110,7 +110,7 @@ fn an_ipv6_hub_address_is_read_as_written() {
     Jail::expect_with(|jail| {
         model_cell(jail, "/srv/cells");
         jail.set_env("GDL_CELL__HUB", "[::1]:1337");
-        let cell = cell_from_env().map_err(|e| e.to_string())?;
+        let cell = cell_from_env(&spec()).map_err(|e| e.to_string())?;
         assert_eq!(
             cell.and_then(|cell| cell.hub).as_deref(),
             Some("[::1]:1337")
@@ -128,7 +128,7 @@ fn a_cells_requirements_are_read_from_the_environment() {
         jail.set_env("GDL_CELL__CLASS", "global");
         jail.set_env("GDL_CELL__REGION", "us-east-1");
         jail.set_env("GDL_CELL__REQUIRES__MODEL_X", "2");
-        let cell = cell_from_env().map_err(|e| e.to_string())?;
+        let cell = cell_from_env(&spec()).map_err(|e| e.to_string())?;
         assert_eq!(
             cell.map(|cell| cell.requires),
             Some(BTreeMap::from([("model_x".into(), 2)]))
@@ -137,26 +137,82 @@ fn a_cells_requirements_are_read_from_the_environment() {
     });
 }
 
+/// A variable that names no setting, or whose value does not fit its
+/// setting or the deployment, is refused, and the refusal names it.
 #[test]
-fn a_misspelled_or_malformed_cell_variable_is_refused() {
+fn a_misspelled_or_malformed_cell_variable_is_refused_by_name() {
     for (variable, value, expected) in [
-        ("GDL_CELL__HONE", "global-us-east-1", "hone"),
-        ("GDL_CELL__HUB", "http://hub:1337", "[cell] hub"),
-        ("GDL_CELL__DIRECTORY", "store", "store"),
-        ("GDL_CELL__SUMMARY_MS", "999", "summary_ms"),
+        (
+            "GDL_CELL__HONE",
+            "global-us-east-1",
+            "GDL_CELL__HONE: unknown field",
+        ),
+        (
+            "GDL_CELL__HUB",
+            "http://hub:1337",
+            "GDL_CELL__HUB: \"http://hub:1337\" must be `host:port`",
+        ),
+        (
+            "GDL_CELL__DIRECTORY",
+            "store",
+            "GDL_CELL__DIRECTORY: unknown variant",
+        ),
+        (
+            "GDL_CELL__SUMMARY_MS",
+            "999",
+            "GDL_CELL__SUMMARY_MS: is 999; the period is at least 1000 ms",
+        ),
+        (
+            "GDL_CELL__SUMMARY_MS",
+            "soon",
+            "GDL_CELL__SUMMARY_MS: invalid type",
+        ),
         // Nothing reads seeds: the relay mesh among global hubs is not built.
-        ("GDL_CELL__SEEDS", r#"["hub-a:1337"]"#, "seeds"),
+        (
+            "GDL_CELL__SEEDS",
+            r#"["hub-a:1337"]"#,
+            "GDL_CELL__SEEDS: unknown field",
+        ),
+        (
+            "GDL_CELL__READY__ZZ",
+            "2",
+            "GDL_CELL__READY__ZZ: not a segment of class `model_x`",
+        ),
+        (
+            "GDL_CELL__REQUIRES__GLOBAL",
+            "1",
+            "GDL_CELL__REQUIRES__GLOBAL: not a class that `model_x` sends to",
+        ),
+        (
+            "GDL_CELL__CLASS",
+            "model_y",
+            "GDL_CELL__CLASS: the placement has no class `model_y`",
+        ),
     ] {
         Jail::expect_with(|jail| {
             model_cell(jail, "/srv/cells");
             jail.set_env(variable, value);
-            let Err(error) = cell_from_env() else {
+            let Err(error) = cell_from_env(&spec()) else {
                 return Err(format!("{variable}={value} was accepted").into());
             };
-            assert!(error.to_string().contains(expected), "{error}");
+            let error = error.to_string();
+            assert!(error.starts_with(expected), "{expected}\nin: {error}");
             Ok(())
         });
     }
+    Jail::expect_with(|jail| {
+        jail.set_env("GDL_CELL__CLASS", "model_x");
+        jail.set_env("GDL_CELL__REGION", "us-east-1");
+        let Err(error) = cell_from_env(&spec()) else {
+            return Err("a cell without a name was accepted".into());
+        };
+        let error = error.to_string();
+        assert!(
+            error.starts_with("GDL_CELL__NAME: missing field `name`"),
+            "{error}"
+        );
+        Ok(())
+    });
 }
 
 /// `GET` on a hub's public listener: the status.
