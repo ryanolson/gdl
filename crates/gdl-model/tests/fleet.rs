@@ -443,8 +443,9 @@ fn home_is_the_cells_parent() {
 }
 
 /// Without a layout, as when the spec does not read, the fleet is still
-/// checked for what needs none: its names, its regions, and that each home
-/// is one of its cells. The classes and quorums wait for a layout.
+/// checked for what needs none: its names, its regions, that each home is
+/// one of its cells, and that no count is 0. Which classes and segments
+/// there are waits for a layout.
 #[test]
 fn without_a_layout_only_what_needs_none_is_judged() {
     let text = "[class.zz]\nready = { q = 0 }\n\
@@ -454,8 +455,10 @@ fn without_a_layout_only_what_needs_none_is_judged() {
         panic!("accepted:\n{text}");
     };
     let errors: Vec<String> = errors.0.iter().map(ToString::to_string).collect();
-    assert_eq!(errors.len(), 3, "{errors:?}");
+    assert_eq!(errors.len(), 5, "{errors:?}");
     for expected in [
+        "[class.zz] ready.q: is 0; a quorum is at least 1",
+        "[cell.Bad] ready.q: is 0; a quorum is at least 1",
         "[cell.Bad]: cell name `Bad` must be",
         "[cell.Bad] region: region name `US` must be",
         "[cell.Bad] home: the fleet has no cell `nope`",

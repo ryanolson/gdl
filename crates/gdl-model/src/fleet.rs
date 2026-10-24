@@ -83,8 +83,8 @@ impl Fleet {
     /// reporting every problem. A cell whose class the placement does not
     /// have is reported once: its quorum, and its home, are not judged
     /// against it. Without a layout (the spec did not read), only what
-    /// needs none is judged: the cells' names and regions, and that each
-    /// home is a cell of the fleet.
+    /// needs none is judged: the cells' names and regions, that each home
+    /// is a cell of the fleet, and that no count is 0.
     pub fn check(&self, layout: Option<&Layout>) -> Result<(), FleetErrors> {
         let segments = layout.map(Layout::class_segments).unwrap_or_default();
         let mut sends = Names::new();
@@ -95,8 +95,19 @@ impl Fleet {
                 .insert(boundary.into.as_str());
         }
         let mut errors = Vec::new();
-        for (class, defaults) in self.classes.iter().filter(|_| layout.is_some()) {
+        for (class, defaults) in &self.classes {
             let table = || FleetTable::Class(class.clone());
+            // A count of 0 is wrong whatever the classes are.
+            if layout.is_none() {
+                zero_ready(table, &defaults.ready, &mut errors);
+                for (required, _) in defaults.requires.iter().filter(|(_, n)| **n == 0) {
+                    errors.push(FleetError::ZeroRequires {
+                        class: class.clone(),
+                        required: required.clone(),
+                    });
+                }
+                continue;
+            }
             let Some(members) = segments.get(class.as_str()) else {
                 errors.push(FleetError::UnknownClass {
                     table: table(),
@@ -134,7 +145,9 @@ impl Fleet {
                     reason,
                 });
             }
-            if layout.is_some() {
+            if layout.is_none() {
+                zero_ready(table, &cell.ready, &mut errors);
+            } else {
                 match segments.get(cell.class.as_str()) {
                     Some(members) => {
                         check_ready(table, &cell.class, members, &cell.ready, &mut errors)
@@ -238,6 +251,21 @@ impl Fleet {
 
 /// Names by a class: its segments, or the classes it sends to.
 type Names<'a> = BTreeMap<&'a str, BTreeSet<&'a str>>;
+
+/// Every `ready` count is at least 1: what can be judged of `ready`
+/// without the classes.
+fn zero_ready(
+    table: impl Fn() -> FleetTable,
+    ready: &BTreeMap<String, u32>,
+    errors: &mut Vec<FleetError>,
+) {
+    for (segment, _) in ready.iter().filter(|(_, count)| **count == 0) {
+        errors.push(FleetError::ZeroReady {
+            table: table(),
+            segment: segment.clone(),
+        });
+    }
+}
 
 /// Every `ready` key is a segment of `class`, with a count of at least 1.
 fn check_ready(
