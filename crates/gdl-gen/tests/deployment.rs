@@ -234,3 +234,95 @@ fn a_classed_bundle_agrees_on_the_placement_hash() {
     }
     assert_eq!(embedded, 2, "one embedded placement per segment");
 }
+
+/// `files`, every file of a bundle, as one text: each file under a line
+/// that names it, with the pinned commit, which moves, as `<rev>`.
+fn pinned(files: &gdl_gen::Files) -> String {
+    let rev = pinned_rev();
+    files
+        .iter()
+        .map(|(path, text)| {
+            format!(
+                "==> {} <==\n{}\n",
+                path.display(),
+                text.replace(&rev, "<rev>")
+            )
+        })
+        .collect()
+}
+
+/// A spec without classes composes as it always has, byte for byte: every
+/// file of the bundle is pinned, so that a bundle for cells changes
+/// nothing of one without them.
+#[test]
+fn a_bundle_without_classes_is_pinned() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spec = portable_spec(&root).expect("valid test fixture");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-pin-")
+        .tempdir()
+        .expect("a directory");
+    let files = gdl_gen::compose_files(&spec, temp.path(), &root.join("target")).expect("a bundle");
+    let expected = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bundle/api.txt"),
+    )
+    .expect("the pinned bundle");
+    let found = pinned(&files);
+    for (found, expected) in found.lines().zip(expected.lines()) {
+        assert_eq!(found, expected, "the bundle differs from the pin");
+    }
+    assert_eq!(found, expected, "the bundle differs from the pin");
+}
+
+/// Every hub's health check is its own liveness, never the cell health
+/// endpoint, and every service waits only for its own cell's hub, given by
+/// `hub_of`. A parent cell's health answers 503 until its children are
+/// ready, so a wait on it, or on another cell, would deadlock a fleet that
+/// starts together.
+fn assert_liveness(compose: &serde_json::Value, hub_of: impl Fn(&str) -> String) {
+    let text = compose.to_string();
+    assert!(!text.contains("/v1/ext/gdl-cell/health"), "{text}");
+    let services = compose["services"].as_object().expect("services");
+    let hubs: Vec<&String> = services
+        .iter()
+        .filter(|(_, service)| {
+            service["build"]["dockerfile"]
+                .as_str()
+                .is_some_and(|file| file.ends_with("hub/Dockerfile"))
+        })
+        .map(|(name, _)| name)
+        .collect();
+    assert!(!hubs.is_empty(), "{text}");
+    for (name, service) in services {
+        if hubs.contains(&name) {
+            assert_eq!(
+                service["healthcheck"]["test"],
+                serde_json::json!(["CMD", "/usr/local/bin/segment", "--healthcheck"]),
+                "{name}"
+            );
+            assert!(service.get("depends_on").is_none(), "{name}: {service}");
+            continue;
+        }
+        let depends = service["depends_on"].as_object().expect("depends_on");
+        assert_eq!(
+            depends.keys().collect::<Vec<_>>(),
+            [&hub_of(name)],
+            "{name} waits only for its own cell's hub"
+        );
+        assert_eq!(depends[&hub_of(name)]["condition"], "service_healthy");
+    }
+}
+
+#[test]
+fn a_bundle_without_classes_waits_only_on_liveness() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spec = portable_spec(&root).expect("valid test fixture");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-live-")
+        .tempdir()
+        .expect("a directory");
+    let files = gdl_gen::compose_files(&spec, temp.path(), &root.join("target")).expect("a bundle");
+    let compose: serde_json::Value =
+        serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
+    assert_liveness(&compose, |_| "hub".into());
+}
