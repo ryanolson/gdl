@@ -1,8 +1,8 @@
 //! The gdl graph model without the runtime: a graph's [`Manifest`], a
-//! [`Placement`] of its nodes in segments, the [`Layout`] that checks one
-//! against the other, diagrams of both, and the cells that deploy a
-//! placement's classes: the [`Fleet`] file and a cell's own
-//! [`CellSettings`].
+//! [`Placement`] of its nodes in segments, a spec's [`Placements`] (one
+//! for each of its layouts), the [`Layout`] that checks a placement against
+//! the graph, diagrams of both, and the cells that deploy a placement's
+//! classes: the [`Fleet`] file and a cell's own [`CellSettings`].
 //!
 //! The generator and the runtime check placements with these rules, and
 //! the composer runs the same rules in a browser while a user draws, so
@@ -43,8 +43,8 @@ pub use metrics::{
 };
 pub use placement::{
     CellPolicy, ClassBoundary, CrossingReport, HopLayout, Layout, Placement, PlacementError,
-    PlacementErrors, RequestRouter, Run, SELECTORS, SelectorInfo, WireReason, check_class_name,
-    check_selector_name, layout,
+    PlacementErrors, Placements, RequestRouter, Run, SELECTORS, SelectorInfo, WireReason,
+    check_class_name, check_layout_name, check_selector_name, layout,
 };
 pub use problem::{Origin, Problem, Problems, read_toml};
 
