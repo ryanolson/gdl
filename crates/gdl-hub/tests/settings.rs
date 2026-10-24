@@ -200,6 +200,34 @@ fn a_misspelled_or_malformed_cell_variable_is_refused_by_name() {
             Ok(())
         });
     }
+    // The variable that supplied the value is named: the later of two
+    // that set one key, and one that set a table under a key.
+    for (variables, expected) in [
+        (
+            &[
+                ("GDL_CELL__READY__D", "1"),
+                ("GDL_CELL__READY", r#"{d="many"}"#),
+            ][..],
+            "GDL_CELL__READY: invalid type",
+        ),
+        (
+            &[("GDL_CELL__SUMMARY_MS__EXTRA", "1")][..],
+            "GDL_CELL__SUMMARY_MS__EXTRA: invalid type",
+        ),
+    ] {
+        Jail::expect_with(|jail| {
+            model_cell(jail, "/srv/cells");
+            for (name, value) in variables {
+                jail.set_env(name, value);
+            }
+            let Err(error) = cell_from_env(&spec()) else {
+                return Err(format!("accepted {variables:?}").into());
+            };
+            let error = error.to_string();
+            assert!(error.starts_with(expected), "{expected}\nin: {error}");
+            Ok(())
+        });
+    }
     // A table set whole in one variable is that variable's.
     Jail::expect_with(|jail| {
         model_cell(jail, "/srv/cells");

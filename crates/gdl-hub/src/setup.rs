@@ -1,14 +1,10 @@
 //! What the hub binary runs: admission for its deployment, and, for a
 //! cell's hub, the cell's extension with the directory its settings name.
 
-use figment::Figment;
-use figment::providers::Env;
-use figment::value::{Dict, Tag, Value};
+use figment::value::{Dict, Map, Tag, Value};
+use figment::{Figment, Metadata, Profile, Provider, Source};
 use gdl_cells::DirDirectory;
-use gdl_model::{
-    CellSettings, DeploymentSpec, DirectoryBackend, Origin, Problems, cell_variable,
-    cell_variable_of,
-};
+use gdl_model::{CellSettings, DeploymentSpec, DirectoryBackend, Origin, Problems, cell_variable};
 use velo_hub::{Hub, HubBuilder, HubConfig};
 
 use crate::{CellError, CellReadiness, CellTiming, GraphAdmission};
@@ -24,18 +20,17 @@ use crate::{CellError, CellReadiness, CellTiming, GraphAdmission};
 /// The hub binary takes its deployment as its only argument and has no
 /// settings file, so the environment is the only source.
 pub fn cell_from_env(spec: &DeploymentSpec) -> Result<Option<CellSettings>, CellError> {
-    let figment = Figment::from(Env::prefixed("GDL_CELL__").split("__"));
+    // One provider to a variable, so that figment's provenance of a value
+    // names the variable that gave it, whichever of several set it last.
+    let figment = variables().fold(Figment::new(), Figment::merge);
     let given = figment
         .extract::<Dict>()
         .map_err(|e| CellError::new(format!("GDL_CELL__*: {e}")))?;
     if given.is_empty() {
         return Ok(None);
     }
-    // Every key came from a variable: the one that set it, or, for a key
-    // that is missing, the one that would.
-    let variables: Vec<String> = std::env::vars_os()
-        .filter_map(|(name, _)| name.into_string().ok())
-        .collect();
+    // A key that is set names the variable that gave its value; one that
+    // is missing, the variable that would set it.
     let named = |problems: Problems| {
         let named = problems.0.into_iter().map(|mut problem| {
             if let Some(key) = problem
@@ -43,8 +38,9 @@ pub fn cell_from_env(spec: &DeploymentSpec) -> Result<Option<CellSettings>, Cell
                 .as_deref()
                 .and_then(|p| p.strip_prefix("cell."))
             {
-                let set = cell_variable_of(key, variables.iter().map(String::as_str));
-                let variable = set.map_or_else(|| cell_variable(key), str::to_string);
+                let variable = figment
+                    .find_metadata(key)
+                    .map_or_else(|| cell_variable(key), |given| given.name.to_string());
                 problem.origin = Some(Origin::Variable(variable));
             }
             problem
@@ -88,4 +84,46 @@ pub fn hub_builder(
     Ok(Hub::builder(config)
         .extension(GraphAdmission::new(spec))
         .extension(readiness))
+}
+
+/// The `GDL_CELL__` variables, one provider to each, in the environment's
+/// order, so that a later variable overrides an earlier one as within one
+/// provider: the keys after the prefix, matched without regard to case,
+/// with `__` between nested keys.
+fn variables() -> impl Iterator<Item = Variable> {
+    const PREFIX: &str = "GDL_CELL__";
+    std::env::vars_os().filter_map(|(name, value)| {
+        let name = name.to_string_lossy().trim().to_string();
+        let key = name
+            .get(..PREFIX.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+            .map(|_| name[PREFIX.len()..].replace("__", ".").to_ascii_lowercase())?;
+        (!key.split('.').any(str::is_empty)).then(|| Variable {
+            key,
+            value: value.to_string_lossy().to_string(),
+            name,
+        })
+    })
+}
+
+/// One environment variable, as a provider named for it.
+struct Variable {
+    name: String,
+    key: String,
+    value: String,
+}
+
+impl Provider for Variable {
+    fn metadata(&self) -> Metadata {
+        Metadata::from(
+            self.name.clone(),
+            Source::Custom("environment variable".into()),
+        )
+    }
+
+    fn data(&self) -> Result<Map<Profile, Dict>, figment::Error> {
+        let Ok(value) = self.value.parse::<Value>();
+        let dict = figment::util::nest(&self.key, value).into_dict();
+        Ok(Profile::Default.collect(dict.unwrap_or_default()))
+    }
 }

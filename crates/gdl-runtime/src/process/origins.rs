@@ -1,14 +1,64 @@
 //! Where each `[cell]` setting was read from, a file or a `GDL_CELL__*`
 //! variable, so that a problem with it names that file or that variable,
 //! whether it is found as the settings are read or as the instance
-//! launches against its deployment.
+//! launches against its deployment. Each `GDL_` variable is a provider of
+//! its own, so that figment's provenance of a value names the variable
+//! that gave it, whichever of several set it last.
 
 use std::collections::BTreeMap;
 
-use figment::providers::Env;
-use figment::value::Value;
-use figment::{Figment, Provider, Source};
-use gdl_model::{CellSettings, Origin, Problems, cell_variable, cell_variable_of};
+use figment::value::{Dict, Map, Value};
+use figment::{Figment, Metadata, Profile, Provider, Source};
+use gdl_model::{CellSettings, Origin, Problems, cell_variable};
+
+use super::{Hosted, KEYS, canonical};
+
+/// The `GDL_` environment as a segment of `H` reads it, one provider to a
+/// variable, in the environment's order, so that a later variable
+/// overrides an earlier one as within one provider. A key is matched
+/// without regard to case (`canonical`), and only the settings' own keys
+/// are read: the build scripts' `GDL_PROFILE` and `GDL_IMAGE_PREFIX` are
+/// not settings.
+pub(super) fn variables<H: Hosted>() -> impl Iterator<Item = Variable> {
+    const PREFIX: &str = "GDL_";
+    std::env::vars_os().filter_map(|(name, value)| {
+        let name = name.to_string_lossy().trim().to_string();
+        let rest = name
+            .get(..PREFIX.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+            .map(|_| &name[PREFIX.len()..])?;
+        let key = canonical::<H>(rest);
+        let first = key.split('.').next().unwrap_or_default();
+        let known = KEYS.contains(&first) || H::KEYS.contains(&first);
+        (known && !key.split('.').any(str::is_empty)).then(|| Variable {
+            key,
+            value: value.to_string_lossy().to_string(),
+            name,
+        })
+    })
+}
+
+/// One environment variable, as a provider named for it.
+pub(super) struct Variable {
+    name: String,
+    key: String,
+    value: String,
+}
+
+/// The source a variable's metadata names, which tells it from a file's.
+const VARIABLE: &str = "environment variable";
+
+impl Provider for Variable {
+    fn metadata(&self) -> Metadata {
+        Metadata::from(self.name.clone(), Source::Custom(VARIABLE.into()))
+    }
+
+    fn data(&self) -> Result<Map<Profile, Dict>, figment::Error> {
+        let Ok(value) = self.value.parse::<Value>();
+        let dict = figment::util::nest(&self.key, value).into_dict();
+        Ok(Profile::Default.collect(dict.unwrap_or_default()))
+    }
+}
 
 /// The origin of each key of a `[cell]` table, by its path in the table
 /// (`ready.e`).
@@ -19,22 +69,15 @@ impl CellOrigins {
     /// Read `cell`, the `[cell]` table that `figment` merged, with where each
     /// of its keys came from. A problem in reading it names its origin.
     pub(super) fn read(figment: &Figment, cell: Value) -> Result<(CellSettings, Self), Problems> {
-        let env = Env::prefixed("GDL_").metadata().name;
-        let variables: Vec<String> = std::env::vars_os()
-            .filter_map(|(name, _)| name.into_string().ok())
-            .collect();
-        // The variable that set the key, which may have set its whole table.
-        let variable = |key: &str| {
-            cell_variable_of(key, variables.iter().map(String::as_str))
-                .map_or_else(|| cell_variable(key), str::to_string)
-        };
         let mut origins = BTreeMap::new();
         let mut note = |key: String| {
             let origin = figment
                 .find_metadata(&format!("cell.{key}"))
                 .and_then(|metadata| match &metadata.source {
                     Some(Source::File(path)) => Some(Origin::File(path.display().to_string())),
-                    _ if metadata.name == env => Some(Origin::Variable(variable(&key))),
+                    Some(Source::Custom(source)) if source == VARIABLE => {
+                        Some(Origin::Variable(metadata.name.to_string()))
+                    }
                     _ => None,
                 });
             if let Some(origin) = origin {

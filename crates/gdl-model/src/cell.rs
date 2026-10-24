@@ -237,32 +237,6 @@ pub fn cell_variable(key: &str) -> String {
     format!("GDL_CELL__{}", key.replace('.', "__").to_ascii_uppercase())
 }
 
-/// Which of `variables`, the names of the variables that are set, set
-/// `key` of a cell's settings: the one that names `key` itself, else the
-/// one that names the table holding it, so that `GDL_CELL__READY` is
-/// named for `ready.e` when it set the whole table. Matched without regard
-/// to case, as the readers match them. `None` when none did: a key that is
-/// missing is [`cell_variable`]'s to set.
-pub fn cell_variable_of<'a>(
-    key: &str,
-    variables: impl IntoIterator<Item = &'a str>,
-) -> Option<&'a str> {
-    const PREFIX: &str = "GDL_CELL__";
-    variables
-        .into_iter()
-        .filter_map(|variable| {
-            let rest = variable
-                .get(..PREFIX.len())
-                .filter(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
-                .map(|_| &variable[PREFIX.len()..])?;
-            let path = rest.to_ascii_lowercase().replace("__", ".");
-            let holds = key == path || key.strip_prefix(&path)?.starts_with('.');
-            holds.then_some((path.len(), variable))
-        })
-        .max_by_key(|(length, _)| *length)
-        .map(|(_, variable)| variable)
-}
-
 /// Whether `address` is `host:port` as a hub's address must be: a host
 /// name of letters, digits, `-`, and `.`, an IPv4 address, or a bracketed
 /// IPv6 address, and a port from 1 to 65535. Nothing else, so that a URL

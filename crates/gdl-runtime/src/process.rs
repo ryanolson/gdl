@@ -190,7 +190,9 @@ impl<H: Hosted> ProcessConfig<H> {
         for path in paths {
             figment = figment.merge(Toml::file_exact(path.as_ref()));
         }
-        Self::from_figment(figment.merge(Self::dynamo_env()).merge(Self::env()))
+        let figment =
+            origins::variables::<H>().fold(figment.merge(Self::dynamo_env()), Figment::merge);
+        Self::from_figment(figment)
     }
 
     /// dynamo's system-port variables, as `[system]` keys.
@@ -263,18 +265,6 @@ impl<H: Hosted> ProcessConfig<H> {
             ));
         }
         Ok(config)
-    }
-
-    /// The `GDL_` environment, as this type reads it. The case flag comes
-    /// last: figment's `map` and `filter` reset it.
-    fn env() -> Env {
-        Env::prefixed("GDL_")
-            .map(|key| canonical::<H>(key.as_str()).into())
-            .filter(|key| {
-                let first = key.as_str().split('.').next().unwrap_or_default();
-                KEYS.contains(&first) || H::KEYS.contains(&first)
-            })
-            .lowercase(false)
     }
 
     /// The settings without the hosted tables, and the tables: a binary

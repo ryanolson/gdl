@@ -514,6 +514,19 @@ async fn a_cell_problem_names_its_file_or_its_variable() {
             ][..],
             "GDL_CELL__NAME: missing field `name`",
         ),
+        (
+            CELL,
+            &[
+                ("GDL_CELL__READY__BACK", "1"),
+                ("GDL_CELL__READY", r#"{back="many"}"#),
+            ][..],
+            "GDL_CELL__READY: invalid type",
+        ),
+        (
+            CELL,
+            &[("GDL_CELL__SUMMARY_MS__EXTRA", "1")][..],
+            "GDL_CELL__SUMMARY_MS__EXTRA: invalid type",
+        ),
     ] {
         Jail::expect_with(|jail| {
             jail.create_file("config.toml", &format!("{BASE}{file}"))?;
