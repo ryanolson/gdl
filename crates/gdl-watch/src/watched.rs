@@ -165,6 +165,7 @@ mod tests {
             CellWatchEvent::Retired {
                 segment: "f".into(),
                 instance,
+                acknowledged: false,
             },
             CellWatchEvent::Left {
                 segment: "f".into(),
@@ -296,6 +297,50 @@ mod tests {
         assert_eq!(
             state,
             serde_json::json!({ "event": "state", "state": "draining" })
+        );
+    }
+
+    /// A reader of the build before `acknowledged`, whose retirement has no
+    /// such field, reads the acknowledged retirement as the retirement
+    /// alone, a known kind, so that nothing withholds the cell; and a
+    /// retirement not yet acknowledged is sent as before.
+    #[test]
+    fn an_earlier_reader_reads_an_acknowledged_retirement_as_the_retirement_alone() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(tag = "event", rename_all = "snake_case")]
+        enum Earlier {
+            Retired {
+                segment: String,
+                instance: InstanceId,
+            },
+        }
+        let instance = InstanceId::new_v4();
+        let acknowledged = serde_json::to_string(&CellWatchEvent::Retired {
+            segment: "f".into(),
+            instance,
+            acknowledged: true,
+        })
+        .expect("an event serializes");
+        assert_eq!(
+            serde_json::from_str::<Earlier>(&acknowledged).expect("an earlier reader reads it"),
+            Earlier::Retired {
+                segment: "f".into(),
+                instance
+            }
+        );
+        assert!(
+            CellWatchEvent::unknown(&acknowledged).is_none(),
+            "a known kind"
+        );
+        let retired = serde_json::to_value(CellWatchEvent::Retired {
+            segment: "f".into(),
+            instance,
+            acknowledged: false,
+        })
+        .expect("an event serializes");
+        assert_eq!(
+            retired,
+            serde_json::json!({ "event": "retired", "segment": "f", "instance": instance })
         );
     }
 }

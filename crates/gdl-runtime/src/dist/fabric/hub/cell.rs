@@ -1,7 +1,9 @@
-//! An instance's part in its cell's drain. The instance learns of the
+//! An instance's part in its cell's drain, and an entry instance's in its
+//! own retirement across the cell's boundary. The instance learns of the
 //! drain from its own hub's cell watch, which carries the cell's state,
-//! and, once no other cell follows the draining cell, says so; nothing
-//! about it is on a request's path.
+//! and, once no other cell follows the draining cell, says so; an entry
+//! instance learns there too that the cells that follow its cell avoid it
+//! once it retired. Nothing about either is on a request's path.
 //!
 //! The cell's entry instances are the drain sources of its interior ones
 //! (`agent-docs/cells.md`, section 5): a chooser in another class reaches
@@ -20,6 +22,7 @@ use gdl_watch::{CellWatchEvent, CellWatcher, Watched};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use velo::InstanceId;
 
 use super::HubSession;
 
@@ -39,6 +42,11 @@ pub(crate) struct CellDrain {
     /// The cell's entry segments, whose instances are the drain sources of
     /// every instance of the cell while it drains.
     entries: Vec<String>,
+    /// Whether a source segment whose requests reach the instance is of
+    /// another class, so that its instances are on another hub.
+    foreign: bool,
+    /// When the instance retired, once it has.
+    retired: Option<Instant>,
     watch: JoinHandle<()>,
 }
 
@@ -50,6 +58,9 @@ struct Learned {
     /// Whether it learned that no other cell follows its draining cell any
     /// more: no chooser of another cell holds an offer to it.
     unfollowed: bool,
+    /// Whether it learned, as an entry instance that retired, that every
+    /// cell that followed its cell then avoids it.
+    acknowledged: bool,
 }
 
 /// What the instance is in its cell.
@@ -70,20 +81,97 @@ enum Role {
 /// summary of the cell, and its cell policy does not choose the cell at
 /// all. The bound is a fallback: the instance stops earlier once its hub
 /// says that no other cell follows the cell, since a cell lets go of
-/// another only once none of its choosers holds an offer to it.
+/// another only once none of its choosers holds an offer to it. The same
+/// bound caps how long a retired entry instance waits for the cells that
+/// follow its cell to avoid it ([`Parent`]), for the same reason.
 pub(crate) fn bound(setup: Duration, summary: Duration) -> Duration {
     setup + summary * 2
 }
 
+/// What a retired entry instance's drain waits for across its cell's
+/// boundary: its hub's word that the cells that followed its cell when it
+/// retired avoid it, so that no chooser of theirs picks it again. Read
+/// when the drain asks, so that the wait borrows nothing of the launch.
+pub(crate) struct Parent {
+    learned: watch::Receiver<Learned>,
+    /// When the instance retired.
+    retired: Instant,
+    bound: Duration,
+}
+
+impl Parent {
+    /// Whether the instance may go on: its hub said that the cells that
+    /// follow its cell avoid it, or, once its cell drains, that none
+    /// follows it any more, or the bound has passed since it retired and,
+    /// once its cell drains, since it learned of the drain too. A drain
+    /// learned while the instance waits here governs from then, as it does
+    /// one learned before: an entry instance of a draining cell takes work
+    /// until its bound has passed since it learned of the drain, or no
+    /// cell follows the cell, whatever stopped it, since a chooser whose
+    /// view of the cell is stale may still offer to it. Taking the drain
+    /// itself as an answer would close the instance a setup timeout after
+    /// the drain began.
+    pub(crate) fn avoids(&self) -> bool {
+        let learned = *self.learned.borrow();
+        let until = learned
+            .drain
+            .map_or(self.retired, |drain| drain.max(self.retired))
+            + self.bound;
+        learned.acknowledged || learned.unfollowed || Instant::now() >= until
+    }
+
+    /// Resolves when the instance declines offers from other cells, as an
+    /// entry instance of a draining cell does once its bound has passed
+    /// since it learned of the drain, or no cell follows the cell: a drain
+    /// learned while the instance waits here was learned after its stop
+    /// decided not to decline, so only this decides again. Never, while
+    /// its cell does not drain.
+    pub(crate) async fn declining(&self) {
+        let mut learned = self.learned.clone();
+        // The watch's task ends once it has said that no cell follows the
+        // cell, or with the instance: a sender gone without a drain is no
+        // signal.
+        let drain = learned
+            .wait_for(|learned| learned.drain.is_some())
+            .await
+            .ok()
+            .and_then(|learned| learned.drain);
+        let Some(drain) = drain else {
+            return std::future::pending().await;
+        };
+        let unfollowed = async {
+            if learned
+                .wait_for(|learned| learned.unfollowed)
+                .await
+                .is_err()
+            {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            () = tokio::time::sleep_until(drain + self.bound) => {}
+            () = unfollowed => {}
+        }
+    }
+}
+
 impl CellDrain {
-    /// Watch the cell of `cell` for its drain, for an instance of
-    /// `segment` at the hub whose public listener is `host`'s
-    /// `public_port`. `None`, and nothing watched, when no hop enters the
-    /// cell's class: such a cell is not drained as a cell.
+    /// Watch the cell of `cell` for its drain, for the instance `me` of
+    /// `segment`, which the source segments `reaching` reach, at the hub
+    /// whose public listener is `host`'s `public_port`, and for an entry
+    /// instance, for its retirement's acknowledgement. `None`, and nothing
+    /// watched, when no hop enters the cell's class: such a cell is not
+    /// drained as a cell, and has no entry instance.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the instance, its cell, and its hub, as the launch holds them"
+    )]
     pub(crate) fn watch(
         layout: &Layout,
         cell: &CellSettings,
         segment: &str,
+        me: InstanceId,
+        reaching: &[String],
         host: &str,
         public_port: u16,
         setup: Duration,
@@ -99,17 +187,53 @@ impl CellDrain {
             false => Role::Interior,
         };
         let entries = entries.into_iter().map(ToString::to_string).collect();
+        let foreign = reaching
+            .iter()
+            .any(|source| layout.class_of(source) != Some(cell.class.as_str()));
         let watcher =
             CellWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
         let address = crate::dist::cells::hub_address(host, public_port);
         let (learns, learned) = watch::channel(Learned::default());
-        let watch = tokio::spawn(run(watcher, address, learns));
+        let retiree = matches!(role, Role::Entry { .. }).then_some(me);
+        let watch = tokio::spawn(run(watcher, address, retiree, learns));
         Ok(Some(Self {
             learned,
             role,
             entries,
+            foreign,
+            retired: None,
             watch,
         }))
+    }
+
+    /// The instance retired now, if it had not already.
+    pub(crate) fn retire(&mut self) {
+        self.retired.get_or_insert_with(Instant::now);
+    }
+
+    /// For an entry instance that retired: what its drain waits for before
+    /// the cells that follow its cell can be taken to avoid it. `None` for
+    /// any other instance, which waits for no cell outside its own.
+    pub(crate) fn parent(&self) -> Option<Parent> {
+        let (Role::Entry { bound }, Some(retired)) = (&self.role, self.retired) else {
+            return None;
+        };
+        Some(Parent {
+            learned: self.learned.clone(),
+            retired,
+            bound: *bound,
+        })
+    }
+
+    /// Whether the drain of the sources' requests (B) cannot be seen from
+    /// here: an entry instance, outside its cell's drain, that a source
+    /// segment of another class reaches, whose instances are members of
+    /// another hub. Their drain is never seen here, and (B) over the
+    /// members this hub has would hold at once.
+    pub(crate) fn blind(&self) -> bool {
+        matches!(self.role, Role::Entry { .. })
+            && self.foreign
+            && self.learned.borrow().drain.is_none()
     }
 
     /// Resolves when the cell's drain begins this instance's stop: an entry
@@ -237,11 +361,18 @@ impl Drop for CellDrain {
 
 /// Watch the cell at the hub at `address` until it says it is
 /// `draining`, then say when on `learns`, and go on until it says that no
-/// other cell follows it, and say so too. A watch that ends or is refused
-/// is asked for again; a refusal is logged once, until a watch begins. An
-/// event of a kind this build does not know ends the watch too, so that
-/// the next one's first event says what the cell's state is.
-async fn run(watcher: CellWatcher, address: String, learns: watch::Sender<Learned>) {
+/// other cell follows it, and say so too. For the entry instance
+/// `retiree`, say too once its retirement is acknowledged. A watch that
+/// ends or is refused is asked for again; a refusal is logged once, until
+/// a watch begins. An event of a kind this build does not know ends the
+/// watch too, so that the next one's first event says what the cell's
+/// state is.
+async fn run(
+    watcher: CellWatcher,
+    address: String,
+    retiree: Option<InstanceId>,
+    learns: watch::Sender<Learned>,
+) {
     let mut refused: Option<String> = None;
     loop {
         let pause = match watcher.watch(&address).await {
@@ -269,6 +400,15 @@ async fn run(watcher: CellWatcher, address: String, learns: watch::Sender<Learne
                                 let first = learned.drain.is_none();
                                 learned.drain.get_or_insert_with(Instant::now);
                                 first
+                            });
+                        }
+                        Watched::Event(CellWatchEvent::Retired {
+                            instance,
+                            acknowledged: true,
+                            ..
+                        }) if Some(instance) == retiree => {
+                            learns.send_if_modified(|learned| {
+                                !std::mem::replace(&mut learned.acknowledged, true)
                             });
                         }
                         // An event of a kind this build does not know may

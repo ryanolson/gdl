@@ -184,6 +184,7 @@ async fn the_snapshot_holds_the_cell_and_its_entry_instances() {
             CellWatchEvent::Retired {
                 segment: "f".into(),
                 instance: retiring.id(),
+                acknowledged: true,
             },
             ready(peer(&hub, serving.id()).await),
             CellWatchEvent::Synced,
@@ -237,6 +238,7 @@ async fn each_change_arrives_in_order() {
         CellWatchEvent::Retired {
             segment: "f".into(),
             instance: retiring.id(),
+            acknowledged: true,
         }
     );
     view.apply(&retired);

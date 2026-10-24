@@ -161,6 +161,12 @@ impl Followers {
         true
     }
 
+    /// Every watch that counts, or is lost: what a retirement announced
+    /// now waits for ([`super::retiring`]).
+    pub(super) fn counted(&self) -> impl Iterator<Item = &WatchKey> {
+        self.watches.keys().chain(&self.lost)
+    }
+
     /// Whether the draining cell has no follower any more.
     pub(super) fn unfollowed(&self) -> bool {
         self.unfollowed

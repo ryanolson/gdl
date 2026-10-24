@@ -1,8 +1,9 @@
 //! Where a launch's stop meets its cell's drain: when the drain begins the
 //! stop, what it changes about the drain, and what the instance announces
-//! at its end. An instance outside a cell, under a roster directory, or
-//! in a binary without hub discovery, takes no part in a cell's drain, and
-//! every answer here is the one its stop has without a cell.
+//! at its end; and what an entry instance's retirement waits for across
+//! its cell's boundary. An instance outside a cell, under a roster
+//! directory, or in a binary without hub discovery, takes no part in
+//! either, and every answer here is the one its stop has without a cell.
 
 #[cfg(feature = "hub")]
 use super::{DRAIN_POLL, Peers};
@@ -30,13 +31,68 @@ impl Launch {
 
     /// The segments whose instances are this one's drain sources: while
     /// its cell drains, the cell's entry segments, for an entry instance
-    /// too; otherwise those hosting a source that can reach it.
-    pub(super) fn drain_sources(&self) -> Vec<String> {
+    /// too; otherwise those hosting a source that can reach it. `None` when
+    /// their drain cannot be seen from here, for an entry instance that a
+    /// source of another class reaches: the drain of the sources' requests
+    /// (B) then never holds, and the instance waits for its senders and its
+    /// parent (A).
+    pub(super) fn drain_sources(&self) -> Option<Vec<String>> {
         #[cfg(feature = "hub")]
-        if let Some(sources) = self.cell_drain.as_ref().and_then(|cell| cell.sources()) {
-            return sources.to_vec();
+        if let Some(cell) = &self.cell_drain {
+            if let Some(sources) = cell.sources() {
+                return Some(sources.to_vec());
+            }
+            if cell.blind() {
+                return None;
+            }
         }
-        self.reaching.clone()
+        Some(self.reaching.clone())
+    }
+
+    /// The instance retires now: from here an entry instance in a cell
+    /// counts its wait for the cells that follow its cell.
+    pub(super) fn cell_retires(&mut self) {
+        #[cfg(feature = "hub")]
+        if let Some(cell) = &mut self.cell_drain {
+            cell.retire();
+        }
+    }
+
+    /// Whether the cells that follow this instance's cell may be taken to
+    /// avoid it, asked by (A) at each poll: for an entry instance that
+    /// retired, once its hub says they do, or, while its cell drains, that
+    /// none follows it, or the bound has passed since it retired and since
+    /// it learned of a drain; for any other, always. What it reads
+    /// is taken now, so that the question borrows nothing of the launch.
+    #[cfg(feature = "hub")]
+    pub(super) fn cell_parent(&self) -> impl Fn() -> bool + use<> {
+        let parent = self.cell_drain.as_ref().and_then(|cell| cell.parent());
+        move || parent.as_ref().is_none_or(crate::dist::Parent::avoids)
+    }
+
+    /// For a retired entry instance, decline offers from `segment` from
+    /// other cells once a drain of its cell it learned of while it waits
+    /// reaches its bound, or no cell follows the cell; then, and for any
+    /// other instance, whose stop decided that as it began, never resolve.
+    /// It runs beside the drain's waiting rather than between its
+    /// questions to the hub, which may stall. What it reads is taken now,
+    /// so that it borrows nothing of the launch.
+    pub(super) fn cell_declining<'a>(
+        &self,
+        segment: &'a dyn Drains,
+    ) -> impl Future<Output = ()> + use<'a> {
+        #[cfg(feature = "hub")]
+        let parent = self.cell_drain.as_ref().and_then(|cell| cell.parent());
+        #[cfg(not(feature = "hub"))]
+        let _ = segment;
+        async move {
+            #[cfg(feature = "hub")]
+            if let Some(parent) = parent {
+                parent.declining().await;
+                segment.decline_offers();
+            }
+            std::future::pending::<()>().await;
+        }
     }
 
     /// For an entry instance of a draining cell, decline offers once its

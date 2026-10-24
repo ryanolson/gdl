@@ -18,13 +18,13 @@ pub use cells::{Cells, FollowedCell};
 #[cfg(feature = "hub")]
 pub(crate) use cells::{check_policies as check_cell_policies, follow as follow_cells};
 #[cfg(feature = "hub")]
-pub(crate) use fabric::CellDrain;
-#[cfg(feature = "hub")]
 pub use fabric::HubSession;
 pub use fabric::bind_node;
 #[cfg(feature = "hub")]
 pub(crate) use fabric::bind_under_hub;
 pub(crate) use fabric::shut_down;
+#[cfg(feature = "hub")]
+pub(crate) use fabric::{CellDrain, Parent};
 pub use hop::{DHop, Register};
 pub(crate) use launch::{announce, announced, follow as follow_directory};
 pub use roster::Roster;

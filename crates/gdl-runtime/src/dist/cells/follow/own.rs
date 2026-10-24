@@ -252,6 +252,7 @@ impl<R: Registry> Follows<R> {
         if acknowledging {
             self.poll = Some(now);
         }
+        self.avoid_retired(Some(key), now);
     }
 }
 

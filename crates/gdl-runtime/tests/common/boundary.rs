@@ -331,7 +331,16 @@ pub async fn model_proxied_leased<H: Register + Send + Sync + 'static>(
     let (settings_of_hub, timing, extra) = summarized(cell, runtime);
     let timing = CellTiming { lease, ..timing };
     let (hub, readiness, proxy) = cell_hub_proxied(spec, settings_of_hub, directory, timing).await;
-    let cell = instances(spec, (hub, readiness), cell, &extra, &|_, r| r, assemble).await;
+    let cell = instances(
+        spec,
+        (hub, readiness),
+        None,
+        cell,
+        &extra,
+        &|_, r| r,
+        assemble,
+    )
+    .await;
     (cell, proxy)
 }
 
@@ -371,7 +380,7 @@ async fn start_model<H: Register + Send + Sync + 'static>(
         "f" => entry(runtime),
         _ => runtime,
     };
-    instances(spec, hub, cell, extra, &configure, assemble).await
+    instances(spec, hub, None, cell, extra, &configure, assemble).await
 }
 
 /// [`model_summarized`] with [`RUNTIME`], each instance's runtime
@@ -385,14 +394,40 @@ pub async fn model_configured<H: Register + Send + Sync + 'static>(
 ) -> ModelCell<H> {
     let (settings_of_hub, timing, extra) = summarized(cell, RUNTIME);
     let hub = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
-    instances(spec, hub, cell, &extra, configure, assemble).await
+    instances(spec, hub, None, cell, &extra, configure, assemble).await
+}
+
+/// [`model_summarized`], whose instances reach their hub's public
+/// listener through a proxy, which the hubs that follow the cell do not.
+pub async fn model_fronted<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    runtime: &str,
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> (ModelCell<H>, Proxy) {
+    let (settings_of_hub, timing, extra) = summarized(cell, runtime);
+    let hub = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
+    let proxy = Proxy::new(hub.0.public_addr()).await;
+    let cell = instances(
+        spec,
+        hub,
+        Some(proxy.port),
+        cell,
+        &extra,
+        &|_, r| r,
+        assemble,
+    )
+    .await;
+    (cell, proxy)
 }
 
 /// Start `cell`'s instances at its hub, each with `extra` added to its
-/// settings.
+/// settings, reaching the hub's public listener on `public` if given.
 async fn instances<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     (hub, readiness): (Hub, Arc<CellReadiness<Resolving>>),
+    public: Option<u16>,
     cell: Model<'_>,
     extra: &str,
     configure: &(dyn Fn(&str, RuntimeConfig) -> RuntimeConfig + Sync),
@@ -400,7 +435,7 @@ async fn instances<H: Register + Send + Sync + 'static>(
 ) -> ModelCell<H> {
     let entries = cell.entries;
     let config = settings(
-        hub.public_addr().port(),
+        public.unwrap_or(hub.public_addr().port()),
         hub.control_addr().port(),
         5_000,
         extra,

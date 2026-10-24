@@ -2,7 +2,7 @@
 //! the life of the instance, read into [`Follows`], beside it a reading
 //! of each cell left unread by an event of a kind this build does not
 //! know, and the acknowledgements it sends its hub of the follows it holds
-//! no offer to.
+//! no offer to and of the retired entry instances it avoids.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{FutureExt, StreamExt};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::Layout;
-use gdl_watch::{CellWatcher, FollowEvent, UnknownFollowEvent, Unoffered, Watched};
+use gdl_watch::{Avoids, CellWatcher, FollowEvent, UnknownFollowEvent, Unoffered, Watched};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use velo::Velo;
@@ -35,8 +35,9 @@ const REWATCH: Duration = Duration::from_millis(100);
 /// cell may call it: one without a cell follows nothing. `live` is the
 /// instance's own membership, `drain` how long an instance in no table
 /// stays registered. `chooser` tells the hub, as this instance, that it
-/// runs this follower, before the relay is first watched, and of each
-/// follow it holds no offer to once the hub marked it not offered.
+/// runs this follower, before the relay is first watched, of each
+/// follow it holds no offer to once the hub marked it not offered, and of
+/// each retired entry instance its tables hold.
 #[expect(
     clippy::too_many_arguments,
     reason = "the chooser's settings, its hub, and its membership, as the launch holds them"
@@ -111,6 +112,9 @@ pub(super) trait Source: Send + Sync + 'static {
         &self,
         unoffered: Unoffered,
     ) -> BoxFuture<'static, std::result::Result<(), String>>;
+
+    /// Tell the hub `avoids`: whether it took it, or why not.
+    fn avoid(&self, avoids: Avoids) -> BoxFuture<'static, std::result::Result<(), String>>;
 }
 
 /// The instance's own hub.
@@ -140,6 +144,11 @@ impl Source for Hub {
         async move { chooser.acknowledge(&unoffered).await }.boxed()
     }
 
+    fn avoid(&self, avoids: Avoids) -> BoxFuture<'static, std::result::Result<(), String>> {
+        let chooser = self.chooser.clone();
+        async move { chooser.avoid(&avoids).await }.boxed()
+    }
+
     async fn watch_of(
         &self,
         class: &str,
@@ -166,7 +175,9 @@ impl Source for Hub {
 pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<R>) {
     let mut chores = Chores {
         acks: JoinSet::new(),
+        avoids: JoinSet::new(),
         refused: None,
+        avoid_refused: None,
     };
     let mut refused: Option<String> = None;
     while let Err(error) = source.declare().await {
@@ -183,10 +194,14 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
         let opening = source.watch();
         tokio::pin!(opening);
         let opened = loop {
-            let (due, poll) = (follows.next_due(), follows.next_poll());
+            let (due, poll, avoid) = (
+                follows.next_due(),
+                follows.next_poll(),
+                follows.next_avoid(),
+            );
             tokio::select! {
                 opened = &mut opening => break opened,
-                chore = next_chore(&mut chores.acks, due, poll) => chores.run(chore, &mut follows, &source),
+                chore = chores.next(due, poll, avoid) => chores.run(chore, &mut follows, &source),
             }
         };
         match opened {
@@ -206,10 +221,14 @@ pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<
         let pause = tokio::time::sleep(REWATCH);
         tokio::pin!(pause);
         loop {
-            let (due, poll) = (follows.next_due(), follows.next_poll());
+            let (due, poll, avoid) = (
+                follows.next_due(),
+                follows.next_poll(),
+                follows.next_avoid(),
+            );
             tokio::select! {
                 () = &mut pause => break,
-                chore = next_chore(&mut chores.acks, due, poll) => chores.run(chore, &mut follows, &source),
+                chore = chores.next(due, poll, avoid) => chores.run(chore, &mut follows, &source),
             }
         }
     }
@@ -236,7 +255,11 @@ async fn read<S: Source, R: Registry>(
                 own.open(source, asked);
             }
         }
-        let (due, poll) = (follows.next_due(), follows.next_poll());
+        let (due, poll, avoid) = (
+            follows.next_due(),
+            follows.next_poll(),
+            follows.next_avoid(),
+        );
         tokio::select! {
             item = events.next() => {
                 let Some(item) = item else {
@@ -277,7 +300,7 @@ async fn read<S: Source, R: Registry>(
             Some((key, watch, item)) = own.reading.next() => {
                 follows.own(key, watch, item, Instant::now());
             }
-            chore = next_chore(&mut chores.acks, due, poll) => chores.run(chore, follows, source),
+            chore = chores.next(due, poll, avoid) => chores.run(chore, follows, source),
         }
     }
 }
@@ -288,9 +311,13 @@ async fn read<S: Source, R: Registry>(
 struct Chores {
     /// The acknowledgements under way. Dropping the set ends them.
     acks: Acks,
+    /// The acknowledgements of retirements under way, ended the same way.
+    avoids: JoinSet<(Avoids, std::result::Result<(), String>)>,
     /// The last reason an acknowledgement was not taken, logged once until
     /// one is taken again.
     refused: Option<String>,
+    /// The same, for the acknowledgements of retirements.
+    avoid_refused: Option<String>,
 }
 
 /// One thing for [`Chores::run`] to do.
@@ -299,25 +326,38 @@ enum Chore {
     Forget,
     /// Look for the acknowledgements due.
     Poll,
+    /// Send the acknowledgements of retirements due.
+    Avoid,
     /// The hub answered an acknowledgement.
     Answered(Unoffered, std::result::Result<(), String>),
+    /// The hub answered an acknowledgement of a retirement.
+    Avoided(Avoids, std::result::Result<(), String>),
 }
 
 /// The acknowledgements under way, each answering with whether the hub
 /// took it.
 type Acks = JoinSet<(Unoffered, std::result::Result<(), String>)>;
 
-/// The next chore: an unregistration due at `due`, a look for
-/// acknowledgements at `poll`, or an answer.
-async fn next_chore(acks: &mut Acks, due: Option<Instant>, poll: Option<Instant>) -> Chore {
-    tokio::select! {
-        () = until(due) => Chore::Forget,
-        () = until(poll) => Chore::Poll,
-        Some(Ok((unoffered, answer))) = acks.join_next() => Chore::Answered(unoffered, answer),
-    }
-}
-
 impl Chores {
+    /// The next chore: an unregistration due at `due`, a look for
+    /// acknowledgements at `poll`, acknowledgements of retirements due at
+    /// `avoid`, or an answer. The last apart from the look, which passes
+    /// over the follows: a retirement's acknowledgement needs no pass.
+    async fn next(
+        &mut self,
+        due: Option<Instant>,
+        poll: Option<Instant>,
+        avoid: Option<Instant>,
+    ) -> Chore {
+        tokio::select! {
+            () = until(due) => Chore::Forget,
+            () = until(poll) => Chore::Poll,
+            () = until(avoid) => Chore::Avoid,
+            Some(Ok((unoffered, answer))) = self.acks.join_next() => Chore::Answered(unoffered, answer),
+            Some(Ok((avoids, answer))) = self.avoids.join_next() => Chore::Avoided(avoids, answer),
+        }
+    }
+
     fn run<S: Source, R: Registry>(&mut self, chore: Chore, follows: &mut Follows<R>, source: &S) {
         let now = Instant::now();
         match chore {
@@ -327,6 +367,30 @@ impl Chores {
                     let sent = source.acknowledge(unoffered.clone());
                     self.acks.spawn(async move { (unoffered, sent.await) });
                 }
+            }
+            Chore::Avoid => {
+                for avoids in follows.avoidances(now) {
+                    let sent = source.avoid(avoids.clone());
+                    self.avoids.spawn(async move { (avoids, sent.await) });
+                }
+            }
+            Chore::Avoided(avoids, answer) => {
+                match &answer {
+                    Ok(()) => {
+                        if self.avoid_refused.take().is_some() {
+                            tracing::info!(
+                                "the hub takes this instance's acknowledgements of retirements again"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        if self.avoid_refused.as_deref() != Some(error.as_str()) {
+                            tracing::warn!(%error, "the hub did not take that this instance avoids a followed cell's retired entry instance");
+                            self.avoid_refused = Some(error.clone());
+                        }
+                    }
+                }
+                follows.avoided(avoids, answer.is_ok(), now);
             }
             Chore::Answered(unoffered, answer) => {
                 match &answer {
