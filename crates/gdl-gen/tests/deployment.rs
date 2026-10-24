@@ -869,6 +869,23 @@ fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
     }
 }
 
+/// A host port of 0 asks Docker for a free one, as a port without a host
+/// port does, so it too runs in several cells.
+#[test]
+fn a_host_port_of_zero_lets_docker_choose() {
+    let ports = "[deployment.segment.engine]\nports = [\"0:9000\", \"127.0.0.1:0:9000\", \"[::1]:0:9000/tcp\"]\n";
+    let spec = placed(&format!("{SPLIT}{ports}"));
+    let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
+    let (_, compose) = fleet_bundle(&spec, &fleet);
+    for service in ["model-x-01_engine", "model-x-02_engine"] {
+        assert_eq!(
+            compose["services"][service]["ports"],
+            serde_json::json!(["0:9000", "127.0.0.1:0:9000", "[::1]:0:9000/tcp"]),
+            "{service}"
+        );
+    }
+}
+
 /// `cargo gdl compose --fleet` checks the fleet, then writes its bundle.
 #[test]
 fn the_cli_composes_a_fleet() {

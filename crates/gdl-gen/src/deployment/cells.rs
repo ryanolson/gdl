@@ -158,7 +158,7 @@ pub(super) fn bundle(
         if let Some(port) = fixed.filter(|_| cells.len() > 1) {
             let cells: Vec<String> = cells.iter().map(|cell| format!("`{cell}`")).collect();
             return Err(Error::new(format!(
-                "segment `{segment}` publishes host port `{port}`, and runs in cells {}: two containers on one host cannot bind one host port; publish it from a segment that runs in one cell, or let Docker choose the host port (`CONTAINER` alone, or `IP::CONTAINER`)",
+                "segment `{segment}` publishes host port `{port}`, and runs in cells {}: two containers on one host cannot bind one host port; publish it from a segment that runs in one cell, or let Docker choose the host port (`CONTAINER` alone, `IP::CONTAINER`, or host port 0)",
                 cells.join(", ")
             )));
         }
@@ -207,8 +207,8 @@ fn variables(cell: &CellSettings) -> Result<Map<String, Value>, Error> {
 
 /// Whether `port`, a port in Compose's short form,
 /// `[[IP:][HOST]:]CONTAINER[/PROTOCOL]`, binds a host port it names: one
-/// that two containers on one host cannot both bind. Without one, Docker
-/// chooses a free host port for each container. A form it does not know
+/// that two containers on one host cannot both bind. Without one, or with
+/// host port 0, Docker chooses a free host port for each container. A form it does not know
 /// counts as binding one, so that a conflict is never let through.
 fn binds_host_port(port: &str) -> bool {
     let port = port.split_once('/').map_or(port, |(port, _)| port);
@@ -216,7 +216,7 @@ fn binds_host_port(port: &str) -> bool {
         return false;
     };
     let host = host.rsplit_once(':').map_or(host, |(_ip, host)| host);
-    !host.is_empty()
+    !host.is_empty() && host.parse::<u16>() != Ok(0)
 }
 
 /// The README of a fleet's bundle.
@@ -226,7 +226,7 @@ A segment starts once its own cell's hub is healthy, and waits for nothing else.
 A cell's hub must never run as two at once: a cell's record has one writer, its hub. Each hub's service names its container, so Compose refuses to scale it. Container names are global on the Docker host, so a host runs one copy of this bundle at a time. Compose's default recreate stops the old container before it starts the new one, so `docker compose up` after a change replaces a hub without two running at once.\n\n\
 Every hub publishes its cell's record to the `dir` cell directory, on the volume `cells`, which every hub of the bundle shares. So the bundle is for one host: cells that run on several machines wait for the `relay` directory backend. Use a fresh directory for each deployment: `docker compose down -v` removes the volume with the containers.\n\n\
 Each image is built once, from one Dockerfile per layout and segment, and every cell of that layout and class runs it. A segment's image is named for its package (`<graph>-<segment>`, or `<graph>-<layout>-<segment>` for a spec of several layouts), and a hub's is `<graph>-hub`, tagged with its layout for a spec of several.\n\n\
-Each segment takes its roster from its cell's hub when it starts: the loaded instances of every segment of its class, at least `min_replicas` of each (one by default). An instance that starts later joins, so `docker compose up --scale <cell>_<segment>=N` adds instances of a segment that publishes no host port. A segment that publishes a host port it names (`HOST:CONTAINER`) runs in one cell; one whose host ports Docker chooses (`CONTAINER`) runs in several. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.\n";
+Each segment takes its roster from its cell's hub when it starts: the loaded instances of every segment of its class, at least `min_replicas` of each (one by default). An instance that starts later joins, so `docker compose up --scale <cell>_<segment>=N` adds instances of a segment that publishes no host port. A segment that publishes a host port it names (`HOST:CONTAINER`) runs in one cell; one whose host ports Docker chooses (`CONTAINER`, or host port 0) runs in several. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.\n";
 
 #[cfg(test)]
 mod tests {
@@ -265,7 +265,15 @@ mod tests {
     /// not known counts as binding one.
     #[test]
     fn a_port_binds_a_host_port_only_where_it_names_one() {
-        for port in ["9000", "9000/udp", "127.0.0.1::9000", "[::1]::9000/tcp"] {
+        for port in [
+            "9000",
+            "9000/udp",
+            "127.0.0.1::9000",
+            "[::1]::9000/tcp",
+            "0:9000",
+            "127.0.0.1:0:9000",
+            "[::1]:0:9000/tcp",
+        ] {
             assert!(!binds_host_port(port), "{port}");
         }
         for port in [
