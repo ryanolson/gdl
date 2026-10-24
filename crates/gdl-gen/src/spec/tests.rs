@@ -111,7 +111,7 @@ fn a_gdl_path_names_the_runtime_crate() {
             .expect_err("the definitions")
             .to_string(),
         format!(
-            "[gdl] path {} is the package `gdl`; it must name `gdl-runtime`",
+            "[gdl] path: {} is the package `gdl`; it must name `gdl-runtime`",
             dir.join("definitions").display()
         )
     );
@@ -122,7 +122,7 @@ fn a_gdl_path_names_the_runtime_crate() {
             .expect_err("no crate")
             .to_string()
             .starts_with(&format!(
-                "reading {}",
+                "[gdl] path: reading {}",
                 dir.join("missing/Cargo.toml").display()
             ))
     );
@@ -644,4 +644,22 @@ fn every_spec_table_refuses_an_unknown_key_where_it_is() {
         );
         assert_eq!(error.lines().count(), 1, "one problem: {error}");
     }
+}
+
+/// A path that names no crate is refused where it is written.
+#[test]
+fn a_path_that_names_no_crate_names_its_table_and_key() {
+    let temp = contract_dir("no-crate");
+    let dir = temp.path();
+    let file = dir.join("gdl.toml");
+    let gdl = CONTRACT.replacen("path = \"runtime\"", "path = \"nowhere\"", 1);
+    let spec = Spec::parse(&gdl, &file, dir).expect("a spec");
+    let error = spec.gdl.check().expect_err("no runtime there").to_string();
+    assert!(error.starts_with("[gdl] path: "), "{error}");
+    let contract = CONTRACT.replacen("path = \"contract\"", "path = \"nowhere\"", 1);
+    let Err(error) = Spec::parse(&contract, &file, dir) else {
+        panic!("a contract that is not there");
+    };
+    let error = error.to_string();
+    assert!(error.starts_with("[contract] path: "), "{error}");
 }

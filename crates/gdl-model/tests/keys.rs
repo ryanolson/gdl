@@ -100,7 +100,13 @@ fn a_fleet_refuses_an_unknown_key_in_every_table() {
             "[class.global]\nready = { a = -1 }\n",
             "line 2: [class.global.ready] a: invalid value",
         ),
-        ("[cell.g]\nclass = 'global' x\n", "line 2: "),
+        ("[cell.g]\nclass = 'global' x\n", "line 2: [cell.g] class: "),
+        // A syntax error outside a key's value, and one in a header.
+        ("[cell.g]\nclass = 'global'\nregion\n", "line 3: [cell.g]: "),
+        (
+            "[cell.g]\nclass = 'global'\n[cell.h\n",
+            "line 3: unclosed table",
+        ),
     ] {
         let error = refused(text, Fleet::from_toml(text));
         assert!(error.starts_with(expected), "{expected}\nin: {error}");

@@ -105,9 +105,12 @@ pub fn read_toml<T: DeserializeOwned>(text: &str) -> Result<T, Problems> {
             .map(|span| text[..span.start.min(text.len())].matches('\n').count() + 1)
     };
     let deserializer = toml::Deserializer::parse(text).map_err(|error| {
+        let (table, key) = error
+            .span()
+            .map_or((None, None), |span| surroundings(text, span.start));
         Problems::from(Problem {
             line: line(&error),
-            ..Problem::at(None, None, error.message())
+            ..Problem::at(table, key, error.message())
         })
     })?;
     serde_path_to_error::deserialize(deserializer).map_err(|error| {
@@ -118,6 +121,47 @@ pub fn read_toml<T: DeserializeOwned>(text: &str) -> Result<T, Problems> {
             ..Problem::from_path(&path, error.message().to_string())
         })
     })
+}
+
+/// The table and the key that a syntax error at `offset` of `text` is in.
+/// The parser gives only the place, so they are read from the text: the
+/// last table header above the error's line, and the key that line
+/// assigns, when the error comes after its `=`. A line of a multi-line
+/// array that is itself a bracketed array can pass for a header; the
+/// line is right whatever the table.
+fn surroundings(text: &str, offset: usize) -> (Option<String>, Option<String>) {
+    let offset = offset.min(text.len());
+    let start = text[..offset].rfind('\n').map_or(0, |at| at + 1);
+    let uncommented = |line: &str| {
+        line.split('#')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let line = text[start..].split('\n').next().unwrap_or_default();
+    // A broken header is no key of the table above it.
+    if line.trim_start().starts_with('[') {
+        return (None, None);
+    }
+    let table = text[..start]
+        .lines()
+        .rev()
+        .map(uncommented)
+        .find(|line| line.starts_with('[') && line.ends_with(']') && !line.contains('='))
+        .map(|header| {
+            header
+                .trim_matches(|c| c == '[' || c == ']')
+                .trim()
+                .to_string()
+        })
+        .filter(|table| !table.is_empty());
+    let key = line
+        .split_once('=')
+        .filter(|(key, _)| start + key.len() < offset)
+        .map(|(key, _)| key.trim().to_string())
+        .filter(|key| !key.is_empty() && !key.starts_with('['));
+    (table, key)
 }
 
 /// The keys of a reader's path, each array element written after the key

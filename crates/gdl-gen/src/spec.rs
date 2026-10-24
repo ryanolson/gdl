@@ -209,7 +209,9 @@ impl GdlDep {
     /// here.
     pub(crate) fn check(&self) -> Result<(), Error> {
         match self {
-            Self::Path(path) => runtime_at(path),
+            Self::Path(path) => {
+                runtime_at(path).map_err(|e| Error::new(format!("[gdl] path: {e}")))
+            }
             Self::Version(_) | Self::Git { .. } => Ok(()),
         }
     }
@@ -484,7 +486,8 @@ impl Spec {
             }
             (Some(contract), None, None) => {
                 let path = dir.join(&contract.path);
-                let CrateNames { package, lib } = crate_names(&path)?;
+                let CrateNames { package, lib } =
+                    crate_names(&path).map_err(|e| Error::new(format!("[contract] path: {e}")))?;
                 let module = contract.module.unwrap_or_else(|| default_module(&lib));
                 Source::Contract(Contract {
                     package,
@@ -663,7 +666,7 @@ pub fn runtime_at(dir: &Path) -> Result<(), Error> {
     let CrateNames { package, .. } = crate_names(dir)?;
     if package != "gdl-runtime" {
         return Err(Error::new(format!(
-            "[gdl] path {} is the package `{package}`; it must name `gdl-runtime`",
+            "{} is the package `{package}`; it must name `gdl-runtime`",
             dir.display()
         )));
     }
