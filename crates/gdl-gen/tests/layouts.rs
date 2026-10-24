@@ -383,3 +383,44 @@ fn the_readme_shows_these_layouts() {
         + &nest("compact", &format!("{SEGMENTS}{TWO}"));
     assert!(readme.contains(&shown), "the README lacks:\n{shown}");
 }
+
+/// `cargo gdl check --fleet` checks each cell against the layout it names.
+#[test]
+fn a_fleet_is_checked_against_each_cells_layout() {
+    let dir = Dir::new(&two_layouts());
+    let fleet = dir.dir.path().join("fleet.toml");
+    let check = || dir.run("check", &["--fleet".as_ref(), fleet.as_os_str()]);
+    let good = "[cell.global-us]\nlayout = \"regional\"\nclass = \"global\"\nregion = \"us-east-1\"\n\
+                [cell.batch-us]\nlayout = \"regional\"\nclass = \"batch\"\nregion = \"us-east-1\"\n\
+                [cell.model-x-us]\nlayout = \"regional\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
+                [cell.global-eu]\nlayout = \"compact\"\nclass = \"global\"\nregion = \"eu-west-1\"\n\
+                [cell.model-x-eu]\nlayout = \"compact\"\nclass = \"model_x\"\nregion = \"eu-west-1\"\nhome = \"global-eu\"\n";
+    std::fs::write(&fleet, good).expect("the fleet");
+    succeeded(&check());
+    let bad = format!(
+        "{good}[cell.unnamed]\nclass = \"global\"\nregion = \"r\"\n\
+         [cell.nowhere]\nlayout = \"west\"\nclass = \"global\"\nregion = \"r\"\n\
+         [cell.batch-eu]\nlayout = \"compact\"\nclass = \"batch\"\nregion = \"eu-west-1\"\n\
+         [cell.model-x-eu-2]\nlayout = \"compact\"\nclass = \"model_x\"\nregion = \"eu-west-1\"\nhome = \"global-us\"\n"
+    );
+    std::fs::write(&fleet, &bad).expect("the fleet");
+    let f = fleet.display().to_string();
+    let found = problems(&check());
+    assert_eq!(
+        found,
+        [
+            format!("{f}: [cell.batch-eu] class: layout `compact` has no class `batch`"),
+            format!(
+                "{f}: [cell.model-x-eu-2] home: cell `global-us` runs layout `regional`, not `compact`; a home is a cell of the cell's own layout"
+            ),
+            format!(
+                "{f}: [cell.nowhere] layout: the spec has no layout `west`; its layouts are `compact`, `regional`"
+            ),
+            format!(
+                "{f}: [cell.unnamed] layout: missing; the spec has layouts `compact`, `regional`, and a cell names the one it runs"
+            ),
+        ],
+        "{}",
+        found.join("\n")
+    );
+}

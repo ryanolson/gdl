@@ -333,6 +333,7 @@ fn a_cell_table_is_read_from_a_file() {
         config.cell(),
         Some(&CellSettings {
             name: "global-us-east-1".into(),
+            layout: None,
             class: "global".into(),
             region: "us-east-1".into(),
             home: Some("g".into()),
@@ -361,11 +362,13 @@ fn a_cell_table_is_read_from_the_environment() {
         jail.set_env("GDL_CELL__DIRECTORY", "memory");
         jail.set_env("GDL_CELL__READY__BACK", "4");
         jail.set_env("GDL_CELL__SUMMARY_MS", "1500");
+        jail.set_env("GDL_CELL__LAYOUT", "regional");
         let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
         assert_eq!(
             config.cell(),
             Some(&CellSettings {
                 name: "global-us-east-1".into(),
+                layout: Some("regional".into()),
                 class: "global".into(),
                 region: "us-west-2".into(),
                 home: None,
@@ -483,6 +486,16 @@ async fn a_cell_problem_names_its_file_or_its_variable() {
             "",
             Some(("GDL_CELL__READY__FRONT", "many")),
             "GDL_CELL__READY__FRONT: invalid type",
+        ),
+        (
+            "layout = \"Regional\"\n",
+            None,
+            "config.toml: [cell] layout: layout name `Regional` must be",
+        ),
+        (
+            "",
+            Some(("GDL_CELL__LAYOUT", "re-gional")),
+            "GDL_CELL__LAYOUT: layout name `re-gional` must be",
         ),
     ] {
         Jail::expect_with(|jail| {

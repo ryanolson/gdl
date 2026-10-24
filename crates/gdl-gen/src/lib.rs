@@ -253,8 +253,8 @@ struct Drawn {
 /// `spec` checked as [`render`] checks it, every problem at once where
 /// one stage does not need the other's result, and each layout whose
 /// placement fits its graph, whatever else is wrong with the spec: a fleet
-/// file is checked against the layouts even when a binding is not. The
-/// layouts are empty when the graph cannot be read.
+/// file is checked against the layouts even when a binding is not. No
+/// layout fits a graph that cannot be read.
 pub(crate) fn checked(
     spec: &Spec,
     target: &Path,
@@ -263,7 +263,11 @@ pub(crate) fn checked(
     let prepared = prepare(spec, None, target, emit::Deps::Relative, from);
     let layouts = match &prepared {
         Ok(prepared) => validate::unbound(spec, &prepared.manifest).0,
-        Err(_) => validate::Layouts::new(),
+        // The layouts are still the spec's, whose cells name them.
+        Err(_) => spec
+            .layout_names()
+            .map(|name| (name.into(), None))
+            .collect(),
     };
     let check = || {
         // A runtime that is not where `[gdl]` says hides nothing else: it is

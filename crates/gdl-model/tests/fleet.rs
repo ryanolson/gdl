@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use gdl_model::{
-    CellSettings, DirectoryBackend, Fleet, HopInfo, Layout, Manifest, NodeInfo, Placement, Role,
-    TypeInfo, layout,
+    CellSettings, DirectoryBackend, Fleet, HopInfo, Layout, Manifest, NodeInfo, Placement,
+    Placements, Role, TypeInfo, layout,
 };
 
 /// The graph of `agent-docs/cells.md` section 3.1,
@@ -117,9 +117,18 @@ region = "eu-west-1"
 home = "global-eu-west-1"
 "#;
 
-fn laid() -> Layout {
-    let placement = Placement::from_toml(PLACEMENT).expect("a placement");
+/// A spec's layouts, as a fleet is checked against them: each layout by
+/// its name, with its placement checked against the graph.
+type Layouts = BTreeMap<String, Option<Layout>>;
+
+fn placed(text: &str) -> Layout {
+    let placement = Placement::from_toml(text).expect("a placement");
     layout(&manifest(), &placement).expect("a layout")
+}
+
+/// The one layout of a spec without `[layout]` tables.
+fn laid() -> Layouts {
+    BTreeMap::from([(Placements::DEFAULT.to_string(), Some(placed(PLACEMENT)))])
 }
 
 fn fleet(text: &str) -> Fleet {
@@ -162,6 +171,7 @@ fn a_cells_settings_have_its_quorum_resolved() {
         larger,
         CellSettings {
             name: "model-x-02-us-east-1".into(),
+            layout: None,
             class: "model_x".into(),
             region: "us-east-1".into(),
             home: Some("global-us-east-1".into()),
@@ -469,4 +479,204 @@ fn without_a_layout_only_what_needs_none_is_judged() {
         );
     }
     fleet(FLEET).check(None).expect("the design's fleet");
+}
+
+/// The graph of [`PLACEMENT`] in two layouts: `split`, the design's, and
+/// `joint`, whose model cells are of class `model_y`.
+fn two_layouts() -> Layouts {
+    let joint = PLACEMENT
+        .replace("model_x", "model_y")
+        .replace("[routing]\nEngine = { selector = \"least_loaded\" }\n", "");
+    BTreeMap::from([
+        ("joint".to_string(), Some(placed(&joint))),
+        ("split".to_string(), Some(placed(PLACEMENT))),
+    ])
+}
+
+/// A fleet of both layouts: a global cell and a model cell of each.
+const TWO_LAYOUTS: &str = r#"
+[class.global]
+ready = { a = 2 }
+
+[class.model_x]
+ready = { e = 4 }
+
+[cell.global-split]
+layout = "split"
+class = "global"
+region = "us-east-1"
+
+[cell.model-x-split]
+layout = "split"
+class = "model_x"
+region = "us-east-1"
+home = "global-split"
+
+[cell.global-joint]
+layout = "joint"
+class = "global"
+region = "eu-west-1"
+
+[cell.model-y-joint]
+layout = "joint"
+class = "model_y"
+region = "eu-west-1"
+home = "global-joint"
+"#;
+
+fn problems_of(text: &str, layouts: &Layouts) -> Vec<String> {
+    match fleet(text).check(Some(layouts)) {
+        Ok(()) => panic!("accepted:\n{text}"),
+        Err(errors) => errors.0.iter().map(ToString::to_string).collect(),
+    }
+}
+
+/// Each cell runs one layout, and is judged against it: its class, its
+/// quorum, and its home are its layout's.
+#[test]
+fn a_fleet_of_two_layouts_checks_clean() {
+    fleet(TWO_LAYOUTS)
+        .check(Some(&two_layouts()))
+        .expect("a sound fleet");
+    // A cell's settings name its layout.
+    let cell = fleet(TWO_LAYOUTS).cell("model-y-joint").expect("a cell");
+    assert_eq!(cell.layout.as_deref(), Some("joint"));
+    assert_eq!(cell.class, "model_y");
+}
+
+#[test]
+fn a_cell_of_a_spec_of_several_layouts_names_a_layout_of_the_spec() {
+    let cell = |extra: &str| {
+        format!(
+            "{TWO_LAYOUTS}[cell.model-x-02]\nclass = 'model_x'\nregion = 'r'\nhome = 'global-split'\n{extra}"
+        )
+    };
+    for (text, expected) in [
+        (
+            cell(""),
+            "[cell.model-x-02] layout: missing; the spec has layouts `joint`, `split`, and a cell names the one it runs",
+        ),
+        (
+            cell("layout = 'nope'\n"),
+            "[cell.model-x-02] layout: the spec has no layout `nope`; its layouts are `joint`, `split`",
+        ),
+        (
+            cell("layout = 'joint'\n").replace(
+                "home = 'global-split'\nlayout",
+                "home = 'global-joint'\nlayout",
+            ),
+            "[cell.model-x-02] class: layout `joint` has no class `model_x`",
+        ),
+    ] {
+        assert_eq!(problems_of(&text, &two_layouts()), [expected], "{text}");
+    }
+}
+
+/// A cell's home is a cell of its own layout: cells of different layouts
+/// never follow or offer to each other.
+#[test]
+fn a_home_is_a_cell_of_the_same_layout() {
+    let text = format!(
+        "{TWO_LAYOUTS}[cell.model-y-02]\nlayout = 'joint'\nclass = 'model_y'\nregion = 'r'\nhome = 'global-split'\n"
+    );
+    assert_eq!(
+        problems_of(&text, &two_layouts()),
+        [
+            "[cell.model-y-02] home: cell `global-split` runs layout `split`, not `joint`; a home is a cell of the cell's own layout"
+        ]
+    );
+    // The control: the same cell at home in its own layout.
+    let text = text.replace("home = 'global-split'", "home = 'global-joint'");
+    fleet(&text).check(Some(&two_layouts())).expect("at home");
+    // Without the spec, the layouts the cells declare are compared.
+    let text = text.replace("home = 'global-joint'", "home = 'global-split'");
+    let Err(errors) = fleet(&text).check(None) else {
+        panic!("accepted:\n{text}");
+    };
+    assert_eq!(
+        errors.to_string(),
+        "[cell.model-y-02] home: cell `global-split` runs layout `split`, not `joint`; a home is a cell of the cell's own layout"
+    );
+}
+
+/// With one layout, a cell need not name it, and may: as `default` for a
+/// spec without `[layout]` tables.
+#[test]
+fn a_cell_of_a_spec_of_one_layout_may_name_it() {
+    fleet(FLEET).check(Some(&laid())).expect("no layout keys");
+    let named = FLEET.replace(
+        "[cell.global-us-east-1]\n",
+        "[cell.global-us-east-1]\nlayout = \"default\"\n",
+    );
+    assert_ne!(named, FLEET);
+    fleet(&named)
+        .check(Some(&laid()))
+        .expect("the one layout, named");
+    let wrong = named.replace("layout = \"default\"", "layout = \"split\"");
+    assert_eq!(
+        problems_of(&wrong, &laid()),
+        [
+            "[cell.global-us-east-1] layout: the spec has no layout `split`; its layouts are `default`"
+        ]
+    );
+}
+
+/// A class's defaults apply to its cells in every layout that has the
+/// class, so they are judged against each.
+#[test]
+fn a_class_table_is_judged_in_every_layout_with_the_class() {
+    let text = TWO_LAYOUTS.replace("ready = { a = 2 }", "ready = { a = 2, d = 1 }")
+        + "[class.zz]\nready = { a = 1 }\n";
+    let found = problems_of(&text, &two_layouts());
+    assert_eq!(
+        found,
+        [
+            "[class.global] ready.d: not a segment of class `global` in layout `joint`",
+            "[class.global] ready.d: not a segment of class `global` in layout `split`",
+            "[class.zz]: no layout of the spec has a class `zz`",
+        ],
+        "{found:?}"
+    );
+}
+
+/// A layout whose placement does not fit the graph is still one of the
+/// spec's: its cells are not refused for naming it, and what needs its
+/// classes waits for it.
+#[test]
+fn a_layout_that_does_not_validate_is_still_named() {
+    let mut layouts = two_layouts();
+    layouts.insert("joint".into(), None);
+    fleet(TWO_LAYOUTS)
+        .check(Some(&layouts))
+        .expect("judged where it can be");
+    // The cells of the other layout are judged in full.
+    let text = TWO_LAYOUTS.replace(
+        "[cell.global-split]\nlayout = \"split\"\nclass = \"global\"",
+        "[cell.global-split]\nlayout = \"split\"\nclass = \"model_y\"",
+    );
+    assert_ne!(text, TWO_LAYOUTS);
+    let found = problems_of(&text, &layouts);
+    assert!(
+        found.contains(
+            &"[cell.global-split] class: layout `split` has no class `model_y`".to_string()
+        ),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_cells_layout_has_a_layout_names_shape() {
+    let text = FLEET.replace(
+        "[cell.global-us-east-1]\n",
+        "[cell.global-us-east-1]\nlayout = \"US-East\"\n",
+    );
+    let Err(errors) = fleet(&text).check(None) else {
+        panic!("accepted:\n{text}");
+    };
+    assert!(
+        errors
+            .to_string()
+            .starts_with("[cell.global-us-east-1] layout: layout name `US-East` must be"),
+        "{errors}"
+    );
 }
