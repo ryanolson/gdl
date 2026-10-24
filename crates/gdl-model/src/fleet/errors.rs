@@ -65,6 +65,22 @@ pub enum FleetError {
         /// Its home.
         home: String,
     },
+    /// A cell of a class that another class sends to has no home.
+    MissingHome {
+        /// The cell.
+        cell: String,
+        /// Its class.
+        class: String,
+        /// The classes that send to it.
+        parents: Vec<String>,
+    },
+    /// A cell of a class that nothing sends to has a home.
+    HomeOfTopClass {
+        /// The cell.
+        cell: String,
+        /// Its class.
+        class: String,
+    },
     /// A cell's home is of a class that does not send to the cell's class.
     HomeNotParent {
         /// The cell.
@@ -162,6 +178,26 @@ impl FleetError {
                 cell(name),
                 key("home"),
                 format!("the fleet has no cell `{home}`"),
+            ),
+            Self::MissingHome {
+                cell: name,
+                class,
+                parents,
+            } => {
+                let parents: Vec<String> = parents.iter().map(|p| format!("`{p}`")).collect();
+                (
+                    cell(name),
+                    key("home"),
+                    format!(
+                        "missing; a cell of class `{class}` names its parent, a cell of a class that sends to it: {}",
+                        parents.join(", ")
+                    ),
+                )
+            }
+            Self::HomeOfTopClass { cell: name, class } => (
+                cell(name),
+                key("home"),
+                format!("no class sends to `{class}`, so its cells have no parent"),
             ),
             Self::HomeNotParent {
                 cell: name,

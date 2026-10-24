@@ -263,11 +263,13 @@ region = "us-east-1"
 [cell.model-x-01-us-east-1]
 class = "model_x"
 region = "us-east-1"
-home = "global-us-east-1"         # optional: a cell of a class that sends to this one
+home = "global-us-east-1"         # the parent cell: required when another class sends to this one
 ready = { engine = 8 }            # optional: overrides the class's default
 ```
 
-`gdl_model::Fleet` reads the file and checks it against the spec's layout, reporting every problem: a class the spec does not have, a `ready` key that is not a segment of the class, a `requires` key that is not a class it sends to, a count of 0, a `home` that names no cell of a parent class, and an unknown key. A cell or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters. `Fleet::cell` gives a cell's own settings (`gdl_model::CellSettings`), with its quorum resolved from its overrides and its class's defaults, and its class's `requires`. Nothing generates bundles from the fleet file yet (see `LIMITATIONS.md`).
+A cell's `home` is its parent cell: the cell of a class that sends to this one that follows it and offers it work. It is required for every cell of a class that another class sends to, and refused for a cell of a class that nothing sends to, such as a global cell. The runtime does not use it yet: a cell's hub follows the cells of its own region that its class sends to, not its children (see `LIMITATIONS.md`).
+
+`gdl_model::Fleet` reads the file and checks it against the spec's layout, reporting every problem: a class the spec does not have, a `ready` key that is not a segment of the class, a `requires` key that is not a class it sends to, a count of 0, a cell without the `home` its class needs, a `home` on a cell that can have none, a `home` that names no cell of a parent class, and an unknown key. A cell or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters. `Fleet::cell` gives a cell's own settings (`gdl_model::CellSettings`), with its quorum resolved from its overrides and its class's defaults, and its class's `requires`. Nothing generates bundles from the fleet file yet (see `LIMITATIONS.md`).
 
 For a graph spec, the generator compiles nothing: it builds the contract's manifest from the graph file and what the source reader found, including which messages are wire types. For a contract spec, it compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`. If the reader takes a type for a wire type that is not one, the segment's build or its deployment, which checks the placement against the compiled contract, fails. If it misses a wire type's serde impls (for example, impls that a macro writes), the generator refuses a cut that would work. `cargo gdl extract --verify` finds both.
 

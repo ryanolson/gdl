@@ -17,7 +17,7 @@ use crate::{Layout, Problem, Problems};
 /// name = "model-x-01-us-east-1"
 /// class = "model_x"
 /// region = "us-east-1"
-/// home = "global-us-east-1"    # optional: the cell of a parent class the policy prefers
+/// home = "global-us-east-1"    # the parent cell, for a class that another sends to
 /// directory = "relay"          # optional: "relay" (the default), "memory", or "dir"
 /// # dir = "/var/lib/gdl/cells" # with "dir", and only with it: the shared directory
 /// hub = "model-x-01-hub:1337"  # optional: where other cells' hubs reach this cell's hub
@@ -36,8 +36,12 @@ pub struct CellSettings {
     pub class: String,
     /// The region the cell runs in.
     pub region: String,
-    /// The cell of a parent class that the cell policy prefers for this
-    /// one. A preference, not a dependency of discovery.
+    /// The parent cell: the cell of a class that sends to this one that
+    /// follows this cell and offers it work. The fleet file requires it
+    /// for a cell of a class that another class sends to, and refuses it
+    /// for one of a class that nothing sends to. Nothing reads it yet: a
+    /// cell's hub follows the cells of its region that its class sends to,
+    /// not its children.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
     /// Where the cell's record is published and the other cells are found:
