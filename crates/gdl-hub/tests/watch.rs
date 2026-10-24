@@ -33,7 +33,11 @@ async fn watching(hub: &Hub) -> BoxStream<'static, CellWatchEvent> {
         .await
         .expect("the hub answers in time")
         .expect("the hub serves the watch")
-        .map(|item| item.event().expect("an event of a kind this build knows"))
+        .map(|item| {
+            item.expect("the watch does not fail")
+                .event()
+                .expect("an event of a kind this build knows")
+        })
         .boxed()
 }
 
@@ -518,7 +522,11 @@ async fn a_watch_waits_for_the_cells_first_record() {
     let outside = tokio::spawn(async move {
         let watcher = CellWatcher::new().expect("a client");
         watcher.watch(&address).await.map(|events| {
-            events.map(|item| item.event().expect("an event of a kind this build knows"))
+            events.map(|item| {
+                item.expect("the watch does not fail")
+                    .event()
+                    .expect("an event of a kind this build knows")
+            })
         })
     });
     count(2, "the hub to hold the request").await;

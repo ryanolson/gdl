@@ -26,6 +26,9 @@ use velo::InstanceId;
 
 use super::HubSession;
 
+#[cfg(test)]
+mod tests;
+
 /// How long to wait before watching the cell again after a watch ended.
 const REWATCH: Duration = Duration::from_millis(100);
 
@@ -364,8 +367,9 @@ impl Drop for CellDrain {
 /// other cell follows it, and say so too. For the entry instance
 /// `retiree`, say too once its retirement is acknowledged. A watch that
 /// ends or is refused is asked for again; a refusal is logged once, until
-/// a watch begins. An event of a kind this build does not know ends the
-/// watch too, so that the next one's first event says what the cell's
+/// a watch begins, and one that fails is logged. What a watch's snapshot
+/// says is learned only once it is complete. An event of a kind this
+/// build does not know ends the watch too, so that the next one's first event says what the cell's
 /// state is.
 async fn run(
     watcher: CellWatcher,
@@ -378,50 +382,43 @@ async fn run(
         let pause = match watcher.watch(&address).await {
             Ok(mut events) => {
                 refused = None;
+                // A snapshot is learned from only once it is complete: one
+                // that ends first, at its bounds or otherwise, teaches
+                // nothing.
+                let mut snapshot = Some(Heard::default());
                 while let Some(item) = events.next().await {
-                    match item {
-                        Watched::Event(CellWatchEvent::State {
-                            state: CellState::Draining,
-                            unfollowed: true,
-                        }) => {
-                            learns.send_modify(|learned| {
-                                learned.drain.get_or_insert_with(Instant::now);
-                                learned.unfollowed = true;
-                            });
-                            return;
-                        }
-                        Watched::Event(
-                            CellWatchEvent::Cell { state, .. }
-                            | CellWatchEvent::State { state, .. },
-                        ) if state == CellState::Draining => {
-                            // The first time only: a watch begun again says so
-                            // again.
-                            learns.send_if_modified(|learned| {
-                                let first = learned.drain.is_none();
-                                learned.drain.get_or_insert_with(Instant::now);
-                                first
-                            });
-                        }
-                        Watched::Event(CellWatchEvent::Retired {
-                            instance,
-                            acknowledged: true,
-                            ..
-                        }) if Some(instance) == retiree => {
-                            learns.send_if_modified(|learned| {
-                                !std::mem::replace(&mut learned.acknowledged, true)
-                            });
-                        }
+                    let event = match item {
+                        Ok(Watched::Event(event)) => event,
                         // An event of a kind this build does not know may
                         // have said that the cell drains: the cell is read
                         // again, from the next watch's first event.
-                        Watched::Unknown(event) => {
+                        Ok(Watched::Unknown(event)) => {
                             tracing::info!(
                                 kind = event.kind,
                                 "this instance's cell watch sent an event of a kind this build does not know; the cell is watched again"
                             );
                             break;
                         }
-                        Watched::Event(_) => {}
+                        Err(failure) => {
+                            tracing::info!(%failure, "this instance's cell watch failed; the cell is watched again");
+                            break;
+                        }
+                    };
+                    let heard = Heard::of(&event, retiree);
+                    let done = match (snapshot.as_mut(), event) {
+                        (Some(filling), CellWatchEvent::Synced) => {
+                            let complete = filling.with(heard);
+                            snapshot = None;
+                            complete.learn(&learns)
+                        }
+                        (Some(filling), _) => {
+                            *filling = filling.with(heard);
+                            false
+                        }
+                        (None, _) => heard.learn(&learns),
+                    };
+                    if done {
+                        return;
                     }
                 }
                 REWATCH
@@ -436,5 +433,82 @@ async fn run(
             }
         };
         tokio::time::sleep(pause).await;
+    }
+}
+
+/// What the cell's watch said of the drain, in one event or in a snapshot
+/// so far.
+#[derive(Debug, Clone, Copy, Default)]
+struct Heard {
+    /// The cell drains.
+    draining: bool,
+    /// The cell drains, and no other cell follows it any more.
+    unfollowed: bool,
+    /// The retiree's retirement is acknowledged.
+    acknowledged: bool,
+}
+
+impl Heard {
+    /// What `event` says, for the entry instance `retiree`.
+    fn of(event: &CellWatchEvent, retiree: Option<InstanceId>) -> Self {
+        match *event {
+            CellWatchEvent::State {
+                state: CellState::Draining,
+                unfollowed,
+            } => Self {
+                draining: true,
+                unfollowed,
+                acknowledged: false,
+            },
+            CellWatchEvent::Cell {
+                state: CellState::Draining,
+                ..
+            } => Self {
+                draining: true,
+                ..Self::default()
+            },
+            CellWatchEvent::Retired {
+                instance,
+                acknowledged: true,
+                ..
+            } if Some(instance) == retiree => Self {
+                acknowledged: true,
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
+
+    /// This and `other` together: each says only what has come to be.
+    fn with(self, other: Self) -> Self {
+        Self {
+            draining: self.draining || other.draining,
+            unfollowed: self.unfollowed || other.unfollowed,
+            acknowledged: self.acknowledged || other.acknowledged,
+        }
+    }
+
+    /// Say on `learns` what was heard: whether the watch is done, as it is
+    /// once no other cell follows the draining cell.
+    fn learn(self, learns: &watch::Sender<Learned>) -> bool {
+        if self.acknowledged {
+            learns.send_if_modified(|learned| !std::mem::replace(&mut learned.acknowledged, true));
+        }
+        if self.unfollowed {
+            learns.send_modify(|learned| {
+                learned.drain.get_or_insert_with(Instant::now);
+                learned.unfollowed = true;
+            });
+            return true;
+        }
+        if self.draining {
+            // The first time only: a watch begun again says so again.
+            learns.send_if_modified(|learned| {
+                let first = learned.drain.is_none();
+                learned.drain.get_or_insert_with(Instant::now);
+                first
+            });
+        }
+        false
     }
 }

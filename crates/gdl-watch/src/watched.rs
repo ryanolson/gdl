@@ -71,6 +71,9 @@ pub(crate) trait Classify: DeserializeOwned + Send + 'static {
     /// tag, its kind is known (so its fields did not parse), or it names
     /// no cell where the watch needs one.
     fn unknown(data: &str) -> Option<Self::Unknown>;
+
+    /// Whether this is the marker that ends a snapshot.
+    fn synced(&self) -> bool;
 }
 
 /// Whether `kind` is one of `kinds`.
@@ -92,6 +95,10 @@ impl Classify for CellWatchEvent {
         }
         let Probe { event } = serde_json::from_str(data).ok()?;
         (!known(Self::KINDS, &event)).then_some(UnknownEvent { kind: event })
+    }
+
+    fn synced(&self) -> bool {
+        matches!(self, Self::Synced)
     }
 }
 
@@ -120,6 +127,10 @@ impl Classify for FollowEvent {
             cell: probe.cell?,
             generation: probe.generation?,
         })
+    }
+
+    fn synced(&self) -> bool {
+        matches!(self, Self::Synced)
     }
 }
 

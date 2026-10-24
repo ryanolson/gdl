@@ -2,6 +2,7 @@
 //! events and an explicit clock, and its task driven by scripted watches.
 
 mod avoided;
+mod bounded;
 mod offered;
 mod reread;
 

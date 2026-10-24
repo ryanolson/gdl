@@ -388,7 +388,11 @@ fn global_hub_relay(hub: &Hub) -> impl Stream<Item = FollowEvent> + Unpin {
     })
     .flatten()
     // A relay of this build sends no kind this build does not know.
-    .map(|item| item.event().expect("an event of a known kind"))
+    .map(|item| {
+        item.expect("the relay's watch does not fail")
+            .event()
+            .expect("an event of a known kind")
+    })
     .boxed()
 }
 

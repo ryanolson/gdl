@@ -413,12 +413,12 @@ async fn an_earlier_watchs_close_leaves_a_follower_with_a_later_one() {
     };
     let mut earlier = watcher.follow(&address, &run(1)).await.expect("a watch");
     through(&mut earlier, |event| {
-        *event == Watched::Event(CellWatchEvent::Synced)
+        *event == Ok(Watched::Event(CellWatchEvent::Synced))
     })
     .await;
     let mut later = watcher.follow(&address, &run(2)).await.expect("a watch");
     through(&mut later, |event| {
-        *event == Watched::Event(CellWatchEvent::Synced)
+        *event == Ok(Watched::Event(CellWatchEvent::Synced))
     })
     .await;
     followers(&model_cell, [global()].into()).await;
@@ -498,7 +498,7 @@ async fn a_released_watch_no_longer_counts() {
     };
     let mut follow = watcher.follow(&address, &follower).await.expect("a watch");
     through(&mut follow, |event| {
-        *event == Watched::Event(CellWatchEvent::Synced)
+        *event == Ok(Watched::Event(CellWatchEvent::Synced))
     })
     .await;
     let mut watch = watching(&model_cell).await;
@@ -543,7 +543,7 @@ async fn a_lost_watch_is_never_taken_as_a_release() {
         };
         let mut follow = watcher.follow(&address, &follower).await.expect("a watch");
         through(&mut follow, |event| {
-            *event == Watched::Event(CellWatchEvent::Synced)
+            *event == Ok(Watched::Event(CellWatchEvent::Synced))
         })
         .await;
         let mut watch = watching(&model_cell).await;

@@ -4,12 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use futures::stream::BoxStream;
 use gdl_cells::CellRecord;
 use tokio_util::sync::CancellationToken;
 
 use super::relay::{Installed, Relay};
-use gdl_watch::{CellWatchEvent, CellWatcher, Follower, UnknownEvent, Watched};
+use gdl_watch::{CellWatchEvent, CellWatcher, Follower, UnknownEvent, WatchStream, Watched};
 
 /// Follow the cell of `record` in `generation` until its watch ends or
 /// fails, or until the relay closes the follow (`close`), then end it in
@@ -42,8 +41,8 @@ pub(super) async fn run(
     (record.name, generation, closed)
 }
 
-/// One item of a cell's watch.
-type Item = Watched<CellWatchEvent, UnknownEvent>;
+/// A cell's watch.
+type Events = WatchStream<CellWatchEvent, UnknownEvent>;
 
 /// Read the cell's watch, as `me`: its snapshot, installed in the relay
 /// once it is complete and only if it is the cell of `record` in the
@@ -53,7 +52,9 @@ type Item = Watched<CellWatchEvent, UnknownEvent>;
 /// snapshot and the events after it are ordered by the cell's hub, so
 /// nothing sent before the snapshot is applied over it, and nothing after
 /// it is lost. A watch that does not begin or ends before its snapshot is
-/// complete ends the follow, as any watch that ends does; one whose
+/// complete, as one does whose snapshot passes its watcher's bounds, ends
+/// the follow, with nothing of it installed, as any watch that ends or
+/// fails does; one whose
 /// snapshot has an event of a kind this build does not know leaves the
 /// cell withheld, and the cell is read again after `retry`.
 async fn follow(
@@ -110,10 +111,16 @@ async fn follow(
         }
         match events.next().await {
             None => return,
+            Some(Err(failure)) => {
+                tracing::info!(cell, %failure, "a followed cell's watch failed");
+                return;
+            }
             // A second snapshot in one watch is not the protocol.
-            Some(Watched::Event(CellWatchEvent::Cell { .. } | CellWatchEvent::Synced)) => return,
-            Some(Watched::Event(event)) => relay.apply(class, cell, generation, event),
-            Some(Watched::Unknown(event)) => {
+            Some(Ok(Watched::Event(CellWatchEvent::Cell { .. } | CellWatchEvent::Synced))) => {
+                return;
+            }
+            Some(Ok(Watched::Event(event))) => relay.apply(class, cell, generation, event),
+            Some(Ok(Watched::Unknown(event))) => {
                 tracing::info!(
                     cell,
                     kind = event.kind,
@@ -134,22 +141,22 @@ struct Snapshot {
 }
 
 /// Read the snapshot that begins a watch of the cell of `record`: `None`
-/// if the watch ends first, or its hub serves another cell, or this cell
-/// in another epoch.
-async fn snapshot(events: &mut BoxStream<'static, Item>, record: &CellRecord) -> Option<Snapshot> {
+/// if the watch ends or fails first, or its hub serves another cell, or
+/// this cell in another epoch.
+async fn snapshot(events: &mut Events, record: &CellRecord) -> Option<Snapshot> {
     let cell = record.name.as_str();
     // A hub at the record's address that serves another cell, or this
     // cell in another epoch (a restart the directory has not shown yet,
     // or one it has and this record predates), is not the cell the record
     // names.
-    let mut installed = match events.next().await {
-        Some(Watched::Event(CellWatchEvent::Cell {
+    let mut installed = match next(events, cell).await? {
+        Watched::Event(CellWatchEvent::Cell {
             name,
             class,
             epoch,
             state,
             load,
-        })) if name == record.name && class == record.class && epoch == record.epoch => {
+        }) if name == record.name && class == record.class && epoch == record.epoch => {
             Installed::new(
                 name,
                 class,
@@ -159,7 +166,7 @@ async fn snapshot(events: &mut BoxStream<'static, Item>, record: &CellRecord) ->
                 load,
             )
         }
-        Some(Watched::Event(CellWatchEvent::Cell { name, epoch, .. })) => {
+        Watched::Event(CellWatchEvent::Cell { name, epoch, .. }) => {
             tracing::info!(
                 cell,
                 served = name,
@@ -174,7 +181,7 @@ async fn snapshot(events: &mut BoxStream<'static, Item>, record: &CellRecord) ->
     };
     let mut unknown = false;
     loop {
-        match events.next().await? {
+        match next(events, cell).await? {
             Watched::Event(CellWatchEvent::Synced) => break,
             Watched::Event(CellWatchEvent::Cell { .. }) => return None,
             // The snapshot's own events are its cell's, before any watcher
@@ -184,6 +191,18 @@ async fn snapshot(events: &mut BoxStream<'static, Item>, record: &CellRecord) ->
         }
     }
     Some(Snapshot { installed, unknown })
+}
+
+/// The next event of a snapshot of `cell`: `None` once the watch ends or
+/// fails, which is logged.
+async fn next(events: &mut Events, cell: &str) -> Option<Watched<CellWatchEvent, UnknownEvent>> {
+    match events.next().await? {
+        Ok(item) => Some(item),
+        Err(failure) => {
+            tracing::info!(cell, %failure, "a followed cell's watch failed in its snapshot");
+            None
+        }
+    }
 }
 
 /// Read the cell of `record` again, from a watch of its own, as `me`, the
@@ -198,7 +217,7 @@ async fn reread(
     watcher: &CellWatcher,
     me: &Follower,
     record: &CellRecord,
-) -> Option<(Option<Installed>, BoxStream<'static, Item>)> {
+) -> Option<(Option<Installed>, Events)> {
     let mut events = watcher.follow(&record.hub, me).await.ok()?;
     let Snapshot { installed, unknown } = snapshot(&mut events, record).await?;
     Some(((!unknown).then_some(installed), events))
