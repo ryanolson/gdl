@@ -23,7 +23,7 @@
 //! (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`). A followed cell whose
 //! watch sends an event of a kind the hub does not know is withheld: the
 //! relay shows it `unavailable`, its instances hidden, until the hub has
-//! read it again from a second watch of it, while the first goes on. The
+//! read it again from a new watch of it, which replaces the first. The
 //! watches' events and their client are `gdl-watch`'s, so that a segment
 //! instance reads the relay without linking the hub.
 mod cell;

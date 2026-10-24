@@ -222,11 +222,12 @@ async fn met(global: &gdl_hub::CellReadiness<Resolving>, met: u32) {
 /// `M`'s watch sends an event of a kind the global's hub does not know:
 /// at once the relay shows `M` `unavailable`, its instances hidden, and
 /// the requirement counts it no more, while `N`'s events go on as they
-/// would. The hub reads `M` again from a second watch, holding what the
-/// first sends meanwhile; once it has, the relay shows `M` as the reading
-/// has it, a retirement that came only in the reading included, then
-/// applies what it held. The first watch stays open, and the follow keeps
-/// its generation: no `dropped`.
+/// would. The hub reads `M` again from a second watch, which replaces the
+/// first: nothing the first sends after the event is applied. Once the
+/// second's snapshot is complete, the relay shows `M` as it has it, a
+/// retirement that came only in the reading included, and the second
+/// watch carries the cell from then. The follow keeps its generation: no
+/// `dropped`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again() {
     let directory = Resolving::new();
@@ -293,12 +294,15 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
         "a cell the hub does not follow"
     );
     let mut second = server.next().await;
-    // While the reading waits, the first watch's events are held, and
-    // `N`'s apply.
+    // While the reading waits, nothing more of the first watch is read,
+    // and `N`'s events apply.
     first
-        .send(&CellWatchEvent::State {
-            state: CellState::Degraded,
-        })
+        .offer(
+            &serde_json::to_string(&CellWatchEvent::State {
+                state: CellState::Degraded,
+            })
+            .expect("an event serializes"),
+        )
         .await;
     others.clear();
     spare.announce(SegmentPhase::Retired).await;
@@ -326,9 +330,8 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
     second
         .snapshot(&like, CellState::Ready, &[a.instance_id()], &[&b])
         .await;
-    drop(second);
     let mut read = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..3 {
         read.push(next_of(&mut watch, M, &mut others).await);
     }
     assert_eq!(
@@ -343,20 +346,20 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
             },
             state(generation, CellState::Ready),
             exposed(generation, &b),
-            state(generation, CellState::Degraded),
         ]
     );
-    // The first watch still carries the cell.
-    first
+    met(&global, 2).await;
+    // The second watch carries the cell now.
+    second
         .send(&CellWatchEvent::State {
-            state: CellState::Ready,
+            state: CellState::Degraded,
         })
         .await;
     assert_eq!(
         next_of(&mut watch, M, &mut others).await,
-        state(generation, CellState::Ready)
+        state(generation, CellState::Degraded)
     );
-    met(&global, 2).await;
+    met(&global, 1).await;
     assert_eq!(
         global.following().borrow()[&("model_x".to_string(), M.to_string())],
         generation,
@@ -370,7 +373,7 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
 
 /// An event of a kind the hub does not know in the snapshot that begins
 /// `M`'s watch installs `M` withheld, `unavailable` with nothing exposed,
-/// and the hub reads it again at once.
+/// and the hub reads it again, from a watch that replaces the first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unknown_event_in_the_first_snapshot_installs_the_cell_withheld() {
     let directory = Resolving::new();
@@ -430,8 +433,10 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_cell_withheld() {
         next_of(&mut watch, M, &mut others).await,
         exposed(generation, &a)
     );
-    // The first watch goes on, and nothing came of M before what it sends.
-    first
+    // The second watch carries the cell, and nothing came of M before
+    // what it sends.
+    drop(first);
+    second
         .send(&CellWatchEvent::State {
             state: CellState::Degraded,
         })
@@ -443,4 +448,247 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_cell_withheld() {
     assert!(server.quiet(), "no other watch of M");
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
+}
+
+impl Watch {
+    /// Send `data` if the watcher still reads this watch.
+    async fn offer(&mut self, data: &str) {
+        let _ = self
+            .stream
+            .write_all(format!("data: {data}\n\n").as_bytes())
+            .await;
+    }
+}
+
+fn load_of(admitted: u64) -> String {
+    serde_json::to_string(&CellWatchEvent::Load {
+        load: Some(gdl_cells::LoadSummary {
+            admitted,
+            limit: 8,
+            instances: 1,
+            refusals: 0,
+            period_ms: 1000,
+        }),
+    })
+    .expect("an event serializes")
+}
+
+/// The hubs of these tests: a model cell's, beside the server's `M`, so
+/// that the global's hub has a record of the deployment to copy for `M`;
+/// the global's; and `M`'s server, whose record the global follows.
+struct Setup {
+    model_hub: velo_hub::Hub,
+    global_hub: velo_hub::Hub,
+    global: std::sync::Arc<gdl_hub::CellReadiness<Resolving>>,
+    server: Server,
+    like: CellRecord,
+    _quorum: Vec<Instance>,
+}
+
+impl Setup {
+    async fn new() -> Self {
+        let directory = Resolving::new();
+        let mut records = Records::new(&directory.inner);
+        let (model_hub, _) = serve_cell(
+            model(CELL, "us-east-1", "model-x-01-hub:1337"),
+            &directory,
+            timing(),
+        )
+        .await;
+        let (quorum, _) = meet_the_quorum(&model_hub).await;
+        let (like, _) = records.until(CellState::Ready).await;
+        let (global_hub, global) = serve_cell(global_requiring(0), &directory, timing()).await;
+        let server = Server::new().await;
+        directory
+            .inner
+            .publish(record_of(&like, &server))
+            .await
+            .expect("stored");
+        Self {
+            model_hub,
+            global_hub,
+            global,
+            server,
+            like,
+            _quorum: quorum,
+        }
+    }
+
+    async fn stop(self) {
+        self.global_hub.shutdown().await.expect("the hub stops");
+        self.model_hub.shutdown().await.expect("the hub stops");
+    }
+}
+
+/// `M` followed with `a` exposed, and the relay's watch after it.
+async fn exposing(
+    setup: &mut Setup,
+    a: &PeerInfo,
+) -> (Watch, gdl_hub::FollowsWatch, Vec<FollowEvent>) {
+    let mut first = setup.server.next().await;
+    first
+        .snapshot(&setup.like, CellState::Ready, &[], &[a])
+        .await;
+    let mut watch = setup.global.follows();
+    let mut others = Vec::new();
+    loop {
+        if matches!(
+            next_of(&mut watch, M, &mut others).await,
+            FollowEvent::Exposed { .. }
+        ) {
+            break;
+        }
+    }
+    (first, watch, others)
+}
+
+/// The events of the relay's watch now that concern `M`.
+fn pending_of(watch: &mut gdl_hub::FollowsWatch) -> Vec<FollowEvent> {
+    let mut events = Vec::new();
+    while let Some(Some(event)) = futures::FutureExt::now_or_never(watch.next()) {
+        if concerns(&event, M) {
+            events.push(event);
+        }
+    }
+    events
+}
+
+/// What the replaced watch sends after the unknown event is never applied
+/// over the reading: `M`'s reading says it is draining, and nothing the
+/// first watch sent meanwhile, a state that exposes and a new instance,
+/// brings it back. The reading's watch carries the cell after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn what_the_replaced_watch_sends_is_not_applied_over_the_reading() {
+    let mut setup = Setup::new().await;
+    let (a, b) = (peer(), peer());
+    let (mut first, mut watch, mut others) = exposing(&mut setup, &a).await;
+    first.raw(r#"{"event":"paused"}"#).await;
+    assert_eq!(
+        next_of(&mut watch, M, &mut others).await,
+        state(1, CellState::Unavailable)
+    );
+    let mut second = setup.server.next().await;
+    let degraded = serde_json::to_string(&CellWatchEvent::State {
+        state: CellState::Degraded,
+    })
+    .expect("an event serializes");
+    let ready = serde_json::to_string(&CellWatchEvent::Ready {
+        segment: "f".into(),
+        peer: b.clone(),
+    })
+    .expect("an event serializes");
+    first.offer(&degraded).await;
+    first.offer(&ready).await;
+    second
+        .snapshot(&setup.like, CellState::Draining, &[], &[&a])
+        .await;
+    first.offer(&load_of(1)).await;
+    second.raw(&load_of(2)).await;
+    let mut read = Vec::new();
+    loop {
+        let event = next_of(&mut watch, M, &mut others).await;
+        let load = matches!(event, FollowEvent::Load { .. });
+        read.push(event);
+        if load {
+            break;
+        }
+    }
+    assert_eq!(
+        read,
+        [
+            state(1, CellState::Draining),
+            FollowEvent::Load {
+                class: "model_x".into(),
+                cell: M.into(),
+                generation: 1,
+                load: Some(gdl_cells::LoadSummary {
+                    admitted: 2,
+                    limit: 8,
+                    instances: 1,
+                    refusals: 0,
+                    period_ms: 1000,
+                }),
+            },
+        ]
+    );
+    setup.stop().await;
+}
+
+/// An event of a kind the hub does not know in the reading's own snapshot
+/// keeps the cell withheld: nothing of it is shown, not even for a moment,
+/// until a later reading's snapshot is clean.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_event_in_the_reading_keeps_the_cell_withheld() {
+    let mut setup = Setup::new().await;
+    let a = peer();
+    let (mut first, mut watch, mut others) = exposing(&mut setup, &a).await;
+    first.raw(r#"{"event":"paused"}"#).await;
+    assert_eq!(
+        next_of(&mut watch, M, &mut others).await,
+        state(1, CellState::Unavailable)
+    );
+    let mut second = setup.server.next().await;
+    second.answer().await;
+    second
+        .send(&CellWatchEvent::Cell {
+            name: M.into(),
+            class: "model_x".into(),
+            epoch: setup.like.epoch,
+            state: CellState::Ready,
+            load: None,
+        })
+        .await;
+    second.raw(r#"{"event":"paused"}"#).await;
+    second
+        .send(&CellWatchEvent::Ready {
+            segment: "f".into(),
+            peer: a.clone(),
+        })
+        .await;
+    second.send(&CellWatchEvent::Synced).await;
+    // The hub asks for a third reading only once it has read the second.
+    let mut third = setup.server.next().await;
+    assert_eq!(pending_of(&mut watch), [], "nothing of M shown");
+    third
+        .snapshot(&setup.like, CellState::Ready, &[], &[&a])
+        .await;
+    assert_eq!(
+        next_of(&mut watch, M, &mut others).await,
+        state(1, CellState::Ready)
+    );
+    assert_eq!(next_of(&mut watch, M, &mut others).await, exposed(1, &a));
+    assert_eq!(setup.global.unknown_events(), 2);
+    setup.stop().await;
+}
+
+/// One that the reading's watch sends after its snapshot withholds the
+/// cell again at once, and the cell is read again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_event_after_the_reading_withholds_the_cell_again() {
+    let mut setup = Setup::new().await;
+    let a = peer();
+    let (mut first, mut watch, mut others) = exposing(&mut setup, &a).await;
+    first.raw(r#"{"event":"paused"}"#).await;
+    let _ = next_of(&mut watch, M, &mut others).await;
+    let mut second = setup.server.next().await;
+    second
+        .snapshot(&setup.like, CellState::Ready, &[], &[&a])
+        .await;
+    assert_eq!(
+        next_of(&mut watch, M, &mut others).await,
+        state(1, CellState::Ready)
+    );
+    assert_eq!(next_of(&mut watch, M, &mut others).await, exposed(1, &a));
+    second.raw(r#"{"event":"paused"}"#).await;
+    assert_eq!(
+        next_of(&mut watch, M, &mut others).await,
+        state(1, CellState::Unavailable)
+    );
+    let _third = setup.server.next().await;
+    assert_eq!(
+        setup.global.following().borrow()[&("model_x".to_string(), M.to_string())],
+        1,
+        "the same follow"
+    );
+    setup.stop().await;
 }

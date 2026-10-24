@@ -42,15 +42,15 @@ fn not_chosen(cells: &Cells, cell: &str) -> bool {
 /// does not choose it, while M2 is chosen throughout. The hub reads M1
 /// again from a second watch, held until the test lets it through; then M1
 /// is chosen again, the retirement it could not read included. The
-/// follow keeps its generation and its first watch, and the chooser's
-/// relay watch is never cut.
+/// follow keeps its generation, and the chooser's relay watch is never
+/// cut.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_hub_withholds_a_cell_whose_watch_sends_an_unknown_event_until_it_reads_it_again() {
     let directory = Resolving::new();
     let (global, relay) = cell_hub(global_hub(), &directory).await;
     // The global's hub reaches M1's hub through the proxy; M1's own
     // instances reach it directly.
-    let (m1, m1_cell) = unresolved_cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
+    let (m1, _) = unresolved_cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
     let link = Proxy::new(m1.public_addr()).await;
     directory.resolve("m1-hub:1337", &format!("127.0.0.1:{}", link.port));
     let (m2, _) = cell_hub(model_hub(M2, "m2-hub:1337"), &directory).await;
@@ -79,8 +79,6 @@ async fn a_hub_withholds_a_cell_whose_watch_sends_an_unknown_event_until_it_read
     let generation = followed(&cells, "f", M1).expect("followed").generation;
     let mut relay_watchers = relay.follows_watchers();
     relay_watchers.borrow_and_update();
-    let mut m1_watchers = m1_cell.watchers();
-    assert_eq!(*m1_watchers.borrow_and_update(), 1);
 
     link.rewrite_once(br#""event":"retired""#, br#""event":"xetired""#);
     link.hold(b"GET /v1/ext/gdl-cell/watch");
@@ -96,7 +94,6 @@ async fn a_hub_withholds_a_cell_whose_watch_sends_an_unknown_event_until_it_read
         .expect("the hub reads M1 again");
     assert!(not_chosen(&cells, M1), "not chosen until it is read again");
     assert!(takes_work(followed(&cells, "f", M2), &[f2.id()]));
-    assert_eq!(*m1_watchers.borrow(), 1, "the first watch stays open");
 
     link.release();
     until(&cells, "M1 read again", |cells| {
