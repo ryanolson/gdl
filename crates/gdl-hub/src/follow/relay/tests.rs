@@ -142,12 +142,14 @@ fn a_state_hides_and_exposes_the_ready_instances() {
 fn held() -> Relay {
     let choosers = super::Choosers::new([("a".to_string(), vec!["model_x".to_string()])]);
     let relay = Relay::new(16, tokio::sync::watch::Sender::new(health()), choosers);
-    relay.joined(
-        "a",
+    let (id, epoch) = (
         InstanceId::new_v4(),
-        velo_hub::store::Incarnation::from_u64(1),
         velo_hub::protocol::RegistrationEpoch::new(),
     );
+    relay.joined("a", id, velo_hub::store::Incarnation::from_u64(1), epoch);
+    relay
+        .declare(id, epoch)
+        .expect("a member of a chooser's segment");
     relay
 }
 

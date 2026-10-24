@@ -117,7 +117,7 @@ async fn a_draining_cell_says_so_once_its_last_follower_lets_go() {
     let name = global_settings.hub.clone().expect("a hub name");
     let (global_hub, global_cell) = common::hub_of(global_settings, unseen.clone(), timing()).await;
     directory.resolve(&name, &global_hub);
-    let chooser = Instance::join(&global_hub, "a").await;
+    let chooser = Instance::chooser(&global_hub).await;
     let mut relay = global_cell.follows();
     unseen.open.send_replace(true);
     let installed = through(&mut relay, |event| {
@@ -314,7 +314,7 @@ async fn a_late_follow_of_a_draining_cell_is_never_offered_and_let_go_at_once() 
     let name = global_settings.hub.clone().expect("a hub name");
     let (global_hub, global_cell) = common::hub_of(global_settings, unseen.clone(), timing()).await;
     directory.resolve(&name, &global_hub);
-    let chooser = Instance::join(&global_hub, "a").await;
+    let chooser = Instance::chooser(&global_hub).await;
     let mut relay = global_cell.follows();
     unseen.open.send_replace(true);
     let installed = through(&mut relay, |event| {

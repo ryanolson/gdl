@@ -95,8 +95,11 @@ impl Offer {
 
 /// The hub's members that choose cells of the classes its cell sends to,
 /// and must acknowledge a follow of a class before it closes: those of the
-/// segments holding the outer end of a hop that crosses into the class.
-/// The other members never offer anything to another class.
+/// segments holding the outer end of a hop that crosses into the class,
+/// once they have said that they run a follower of the hub's relay. The
+/// other members never offer anything to another class, and neither does
+/// one of those segments that runs no follower, as an instance without
+/// `[cell]` does: it never acknowledges, and must not hold a follow open.
 #[derive(Debug, Default)]
 pub(crate) struct Choosers {
     /// For each segment that chooses, the classes it chooses cells of.
@@ -111,6 +114,8 @@ struct Chooser {
     incarnation: Incarnation,
     epoch: RegistrationEpoch,
     classes: Arc<[String]>,
+    /// Whether it said that it runs a follower, in this registration.
+    declared: bool,
 }
 
 impl Choosers {
@@ -126,28 +131,65 @@ impl Choosers {
         }
     }
 
-    /// The hub committed a registration of `id` in `segment`.
+    /// The hub committed a registration of `id` in `segment`: the
+    /// classes it no longer counts for, if it had declared in a
+    /// registration this one replaces.
     pub(super) fn joined(
         &mut self,
         segment: &str,
         id: InstanceId,
         incarnation: Incarnation,
         epoch: RegistrationEpoch,
-    ) {
-        let Some(classes) = self.segments.get(segment) else {
-            return;
-        };
+    ) -> Option<Arc<[String]>> {
+        let classes = self.segments.get(segment)?;
         let renewed = self.members.insert(
             id,
             Chooser {
                 incarnation,
                 epoch,
                 classes: Arc::clone(classes),
+                declared: false,
             },
         );
-        if renewed.is_none() {
-            for class in classes.iter() {
+        // A registration that renews the instance's keeps its declaration;
+        // a new one is not counted until it declares again.
+        if let Some(renewed) = renewed
+            && renewed.declared
+        {
+            if renewed.epoch == epoch {
+                self.members.get_mut(&id).expect("just inserted").declared = true;
+            } else {
+                self.uncount(&renewed.classes);
+                return Some(renewed.classes);
+            }
+        }
+        None
+    }
+
+    /// `id`, in its registration of `epoch`, says that it runs a follower
+    /// of the hub's relay: from now it counts as a chooser of its classes.
+    /// Refused for an instance that is not a member of a chooser's segment
+    /// in that registration.
+    pub(super) fn declare(&mut self, id: InstanceId, epoch: RegistrationEpoch) -> bool {
+        let Some(chooser) = self
+            .members
+            .get_mut(&id)
+            .filter(|chooser| chooser.epoch == epoch)
+        else {
+            return false;
+        };
+        if !std::mem::replace(&mut chooser.declared, true) {
+            for class in chooser.classes.iter() {
                 *self.counts.entry(class.clone()).or_default() += 1;
+            }
+        }
+        true
+    }
+
+    fn uncount(&mut self, classes: &[String]) {
+        for class in classes {
+            if let Some(count) = self.counts.get_mut(class) {
+                *count -= 1;
             }
         }
     }
@@ -164,11 +206,10 @@ impl Choosers {
             return None;
         }
         let chooser = self.members.remove(&removal.id)?;
-        for class in chooser.classes.iter() {
-            if let Some(count) = self.counts.get_mut(class) {
-                *count -= 1;
-            }
+        if !chooser.declared {
+            return None;
         }
+        self.uncount(&chooser.classes);
         Some(chooser.classes)
     }
 
@@ -176,7 +217,9 @@ impl Choosers {
     /// `class`.
     pub(super) fn chooses(&self, id: InstanceId, epoch: RegistrationEpoch, class: &str) -> bool {
         self.members.get(&id).is_some_and(|chooser| {
-            chooser.epoch == epoch && chooser.classes.iter().any(|of| of == class)
+            chooser.declared
+                && chooser.epoch == epoch
+                && chooser.classes.iter().any(|of| of == class)
         })
     }
 
@@ -228,7 +271,8 @@ mod tests {
     }
 
     /// A member of a segment that chooses counts for each class it
-    /// chooses, once however often it registers, and until its last
+    /// chooses once it declares that it runs a follower, once however often
+    /// it declares or renews its registration, and until its last
     /// incarnation is removed; a member of another segment never counts.
     #[test]
     fn the_choosers_of_a_class_are_the_members_of_its_segments() {
@@ -237,8 +281,20 @@ mod tests {
         let epoch = RegistrationEpoch::new();
         let (first, second) = (Incarnation::from_u64(1), Incarnation::from_u64(2));
         choosers.joined("a", id, first, epoch);
-        choosers.joined("a", id, second, epoch);
         choosers.joined("b", other, first, epoch);
+        assert_eq!(choosers.count("model_x"), 0, "counted before it declared");
+        assert!(!choosers.chooses(id, epoch, "model_x"));
+        assert!(
+            !choosers.declare(other, epoch),
+            "not of a chooser's segment"
+        );
+        assert!(
+            !choosers.declare(id, RegistrationEpoch::new()),
+            "another registration"
+        );
+        assert!(choosers.declare(id, epoch));
+        assert!(choosers.declare(id, epoch), "twice");
+        choosers.joined("a", id, second, epoch);
         assert_eq!(choosers.count("model_x"), 1);
         assert!(choosers.chooses(id, epoch, "model_x"));
         assert!(!choosers.chooses(id, RegistrationEpoch::new(), "model_x"));

@@ -11,7 +11,7 @@ pub use hub::HubSession;
 #[cfg(feature = "hub")]
 pub(crate) use hub::bind_under_hub;
 #[cfg(feature = "hub")]
-pub(crate) use hub::{Acknowledger, CellDrain};
+pub(crate) use hub::{CellDrain, ChooserHub};
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError, Weak};

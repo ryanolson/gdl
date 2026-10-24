@@ -241,8 +241,10 @@ impl Relay {
     }
 
     /// The hub committed a registration of `id` in `segment`, as
-    /// `incarnation` in `epoch`: a chooser of a class is waited for by
-    /// every follow of the class that closes after it.
+    /// `incarnation` in `epoch`. A member of a chooser's segment counts as
+    /// a chooser once it declares ([`Relay::declare`]); a registration
+    /// that replaces a declared one is not counted until it declares
+    /// again, which may close the follows that waited for it.
     pub(crate) fn joined(
         &self,
         segment: &str,
@@ -250,7 +252,27 @@ impl Relay {
         incarnation: Incarnation,
         epoch: RegistrationEpoch,
     ) {
-        self.lock().choosers.joined(segment, id, incarnation, epoch);
+        let mut shared = self.lock();
+        if let Some(classes) = shared.choosers.joined(segment, id, incarnation, epoch) {
+            shared.settle_left(&classes, id);
+        }
+    }
+
+    /// `chooser`, in its registration of `epoch`, says that it runs a
+    /// follower of the relay: from now every follow of its classes that is
+    /// not offered waits for its acknowledgement. Refused for an instance
+    /// that is not a member of a chooser's segment in that registration.
+    pub(crate) fn declare(
+        &self,
+        chooser: InstanceId,
+        epoch: RegistrationEpoch,
+    ) -> Result<(), String> {
+        if self.lock().choosers.declare(chooser, epoch) {
+            return Ok(());
+        }
+        Err(format!(
+            "instance {chooser} is not a member of this hub of a segment that chooses cells"
+        ))
     }
 
     /// The hub removed an incarnation of an instance: a chooser that left
@@ -261,11 +283,7 @@ impl Relay {
         let Some(classes) = shared.choosers.removed(removal) else {
             return;
         };
-        for class in classes.iter() {
-            for (cell, generation) in shared.left(class, removal.id) {
-                shared.settle(class, &cell, generation);
-            }
-        }
+        shared.settle_left(&classes, removal.id);
     }
 
     /// A watch of the relay: its snapshot, then each change.
@@ -428,6 +446,16 @@ impl Shared {
                 cells.remove(cell);
             }
             let _ = self.events.send(dropped());
+        }
+    }
+
+    /// The chooser `id` of `classes` no longer counts: settle every follow
+    /// of them that is not offered, since it may have waited only for it.
+    fn settle_left(&mut self, classes: &[String], id: InstanceId) {
+        for class in classes {
+            for (cell, generation) in self.left(class, id) {
+                self.settle(class, &cell, generation);
+            }
         }
     }
 

@@ -65,10 +65,26 @@ pub fn load_path(instance: InstanceId) -> String {
     format!("/instances/{instance}/load")
 }
 
+/// The route by which a chooser says it runs a follower of its hub's
+/// relay, under the extension's, on the hub's control listener: `POST`,
+/// with no body, carrying the credential of the instance the path names,
+/// which must be a member of the hub of a segment that chooses cells of
+/// another class. Only from then does the hub wait for its
+/// acknowledgements ([`UNOFFERED_ROUTE`]) before it closes a follow: a
+/// member that runs no follower never makes an offer, and never
+/// acknowledges. A chooser says so before it first watches the relay.
+pub const CHOOSER_ROUTE: &str = "/instances/{instance_id}/chooser";
+
+/// [`CHOOSER_ROUTE`]'s path for `instance`.
+pub fn chooser_path(instance: InstanceId) -> String {
+    format!("/instances/{instance}/chooser")
+}
+
 /// The acknowledgement's route, under the extension's, on the hub's
 /// control listener: `POST` with an [`Unoffered`], carrying the
 /// credential of the instance the path names, which must be a member of
-/// the hub whose segment chooses cells of the class it names. Answered
+/// the hub whose segment chooses cells of the class it names, and that has
+/// said it runs a follower ([`CHOOSER_ROUTE`]). Answered
 /// `204 No Content` once the hub has taken it, whether or not it still
 /// answers the follow's current revision; one that does not counts for
 /// nothing.

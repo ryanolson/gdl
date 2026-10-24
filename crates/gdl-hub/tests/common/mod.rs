@@ -216,6 +216,21 @@ impl Instance {
             .await
     }
 
+    /// Join as an instance of `a`, the global's segment that chooses
+    /// cells of `model_x`, and say, as a chooser does before it watches
+    /// its hub's relay, that it runs a follower: from then the hub waits
+    /// for its acknowledgements.
+    pub async fn chooser(hub: &Hub) -> Self {
+        let instance = Self::join(hub, "a").await;
+        instance
+            .client
+            .ext(gdl_watch::EXTENSION)
+            .control_post::<_, ()>(&gdl_watch::chooser_path(instance.id()), &())
+            .await
+            .expect("the hub takes the chooser");
+        instance
+    }
+
     /// Tell the hub, as this instance, that it holds no offer to the
     /// follow `unoffered` names, at its revision.
     pub async fn acknowledge(&self, unoffered: &Unoffered) -> Result<(), ClientError> {

@@ -499,7 +499,7 @@ impl<H> ProcessConfig<H> {
                         &node,
                         roster.live(),
                         drain,
-                        session.acknowledger(node.instance_id()),
+                        session.chooser_hub(node.instance_id()),
                     )?
                     .map(|(cells, task)| (cells, Abort(task)));
                     cell_drain = crate::dist::CellDrain::watch(

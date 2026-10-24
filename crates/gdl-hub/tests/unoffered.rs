@@ -209,7 +209,7 @@ impl Followed {
 async fn a_draining_cell_closes_once_every_chooser_acknowledged() {
     let mut cells = followed().await;
     let generation = cells.generation;
-    let first = Instance::join(&cells.global_hub, "a").await;
+    let first = Instance::chooser(&cells.global_hub).await;
 
     cells.model_cell.drain().await.expect("the cell drains");
     let marked = through(&mut cells.watch, |event| {
@@ -217,7 +217,7 @@ async fn a_draining_cell_closes_once_every_chooser_acknowledged() {
     })
     .await;
     assert_eq!(marked.last(), Some(&offering(generation, 2, false)));
-    let second = Instance::join(&cells.global_hub, "a").await;
+    let second = Instance::chooser(&cells.global_hub).await;
 
     first
         .acknowledge(&unoffered(generation, 2))
@@ -249,7 +249,7 @@ async fn a_draining_cell_closes_once_every_chooser_acknowledged() {
 async fn a_cell_offered_again_is_not_closed_by_an_earlier_acknowledgement() {
     let mut cells = followed().await;
     let generation = cells.generation;
-    let chooser = Instance::join(&cells.global_hub, "a").await;
+    let chooser = Instance::chooser(&cells.global_hub).await;
 
     let marked = cells.unavailable().await;
     assert_eq!(marked.last(), Some(&offering(generation, 2, false)));
@@ -281,8 +281,8 @@ async fn an_acknowledgement_answers_only_the_revision_it_names() {
     let mut cells = followed().await;
     let generation = cells.generation;
     let (late, prompt) = (
-        Instance::join(&cells.global_hub, "a").await,
-        Instance::join(&cells.global_hub, "a").await,
+        Instance::chooser(&cells.global_hub).await,
+        Instance::chooser(&cells.global_hub).await,
     );
 
     let marked = cells.unavailable().await;
@@ -316,8 +316,8 @@ async fn a_chooser_that_leaves_counts_as_acknowledged() {
     let mut cells = followed().await;
     let generation = cells.generation;
     let (leaving, staying) = (
-        Instance::join(&cells.global_hub, "a").await,
-        Instance::join(&cells.global_hub, "a").await,
+        Instance::chooser(&cells.global_hub).await,
+        Instance::chooser(&cells.global_hub).await,
     );
     cells.unavailable().await;
     staying
@@ -339,7 +339,7 @@ async fn a_chooser_that_leaves_counts_as_acknowledged() {
 async fn a_lost_link_is_not_offered_at_once_and_closes_once_acknowledged() {
     let cells = followed().await;
     let generation = cells.generation;
-    let chooser = Instance::join(&cells.global_hub, "a").await;
+    let chooser = Instance::chooser(&cells.global_hub).await;
     let mut following = cells.global_cell.following();
     let key = ("model_x".to_string(), CELL.to_string());
 
@@ -441,4 +441,23 @@ async fn a_cell_that_recovers_as_its_follow_closes_is_followed_again() {
     .expect("the extension runs");
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
+}
+
+/// A member of a chooser's segment counts as a chooser that must
+/// acknowledge only once it says it runs a follower, which an instance
+/// without `[cell]` never does: such a member does not keep a follow from
+/// closing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_that_runs_no_follower_holds_no_follow() {
+    let mut cells = followed().await;
+    let generation = cells.generation;
+    let _member = Instance::join(&cells.global_hub, "a").await;
+    cells.model_cell.drain().await.expect("the cell drains");
+    let marked = through(&mut cells.watch, |event| {
+        matches!(event, FollowEvent::Offering { .. })
+    })
+    .await;
+    assert_eq!(marked.last(), Some(&offering(generation, 2, false)));
+    assert_eq!(next(&mut cells.watch).await, dropped(generation));
+    cells.stop().await;
 }

@@ -17,7 +17,7 @@ use velo::Velo;
 
 use super::Cells;
 use super::follow::Follows;
-use crate::dist::fabric::{Acknowledger, Registry};
+use crate::dist::fabric::{ChooserHub, Registry};
 use crate::dist::roster::Live;
 
 /// How long to wait before watching the relay again after a watch ended
@@ -32,8 +32,9 @@ const REWATCH: Duration = Duration::from_millis(100);
 /// segment that holds no hop into another class. Only an instance in a
 /// cell may call it: one without a cell follows nothing. `live` is the
 /// instance's own membership, `drain` how long an instance in no table
-/// stays registered. `acknowledger` tells the hub, as this instance, of
-/// each follow it holds no offer to once the hub marked it not offered.
+/// stays registered. `chooser` tells the hub, as this instance, that it
+/// runs this follower, before the relay is first watched, and of each
+/// follow it holds no offer to once the hub marked it not offered.
 #[expect(
     clippy::too_many_arguments,
     reason = "the chooser's settings, its hub, and its membership, as the launch holds them"
@@ -47,7 +48,7 @@ pub(crate) fn follow(
     node: &Velo,
     live: &Arc<Live>,
     drain: Duration,
-    acknowledger: Acknowledger,
+    chooser: ChooserHub,
 ) -> Result<Option<(Cells, JoinHandle<()>)>> {
     let wanted = super::entries(layout, segment);
     if wanted.is_empty() {
@@ -62,7 +63,7 @@ pub(crate) fn follow(
         Hub {
             watcher,
             address,
-            acknowledger,
+            chooser,
         },
         follows,
     ));
@@ -88,6 +89,10 @@ pub(super) trait Source: Send + Sync + 'static {
         &self,
     ) -> impl Future<Output = std::result::Result<BoxStream<'static, FollowEvent>, String>> + Send;
 
+    /// Tell the hub that this instance runs a follower of its relay:
+    /// whether the hub took it, or why not.
+    fn declare(&self) -> impl Future<Output = std::result::Result<(), String>> + Send;
+
     /// Tell the hub `unoffered`: whether it took it, or why not.
     fn acknowledge(
         &self,
@@ -99,7 +104,7 @@ pub(super) trait Source: Send + Sync + 'static {
 struct Hub {
     watcher: CellWatcher,
     address: String,
-    acknowledger: Acknowledger,
+    chooser: ChooserHub,
 }
 
 impl Source for Hub {
@@ -110,12 +115,16 @@ impl Source for Hub {
             .map_err(|e| e.to_string())
     }
 
+    async fn declare(&self) -> std::result::Result<(), String> {
+        self.chooser.declare().await
+    }
+
     fn acknowledge(
         &self,
         unoffered: Unoffered,
     ) -> BoxFuture<'static, std::result::Result<(), String>> {
-        let acknowledger = self.acknowledger.clone();
-        async move { acknowledger.acknowledge(&unoffered).await }.boxed()
+        let chooser = self.chooser.clone();
+        async move { chooser.acknowledge(&unoffered).await }.boxed()
     }
 }
 
@@ -125,13 +134,25 @@ impl Source for Hub {
 /// snapshot is complete. A watch refused again for the same reason is
 /// not logged again, since a hub without the cell's extension refuses
 /// every one. Unregistrations and acknowledgements go on throughout, a
-/// watch's absence included.
+/// watch's absence included. Before the first watch, the follower tells
+/// the hub that it runs, and asks again until the hub takes it: from then
+/// the hub waits for this instance before it closes a follow, and nothing
+/// is offered to a cell before it, since the tables fill only from a
+/// watch.
 pub(super) async fn run<S: Source, R: Registry>(source: S, mut follows: Follows<R>) {
     let mut chores = Chores {
         acks: JoinSet::new(),
         refused: None,
     };
     let mut refused: Option<String> = None;
+    while let Err(error) = source.declare().await {
+        if refused.as_deref() != Some(error.as_str()) {
+            tracing::warn!(%error, "the hub did not take that this instance follows its relay");
+            refused = Some(error);
+        }
+        tokio::time::sleep(REWATCH).await;
+    }
+    refused = None;
     loop {
         // A hub can take the connection and not answer: the deadlines are
         // kept while the watch is asked for.

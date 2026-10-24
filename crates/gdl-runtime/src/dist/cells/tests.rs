@@ -628,6 +628,10 @@ impl Source for Scripted {
         })
     }
 
+    async fn declare(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn acknowledge(
         &self,
         _: gdl_watch::Unoffered,

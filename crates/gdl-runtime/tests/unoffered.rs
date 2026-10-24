@@ -28,6 +28,7 @@ use gdl_runtime::{CellState, Cells, Deployment, DeploymentSpec, Register, Runtim
 use gdl_watch::FollowEvent;
 use tokio::task::JoinHandle;
 use velo::InstanceId;
+use velo::discovery::ServiceDiscovery as _;
 use velo_hub::Hub;
 
 const M1: &str = "model-x-01-us-east-1";
@@ -250,6 +251,72 @@ async fn a_draining_cell_is_let_go_once_every_chooser_acknowledged() {
         .await
         .expect("the model cell's hub saw its follower go in time")
         .expect("the extension runs");
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// An instance of the chooser's segment that runs without `[cell]`, under
+/// the same hub, follows nothing and offers nothing to another cell, so
+/// it does not keep the global's follow of a draining cell from closing.
+/// Such an instance waits at its launch for the instances of every
+/// segment it sends to, which are in another hub; it is a member of the
+/// global's hub meanwhile, which is when it could hold the follow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_without_a_cell_holds_no_follow_open() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, global) = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let m1 = cell(&spec, &directory, &quiet).await;
+    offered(&tables(&chooser)).await;
+    let config = settings(
+        hub.public_addr().port(),
+        hub.control_addr().port(),
+        60_000,
+        RUNTIME,
+    );
+    let runtime = RuntimeConfig {
+        selectors: Selectors::new(),
+        ..config.runtime.clone()
+    };
+    let plain = tokio::spawn({
+        let (spec, quiet) = (spec.clone(), Arc::clone(&quiet));
+        async move {
+            let _ = run_graph(&config, "a", &spec, runtime, &|deployment: &Deployment| {
+                reference_graph(deployment, &quiet)
+            })
+            .await;
+        }
+    });
+    let client = velo_hub::client::HubClient::builder()
+        .host("127.0.0.1")
+        .public_port(hub.public_addr().port())
+        .control_port(hub.control_addr().port())
+        .build()
+        .expect("valid test fixture");
+    let loaded = gdl_model::segment_service("a", gdl_model::SegmentPhase::Loaded);
+    tokio::time::timeout(WAIT, async {
+        while client
+            .services()
+            .get_instances(&loaded)
+            .await
+            .map_or(0, |instances| instances.len())
+            < 2
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the instance without a cell is a member of the hub in time");
+    let mut relay = global.follows();
+
+    m1.readiness.drain().await.expect("the cell drains");
+    relayed(&mut relay, WAIT, is_dropped)
+        .await
+        .expect("closed though an instance without a cell is a member");
+    plain.abort();
     for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }

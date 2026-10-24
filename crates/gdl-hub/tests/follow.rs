@@ -385,7 +385,7 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
     let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
     // A chooser that never acknowledges that the cell is not offered, so
     // that the follow lives through the states that take no work.
-    let _chooser = Instance::join(&global_hub, "a").await;
+    let _chooser = Instance::chooser(&global_hub).await;
     let mut inner = global_cell.follows();
     let mut relay = Relay::of(&snapshot(&mut inner).await);
     until(
@@ -721,7 +721,7 @@ async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
     let (instances, _) = meet_the_quorum(&model_hub).await;
     let (record, _) = records.until(CellState::Ready).await;
     let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
-    let chooser = Instance::join(&global_hub, "a").await;
+    let chooser = Instance::chooser(&global_hub).await;
     let mut watch = global_cell.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {

@@ -91,7 +91,11 @@ pub use feed::CellWatch;
 /// the relay carries. One that is not offered closes once every chooser of
 /// its class among the hub's members, the instances of the segments that
 /// hold the outer end of a hop into the class, has acknowledged its
-/// current revision or left: `POST instances/{instance_id}/unoffered` on
+/// current revision or left: a member counts as a chooser once it says
+/// that it runs a follower of the relay (`POST instances/{instance_id}/chooser`
+/// on the control listener, with its own credential), since one that runs
+/// none, as an instance without `[cell]`, never offers and never
+/// acknowledges; and it acknowledges with `POST instances/{instance_id}/unoffered` on
 /// the control listener, a [`gdl_watch::Unoffered`] with the chooser's own
 /// credential, refused with 409 from any other instance. Then the relay
 /// drops it and its link ends. A follow whose link ends, or that a newer
@@ -524,7 +528,17 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
     fn control_routes(self: Arc<Self>) -> Router {
         let draining = Arc::clone(&self);
         let relay = Arc::clone(&self.relay);
+        let declared = Arc::clone(&self.relay);
         Router::new()
+            .route(
+                gdl_watch::CHOOSER_ROUTE,
+                post(move |authorized: Authorized| async move {
+                    declared
+                        .declare(authorized.owner, authorized.lease.epoch)
+                        .map(|()| StatusCode::NO_CONTENT)
+                        .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
+                }),
+            )
             .route(
                 gdl_watch::UNOFFERED_ROUTE,
                 post(
