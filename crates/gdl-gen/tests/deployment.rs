@@ -815,7 +815,7 @@ fn a_segment_that_publishes_ports_runs_in_one_cell() {
         .to_string();
     assert!(
         error.contains(
-            "segment `front` publishes ports, and runs in cells `global-eu`, `global-us`"
+            "segment `front` publishes host port `8082:8082`, and runs in cells `global-eu`, `global-us`"
         ),
         "{error}"
     );
@@ -829,6 +829,44 @@ fn a_segment_that_publishes_ports_runs_in_one_cell() {
         compose["services"]["global-eu_front"]["ports"],
         serde_json::json!(["8082:8082"])
     );
+}
+
+/// A port that Docker gives a host port of its own choosing binds nothing
+/// fixed, so a segment that publishes only such ports runs in several
+/// cells, each container with its own host port.
+#[test]
+fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
+    let ports =
+        "[deployment.segment.engine]\nports = [\"9000\", \"127.0.0.1::9001\", \"9002/udp\"]\n";
+    let spec = placed(&format!("{SPLIT}{ports}"));
+    let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
+    let (_, compose) = fleet_bundle(&spec, &fleet);
+    for service in ["model-x-01_engine", "model-x-02_engine"] {
+        assert_eq!(
+            compose["services"][service]["ports"],
+            serde_json::json!(["9000", "127.0.0.1::9001", "9002/udp"]),
+            "{service}"
+        );
+    }
+    // A fixed host port among them is still refused.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for fixed in ["9000:9000", "127.0.0.1:9000:9000", "[::1]:9000:9000/tcp"] {
+        let ports = format!("[deployment.segment.engine]\nports = [\"9001\", \"{fixed}\"]\n");
+        let spec = placed(&format!("{SPLIT}{ports}"));
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-compose-ports-")
+            .tempdir()
+            .expect("a directory");
+        let error = gdl_gen::compose_files(&spec, Some(&fleet), temp.path(), &root.join("target"))
+            .expect_err("two cells bind one host port")
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "segment `engine` publishes host port `{fixed}`, and runs in cells `model-x-01`, `model-x-02`"
+            )),
+            "{error}"
+        );
+    }
 }
 
 /// `cargo gdl compose --fleet` checks the fleet, then writes its bundle.
