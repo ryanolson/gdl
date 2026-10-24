@@ -259,14 +259,20 @@ struct Raw {
     messages: Option<RawMessages>,
     nodes: Option<RawNodes>,
     gdl: RawGdl,
+    // The placement's tables, read by `Placement::from_toml` from the same
+    // text, so that its problems have their lines in the spec.
     #[serde(default)]
-    segment: toml::Table,
+    #[allow(dead_code)]
+    segment: serde::de::IgnoredAny,
     #[serde(default)]
-    routing: toml::Table,
+    #[allow(dead_code)]
+    routing: serde::de::IgnoredAny,
     #[serde(default)]
-    class: toml::Table,
+    #[allow(dead_code)]
+    class: serde::de::IgnoredAny,
     #[serde(default)]
-    cells: toml::Table,
+    #[allow(dead_code)]
+    cells: serde::de::IgnoredAny,
     #[serde(default)]
     bind: BTreeMap<String, RawBind>,
 }
@@ -284,8 +290,8 @@ struct RawGraph {
     path: PathBuf,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
+/// A `[messages]` or `[nodes]` entry: a directory or `name@version`, or a
+/// Git package's table.
 enum RawCrate {
     Named(String),
     Git {
@@ -294,6 +300,50 @@ enum RawCrate {
         rev: String,
         lib: Option<String>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGit {
+    package: String,
+    git: String,
+    rev: String,
+    lib: Option<String>,
+}
+
+// Read by hand rather than as an untagged enum, which would refuse a
+// table with an unknown key only as matching no variant, without the key.
+impl<'de> Deserialize<'de> for RawCrate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entry;
+        impl<'de> serde::de::Visitor<'de> for Entry {
+            type Value = RawCrate;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a directory, `name@version`, or { package, git, rev }")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, entry: &str) -> Result<RawCrate, E> {
+                Ok(RawCrate::Named(entry.to_string()))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<RawCrate, A::Error> {
+                let RawGit {
+                    package,
+                    git,
+                    rev,
+                    lib,
+                } = RawGit::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(RawCrate::Git {
+                    package,
+                    git,
+                    rev,
+                    lib,
+                })
+            }
+        }
+        deserializer.deserialize_any(Entry)
+    }
 }
 
 impl RawCrate {
@@ -423,8 +473,10 @@ impl Spec {
     }
 
     fn parse(text: &str, file: &Path, dir: &Path) -> Result<Self, Error> {
-        let raw: Raw =
-            toml::from_str(text).map_err(|e| Error::new(format!("{}: {e}", file.display())))?;
+        let located = |problems: gdl_model::Problems| {
+            Error::new(problems.in_file(file.display()).to_string())
+        };
+        let raw: Raw = gdl_model::read_toml(text).map_err(|p| located(p.into()))?;
         let nodes = raw.nodes;
         let source = match (raw.contract, raw.graph, raw.messages) {
             (Some(_), None, None) if nodes.is_some() => {
@@ -478,22 +530,7 @@ impl Spec {
                 ));
             }
         };
-        let mut placement_table = toml::Table::new();
-        placement_table.insert("segment".into(), toml::Value::Table(raw.segment));
-        placement_table.insert("routing".into(), toml::Value::Table(raw.routing));
-        let mut placement = gdl_model::Placement::from_toml(&placement_table.to_string())
-            .map_err(|e| Error::new(format!("{}: [segment]: {e}", file.display())))?;
-        // Parsed again with the classes, then with the cell policies, once
-        // the rest is known to parse, so that an error is reported as the
-        // table it is in.
-        for (key, table) in [("class", raw.class), ("cells", raw.cells)] {
-            if table.is_empty() {
-                continue;
-            }
-            placement_table.insert(key.into(), toml::Value::Table(table));
-            placement = gdl_model::Placement::from_toml(&placement_table.to_string())
-                .map_err(|e| Error::new(format!("{}: [{key}]: {e}", file.display())))?;
-        }
+        let placement = gdl_model::Placement::from_toml(text).map_err(located)?;
         let bind = raw
             .bind
             .into_iter()

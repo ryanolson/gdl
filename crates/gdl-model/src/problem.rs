@@ -1,0 +1,187 @@
+use std::fmt;
+
+use serde::de::DeserializeOwned;
+
+/// One thing wrong with a deployment's settings, and where it is. Every
+/// reader of the spec, the fleet file, and a cell's settings reports in
+/// this shape, so that a problem reads the same from every command:
+///
+/// ```text
+/// fleet.toml:12: [cell.model-x-01] zone: unknown field `zone`, expected one of `class`, `region`, `home`, `ready`
+/// gdl.toml: [cells.model_x]: cell policy `[cells.model_x]`: the placement has no class `model_x`
+/// GDL_CELL__SUMMARY_MS: is 500; the period is at least 1000 ms
+/// ```
+///
+/// A file's problem names the file, the line when the parser gives one
+/// (a problem found after parsing has none), the table, and the key. A
+/// variable's names the variable, which spells its table and key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// Where the setting was read from: `None` until the reader, which
+    /// knows the file or the variable, says.
+    pub origin: Option<Origin>,
+    /// The line, counted from 1, when the parser gives one.
+    pub line: Option<usize>,
+    /// The table, as a dotted path without its brackets
+    /// (`cell.model-x-01`); `None` for the file's top level.
+    pub table: Option<String>,
+    /// The key in the table; `None` when the problem is the table's own.
+    pub key: Option<String>,
+    /// What is wrong.
+    pub message: String,
+}
+
+/// Where a setting was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// A file, by the path its reader was given.
+    File(String),
+    /// An environment variable, by its name.
+    Variable(String),
+}
+
+impl Problem {
+    /// A problem of `key` in `table`, from no origin yet.
+    pub fn at(table: Option<String>, key: Option<String>, message: impl Into<String>) -> Self {
+        Self {
+            origin: None,
+            line: None,
+            table,
+            key,
+            message: message.into(),
+        }
+    }
+
+    /// The problem a reader met at `path`: the table and the key from the
+    /// path it had reached. An unknown key's path ends with that key, and a
+    /// missing one's at its table, whose message names the key. The table
+    /// ends where an array begins, since TOML addresses an array's
+    /// elements from the key that holds it (`[messages] crates[0].rev`).
+    pub(crate) fn from_path(path: &serde_path_to_error::Path, message: String) -> Self {
+        let keys = segments(path);
+        let array = keys.iter().position(|key| key.contains('['));
+        let split = match (array, message.starts_with("missing field")) {
+            (Some(array), _) => array,
+            (None, true) => keys.len(),
+            (None, false) => keys.len().saturating_sub(1),
+        };
+        let (table, key) = keys.split_at(split);
+        Self::at(
+            (!table.is_empty()).then(|| table.join(".")),
+            (!key.is_empty()).then(|| key.join(".")),
+            message,
+        )
+    }
+}
+
+/// Read `text`, a TOML file, as a `T`. A file that does not parse is one
+/// problem, located by its line, table, and key; its reader adds the file.
+pub fn read_toml<T: DeserializeOwned>(text: &str) -> Result<T, Problem> {
+    let line = |error: &toml::de::Error| {
+        error
+            .span()
+            .map(|span| text[..span.start.min(text.len())].matches('\n').count() + 1)
+    };
+    let deserializer = toml::Deserializer::parse(text).map_err(|error| Problem {
+        line: line(&error),
+        ..Problem::at(None, None, error.message())
+    })?;
+    serde_path_to_error::deserialize(deserializer).map_err(|error| {
+        let path = error.path().clone();
+        let error = error.into_inner();
+        Problem {
+            line: line(&error),
+            ..Problem::from_path(&path, error.message().to_string())
+        }
+    })
+}
+
+/// The keys of a reader's path, each array element written after the key
+/// that holds it (`crates[0]`), as TOML addresses it.
+fn segments(path: &serde_path_to_error::Path) -> Vec<String> {
+    use serde_path_to_error::Segment;
+    let mut keys: Vec<String> = Vec::new();
+    for segment in path.iter() {
+        match segment {
+            Segment::Map { key } => keys.push(key.clone()),
+            Segment::Seq { index } => match keys.last_mut() {
+                Some(last) => last.push_str(&format!("[{index}]")),
+                None => keys.push(format!("[{index}]")),
+            },
+            Segment::Enum { variant } => keys.push(variant.clone()),
+            Segment::Unknown => {}
+        }
+    }
+    keys
+}
+
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.origin, self.line) {
+            // The variable's name spells the table and the key.
+            (Some(Origin::Variable(name)), _) => return write!(f, "{name}: {}", self.message),
+            (Some(Origin::File(path)), Some(line)) => write!(f, "{path}:{line}: ")?,
+            (Some(Origin::File(path)), None) => write!(f, "{path}: ")?,
+            (None, Some(line)) => write!(f, "line {line}: ")?,
+            (None, None) => {}
+        }
+        match (&self.table, &self.key) {
+            (Some(table), Some(key)) => write!(f, "[{table}] {key}: ")?,
+            (Some(table), None) => write!(f, "[{table}]: ")?,
+            (None, Some(key)) => write!(f, "{key}: ")?,
+            (None, None) => {}
+        }
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Problem {}
+
+/// Every problem a reader or a check found, in the order found; printed
+/// one to a line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Problems(pub Vec<Problem>);
+
+impl Problems {
+    /// Each problem without an origin, read from the file at `path`.
+    pub fn in_file(mut self, path: impl fmt::Display) -> Self {
+        let path = path.to_string();
+        for problem in &mut self.0 {
+            problem
+                .origin
+                .get_or_insert_with(|| Origin::File(path.clone()));
+        }
+        self
+    }
+
+    /// Whether there is none.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<Problem> for Problems {
+    fn from(problem: Problem) -> Self {
+        Self(vec![problem])
+    }
+}
+
+impl fmt::Display for Problems {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, problem) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str("\n")?;
+            }
+            write!(f, "{problem}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Problems {}
+
+impl From<Problems> for crate::Error {
+    fn from(problems: Problems) -> Self {
+        crate::Error::new(problems.to_string())
+    }
+}

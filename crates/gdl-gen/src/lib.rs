@@ -147,7 +147,7 @@ fn bound<'s>(
                 Ok(values) => {
                     with_binds.config.insert(name.clone(), values);
                 }
-                Err(e) => with_binds.problems.push(format!("node `{name}`: {e}")),
+                Err(e) => with_binds.problems.push(format!("[config.{name}]: {e}")),
             }
         }
     }
@@ -165,9 +165,9 @@ fn bound<'s>(
             .as_ref()
             .is_some_and(|s| s.nodes().iter().any(|n| &n.name == name));
         if !with_binds.bind.contains_key(name) && !adapter {
-            with_binds
-                .problems
-                .push(format!("config names unbound node `{name}`"));
+            with_binds.problems.push(format!(
+                "[config.{name}]: the graph has no bound node `{name}`"
+            ));
         }
     }
     with_binds.problems.extend(problems);

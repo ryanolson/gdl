@@ -46,10 +46,14 @@ pub(crate) fn validate(
             .node(root)
             .is_none_or(|n| n.role != gdl_model::Role::Source)
         {
-            problems.push(format!("pipeline name refers to unknown root `{root}`"));
+            problems.push(format!(
+                "[pipeline_names] {root}: the graph has no source `{root}`"
+            ));
         }
         if name.trim().is_empty() || !labels.insert(name) {
-            problems.push("pipeline names must be nonempty and unique".into());
+            problems.push(format!(
+                "[pipeline_names] {root}: pipeline names must be nonempty and unique"
+            ));
         }
     }
     let entry_nodes = spec.service.as_ref().map(|s| s.nodes()).unwrap_or_default();

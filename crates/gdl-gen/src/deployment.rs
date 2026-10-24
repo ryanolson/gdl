@@ -132,7 +132,7 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
             .any(|(segment, _)| segment == name)
         {
             return Err(Error::new(format!(
-                "image override names unknown segment `{name}`"
+                "[deployment.segment.{name}]: the placement has no segment `{name}`"
             )));
         }
     }

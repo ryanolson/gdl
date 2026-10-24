@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::cell::{check_cell_name, check_region_name};
-use crate::{CellSettings, DirectoryBackend, Error, Layout};
+use crate::{CellSettings, DirectoryBackend, Layout, Problems, read_toml};
 
 mod errors;
 
@@ -60,8 +60,8 @@ struct CellSpec {
 impl Fleet {
     /// Parse a fleet file. An unknown key anywhere is refused; what the
     /// values mean is checked against a layout by [`Fleet::check`].
-    pub fn from_toml(text: &str) -> Result<Self, Error> {
-        toml::from_str(text).map_err(|e| Error::new(e.to_string()))
+    pub fn from_toml(text: &str) -> Result<Self, Problems> {
+        Ok(read_toml(text)?)
     }
 
     /// Check the fleet against the layout of the placement it deploys,

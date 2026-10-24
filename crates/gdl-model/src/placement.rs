@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::Error;
 use crate::Role;
 use crate::hash::Fnv;
 use crate::manifest::{HopInfo, Manifest, TypeInfo};
+use crate::{Problem, Problems, read_toml};
 
 mod boundary;
 mod cells;
@@ -48,6 +48,7 @@ pub struct Placement {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SegmentSpec {
     nodes: Vec<String>,
 }
@@ -64,7 +65,7 @@ struct ClassSpec {
 ///
 /// In a placement file a policy is a string (`"round_robin"`, `"random"`)
 /// and a selector a table (`{ selector = "affinity" }`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestRouter {
     /// Cycle through replicas in roster order.
@@ -98,6 +99,44 @@ pub const SELECTORS: &[SelectorInfo] = &[
         summary: "Send each request to the replica with the fewest requests this sender has in flight there.",
     },
 ];
+
+// Read by hand rather than derived: a derived enum reads a selector's
+// table as one entry, so a second key is refused without its name.
+impl<'de> Deserialize<'de> for RequestRouter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Router;
+        impl<'de> serde::de::Visitor<'de> for Router {
+            type Value = RequestRouter;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("\"round_robin\", \"random\", or { selector = \"<name>\" }")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, policy: &str) -> Result<Self::Value, E> {
+                match policy {
+                    "round_robin" => Ok(RequestRouter::RoundRobin),
+                    "random" => Ok(RequestRouter::Random),
+                    other => Err(E::unknown_variant(other, &["round_robin", "random"])),
+                }
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Selector {
+                    selector: String,
+                }
+                let table =
+                    Selector::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(RequestRouter::Selector(table.selector))
+            }
+        }
+        deserializer.deserialize_any(Router)
+    }
+}
 
 /// The longest selector or class name.
 const NAME_LIMIT: usize = 64;
@@ -208,26 +247,40 @@ impl Placement {
     }
 
     /// Parse segment placement, request routing, classes, and cell policies
-    /// from a deployment file.
-    pub fn from_toml(text: &str) -> Result<Self, Error> {
-        let mut placement: Self = toml::from_str(text).map_err(|e| Error::new(e.to_string()))?;
+    /// from a deployment file. Every problem with the names is reported,
+    /// each where it is; a file that does not parse is one problem.
+    pub fn from_toml(text: &str) -> Result<Self, Problems> {
+        let mut placement: Self = read_toml(text)?;
         placement
             .routing
             .retain(|_, router| *router != RequestRouter::default());
+        let mut problems = Vec::new();
         for (node, router) in &placement.routing {
-            if let RequestRouter::Selector(name) = router {
-                check_selector_name(name)
-                    .map_err(|why| Error::new(format!("[routing] {node}: {why}")))?;
+            if let RequestRouter::Selector(name) = router
+                && let Err(why) = check_selector_name(name)
+            {
+                problems.push(Problem::at(Some("routing".into()), Some(node.clone()), why));
             }
         }
         for name in placement.classes.keys() {
-            check_class_name(name).map_err(Error::new)?;
+            if let Err(why) = check_class_name(name) {
+                problems.push(Problem::at(Some(format!("class.{name}")), None, why));
+            }
         }
         for (class, policy) in &placement.cells {
-            cells::check_policy_name(policy)
-                .map_err(|why| Error::new(format!("[cells.{class}]: {why}")))?;
+            if let Err(why) = cells::check_policy_name(policy) {
+                problems.push(Problem::at(
+                    Some(format!("cells.{class}")),
+                    Some("policy".into()),
+                    why,
+                ));
+            }
         }
-        Ok(placement)
+        if problems.is_empty() {
+            Ok(placement)
+        } else {
+            Err(Problems(problems))
+        }
     }
 
     /// Segment names and their nodes, in name order.

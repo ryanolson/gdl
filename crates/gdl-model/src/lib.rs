@@ -19,6 +19,7 @@ mod hash;
 mod manifest;
 mod metrics;
 mod placement;
+mod problem;
 
 use std::fmt;
 
@@ -45,6 +46,7 @@ pub use placement::{
     PlacementErrors, RequestRouter, Run, SELECTORS, SelectorInfo, WireReason, check_class_name,
     check_selector_name, layout,
 };
+pub use problem::{Origin, Problem, Problems, read_toml};
 
 /// Support for `derive(gdl::Config)`. Not a stable interface.
 #[doc(hidden)]

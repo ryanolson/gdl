@@ -257,6 +257,12 @@ impl From<gdl_model::Error> for Error {
     }
 }
 
+impl From<gdl_model::Problems> for Error {
+    fn from(problems: gdl_model::Problems) -> Self {
+        Self::new(ErrorKind::Placement, problems.to_string())
+    }
+}
+
 impl From<gdl_model::PlacementErrors> for Error {
     fn from(errors: gdl_model::PlacementErrors) -> Self {
         Self::new(ErrorKind::Placement, errors.to_string())
