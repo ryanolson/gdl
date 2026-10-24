@@ -34,11 +34,11 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Would lift it:** the generator binding selector crates, planned with dynamo's KV router.
 - **See:** ruling 162.
 
-### An instance of an earlier build reads an unknown outcome as a transport error
+### An unknown outcome is refused by an instance built before it, so this build rolls out at once
 
-- **What happens:** an error of the kind `OutcomeUnknown` (a hand-off whose answer did not come, so the receiver may have run it) reaches an instance built before the kind existed as a `Transport` error whose message begins `[outcome unknown] `. An instance of this build reads it back as `OutcomeUnknown`. A `Transport` error whose own message begins with `[outcome unknown] ` or `[transport] ` is sent with `[transport] ` before it, so that this build reads it back as it was; an earlier build shows the prefix.
-- **Why:** an earlier build refuses an error kind it does not know, and with it the stream item that carries the error, and it refuses an error with a field it does not know too. So the new kind is sent as the earlier kind nearest it, with its name in the message.
-- **Would lift it:** nothing, for the builds that came before; a kind added later is sent the same way.
+- **What happens:** an error of the kind `OutcomeUnknown` (a hand-off whose answer did not come, so the receiver may have run it) is sent as its own kind. An instance built before the kind existed refuses it, and with it the stream item that carries it. So every cell moves to this build at once, not one cell at a time.
+- **Why:** the earlier builds refuse an error kind they do not know. This build does not: it reads such a kind as `Transport` and keeps the kind's name (`Error::unknown_kind`, and the error's `Display`: `transport error (unknown kind <name>): <message>`), and sends it on under that name. A kind sent as its index in msgpack is read the same way, an unknown index named by its decimal.
+- **Would lift it:** nothing, for the builds before this one. Error kinds added after this one need no such step: the builds from this one on read them as `Transport`.
 - **See:** `crates/gdl/src/error.rs`.
 
 ## Bring-up, shutdown, and membership
