@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -22,7 +22,7 @@ use velo_hub::{
     Rejection, StartContext, Txn,
 };
 
-use crate::follow::{Choosers, Follower, FollowsWatch, Relay};
+use crate::follow::{Choosers, Follower, FollowsWatch, Relay, Retirement};
 use crate::{GraphAdmission, Quorum};
 use drain::Drain;
 use feed::Feed;
@@ -40,6 +40,7 @@ mod followers;
 mod judge;
 mod load;
 mod publish;
+mod retiring;
 
 pub use feed::CellWatch;
 
@@ -103,7 +104,20 @@ pub use feed::CellWatch;
 /// acknowledges; and it acknowledges with `POST instances/{instance_id}/unoffered` on
 /// the control listener, a [`gdl_watch::Unoffered`] with the chooser's own
 /// credential, refused with 409 from any other instance. Then the relay
-/// drops it and its link ends. A follow whose link ends, or that a newer
+/// drops it and its link ends. A retirement of a followed cell's entry
+/// instance waits, in the same way, for the choosers whose hops enter the
+/// instance's segment, as they are when the relay applies it: each says
+/// that it avoids the instance once its tables hold it retired
+/// (`POST instances/{instance_id}/avoids` on the control listener, a
+/// [`gdl_watch::Avoids`] with its own credential, refused with 409 from any
+/// other instance), and one that leaves counts as one that did. A chooser
+/// that says it runs a follower later counts as one that did, since the
+/// relay's snapshot shows it the instance retired; so does a retirement in
+/// the snapshot a follow is installed from, which the cell's hub does not
+/// wait for this follow for. Once every chooser it waited for avoids it,
+/// the hub tells the cell's hub, once for its whole cell
+/// ([`gdl_watch::Avoided`]); a follow that closes first is released
+/// instead. A follow whose link ends, or that a newer
 /// epoch in the directory replaces, is not offered from then, and is kept
 /// beside the cell's later follows until it closes the same way; the cell
 /// is followed again, as a new generation, while it is still a child that
@@ -147,6 +161,20 @@ pub use feed::CellWatch;
 /// (its [`gdl_watch::CellWatchEvent::State`] again, with `unfollowed`),
 /// and its entry instances
 /// stop taking work from other cells then rather than at their bound.
+///
+/// An entry instance's retirement waits for the cells that follow the cell
+/// when it retires, in the same states: each follower's hub says, once
+/// every chooser of its cell avoids the instance, that its whole cell does
+/// (`POST avoided` on the public listener, with the [`gdl_watch::Avoided`]
+/// that names its watch and the instance), and a release counts too, since
+/// a follower that let go makes no new offer. A watch lost without a
+/// release never counts; one that opens after the retirement is not waited
+/// for, since its snapshot shows the instance retired. Once none is
+/// waited for, the watch sends the instance's `retired` again with
+/// `acknowledged`, once, as the first one does when no cell follows; the
+/// retiree's stop waits for it, up to a bound of its own. Like a release,
+/// `avoided` is not authenticated: anything that can reach the cell's hub
+/// can end a retiree's wait early.
 ///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,
@@ -404,6 +432,14 @@ impl<D: CellDirectory> CellReadiness<D> {
         self.watcher.get().map_or(0, CellWatcher::unknown_events)
     }
 
+    /// The retirements of the followed cells' entry instances that the hub
+    /// waits for its choosers to avoid before it tells each cell's hub, by
+    /// the cell's class and name, the follow's generation, and the
+    /// instance, as it changes.
+    pub fn retirements(&self) -> watch::Receiver<HashSet<Retirement>> {
+        self.relay.retirements()
+    }
+
     /// The cells the hub has decided to follow, by class and name, each
     /// with the generation of its follow, as it changes: a cell is here
     /// from the moment its follow begins, before its snapshot is complete,
@@ -549,8 +585,23 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
     fn public_routes(self: Arc<Self>) -> Router {
         let feed = Arc::clone(&self.feed);
         let releasing = Arc::clone(&self.feed);
+        let avoiding = Arc::clone(&self.feed);
         let relay = Arc::clone(&self.relay);
         Router::new()
+            .route(
+                gdl_watch::AVOIDED_ROUTE,
+                post(move |Json(avoided): Json<gdl_watch::Avoided>| async move {
+                    let gdl_watch::Avoided { follower, instance } = avoided;
+                    let gdl_watch::Follower {
+                        class,
+                        cell,
+                        run,
+                        generation,
+                    } = follower;
+                    avoiding.avoided(&((class, cell), run, generation), instance);
+                    StatusCode::NO_CONTENT
+                }),
+            )
             .route(
                 gdl_watch::RELEASE_ROUTE,
                 post(move |Json(follower): Json<gdl_watch::Follower>| async move {
@@ -624,7 +675,21 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         let draining = Arc::clone(&self);
         let relay = Arc::clone(&self.relay);
         let declared = Arc::clone(&self.relay);
+        let avoiding = Arc::clone(&self.relay);
         Router::new()
+            .route(
+                gdl_watch::AVOIDS_ROUTE,
+                post(
+                    move |authorized: Authorized, HubJson(avoids): HubJson<gdl_watch::Avoids>| async move {
+                        avoiding
+                            .avoids(authorized.owner, authorized.lease.epoch, &avoids)
+                            .map(|()| StatusCode::NO_CONTENT)
+                            // Not 401 or 404: velo-hub's client drops its
+                            // registration on those.
+                            .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
+                    },
+                ),
+            )
             .route(
                 gdl_watch::CHOOSER_ROUTE,
                 post(move |authorized: Authorized| async move {
@@ -725,28 +790,30 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 }
 
 /// The segments of `class` that choose cells of the classes it sends to,
-/// each with those classes: the segments holding the outer end of a hop
-/// that crosses out of the class, whose instances offer requests to the
-/// cells this hub follows.
+/// each with those classes and the entry segments its hops enter: the
+/// segments holding the outer end of a hop that crosses out of the class,
+/// whose instances offer requests to the cells this hub follows.
 fn choosers(layout: &gdl_model::Layout, class: &str) -> Choosers {
-    let mut segments: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    type Chosen = (BTreeSet<String>, BTreeSet<String>);
+    let mut segments: BTreeMap<String, Chosen> = BTreeMap::new();
     for boundary in layout.boundaries() {
         if boundary.from != class {
             continue;
         }
         let hop = &layout.hops()[boundary.hop];
         if let Some(outer) = hop.forward_runs.first() {
-            segments
-                .entry(outer.segment.clone())
-                .or_default()
-                .insert(boundary.into.clone());
+            let (classes, entries) = segments.entry(outer.segment.clone()).or_default();
+            classes.insert(boundary.into.clone());
+            entries.extend(hop.backward_runs.first().map(|inner| inner.segment.clone()));
         }
     }
-    Choosers::new(
-        segments
-            .into_iter()
-            .map(|(segment, classes)| (segment, classes.into_iter().collect())),
-    )
+    Choosers::new(segments.into_iter().map(|(segment, (classes, entries))| {
+        (
+            segment,
+            classes.into_iter().collect(),
+            entries.into_iter().collect(),
+        )
+    }))
 }
 
 /// The query of a watch: the follower's watch it names, if it names one

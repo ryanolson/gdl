@@ -1,6 +1,7 @@
 //! The follower's rules, without a hub: its state machine driven by
 //! events and an explicit clock, and its task driven by scripted watches.
 
+mod avoided;
 mod offered;
 mod reread;
 

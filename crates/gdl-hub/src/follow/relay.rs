@@ -21,13 +21,20 @@
 //! same way, since what the choosers offered to it may still be under
 //! way.
 //!
+//! A retirement of a followed cell's entry instance that the relay applies
+//! waits for the choosers that route to the instance's segment to avoid
+//! it ([`super::avoid`]); once they have, or left, the relay says so to the
+//! cell's hub, once for the whole cell. A follow that closes forgets what
+//! it waited for: its release tells the cell's hub more. So does one whose
+//! retiree left, which its cell's hub has forgotten too.
+//!
 //! The relay also counts, per class, the installed follows whose link
 //! last said `ready`, and shows each count in the cell's health as it
 //! changes, under the same lock, so that a count is never overwritten by
 //! an older one. A change costs one count, never a pass over the
 //! follows.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
@@ -44,11 +51,16 @@ mod installed;
 
 pub(crate) use installed::Installed;
 
+use super::avoid::Avoiding;
 use super::offer::{Choosers, Offer};
-use super::release::Release;
+use super::release::{Release, Told};
 use crate::CellHealth;
 use crate::fanout::Watchers;
-use gdl_watch::{CellWatchEvent, FollowEvent, Unoffered};
+use gdl_watch::{Avoids, CellWatchEvent, FollowEvent, Unoffered};
+
+/// A retirement the relay waits for its choosers to avoid: the follow, by
+/// its cell's class and name and its generation, and the instance.
+pub(crate) type Retirement = (String, String, u64, InstanceId);
 
 /// The followed cells, and the relay's watchers.
 pub(crate) struct Relay {
@@ -93,6 +105,7 @@ impl Relay {
                 health,
                 choosers,
                 releases,
+                retirements: watch::Sender::new(HashSet::new()),
             })),
             watchers: Watchers::new(),
             one: Watchers::new(),
@@ -128,6 +141,7 @@ impl Relay {
                 generation,
                 installed: None,
                 offer: Offer::new(true),
+                avoiding: Avoiding::default(),
                 close: close.clone(),
             },
         );
@@ -232,7 +246,12 @@ impl Relay {
     ) {
         let mut shared = self.lock();
         let Shared {
-            follows, changes, ..
+            follows,
+            changes,
+            choosers,
+            releases,
+            retirements,
+            ..
         } = &mut *shared;
         let Some(follow) = follows
             .get_mut(class)
@@ -243,7 +262,36 @@ impl Relay {
         };
         let installed = follow.installed.as_mut().expect("the follow is installed");
         let counted = installed.counted();
-        change(installed, &mut |event| changes.send(event));
+        let (mut retired, mut left) = (Vec::new(), Vec::new());
+        change(installed, &mut |event| {
+            match &event {
+                FollowEvent::Retired {
+                    segment, instance, ..
+                } => retired.push((*instance, segment.clone())),
+                FollowEvent::Left { instance, .. } => left.push(*instance),
+                _ => {}
+            }
+            changes.send(event);
+        });
+        // A retiree that left is forgotten by its cell's hub, and no
+        // chooser is shown it again: what it waited for would stay.
+        let gone: Vec<InstanceId> = left
+            .into_iter()
+            .filter(|instance| follow.avoiding.gone(*instance))
+            .collect();
+        unwait(retirements, class, cell, generation, gone);
+        for (instance, segment) in retired {
+            if follow
+                .avoiding
+                .retire(instance, choosers.routing_to(class, &segment))
+            {
+                tell(releases, installed, generation, Told::Avoided(instance));
+            } else {
+                retirements.send_modify(|waiting| {
+                    waiting.insert((class.to_string(), cell.to_string(), generation, instance));
+                });
+            }
+        }
         let (offered, recounted) = (installed.exposes(), installed.counted());
         if follow.offer.set(offered) {
             changes.send(follow.offer.event(class, cell, generation));
@@ -287,6 +335,68 @@ impl Relay {
             shared.settle(class, cell, *generation);
         }
         Ok(())
+    }
+
+    /// `chooser`, in its registration of `epoch`, avoids the retired entry
+    /// instance `avoids` names: once every chooser the retirement waited
+    /// for does, or has left, the cell's hub is told. One the relay does
+    /// not wait for changes nothing. Refused for an instance that chooses
+    /// no cell of the class at this hub.
+    pub(crate) fn avoids(
+        &self,
+        chooser: InstanceId,
+        epoch: RegistrationEpoch,
+        avoids: &Avoids,
+    ) -> Result<(), String> {
+        let mut shared = self.lock();
+        let Avoids {
+            class,
+            cell,
+            generation,
+            instance,
+        } = avoids;
+        if !shared.choosers.chooses(chooser, epoch, class) {
+            return Err(format!(
+                "instance {chooser} is not a member of this hub that chooses cells of class `{class}`"
+            ));
+        }
+        let Shared {
+            follows,
+            closing,
+            releases,
+            retirements,
+            ..
+        } = &mut *shared;
+        let current = follows
+            .get_mut(class)
+            .and_then(|cells| cells.get_mut(cell))
+            .filter(|follow| follow.generation == *generation);
+        let found = match current {
+            Some(Follow {
+                installed: Some(installed),
+                avoiding,
+                ..
+            }) => Some((&*installed, avoiding)),
+            Some(_) => None,
+            None => closing
+                .get_mut(class)
+                .and_then(|cells| cells.get_mut(cell))
+                .and_then(|closing| closing.get_mut(generation))
+                .map(|closing| (&closing.installed, &mut closing.avoiding)),
+        };
+        if let Some((installed, avoiding)) = found
+            && avoiding.avoids(*instance, chooser)
+        {
+            unwait(retirements, class, cell, *generation, [*instance]);
+            tell(releases, installed, *generation, Told::Avoided(*instance));
+        }
+        Ok(())
+    }
+
+    /// The retirements of the followed cells' entry instances the relay
+    /// waits for its choosers to avoid, as it changes.
+    pub(crate) fn retirements(&self) -> watch::Receiver<HashSet<Retirement>> {
+        self.lock().retirements.subscribe()
     }
 
     /// The hub committed a registration of `id` in `segment`, as
@@ -414,8 +524,11 @@ struct Shared {
     health: watch::Sender<CellHealth>,
     /// The members that must acknowledge a follow before it closes.
     choosers: Choosers,
-    /// Where each follow the relay closes is sent, for its cell's hub.
+    /// Where each follow the relay closes, and each retirement its
+    /// choosers avoid, is sent, for its cell's hub.
     releases: mpsc::UnboundedSender<Release>,
+    /// The retirements waited for, for whoever needs to see them.
+    retirements: watch::Sender<HashSet<Retirement>>,
 }
 
 /// Where the relay's changes are sent: to the watches of the whole relay,
@@ -477,6 +590,8 @@ struct Follow {
     generation: u64,
     installed: Option<Installed>,
     offer: Offer,
+    /// The retirements its choosers have yet to avoid.
+    avoiding: Avoiding,
     close: CancellationToken,
 }
 
@@ -485,6 +600,7 @@ struct Follow {
 struct Closing {
     installed: Installed,
     offer: Offer,
+    avoiding: Avoiding,
 }
 
 impl Shared {
@@ -524,6 +640,7 @@ impl Shared {
         let Follow {
             installed,
             mut offer,
+            avoiding,
             ..
         } = cells.remove(cell).expect("the follow was just found");
         let Some(installed) = installed else {
@@ -540,7 +657,14 @@ impl Shared {
             .or_default()
             .entry(cell.to_string())
             .or_default()
-            .insert(generation, Closing { installed, offer });
+            .insert(
+                generation,
+                Closing {
+                    installed,
+                    offer,
+                    avoiding,
+                },
+            );
         self.settle(class, cell, generation);
     }
 
@@ -570,6 +694,13 @@ impl Shared {
             let follow = cells.remove(cell).expect("the follow was just found");
             // Not offered, so not ready, and not counted.
             follow.close.cancel();
+            unwait(
+                &self.retirements,
+                class,
+                cell,
+                generation,
+                follow.avoiding.waiting(),
+            );
             self.changes.send(dropped());
             if let Some(installed) = follow.installed {
                 self.release(&installed, generation);
@@ -592,6 +723,13 @@ impl Shared {
             if generations.is_empty() {
                 cells.remove(cell);
             }
+            unwait(
+                &self.retirements,
+                class,
+                cell,
+                generation,
+                closing.avoiding.waiting(),
+            );
             self.changes.send(dropped());
             self.release(&closing.installed, generation);
         }
@@ -600,12 +738,7 @@ impl Shared {
     /// Tell the hub of `installed`'s cell that its follow `generation`
     /// closed.
     fn release(&self, installed: &Installed, generation: u64) {
-        let _ = self.releases.send(Release {
-            hub: installed.hub.clone(),
-            class: installed.class.clone(),
-            cell: installed.cell.clone(),
-            generation,
-        });
+        tell(&self.releases, installed, generation, Told::Released);
     }
 
     /// The chooser `id` of `classes` no longer counts: settle every follow
@@ -618,19 +751,63 @@ impl Shared {
         }
     }
 
-    /// The chooser `id` of `class` left: forget what it acknowledged of
-    /// every follow of the class that is not offered, and return them, by
-    /// cell and generation, for each to be settled.
+    /// The chooser `id` of `class` left: it avoids every retirement of
+    /// the class's follows that waited for it, so the cells' hubs are told
+    /// of those it was the last for; forget what it acknowledged of every
+    /// follow of the class that is not offered, and return them, by cell
+    /// and generation, for each to be settled.
     fn left(&mut self, class: &str, id: InstanceId) -> Vec<(String, u64)> {
         let mut unoffered = Vec::new();
-        for (cell, follow) in self.follows.get_mut(class).into_iter().flatten() {
-            if follow.installed.is_some() && !follow.offer.offered() {
+        let Self {
+            follows,
+            closing,
+            releases,
+            retirements,
+            ..
+        } = self;
+        for (cell, follow) in follows.get_mut(class).into_iter().flatten() {
+            let Some(installed) = &follow.installed else {
+                continue;
+            };
+            let avoided = follow.avoiding.left(id);
+            unwait(
+                retirements,
+                class,
+                cell,
+                follow.generation,
+                avoided.iter().copied(),
+            );
+            for instance in avoided {
+                tell(
+                    releases,
+                    installed,
+                    follow.generation,
+                    Told::Avoided(instance),
+                );
+            }
+            if !follow.offer.offered() {
                 follow.offer.left(id);
                 unoffered.push((cell.clone(), follow.generation));
             }
         }
-        for (cell, generations) in self.closing.get_mut(class).into_iter().flatten() {
+        for (cell, generations) in closing.get_mut(class).into_iter().flatten() {
             for (generation, closing) in generations {
+                let avoided = closing.avoiding.left(id);
+                unwait(
+                    retirements,
+                    class,
+                    cell,
+                    *generation,
+                    avoided.iter().copied(),
+                );
+                for instance in avoided {
+                    tell(
+                        releases,
+                        &closing.installed,
+                        *generation,
+                        Told::Avoided(instance),
+                    );
+                }
                 closing.offer.left(id);
                 unoffered.push((cell.clone(), *generation));
             }
@@ -704,6 +881,42 @@ impl Shared {
             events.extend(installed.snapshot(follow.generation, offering));
         }
     }
+}
+
+/// Tell the hub of `installed`'s cell `told` of its follow `generation`.
+fn tell(
+    releases: &mpsc::UnboundedSender<Release>,
+    installed: &Installed,
+    generation: u64,
+    told: Told,
+) {
+    let _ = releases.send(Release {
+        hub: installed.hub.clone(),
+        class: installed.class.clone(),
+        cell: installed.cell.clone(),
+        generation,
+        told,
+    });
+}
+
+/// The retirements `instances` of the follow `generation` of the cell
+/// `cell` of `class` are no longer waited for.
+fn unwait(
+    retirements: &watch::Sender<HashSet<Retirement>>,
+    class: &str,
+    cell: &str,
+    generation: u64,
+    instances: impl IntoIterator<Item = InstanceId>,
+) {
+    let mut instances = instances.into_iter().peekable();
+    if instances.peek().is_none() {
+        return;
+    }
+    retirements.send_modify(|waiting| {
+        for instance in instances {
+            waiting.remove(&(class.to_string(), cell.to_string(), generation, instance));
+        }
+    });
 }
 
 /// A watch of what a hub follows, in process: its snapshot, then each

@@ -4,7 +4,11 @@
 //! an entry instance sends its own hub of its admission ([`LoadReport`]),
 //! from which the hub makes the cell's load summary, and the
 //! acknowledgement a chooser sends its own hub once it no longer holds an
-//! offer to a followed cell that is not offered ([`Unoffered`]).
+//! offer to a followed cell that is not offered ([`Unoffered`]). And the
+//! acknowledgements of a followed cell's retired entry instance: the one a
+//! chooser sends its own hub once its tables hold the instance retired
+//! ([`Avoids`]), and the one its hub sends the cell's hub once every
+//! chooser of its cell has ([`Avoided`]).
 //!
 //! The hub (`gdl-hub`) serves them and a segment instance reads the relay
 //! and its own cell's watch, for the cell's drain, and sends the report, so the wire types, the routes, and the client
@@ -76,6 +80,33 @@ pub struct Follower {
     pub generation: u64,
 }
 
+/// The route by which a follower says that its whole cell avoids one of
+/// the followed cell's retired entry instances, under the extension's, on
+/// the cell hub's public listener, beside [`RELEASE_ROUTE`]: `POST` with
+/// an [`Avoided`], answered `204 No Content`. The follower's hub sends it
+/// once every chooser of its cell has acknowledged the retirement or left
+/// ([`AVOIDS_ROUTE`]). The cell's hub counts it only from a watch it
+/// counted among its followers, under the [`Follower`] it names, when the
+/// instance retired; any other changes nothing. Like a release, it is not
+/// authenticated: anything that can reach the cell's hub can end a
+/// retiree's wait early, and a chooser that still picks the retiree once
+/// it has stopped taking work is refused, and offers the request to
+/// another cell.
+pub const AVOIDED_ROUTE: &str = "/avoided";
+
+/// What a follower tells a followed cell's hub once its whole cell avoids
+/// one of the cell's retired entry instances: the watch of the follow, as
+/// [`WATCH_ROUTE`]'s query named it, and the instance. The body of
+/// [`AVOIDED_ROUTE`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Avoided {
+    /// The follow's watch.
+    #[serde(flatten)]
+    pub follower: Follower,
+    /// The retired entry instance.
+    pub instance: InstanceId,
+}
+
 /// The relay's route, under the extension's.
 pub const FOLLOWS_ROUTE: &str = "/follows";
 
@@ -143,6 +174,38 @@ pub const UNOFFERED_ROUTE: &str = "/instances/{instance_id}/unoffered";
 /// [`UNOFFERED_ROUTE`]'s path for `instance`.
 pub fn unoffered_path(instance: InstanceId) -> String {
     format!("/instances/{instance}/unoffered")
+}
+
+/// The route by which a chooser tells its own hub that it avoids a
+/// followed cell's retired entry instance, under the extension's, on the
+/// hub's control listener: `POST` with an [`Avoids`], carrying the
+/// credential of the instance the path names, which must be a member of
+/// the hub whose segment chooses cells of the class it names, and that has
+/// said it runs a follower ([`CHOOSER_ROUTE`]). Answered `204 No Content`
+/// once the hub has taken it, whether or not the hub still waits for it;
+/// one it does not wait for counts for nothing.
+pub const AVOIDS_ROUTE: &str = "/instances/{instance_id}/avoids";
+
+/// [`AVOIDS_ROUTE`]'s path for `instance`.
+pub fn avoids_path(instance: InstanceId) -> String {
+    format!("/instances/{instance}/avoids")
+}
+
+/// What a chooser tells its own hub once its tables hold a followed
+/// cell's entry instance as retired, so that it never picks it again: the
+/// follow, by the cell's class and name and its generation, and the
+/// instance. It promises nothing about the hand-offs it sent the instance
+/// before: the instance's setup timeout covers those.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Avoids {
+    /// The cell's class.
+    pub class: String,
+    /// The cell, named within its class.
+    pub cell: String,
+    /// The follow's generation.
+    pub generation: u64,
+    /// The retired entry instance.
+    pub instance: InstanceId,
 }
 
 /// What a chooser tells its own hub once it has applied a change of a
@@ -266,12 +329,31 @@ pub enum CellWatchEvent {
         /// Who it is and where it is reached, as the hub's members name it.
         peer: PeerInfo,
     },
-    /// An entry instance retired: no new work may be sent to it.
+    /// An entry instance retired: no new work may be sent to it. Sent
+    /// again, with `acknowledged`, once every cell that followed this one
+    /// when it retired avoids it.
     Retired {
         /// Its segment.
         segment: String,
         /// The instance.
         instance: InstanceId,
+        /// Every cell that followed this one when the instance retired has
+        /// acknowledged the retirement ([`AVOIDED_ROUTE`]), or let go of
+        /// the cell ([`RELEASE_ROUTE`]): none of its choosers picks the
+        /// instance again. With no such cell, the first `retired` says so.
+        /// Sent once, and in every snapshot after it. A cell that starts to
+        /// follow this one later is shown the instance retired, and never
+        /// offers to it, so it is not waited for.
+        ///
+        /// A field of a known event, not a kind of its own, so that a
+        /// reader that does not know it ignores it: it is for the retired
+        /// instance, whose stop waits for it, and says nothing a follower
+        /// needs, which a kind it did not know would have made it fail
+        /// closed for, reading the cell again at every retirement. A
+        /// follower that reads the event again finds the instance retired
+        /// already, and changes nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        acknowledged: bool,
     },
     /// An entry instance that a `ready` or `retired` event named left the
     /// hub.

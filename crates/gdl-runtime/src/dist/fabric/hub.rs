@@ -1126,5 +1126,5 @@ mod chooser;
 mod drains;
 mod load;
 
-pub(crate) use cell::CellDrain;
+pub(crate) use cell::{CellDrain, Parent};
 pub(crate) use chooser::ChooserHub;

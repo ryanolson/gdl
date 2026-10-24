@@ -51,11 +51,13 @@ use crate::dist::roster::Live;
 pub(super) type Key = (String, String);
 
 mod ack;
+mod avoid;
 mod own;
 
 use ack::Ack;
 #[cfg(test)]
 pub(super) use ack::{ACK_POLL, ACK_RETRY, SCANNED};
+use avoid::Avoiding;
 pub(super) use own::Asked;
 use own::Own;
 
@@ -92,6 +94,8 @@ pub(crate) struct Follows<R> {
     /// When the follower looks again for a follow to acknowledge, while it
     /// has one.
     poll: Option<Instant>,
+    /// The retirements to acknowledge.
+    avoiding: Avoiding,
     /// The cells read from a watch of their own since an event of a kind
     /// this build does not know named them: what the relay's watch sends
     /// of them is not applied, since that watch and a cell's own are not
@@ -125,6 +129,7 @@ impl<R: Registry> Follows<R> {
             forget: VecDeque::new(),
             due: HashMap::new(),
             poll: None,
+            avoiding: Avoiding::default(),
             own: HashMap::new(),
             asked: Vec::new(),
             watches: 0,
@@ -164,6 +169,14 @@ impl<R: Registry> Follows<R> {
     /// that is not is shown so before it refuses them, so that an offer
     /// refused a lease finds the table that no longer offers it.
     pub(crate) fn apply(&mut self, event: FollowEvent, now: Instant) {
+        let retired = match &event {
+            FollowEvent::Retired {
+                generation,
+                instance,
+                ..
+            } => Some((*generation, *instance)),
+            _ => None,
+        };
         let (key, change) = match self.followed.apply(&self.wanted, event, now) {
             Some(changed) => changed,
             None => return,
@@ -213,6 +226,9 @@ impl<R: Registry> Follows<R> {
             Change::Released(id) => self.unhold(id, now),
         }
         self.publish(&key);
+        if let Some((generation, instance)) = retired {
+            self.avoid(&key, generation, instance, now);
+        }
     }
 
     /// A watch's snapshot is complete: it replaces everything this
@@ -313,6 +329,7 @@ impl<R: Registry> Follows<R> {
             self.poll = Some(now);
         }
         self.cells.changed();
+        self.avoid_retired(None, now);
     }
 
     /// When the next unregistration falls due, if one does.

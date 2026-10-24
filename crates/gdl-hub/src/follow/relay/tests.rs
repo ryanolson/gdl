@@ -91,6 +91,7 @@ fn a_retired_instance_is_never_exposed() {
         CellWatchEvent::Retired {
             segment: "f".into(),
             instance: id,
+            acknowledged: false,
         },
     );
     assert_eq!(retired.len(), 1);
@@ -105,6 +106,26 @@ fn a_retired_instance_is_never_exposed() {
             state: CellState::Ready,
         }]
     );
+}
+
+/// A retirement sent again, acknowledged, finds the instance retired
+/// already: the relay's watchers are sent nothing, and the cell stays as
+/// it was, exposing its other instances, not withheld.
+#[test]
+fn an_acknowledged_retirement_changes_nothing_for_a_follower() {
+    let mut cell = installed(CellState::Ready);
+    let (retiree, staying) = (peer(), peer());
+    assert_eq!(sent(&mut cell, ready(&staying)), [exposed(&staying)]);
+    let retired = |acknowledged| CellWatchEvent::Retired {
+        segment: "f".into(),
+        instance: retiree.instance_id(),
+        acknowledged,
+    };
+    assert_eq!(sent(&mut cell, retired(false)).len(), 1);
+    assert_eq!(sent(&mut cell, retired(true)), []);
+    assert!(cell.exposes() && !cell.withheld);
+    let shown = cell.snapshot(1, None);
+    assert!(shown.contains(&exposed(&staying)), "{shown:?}");
 }
 
 /// A state that exposes nothing sends the state alone; one that exposes
@@ -150,7 +171,11 @@ fn a_state_hides_and_exposes_the_ready_instances() {
 /// A relay with one chooser of `model_x` among its hub's members, which
 /// never acknowledges: no follow closes.
 fn held() -> Relay {
-    let choosers = super::Choosers::new([("a".to_string(), vec!["model_x".to_string()])]);
+    let choosers = super::Choosers::new([(
+        "a".to_string(),
+        vec!["model_x".to_string()],
+        vec!["f".to_string()],
+    )]);
     let relay = Relay::new(
         16,
         tokio::sync::watch::Sender::new(health()),
@@ -253,7 +278,11 @@ fn only_the_current_generation_writes() {
 /// is not offered: no one can hold an offer to it.
 #[test]
 fn with_no_chooser_a_follow_closes_as_it_is_not_offered() {
-    let choosers = super::Choosers::new([("a".to_string(), vec!["model_x".to_string()])]);
+    let choosers = super::Choosers::new([(
+        "a".to_string(),
+        vec!["model_x".to_string()],
+        vec!["f".to_string()],
+    )]);
     let relay = Relay::new(
         16,
         tokio::sync::watch::Sender::new(health()),

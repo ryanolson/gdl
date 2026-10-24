@@ -135,7 +135,11 @@ impl Installed {
         for (instance, segment) in fresh.retired {
             self.apply(
                 generation,
-                CellWatchEvent::Retired { segment, instance },
+                CellWatchEvent::Retired {
+                    segment,
+                    instance,
+                    acknowledged: false,
+                },
                 &mut send,
             );
         }
@@ -232,7 +236,11 @@ impl Installed {
                     });
                 }
             }
-            CellWatchEvent::Retired { segment, instance } => {
+            // Sent again once the retirement is acknowledged, which is for
+            // the retiree and changes nothing here.
+            CellWatchEvent::Retired {
+                segment, instance, ..
+            } => {
                 self.ready.remove(&instance);
                 self.sent.remove(&instance);
                 if self.retired.insert(instance, segment.clone()).is_none() {

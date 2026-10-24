@@ -108,6 +108,8 @@ impl Offer {
 pub(crate) struct Choosers {
     /// For each segment that chooses, the classes it chooses cells of.
     segments: HashMap<String, Arc<[String]>>,
+    /// For each segment that chooses, the entry segments its hops enter.
+    entries: HashMap<String, Arc<[String]>>,
     members: HashMap<InstanceId, Chooser>,
     /// How many members choose cells of each class.
     counts: HashMap<String, usize>,
@@ -118,21 +120,24 @@ struct Chooser {
     incarnation: Incarnation,
     epoch: RegistrationEpoch,
     classes: Arc<[String]>,
+    entries: Arc<[String]>,
     /// Whether it said that it runs a follower, in this registration.
     declared: bool,
 }
 
 impl Choosers {
     /// The choosers of the segments `segments` names, each with the
-    /// classes it chooses cells of.
-    pub(crate) fn new(segments: impl IntoIterator<Item = (String, Vec<String>)>) -> Self {
-        Self {
-            segments: segments
-                .into_iter()
-                .map(|(segment, classes)| (segment, classes.into()))
-                .collect(),
-            ..Self::default()
+    /// classes it chooses cells of and the entry segments of those classes
+    /// its hops enter.
+    pub(crate) fn new(
+        segments: impl IntoIterator<Item = (String, Vec<String>, Vec<String>)>,
+    ) -> Self {
+        let mut choosers = Self::default();
+        for (segment, classes, entries) in segments {
+            choosers.segments.insert(segment.clone(), classes.into());
+            choosers.entries.insert(segment, entries.into());
         }
+        choosers
     }
 
     /// The hub committed a registration of `id` in `segment`: the
@@ -146,12 +151,14 @@ impl Choosers {
         epoch: RegistrationEpoch,
     ) -> Option<Arc<[String]>> {
         let classes = self.segments.get(segment)?;
+        let entries = self.entries.get(segment).cloned().unwrap_or_default();
         let renewed = self.members.insert(
             id,
             Chooser {
                 incarnation,
                 epoch,
                 classes: Arc::clone(classes),
+                entries,
                 declared: false,
             },
         );
@@ -227,6 +234,22 @@ impl Choosers {
         })
     }
 
+    /// The members, among those that said they run a follower, that choose
+    /// cells of `class` and route to their entry segment `segment`: what a
+    /// retirement of an instance of the segment waits for. Costs one look
+    /// per chooser of the hub.
+    pub(super) fn routing_to(&self, class: &str, segment: &str) -> HashSet<InstanceId> {
+        self.members
+            .iter()
+            .filter(|(_, chooser)| {
+                chooser.declared
+                    && chooser.classes.iter().any(|of| of == class)
+                    && chooser.entries.iter().any(|entry| entry == segment)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// How many members choose cells of `class`.
     pub(super) fn count(&self, class: &str) -> usize {
         self.counts.get(class).copied().unwrap_or(0)
@@ -280,7 +303,11 @@ mod tests {
     /// incarnation is removed; a member of another segment never counts.
     #[test]
     fn the_choosers_of_a_class_are_the_members_of_its_segments() {
-        let mut choosers = Choosers::new([("a".to_string(), vec!["model_x".to_string()])]);
+        let mut choosers = Choosers::new([(
+            "a".to_string(),
+            vec!["model_x".to_string()],
+            vec!["f".to_string()],
+        )]);
         let (id, other) = (InstanceId::new_v4(), InstanceId::new_v4());
         let epoch = RegistrationEpoch::new();
         let (first, second) = (Incarnation::from_u64(1), Incarnation::from_u64(2));
@@ -298,6 +325,11 @@ mod tests {
         );
         assert!(choosers.declare(id, epoch));
         assert!(choosers.declare(id, epoch), "twice");
+        assert_eq!(choosers.routing_to("model_x", "f"), [id].into());
+        assert!(
+            choosers.routing_to("model_x", "d").is_empty(),
+            "no hop enters d"
+        );
         choosers.joined("a", id, second, epoch);
         assert_eq!(choosers.count("model_x"), 1);
         assert!(choosers.chooses(id, epoch, "model_x"));
