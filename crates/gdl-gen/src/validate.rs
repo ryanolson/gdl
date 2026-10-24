@@ -32,14 +32,16 @@ pub(crate) fn library_clashes(contract: &str, crates: &[spec::ListedCrate]) -> V
         .collect()
 }
 
-/// Check the placement and the bindings against the manifest, reporting
-/// every problem found.
-pub(crate) fn validate(
+/// The checks of `spec` that need none of its bindings: its placement
+/// against the graph, each with the table and key it is about, the
+/// pipeline names, and the deployment's segment names. They are made with
+/// the bindings, and without them when the bindings cannot be read, so
+/// that a node crate that does not read hides none of them.
+pub(crate) fn unbound(
     spec: &Spec,
-    contract: &spec::Contract,
     manifest: &gdl_model::Manifest,
-) -> Result<gdl_model::Layout, Error> {
-    let mut problems = spec.problems.clone();
+) -> (Option<gdl_model::Layout>, Vec<gdl_model::Problem>) {
+    let mut problems = Vec::new();
     let mut labels = BTreeSet::new();
     for (root, name) in &spec.pipeline_names {
         if manifest
@@ -67,6 +69,26 @@ pub(crate) fn validate(
             ));
         }
     }
+    let (layout, placed) = match gdl_model::layout(manifest, &spec.placement) {
+        Ok(layout) => (Some(layout), Vec::new()),
+        Err(errors) => (None, gdl_model::Problems::from(errors).0),
+    };
+    let found = placed
+        .into_iter()
+        .chain(problems.into_iter().map(Into::into))
+        .collect();
+    (layout, found)
+}
+
+/// Check the placement and the bindings against the manifest, reporting
+/// every problem found.
+pub(crate) fn validate(
+    spec: &Spec,
+    contract: &spec::Contract,
+    manifest: &gdl_model::Manifest,
+) -> Result<gdl_model::Layout, Error> {
+    let mut problems = spec.problems.clone();
+    let (layout, placed) = unbound(spec, manifest);
     let entry_nodes = spec.service.as_ref().map(|s| s.nodes()).unwrap_or_default();
     let entry_names: BTreeSet<_> = entry_nodes.iter().map(|n| n.name.as_str()).collect();
     let bindings: BTreeMap<_, _> = spec
@@ -110,11 +132,6 @@ pub(crate) fn validate(
         } else {
             format!("[bind.{node}]")
         }
-    };
-    // Each with the table and key of the placement it is about.
-    let (layout, placed) = match gdl_model::layout(manifest, &spec.placement) {
-        Ok(layout) => (Some(layout), gdl_model::Problems::default()),
-        Err(errors) => (None, gdl_model::Problems::from(errors)),
     };
     if !manifest
         .name
@@ -328,11 +345,10 @@ pub(crate) fn validate(
             ));
         }
     }
-    match (layout, problems.is_empty()) {
+    match (layout, placed.is_empty() && problems.is_empty()) {
         (Some(layout), true) => Ok(layout),
         _ => Err(Error::all(
             placed
-                .0
                 .into_iter()
                 .chain(problems.into_iter().map(Into::into)),
         )),

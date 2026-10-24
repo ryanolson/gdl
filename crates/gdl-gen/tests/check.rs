@@ -293,3 +293,45 @@ fn a_fleet_without_a_layout_still_has_its_counts_checked() {
         ],
     );
 }
+
+/// A node crate whose source does not read is one problem among the
+/// others: the placement and the pipeline names are still checked.
+#[test]
+fn a_node_crate_that_does_not_read_hides_no_other_problem() {
+    let chat = root().join("examples/chat");
+    let engine = format!("{:?}", chat.join("engine-mock").display().to_string());
+    let files = Files::new("", FLEET);
+    let broken = files.dir.path().join("broken-nodes");
+    std::fs::create_dir_all(broken.join("src")).expect("a crate");
+    std::fs::write(
+        broken.join("Cargo.toml"),
+        "[package]\nname = \"broken-nodes\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("a manifest");
+    std::fs::write(broken.join("src/lib.rs"), "pub fn (\n").expect("a source");
+    let spec = spec("[pipeline_names]\nGhost = \"ghost\"\n")
+        .replacen(
+            &engine,
+            &format!("{engine}, {:?}", broken.display().to_string()),
+            1,
+        )
+        .replacen("\"Engine\"]", "\"Engine\", \"Ghost\"]", 1);
+    std::fs::write(files.spec(), &spec).expect("the spec");
+    let s = files.spec().display().to_string();
+    let found = problems(&files.check());
+    assert!(
+        found.iter().any(|line| line.contains("broken-nodes")),
+        "the node crate's problem in:\n{}",
+        found.join("\n")
+    );
+    for expected in [
+        format!("{s}: [segment.engine] nodes: segment `engine` lists unknown node `Ghost`"),
+        format!("{s}: [pipeline_names] Ghost: the graph has no source `Ghost`"),
+    ] {
+        assert!(
+            found.iter().any(|line| line.starts_with(&expected)),
+            "{expected}\nin:\n{}",
+            found.join("\n")
+        );
+    }
+}

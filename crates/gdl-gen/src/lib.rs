@@ -248,7 +248,14 @@ pub(crate) fn checked(
             None => error,
         };
         let prepared = prepared.map_err(with)?;
-        let spec = bound(spec, &prepared, target, from).map_err(with)?;
+        let spec = match bound(spec, &prepared, target, from) {
+            Ok(spec) => spec,
+            // What needs no binding is still checked.
+            Err(error) => {
+                let (_, found) = validate::unbound(spec, &prepared.manifest);
+                return Err(with(Error::all(error.0.into_iter().chain(found))));
+            }
+        };
         let layout = validate(&spec, &prepared.contract, &prepared.manifest).map_err(with)?;
         if let Some(runtime) = runtime {
             return Err(runtime);
