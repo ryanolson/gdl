@@ -20,6 +20,8 @@ mod follow;
 mod lease;
 mod offer;
 mod policy;
+#[cfg(test)]
+pub(crate) mod served;
 mod task;
 #[cfg(test)]
 mod tests;

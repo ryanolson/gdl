@@ -1,5 +1,5 @@
 //! The limits a watch's reader keeps: on one event's bytes, however many
-//! chunks they come in.
+//! chunks they come in, and on its snapshot's bytes and time.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,7 +15,10 @@ use crate::{CellWatchEvent, UnknownEvent, WatchFailure, WatchItem, WatchLimits, 
 const LIMIT: usize = 1024;
 
 fn limits() -> WatchLimits {
-    WatchLimits { event: LIMIT }
+    WatchLimits {
+        event: LIMIT,
+        ..WatchLimits::default()
+    }
 }
 
 /// A `left` event whose bytes, as sent, are `len` long.
@@ -59,8 +62,12 @@ fn bytes_past_the_limit_without_an_end_end_the_watch() {
     let bytes = futures::stream::iter(chunks).inspect(move |_| {
         counted.fetch_add(1, Ordering::Relaxed);
     });
-    let items: Vec<WatchItem<CellWatchEvent, UnknownEvent>> =
-        runtime().block_on(events(bytes, Arc::default(), limits()).collect());
+    let items: Vec<WatchItem<CellWatchEvent, UnknownEvent>> = runtime().block_on(async {
+        let synced_by = tokio::time::Instant::now() + WatchLimits::SYNCED_WITHIN;
+        events(bytes, Arc::default(), limits(), synced_by)
+            .collect()
+            .await
+    });
     assert_eq!(
         items,
         [Err(WatchFailure::EventTooLarge { limit: LIMIT })],

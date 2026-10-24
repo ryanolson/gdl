@@ -26,7 +26,7 @@ use crate::dist::roster::Live;
 
 /// How long to wait before watching the relay again after a watch ended
 /// or could not begin, as the membership follower waits.
-const REWATCH: Duration = Duration::from_millis(100);
+pub(super) const REWATCH: Duration = Duration::from_millis(100);
 
 /// Start following the cells of the classes `segment` sends to, for an
 /// instance in a cell of `region` at the hub `host`, whose public
@@ -168,7 +168,7 @@ impl Source for Hub {
 /// The items of `events`, a watch of the relay, until it ends: one that
 /// fails ends there, and says why, since its reader handles every end
 /// alike, from a snapshot again.
-fn relayed(
+pub(super) fn relayed(
     events: WatchStream<FollowEvent, UnknownFollowEvent>,
     watch: &'static str,
 ) -> BoxStream<'static, Relayed> {

@@ -74,17 +74,21 @@ impl CellWatcher {
     }
 
     /// Watch the cell whose hub is at `hub`, `host:port` as the cell's
-    /// record names it. The events end when the hub ends the watch (it
-    /// stopped, this watcher fell behind, or the cell's drain ended), and
-    /// with a [`WatchFailure`] when the connection fails or goes idle, at
-    /// an event that is not JSON or is of a known kind whose fields do not
-    /// parse, or at one past the limits; a follower then watches again
-    /// from a snapshot. An event of a kind this build does
+    /// record names it. The events end, with no more items, when the hub
+    /// ends the watch (it stopped, this watcher fell behind, or the cell's
+    /// drain ended), and with a [`WatchFailure`] as the last item when the
+    /// connection fails or goes idle, at an event that is not JSON or is
+    /// of a known kind whose fields do not parse, at an event past the
+    /// limit, or when the snapshot is past its limit or not complete
+    /// within its bound of when the watch was asked for ([`WatchLimits`]);
+    /// a follower then watches again from a snapshot, and applies nothing
+    /// of one that did not complete. An event of a kind this build does
     /// not know is read as [`Watched::Unknown`], and the watch goes on: it
     /// concerns the watched cell, which the reader fails closed for until
     /// it has read the cell again. A hub that has not yet published its
     /// cell's record holds the watch until it has, since the epoch it
-    /// would send is not settled before, and refuses it after 5 s.
+    /// would send is not settled before, and refuses it after 5 s; a peer
+    /// that does not answer within the snapshot's bound is refused too.
     pub async fn watch(
         &self,
         hub: &str,
@@ -105,8 +109,9 @@ impl CellWatcher {
 
     /// Watch what the hub at `hub`, `host:port`, follows: its relay, each
     /// [`FollowEvent`] as it is sent. The events end as a cell's watch's
-    /// do, and also with [`WatchFailure::Unparsed`] at an event of a kind
-    /// this build does not know that names no follow; one that names its follow is read as
+    /// do, its snapshot within the same bounds, and also with
+    /// [`WatchFailure::Unparsed`] at an event of a kind this build does
+    /// not know that names no follow; one that names its follow is read as
     /// [`Watched::Unknown`], for the reader to fail closed for that cell
     /// alone until it has read it again ([`CellWatcher::follows_of`]). A
     /// consumer whose watch ended watches again from a snapshot.
@@ -176,23 +181,38 @@ impl CellWatcher {
         follower: Option<&Follower>,
     ) -> Result<WatchStream<T, T::Unknown>, CellWatchError> {
         gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
+        // The snapshot's bound runs from here, so that a peer that answers
+        // slowly, or never, is bounded as one that sends slowly is.
+        let synced_by = tokio::time::Instant::now() + self.limits.synced_within;
         let url = format!("http://{hub}/v1/ext/{EXTENSION}{route}");
         let mut request = self.http.get(&url);
         if let Some(follower) = follower {
             request = request.query(follower);
         }
-        let mut response = request
-            .send()
+        let late = || {
+            CellWatchError(format!(
+                "GET {url}: {}",
+                WatchFailure::SnapshotLate {
+                    within: self.limits.synced_within
+                }
+            ))
+        };
+        let mut response = tokio::time::timeout_at(synced_by, request.send())
             .await
+            .map_err(|_| late())?
             .map_err(|e| CellWatchError(format!("GET {url}: {e}")))?;
         let status = response.status();
         if !status.is_success() {
             let mut body = Vec::new();
-            while body.len() < REFUSAL
-                && let Ok(Some(chunk)) = response.chunk().await
-            {
-                body.extend_from_slice(&chunk);
-            }
+            let read = async {
+                while body.len() < REFUSAL
+                    && let Ok(Some(chunk)) = response.chunk().await
+                {
+                    body.extend_from_slice(&chunk);
+                }
+            };
+            // A refusal's body is only for its error: what came in time.
+            let _ = tokio::time::timeout_at(synced_by, read).await;
             body.truncate(REFUSAL);
             return Err(CellWatchError(format!(
                 "GET {url}: {status}: {}",
@@ -203,6 +223,7 @@ impl CellWatcher {
             response.bytes_stream(),
             Arc::clone(&self.unknown),
             self.limits,
+            synced_by,
         )
         .boxed())
     }
@@ -244,6 +265,7 @@ fn events<T, S, B, E>(
     bytes: S,
     unknown: Arc<AtomicU64>,
     limits: WatchLimits,
+    synced_by: tokio::time::Instant,
 ) -> impl Stream<Item = WatchItem<T, T::Unknown>> + Send + 'static
 where
     T: Classify,
@@ -257,6 +279,10 @@ where
         start: 0,
         scanned: 0,
         limits,
+        snapshot: Some(Snapshot {
+            by: Box::pin(tokio::time::sleep_until(synced_by)),
+            bytes: 0,
+        }),
         unknown,
         ended: false,
         _items: std::marker::PhantomData::<fn() -> T>,
@@ -277,10 +303,19 @@ struct Reader<T, S> {
     start: usize,
     scanned: usize,
     limits: WatchLimits,
+    /// The snapshot, until its `synced` is read.
+    snapshot: Option<Snapshot>,
     unknown: Arc<AtomicU64>,
     /// Whether the watch has ended: after a failure, nothing more is read.
     ended: bool,
     _items: std::marker::PhantomData<fn() -> T>,
+}
+
+/// A snapshot being read: when it must be complete, one timer for the
+/// watch, and its bytes so far.
+struct Snapshot {
+    by: std::pin::Pin<Box<tokio::time::Sleep>>,
+    bytes: usize,
 }
 
 impl<T, S, B, E> Reader<T, S>
@@ -302,16 +337,29 @@ where
     async fn read(&mut self) -> Option<WatchItem<T, T::Unknown>> {
         loop {
             while let Some(end) = self.event_end() {
-                if end - self.start > self.limits.event {
+                let len = end - self.start;
+                if len > self.limits.event {
                     return Some(Err(self.too_large()));
+                }
+                if let Some(snapshot) = &mut self.snapshot {
+                    snapshot.bytes += len;
+                    if snapshot.bytes > self.limits.snapshot {
+                        return Some(Err(WatchFailure::SnapshotTooLarge {
+                            limit: self.limits.snapshot,
+                        }));
+                    }
                 }
                 let raw = &self.buffer[self.start..end];
                 self.start = end;
                 self.scanned = end;
                 match parse::<T>(raw) {
                     Ok(Some(item)) => {
-                        if matches!(item, Watched::Unknown(_)) {
-                            self.unknown.fetch_add(1, Ordering::Relaxed);
+                        match &item {
+                            Watched::Event(event) if event.synced() => self.snapshot = None,
+                            Watched::Event(_) => {}
+                            Watched::Unknown(_) => {
+                                self.unknown.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                         return Some(Ok(item));
                     }
@@ -330,7 +378,23 @@ where
             self.buffer.drain(..self.start);
             self.scanned -= self.start;
             self.start = 0;
-            match self.bytes.next().await {
+            // Until the snapshot is complete, its bound is kept whatever
+            // bytes come: a keep-alive resets only the idle timeout. Events
+            // already buffered are read first, as many as the snapshot's
+            // limit allows.
+            let next = match &mut self.snapshot {
+                Some(snapshot) => tokio::select! {
+                    biased;
+                    () = &mut snapshot.by => {
+                        return Some(Err(WatchFailure::SnapshotLate {
+                            within: self.limits.synced_within,
+                        }));
+                    }
+                    next = self.bytes.next() => next,
+                },
+                None => self.bytes.next().await,
+            };
+            match next {
                 Some(Ok(chunk)) => self.buffer.extend_from_slice(chunk.as_ref()),
                 Some(Err(error)) => return Some(Err(WatchFailure::Connection(error.to_string()))),
                 None => return None,
@@ -396,6 +460,9 @@ fn parse<T: Classify>(raw: &[u8]) -> Result<Option<Watched<T, T::Unknown>>, ()> 
 mod bounds;
 
 #[cfg(test)]
+mod snapshot;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -434,10 +501,17 @@ mod tests {
         limits: WatchLimits,
     ) -> Read<T> {
         let unknown = Arc::new(AtomicU64::new(0));
-        let items: Vec<WatchItem<T, T::Unknown>> = runtime().block_on(
-            events::<T, _, _, _>(futures::stream::iter(chunks), Arc::clone(&unknown), limits)
-                .collect(),
-        );
+        let items: Vec<WatchItem<T, T::Unknown>> = runtime().block_on(async {
+            let synced_by = tokio::time::Instant::now() + limits.synced_within;
+            events::<T, _, _, _>(
+                futures::stream::iter(chunks),
+                Arc::clone(&unknown),
+                limits,
+                synced_by,
+            )
+            .collect()
+            .await
+        });
         let mut events = Vec::new();
         let mut failed = None;
         for item in items {

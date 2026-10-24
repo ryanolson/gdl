@@ -523,9 +523,8 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         } else {
             match self.watcher.get() {
                 Some(watcher) => Ok(watcher.clone()),
-                None => {
-                    CellWatcher::new().map(|watcher| self.watcher.get_or_init(|| watcher).clone())
-                }
+                None => CellWatcher::with_limits(self.timing.watch)
+                    .map(|watcher| self.watcher.get_or_init(|| watcher).clone()),
             }
             .map(|watcher| {
                 let me = gdl_watch::Follower {
@@ -853,6 +852,8 @@ pub struct CellTiming {
     /// How long after a follow's link ends the hub waits before it may
     /// follow the cell again.
     pub refollow: Duration,
+    /// What a followed cell's watch may cost before its link ends it.
+    pub watch: gdl_watch::WatchLimits,
 }
 
 impl Default for CellTiming {
@@ -863,6 +864,7 @@ impl Default for CellTiming {
             lease: CellRecord::DEFAULT_LEASE,
             watch_buffer: 1024,
             refollow: Duration::from_millis(250),
+            watch: gdl_watch::WatchLimits::default(),
         }
     }
 }

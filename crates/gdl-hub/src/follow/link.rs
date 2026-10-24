@@ -52,7 +52,9 @@ type Events = WatchStream<CellWatchEvent, UnknownEvent>;
 /// snapshot and the events after it are ordered by the cell's hub, so
 /// nothing sent before the snapshot is applied over it, and nothing after
 /// it is lost. A watch that does not begin or ends before its snapshot is
-/// complete ends the follow, as any watch that ends or fails does; one whose
+/// complete, as one does whose snapshot passes its watcher's bounds, ends
+/// the follow, with nothing of it installed, as any watch that ends or
+/// fails does; one whose
 /// snapshot has an event of a kind this build does not know leaves the
 /// cell withheld, and the cell is read again after `retry`.
 async fn follow(

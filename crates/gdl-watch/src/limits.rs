@@ -1,6 +1,8 @@
 //! What a watch may cost its reader, and why a watch that began ended
 //! other than cleanly.
 
+use std::time::Duration;
+
 /// What one watch may cost its reader before the client ends it, so that
 /// a peer that misbehaves, by a defect or because anything can answer on
 /// a hub's address, cannot hold a reader's memory without bound.
@@ -9,6 +11,12 @@ pub struct WatchLimits {
     /// The most bytes of one event, from its first byte to the end of its
     /// blank line, counted across the chunks it arrives in.
     pub event: usize,
+    /// The most bytes of a watch's snapshot, from its first byte to the
+    /// end of its `synced`.
+    pub snapshot: usize,
+    /// How long from when a watch is asked for its snapshot may take to
+    /// complete, its `synced` read, whatever bytes come meanwhile.
+    pub synced_within: Duration,
 }
 
 impl WatchLimits {
@@ -30,11 +38,40 @@ impl WatchLimits {
     /// on the relay. So 4 MiB refuses nothing a hub sends, with room for a
     /// larger address, and holds a watch's buffer to 4 MiB and one chunk.
     pub const EVENT: usize = 4 << 20;
+
+    /// The default limit on a snapshot's bytes: 64 MiB.
+    ///
+    /// A snapshot holds an event for each instance it shows, and a few for
+    /// each cell: a cell's watch its entry instances, the relay every
+    /// entry instance of every cell its hub follows. An instance's event
+    /// is about 1 KiB with one TCP transport: a real hub's snapshot of a
+    /// cell of 64 entry instances is 64,468 bytes, and its follower's
+    /// relay of it 68,644. So 64 MiB holds a snapshot of some 60,000
+    /// instances, more entry instances than one hub follows, and bounds
+    /// what a reader holds of a snapshot that is not complete.
+    pub const SNAPSHOT: usize = 64 << 20;
+
+    /// The default bound on a snapshot's time: 30 s from when the watch
+    /// is asked for.
+    ///
+    /// It covers the connection (at most 5 s), a cell's hub's wait for its
+    /// first record before it answers a watch (at most 5 s), and the
+    /// snapshot itself, which a hub sends from what it holds in memory: a
+    /// real hub's snapshot of a cell of 64 entry instances completes in 8
+    /// ms over loopback, and its follower's relay of it in 14 ms, and the
+    /// 20 s left carry a snapshot at the limit at 3.2 MB/s. It is also the idle timeout, so a hub that
+    /// stalls is told the same way before and after its snapshot. A watch
+    /// whose snapshot is complete is never ended by it.
+    pub const SYNCED_WITHIN: Duration = Duration::from_secs(30);
 }
 
 impl Default for WatchLimits {
     fn default() -> Self {
-        Self { event: Self::EVENT }
+        Self {
+            event: Self::EVENT,
+            snapshot: Self::SNAPSHOT,
+            synced_within: Self::SYNCED_WITHIN,
+        }
     }
 }
 
@@ -57,6 +94,17 @@ pub enum WatchFailure {
         /// The limit, in bytes.
         limit: usize,
     },
+    /// A snapshot longer than the limit ([`WatchLimits::snapshot`]).
+    SnapshotTooLarge {
+        /// The limit, in bytes.
+        limit: usize,
+    },
+    /// A snapshot not complete within the bound
+    /// ([`WatchLimits::synced_within`]) of when the watch was asked for.
+    SnapshotLate {
+        /// The bound.
+        within: Duration,
+    },
 }
 
 impl std::fmt::Display for WatchFailure {
@@ -67,6 +115,14 @@ impl std::fmt::Display for WatchFailure {
             Self::EventTooLarge { limit } => {
                 write!(f, "the watch sent an event longer than {limit} bytes")
             }
+            Self::SnapshotTooLarge { limit } => {
+                write!(f, "the watch sent a snapshot longer than {limit} bytes")
+            }
+            Self::SnapshotLate { within } => write!(
+                f,
+                "the watch's snapshot was not complete within {} ms",
+                within.as_millis()
+            ),
         }
     }
 }
