@@ -424,3 +424,21 @@ fn a_fleet_is_checked_against_each_cells_layout() {
         found.join("\n")
     );
 }
+
+/// `diagram` locates a layout's problems as `check` does: in the layout's
+/// tables.
+#[test]
+fn diagram_locates_a_layouts_problems() {
+    let unplaced = SEGMENTS.replace("\"Engine\", \"Spare\"", "\"Engine\"");
+    let dir = Dir::new(&(header() + &nest("regional", &format!("{unplaced}{THREE}"))));
+    let output = dir.run("diagram", &["--format".as_ref(), "mermaid".as_ref()]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let s = dir.spec().display().to_string();
+    assert!(
+        stderr.contains(&format!(
+            "{s}: [layout.regional.segment]: node `Spare` is in no segment"
+        )),
+        "{stderr}"
+    );
+}

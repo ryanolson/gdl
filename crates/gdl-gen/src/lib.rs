@@ -324,8 +324,8 @@ pub enum Format {
 pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
     let laid = spec.only_layout("`diagram`")?;
     let manifest = prepare(spec, None, target, emit::Deps::Relative, Offers::Read)?.manifest;
-    let layout =
-        gdl_model::layout(&manifest, laid.placement).map_err(|e| Error::new(e.to_string()))?;
+    let layout = gdl_model::layout(&manifest, laid.placement)
+        .map_err(|errors| Error::all(laid.problems(&errors)))?;
     match format {
         Format::Dot => manifest.to_dot(Some(&layout)),
         Format::Mermaid => manifest.to_mermaid(Some(&layout)),
