@@ -21,8 +21,8 @@ use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
+use futures::Stream;
 use futures::stream::BoxStream;
-use futures::{Stream, StreamExt};
 use gdl_cells::{CellState, LoadSummary};
 use tokio::sync::{broadcast, watch};
 use velo_hub::velo::{InstanceId, PeerInfo};
@@ -53,7 +53,11 @@ impl Relay {
             shared: Mutex::new(Shared {
                 generations: HashMap::new(),
                 follows: HashMap::new(),
-                events: broadcast::channel(buffer).0,
+                changes: Changes {
+                    all: broadcast::channel(buffer).0,
+                    one: HashMap::new(),
+                    buffer,
+                },
                 ready: HashMap::new(),
                 health,
             }),
@@ -117,7 +121,7 @@ impl Relay {
     pub(crate) fn install(&self, generation: u64, installed: Installed) {
         let mut shared = self.lock();
         let Shared {
-            follows, events, ..
+            follows, changes, ..
         } = &mut *shared;
         let Some(follow) = follows
             .get_mut(&installed.class)
@@ -127,7 +131,7 @@ impl Relay {
             return;
         };
         for event in installed.snapshot(generation) {
-            let _ = events.send(event);
+            changes.send(event);
         }
         let counted = installed.counted().then(|| installed.class.clone());
         follow.installed = Some(installed);
@@ -174,7 +178,7 @@ impl Relay {
     ) {
         let mut shared = self.lock();
         let Shared {
-            follows, events, ..
+            follows, changes, ..
         } = &mut *shared;
         let Some(installed) = follows
             .get_mut(class)
@@ -185,9 +189,7 @@ impl Relay {
             return;
         };
         let counted = installed.counted();
-        change(installed, &mut |event| {
-            let _ = events.send(event);
-        });
+        change(installed, &mut |event| changes.send(event));
         if installed.counted() != counted {
             shared.count(class, !counted);
         }
@@ -195,29 +197,22 @@ impl Relay {
 
     /// A watch of one follow: the follow of the cell `cell` of `class` as
     /// a watch of the relay begins with it, then the marker, then each
-    /// change that names the cell, of whichever generation. The snapshot is
-    /// taken and the changes subscribed to under one hold of the lock, as
-    /// for a watch of the whole relay, so that no change falls between
-    /// them: a reader that reads the cell from this watch, rather than
-    /// from a watch it already had, depends on it.
+    /// change that names the cell, of whichever generation, from the cell's
+    /// own channel ([`Changes`]). The snapshot is taken and the changes
+    /// subscribed to under one hold of the lock, as for a watch of the
+    /// whole relay, so that no change falls between them: a reader that
+    /// reads the cell from this watch, rather than from a watch it already
+    /// had, depends on it.
     pub(crate) fn watch_of(&self, class: &str, cell: &str) -> FollowsWatch {
         let counted = self.one.count();
         let (snapshot, events) = {
-            let shared = self.lock();
-            (shared.followed(class, cell), shared.events.subscribe())
+            let mut shared = self.lock();
+            let snapshot = shared.followed(class, cell);
+            (snapshot, shared.changes.subscribe_one(class, cell))
         };
-        let (class, cell) = (class.to_string(), cell.to_string());
-        let events = self
-            .one
-            .stream(counted, snapshot, events)
-            .filter(move |event| {
-                let named = event
-                    .cell()
-                    .is_none_or(|named| named == (class.as_str(), cell.as_str()));
-                std::future::ready(named)
-            })
-            .boxed();
-        FollowsWatch { events }
+        FollowsWatch {
+            events: self.one.stream(counted, snapshot, events),
+        }
     }
 
     /// A watch of the relay: its snapshot, then each change.
@@ -225,7 +220,7 @@ impl Relay {
         let counted = self.watchers.count();
         let (snapshot, events) = {
             let shared = self.lock();
-            (shared.snapshot(), shared.events.subscribe())
+            (shared.snapshot(), shared.changes.all.subscribe())
         };
         FollowsWatch {
             events: self.watchers.stream(counted, snapshot, events),
@@ -258,10 +253,52 @@ struct Shared {
     generations: HashMap<String, HashMap<String, u64>>,
     /// Each followed cell's current follow.
     follows: HashMap<String, HashMap<String, Follow>>,
-    events: broadcast::Sender<FollowEvent>,
+    changes: Changes,
     /// Per class, the installed follows whose link last said `ready`.
     ready: HashMap<String, u32>,
     health: watch::Sender<CellHealth>,
+}
+
+/// Where the relay's changes are sent: to the watches of the whole relay,
+/// and to the watches of the one follow each names, on a channel of the
+/// cell's own, so that such a watch is sent its cell's changes alone
+/// rather than every change, to drop all but its own: with a watch of
+/// each cell, that would cost each change a copy per cell.
+struct Changes {
+    all: broadcast::Sender<FollowEvent>,
+    /// By class, then by cell, so that finding a change's channel by the
+    /// names it carries allocates nothing; a channel no watch reads any
+    /// more is dropped at its cell's next change.
+    one: HashMap<String, HashMap<String, broadcast::Sender<FollowEvent>>>,
+    buffer: usize,
+}
+
+impl Changes {
+    fn send(&mut self, event: FollowEvent) {
+        if !self.one.is_empty()
+            && let Some((class, cell)) = event.cell()
+            && let Some(cells) = self.one.get_mut(class)
+            && let Some(channel) = cells.get(cell)
+        {
+            if channel.receiver_count() == 0 {
+                cells.remove(cell);
+            } else {
+                let _ = channel.send(event.clone());
+            }
+        }
+        let _ = self.all.send(event);
+    }
+
+    /// Subscribe to the changes of the cell `cell` of `class` alone.
+    fn subscribe_one(&mut self, class: &str, cell: &str) -> broadcast::Receiver<FollowEvent> {
+        let buffer = self.buffer;
+        self.one
+            .entry(class.to_string())
+            .or_default()
+            .entry(cell.to_string())
+            .or_insert_with(|| broadcast::channel(buffer).0)
+            .subscribe()
+    }
 }
 
 /// One cell's current follow: its generation, and what it exposes once
@@ -288,7 +325,7 @@ impl Shared {
         }
         let follow = cells.remove(cell).expect("the follow was just found");
         if let Some(installed) = follow.installed {
-            let _ = self.events.send(FollowEvent::Dropped {
+            self.changes.send(FollowEvent::Dropped {
                 class: class.to_string(),
                 cell: cell.to_string(),
                 generation,

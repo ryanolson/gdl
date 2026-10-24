@@ -251,3 +251,42 @@ fn a_reading_ends_what_left_and_keeps_what_retired() {
         ]
     );
 }
+
+/// A watch of one follow is sent that follow's changes alone: with a
+/// watch of each of `n` cells, one change of each costs `n` copies, not
+/// one per watch per change.
+#[test]
+fn a_watch_of_one_follow_receives_its_changes_alone() {
+    let received = |n: usize| {
+        let relay = Relay::new(4 * n, tokio::sync::watch::Sender::new(health()));
+        let cells: Vec<String> = (0..n).map(|i| format!("m{i}")).collect();
+        let mut watches = Vec::new();
+        for cell in &cells {
+            let generation = relay.begin("model_x", cell);
+            relay.install(generation, installed(cell, CellState::Ready));
+            let mut watch = relay.watch_of("model_x", cell);
+            let _ = pending(&mut watch);
+            watches.push((cell, generation, watch));
+        }
+        for (cell, generation, _) in &watches {
+            relay.apply(
+                "model_x",
+                cell,
+                *generation,
+                CellWatchEvent::State {
+                    state: CellState::Degraded,
+                },
+            );
+        }
+        crate::fanout::RECEIVED.with(|received| received.set(0));
+        for (cell, generation, watch) in &mut watches {
+            assert_eq!(
+                pending(watch),
+                [state(cell, *generation, CellState::Degraded)]
+            );
+        }
+        crate::fanout::RECEIVED.with(std::cell::Cell::get)
+    };
+    assert_eq!(received(8), 8);
+    assert_eq!(received(64), 64);
+}
