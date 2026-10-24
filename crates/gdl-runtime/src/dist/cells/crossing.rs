@@ -192,7 +192,7 @@ impl Crossing {
     fn cell<'t>(&self, table: &'t EntryTable, excluded: &[u64]) -> Option<&'t Arc<CellTable>> {
         let target = &self.target;
         let turn = self.draws.fetch_add(1, Ordering::Relaxed);
-        let draw = if target.policy.random() {
+        let draw = if target.random {
             self.random.hash_one(turn)
         } else {
             turn as u64
@@ -258,6 +258,8 @@ pub(crate) struct Target {
     table: Arc<ArcSwap<EntryTable>>,
     region: Arc<str>,
     policy: &'static dyn CellChooser,
+    /// Whether `policy` draws at random, asked once rather than per pick.
+    random: bool,
     /// The cells the chooser damps, shared by all its hand-offs.
     damping: Arc<Damping>,
 }
@@ -288,6 +290,7 @@ pub(crate) fn targets(
         let Some(table) = cells.slot(&inner.segment) else {
             continue;
         };
+        let policy = policy::of(layout, &boundary.into)?;
         targets.insert(
             (boundary.hop, inner.start),
             Target {
@@ -295,7 +298,8 @@ pub(crate) fn targets(
                 segment: inner.segment.clone(),
                 table,
                 region: cells.region(),
-                policy: policy::of(layout, &boundary.into)?,
+                policy,
+                random: policy.random(),
                 damping: cells.damping(),
             },
         );
@@ -358,6 +362,7 @@ mod tests {
                 table,
                 region: Arc::from("home"),
                 policy: &policy::HomeFirst,
+                random: true,
                 damping: Arc::default(),
             },
             router,
