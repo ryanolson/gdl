@@ -219,3 +219,54 @@ fn every_problem_of_both_files_is_reported() {
     assert_problems(&problems(&compose), &expected);
     assert!(!out.exists(), "compose wrote a bundle");
 }
+
+/// A default spelled out for a node, a class, or a segment the spec does
+/// not have is refused as any other value for it is: the name is the
+/// spec's to check, whatever its value.
+#[test]
+fn a_default_for_a_name_the_spec_lacks_is_refused() {
+    for (extra, expected) in [
+        (
+            "[routing]\nGhost = \"round_robin\"\n",
+            "[routing] Ghost: request router `Ghost` must target a request boundary",
+        ),
+        (
+            "[cells.ghost]\npolicy = \"home_first\"\n",
+            "[cells.ghost]: cell policy `[cells.ghost]`: the placement has no class `ghost`",
+        ),
+        (
+            "[deployment.segment.ghost]\nports = []\n",
+            "[deployment.segment.ghost]: the placement has no segment `ghost`",
+        ),
+    ] {
+        let files = Files::new(&spec(extra), FLEET);
+        let s = files.spec().display().to_string();
+        assert_problems(&problems(&files.check()), &[format!("{s}: {expected}")]);
+    }
+}
+
+/// A count of 0 is wrong whatever the classes are, so a fleet file whose
+/// spec does not read has its counts checked too.
+#[test]
+fn a_fleet_without_a_layout_still_has_its_counts_checked() {
+    let spec = spec("").replacen("nodes = [\"Engine\"]", "node = [\"Engine\"]", 1);
+    let fleet = "[class.global]\nready = { front = 0 }\nrequires = { model_x = 0 }\n\
+                 [cell.global-us-east-1]\nclass = \"global\"\nregion = \"us-east-1\"\nready = { front = 0 }\n";
+    let files = Files::new(&spec, fleet);
+    let (s, f) = (
+        files.spec().display().to_string(),
+        files.fleet().display().to_string(),
+    );
+    assert_problems(
+        &problems(&files.check()),
+        &[
+            format!(
+                "{s}:{}: [segment.engine] node: unknown field `node`",
+                line_of(&spec, "node = [")
+            ),
+            format!("{f}: [class.global] ready.front: is 0; a quorum is at least 1"),
+            format!("{f}: [class.global] requires.model_x: is 0; a requirement is at least 1"),
+            format!("{f}: [cell.global-us-east-1] ready.front: is 0; a quorum is at least 1"),
+        ],
+    );
+}

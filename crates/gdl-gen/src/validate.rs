@@ -56,6 +56,17 @@ pub(crate) fn validate(
             ));
         }
     }
+    for name in spec.deployment.iter().flat_map(|d| d.segments()) {
+        if !spec
+            .placement
+            .segments()
+            .any(|(segment, _)| segment == name)
+        {
+            problems.push(format!(
+                "[deployment.segment.{name}]: the placement has no segment `{name}`"
+            ));
+        }
+    }
     let entry_nodes = spec.service.as_ref().map(|s| s.nodes()).unwrap_or_default();
     let entry_names: BTreeSet<_> = entry_nodes.iter().map(|n| n.name.as_str()).collect();
     let bindings: BTreeMap<_, _> = spec

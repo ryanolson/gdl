@@ -17,6 +17,13 @@ pub(crate) const DEFAULT_BASE_IMAGE: &str = "debian:bookworm-slim";
 /// every binary is built in.
 pub(crate) const DEFAULT_BUILD_IMAGE: &str = "rust:1.93-slim-bookworm";
 
+impl Settings {
+    /// The segments that `[deployment.segment.<name>]` tables name.
+    pub(crate) fn segments(&self) -> impl Iterator<Item = &str> {
+        self.segment.keys().map(String::as_str)
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -132,17 +139,6 @@ pub fn compose_files(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Er
         )
     {
         validate_image(image)?;
-    }
-    for name in settings.segment.keys() {
-        if !spec
-            .placement
-            .segments()
-            .any(|(segment, _)| segment == name)
-        {
-            return Err(Error::new(format!(
-                "[deployment.segment.{name}]: the placement has no segment `{name}`"
-            )));
-        }
     }
     let mut services = serde_json::Map::new();
     services.insert("hub".into(),json!({"build":{"context":".","dockerfile":"hub/Dockerfile"},"healthcheck":{"test":["CMD","/usr/local/bin/segment","--healthcheck"],"interval":"2s","timeout":"2s","retries":30}}));
