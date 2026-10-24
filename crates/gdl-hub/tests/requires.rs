@@ -136,9 +136,16 @@ fn two_classes() -> DeploymentSpec {
     DeploymentSpec::new(graph, placement).expect("valid test fixture")
 }
 
+/// The cell `name` of `class`; a model cell is a child of
+/// `global-us-east-1`.
 fn cell(name: &str, class: &str, hub: &str, requires: &str) -> CellSettings {
+    let home = if class == "global" {
+        String::new()
+    } else {
+        "home = 'global-us-east-1'\n".to_string()
+    };
     toml::from_str(&format!(
-        "name = '{name}'\nclass = '{class}'\nregion = 'us-east-1'\nhub = '{hub}'\n\
+        "name = '{name}'\nclass = '{class}'\nregion = 'us-east-1'\n{home}hub = '{hub}'\n\
          directory = 'memory'\n{requires}"
     ))
     .expect("valid test fixture")

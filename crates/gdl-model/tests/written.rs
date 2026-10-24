@@ -11,7 +11,7 @@ use gdl_model::{CellSettings, DirectoryBackend, Fleet, Placement};
 const PLACEMENT: &str = "[segment.a]\nnodes = ['S', 'F']\n[segment.d]\nnodes = ['D']\n\
     [class.global]\nsegments = ['a']\n[class.model_x]\nsegments = ['d']\n\
     [routing]\nD = { selector = 'least_loaded' }\nF = 'random'\n\
-    [cells.model_x]\npolicy = 'nearest'\nspill_rtt_ms = 20\nmax_near = 2\n";
+    [cells.model_x]\npolicy = 'nearest'\n";
 
 #[test]
 fn a_placement_reads_back_what_it_writes() {
@@ -37,11 +37,11 @@ fn a_placement_leaves_its_defaults_unsaid() {
         "[segment.a]\nnodes = ['S']\n[segment.d]\nnodes = ['D']\n\
          [class.global]\nsegments = ['a']\n[class.model_x]\nsegments = ['d']\n\
          [routing]\nD = 'round_robin'\n\
-         [cells.model_x]\npolicy = 'home_first'\nspill_rtt_ms = 80\nmax_near = 16\n",
+         [cells.model_x]\npolicy = 'round_robin'\n",
     )
     .expect("a placement");
     let text = toml::to_string(&spelled).expect("toml");
-    for unsaid in ["routing", "round_robin", "cells", "home_first"] {
+    for unsaid in ["routing", "round_robin", "cells"] {
         assert!(!text.contains(unsaid), "{unsaid} in:\n{text}");
     }
     assert_eq!(Placement::from_toml(&text).expect("reads"), spelled);

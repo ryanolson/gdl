@@ -843,14 +843,6 @@ fn defaults() -> Vec<(&'static str, String)> {
             format!("{:?}", CellPolicy::DEFAULT_POLICY),
         ),
         (
-            "CellPolicy::DEFAULT_SPILL_RTT_MS",
-            CellPolicy::DEFAULT_SPILL_RTT_MS.to_string(),
-        ),
-        (
-            "CellPolicy::DEFAULT_MAX_NEAR",
-            CellPolicy::DEFAULT_MAX_NEAR.to_string(),
-        ),
-        (
             "DEFAULT_BASE_IMAGE",
             format!("{:?}", deployment::DEFAULT_BASE_IMAGE),
         ),
@@ -935,14 +927,14 @@ fn the_readme_names_every_default_with_its_value() {
     }
     // The control: a table that drifted is caught.
     let drifted = readme.replacen(
-        "| `16` | `CellPolicy::DEFAULT_MAX_NEAR` |",
-        "| `8` | `CellPolicy::DEFAULT_MAX_NEAR` |",
+        "| `\"round_robin\"` | `CellPolicy::DEFAULT_POLICY` |",
+        "| `\"home_first\"` | `CellPolicy::DEFAULT_POLICY` |",
         1,
     );
     assert_ne!(drifted, readme, "the row to change");
     assert_eq!(
         defaults_drift(&drifted),
-        ["CellPolicy::DEFAULT_MAX_NEAR is 16, but the table says 8"]
+        ["CellPolicy::DEFAULT_POLICY is \"round_robin\", but the table says \"home_first\""]
     );
     let missing = readme.replacen(
         "| `1` | `CellSettings::DEFAULT_QUORUM` |",

@@ -393,9 +393,9 @@ fn global_hub_relay(hub: &Hub) -> impl Stream<Item = FollowEvent> + Unpin {
 }
 
 /// A follow closed because its cell took no work is followed again from
-/// the first later write of the cell's record that makes it a home cell,
-/// also one written while the follow's link waits out its delay before a
-/// follow: the cell recovers within the global's 2 s delay, and its hub
+/// the first later write of the cell's record that makes it a child that
+/// takes work, also one written while the follow's link waits out its
+/// delay before a follow: the cell recovers within the global's 2 s delay, and its hub
 /// writes nothing more for the length of the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cell_that_recovers_as_its_follow_closes_is_followed_again() {

@@ -456,12 +456,12 @@ fn a_bad_class_table_is_the_class_tables_error() {
 fn a_spec_sets_a_cell_policy() {
     let temp = contract_dir("cells");
     let dir = temp.path();
-    let text = format!("{CLASSED}    [cells.model_x]\n    max_near = 4\n");
+    let text = format!("{CLASSED}    [cells.model_x]\n    policy = 'home_first'\n");
     let spec = Spec::parse(&text, &dir.join("gdl.toml"), dir).expect("spec");
     let direct = gdl_model::Placement::from_toml(
         "[segment.front]\nnodes = ['A', 'B']\n[segment.engine]\nnodes = ['E']\n\
          [class.global]\nsegments = ['front']\n[class.model_x]\nsegments = ['engine']\n\
-         [cells.model_x]\nmax_near = 4\n",
+         [cells.model_x]\npolicy = 'home_first'\n",
     )
     .expect("a placement");
     assert_eq!(spec.placement, direct);
@@ -677,7 +677,7 @@ fn a_spec_reads_back_what_it_writes() {
         [segment.front]\nnodes = [\"A\", \"B\"]\n[segment.engine]\nnodes = [\"E\"]\n\
         [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
         [routing]\nE = { selector = \"affinity\" }\nB = \"random\"\n\
-        [cells.model_x]\npolicy = \"nearest\"\nspill_rtt_ms = 20\nmax_near = 2\n\
+        [cells.model_x]\npolicy = \"nearest\"\n\
         [deployment]\nbase_image = \"debian:trixie-slim\"\nbuild_image = \"rust:1.93\"\nhub_image = \"hub:1\"\n\
         [deployment.segment.engine]\nbase_image = \"cuda:12\"\nports = [\"9000:9000\"]\n\
         [deployment.segment.engine.config.runtime]\ndrain_ms = 90000\n\

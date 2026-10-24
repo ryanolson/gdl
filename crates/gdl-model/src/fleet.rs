@@ -23,7 +23,7 @@ pub use errors::{FleetError, FleetErrors, FleetTable};
 /// [cell.model-x-01-us-east-1]
 /// class = "model_x"
 /// region = "us-east-1"
-/// home = "global-us-east-1"          # the parent cell: required when another class sends to this one
+/// home = "global-us-east-1"          # the parent cell, required when another class sends to this one: whose hub follows it
 /// ready = { e = 8 }                  # optional: overrides the class's default
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -28,11 +28,11 @@ use super::WAIT;
 /// Every segment of [`spec`].
 pub const SEGMENTS: &[&str] = &["a", "f", "d"];
 
-/// The region every cell of these tests runs in: a global cell follows
-/// only the model cells of its own region.
+/// The region every cell of these tests runs in.
 pub const REGION: &str = "us-east-1";
 
-/// The global cell.
+/// The global cell: the parent of every model cell here unless a test
+/// says otherwise, since a global's hub follows only its children.
 pub const GLOBAL: &str = "global-01-us-east-1";
 
 /// `S => F { D }`: `a` in `global`, `f` and `d` in `model_x`.
@@ -140,12 +140,13 @@ impl Hosted for Nothing {
     const NAMES: &'static [&'static str] = &[];
 }
 
-/// The settings of the hub of the model cell `name`, which its peers' hubs
-/// reach under the name `hub`: `f` and `d` each need one usable instance.
+/// The settings of the hub of the model cell `name`, a child of
+/// [`GLOBAL`], which its peers' hubs reach under the name `hub`: `f` and
+/// `d` each need one usable instance.
 pub fn model_hub(name: &str, hub: &str) -> CellSettings {
     toml::from_str(&format!(
-        "name = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\nhub = '{hub}'\n\
-         directory = 'memory'\n[ready]\nf = 1\nd = 1\n"
+        "name = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\nhome = '{GLOBAL}'\n\
+         hub = '{hub}'\ndirectory = 'memory'\n[ready]\nf = 1\nd = 1\n"
     ))
     .expect("valid test fixture")
 }

@@ -26,8 +26,9 @@ use crate::dist::runtime::Router;
 pub(crate) struct Crossing {
     target: Target,
     within: Within,
-    /// The attempts' draws for the cell policy, apart from the turns of
-    /// the instance within the cell: with one sequence and one hasher for
+    /// The attempts' turns for the cell policy, and the draws hashed from
+    /// them for a policy that draws at random, apart from the turns of the
+    /// instance within the cell: with one sequence and one hasher for
     /// both, the two choices of an attempt would be correlated.
     draws: AtomicUsize,
     random: RandomState,
@@ -98,7 +99,8 @@ impl Crossing {
     /// those in `excluded` may take it. A selector may wait, so the choice
     /// is checked when it returns (ruling 154): if the instance is no
     /// longer eligible in the cell's current table, or the cell itself no
-    /// longer is by the cell policy (its summary went, or went stale), or
+    /// longer is by the cell policy (it stopped taking work, or, under
+    /// `home_first`, its summary went or went stale), or
     /// its follow refuses the lease because it is no longer offered, the
     /// choice and its lease are dropped and both the cell and the instance
     /// are chosen again. A request that ended while its selector chose
@@ -184,12 +186,17 @@ impl Crossing {
     }
 
     /// The cell the policy chooses from `table` for one attempt, of those
-    /// not in `excluded`, by the summaries' ages now.
+    /// not in `excluded`, by the summaries' ages now: one relaxed increment
+    /// of the attempts' count, hashed only for a policy that draws at
+    /// random.
     fn cell<'t>(&self, table: &'t EntryTable, excluded: &[u64]) -> Option<&'t Arc<CellTable>> {
-        let draw = self
-            .random
-            .hash_one(self.draws.fetch_add(1, Ordering::Relaxed));
         let target = &self.target;
+        let turn = self.draws.fetch_add(1, Ordering::Relaxed);
+        let draw = if target.random {
+            self.random.hash_one(turn)
+        } else {
+            turn as u64
+        };
         target
             .policy
             .choose(
@@ -251,6 +258,8 @@ pub(crate) struct Target {
     table: Arc<ArcSwap<EntryTable>>,
     region: Arc<str>,
     policy: &'static dyn CellChooser,
+    /// Whether `policy` draws at random, asked once rather than per pick.
+    random: bool,
     /// The cells the chooser damps, shared by all its hand-offs.
     damping: Arc<Damping>,
 }
@@ -281,6 +290,7 @@ pub(crate) fn targets(
         let Some(table) = cells.slot(&inner.segment) else {
             continue;
         };
+        let policy = policy::of(layout, &boundary.into)?;
         targets.insert(
             (boundary.hop, inner.start),
             Target {
@@ -288,7 +298,8 @@ pub(crate) fn targets(
                 segment: inner.segment.clone(),
                 table,
                 region: cells.region(),
-                policy: policy::of(layout, &boundary.into)?,
+                policy,
+                random: policy.random(),
                 damping: cells.damping(),
             },
         );
@@ -351,6 +362,7 @@ mod tests {
                 table,
                 region: Arc::from("home"),
                 policy: &policy::HomeFirst,
+                random: true,
                 damping: Arc::default(),
             },
             router,

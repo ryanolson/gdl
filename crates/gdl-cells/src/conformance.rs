@@ -84,6 +84,7 @@ fn record(class: &str, cell: &str, epoch: u64, seq: u64) -> CellRecord {
         name: cell.into(),
         class: class.into(),
         region: "us-east-1".into(),
+        home: None,
         contract: 1,
         placement: 2,
         state: CellState::Ready,

@@ -5,9 +5,10 @@
 //! A hand-off whose answer does not come is an unknown outcome: the
 //! request fails with `OutcomeUnknown` and no other cell is tried.
 //!
-//! Each test makes `M1` the only `ready` cell, so `home_first` always
-//! offers it first, and the other cells `degraded`, which take the
-//! request only once `M1` declined it.
+//! Each test but the one that names `home_first` makes `M1` the only
+//! `ready` cell, so the default policy, `round_robin`, always offers it
+//! first, and the other cells `degraded`, which take the request only once
+//! `M1` declined it.
 
 mod common;
 
@@ -16,7 +17,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, model_of, placement, run_graph, spec_of,
+    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, home_first, model_of, placement, run_graph,
+    spec_of,
 };
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::streamed::{self, Script, replies, words};
@@ -408,6 +410,70 @@ async fn when_every_cell_declines_the_request_is_overloaded() {
     }
 }
 
+/// The request fails with the last refusal, not the first: the ready cell
+/// is full and declines with admission's refusal, then the degraded
+/// cell's only entry instance has retired and declines with its own.
+/// Both are `Overloaded`, so only their messages tell which the request
+/// kept. M1 refuses once its entry's wait for an admission permit passes,
+/// so the test takes about 2 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_request_fails_with_the_last_refusal_not_the_first() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub, "", Selectors::new(), &|deployment| {
+        reference_graph(deployment, &quiet)
+    })
+    .await;
+    let m1 = reference_cell(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        &one_at_a_time,
+        &quiet,
+    )
+    .await;
+    let m2 = reference_cell(
+        &spec,
+        &directory,
+        degraded(M2, "m2-hub:1337"),
+        &|r| r,
+        &quiet,
+    )
+    .await;
+    following(
+        &tables(&chooser),
+        &[(M1, CellState::Ready), (M2, CellState::Degraded)],
+    )
+    .await;
+    let held = hold(&chooser, "held").await;
+    assert_eq!((m1.forwards(), m2.forwards()), (1, 0), "held in M1");
+    m2.entries[0].segment.close();
+
+    let before = offered(&[&m1, &m2]);
+    let error = ask(&chooser.segment).await.expect_err("both cells decline");
+    let now: Vec<usize> = offered(&[&m1, &m2])
+        .iter()
+        .zip(&before)
+        .map(|(now, before)| now - before)
+        .collect();
+    assert_eq!(now, [1, 1], "M1, then M2, was offered the request");
+    assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
+    assert!(
+        error.to_string().contains("retired"),
+        "not M2's refusal, the last: {error}"
+    );
+    assert!(
+        !error.to_string().contains("admission"),
+        "M1's refusal, the first: {error}"
+    );
+    drop(held);
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
 /// A hand-off that never left is not a refusal: when a full cell has
 /// declined the request and the next cell's hand-off never left, the
 /// request fails with the full cell's `Overloaded`, whether its
@@ -629,8 +695,9 @@ fn admitting(limit: usize) -> impl Fn(RuntimeConfig) -> RuntimeConfig + Sync {
     }
 }
 
-/// Two ready home cells: `M1` holds 3 of the 4 roots it admits, `M2` none
-/// of its 2. Requests go to the lighter, `M2`. Once `M2` is full, but
+/// Under `home_first`, which chooses by load: two ready cells, `M1`
+/// holding 3 of the 4 roots it admits, `M2` none of its 2. Requests go to
+/// the lighter, `M2`. Once `M2` is full, but
 /// before its summary says so, the request offered to it is declined and
 /// answered by `M1`, and the chooser damps `M2`: the next request is not
 /// offered to it at all. The test fills `M2` just after a summary of it
@@ -639,7 +706,7 @@ fn admitting(limit: usize) -> impl Fn(RuntimeConfig) -> RuntimeConfig + Sync {
 /// which come a period apart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cell_that_declines_is_damped_and_the_lighter_cell_is_preferred() {
-    let spec = spec_of(placement());
+    let spec = spec_of(home_first());
     let directory = Resolving::new();
     let quiet = Events::quiet();
     let hub = global_hub_of(&spec, &directory).await;

@@ -21,7 +21,8 @@ use tokio::task::JoinHandle;
 use velo_hub::Hub;
 
 use super::cells::{
-    Nothing, REGION, Resolving, cell_hub_proxied, cell_hub_timed, model_cell, settings, timing,
+    GLOBAL, Nothing, REGION, Resolving, cell_hub_proxied, cell_hub_timed, model_cell, settings,
+    timing,
 };
 use super::proxy::Proxy;
 use super::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
@@ -39,17 +40,30 @@ pub fn placement() -> Placement {
         .class("model_x", ["f", "d"])
 }
 
+/// [`placement`], choosing a cell of `model_x` by `home_first`, which
+/// chooses by the cells' load summaries, rather than by the default,
+/// `round_robin`, which reads none.
+pub fn home_first() -> Placement {
+    placement().cell_policy(
+        "model_x",
+        gdl_model::CellPolicy {
+            policy: "home_first".into(),
+        },
+    )
+}
+
 /// The reference graph under `placement`.
 pub fn spec_of(placement: Placement) -> DeploymentSpec {
     DeploymentSpec::new(super::reference_manifest(|_| true), placement).expect("valid test fixture")
 }
 
-/// The settings of the hub of the model cell `name`, reached under the
-/// name `hub`: `f` needs `entries` usable instances to be ready, `d` one.
+/// The settings of the hub of the model cell `name`, a child of
+/// [`GLOBAL`], reached under the name `hub`: `f` needs `entries` usable
+/// instances to be ready, `d` one.
 pub fn model_hub_needing(name: &str, hub: &str, entries: u32) -> CellSettings {
     toml::from_str(&format!(
-        "name = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\nhub = '{hub}'\n\
-         directory = 'memory'\n[ready]\nf = {entries}\nd = 1\n"
+        "name = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\nhome = '{GLOBAL}'\n\
+         hub = '{hub}'\ndirectory = 'memory'\n[ready]\nf = {entries}\nd = 1\n"
     ))
     .expect("valid test fixture")
 }
@@ -238,7 +252,19 @@ pub async fn model_unsummarized(
     cell: Model<'_>,
     events: &Arc<Events>,
 ) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
-    let hub = model_hub_needing(cell.name, cell.hub, cell.quorum);
+    model_changed(spec, directory, cell, &|hub| hub, events).await
+}
+
+/// [`model_unsummarized`], with its hub's settings changed by `change`: a
+/// cell with another parent, or none, or in another region.
+pub async fn model_changed(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    change: &dyn Fn(CellSettings) -> CellSettings,
+    events: &Arc<Events>,
+) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
+    let hub = change(model_hub_needing(cell.name, cell.hub, cell.quorum));
     let extra = format!("{}{RUNTIME}", model_cell(cell.name));
     start_model(
         spec,

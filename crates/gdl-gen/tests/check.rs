@@ -156,7 +156,7 @@ fn a_spec_that_does_not_parse_leaves_the_fleet_checked() {
 /// the spec is still reported.
 #[test]
 fn a_fleet_that_does_not_parse_leaves_the_spec_checked() {
-    let spec = spec("[cells.zz]\nmax_near = 4\n[config.Nobody]\nx = 1\n").replacen(
+    let spec = spec("[cells.zz]\npolicy = 'home_first'\n[config.Nobody]\nx = 1\n").replacen(
         "\"Engine\"]",
         "\"Engine\", \"Ghost\"]",
         1,
