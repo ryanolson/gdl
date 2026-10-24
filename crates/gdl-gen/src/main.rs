@@ -180,7 +180,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     };
     let spec = || -> Result<gdl_gen::Spec, Box<dyn std::error::Error>> {
         let file = args.spec.as_ref().ok_or(USAGE)?;
-        Ok(gdl_gen::Spec::load(file)?)
+        Ok(gdl_gen::Spec::load(file).map_err(|e| e.in_file(file.display()))?)
     };
     match &args.command {
         Command::Extract {

@@ -335,3 +335,34 @@ fn a_node_crate_that_does_not_read_hides_no_other_problem() {
         );
     }
 }
+
+/// Every command that reads a spec names the spec's file in a problem of
+/// its own, as `check` does: here `generate`, with a contract that is not
+/// there.
+#[test]
+fn generate_names_the_spec_in_a_problem_of_its_own() {
+    let files = Files::new(
+        "[contract]\npath = \"nowhere\"\n[gdl]\nversion = \"0.1\"\n[segment.front]\nnodes = [\"A\"]\n",
+        FLEET,
+    );
+    let out = files.dir.path().join("out");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .args(["gdl", "generate", "--spec"])
+        .arg(files.spec())
+        .arg("--out")
+        .arg(&out)
+        .arg("--target-dir")
+        .arg(target("gdl-check-tests"))
+        .output()
+        .expect("cargo gdl");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected = format!("{}: [contract] path: ", files.spec().display());
+    assert!(stderr.contains(&expected), "{expected}\nin: {stderr}");
+    // The control: `check` names it the same way.
+    let check = problems(&files.check());
+    assert!(
+        check.iter().any(|line| line.starts_with(&expected)),
+        "{check:?}"
+    );
+}

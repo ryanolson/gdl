@@ -424,8 +424,12 @@ impl Spec {
     /// bound crates is reported when the spec is validated, with every other
     /// problem.
     pub fn load(file: &Path) -> Result<Self, Error> {
-        let text = std::fs::read_to_string(file)
-            .map_err(|e| Error::new(format!("reading {}: {e}", file.display())))?;
+        let text = std::fs::read_to_string(file).map_err(|e| {
+            Error::from(
+                gdl_model::Problems::from(gdl_model::Problem::from(format!("cannot be read: {e}")))
+                    .in_file(file.display()),
+            )
+        })?;
         // A bare file name has an empty parent: the current directory.
         let dir = match file.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
