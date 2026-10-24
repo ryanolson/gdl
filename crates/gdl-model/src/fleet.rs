@@ -493,6 +493,12 @@ impl Fleet {
             summary: CellSettings::DEFAULT_SUMMARY,
         })
     }
+
+    /// Every cell's settings, as [`Fleet::cell`] gives them, in name order:
+    /// what a bundle generator deploys.
+    pub fn cells(&self) -> impl Iterator<Item = CellSettings> + '_ {
+        self.cells.keys().filter_map(|name| self.cell(name))
+    }
 }
 
 /// Names by a class: its segments, or the classes it sends to.

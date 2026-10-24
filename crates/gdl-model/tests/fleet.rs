@@ -695,3 +695,20 @@ fn a_cells_layout_has_a_layout_names_shape() {
         "{errors}"
     );
 }
+
+/// A generator lists the fleet's cells, each with its settings as
+/// `Fleet::cell` gives them, in name order.
+#[test]
+fn a_fleet_lists_its_cells_in_name_order() {
+    let fleet = fleet(FLEET);
+    let cells: Vec<CellSettings> = fleet.cells().collect();
+    let names: Vec<&str> = cells.iter().map(|cell| cell.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted);
+    assert_eq!(names.len(), 7, "{names:?}");
+    for cell in &cells {
+        assert_eq!(Some(cell), fleet.cell(&cell.name).as_ref());
+    }
+    assert_eq!(Fleet::default().cells().count(), 0);
+}
