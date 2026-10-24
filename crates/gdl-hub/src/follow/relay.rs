@@ -135,6 +135,39 @@ impl Relay {
     /// The cell watch of the follow `generation` of the cell `cell` of
     /// `class` sent `event`, after its snapshot.
     pub(crate) fn apply(&self, class: &str, cell: &str, generation: u64, event: CellWatchEvent) {
+        self.change(class, cell, generation, |installed, send| {
+            installed.apply(generation, event, send);
+        });
+    }
+
+    /// The cell watch of the follow `generation` of the cell `cell` of
+    /// `class` sent an event of a kind this build does not know: withhold
+    /// the cell until [`Relay::restore`] (see [`Installed::withhold`]).
+    pub(crate) fn withhold(&self, class: &str, cell: &str, generation: u64) {
+        self.change(class, cell, generation, |installed, send| {
+            installed.withhold(generation, send);
+        });
+    }
+
+    /// The cell of the follow `generation` of the cell `cell` of `class`
+    /// was read again, as `fresh`: it is what the relay shows of the cell,
+    /// which is no longer withheld.
+    pub(crate) fn restore(&self, class: &str, cell: &str, generation: u64, fresh: Installed) {
+        self.change(class, cell, generation, |installed, send| {
+            installed.restore(fresh, generation, send);
+        });
+    }
+
+    /// Change the installed follow `generation` of the cell `cell` of
+    /// `class` by `change`, sending what it sends to the watchers and
+    /// counting the cell again, under the lock.
+    fn change(
+        &self,
+        class: &str,
+        cell: &str,
+        generation: u64,
+        change: impl FnOnce(&mut Installed, &mut dyn FnMut(FollowEvent)),
+    ) {
         let mut shared = self.lock();
         let Shared {
             follows, events, ..
@@ -148,12 +181,25 @@ impl Relay {
             return;
         };
         let counted = installed.counted();
-        installed.apply(generation, event, |event| {
+        change(installed, &mut |event| {
             let _ = events.send(event);
         });
         if installed.counted() != counted {
             shared.count(class, !counted);
         }
+    }
+
+    /// The follow of the cell `cell` of `class` as a watch of the relay
+    /// begins with it, then the marker; only the marker when it has no
+    /// installed follow.
+    pub(crate) fn followed(&self, class: &str, cell: &str) -> Vec<FollowEvent> {
+        let shared = self.lock();
+        let mut events = shared
+            .follow(class, cell)
+            .and_then(|follow| Some(follow.installed.as_ref()?.snapshot(follow.generation)))
+            .unwrap_or_default();
+        events.push(FollowEvent::Synced);
+        events
     }
 
     /// A watch of the relay: its snapshot, then each change.
@@ -286,6 +332,9 @@ pub(crate) struct Installed {
     /// Ready entry instances that have not retired, with their segments:
     /// exposed while the state allows.
     ready: HashMap<InstanceId, (String, PeerInfo)>,
+    /// Whether the cell is withheld: its watch sent an event of a kind
+    /// this build does not know, and it has not been read again since.
+    withheld: bool,
 }
 
 impl Installed {
@@ -305,19 +354,121 @@ impl Installed {
             load,
             retired: HashMap::new(),
             ready: HashMap::new(),
+            withheld: false,
+        }
+    }
+
+    /// The state the relay shows: the one the cell last sent, or
+    /// `unavailable` while the cell is withheld.
+    fn shown(&self) -> CellState {
+        if self.withheld {
+            CellState::Unavailable
+        } else {
+            self.state
         }
     }
 
     /// Whether the cell counts toward what a requirement of its class
-    /// meets: its link last said it is `ready`.
+    /// meets: its link last said it is `ready`, and it is not withheld.
     fn counted(&self) -> bool {
-        self.state == CellState::Ready
+        self.shown() == CellState::Ready
     }
 
-    /// Whether the state the cell last sent lets its instances be routed
-    /// to.
+    /// Whether the state shown lets the cell's instances be routed to.
     fn exposes(&self) -> bool {
-        matches!(self.state, CellState::Ready | CellState::Degraded)
+        matches!(self.shown(), CellState::Ready | CellState::Degraded)
+    }
+
+    /// The cell's watch sent an event of a kind this build does not know,
+    /// so the relay cannot tell what the cell is: it is withheld until it
+    /// has been read again ([`Installed::restore`]). The relay shows a
+    /// withheld cell as `unavailable`, which hides its instances, keeps
+    /// every chooser from it, and leaves it out of what a requirement of
+    /// its class meets: the nearest the relay's events come to saying
+    /// that the cell is not to be offered work. Its watchers are sent the
+    /// state, if they were shown another.
+    pub(crate) fn withhold(&mut self, generation: u64, mut send: impl FnMut(FollowEvent)) {
+        if self.withheld {
+            return;
+        }
+        let shown = self.shown();
+        self.withheld = true;
+        if shown != CellState::Unavailable {
+            send(FollowEvent::State {
+                class: self.class.clone(),
+                cell: self.cell.clone(),
+                generation,
+                state: CellState::Unavailable,
+            });
+        }
+    }
+
+    /// The cell, withheld, was read again, as `fresh`: send its watchers
+    /// what changed while it was withheld, then its state, and, if that
+    /// exposes them, its ready instances, as for a state that exposes
+    /// them again. An instance that `fresh` does not have left; one it
+    /// shows ready that has retired here stays retired.
+    pub(crate) fn restore(
+        &mut self,
+        fresh: Installed,
+        generation: u64,
+        mut send: impl FnMut(FollowEvent),
+    ) {
+        let gone: Vec<(InstanceId, String)> = self
+            .ready
+            .iter()
+            .map(|(id, (segment, _))| (*id, segment.clone()))
+            .chain(
+                self.retired
+                    .iter()
+                    .map(|(id, segment)| (*id, segment.clone())),
+            )
+            .filter(|(id, _)| !fresh.ready.contains_key(id) && !fresh.retired.contains_key(id))
+            .collect();
+        // While the cell is withheld, these send only what its watchers
+        // still hold: retirements, and the instances retired that left.
+        self.withheld = true;
+        for (instance, segment) in gone {
+            self.apply(
+                generation,
+                CellWatchEvent::Left { segment, instance },
+                &mut send,
+            );
+        }
+        for (instance, segment) in fresh.retired {
+            self.apply(
+                generation,
+                CellWatchEvent::Retired { segment, instance },
+                &mut send,
+            );
+        }
+        for (segment, peer) in fresh.ready.into_values() {
+            self.apply(
+                generation,
+                CellWatchEvent::Ready { segment, peer },
+                &mut send,
+            );
+        }
+        if self.load != fresh.load {
+            self.apply(
+                generation,
+                CellWatchEvent::Load { load: fresh.load },
+                &mut send,
+            );
+        }
+        self.withheld = false;
+        self.state = fresh.state;
+        send(FollowEvent::State {
+            class: self.class.clone(),
+            cell: self.cell.clone(),
+            generation,
+            state: self.state,
+        });
+        if self.exposes() {
+            for event in self.exposed(generation) {
+                send(event);
+            }
+        }
     }
 
     /// Apply one event of the cell's watch after its first, sending what
@@ -333,6 +484,11 @@ impl Installed {
             CellWatchEvent::State { state } => {
                 let hidden = !self.exposes();
                 self.state = state;
+                // A withheld cell's watchers are shown it `unavailable`
+                // until it is read again.
+                if self.withheld {
+                    return;
+                }
                 send(FollowEvent::State {
                     class,
                     cell,
@@ -415,7 +571,7 @@ impl Installed {
             cell: self.cell.clone(),
             generation,
             region: self.region.clone(),
-            state: self.state,
+            state: self.shown(),
             load: self.load,
         });
         events.extend(
@@ -474,6 +630,9 @@ impl Stream for FollowsWatch {
         self.events.as_mut().poll_next(cx)
     }
 }
+
+#[cfg(test)]
+mod withheld;
 
 #[cfg(test)]
 mod tests {

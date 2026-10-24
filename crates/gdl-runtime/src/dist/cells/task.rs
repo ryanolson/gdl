@@ -85,10 +85,15 @@ struct Hub {
 
 impl Source for Hub {
     async fn watch(&self) -> std::result::Result<BoxStream<'static, FollowEvent>, String> {
-        self.watcher
+        let events = self
+            .watcher
             .follows(&self.address)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // An event of a kind this build does not know ends the watch.
+        Ok(events
+            .scan((), |(), item| std::future::ready(item.event()))
+            .boxed())
     }
 }
 

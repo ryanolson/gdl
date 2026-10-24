@@ -19,8 +19,13 @@
 //! cells in the directory, follows each over its watch, and relays what it
 //! follows to its own instances (`GET /v1/ext/gdl-cell/follows`, as
 //! [`gdl_watch::FollowEvent`]s, which a [`gdl_watch::CellWatcher`] reads
-//! too). The watches' events and their client are `gdl-watch`'s, so that a
-//! segment instance reads the relay without linking the hub.
+//! too), and one follow of it alone, as a watch of it begins with it
+//! (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`). A followed cell whose
+//! watch sends an event of a kind the hub does not know is withheld: the
+//! relay shows it `unavailable`, its instances hidden, until the hub has
+//! read it again from a second watch of it, while the first goes on. The
+//! watches' events and their client are `gdl-watch`'s, so that a segment
+//! instance reads the relay without linking the hub.
 mod cell;
 mod fanout;
 mod follow;

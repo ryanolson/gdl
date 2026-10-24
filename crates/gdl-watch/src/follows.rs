@@ -38,6 +38,13 @@ use velo::{InstanceId, PeerInfo};
 /// `draining`), which hides every instance of the follow at once, or
 /// until the follow is dropped. A state that exposes them again is
 /// followed by an `exposed` event for each ready instance.
+///
+/// Every event but [`FollowEvent::Synced`] names its follow by its class,
+/// cell, and generation, and an event a later build adds must too: a
+/// reader that does not know its kind fails closed for that cell until it
+/// has read it again (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`), and
+/// ends its watch at one that names no follow. A field a later build adds
+/// to a known event is optional, and a reader of this build ignores it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum FollowEvent {

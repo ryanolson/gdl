@@ -1,13 +1,19 @@
 //! The client of a cell hub's watches: its server-sent events, parsed into
-//! [`CellWatchEvent`]s or [`FollowEvent`]s.
+//! [`CellWatchEvent`]s or [`FollowEvent`]s, or read as events of a kind
+//! this build does not know.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
-use serde::de::DeserializeOwned;
 
-use super::{CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, WATCH_ROUTE};
+use super::watched::Classify;
+use super::{
+    CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, UnknownEvent, UnknownFollowEvent,
+    WATCH_ROUTE, Watched,
+};
 
 /// How long a connection to a cell's hub may take to open.
 const CONNECT: Duration = Duration::from_secs(5);
@@ -21,10 +27,12 @@ const IDLE: Duration = Duration::from_secs(30);
 const REFUSAL: usize = 1024;
 
 /// Watches cells' hubs, over one pool of connections: their cells, and
-/// what they follow.
+/// what they follow. Its clones share the pool, and the count of the
+/// events of a kind this build does not know that they have read.
 #[derive(Debug, Clone)]
 pub struct CellWatcher {
     http: reqwest::Client,
+    unknown: Arc<AtomicU64>,
 }
 
 impl CellWatcher {
@@ -36,40 +44,90 @@ impl CellWatcher {
             .read_timeout(IDLE)
             .build()
             .map_err(|e| CellWatchError(format!("the cell watch's HTTP client: {e}")))?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            unknown: Arc::default(),
+        })
+    }
+
+    /// How many events of a kind this build does not know this watcher
+    /// and its clones have read, in every watch and snapshot.
+    pub fn unknown_events(&self) -> u64 {
+        self.unknown.load(Ordering::Relaxed)
     }
 
     /// Watch the cell whose hub is at `hub`, `host:port` as the cell's
     /// record names it. The events end when the hub ends the watch (it
-    /// stopped, this watcher fell behind, or the cell's drain ended), when the connection fails or
-    /// goes idle, or at an event that does not parse; a follower then
-    /// watches again from a snapshot. A hub that has not yet published its
-    /// cell's record holds the watch until it has, since the epoch it would
-    /// send is not settled before, and refuses it after 5 s.
+    /// stopped, this watcher fell behind, or the cell's drain ended), when
+    /// the connection fails or goes idle, or at an event that is not JSON
+    /// or is of a known kind whose fields do not parse; a follower then
+    /// watches again from a snapshot. An event of a kind this build does
+    /// not know is read as [`Watched::Unknown`], and the watch goes on: it
+    /// concerns the watched cell, which the reader fails closed for until
+    /// it has read the cell again. A hub that has not yet published its
+    /// cell's record holds the watch until it has, since the epoch it
+    /// would send is not settled before, and refuses it after 5 s.
     pub async fn watch(
         &self,
         hub: &str,
-    ) -> Result<BoxStream<'static, CellWatchEvent>, CellWatchError> {
+    ) -> Result<BoxStream<'static, Watched<CellWatchEvent, UnknownEvent>>, CellWatchError> {
         self.open(hub, WATCH_ROUTE).await
     }
 
     /// Watch what the hub at `hub`, `host:port`, follows: its relay, each
-    /// [`FollowEvent`] as it is sent. The events end when the hub ends the
-    /// watch (it stopped, or this watcher fell behind), when the
-    /// connection fails or goes idle, or at an event that does not parse;
-    /// a consumer then watches again from a snapshot.
+    /// [`FollowEvent`] as it is sent. The events end as a cell's watch's
+    /// do, and also at an event of a kind this build does not know that
+    /// names no follow; one that names its follow is read as
+    /// [`Watched::Unknown`], for the reader to fail closed for that cell
+    /// alone until it has read it again ([`CellWatcher::followed`]). A
+    /// consumer whose watch ended watches again from a snapshot.
     pub async fn follows(
         &self,
         hub: &str,
-    ) -> Result<BoxStream<'static, FollowEvent>, CellWatchError> {
+    ) -> Result<BoxStream<'static, Watched<FollowEvent, UnknownFollowEvent>>, CellWatchError> {
         self.open(hub, FOLLOWS_ROUTE).await
     }
 
-    async fn open<T: DeserializeOwned + Send + 'static>(
+    /// Read one follow of the relay of the hub at `hub`, `host:port`, as it
+    /// is now: the follow of the cell `cell` of `class`, as a watch of the
+    /// relay begins with it, without its marker; empty when the hub follows
+    /// no such cell, or has not yet installed its follow. Refused when the
+    /// snapshot has an event of a kind this build does not know, since
+    /// the cell cannot be read whole then.
+    pub async fn followed(
+        &self,
+        hub: &str,
+        class: &str,
+        cell: &str,
+    ) -> Result<Vec<FollowEvent>, CellWatchError> {
+        gdl_model::check_class_name(class).map_err(CellWatchError)?;
+        gdl_model::check_cell_name(cell).map_err(CellWatchError)?;
+        let mut events = self
+            .open::<FollowEvent>(hub, &super::followed_path(class, cell))
+            .await?;
+        let mut snapshot = Vec::new();
+        while let Some(item) = events.next().await {
+            match item {
+                Watched::Event(FollowEvent::Synced) => return Ok(snapshot),
+                Watched::Event(event) => snapshot.push(event),
+                Watched::Unknown(event) => {
+                    return Err(CellWatchError(format!(
+                        "the follow of {class} cell {cell} has an event of a kind this build does not know, `{}`",
+                        event.kind
+                    )));
+                }
+            }
+        }
+        Err(CellWatchError(format!(
+            "the follow of {class} cell {cell} ended before its snapshot was complete"
+        )))
+    }
+
+    async fn open<T: Classify>(
         &self,
         hub: &str,
         route: &str,
-    ) -> Result<BoxStream<'static, T>, CellWatchError> {
+    ) -> Result<BoxStream<'static, Watched<T, T::Unknown>>, CellWatchError> {
         gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
         let url = format!("http://{hub}/v1/ext/{EXTENSION}{route}");
         let mut response = self
@@ -92,7 +150,7 @@ impl CellWatcher {
                 String::from_utf8_lossy(&body)
             )));
         }
-        Ok(events(response.bytes_stream()).boxed())
+        Ok(events(response.bytes_stream(), Arc::clone(&self.unknown)).boxed())
     }
 }
 
@@ -123,27 +181,40 @@ impl std::fmt::Debug for CellWatchError {
 impl std::error::Error for CellWatchError {}
 
 /// The events in a watch's bytes, ending with the bytes, at the first
-/// error, or at the first event that does not parse.
-fn events<T, S, B, E>(bytes: S) -> impl Stream<Item = T> + Send + 'static
+/// error, or at the first event that is neither an event this build knows
+/// nor one of a kind it does not ([`Classify::unknown`]). Each of the
+/// latter is counted in `unknown`.
+fn events<T, S, B, E>(
+    bytes: S,
+    unknown: Arc<AtomicU64>,
+) -> impl Stream<Item = Watched<T, T::Unknown>> + Send + 'static
 where
-    T: DeserializeOwned + Send + 'static,
+    T: Classify,
     S: Stream<Item = Result<B, E>> + Send + 'static,
     B: AsRef<[u8]>,
 {
     let state = (Box::pin(bytes), Vec::new());
-    futures::stream::unfold(state, |(mut bytes, mut buffer)| async move {
-        loop {
-            if let Some(end) = event_end(&buffer) {
-                let raw: Vec<u8> = buffer.drain(..end).collect();
-                match parse(&raw) {
-                    Ok(Some(event)) => return Some((event, (bytes, buffer))),
-                    Ok(None) => continue,
-                    Err(()) => return None,
+    futures::stream::unfold(state, move |(mut bytes, mut buffer)| {
+        let unknown = Arc::clone(&unknown);
+        async move {
+            loop {
+                if let Some(end) = event_end(&buffer) {
+                    let raw: Vec<u8> = buffer.drain(..end).collect();
+                    match parse::<T>(&raw) {
+                        Ok(Some(item)) => {
+                            if matches!(item, Watched::Unknown(_)) {
+                                unknown.fetch_add(1, Ordering::Relaxed);
+                            }
+                            return Some((item, (bytes, buffer)));
+                        }
+                        Ok(None) => continue,
+                        Err(()) => return None,
+                    }
                 }
-            }
-            match bytes.next().await {
-                Some(Ok(chunk)) => buffer.extend_from_slice(chunk.as_ref()),
-                Some(Err(_)) | None => return None,
+                match bytes.next().await {
+                    Some(Ok(chunk)) => buffer.extend_from_slice(chunk.as_ref()),
+                    Some(Err(_)) | None => return None,
+                }
             }
         }
     })
@@ -158,8 +229,10 @@ fn event_end(buffer: &[u8]) -> Option<usize> {
 }
 
 /// One server-sent event: `None` for one without data (a keep-alive
-/// comment), `Err` for one whose data is not an event.
-fn parse<T: DeserializeOwned>(raw: &[u8]) -> Result<Option<T>, ()> {
+/// comment), `Err` for one whose data is no event. An event of a known
+/// kind costs the one parse; only one that does not parse is read again,
+/// for its kind and the cell it names.
+fn parse<T: Classify>(raw: &[u8]) -> Result<Option<Watched<T, T::Unknown>>, ()> {
     let text = std::str::from_utf8(raw).map_err(|_| ())?;
     let mut data: Option<String> = None;
     for line in text.lines() {
@@ -174,25 +247,50 @@ fn parse<T: DeserializeOwned>(raw: &[u8]) -> Result<Option<T>, ()> {
             }
         }
     }
-    data.map(|data| serde_json::from_str(&data).map_err(|_| ()))
-        .transpose()
+    let Some(data) = data else {
+        return Ok(None);
+    };
+    match serde_json::from_str(&data) {
+        Ok(event) => Ok(Some(Watched::Event(event))),
+        Err(_) => T::unknown(&data)
+            .map(|event| Some(Watched::Unknown(event)))
+            .ok_or(()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::{CellWatchEvent, events};
+    use crate::watched::Classify;
+    use crate::{FollowEvent, UnknownEvent, UnknownFollowEvent, Watched};
     use futures::StreamExt;
     use gdl_cells::CellState;
     use velo::InstanceId;
 
-    fn parsed(chunks: &[&str]) -> Vec<CellWatchEvent> {
+    /// What a watch's bytes read as, and how many of them were of a kind
+    /// this build does not know.
+    fn read<T: Classify>(chunks: &[&str]) -> (Vec<Watched<T, T::Unknown>>, u64) {
         let chunks: Vec<Result<Vec<u8>, ()>> = chunks
             .iter()
             .map(|chunk| Ok(chunk.as_bytes().to_vec()))
             .collect();
-        futures::executor::block_on(
-            events::<CellWatchEvent, _, _, _>(futures::stream::iter(chunks)).collect(),
-        )
+        let unknown = Arc::new(AtomicU64::new(0));
+        let read = futures::executor::block_on(
+            events::<T, _, _, _>(futures::stream::iter(chunks), Arc::clone(&unknown)).collect(),
+        );
+        (read, unknown.load(Ordering::Relaxed))
+    }
+
+    /// The events of a cell's watch, when all are of known kinds.
+    fn parsed(chunks: &[&str]) -> Vec<CellWatchEvent> {
+        read::<CellWatchEvent>(chunks)
+            .0
+            .into_iter()
+            .map(|item| item.event().expect("a known event"))
+            .collect()
     }
 
     fn left(instance: InstanceId) -> CellWatchEvent {
@@ -273,17 +371,125 @@ mod tests {
         assert_eq!(got, [CellWatchEvent::Synced]);
     }
 
-    /// An event that does not parse ends the stream: what follows it
-    /// cannot be trusted to follow on.
+    /// An event that is not JSON, or of a known kind whose fields do not
+    /// parse, ends the stream: what follows it cannot be trusted to follow
+    /// on.
     #[test]
     fn an_event_that_does_not_parse_ends_the_stream() {
         let a = InstanceId::new_v4();
-        let got = parsed(&[
+        for bad in [
+            "data: {\"event\":\n\n",
+            "data: {\"event\":\"left\",\"segment\":7}\n\n",
+            "data: {\"event\":\"state\",\"state\":\"paused\"}\n\n",
+            "data: {\"kind\":\"left\"}\n\n",
+            "data: [1]\n\n",
+        ] {
+            let got = parsed(&[&sse(&left(a)), bad, &sse(&left(a))]);
+            assert_eq!(got, [left(a)], "{bad:?}");
+        }
+    }
+
+    /// A field a later build adds to a known event is ignored: the event
+    /// is read as this build knows it.
+    #[test]
+    fn a_known_event_with_a_field_it_does_not_know_parses() {
+        let a = InstanceId::new_v4();
+        let later = format!(
+            "data: {{\"event\":\"left\",\"segment\":\"f\",\"instance\":\"{a}\",\"why\":{{\"code\":3}}}}\n\n"
+        );
+        assert_eq!(parsed(&[&later]), [left(a)]);
+        let relayed = format!(
+            "data: {{\"event\":\"left\",\"class\":\"model_x\",\"cell\":\"m\",\"generation\":2,\"segment\":\"f\",\"instance\":\"{a}\",\"why\":1}}\n\n"
+        );
+        let (got, unknown) = read::<FollowEvent>(&[&relayed]);
+        assert_eq!(
+            got,
+            [Watched::Event(FollowEvent::Left {
+                class: "model_x".into(),
+                cell: "m".into(),
+                generation: 2,
+                segment: "f".into(),
+                instance: a,
+            })]
+        );
+        assert_eq!(unknown, 0);
+    }
+
+    /// An event of a kind this build does not know, between two known
+    /// ones, is read as unknown and counted, and the watch goes on: on a
+    /// cell's watch it concerns the watched cell, whatever it names.
+    #[test]
+    fn an_unknown_kind_on_a_cell_watch_is_read_and_the_watch_goes_on() {
+        let (a, b) = (InstanceId::new_v4(), InstanceId::new_v4());
+        let (got, unknown) = read::<CellWatchEvent>(&[
             &sse(&left(a)),
-            "data: {\"event\":\"later\"}\n\n",
-            &sse(&left(a)),
+            "data: {\"event\":\"paused\",\"cell\":7,\"until\":{\"ms\":10}}\n\n",
+            &sse(&left(b)),
         ]);
-        assert_eq!(got, [left(a)]);
+        assert_eq!(
+            got,
+            [
+                Watched::Event(left(a)),
+                Watched::Unknown(UnknownEvent {
+                    kind: "paused".into()
+                }),
+                Watched::Event(left(b)),
+            ]
+        );
+        assert_eq!(unknown, 1);
+    }
+
+    fn relay_state(cell: &str, state: CellState) -> FollowEvent {
+        FollowEvent::State {
+            class: "model_x".into(),
+            cell: cell.into(),
+            generation: 1,
+            state,
+        }
+    }
+
+    fn relay_sse(event: &FollowEvent) -> String {
+        format!(
+            "data: {}\n\n",
+            serde_json::to_string(event).expect("an event serializes")
+        )
+    }
+
+    /// On the relay, an event of a kind this build does not know names the
+    /// follow it concerns, and the watch goes on past it; one that names no
+    /// follow ends the watch, since no cell can be failed closed for it.
+    #[test]
+    fn an_unknown_kind_on_the_relay_names_its_follow() {
+        let before = relay_state("n", CellState::Ready);
+        let after = relay_state("n", CellState::Degraded);
+        let (got, unknown) = read::<FollowEvent>(&[
+            &relay_sse(&before),
+            "data: {\"event\":\"paused\",\"class\":\"model_x\",\"cell\":\"m\",\"generation\":3,\"for_ms\":5}\n\n",
+            &relay_sse(&after),
+        ]);
+        assert_eq!(
+            got,
+            [
+                Watched::Event(before.clone()),
+                Watched::Unknown(UnknownFollowEvent {
+                    kind: "paused".into(),
+                    class: "model_x".into(),
+                    cell: "m".into(),
+                    generation: 3,
+                }),
+                Watched::Event(after.clone()),
+            ]
+        );
+        assert_eq!(unknown, 1);
+        for nameless in [
+            "data: {\"event\":\"paused\"}\n\n",
+            "data: {\"event\":\"paused\",\"class\":\"model_x\",\"cell\":\"m\"}\n\n",
+            "data: {\"event\":\"paused\",\"class\":\"model_x\",\"cell\":\"m\",\"generation\":\"3\"}\n\n",
+        ] {
+            let (got, _) =
+                read::<FollowEvent>(&[&relay_sse(&before), nameless, &relay_sse(&after)]);
+            assert_eq!(got, [Watched::Event(before.clone())], "{nameless:?}");
+        }
     }
 
     /// A connection that fails ends the stream, and an event cut short by
@@ -298,9 +504,10 @@ mod tests {
             Err(()),
             Ok(whole.into_bytes()),
         ];
-        let got: Vec<CellWatchEvent> =
-            futures::executor::block_on(events(futures::stream::iter(chunks)).collect());
-        assert_eq!(got, [left(a)]);
+        let got: Vec<Watched<CellWatchEvent, UnknownEvent>> = futures::executor::block_on(
+            events(futures::stream::iter(chunks), Arc::default()).collect(),
+        );
+        assert_eq!(got, [Watched::Event(left(a))]);
     }
 
     /// A hub address that is not `host:port` is refused before anything
