@@ -779,6 +779,13 @@ pub(crate) struct Handed {
 /// the selector that chose where it went, if one did, and, for a
 /// chooser's offer to a cell, the lease on the cell's follow, by which the
 /// chooser knows when it no longer holds an offer to it.
+///
+/// Under the `hub` feature the cell's lease makes it, and so every
+/// hand-off's [`Handed`], 8 bytes larger: 24 bytes against the selector's
+/// lease's 16, computed from the fields (a boxed lease is two words, an
+/// `Arc` one, each `Option` niched), not measured. A hand-off that is not
+/// a chooser's offer to a cell carries `None` there: making it and
+/// dropping it take no atomic operation, only the empty check on drop.
 #[derive(Default)]
 #[allow(dead_code, reason = "held for their drop")]
 pub(crate) struct Held {
