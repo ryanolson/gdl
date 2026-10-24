@@ -15,8 +15,9 @@
 //! summary, which its record and its watch carry. It drains the cell when
 //! asked (`POST /v1/ext/gdl-cell/drain` on the control listener): the cell
 //! is then `draining` whatever its quorum. The hub of a cell whose
-//! class sends to other classes is such a follower: it finds their home
-//! cells in the directory, follows each over its watch, and relays what it
+//! class sends to other classes is such a follower: it finds its children,
+//! the cells of those classes whose record names its cell as their parent,
+//! in the directory, follows each over its watch, and relays what it
 //! follows to its own instances (`GET /v1/ext/gdl-cell/follows`, as
 //! [`gdl_watch::FollowEvent`]s, which a [`gdl_watch::CellWatcher`] reads
 //! too), and a watch of one follow of it alone, ordered as the relay is

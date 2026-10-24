@@ -65,9 +65,9 @@ impl CellDirectory for Scripted {
     }
 }
 
-/// A watch that names a home cell and then fails, before its snapshot is
-/// complete, then a watch whose complete snapshot is empty: the cell was
-/// withdrawn meanwhile. The global follows the cell from the first
+/// A watch that names a child of the global and then fails, before its
+/// snapshot is complete, then a watch whose complete snapshot is empty:
+/// the cell was withdrawn meanwhile. The global follows the cell from the first
 /// watch; its link fails, since no hub serves the cell, and once the
 /// second snapshot is in, the global does not follow it again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -81,7 +81,7 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
         name: "model-x-07-us-east-1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
-        home: None,
+        home: Some(GLOBAL.into()),
         contract: layout.contract_hash(),
         placement: layout.placement_hash(),
         state: CellState::Ready,

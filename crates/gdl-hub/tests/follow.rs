@@ -1,5 +1,5 @@
-//! A global cell's hub follows the model cells of its region over their
-//! cell watches, and relays what it follows to its own instances. In the
+//! A global cell's hub follows its children, the model cells that name it
+//! as their parent, over their cell watches, and relays what it follows to its own instances. In the
 //! deployment of these tests, `global` runs `a` and sends to `model_x`,
 //! whose entry segment is `f`. Every hub runs in process on OS-assigned
 //! ports, sharing one directory whose hub names a test resolves once each
@@ -124,8 +124,8 @@ async fn peer(hub: &Hub, id: InstanceId) -> PeerInfo {
         .expect("a member")
 }
 
-/// A record a test writes into the directory itself: a model cell of the
-/// global's region, deployment, and class, ready, at `hub`.
+/// A record a test writes into the directory itself: a child of the
+/// global, of its region, deployment, and class, ready, at `hub`.
 fn written(like: &CellRecord, name: &str, hub: &str) -> CellRecord {
     CellRecord {
         name: name.into(),
@@ -292,14 +292,16 @@ impl Relay {
     }
 }
 
-/// A global follows a model cell of its own region and deployment once
-/// the cell's record says it takes work (`ready` or `degraded`). It does
-/// not follow a cell of another region, one with other hashes, or one
-/// that is `unavailable`. The follower decides on each record in the
+/// A global follows its children, the model cells whose record names it as
+/// their parent (`home`) with its contract and placement hashes, once
+/// their record says they take work (`ready` or `degraded`), whatever
+/// their region. It does not follow a cell whose parent is another global,
+/// one with no parent, one with another contract or placement hash, or
+/// one that is `unavailable`. The follower decides on each record in the
 /// order the directory gives them, so once it follows a cell whose record
 /// came last, it has decided on every record before it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_global_follows_the_home_cells_that_take_work() {
+async fn a_global_follows_its_children_that_take_work() {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
     let (model_hub, model_cell) = serve_cell(
@@ -310,15 +312,28 @@ async fn a_global_follows_the_home_cells_that_take_work() {
     .await;
     let published = records.next().await;
     assert_eq!(published.state, CellState::Unavailable);
+    assert_eq!(published.home.as_deref(), Some(GLOBAL));
     let elsewhere = CellRecord {
         region: "us-west-2".into(),
         ..written(&published, "model-x-01-us-west-2", &nowhere())
+    };
+    let cousin = CellRecord {
+        home: Some("global-02-us-east-1".into()),
+        ..written(&published, "model-x-03-us-east-1", &nowhere())
+    };
+    let orphan = CellRecord {
+        home: None,
+        ..written(&published, "model-x-04-us-east-1", &nowhere())
     };
     let foreign = CellRecord {
         contract: published.contract ^ 1,
         ..written(&published, "model-x-02-us-east-1", &nowhere())
     };
-    for record in [elsewhere, foreign] {
+    let replaced = CellRecord {
+        placement: published.placement ^ 1,
+        ..written(&published, "model-x-05-us-east-1", &nowhere())
+    };
+    for record in [elsewhere, cousin, orphan, foreign, replaced] {
         directory.inner.publish(record).await.expect("stored");
     }
     let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
@@ -331,8 +346,8 @@ async fn a_global_follows_the_home_cells_that_take_work() {
     .await;
     assert_eq!(
         cells.keys().collect::<Vec<_>>(),
-        ["model-x-08-us-east-1"],
-        "not another region's, another deployment's, or an unavailable cell"
+        ["model-x-01-us-west-2", "model-x-08-us-east-1"],
+        "another region's child, and not another global's, an orphan, another deployment's, or an unavailable cell"
     );
 
     let (_instances, _) = meet_the_quorum(&model_hub).await;
@@ -342,7 +357,7 @@ async fn a_global_follows_the_home_cells_that_take_work() {
     .await;
     assert_eq!(
         cells.keys().collect::<Vec<_>>(),
-        [CELL, "model-x-08-us-east-1"]
+        [CELL, "model-x-01-us-west-2", "model-x-08-us-east-1"]
     );
     let mut watchers = model_cell.watchers();
     tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == 1))

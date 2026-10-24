@@ -81,9 +81,11 @@ pub use feed::CellWatch;
 /// withdrawn.
 ///
 /// A cell whose class sends to other classes follows their cells: for
-/// each class it sends to, it watches `directory`, and follows each home
-/// cell of the class (one of its own region and deployment, whose record
-/// is `ready` or `degraded`) over the cell's watch, one link per cell. It
+/// each class it sends to, it watches `directory`, and follows each child
+/// of its cell in the class (a cell whose record names this cell as its
+/// parent, `home`, has this deployment's contract and placement hashes,
+/// and is `ready` or `degraded`, whatever its region) over the cell's
+/// watch, one link per cell. It
 /// relays what it follows on `GET follows`, server-sent events, each one
 /// [`gdl_watch::FollowEvent`] as JSON, with the same keep-alive and buffer as
 /// the cell's watch: each followed cell's state, then its retired entry
@@ -104,8 +106,8 @@ pub use feed::CellWatch;
 /// drops it and its link ends. A follow whose link ends, or that a newer
 /// epoch in the directory replaces, is not offered from then, and is kept
 /// beside the cell's later follows until it closes the same way; the cell
-/// is followed again, as a new generation, while it is still a home cell
-/// that takes work, and, after a follow closed, only from a later write
+/// is followed again, as a new generation, while it is still a child that
+/// takes work, and, after a follow closed, only from a later write
 /// of its record. A record that expires or is withdrawn ends no follow.
 ///
 /// Each usable entry instance of the cell reports its admission to the
@@ -513,7 +515,6 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                         refollow: self.timing.refollow,
                         me: me.clone(),
                         class: class.clone(),
-                        region: self.record.region.clone(),
                         contract: self.record.contract,
                         placement: self.record.placement,
                     };

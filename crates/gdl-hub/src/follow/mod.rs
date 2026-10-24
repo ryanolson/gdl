@@ -9,13 +9,16 @@
 //! ends a follow, or changes whether it is offered, and a link that ends
 //! makes its follow not offered at once, whatever the directory says. A
 //! newer epoch in the directory ends a follow too, since the hub it was
-//! following is gone. The follow set is the home cells, so a cell leaves
+//! following is gone. The follow set is the follower's children, the cells
+//! whose record names its cell as their parent (`home`), so a cell leaves
 //! it only so: a cell that stops taking work stays followed, not offered,
-//! until the relay closes its follow.
+//! until the relay closes its follow. Region plays no part: a parent
+//! follows its children wherever they run, and no other cell.
 //!
 //! A follow the relay closed, once every chooser acknowledged that it is
 //! not offered, is followed again only once the directory shows a later
-//! write of the cell's record that makes it a home cell: until then the
+//! write of the cell's record that makes it a child that takes work: until
+//! then the
 //! directory may still show the cell taking work when its link said it
 //! does not, and following it again would only close again.
 
@@ -53,12 +56,11 @@ pub(crate) struct Follower<D> {
     /// again.
     pub(crate) refollow: Duration,
     /// The follower's own cell, which its watches name, so that a
-    /// followed cell knows who follows it.
+    /// followed cell knows who follows it, and which its children name as
+    /// their parent.
     pub(crate) me: gdl_watch::Follower,
     /// The class followed.
     pub(crate) class: String,
-    /// The follower's own region: its home cells are those of this region.
-    pub(crate) region: String,
     /// The follower's contract and placement hashes: a cell with others
     /// serves another deployment, and is ignored.
     pub(crate) contract: u64,
@@ -113,10 +115,10 @@ impl<D: CellDirectory> Follower<D> {
         }
     }
 
-    /// Whether `record` is a home cell that takes work: of this region and
-    /// deployment, and `ready` or `degraded`.
-    fn home(&self, record: &CellRecord) -> bool {
-        record.region == self.region
+    /// Whether `record` is a child that takes work: it names this cell as
+    /// its parent, is of this deployment, and is `ready` or `degraded`.
+    fn child(&self, record: &CellRecord) -> bool {
+        record.home.as_deref() == Some(self.me.cell.as_str())
             && record.contract == self.contract
             && record.placement == self.placement
             && matches!(record.state, CellState::Ready | CellState::Degraded)
@@ -170,7 +172,7 @@ impl<D: CellDirectory> Follows<'_, D> {
         }
     }
 
-    /// Follow `cell` if its record makes it a home cell that takes work
+    /// Follow `cell` if its record makes it a child that takes work
     /// and it is not followed yet, unless the relay closed its last follow
     /// and the record is no later than it was then; end its follow if the
     /// record has a newer epoch than the one it began from, and follow it
@@ -208,7 +210,7 @@ impl<D: CellDirectory> Follows<'_, D> {
         {
             self.closed.remove(cell);
         }
-        match record.filter(|record| self.follower.home(record) && !self.closed.contains_key(cell))
+        match record.filter(|record| self.follower.child(record) && !self.closed.contains_key(cell))
         {
             Some(record) => self.start(record),
             None => self.follower.relay.forget(&self.follower.class, cell),
@@ -216,7 +218,7 @@ impl<D: CellDirectory> Follows<'_, D> {
     }
 
     /// A link's task ended: if it is the cell's current follow, follow the
-    /// cell again if its record still makes it a home cell that takes work.
+    /// cell again if its record still makes it a child that takes work.
     fn ended(&mut self, ended: Result<(String, u64, bool), JoinError>) {
         // A task aborted for a newer epoch was replaced already.
         let Ok((cell, generation, closed)) = ended else {

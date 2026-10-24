@@ -503,12 +503,12 @@ pub async fn serve_cell(
     (hub, readiness)
 }
 
-/// A model cell named `name` in `region` whose hub is named `hub`: `d`
-/// needs two usable instances, `f` one.
+/// A model cell named `name` in `region`, a child of [`GLOBAL`], whose hub
+/// is named `hub`: `d` needs two usable instances, `f` one.
 pub fn model(name: &str, region: &str, hub: &str) -> CellSettings {
     toml::from_str(&format!(
-        "name = '{name}'\nclass = 'model_x'\nregion = '{region}'\nhub = '{hub}'\n\
-         directory = 'memory'\n[ready]\nd = 2\n"
+        "name = '{name}'\nclass = 'model_x'\nregion = '{region}'\nhome = '{GLOBAL}'\n\
+         hub = '{hub}'\ndirectory = 'memory'\n[ready]\nd = 2\n"
     ))
     .expect("valid test fixture")
 }

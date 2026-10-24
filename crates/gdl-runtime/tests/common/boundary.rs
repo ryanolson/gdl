@@ -21,7 +21,8 @@ use tokio::task::JoinHandle;
 use velo_hub::Hub;
 
 use super::cells::{
-    Nothing, REGION, Resolving, cell_hub_proxied, cell_hub_timed, model_cell, settings, timing,
+    GLOBAL, Nothing, REGION, Resolving, cell_hub_proxied, cell_hub_timed, model_cell, settings,
+    timing,
 };
 use super::proxy::Proxy;
 use super::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
@@ -44,12 +45,13 @@ pub fn spec_of(placement: Placement) -> DeploymentSpec {
     DeploymentSpec::new(super::reference_manifest(|_| true), placement).expect("valid test fixture")
 }
 
-/// The settings of the hub of the model cell `name`, reached under the
-/// name `hub`: `f` needs `entries` usable instances to be ready, `d` one.
+/// The settings of the hub of the model cell `name`, a child of
+/// [`GLOBAL`], reached under the name `hub`: `f` needs `entries` usable
+/// instances to be ready, `d` one.
 pub fn model_hub_needing(name: &str, hub: &str, entries: u32) -> CellSettings {
     toml::from_str(&format!(
-        "name = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\nhub = '{hub}'\n\
-         directory = 'memory'\n[ready]\nf = {entries}\nd = 1\n"
+        "name = '{name}'\nclass = 'model_x'\nregion = '{REGION}'\nhome = '{GLOBAL}'\n\
+         hub = '{hub}'\ndirectory = 'memory'\n[ready]\nf = {entries}\nd = 1\n"
     ))
     .expect("valid test fixture")
 }

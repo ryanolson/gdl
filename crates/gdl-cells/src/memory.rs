@@ -151,9 +151,12 @@ impl CellDirectory for MemoryDirectory {
     async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
         record.check()?;
         let (class, cell) = (record.class.clone(), record.name.clone());
-        self.write(&class, &cell, Held::Record(Box::new(record.clone())), |token| {
-            CellEvent::Put { record, token }
-        })
+        self.write(
+            &class,
+            &cell,
+            Held::Record(Box::new(record.clone())),
+            |token| CellEvent::Put { record, token },
+        )
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {

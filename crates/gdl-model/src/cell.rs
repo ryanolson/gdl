@@ -17,7 +17,7 @@ use crate::{Error, Layout};
 /// name = "model-x-01-us-east-1"
 /// class = "model_x"
 /// region = "us-east-1"
-/// home = "global-us-east-1"    # optional: the cell of a parent class the policy prefers
+/// home = "global-us-east-1"    # optional: the parent cell, whose hub follows this one
 /// directory = "relay"          # optional: "relay" (the default), "memory", or "dir"
 /// # dir = "/var/lib/gdl/cells" # with "dir", and only with it: the shared directory
 /// seeds = ["hub-a:1337"]       # optional: hub addresses to join the relay mesh from
@@ -37,8 +37,10 @@ pub struct CellSettings {
     pub class: String,
     /// The region the cell runs in.
     pub region: String,
-    /// The cell of a parent class that the cell policy prefers for this
-    /// one. A preference, not a dependency of discovery.
+    /// The parent cell: the cell of the class that sends to this one whose
+    /// hub follows this cell, and whose choosers alone offer it work. The
+    /// cell's record names it. A cell that names none, or names another,
+    /// is not followed by that parent's hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
     /// Where the cell's record is published and the other cells are found:
