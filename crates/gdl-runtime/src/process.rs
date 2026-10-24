@@ -511,6 +511,8 @@ impl<H> ProcessConfig<H> {
                         &layout,
                         cell,
                         segment,
+                        node.instance_id(),
+                        &reaching,
                         host,
                         *public_port,
                         self.runtime.setup_timeout,
@@ -796,7 +798,13 @@ impl Launch {
     /// every instance that sends to its segment has promised to avoid it or
     /// left, and the runtime's setup timeout has passed since; or every
     /// instance of the source segments whose requests can reach it has
-    /// drained (its `serve` returned) or left. A source's instance
+    /// drained (its `serve` returned) or left. An entry instance of a cell
+    /// under a hub, one whose segment a hop from another class enters,
+    /// waits also, before the setup timeout, until its hub says that the
+    /// cells that follow its cell avoid it, or for at most the setup
+    /// timeout and twice the cell's `summary_ms` after it retired; and, as
+    /// sources of another class reach it whose drain its hub does not see,
+    /// never takes them for drained. A source's instance
     /// announces that it has drained before it waits, so source segments
     /// that route to each other never wait for each other. Then it refuses
     /// what arrives, waits until it holds no request (a stream holds its
@@ -992,6 +1000,7 @@ impl Launch {
     /// `deadline`; what does not get through leaves the drain to (B) or its
     /// bound.
     async fn retire(&mut self, deadline: tokio::time::Instant) {
+        self.cell_retires();
         let retired = match &mut self.peers {
             Peers::Files(dir) => announce(dir, "retired", self.segment, &self.node),
             #[cfg(feature = "hub")]
@@ -1013,9 +1022,12 @@ impl Launch {
     /// to this one has promised to avoid it, or left, and `setup` has
     /// passed since, so that a hand-off sent before the promise has
     /// arrived; or (B) every instance of the source segments that can reach
-    /// this one has drained or left. Then it closes its entries (ruling
-    /// 150) and waits until it holds no request; a stream holds its share
-    /// until velo has handed its output on. Each wait ends at `deadline`.
+    /// this one has drained or left. A retired entry instance of a cell
+    /// counts (A) only once the cells that follow its cell avoid it too, or
+    /// its bound has passed, and outside its cell's drain never counts (B)
+    /// while a source of another class reaches it. Then it closes its
+    /// entries (ruling 150) and waits until it holds no request; a stream
+    /// holds its share until velo has handed its output on. Each wait ends at `deadline`.
     /// While its cell drains, an entry instance first waits out its bound,
     /// declines offers, waits until it holds no request, and announces
     /// that it has drained; and every instance's sources in (B) are the
@@ -1032,7 +1044,10 @@ impl Launch {
     ) {
         self.cell_drain_settles(segment, deadline, hub).await;
         let sources = self.drain_sources();
-        let reaching: Vec<&str> = sources.iter().map(String::as_str).collect();
+        let blind = sources.is_none();
+        let reaching: Vec<&str> = sources.iter().flatten().map(String::as_str).collect();
+        #[cfg(feature = "hub")]
+        let parent = self.cell_parent();
         let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
         let me = self.node.instance_id();
         let pause = |every: Duration| async move {
@@ -1077,7 +1092,7 @@ impl Launch {
                             want.is_subset(&done)
                         })
                     };
-                    let drained = done("drained", &sources);
+                    let drained = !blind && done("drained", &sources);
                     if avoided.is_none() && done(&avoiding, &sending) {
                         avoided = Some(tokio::time::Instant::now());
                     }
@@ -1103,8 +1118,10 @@ impl Launch {
                         break;
                     }
                     let ask = async {
-                        let drained = reaching.is_empty() || session.all_drained(&reaching).await?;
-                        let avoiding = avoided.is_some() || session.all_avoid(me, &senders).await?;
+                        let drained = !blind
+                            && (reaching.is_empty() || session.all_drained(&reaching).await?);
+                        let avoiding = avoided.is_some()
+                            || (parent() && session.all_avoid(me, &senders).await?);
                         Ok::<_, Error>((drained, avoiding))
                     };
                     let asked = tokio::select! {

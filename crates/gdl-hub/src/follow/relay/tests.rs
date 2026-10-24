@@ -108,6 +108,26 @@ fn a_retired_instance_is_never_exposed() {
     );
 }
 
+/// A retirement sent again, acknowledged, finds the instance retired
+/// already: the relay's watchers are sent nothing, and the cell stays as
+/// it was, exposing its other instances, not withheld.
+#[test]
+fn an_acknowledged_retirement_changes_nothing_for_a_follower() {
+    let mut cell = installed(CellState::Ready);
+    let (retiree, staying) = (peer(), peer());
+    assert_eq!(sent(&mut cell, ready(&staying)), [exposed(&staying)]);
+    let retired = |acknowledged| CellWatchEvent::Retired {
+        segment: "f".into(),
+        instance: retiree.instance_id(),
+        acknowledged,
+    };
+    assert_eq!(sent(&mut cell, retired(false)).len(), 1);
+    assert_eq!(sent(&mut cell, retired(true)), []);
+    assert!(cell.exposes() && !cell.withheld);
+    let shown = cell.snapshot(1, None);
+    assert!(shown.contains(&exposed(&staying)), "{shown:?}");
+}
+
 /// A state that exposes nothing sends the state alone; one that exposes
 /// again sends each ready instance after it, including one that became
 /// ready meanwhile. An instance hidden when it leaves is still sent its

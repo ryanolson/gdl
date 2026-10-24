@@ -32,11 +32,20 @@ async fn a_global_instance_in_a_cell_serves_with_no_model_cell() {
 
 /// A model cell's instances launch and serve with no global instance
 /// running: they wait for each other, the segments of their own class.
+/// Their bodies end at once, and the entry instance's stop waits for the
+/// cells that follow its cell, which this hub, without the cell's
+/// extension, never says avoid it: so up to its bound, the setup timeout
+/// and twice the summary period, here 200 ms and 1 s, then the setup
+/// timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_model_cell_serves_with_no_global_instance() {
     let hub = admission_hub().await;
     let (public, control) = (hub.public_addr().port(), hub.control_addr().port());
-    let config = settings(public, control, 2_000, &model_cell("model-x-01-us-east-1"));
+    let extra = format!(
+        "{}summary_ms = 1000\n[runtime]\nsetup_timeout_ms = 200\n",
+        model_cell("model-x-01-us-east-1")
+    );
+    let config = settings(public, control, 2_000, &extra);
     let (entry, interior) = tokio::time::timeout(WAIT, async {
         tokio::join!(launch(&config, "f"), launch(&config, "d"))
     })
