@@ -7,12 +7,15 @@
 
 mod common;
 
-use common::WAIT;
+use common::boundary::{
+    Model, RUNTIME, Running, ask, model_of, model_proxied, placement, run_graph, spec_of,
+};
 use common::cells::{
-    Instance, Resolving, cell_hub, followed, global_cell, global_hub, launch, model_hub, settings,
-    sorted, unresolved_cell_hub, until,
+    Instance, Resolving, cell_hub, cell_hub_of, followed, global_cell, global_hub, launch,
+    model_hub, settings, sorted, unresolved_cell_hub, until,
 };
 use common::proxy::Proxy;
+use common::{Chunk, Events, Prompt, WAIT, reference_graph};
 use gdl_model::SegmentPhase;
 use gdl_runtime::{CellState, Cells, FollowedCell};
 
@@ -196,4 +199,132 @@ async fn a_chooser_leaves_a_cell_unread_for_an_unknown_relay_event_until_it_read
     for hub in [global, m1, m2] {
         hub.shutdown().await.expect("valid test fixture");
     }
+}
+
+/// The chooser of the request-level tests, through `public`, a proxy in
+/// front of its hub's public listener.
+async fn chooser_through(
+    spec: &gdl_runtime::DeploymentSpec,
+    hub: &velo_hub::Hub,
+    public: u16,
+) -> Running<impl gdl::Next<Prompt, Chunk> + gdl_runtime::Register + use<>> {
+    let extra = format!("{}{RUNTIME}", global_cell());
+    let config = settings(public, hub.control_addr().port(), 5_000, &extra);
+    run_graph(&config, "a", spec, config.runtime.clone(), &|deployment| {
+        reference_graph(deployment, &Events::quiet())
+    })
+    .await
+    .expect("the chooser serves")
+}
+
+/// `M1`, ready with one entry, and `M2`, degraded with one: `home_first`
+/// sends every request to `M1` while it may, and to `M2` only when it may
+/// not.
+fn cells_of(name: &'static str) -> Model<'static> {
+    match name {
+        M1 => Model {
+            name,
+            hub: "m1-hub:1337",
+            quorum: 1,
+            entries: 1,
+        },
+        _ => Model {
+            name,
+            hub: "m2-hub:1337",
+            quorum: 2,
+            entries: 1,
+        },
+    }
+}
+
+/// Wait until the chooser follows `M1` ready and `M2` degraded, each with
+/// its entry and a load summary to choose it by.
+async fn both_followed(cells: &Cells) {
+    until(cells, "M1 ready and M2 degraded, with summaries", |cells| {
+        let has = |cell, state| {
+            followed(cells, "f", cell).is_some_and(|m| {
+                m.state == state && m.eligible.len() == 1 && m.load.is_some() && !m.unread
+            })
+        };
+        has(M1, CellState::Ready) && has(M2, CellState::Degraded)
+    })
+    .await;
+}
+
+/// Requests: `M1` takes them; the hub's follow of `M1` meets an event of
+/// a kind it does not know, in place of one of `M1`'s load summaries, and
+/// while the hub reads `M1` again the requests go to `M2`; once it has,
+/// `M1` takes them again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_go_to_another_cell_while_a_hub_reads_one_again() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let chooser = chooser_through(&spec, &hub, hub.public_addr().port()).await;
+    let cells = chooser.cells.clone().expect("a chooser");
+    let assemble =
+        |deployment: &gdl_runtime::Deployment| reference_graph(deployment, &Events::quiet());
+    let (m1, link) = model_proxied(&spec, &directory, cells_of(M1), RUNTIME, &assemble).await;
+    let m2 = model_of(&spec, &directory, cells_of(M2), &|r| r, &assemble).await;
+    both_followed(&cells).await;
+    let generation = followed(&cells, "f", M1).expect("followed").generation;
+    ask(&chooser.segment).await.expect("answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (1, 0));
+
+    link.rewrite_once(br#""event":"load""#, br#""event":"lxad""#);
+    link.hold(b"GET /v1/ext/gdl-cell/watch");
+    tokio::time::timeout(WAIT, link.holding())
+        .await
+        .expect("the hub reads M1 again");
+    until(&cells, "M1 withheld", |cells| not_chosen(cells, M1)).await;
+    ask(&chooser.segment).await.expect("answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (1, 1), "M2 took it");
+
+    link.release();
+    both_followed(&cells).await;
+    ask(&chooser.segment).await.expect("answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (2, 1), "M1 took it again");
+    assert_eq!(
+        followed(&cells, "f", M1).expect("followed").generation,
+        generation,
+        "the same follow, not dropped and followed again"
+    );
+}
+
+/// Requests: `M1` takes them; the chooser's relay watch meets an event of
+/// a kind it does not know for `M1`, in place of one of its load
+/// summaries, and while the chooser reads `M1` again the requests go to
+/// `M2`; once it has, `M1` takes them again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_go_to_another_cell_while_a_chooser_reads_one_again() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let public = Proxy::new(hub.public_addr()).await;
+    let chooser = chooser_through(&spec, &hub, public.port).await;
+    let cells = chooser.cells.clone().expect("a chooser");
+    let assemble =
+        |deployment: &gdl_runtime::Deployment| reference_graph(deployment, &Events::quiet());
+    let m1 = model_of(&spec, &directory, cells_of(M1), &|r| r, &assemble).await;
+    let m2 = model_of(&spec, &directory, cells_of(M2), &|r| r, &assemble).await;
+    both_followed(&cells).await;
+    ask(&chooser.segment).await.expect("answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (1, 0));
+
+    let load = format!(r#""event":"load","class":"model_x","cell":"{M1}""#);
+    let unknown = format!(r#""event":"lxad","class":"model_x","cell":"{M1}""#);
+    public.rewrite_once(load.as_bytes(), unknown.as_bytes());
+    public.hold(format!("/follows/model_x/{M1}").as_bytes());
+    tokio::time::timeout(WAIT, public.holding())
+        .await
+        .expect("the chooser reads M1 again");
+    assert!(followed(&cells, "f", M1).is_some_and(|m| m.unread));
+    ask(&chooser.segment).await.expect("answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (1, 1), "M2 took it");
+
+    public.release();
+    both_followed(&cells).await;
+    ask(&chooser.segment).await.expect("answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (2, 1), "M1 took it again");
+    assert_eq!(cells.unknown_events(), 1);
 }
