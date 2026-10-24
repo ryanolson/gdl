@@ -45,7 +45,8 @@ pub struct CellSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
     /// Where the cell's record is published and the other cells are found:
-    /// the `directory` key, with the `dir` key for [`DirectoryBackend::Dir`].
+    /// the `directory` key, with the `dir` key for [`DirectoryBackend::Dir`];
+    /// [`DirectoryBackend::Relay`] by default.
     pub directory: DirectoryBackend,
     /// Usable instances each segment of the class needs for the cell to be
     /// ready; see [`CellSettings::quorum`].
@@ -88,20 +89,28 @@ pub enum DirectoryBackend {
 }
 
 impl CellSettings {
-    /// The load summary's period when `summary_ms` is not set.
+    /// The load summary's period when `summary_ms` is not set: 10 s.
     pub const DEFAULT_SUMMARY: Duration = Duration::from_secs(10);
 
-    /// The shortest load summary period: a report per entry instance and a
+    /// The shortest load summary period, 1 s: a report per entry instance and a
     /// summary per cell each period, which a shorter one would make a load
     /// of their own.
     pub const MIN_SUMMARY: Duration = Duration::from_secs(1);
 
+    /// The quorum of a segment that neither the cell's `ready` nor, in
+    /// the fleet file, its class's names: one usable instance.
+    pub const DEFAULT_QUORUM: u32 = 1;
+
     /// The usable instances `segment` needs for the cell to be ready: its
-    /// `ready` entry, else 1. The fleet file supplies the class's default
-    /// when it fills in a cell's settings, so the fallback applies only to
-    /// a segment that neither the cell nor its class gives a quorum.
+    /// `ready` entry, else [`CellSettings::DEFAULT_QUORUM`]. The fleet file
+    /// supplies the class's default when it fills in a cell's settings, so
+    /// the fallback applies only to a segment that neither the cell nor
+    /// its class gives a quorum.
     pub fn quorum(&self, segment: &str) -> u32 {
-        self.ready.get(segment).copied().unwrap_or(1)
+        self.ready
+            .get(segment)
+            .copied()
+            .unwrap_or(Self::DEFAULT_QUORUM)
     }
 
     /// Whether these settings fit an instance of `segment` in `layout`: the

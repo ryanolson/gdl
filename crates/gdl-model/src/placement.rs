@@ -68,7 +68,8 @@ struct ClassSpec {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestRouter {
-    /// Cycle through replicas in roster order.
+    /// Cycle through replicas in roster order: the default, for a hop
+    /// that `[routing]` does not name.
     #[default]
     RoundRobin,
     /// Select a replica independently for each request hand-off.

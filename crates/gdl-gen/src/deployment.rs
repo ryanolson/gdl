@@ -9,11 +9,19 @@ pub(crate) struct Settings {
     hub_image: Option<String>,
     segment: std::collections::BTreeMap<String, Image>,
 }
+/// `[deployment] base_image` when the spec does not set it: the image a
+/// segment, and the hub unless `hub_image` says otherwise, runs in.
+pub(crate) const DEFAULT_BASE_IMAGE: &str = "debian:bookworm-slim";
+
+/// `[deployment] build_image` when the spec does not set it: the image
+/// every binary is built in.
+pub(crate) const DEFAULT_BUILD_IMAGE: &str = "rust:1.93-slim-bookworm";
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            base_image: "debian:bookworm-slim".into(),
-            build_image: "rust:1.93-slim-bookworm".into(),
+            base_image: DEFAULT_BASE_IMAGE.into(),
+            build_image: DEFAULT_BUILD_IMAGE.into(),
             hub_image: None,
             segment: Default::default(),
         }

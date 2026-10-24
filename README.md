@@ -285,6 +285,25 @@ cargo gdl: 4 problems
 
 Every table of the spec, the fleet file, and a cell's settings refuses a key it does not know, and a table whose keys are names (a segment's in `ready`, a class's in `requires`, a node's in `[config]`) refuses a name that is not one of the spec's. A file that does not parse is one problem, and the other file is still checked: a fleet file whose spec does not read is checked for what needs no layout (its cell names, regions, and that each `home` is one of its cells). `cargo gdl compose --fleet fleet.toml` runs the same check first, and writes nothing when it finds a problem.
 
+### Defaults
+
+Every default of the spec's placement and deployment tables, the fleet file, and a cell's settings is a named constant:
+
+| Key | Default | Constant |
+|---|---|---|
+| spec `[routing] <node>` | `"round_robin"` | `RequestRouter::default()` |
+| spec `[cells.<class>] policy` | `"home_first"` | `CellPolicy::DEFAULT_POLICY` |
+| spec `[cells.<class>] spill_rtt_ms` | `80` | `CellPolicy::DEFAULT_SPILL_RTT_MS` |
+| spec `[cells.<class>] max_near` | `16` | `CellPolicy::DEFAULT_MAX_NEAR` |
+| spec `[deployment] base_image` | `"debian:bookworm-slim"` | `DEFAULT_BASE_IMAGE` |
+| spec `[deployment] build_image` | `"rust:1.93-slim-bookworm"` | `DEFAULT_BUILD_IMAGE` |
+| fleet `ready.<segment>`, `[cell] ready.<segment>` | `1` | `CellSettings::DEFAULT_QUORUM` |
+| `[cell] directory` | `"relay"` | `DirectoryBackend::default()` |
+| `[cell] summary_ms` | `10000` | `CellSettings::DEFAULT_SUMMARY` |
+| `[cell] summary_ms`, its least | `1000` | `CellSettings::MIN_SUMMARY` |
+
+The constants are `gdl_model`'s, and the two images are the generator's (`gdl-gen`). A fleet cell's quorum for a segment is its own `ready`, else its class's, else the default. A placement and a fleet file leave a default unsaid when they are written, and a spec that spells a default of its placement out has the placement, and the hash, of one that leaves it unsaid. Every other optional key has no value unless it is set, except `[deployment] hub_image`, which is the `base_image`, and `[contract] module`, which is the contract library's name.
+
 For a graph spec, the generator compiles nothing: it builds the contract's manifest from the graph file and what the source reader found, including which messages are wire types. For a contract spec, it compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`. If the reader takes a type for a wire type that is not one, the segment's build or its deployment, which checks the placement against the compiled contract, fails. If it misses a wire type's serde impls (for example, impls that a macro writes), the generator refuses a cut that would work. `cargo gdl extract --verify` finds both.
 
 For each segment, the generator writes a crate with:

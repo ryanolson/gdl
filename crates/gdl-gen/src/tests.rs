@@ -822,3 +822,125 @@ fn a_segment_name_is_short_enough_for_its_hub_services() {
     let placement = gdl_model::Placement::new().segment(fits.as_str(), ["S", "D"]);
     check(&spec(placement, &[("D", "tiny_nodes::D")]), &manifest()).expect("a name at the limit");
 }
+
+/// Each default constant, as the README's table names it, and its value
+/// as the table writes it.
+fn defaults() -> Vec<(&'static str, String)> {
+    use gdl_model::{CellPolicy, CellSettings, DirectoryBackend, RequestRouter};
+    let millis = |d: std::time::Duration| d.as_millis().to_string();
+    let directory = match DirectoryBackend::default() {
+        DirectoryBackend::Relay => "relay",
+        DirectoryBackend::Memory => "memory",
+        DirectoryBackend::Dir { .. } => "dir",
+    };
+    vec![
+        (
+            "RequestRouter::default()",
+            serde_json::to_string(&RequestRouter::default()).expect("a name"),
+        ),
+        (
+            "CellPolicy::DEFAULT_POLICY",
+            format!("{:?}", CellPolicy::DEFAULT_POLICY),
+        ),
+        (
+            "CellPolicy::DEFAULT_SPILL_RTT_MS",
+            CellPolicy::DEFAULT_SPILL_RTT_MS.to_string(),
+        ),
+        (
+            "CellPolicy::DEFAULT_MAX_NEAR",
+            CellPolicy::DEFAULT_MAX_NEAR.to_string(),
+        ),
+        (
+            "DEFAULT_BASE_IMAGE",
+            format!("{:?}", deployment::DEFAULT_BASE_IMAGE),
+        ),
+        (
+            "DEFAULT_BUILD_IMAGE",
+            format!("{:?}", deployment::DEFAULT_BUILD_IMAGE),
+        ),
+        (
+            "CellSettings::DEFAULT_QUORUM",
+            CellSettings::DEFAULT_QUORUM.to_string(),
+        ),
+        ("DirectoryBackend::default()", format!("{directory:?}")),
+        (
+            "CellSettings::DEFAULT_SUMMARY",
+            millis(CellSettings::DEFAULT_SUMMARY),
+        ),
+        (
+            "CellSettings::MIN_SUMMARY",
+            millis(CellSettings::MIN_SUMMARY),
+        ),
+    ]
+}
+
+/// What differs between the defaults table of `readme` and the
+/// constants: a constant the table lacks or gives another value, and a
+/// row that names no constant.
+fn defaults_drift(readme: &str) -> Vec<String> {
+    let section = readme
+        .split_once("\n### Defaults\n")
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    let rows: Vec<(String, String)> = section
+        .lines()
+        .skip_while(|line| !line.starts_with('|'))
+        .take_while(|line| line.starts_with('|'))
+        .skip(2)
+        .filter_map(|line| {
+            let cells: Vec<&str> = line.trim_matches('|').split(" | ").map(str::trim).collect();
+            let unquote = |cell: &str| cell.trim_matches('`').to_string();
+            Some((unquote(cells.get(2)?), unquote(cells.get(1)?)))
+        })
+        .collect();
+    let constants = defaults();
+    let mut drift = Vec::new();
+    for (constant, value) in &constants {
+        match rows.iter().find(|(name, _)| name == constant) {
+            None => drift.push(format!("{constant} is not in the table")),
+            Some((_, written)) if written != value => {
+                drift.push(format!(
+                    "{constant} is {value}, but the table says {written}"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    for (name, _) in &rows {
+        if !constants.iter().any(|(constant, _)| constant == name) {
+            drift.push(format!("the table's {name} is no default constant"));
+        }
+    }
+    drift
+}
+
+/// The README's table of defaults names every default constant with its
+/// value, and nothing else, so that the two cannot drift.
+#[test]
+fn the_readme_names_every_default_with_its_value() {
+    let readme = include_str!("../../../README.md");
+    assert_eq!(defaults_drift(readme), Vec::<String>::new());
+    // The control: a table that drifted is caught.
+    let drifted = readme.replacen(
+        "| `16` | `CellPolicy::DEFAULT_MAX_NEAR` |",
+        "| `8` | `CellPolicy::DEFAULT_MAX_NEAR` |",
+        1,
+    );
+    assert_ne!(drifted, readme, "the row to change");
+    assert_eq!(
+        defaults_drift(&drifted),
+        ["CellPolicy::DEFAULT_MAX_NEAR is 16, but the table says 8"]
+    );
+    let missing = readme.replacen(
+        "| `1` | `CellSettings::DEFAULT_QUORUM` |",
+        "| `1` | (none) |",
+        1,
+    );
+    assert_eq!(
+        defaults_drift(&missing),
+        [
+            "CellSettings::DEFAULT_QUORUM is not in the table",
+            "the table's (none) is no default constant"
+        ]
+    );
+}
