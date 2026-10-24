@@ -462,6 +462,26 @@ fn a_fleet_bundles_variables_give_a_segment_its_hub_and_cell() {
         );
         Ok(())
     });
+    // A name that would read as another value is quoted, and a quorum of
+    // a segment whose name holds `__` is one variable holding the table.
+    Jail::expect_with(|jail| {
+        jail.create_file("config.toml", IMAGE)?;
+        jail.set_env("GDL_CELL__NAME", "\"true\"");
+        jail.set_env("GDL_CELL__CLASS", "global");
+        jail.set_env("GDL_CELL__REGION", "us-east-1");
+        jail.set_env("GDL_CELL__READY", "{\"front__work\"=2}");
+        jail.set_env("GDL_HUB__HOST", "true");
+        assert!(
+            Config::load(["config.toml"]).is_err(),
+            "a host that reads as a boolean"
+        );
+        jail.set_env("GDL_HUB__HOST", "\"true\"");
+        let config = Config::load(["config.toml"]).map_err(|e| e.to_string())?;
+        let cell = config.cell().expect("a cell");
+        assert_eq!(cell.name, "true");
+        assert_eq!(cell.ready, BTreeMap::from([("front__work".into(), 2)]));
+        Ok(())
+    });
 }
 
 #[test]

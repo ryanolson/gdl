@@ -449,7 +449,7 @@ model-x-02-us-east-1            hub, image api-hub
 model-x-02-us-east-1_engine     segment engine, image api-engine
 ```
 
-Each service is configured as its cell through the environment, so that cells of one layout and class share one image: the hub and the segments of a cell take the `GDL_CELL__*` variables that `Fleet::cell` gives the cell, with `GDL_CELL__DIRECTORY=dir`, `GDL_CELL__DIR`, the one directory every hub shares, and `GDL_CELL__HUB`, where other cells' hubs reach the cell's hub on the bundle's network (`<cell>:1337`). A segment also takes its cell's hub as `GDL_HUB__HOST`. An excerpt of `compose.yaml`, the second model cell's hub and its segment, which runs the image the first model cell's segment builds:
+Each service is configured as its cell through the environment, so that cells of one layout and class share one image: the hub and the segments of a cell take the `GDL_CELL__*` variables that `Fleet::cell` gives the cell, with `GDL_CELL__DIRECTORY=dir`, `GDL_CELL__DIR`, the one directory every hub shares, and `GDL_CELL__HUB`, where other cells' hubs reach the cell's hub on the bundle's network (`<cell>:1337`). A segment also takes its cell's hub as `GDL_HUB__HOST`. Each value is written so that the reader takes it back as it is: a string that would read as another value, such as a cell named `true`, is quoted (`"true"`), and a table with a key that a variable's name cannot spell, such as a quorum of a segment named `engine__work`, whose `__` the name would split, is one variable holding the table (`GDL_CELL__READY={"engine__work"=2}`). An excerpt of `compose.yaml`, the second model cell's hub and its segment, which runs the image the first model cell's segment builds:
 
 ```json
 "model-x-02-us-east-1": {

@@ -5,9 +5,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gdl_model::{CellSettings, DirectoryBackend, Fleet, HUB_PUBLIC_PORT, Manifest, cell_variable};
+use gdl_model::{CellSettings, DirectoryBackend, Fleet, HUB_PUBLIC_PORT, Manifest};
 use serde_json::{Map, Value, json};
 
+use super::variables::{cell_variables, string};
 use super::{Bundle, check_segment_name, hub_healthcheck, io, segment_healthcheck};
 use crate::{Error, Files, Spec, emit, export::image_problem, validate::Layouts};
 
@@ -131,7 +132,7 @@ pub(super) fn bundle(
                 }
                 runs.entry(segment).or_default().insert(&cell.name);
                 let mut variables = variables.clone();
-                variables.insert("GDL_HUB__HOST".into(), cell.name.clone().into());
+                variables.insert("GDL_HUB__HOST".into(), string(&cell.name).into());
                 // A segment waits only for its own cell's hub to be live:
                 // never for another cell, nor for a cell's health, which a
                 // parent answers 503 until its children are ready.
@@ -194,31 +195,10 @@ fn variables(cell: &CellSettings) -> Result<Map<String, Value>, Error> {
     let mut cell = cell.clone();
     cell.directory = DirectoryBackend::Dir { path: CELLS.into() };
     cell.hub = Some(format!("{}:{HUB_PUBLIC_PORT}", cell.name));
-    let table = toml::Value::try_from(&cell).map_err(io)?;
-    let mut variables = Map::new();
-    flatten("", &table, &mut variables);
-    Ok(variables)
-}
-
-/// `value`, the `[cell]` table at `key`, as one variable per setting.
-fn flatten(key: &str, value: &toml::Value, variables: &mut Map<String, Value>) {
-    match value {
-        toml::Value::Table(table) => {
-            for (name, value) in table {
-                let key = match key {
-                    "" => name.clone(),
-                    key => format!("{key}.{name}"),
-                };
-                flatten(&key, value, variables);
-            }
-        }
-        toml::Value::String(text) => {
-            variables.insert(cell_variable(key), text.clone().into());
-        }
-        value => {
-            variables.insert(cell_variable(key), value.to_string().into());
-        }
-    }
+    let toml::Value::Table(table) = toml::Value::try_from(&cell).map_err(io)? else {
+        return Err(Error::new("a cell's settings are a table"));
+    };
+    Ok(cell_variables(&table))
 }
 
 /// The README of a fleet's bundle.

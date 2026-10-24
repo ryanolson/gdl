@@ -66,6 +66,7 @@ use crate::{
 };
 
 mod cells;
+mod variables;
 
 /// Render a Docker Compose deployment from Git or registry dependencies.
 /// Without `fleet`, it deploys the spec's one placement with one hub. With

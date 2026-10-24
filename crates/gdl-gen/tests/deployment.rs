@@ -668,46 +668,79 @@ fn no_hub_can_be_scaled() {
 /// them, with the shared directory and the address other hubs reach it at.
 #[test]
 fn each_hub_reads_its_cells_settings_as_the_fleet_gives_them() {
-    for (spec, fleet) in [(placed(SPLIT), ONE_FLEET), (two_layouts(), TWO_FLEET)] {
-        let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
-        let (files, compose) = fleet_bundle(&spec, &fleet);
-        for cell in fleet.cells() {
-            let deployment = cell
-                .layout
-                .as_ref()
-                .map_or("deployment.json".into(), |layout| {
-                    format!("{layout}/deployment.json")
-                });
-            let deployment: gdl_model::DeploymentSpec =
-                serde_json::from_str(&files[Path::new(&deployment)]).expect("the hub's spec");
-            let vars = compose["services"][&cell.name]["environment"]
-                .as_object()
-                .expect("the hub's variables")
-                .iter()
-                .map(|(name, value)| (name.into(), value.as_str().expect("a string").into()));
-            let read = gdl_hub::cell_from_vars(&deployment, vars)
-                .expect("the hub reads its variables")
-                .expect("a cell");
-            let mut expected = cell.clone();
-            expected.directory = gdl_model::DirectoryBackend::Dir { path: CELLS.into() };
-            expected.hub = Some(format!("{}:1337", cell.name));
-            assert_eq!(read, expected);
-            // Each of its segments reads the same `[cell]`, which fits an
-            // instance of the segment, as the instance checks at its launch.
-            let layout =
-                gdl_model::layout(&deployment.graph, &deployment.placement).expect("the layout");
-            let services = compose["services"].as_object().expect("services");
-            let mut segments = 0;
-            for name in services.keys() {
-                let Some(segment) = name.strip_prefix(&format!("{}_", cell.name)) else {
-                    continue;
-                };
-                read.check(&layout, segment)
-                    .unwrap_or_else(|problems| panic!("{name}: {problems}"));
-                segments += 1;
-            }
-            assert!(segments > 0, "{}", cell.name);
+    assert_each_hub_reads_its_cell(&placed(SPLIT), ONE_FLEET);
+    assert_each_hub_reads_its_cell(&two_layouts(), TWO_FLEET);
+}
+
+/// A segment's name may hold `__`, which the environment's keys use
+/// between nested keys: its quorum still reads back as the fleet gives it.
+#[test]
+fn a_quorum_of_a_segment_whose_name_holds_a_separator_reads_back() {
+    let split = SPLIT
+        .replace("[segment.engine]", "[segment.engine__work]")
+        .replace("\"engine\"", "\"engine__work\"");
+    let fleet = ONE_FLEET.replace("engine =", "engine__work =");
+    assert!(split.contains("engine__work") && fleet.contains("engine__work"));
+    assert_each_hub_reads_its_cell(&placed(&split), &fleet);
+}
+
+/// A name that reads as another type when it is written bare, such as a
+/// cell named `true`, reads back as the name it is, in the hub's
+/// variables and in its segments' `GDL_HUB__HOST`.
+#[test]
+fn a_name_that_reads_as_another_type_reads_back_as_written() {
+    let fleet = ONE_FLEET.replace("global-us", "true");
+    assert!(fleet.contains("[cell.true]") && fleet.contains("home = \"true\""));
+    assert_each_hub_reads_its_cell(&placed(SPLIT), &fleet);
+}
+
+/// The check of [`each_hub_reads_its_cells_settings_as_the_fleet_gives_them`]
+/// for `spec` and the fleet `fleet`. A segment's `GDL_HUB__HOST` is its
+/// hub's name, written as the hub's own `GDL_CELL__NAME` is.
+fn assert_each_hub_reads_its_cell(spec: &gdl_gen::Spec, fleet: &str) {
+    let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
+    let (files, compose) = fleet_bundle(spec, &fleet);
+    for cell in fleet.cells() {
+        let deployment = cell
+            .layout
+            .as_ref()
+            .map_or("deployment.json".into(), |layout| {
+                format!("{layout}/deployment.json")
+            });
+        let deployment: gdl_model::DeploymentSpec =
+            serde_json::from_str(&files[Path::new(&deployment)]).expect("the hub's spec");
+        let env = compose["services"][&cell.name]["environment"]
+            .as_object()
+            .expect("the hub's variables");
+        let vars = env
+            .iter()
+            .map(|(name, value)| (name.into(), value.as_str().expect("a string").into()));
+        let read = gdl_hub::cell_from_vars(&deployment, vars)
+            .unwrap_or_else(|error| panic!("{}: {error}", cell.name))
+            .expect("a cell");
+        let mut expected = cell.clone();
+        expected.directory = gdl_model::DirectoryBackend::Dir { path: CELLS.into() };
+        expected.hub = Some(format!("{}:1337", cell.name));
+        assert_eq!(read, expected);
+        // Each of its segments reads the same `[cell]`, which fits an
+        // instance of the segment, as the instance checks at its launch.
+        let layout =
+            gdl_model::layout(&deployment.graph, &deployment.placement).expect("the layout");
+        let services = compose["services"].as_object().expect("services");
+        let mut segments = 0;
+        for (name, service) in services {
+            let Some(segment) = name.strip_prefix(&format!("{}_", cell.name)) else {
+                continue;
+            };
+            read.check(&layout, segment)
+                .unwrap_or_else(|problems| panic!("{name}: {problems}"));
+            assert_eq!(
+                service["environment"]["GDL_HUB__HOST"], env["GDL_CELL__NAME"],
+                "{name}"
+            );
+            segments += 1;
         }
+        assert!(segments > 0, "{}", cell.name);
     }
 }
 
