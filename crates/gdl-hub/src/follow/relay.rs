@@ -827,13 +827,7 @@ impl Shared {
         }
         let ready = *ready;
         self.health
-            .send_if_modified(|health| match health.requires.get_mut(class) {
-                Some(required) if required.met != ready => {
-                    required.met = ready;
-                    true
-                }
-                _ => false,
-            });
+            .send_if_modified(|health| health.meet(class, ready));
     }
 
     /// The follows of the cell `cell` of `class` as a watch of the relay

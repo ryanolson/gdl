@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use common::{
-    CELL, GLOBAL, Instance, Records, Resolving, WAIT, global_requiring, health, meet_the_quorum,
+    CELL, GLOBAL, Instance, Records, Resolving, WAIT, global_default, health, meet_the_quorum,
     model, serve_cell, timing, usable,
 };
 use futures::stream::BoxStream;
@@ -336,7 +336,7 @@ async fn a_global_follows_its_children_that_take_work() {
     for record in [elsewhere, cousin, orphan, foreign, replaced] {
         directory.inner.publish(record).await.expect("stored");
     }
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
 
     let first = written(&published, "model-x-08-us-east-1", &nowhere());
     directory.inner.publish(first).await.expect("stored");
@@ -399,7 +399,7 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
     }
     records.until(CellState::Ready).await;
 
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
     // A chooser that never acknowledges that the cell is not offered, so
     // that the follow lives through the states that take no work.
     let _chooser = Instance::chooser(&global_hub).await;
@@ -520,7 +520,7 @@ async fn a_cell_whose_hub_stops_is_dropped_and_its_successor_followed_anew() {
     let (first_instances, _) = meet_the_quorum(&first_hub).await;
     let (before, _) = records.until(CellState::Ready).await;
     let (global_hub, global_cell) = serve_cell(
-        global_requiring(0),
+        global_default(),
         &directory,
         CellTiming {
             refollow: Duration::from_secs(600),
@@ -600,7 +600,7 @@ async fn a_hub_serving_another_cell_or_epoch_is_not_installed() {
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
     let (record, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
     let mut watch = global_cell.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
@@ -689,7 +689,7 @@ async fn a_withdrawn_record_does_not_end_a_live_follow() {
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
     let (record, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
     let mut watch = global_cell.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
@@ -737,7 +737,7 @@ async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
     let (record, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
     let chooser = Instance::chooser(&global_hub).await;
     let mut watch = global_cell.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
@@ -813,7 +813,7 @@ async fn an_expired_record_does_not_end_a_live_follow() {
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
     let (record, _) = records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
     let mut watch = global_cell.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {
@@ -852,7 +852,7 @@ async fn a_relay_watcher_that_falls_behind_is_ended() {
     )
     .await;
     let (global_hub, global_cell) = serve_cell(
-        global_requiring(0),
+        global_default(),
         &directory,
         CellTiming {
             watch_buffer: 4,
@@ -888,7 +888,7 @@ async fn a_relay_watcher_that_falls_behind_is_ended() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_a_relay_watch_releases_it() {
     let directory = Resolving::new();
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
     let mut watchers = global_cell.follows_watchers();
     let mut count = async |n: usize| {
         tokio::time::timeout(WAIT, watchers.wait_for(|watching| *watching == n))
@@ -928,7 +928,7 @@ async fn a_stopped_hub_relays_nothing() {
     )
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
     let mut watch = global_cell.follows();
     let mut relay = Relay::of(&snapshot(&mut watch).await);
     until(&mut watch, &mut relay, "the follow", |relay| {

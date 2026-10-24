@@ -44,7 +44,7 @@ fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
             module: "tiny_contract".into(),
         }),
         gdl: GdlDep::Version("0.1".into()),
-        placement,
+        placements: placement.into(),
         bind: bind
             .iter()
             .map(|(node, ty)| {
@@ -63,6 +63,7 @@ fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
 
 fn check(spec: &Spec, manifest: &Manifest) -> Result<gdl_model::Layout, Error> {
     validate(spec, spec.contract().expect("a contract spec"), manifest)
+        .map(|mut layouts| layouts.pop_first().expect("a layout").1)
 }
 
 fn rendered(spec: &Spec, manifest: &Manifest, out: &Path) -> Result<Files, Error> {
@@ -853,6 +854,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         (
             "CellSettings::DEFAULT_QUORUM",
             CellSettings::DEFAULT_QUORUM.to_string(),
+        ),
+        (
+            "CellSettings::DEFAULT_REQUIRES",
+            CellSettings::DEFAULT_REQUIRES.to_string(),
         ),
         ("DirectoryBackend::DEFAULT", format!("{directory:?}")),
         (

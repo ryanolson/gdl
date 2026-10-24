@@ -45,7 +45,7 @@ fn a_spec_resolves_paths_from_its_own_directory() {
     assert_eq!(spec.gdl, GdlDep::Path(dir.join("runtime")));
     assert_eq!(spec.bind["B"].source, CrateSource::Path(dir.join("front")));
     assert_eq!(
-        spec.placement,
+        *spec.placement(),
         gdl_model::Placement::new().segment("front", ["A", "B"])
     );
 }
@@ -382,7 +382,15 @@ fn the_examples_keep_their_placement_hash() {
         ("api/gdl.toml", 0x19c0_427a_556d_c30d),
     ] {
         let loaded = Spec::load(&examples.join(spec)).expect("an example spec");
-        assert_eq!(loaded.placement.hash(), hash, "{spec}");
+        // A spec without `[layout]` tables has one layout, and it is the
+        // placement the spec always held.
+        assert_eq!(
+            loaded.layout_names().collect::<Vec<_>>(),
+            [gdl_model::Placements::DEFAULT],
+            "{spec}"
+        );
+        assert!(!loaded.placements.tabled(), "{spec}");
+        assert_eq!(loaded.placement().hash(), hash, "{spec}");
     }
 }
 
@@ -413,11 +421,11 @@ fn a_spec_groups_its_segments_into_classes() {
          [class.global]\nsegments = ['front']\n[class.model_x]\nsegments = ['engine']\n",
     )
     .expect("a placement");
-    assert_eq!(spec.placement, direct);
-    assert_eq!(spec.placement.hash(), direct.hash());
-    let classes: Vec<&str> = spec.placement.classes().map(|(name, _)| name).collect();
+    assert_eq!(*spec.placement(), direct);
+    assert_eq!(spec.placement().hash(), direct.hash());
+    let classes: Vec<&str> = spec.placement().classes().map(|(name, _)| name).collect();
     assert_eq!(classes, ["global", "model_x"]);
-    let embedded = toml::to_string(&spec.placement).expect("toml");
+    let embedded = toml::to_string(spec.placement()).expect("toml");
     let back = gdl_model::Placement::from_toml(&embedded).expect("reads what it wrote");
     assert_eq!(back.hash(), direct.hash(), "{embedded}");
 }
@@ -464,12 +472,12 @@ fn a_spec_sets_a_cell_policy() {
          [cells.model_x]\npolicy = 'home_first'\n",
     )
     .expect("a placement");
-    assert_eq!(spec.placement, direct);
+    assert_eq!(*spec.placement(), direct);
     assert_ne!(
-        spec.placement.hash(),
+        spec.placement().hash(),
         Spec::parse(CLASSED, &dir.join("gdl.toml"), dir)
             .expect("spec")
-            .placement
+            .placement()
             .hash()
     );
 }
@@ -687,19 +695,41 @@ fn a_spec_reads_back_what_it_writes() {
     let contract = "[contract]\npath = \"contract\"\nmodule = \"chat_contract::graph\"\n\
         [gdl]\nversion = \"0.1\"\n[segment.front]\nnodes = [\"A\"]\n\
         [bind.A]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::A\"\n";
+    // The graph spec's placement as two layouts' tables.
+    let layouts = {
+        let (head, tail) = graph.split_at(graph.find("[segment.front]").expect("segments"));
+        let (placement, rest) = tail.split_at(tail.find("[deployment]").expect("deployment"));
+        let nested: String = ["east", "west"]
+            .iter()
+            .flat_map(|name| {
+                placement
+                    .lines()
+                    .map(move |line| match line.strip_prefix('[') {
+                        Some(header) => format!("[layout.{name}.{header}\n"),
+                        None => format!("{line}\n"),
+                    })
+            })
+            .collect();
+        format!("{head}{nested}{rest}")
+    };
     let temp = contract_dir("round-trip");
     let dir = temp.path();
     let file = dir.join("gdl.toml");
-    for text in [graph, contract] {
+    for text in [graph, contract, &layouts] {
         let raw: Raw = gdl_model::read_toml(text).expect("a spec");
         let written = toml::to_string(&raw).expect("toml");
         let back: Raw = gdl_model::read_toml(&written).expect("reads what it wrote");
         assert_eq!(back, raw, "{written}");
         let first = Spec::parse(text, &file, dir).expect("a spec");
         let again = Spec::parse(&written, &file, dir).expect("reads what it wrote");
-        assert_eq!(again.placement, first.placement, "{written}");
-        assert_eq!(again.placement.hash(), first.placement.hash(), "{written}");
+        assert_eq!(again.placements, first.placements, "{written}");
+        for (name, placement) in first.placements.iter() {
+            let back = again.placements.get(name).expect("the same layouts");
+            assert_eq!(back.hash(), placement.hash(), "{written}");
+        }
     }
+    let read = Spec::parse(&layouts, &file, dir).expect("a spec of layouts");
+    assert_eq!(read.layout_names().collect::<Vec<_>>(), ["east", "west"]);
     // What is not set is not written.
     let least: Raw = gdl_model::read_toml(
         "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"p@1.0.0\"]\n[gdl]\nversion = \"0.1\"\n",
@@ -707,6 +737,7 @@ fn a_spec_reads_back_what_it_writes() {
     .expect("a spec");
     let written = toml::to_string(&least).expect("toml");
     for unsaid in [
+        "layout",
         "deployment",
         "entry",
         "config",

@@ -10,6 +10,9 @@ use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
+#[path = "api/layouts.rs"]
+mod layouts;
+
 fn crates() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }

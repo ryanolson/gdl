@@ -87,6 +87,7 @@ fn a_cells_settings_are_read_from_the_environment() {
             cell_from_env(&spec()).map_err(|e| e.to_string())?,
             Some(CellSettings {
                 name: "model-x-01-us-east-1".into(),
+                layout: None,
                 class: "model_x".into(),
                 region: "us-east-1".into(),
                 home: None,
@@ -271,6 +272,7 @@ async fn status(hub: &Hub, path: &str) -> u16 {
 fn settings(directory: DirectoryBackend) -> CellSettings {
     CellSettings {
         name: "model-x-01-us-east-1".into(),
+        layout: None,
         class: "model_x".into(),
         region: "us-east-1".into(),
         home: None,

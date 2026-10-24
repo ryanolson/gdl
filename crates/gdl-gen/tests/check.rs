@@ -148,6 +148,11 @@ fn a_spec_that_does_not_parse_leaves_the_fleet_checked() {
             format!("{f}: [cell.Global]: cell name `Global` must be"),
             format!("{f}: [cell.Global] region: region name `US` must be"),
             format!("{f}: [cell.m] home: the fleet has no cell `nope`"),
+            // Which class sends to which is the layout's, so no parent's
+            // children are judged, and the check says so once.
+            format!(
+                "{f}: the cells' children are not checked: which class sends to which is a layout's, and the spec's layouts did not read"
+            ),
         ],
     );
 }
@@ -220,28 +225,65 @@ fn every_problem_of_both_files_is_reported() {
     assert!(!out.exists(), "compose wrote a bundle");
 }
 
+/// A parent cell without a child of a class its class sends to is one
+/// problem among the others, at the parent's table: `check` reports every
+/// one and fails, and `compose` refuses the same fleet.
+#[test]
+fn a_missing_child_is_reported_with_every_other_problem() {
+    let fleet = "[class.model_x]\nready = { front = 1 }\n\
+                 [cell.global-us-east-1]\nclass = \"global\"\nregion = \"us-east-1\"\n";
+    let files = Files::new(&spec(""), fleet);
+    let f = files.fleet().display().to_string();
+    let expected = [
+        format!("{f}: [class.model_x] ready.front: not a segment of class `model_x`"),
+        format!("{f}: [cell.global-us-east-1]: no child of class `model_x` in layout `default`; "),
+    ];
+    let check = files.check();
+    assert_eq!(check.status.code(), Some(1), "{check:?}");
+    assert_problems(&problems(&check), &expected);
+    let out = files.dir.path().join("deployment");
+    let compose = files.run("compose", &["--out".as_ref(), out.as_os_str()]);
+    assert_problems(&problems(&compose), &expected);
+    assert!(!out.exists(), "compose wrote a bundle");
+}
+
 /// A default spelled out for a node, a class, or a segment the spec does
 /// not have is refused as any other value for it is: the name is the
 /// spec's to check, whatever its value.
 #[test]
 fn a_default_for_a_name_the_spec_lacks_is_refused() {
-    for (extra, expected) in [
+    // A placement's problem leaves its layout's classes unknown, so the
+    // check notes that the cells' children went unjudged; a deployment's
+    // does not.
+    for (extra, expected, unlaid) in [
         (
             "[routing]\nGhost = \"round_robin\"\n",
             "[routing] Ghost: request router `Ghost` must target a request boundary",
+            true,
         ),
         (
             "[cells.ghost]\npolicy = \"home_first\"\n",
             "[cells.ghost]: cell policy `[cells.ghost]`: the placement has no class `ghost`",
+            true,
         ),
         (
             "[deployment.segment.ghost]\nports = []\n",
             "[deployment.segment.ghost]: the placement has no segment `ghost`",
+            false,
         ),
     ] {
         let files = Files::new(&spec(extra), FLEET);
-        let s = files.spec().display().to_string();
-        assert_problems(&problems(&files.check()), &[format!("{s}: {expected}")]);
+        let (s, f) = (
+            files.spec().display().to_string(),
+            files.fleet().display().to_string(),
+        );
+        let mut lines = vec![format!("{s}: {expected}")];
+        if unlaid {
+            lines.push(format!(
+                "{f}: the cells' children are not checked in layout `default`: which class sends to which is a layout's, and the layout has problems"
+            ));
+        }
+        assert_problems(&problems(&files.check()), &lines);
     }
 }
 
@@ -257,13 +299,19 @@ fn a_bad_runtime_path_hides_no_other_problem() {
         .replacen(&gdl, "\"/nonexistent/gdl-runtime\"", 1)
         .replacen("\"Engine\"]", "\"Engine\", \"Ghost\"]", 1);
     let files = Files::new(&spec, FLEET);
-    let s = files.spec().display().to_string();
+    let (s, f) = (
+        files.spec().display().to_string(),
+        files.fleet().display().to_string(),
+    );
     assert_problems(
         &problems(&files.check()),
         &[
             format!("{s}: [gdl] path: "),
             format!("{s}: [segment.engine] nodes: segment `engine` lists unknown node `Ghost`"),
             format!("{s}: [pipeline_names] Ghost: the graph has no source `Ghost`"),
+            format!(
+                "{f}: the cells' children are not checked in layout `default`: which class sends to which is a layout's, and the layout has problems"
+            ),
         ],
     );
 }
@@ -290,6 +338,9 @@ fn a_fleet_without_a_layout_still_has_its_counts_checked() {
             format!("{f}: [class.global] ready.front: is 0; a quorum is at least 1"),
             format!("{f}: [class.global] requires.model_x: is 0; a requirement is at least 1"),
             format!("{f}: [cell.global-us-east-1] ready.front: is 0; a quorum is at least 1"),
+            format!(
+                "{f}: the cells' children are not checked: which class sends to which is a layout's, and the spec's layouts did not read"
+            ),
         ],
     );
 }
@@ -388,6 +439,9 @@ fn a_spec_with_text_that_is_not_ascii_is_checked_whole() {
                 line_of(&spec, "limit = 3 x")
             ),
             format!("{f}: [cell.Global]: cell name `Global` must be"),
+            format!(
+                "{f}: the cells' children are not checked: which class sends to which is a layout's, and the spec's layouts did not read"
+            ),
         ],
     );
 }

@@ -16,6 +16,7 @@ use gdl_model::{Layout, Manifest, Role};
 mod binary;
 
 use crate::Error;
+use crate::laid::Laid;
 use crate::paths::{display, relative};
 use crate::spec::{Contract, CrateSource, Spec};
 
@@ -61,24 +62,31 @@ impl Deps {
     }
 }
 
-/// Everything to write under the output directory, keyed by path relative
-/// to it. `out` is the output directory, absolute and normalized.
+/// Everything to write under the output directory for layout `laid`,
+/// keyed by path relative to it: under the layout's own directory when the
+/// spec has several. `out` is the output directory, absolute and
+/// normalized.
 pub(crate) fn files(
     spec: &Spec,
+    laid: &Laid<'_>,
     contract: &Contract,
     manifest: &Manifest,
     layout: &Layout,
     out: &Path,
     deps: Deps,
 ) -> Result<BTreeMap<PathBuf, String>, Error> {
-    let segments: Vec<&str> = spec.placement.segments().map(|(name, _)| name).collect();
+    let placement = laid.placement;
+    let segments: Vec<&str> = placement.segments().map(|(name, _)| name).collect();
     let spec_dir = crate::dump::absolute(&spec.dir)?;
+    let dir = laid.dir();
     let mut files = BTreeMap::new();
-    for (segment, nodes) in spec.placement.segments() {
-        let crate_dir = out.join(segment);
+    for (segment, nodes) in placement.segments() {
+        let crate_dir = out.join(&dir).join(segment);
         let regenerate = regenerate_command(spec, &spec_dir, &crate_dir, out, deps);
         let unit = Unit {
             spec,
+            placement,
+            package: laid.package(&manifest.name, segment),
             contract,
             manifest,
             segment,
@@ -89,18 +97,13 @@ pub(crate) fn files(
             deps,
             regenerate: &regenerate,
         };
-        files.insert(PathBuf::from(segment).join("Cargo.toml"), unit.cargo_toml());
-        files.insert(
-            PathBuf::from(segment).join("src/lib.rs"),
-            rustfmt(&unit.lib_rs())?,
-        );
-        files.insert(
-            PathBuf::from(segment).join("src/main.rs"),
-            rustfmt(&unit.main_rs())?,
-        );
+        let path = dir.join(segment);
+        files.insert(path.join("Cargo.toml"), unit.cargo_toml());
+        files.insert(path.join("src/lib.rs"), rustfmt(&unit.lib_rs())?);
+        files.insert(path.join("src/main.rs"), rustfmt(&unit.main_rs())?);
     }
     files.insert(
-        PathBuf::from("crossings.txt"),
+        dir.join("crossings.txt"),
         format!(
             "# {MARKER}\n# Crossings for one request through each root of `{}` under this placement.\n{}\n",
             manifest.name,
@@ -170,11 +173,6 @@ fn rustfmt_config() -> Result<(tempfile::TempDir, PathBuf), Error> {
     Ok((dir, file))
 }
 
-/// The package name of a segment's crate.
-pub(crate) fn package(manifest: &Manifest, segment: &str) -> String {
-    package_name(&manifest.name, segment)
-}
-
 /// The package that graph `graph` generates for `part`: a segment, or the
 /// contract.
 pub(crate) fn package_name(graph: &str, part: &str) -> String {
@@ -232,6 +230,9 @@ fn export_command(spec: &Path) -> String {
 
 struct Unit<'a> {
     spec: &'a Spec,
+    placement: &'a gdl_model::Placement,
+    /// The segment's package.
+    package: String,
     contract: &'a Contract,
     manifest: &'a Manifest,
     segment: &'a str,
@@ -253,7 +254,7 @@ struct Hosted<'a> {
 
 impl Unit<'_> {
     fn package(&self) -> String {
-        package(self.manifest, self.segment)
+        self.package.clone()
     }
 
     fn lib(&self) -> String {
@@ -474,7 +475,7 @@ impl Unit<'_> {
         );
         let _ = writeln!(text);
         let _ = writeln!(text, "/// The placement this crate was generated for.");
-        let placement = toml::to_string(&self.spec.placement).unwrap_or_default();
+        let placement = toml::to_string(self.placement).unwrap_or_default();
         let _ = writeln!(
             text,
             "pub const PLACEMENT: &str = {};",

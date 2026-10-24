@@ -11,6 +11,7 @@ mod boundary;
 mod cells;
 mod classes;
 mod errors;
+mod layouts;
 mod report;
 mod spelled;
 
@@ -18,6 +19,7 @@ use boundary::bound;
 pub use cells::CellPolicy;
 use classes::classify;
 pub use errors::{PlacementError, PlacementErrors, WireReason};
+pub use layouts::{Placements, check_layout_name};
 pub use report::CrossingReport;
 use report::hop_lines;
 use spelled::Spelled;
@@ -268,11 +270,19 @@ impl Placement {
     /// from a deployment file. Every problem with the names is reported,
     /// each where it is; a file that does not parse is one problem.
     pub fn from_toml(text: &str) -> Result<Self, Problems> {
-        let mut placement: Self = read_toml(text)?;
+        let placement: Self = read_toml(text)?;
+        placement.finish(&toml::from_str(text).unwrap_or_default())
+    }
+
+    /// The placement as read from `written`, the table that holds its
+    /// tables, with its defaults dropped and its names checked. Each
+    /// problem's table is relative to `written`.
+    fn finish(self, written: &toml::Table) -> Result<Self, Problems> {
+        let mut placement = self;
         placement
             .routing
             .retain(|_, router| *router != RequestRouter::default());
-        placement.spelled = Spelled::read(text, &placement.routing, &placement.cells);
+        placement.spelled = Spelled::read(written, &placement.routing, &placement.cells);
         let mut problems = Vec::new();
         for (node, router) in &placement.routing {
             if let RequestRouter::Selector(name) = router

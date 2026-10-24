@@ -8,7 +8,7 @@
 mod common;
 
 use common::{
-    CELL, GLOBAL, Gated, Instance, Records, WAIT, cell_hub, get, global_requiring, health, hub_of,
+    CELL, GLOBAL, Gated, Instance, Records, WAIT, cell_hub, get, global_default, health, hub_of,
     meet_the_quorum, timing, usable,
 };
 use futures::{FutureExt, StreamExt};
@@ -105,7 +105,7 @@ async fn a_drained_cell_is_draining_at_once_whatever_its_quorum() {
 async fn a_cell_whose_class_no_hop_enters_is_not_drained() {
     let directory = MemoryDirectory::new();
     let mut records = Records::of(&directory, "global", GLOBAL);
-    let (hub, cell) = hub_of(global_requiring(0), directory.clone(), timing()).await;
+    let (hub, cell) = hub_of(global_default(), directory.clone(), timing()).await;
     let mut instance = Instance::join(&hub, "a").await;
     instance.announce(gdl_model::SegmentPhase::Ready).await;
     records.until(CellState::Ready).await;

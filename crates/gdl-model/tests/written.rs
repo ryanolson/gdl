@@ -50,7 +50,7 @@ fn a_placement_leaves_its_defaults_unsaid() {
 const FLEET: &str = "[class.global]\nready = { a = 2 }\nrequires = { model_x = 1 }\n\
     [class.model_x]\nready = { d = 4 }\n\
     [cell.g]\nclass = 'global'\nregion = 'us-east-1'\nready = { a = 3 }\n\
-    [cell.m]\nclass = 'model_x'\nregion = 'us-east-1'\nhome = 'g'\nready = { d = 8 }\n";
+    [cell.m]\nlayout = 'regional'\nclass = 'model_x'\nregion = 'us-east-1'\nhome = 'g'\nready = { d = 8 }\n";
 
 #[test]
 fn a_fleet_reads_back_what_it_writes() {
@@ -61,7 +61,7 @@ fn a_fleet_reads_back_what_it_writes() {
     let least = Fleet::from_toml("[class.model_x]\n[cell.g]\nclass = 'global'\nregion = 'r'\n")
         .expect("a fleet");
     let text = toml::to_string(&least).expect("toml");
-    for unsaid in ["ready", "requires", "home"] {
+    for unsaid in ["ready", "requires", "home", "layout"] {
         assert!(!text.contains(unsaid), "{unsaid} in:\n{text}");
     }
     assert_eq!(Fleet::from_toml(&text).expect("reads"), least, "{text}");
@@ -71,6 +71,7 @@ fn a_fleet_reads_back_what_it_writes() {
 fn a_cells_settings_read_back_what_they_write() {
     let every = CellSettings {
         name: "model-x-01-us-east-1".into(),
+        layout: Some("regional".into()),
         class: "model_x".into(),
         region: "us-east-1".into(),
         home: Some("global-us-east-1".into()),
@@ -86,6 +87,7 @@ fn a_cells_settings_read_back_what_they_write() {
     let value: toml::Value = toml::from_str(&text).expect("toml");
     assert_eq!(CellSettings::read(value).expect("reads"), every, "{text}");
     let least = CellSettings {
+        layout: None,
         home: None,
         directory: DirectoryBackend::default(),
         ready: BTreeMap::new(),
@@ -95,7 +97,7 @@ fn a_cells_settings_read_back_what_they_write() {
         ..every
     };
     let text = toml::to_string(&least).expect("toml");
-    for unsaid in ["home", "dir =", "ready", "requires", "hub"] {
+    for unsaid in ["layout", "home", "dir =", "ready", "requires", "hub"] {
         assert!(!text.contains(unsaid), "{unsaid} in:\n{text}");
     }
     let value: toml::Value = toml::from_str(&text).expect("toml");

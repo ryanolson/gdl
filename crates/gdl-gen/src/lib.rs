@@ -8,7 +8,9 @@
 //! writes, per segment, a crate with a library
 //! (`start`, to deploy the segment inside a program) and a binary (to run
 //! it on its own). Each segment crate depends only on the implementation
-//! crates of the nodes it hosts.
+//! crates of the nodes it hosts. A spec may place its graph in several
+//! layouts (`[layout.<name>]` tables), each validated on its own; each
+//! layout's crates are then written in a directory named for it.
 //!
 //! The generator owns each segment crate's directory: every file in it is
 //! generated, and carries a do-not-edit marker on its first line. [`write`]
@@ -38,6 +40,7 @@ mod emit;
 mod export;
 mod extract;
 mod fleet;
+mod laid;
 mod names;
 mod nodes;
 mod offers;
@@ -214,31 +217,58 @@ pub struct Check {
 }
 
 /// Check `spec` as [`render`] and [`export`] check it, with offers from
-/// `from`, and write nothing. A spec that passes generates.
+/// `from`, and write nothing. A spec that passes generates and exports, so
+/// a spec of several layouts, which export refuses, is refused.
 pub fn check(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Check, Error> {
-    let check = checked(spec, target, from).0?;
+    let Checked {
+        manifest,
+        mut layouts,
+    } = checked(spec, target, from).0?;
     // What an export of it would refuse.
-    let problems = export::refusals(spec, &check.manifest.name);
+    let problems = export::refusals(spec, &manifest.name);
     if !problems.is_empty() {
         return Err(Error::all(problems));
     }
-    Ok(check)
+    let (_, drawn) = layouts.pop_first().expect("a spec has a layout");
+    Ok(Check {
+        manifest,
+        crossings: drawn.crossings,
+        mermaid: drawn.mermaid,
+    })
+}
+
+/// A spec checked as [`render`] checks it: its manifest, and each of its
+/// layouts' crossing report and placed graph, by layout name.
+pub(crate) struct Checked {
+    manifest: gdl_model::Manifest,
+    layouts: BTreeMap<String, Drawn>,
+}
+
+/// One layout's crossing report and placed graph.
+struct Drawn {
+    crossings: String,
+    mermaid: String,
 }
 
 /// `spec` checked as [`render`] checks it, every problem at once where
-/// one stage does not need the other's result, and its layout whenever its
-/// placement fits its graph, whatever else is wrong with it: a fleet file
-/// is checked against the layout even when a binding is not.
+/// one stage does not need the other's result, and each layout whose
+/// placement fits its graph, whatever else is wrong with the spec: a fleet
+/// file is checked against the layouts even when a binding is not. No
+/// layout fits a graph that cannot be read.
 pub(crate) fn checked(
     spec: &Spec,
     target: &Path,
     from: Offers<'_>,
-) -> (Result<Check, Error>, Option<gdl_model::Layout>) {
+) -> (Result<Checked, Error>, validate::Layouts) {
     let prepared = prepare(spec, None, target, emit::Deps::Relative, from);
-    let layout = prepared
-        .as_ref()
-        .ok()
-        .and_then(|prepared| gdl_model::layout(&prepared.manifest, &spec.placement).ok());
+    let layouts = match &prepared {
+        Ok(prepared) => validate::unbound(spec, &prepared.manifest).0,
+        // The layouts are still the spec's, whose cells name them.
+        Err(_) => spec
+            .layout_names()
+            .map(|name| (name.into(), None))
+            .collect(),
+    };
     let check = || {
         // A runtime that is not where `[gdl]` says hides nothing else: it is
         // reported with what validation finds.
@@ -256,21 +286,26 @@ pub(crate) fn checked(
                 return Err(with(Error::all(error.0.into_iter().chain(found))));
             }
         };
-        let layout = validate(&spec, &prepared.contract, &prepared.manifest).map_err(with)?;
+        let layouts = validate(&spec, &prepared.contract, &prepared.manifest).map_err(with)?;
         if let Some(runtime) = runtime {
             return Err(runtime);
         }
-        let mermaid = prepared
-            .manifest
-            .to_mermaid(Some(&layout))
-            .map_err(|e| Error::new(e.to_string()))?;
-        Ok(Check {
-            crossings: layout.report().to_string(),
-            mermaid: service::diagram(&spec, &prepared.manifest, mermaid),
+        let mut drawn = BTreeMap::new();
+        for (name, layout) in layouts {
+            let mermaid = prepared
+                .manifest
+                .to_mermaid(Some(&layout))
+                .map_err(|e| Error::new(e.to_string()))?;
+            let mermaid = service::diagram(&spec, &prepared.manifest, mermaid);
+            let crossings = layout.report().to_string();
+            drawn.insert(name, Drawn { crossings, mermaid });
+        }
+        Ok(Checked {
             manifest: prepared.manifest,
+            layouts: drawn,
         })
     };
-    (check(), layout)
+    (check(), layouts)
 }
 
 /// A diagram format for [`diagram`].
@@ -284,11 +319,13 @@ pub enum Format {
 
 /// The spec's placed graph as a diagram: each segment a cluster, and each
 /// edge that crosses segments marked. The contract's manifest is built in
-/// `target` (a cargo target directory), as for [`render`].
+/// `target` (a cargo target directory), as for [`render`]. A spec of
+/// several layouts is refused: a diagram draws one.
 pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
+    let laid = spec.only_layout("`diagram`")?;
     let manifest = prepare(spec, None, target, emit::Deps::Relative, Offers::Read)?.manifest;
-    let layout =
-        gdl_model::layout(&manifest, &spec.placement).map_err(|e| Error::new(e.to_string()))?;
+    let layout = gdl_model::layout(&manifest, laid.placement)
+        .map_err(|errors| Error::all(laid.problems(&errors)))?;
     match format {
         Format::Dot => manifest.to_dot(Some(&layout)),
         Format::Mermaid => manifest.to_mermaid(Some(&layout)),
@@ -456,6 +493,7 @@ fn prepare(
     })
 }
 
+/// Every layout's files: its segment crates and its crossing report.
 fn render_manifest(
     spec: &Spec,
     contract: &spec::Contract,
@@ -463,9 +501,16 @@ fn render_manifest(
     out: &Path,
     deps: emit::Deps,
 ) -> Result<Files, Error> {
-    let layout = validate(spec, contract, manifest)?;
+    let layouts = validate(spec, contract, manifest)?;
     let out = dump::absolute(out)?;
-    emit::files(spec, contract, manifest, &layout, &out, deps)
+    let mut files = Files::new();
+    for laid in spec.layouts() {
+        let layout = &layouts[laid.name];
+        files.extend(emit::files(
+            spec, &laid, contract, manifest, layout, &out, deps,
+        )?);
+    }
+    Ok(files)
 }
 
 #[cfg(test)]

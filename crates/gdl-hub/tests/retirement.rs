@@ -15,8 +15,8 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use common::{
-    CELL, GLOBAL, Instance, Resolving, WAIT, global_requiring, meet_the_quorum, serve_cell,
-    settings, timing,
+    CELL, GLOBAL, Instance, Resolving, WAIT, global_default, meet_the_quorum, serve_cell, settings,
+    timing,
 };
 use futures::{FutureExt, Stream, StreamExt};
 use gdl_cells::MemoryDirectory;
@@ -391,7 +391,7 @@ struct Followed {
 /// which has said it runs a follower before the model cell is followed.
 async fn followed(choosers: usize) -> (Followed, Vec<Instance>) {
     let directory = Resolving::new();
-    let global_settings = global_requiring(0);
+    let global_settings = global_default();
     let name = global_settings.hub.clone().expect("a hub name");
     let (global_hub, global_cell) =
         common::hub_of(global_settings, directory.clone(), timing()).await;

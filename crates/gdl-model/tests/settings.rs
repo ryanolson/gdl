@@ -75,6 +75,7 @@ fn a_cells_settings_are_read_whole() {
         settings(MODEL),
         CellSettings {
             name: "model-x-01-us-east-1".into(),
+            layout: None,
             class: "model_x".into(),
             region: "us-east-1".into(),
             home: Some("global-us-east-1".into()),
@@ -377,4 +378,33 @@ fn the_summary_period_is_read_and_has_a_floor() {
             "{bad}: {error}"
         );
     }
+}
+
+/// `layout` names the layout the cell runs, when its spec has several: a
+/// layout name, read where it is written, and written back.
+#[test]
+fn a_cell_names_its_layout() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    assert_eq!(settings(LEAST).layout, None);
+    let cell = settings(&format!("{LEAST}layout = 'regional'\n"));
+    assert_eq!(cell.layout.as_deref(), Some("regional"));
+    let text = toml::to_string(&cell).expect("toml");
+    assert!(text.contains("layout = \"regional\""), "{text}");
+    assert_eq!(settings(&text), cell, "{text}");
+    let value: toml::Value =
+        toml::from_str(&format!("{LEAST}layout = 'Regional'\n")).expect("toml");
+    let problems = CellSettings::read(value).expect_err("not a layout name");
+    assert_eq!(problems.0.len(), 1, "{problems}");
+    let problem = &problems.0[0];
+    assert_eq!(
+        (problem.table.as_deref(), problem.key.as_deref()),
+        (Some("cell"), Some("layout")),
+        "{problem}"
+    );
+    assert!(
+        problem
+            .message
+            .starts_with("layout name `Regional` must be"),
+        "{problem}"
+    );
 }

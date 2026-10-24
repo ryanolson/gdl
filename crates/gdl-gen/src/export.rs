@@ -22,14 +22,19 @@ use std::path::{Path, PathBuf};
 use crate::spec::{CrateSource, GdlDep, Source};
 use crate::{Error, Offers, Spec, emit};
 
+/// What a refusal of a spec of several layouts calls an export: an archive
+/// holds one layout's segments.
+const EXPORT: &str = "`export`";
+
 /// The spec's crates as a `.tar.gz`, under a directory named for the graph.
 /// The contract's manifest is built in `target`, as for [`crate::render`].
 pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, Error> {
+    let laid = spec.only_layout(EXPORT)?;
     // The output's place only decides which paths are inside it; nothing
     // is written there.
     let out = crate::dump::absolute(&spec.dir)?.join(".gdl-export");
     let (files, graph) = crate::render_with(spec, &out, target, emit::Deps::Exported, from)?;
-    let segments: Vec<&str> = spec.placement.segments().map(|(name, _)| name).collect();
+    let segments: Vec<&str> = laid.placement.segments().map(|(name, _)| name).collect();
 
     let mut entries: Vec<(PathBuf, Vec<u8>, u32)> = files
         .into_iter()
@@ -101,10 +106,14 @@ pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, E
 /// rendering it does: a check refuses the same, so a spec that checks
 /// exports.
 pub(crate) fn refusals(spec: &Spec, graph: &str) -> Vec<String> {
+    let laid = match spec.only_layout(EXPORT) {
+        Ok(laid) => laid,
+        Err(several) => return vec![several.to_string()],
+    };
     if !portable(spec) {
         return Vec::new();
     }
-    let segments: Vec<&str> = spec.placement.segments().map(|(name, _)| name).collect();
+    let segments: Vec<&str> = laid.placement.segments().map(|(name, _)| name).collect();
     image_problems(graph, &segments)
 }
 

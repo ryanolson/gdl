@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Layout, Problem, Problems};
+use crate::{Layout, Problem, Problems, check_layout_name};
 
 /// A cell's own settings: the `[cell]` table of a segment's settings
 /// (`GDL_CELL__NAME`, `GDL_CELL__READY__<SEGMENT>`, and so on), which tells
@@ -15,6 +15,7 @@ use crate::{Layout, Problem, Problems};
 ///
 /// ```toml
 /// name = "model-x-01-us-east-1"
+/// layout = "regional"          # the spec's layout the cell runs, when it has several
 /// class = "model_x"
 /// region = "us-east-1"
 /// home = "global-us-east-1"    # the parent cell, for a class that another sends to: whose hub follows this one
@@ -24,7 +25,7 @@ use crate::{Layout, Problem, Problems};
 /// summary_ms = 10000           # optional: the load summary's period, at least 1000
 /// [ready]                      # optional: the quorum of each segment of the class
 /// e = 4
-/// [requires]                   # optional: ready cells of each class it sends to that its health needs
+/// [requires]                   # optional: ready cells of each class it sends to that its health needs; 1 of each when unsaid
 /// model_y = 1
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +33,14 @@ use crate::{Layout, Problem, Problems};
 pub struct CellSettings {
     /// The cell's name.
     pub name: String,
+    /// The layout the cell runs: one of its spec's `[layout.<name>]`
+    /// tables, or `default` for a spec without them. The fleet file
+    /// requires it when the spec has more than one layout. Nothing in an
+    /// instance or a hub reads it: a cell's placement hash is its layout's,
+    /// and a hub follows only cells whose placement hash is its own, so
+    /// cells of different layouts never follow or offer to each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
     /// The class the cell deploys.
     pub class: String,
     /// The region the cell runs in.
@@ -54,7 +63,9 @@ pub struct CellSettings {
     pub ready: BTreeMap<String, u32>,
     /// How many ready cells of each class the cell's class sends to its
     /// hub must follow for the cell health endpoint to answer that the
-    /// cell is healthy. Only the cell's hub reads it.
+    /// cell is healthy. Empty when unsaid, which requires one of each
+    /// class the cell's class sends to ([`CellSettings::requirements`]).
+    /// Only the cell's hub reads it.
     pub requires: BTreeMap<String, u32>,
     /// The address, `host:port`, at which other cells' hubs reach this
     /// cell's hub: the hub address of the cell's record. Only the cell's
@@ -113,6 +124,10 @@ impl CellSettings {
     /// the fleet file, its class's names: one usable instance.
     pub const DEFAULT_QUORUM: u32 = 1;
 
+    /// The ready cells of each class its class sends to that a cell's
+    /// health requires when `requires` is unsaid.
+    pub const DEFAULT_REQUIRES: u32 = 1;
+
     /// The usable instances `segment` needs for the cell to be ready: its
     /// `ready` entry, else [`CellSettings::DEFAULT_QUORUM`]. The fleet file
     /// supplies the class's default when it fills in a cell's settings, so
@@ -123,6 +138,22 @@ impl CellSettings {
             .get(segment)
             .copied()
             .unwrap_or(Self::DEFAULT_QUORUM)
+    }
+
+    /// The ready cells of each class its class sends to in `layout` that
+    /// the cell's health requires, among the children its hub follows: its
+    /// `requires`, or, when that is unsaid, each class its class sends to
+    /// with [`CellSettings::DEFAULT_REQUIRES`]. An explicit `requires`
+    /// replaces the default whole, so a class it does not name is not
+    /// required. A cell of a class that sends to none requires nothing.
+    pub fn requirements(&self, layout: &Layout) -> BTreeMap<String, u32> {
+        if !self.requires.is_empty() {
+            return self.requires.clone();
+        }
+        sent(layout, &self.class)
+            .into_iter()
+            .map(|class| (class.to_string(), Self::DEFAULT_REQUIRES))
+            .collect()
     }
 
     /// Whether these settings fit an instance of `segment` in `layout`: the
@@ -202,12 +233,7 @@ impl CellSettings {
                         format!("not a segment of class `{class}`"),
                     )
                 });
-            let sent: BTreeSet<&str> = layout
-                .boundaries()
-                .iter()
-                .filter(|boundary| boundary.from == class)
-                .map(|boundary| boundary.into.as_str())
-                .collect();
+            let sent = sent(layout, class);
             let requires = self.requires.iter().filter_map(|(required, &count)| {
                 let key = format!("requires.{required}");
                 if !sent.contains(required.as_str()) {
@@ -221,6 +247,16 @@ impl CellSettings {
             own.into_iter().chain(strays).chain(requires).collect()
         }
     }
+}
+
+/// The classes `class` sends to in `layout`.
+fn sent<'a>(layout: &'a Layout, class: &str) -> BTreeSet<&'a str> {
+    layout
+        .boundaries()
+        .iter()
+        .filter(|boundary| boundary.from == class)
+        .map(|boundary| boundary.into.as_str())
+        .collect()
 }
 
 fn refuse(problems: Vec<Problem>) -> Result<(), Problems> {
@@ -323,6 +359,8 @@ fn check_label(kind: &str, name: &str) -> Result<(), String> {
 #[serde(deny_unknown_fields)]
 struct Table {
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout: Option<String>,
     class: String,
     region: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,6 +436,9 @@ impl TryFrom<Table> for CellSettings {
                 ));
             }
         };
+        if let Some(layout) = &table.layout {
+            check_layout_name(layout).map_err(|why| at("layout", why))?;
+        }
         if let Some(hub) = &table.hub {
             check_hub_address(hub).map_err(|why| at("hub", why))?;
         }
@@ -405,6 +446,7 @@ impl TryFrom<Table> for CellSettings {
         check_summary(summary).map_err(|why| at("summary_ms", why))?;
         Ok(Self {
             name: table.name,
+            layout: table.layout,
             class: table.class,
             region: table.region,
             home: table.home,
@@ -426,6 +468,7 @@ impl From<CellSettings> for Table {
         };
         Self {
             name: settings.name,
+            layout: settings.layout,
             class: settings.class,
             region: settings.region,
             home: settings.home,
