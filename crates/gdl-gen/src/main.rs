@@ -5,8 +5,9 @@
 //! cargo gdl catalog <dir>
 //! cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
+//! cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
-//! cargo gdl compose --spec <gdl.toml> --out <directory> [--target-dir <dir>]
+//! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
 //!
@@ -19,12 +20,16 @@
 //! from what was read. `resolve` prints the message each name of a spec's
 //! graph file resolves to. `generate` writes one crate per segment, and the
 //! contract crate of a graph file, into `--out`; with `--check` it writes
-//! nothing and fails if the files there differ. `diagram` prints the placed
-//! graph. `export` writes the generated crates as a `.tar.gz` with
+//! nothing and fails if the files there differ. `check` checks the spec
+//! as `generate` does, and with `--fleet` the fleet file against it,
+//! writing nothing; it prints every problem in both files, each with its
+//! file, table, and key, and fails if there is any. `diagram` prints the
+//! placed graph. `compose` with `--fleet` runs the same check first, and
+//! writes nothing if it fails. `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use gdl_gen::Format;
@@ -33,13 +38,18 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl catalog <dir>
        cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
+       cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
-       cargo gdl compose --spec <gdl.toml> --out <directory> [--target-dir <dir>]
+       cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
 enum Command {
     Compose {
         out: PathBuf,
+        fleet: Option<PathBuf>,
+    },
+    Check {
+        fleet: Option<PathBuf>,
     },
     Extract {
         krate: gdl_gen::Crate,
@@ -76,6 +86,7 @@ fn args() -> Result<Args, String> {
         .ok_or_else(|| USAGE.to_string())?;
     let (mut spec, mut out, mut catalog, mut target, mut format, mut krate) =
         (None, None, None, None, None, None);
+    let mut fleet = None;
     let (mut check, mut verify) = (false, false);
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -89,6 +100,7 @@ fn args() -> Result<Args, String> {
             Some("--catalog") => catalog = Some(value()?),
             Some("--target-dir") => target = Some(value()?),
             Some("--format") => format = Some(value()?),
+            Some("--fleet") => fleet = Some(value()?),
             Some("--check") => check = true,
             Some("--verify") => verify = true,
             Some(other) if !other.starts_with("--") && krate.is_none() => {
@@ -112,6 +124,10 @@ fn args() -> Result<Args, String> {
         },
         "compose" => Command::Compose {
             out: out.ok_or_else(|| USAGE.to_string())?,
+            fleet: fleet.take(),
+        },
+        "check" => Command::Check {
+            fleet: fleet.take(),
         },
         "export" => Command::Export {
             out: out.ok_or_else(|| USAGE.to_string())?,
@@ -128,7 +144,8 @@ fn args() -> Result<Args, String> {
         _ => return Err(USAGE.to_string()),
     };
     let needs_spec = !matches!(command, Command::Extract { .. } | Command::Catalog(_));
-    if needs_spec && spec.is_none() {
+    // `--fleet` is for the commands that took it above.
+    if (needs_spec && spec.is_none()) || fleet.is_some() {
         return Err(USAGE.to_string());
     }
     Ok(Args {
@@ -195,7 +212,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let target = target(spec.dir());
             print!("{}", gdl_gen::diagram(&spec, &target, *format)?);
         }
-        Command::Compose { out } => {
+        Command::Check { fleet } => {
+            let file = args.spec.as_ref().ok_or(USAGE)?;
+            let problems = gdl_gen::check_files(file, fleet.as_deref(), &target(beside(file)));
+            return Ok(report(&problems));
+        }
+        Command::Compose { out, fleet } => {
+            if let Some(fleet) = fleet {
+                let file = args.spec.as_ref().ok_or(USAGE)?;
+                let problems = gdl_gen::check_files(file, Some(fleet), &target(beside(file)));
+                if !problems.is_empty() {
+                    return Ok(report(&problems));
+                }
+            }
             let spec = spec()?;
             let target = target(spec.dir());
             gdl_gen::compose(&spec, out, &target)?;
@@ -227,4 +256,29 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The directory of the spec `file`, which its relative paths are read
+/// from: a bare file name's is the current directory.
+fn beside(file: &Path) -> &Path {
+    match file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// Print each problem on its own line and their count, and fail; or say
+/// that there are none.
+fn report(problems: &gdl_model::Problems) -> ExitCode {
+    if problems.is_empty() {
+        println!("cargo gdl: no problems");
+        return ExitCode::SUCCESS;
+    }
+    for problem in &problems.0 {
+        eprintln!("{problem}");
+    }
+    let count = problems.0.len();
+    let noun = if count == 1 { "problem" } else { "problems" };
+    eprintln!("cargo gdl: {count} {noun}");
+    ExitCode::FAILURE
 }

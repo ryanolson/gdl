@@ -196,13 +196,12 @@ impl PlacementError {
             Self::InvalidRouter(node) | Self::InvalidSelector { node, .. } => {
                 at("routing".into(), Some(node))
             }
-            Self::InvalidManifest(_) => (None, None),
+            // A message type that cannot cross is the graph's to change.
+            Self::InvalidManifest(_) | Self::NotWire { .. } => (None, None),
             Self::UnknownNode { segment, .. } | Self::EmptySegment { segment } => {
                 at(format!("segment.{segment}"), Some("nodes"))
             }
-            Self::Unplaced { .. } | Self::PlacedTwice { .. } | Self::NotWire { .. } => {
-                at("segment".into(), None)
-            }
+            Self::Unplaced { .. } | Self::PlacedTwice { .. } => at("segment".into(), None),
             Self::InvalidClassName { class, .. } => at(format!("class.{class}"), None),
             Self::UnknownSegment { class, .. }
             | Self::EmptyClass { class }

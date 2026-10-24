@@ -76,7 +76,7 @@ impl Fleet {
     /// Parse a fleet file. An unknown key anywhere is refused; what the
     /// values mean is checked against a layout by [`Fleet::check`].
     pub fn from_toml(text: &str) -> Result<Self, Problems> {
-        Ok(read_toml(text)?)
+        read_toml(text)
     }
 
     /// Check the fleet against the layout of the placement it deploys,

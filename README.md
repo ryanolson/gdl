@@ -271,6 +271,20 @@ A cell's `home` is its parent cell: the cell of a class that sends to this one t
 
 `gdl_model::Fleet` reads the file and checks it against the spec's layout, reporting every problem: a class the spec does not have, a `ready` key that is not a segment of the class, a `requires` key that is not a class it sends to, a count of 0, a cell without the `home` its class needs, a `home` on a cell that can have none, a `home` that names no cell of a parent class, and an unknown key. A cell or region name is a DNS label: lowercase letters, digits, and `-`, starting with a letter, ending with a letter or digit, at most 63 characters. `Fleet::cell` gives a cell's own settings (`gdl_model::CellSettings`), with its quorum resolved from its overrides and its class's defaults, and its class's `requires`. Nothing generates bundles from the fleet file yet (see `LIMITATIONS.md`).
 
+### Check a spec and a fleet file
+
+`cargo gdl check --spec gdl.toml --fleet fleet.toml` checks the spec as `generate` does (the graph, the placement, the classes, the boundary rule, and the bindings) and the fleet file against the spec's layout, and writes nothing. It prints every problem in both files on its own line, then their count, and exits non-zero when there is any; with none, it prints `cargo gdl: no problems`. `--fleet` is optional. Each problem names its file, the table and key it is in, and the line when the parser gives one:
+
+```text
+gdl.toml:14: [segment.engine] node: unknown field `node`, expected `nodes`
+gdl.toml: [cells.zz]: cell policy `[cells.zz]`: the placement has no class `zz`
+fleet.toml: [class.model_x] ready.front: not a segment of class `model_x`
+fleet.toml: [cell.model-x-02-us-east-1] home: missing; a cell of class `model_x` names its parent, a cell of a class that sends to it: `global`
+cargo gdl: 4 problems
+```
+
+Every table of the spec, the fleet file, and a cell's settings refuses a key it does not know, and a table whose keys are names (a segment's in `ready`, a class's in `requires`, a node's in `[config]`) refuses a name that is not one of the spec's. A file that does not parse is one problem, and the other file is still checked: a fleet file whose spec does not read is checked for what needs no layout (its cell names, regions, and that each `home` is one of its cells). `cargo gdl compose --fleet fleet.toml` runs the same check first, and writes nothing when it finds a problem.
+
 For a graph spec, the generator compiles nothing: it builds the contract's manifest from the graph file and what the source reader found, including which messages are wire types. For a contract spec, it compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`. If the reader takes a type for a wire type that is not one, the segment's build or its deployment, which checks the placement against the compiled contract, fails. If it misses a wire type's serde impls (for example, impls that a macro writes), the generator refuses a cut that would work. `cargo gdl extract --verify` finds both.
 
 For each segment, the generator writes a crate with:
@@ -316,7 +330,7 @@ cd /path/to/deployment
 docker compose up --build
 ```
 
-The output contains a Dockerfile and runtime config for each segment, a hub Dockerfile, `deployment.json`, and `compose.yaml`. The output directory must be new. Cargo fetches Git and registry dependencies during the image build. The bundle contains no local dependency source snapshot. The public example in `examples/api/deploy.toml` pins both the example package and GDL to the same Git commit. That commit must carry the runtime the generator emits for (`gdl_runtime::ProcessConfig` and `gdl_runtime::Hosted`), so bump the pin whenever the generator and the runtime change together; a bundle built against an older gdl does not compile.
+The output contains a Dockerfile and runtime config for each segment, a hub Dockerfile, `deployment.json`, and `compose.yaml`. The output directory must be new. With `--fleet <fleet.toml>`, compose first checks the spec and the fleet file together as `cargo gdl check` does, and writes nothing if either has a problem; the bundle does not use the fleet file yet. Cargo fetches Git and registry dependencies during the image build. The bundle contains no local dependency source snapshot. The public example in `examples/api/deploy.toml` pins both the example package and GDL to the same Git commit. That commit must carry the runtime the generator emits for (`gdl_runtime::ProcessConfig` and `gdl_runtime::Hosted`), so bump the pin whenever the generator and the runtime change together; a bundle built against an older gdl does not compile.
 
 
 Image settings belong in the graph spec:
@@ -663,7 +677,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-extract` | The source reader: what a crate offers to graphs (messages, exports, and nodes), read from its source without building it; and the working catalogue of such offers |
 | `crates/gdl-macros` | The `graph!` macro, `derive(Message)`, `derive(Node)`, and `#[export]` |
 | `crates/gdl-web` | The composer: a page and its server, which check and export graphs built from a working catalogue |
-| `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `catalog`, `resolve`, `generate`, `diagram`, and `export` |
+| `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `compose`, and `export` |
 | `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |
 | `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |
 | [`examples/film`](examples/film/README.md) | Two node crates with graph settings, custom metrics, a mock engine, and a vendor usage tap. Distributed and compact specs use the same graph. |

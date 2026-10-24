@@ -37,6 +37,7 @@ mod dump;
 mod emit;
 mod export;
 mod extract;
+mod fleet;
 mod names;
 mod nodes;
 mod offers;
@@ -55,6 +56,7 @@ pub use deployment::{ComposeBundle, compose, compose_bundle, compose_files};
 use emit::MARKER;
 pub use export::export;
 pub use extract::{Crate, Extracted, add_to_catalog, extract, verify};
+pub use fleet::check_files;
 /// The working catalogue, its entries, and what a crate offers, read from
 /// its source.
 pub use gdl_extract::{Catalog, Entry, Offer};
@@ -65,19 +67,43 @@ pub use resolve::Resolved;
 pub use spec::{Spec, runtime_at};
 use validate::{library_clashes, validate};
 
-/// A generation failure, with everything wrong at once where possible.
+/// A generation failure, with everything wrong at once where possible:
+/// each problem, printed one to a line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error(String);
+pub struct Error(Vec<gdl_model::Problem>);
 
 impl Error {
     fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self(vec![gdl_model::Problem::from(message.into())])
+    }
+
+    /// Every one of `problems`, at once.
+    fn all<P: Into<gdl_model::Problem>>(problems: impl IntoIterator<Item = P>) -> Self {
+        Self(problems.into_iter().map(Into::into).collect())
+    }
+
+    /// Each problem, those that name no file as read from `file`: the
+    /// spec's problems, located in the spec.
+    pub fn in_file(self, file: impl fmt::Display) -> gdl_model::Problems {
+        gdl_model::Problems(self.0).in_file(file)
+    }
+}
+
+impl From<gdl_model::Problems> for Error {
+    fn from(problems: gdl_model::Problems) -> Self {
+        Self(problems.0)
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        for (index, problem) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str("\n")?;
+            }
+            write!(f, "{problem}")?;
+        }
+        Ok(())
     }
 }
 
@@ -190,24 +216,43 @@ pub struct Check {
 /// Check `spec` as [`render`] and [`export`] check it, with offers from
 /// `from`, and write nothing. A spec that passes generates.
 pub fn check(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Check, Error> {
-    spec.gdl.check()?;
-    let prepared = prepare(spec, None, target, emit::Deps::Relative, from)?;
-    let spec = bound(spec, &prepared, target, from)?;
-    let layout = validate(&spec, &prepared.contract, &prepared.manifest)?;
-    // What an export of it would refuse.
-    let problems = export::refusals(&spec, &prepared.manifest.name);
-    if !problems.is_empty() {
-        return Err(Error::new(problems.join("\n")));
-    }
-    let mermaid = prepared
-        .manifest
-        .to_mermaid(Some(&layout))
-        .map_err(|e| Error::new(e.to_string()))?;
-    Ok(Check {
-        crossings: layout.report().to_string(),
-        mermaid: service::diagram(&spec, &prepared.manifest, mermaid),
-        manifest: prepared.manifest,
-    })
+    checked(spec, target, from).0
+}
+
+/// [`check`], and the spec's layout whenever its placement fits its
+/// graph, whatever else is wrong with it: a fleet file is checked against
+/// the layout even when a binding is not.
+pub(crate) fn checked(
+    spec: &Spec,
+    target: &Path,
+    from: Offers<'_>,
+) -> (Result<Check, Error>, Option<gdl_model::Layout>) {
+    let prepared = prepare(spec, None, target, emit::Deps::Relative, from);
+    let layout = prepared
+        .as_ref()
+        .ok()
+        .and_then(|prepared| gdl_model::layout(&prepared.manifest, &spec.placement).ok());
+    let check = || {
+        spec.gdl.check()?;
+        let prepared = prepared?;
+        let spec = bound(spec, &prepared, target, from)?;
+        let layout = validate(&spec, &prepared.contract, &prepared.manifest)?;
+        // What an export of it would refuse.
+        let problems = export::refusals(&spec, &prepared.manifest.name);
+        if !problems.is_empty() {
+            return Err(Error::all(problems));
+        }
+        let mermaid = prepared
+            .manifest
+            .to_mermaid(Some(&layout))
+            .map_err(|e| Error::new(e.to_string()))?;
+        Ok(Check {
+            crossings: layout.report().to_string(),
+            mermaid: service::diagram(&spec, &prepared.manifest, mermaid),
+            manifest: prepared.manifest,
+        })
+    };
+    (check(), layout)
 }
 
 /// A diagram format for [`diagram`].
@@ -282,8 +327,7 @@ fn resolved(
         None => names::GraphFile::read(&source.path)?,
     };
     let offers = offers(&source.crates, target, from)?;
-    let messages = resolve::resolve(&file.uses, &offers, &source.pins)
-        .map_err(|problems| Error::new(problems.join("\n")))?;
+    let messages = resolve::resolve(&file.uses, &offers, &source.pins).map_err(Error::all)?;
     Ok((file, Resolution { messages }))
 }
 
@@ -343,7 +387,7 @@ fn prepare(
     let lib = package.replace('-', "_");
     let clashes = library_clashes(&lib, &source.crates);
     if !clashes.is_empty() {
-        return Err(Error::new(clashes.join("\n")));
+        return Err(Error::all(clashes));
     }
     let lib_rs = contract::lib_rs(&file.graph, &resolution, &source.path);
     let crates = |path: &dyn Fn(&Path) -> String| {

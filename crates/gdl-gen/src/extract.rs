@@ -160,7 +160,7 @@ pub fn extract(
         }
     };
     if !extraction.problems.is_empty() {
-        return Err(Error::new(extraction.problems.join("\n")));
+        return Err(Error::all(extraction.problems));
     }
     Ok(Extracted {
         offer: extraction.offer,
@@ -255,7 +255,7 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
     if problems.is_empty() {
         Ok(())
     } else {
-        Err(Error::new(problems.join("\n")))
+        Err(Error::all(problems))
     }
 }
 

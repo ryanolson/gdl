@@ -473,10 +473,8 @@ impl Spec {
     }
 
     fn parse(text: &str, file: &Path, dir: &Path) -> Result<Self, Error> {
-        let located = |problems: gdl_model::Problems| {
-            Error::new(problems.in_file(file.display()).to_string())
-        };
-        let raw: Raw = gdl_model::read_toml(text).map_err(|p| located(p.into()))?;
+        let located = |problems: gdl_model::Problems| Error::from(problems.in_file(file.display()));
+        let raw: Raw = gdl_model::read_toml(text).map_err(located)?;
         let nodes = raw.nodes;
         let source = match (raw.contract, raw.graph, raw.messages) {
             (Some(_), None, None) if nodes.is_some() => {

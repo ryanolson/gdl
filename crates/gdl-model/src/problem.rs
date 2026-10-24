@@ -22,6 +22,9 @@ pub struct Problem {
     pub origin: Option<Origin>,
     /// The line, counted from 1, when the parser gives one.
     pub line: Option<usize>,
+    /// The column, counted from 1, when the parser gives one with the
+    /// line: a graph file's parser does, TOML's reader is given none.
+    pub column: Option<usize>,
     /// The table, as a dotted path without its brackets
     /// (`cell.model-x-01`); `None` for the file's top level.
     pub table: Option<String>,
@@ -46,6 +49,7 @@ impl Problem {
         Self {
             origin: None,
             line: None,
+            column: None,
             table,
             key,
             message: message.into(),
@@ -94,23 +98,25 @@ impl Problem {
 
 /// Read `text`, a TOML file, as a `T`. A file that does not parse is one
 /// problem, located by its line, table, and key; its reader adds the file.
-pub fn read_toml<T: DeserializeOwned>(text: &str) -> Result<T, Problem> {
+pub fn read_toml<T: DeserializeOwned>(text: &str) -> Result<T, Problems> {
     let line = |error: &toml::de::Error| {
         error
             .span()
             .map(|span| text[..span.start.min(text.len())].matches('\n').count() + 1)
     };
-    let deserializer = toml::Deserializer::parse(text).map_err(|error| Problem {
-        line: line(&error),
-        ..Problem::at(None, None, error.message())
+    let deserializer = toml::Deserializer::parse(text).map_err(|error| {
+        Problems::from(Problem {
+            line: line(&error),
+            ..Problem::at(None, None, error.message())
+        })
     })?;
     serde_path_to_error::deserialize(deserializer).map_err(|error| {
         let path = error.path().clone();
         let error = error.into_inner();
-        Problem {
+        Problems::from(Problem {
             line: line(&error),
             ..Problem::from_path(&path, error.message().to_string())
-        }
+        })
     })
 }
 
@@ -138,7 +144,10 @@ impl fmt::Display for Problem {
         match (&self.origin, self.line) {
             // The variable's name spells the table and the key.
             (Some(Origin::Variable(name)), _) => return write!(f, "{name}: {}", self.message),
-            (Some(Origin::File(path)), Some(line)) => write!(f, "{path}:{line}: ")?,
+            (Some(Origin::File(path)), Some(line)) => match self.column {
+                Some(column) => write!(f, "{path}:{line}:{column}: ")?,
+                None => write!(f, "{path}:{line}: ")?,
+            },
             (Some(Origin::File(path)), None) => write!(f, "{path}: ")?,
             (None, Some(line)) => write!(f, "line {line}: ")?,
             (None, None) => {}
@@ -154,6 +163,13 @@ impl fmt::Display for Problem {
 }
 
 impl std::error::Error for Problem {}
+
+impl From<String> for Problem {
+    /// A problem that names no table or key.
+    fn from(message: String) -> Self {
+        Self::at(None, None, message)
+    }
+}
 
 /// Every problem a reader or a check found, in the order found; printed
 /// one to a line.

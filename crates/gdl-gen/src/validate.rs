@@ -100,12 +100,10 @@ pub(crate) fn validate(
             format!("[bind.{node}]")
         }
     };
-    let layout = match gdl_model::layout(manifest, &spec.placement) {
-        Ok(layout) => Some(layout),
-        Err(errors) => {
-            problems.push(errors.to_string());
-            None
-        }
+    // Each with the table and key of the placement it is about.
+    let (layout, placed) = match gdl_model::layout(manifest, &spec.placement) {
+        Ok(layout) => (Some(layout), gdl_model::Problems::default()),
+        Err(errors) => (None, gdl_model::Problems::from(errors)),
     };
     if !manifest
         .name
@@ -319,7 +317,12 @@ pub(crate) fn validate(
     }
     match (layout, problems.is_empty()) {
         (Some(layout), true) => Ok(layout),
-        _ => Err(Error::new(problems.join("\n"))),
+        _ => Err(Error::all(
+            placed
+                .0
+                .into_iter()
+                .chain(problems.into_iter().map(Into::into)),
+        )),
     }
 }
 

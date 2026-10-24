@@ -33,7 +33,7 @@ pub(crate) fn offers(
             .iter()
             .map(|c| given_offer(given, &c.package, &c.lib, &c.source))
             .collect::<Result<Vec<_>, Vec<String>>>()
-            .map_err(|problems| Error::new(problems.join("\n")));
+            .map_err(Error::all);
     }
     let mut workspaces: Vec<gdl_extract::Workspace> = Vec::new();
     let mut offers = Vec::with_capacity(listed.len());
@@ -114,7 +114,7 @@ pub(crate) fn offers(
     if problems.is_empty() {
         Ok(offers)
     } else {
-        Err(Error::new(problems.join("\n")))
+        Err(Error::all(problems))
     }
 }
 
