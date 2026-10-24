@@ -12,6 +12,7 @@ mod cells;
 mod classes;
 mod errors;
 mod report;
+mod spelled;
 
 use boundary::bound;
 pub use cells::CellPolicy;
@@ -19,6 +20,7 @@ use classes::classify;
 pub use errors::{PlacementError, PlacementErrors, WireReason};
 pub use report::CrossingReport;
 use report::hop_lines;
+use spelled::Spelled;
 
 /// Which nodes live in which segment.
 ///
@@ -45,6 +47,8 @@ pub struct Placement {
         deserialize_with = "cells::recorded"
     )]
     cells: BTreeMap<String, CellPolicy>,
+    #[serde(skip)]
+    spelled: Spelled,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,7 +231,9 @@ impl Placement {
         let node = node.into();
         if router == RequestRouter::default() {
             self.routing.remove(&node);
+            self.spelled.routing.insert(node);
         } else {
+            self.spelled.routing.remove(&node);
             self.routing.insert(node, router);
         }
         self
@@ -241,7 +247,9 @@ impl Placement {
         let class = class.into();
         if policy == CellPolicy::default() {
             self.cells.remove(&class);
+            self.spelled.cells.insert(class);
         } else {
+            self.spelled.cells.remove(&class);
             self.cells.insert(class, policy);
         }
         self
@@ -255,6 +263,7 @@ impl Placement {
         placement
             .routing
             .retain(|_, router| *router != RequestRouter::default());
+        placement.spelled = Spelled::read(text, &placement.routing, &placement.cells);
         let mut problems = Vec::new();
         for (node, router) in &placement.routing {
             if let RequestRouter::Selector(name) = router
@@ -682,6 +691,18 @@ fn place(
                 }
             }
         }
+        if !found {
+            errors.push(PlacementError::InvalidRouter(node.clone()));
+        }
+    }
+    // A default router names a boundary as any other router does.
+    for node in &placement.spelled.routing {
+        let found = hops.iter().any(|hop| {
+            hop.forward_runs
+                .iter()
+                .skip(1)
+                .any(|run| run.stages.first() == Some(node))
+        });
         if !found {
             errors.push(PlacementError::InvalidRouter(node.clone()));
         }

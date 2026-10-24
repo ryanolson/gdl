@@ -97,6 +97,15 @@ pub(super) fn hash(h: &mut Fnv, cells: &BTreeMap<String, CellPolicy>) {
     }
 }
 
+/// Every class a `[cells]` table names, with a value or with defaults only.
+fn named(placement: &Placement) -> BTreeSet<&String> {
+    placement
+        .cells
+        .keys()
+        .chain(&placement.spelled.cells)
+        .collect()
+}
+
 /// The checks that need only the placement: each table's policy name, and
 /// that it names a class the placement has.
 pub(super) fn judge(placement: &Placement, errors: &mut Vec<PlacementError>) {
@@ -107,6 +116,8 @@ pub(super) fn judge(placement: &Placement, errors: &mut Vec<PlacementError>) {
                 reason,
             });
         }
+    }
+    for class in named(placement) {
         if placement.classes.is_empty() {
             errors.push(PlacementError::CellPolicyWithoutClasses {
                 class: class.clone(),
@@ -130,7 +141,7 @@ pub(super) fn entered(
     errors: &mut Vec<PlacementError>,
 ) -> BTreeMap<String, CellPolicy> {
     let into: BTreeSet<&str> = boundaries.iter().map(|b| b.into.as_str()).collect();
-    for class in placement.cells.keys() {
+    for class in named(placement) {
         if placement.classes.contains_key(class)
             && !into.contains(class.as_str())
             && !undecided.may_enter(class)
