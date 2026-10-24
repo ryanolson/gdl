@@ -298,6 +298,14 @@ async fn a_chooser_that_has_not_applied_the_retirement_holds_the_retiree() {
     );
     assert!(!ended.is_finished(), "the retiree left");
     assert!(
+        global
+            .retirements()
+            .borrow()
+            .iter()
+            .any(|(_, _, _, of)| *of == id),
+        "the global's hub no longer waits for the held chooser"
+    );
+    assert!(
         !matches!(
             retirement_now(&mut watch, id),
             Some(CellWatchEvent::Retired {
