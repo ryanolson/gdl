@@ -101,22 +101,23 @@ impl CellOrigins {
 
     /// `problems`, each with the origin of its key. A key that was never
     /// set, a missing one, is the variable's to set when every other key
-    /// came from a variable, and the file's when every other came from one
-    /// file; otherwise it is named by its key alone.
+    /// came from a variable, and the file's when one file holds the
+    /// table; with several files, which one should hold it cannot be
+    /// told, and none is named.
     pub(super) fn locate(&self, problems: Problems) -> Problems {
         let variables = !self.0.is_empty()
             && self
                 .0
                 .values()
                 .all(|origin| matches!(origin, Origin::Variable(_)));
-        let file = {
-            let mut all = self.0.values();
-            all.next()
-                .filter(|first| {
-                    matches!(first, Origin::File(_)) && all.all(|other| other == *first)
-                })
-                .cloned()
-        };
+        let mut files = self
+            .0
+            .values()
+            .filter(|origin| matches!(origin, Origin::File(_)));
+        let file = files
+            .next()
+            .filter(|first| files.all(|other| other == *first))
+            .cloned();
         let unset = |key: &str| match variables {
             true => Some(Origin::Variable(cell_variable(key))),
             false => file.clone(),

@@ -527,6 +527,12 @@ async fn a_cell_problem_names_its_file_or_its_variable() {
             &[("GDL_CELL__SUMMARY_MS__EXTRA", "1")][..],
             "GDL_CELL__SUMMARY_MS__EXTRA: invalid type",
         ),
+        // Set from a file and a variable: the file holds the table.
+        (
+            "[cell]\nclass = \"global\"\n",
+            &[("GDL_CELL__REGION", "us-east-1")][..],
+            "config.toml: [cell] name: missing field `name`",
+        ),
     ] {
         Jail::expect_with(|jail| {
             jail.create_file("config.toml", &format!("{BASE}{file}"))?;
