@@ -140,7 +140,8 @@ pub use feed::CellWatch;
 /// looked at once a summary period, it no longer shows as a follower, but
 /// it is never taken as a release. Once the cell drains and every watch
 /// that counted has been released, or none did, its watch says so, once
-/// ([`gdl_watch::CellWatchEvent::Unfollowed`]), and its entry instances
+/// (its [`gdl_watch::CellWatchEvent::State`] again, with `unfollowed`),
+/// and its entry instances
 /// stop taking work from other cells then rather than at their bound.
 ///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on

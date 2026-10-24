@@ -62,14 +62,18 @@ async fn a_drained_cell_is_draining_at_once_whatever_its_quorum() {
     assert_eq!(
         watch.next().now_or_never(),
         Some(Some(CellWatchEvent::State {
-            state: CellState::Draining
+            state: CellState::Draining,
+            unfollowed: false,
         })),
         "the watch did not say draining by the time the drain was answered"
     );
     // No cell follows this one, so it says so with the drain.
     assert_eq!(
         watch.next().now_or_never(),
-        Some(Some(CellWatchEvent::Unfollowed))
+        Some(Some(CellWatchEvent::State {
+            state: CellState::Draining,
+            unfollowed: true,
+        }))
     );
     let (record, _) = records.until(CellState::Draining).await;
 

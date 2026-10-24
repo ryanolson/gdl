@@ -355,6 +355,7 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
         .offer(
             &serde_json::to_string(&CellWatchEvent::State {
                 state: CellState::Degraded,
+                unfollowed: false,
             })
             .expect("an event serializes"),
         )
@@ -408,6 +409,7 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
     second
         .send(&CellWatchEvent::State {
             state: CellState::Degraded,
+            unfollowed: false,
         })
         .await;
     assert_eq!(
@@ -516,6 +518,7 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_cell_withheld() {
     second
         .send(&CellWatchEvent::State {
             state: CellState::Degraded,
+            unfollowed: false,
         })
         .await;
     assert_eq!(
@@ -652,6 +655,7 @@ async fn what_the_replaced_watch_sends_is_not_applied_over_the_reading() {
     let mut second = setup.server.next().await;
     let degraded = serde_json::to_string(&CellWatchEvent::State {
         state: CellState::Degraded,
+        unfollowed: false,
     })
     .expect("an event serializes");
     let ready = serde_json::to_string(&CellWatchEvent::Ready {

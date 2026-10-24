@@ -82,14 +82,7 @@ impl Classify for CellWatchEvent {
     type Unknown = UnknownEvent;
 
     const KINDS: &'static [&'static str] = &[
-        "cell",
-        "synced",
-        "state",
-        "load",
-        "ready",
-        "retired",
-        "left",
-        "unfollowed",
+        "cell", "synced", "state", "load", "ready", "retired", "left",
     ];
 
     fn unknown(data: &str) -> Option<UnknownEvent> {
@@ -162,6 +155,7 @@ mod tests {
             CellWatchEvent::Synced,
             CellWatchEvent::State {
                 state: CellState::Ready,
+                unfollowed: false,
             },
             CellWatchEvent::Load { load: None },
             CellWatchEvent::Ready {
@@ -176,7 +170,6 @@ mod tests {
                 segment: "f".into(),
                 instance,
             },
-            CellWatchEvent::Unfollowed,
         ];
         for event in &cell {
             match event {
@@ -186,8 +179,7 @@ mod tests {
                 | CellWatchEvent::Load { .. }
                 | CellWatchEvent::Ready { .. }
                 | CellWatchEvent::Retired { .. }
-                | CellWatchEvent::Left { .. }
-                | CellWatchEvent::Unfollowed => {}
+                | CellWatchEvent::Left { .. } => {}
             }
         }
         let tags: Vec<String> = cell.iter().map(tag).collect();
@@ -273,5 +265,37 @@ mod tests {
                 assert!(value.get(field).is_some(), "{event:?} names no {field}");
             }
         }
+    }
+
+    /// A reader of the build before `unfollowed`, whose state event has no
+    /// such field, reads the state that carries it as the state alone, and
+    /// a state that does not carry it is sent as before.
+    #[test]
+    fn an_earlier_reader_reads_unfollowed_as_the_state_alone() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(tag = "event", rename_all = "snake_case")]
+        enum Earlier {
+            State { state: CellState },
+        }
+        let unfollowed = serde_json::to_string(&CellWatchEvent::State {
+            state: CellState::Draining,
+            unfollowed: true,
+        })
+        .expect("an event serializes");
+        assert_eq!(
+            serde_json::from_str::<Earlier>(&unfollowed).expect("an earlier reader reads it"),
+            Earlier::State {
+                state: CellState::Draining
+            }
+        );
+        let state = serde_json::to_value(CellWatchEvent::State {
+            state: CellState::Draining,
+            unfollowed: false,
+        })
+        .expect("an event serializes");
+        assert_eq!(
+            state,
+            serde_json::json!({ "event": "state", "state": "draining" })
+        );
     }
 }

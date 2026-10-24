@@ -334,7 +334,8 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(CellWatchEvent::State {
-                state: CellState::Degraded
+                state: CellState::Degraded,
+                unfollowed: false,
             })
             .expect("an event serializes"),
             serde_json::json!({ "event": "state", "state": "degraded" }),

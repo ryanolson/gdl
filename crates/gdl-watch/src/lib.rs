@@ -180,10 +180,11 @@ pub struct LoadReport {
 /// hub's public listener: each server-sent event's data is one of these,
 /// as JSON tagged by `event`.
 ///
-/// A watch begins with a snapshot: [`CellWatchEvent::Cell`], then
-/// [`CellWatchEvent::Unfollowed`] if the cell has been told so, then the
-/// retired entry instances, then the ready ones that have not retired,
-/// then [`CellWatchEvent::Synced`]. After it, each change as it happens.
+/// A watch begins with a snapshot: [`CellWatchEvent::Cell`], then, if the
+/// draining cell has been told that no cell follows it, its
+/// [`CellWatchEvent::State`] again with `unfollowed`, then the retired
+/// entry instances, then the ready ones that have not retired, then
+/// [`CellWatchEvent::Synced`]. After it, each change as it happens.
 /// The retired instances come first, so that a follower never makes an
 /// instance routable that has already retired.
 ///
@@ -230,10 +231,25 @@ pub enum CellWatchEvent {
     /// The snapshot is complete: the events before this one are the cell
     /// as the watch began.
     Synced,
-    /// The cell's state changed.
+    /// The cell's state changed; or, sent again with `unfollowed`, the
+    /// cell drains and no cell follows it any more.
     State {
         /// The state it changed to.
         state: CellState,
+        /// The cell drains, and no cell follows it any more: each that did
+        /// has let go of it, which a cell's hub does only once none of its
+        /// choosers holds an offer to it, so no offer from another cell is
+        /// still on its way. Sent once, and in every snapshot after it.
+        ///
+        /// A field of a known event, not a kind of its own, so that a reader
+        /// that does not know it ignores it: it is for the cell's own
+        /// instances, and says nothing about whether another cell is to
+        /// offer the cell work, which a kind it did not know would have
+        /// made it fail closed for, reading the cell again for as long as
+        /// it drains. An earlier entry instance, which reads only the
+        /// state, keeps its bound.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unfollowed: bool,
     },
     /// The cell's load summary: sent once a summary period while the cell
     /// has one, changed or not, so that a watcher can tell a quiet cell
@@ -265,9 +281,4 @@ pub enum CellWatchEvent {
         /// The instance.
         instance: InstanceId,
     },
-    /// The cell drains, and no cell follows it any more: each that did has
-    /// let go of it, which a cell's hub does only once none of its
-    /// choosers holds an offer to it, so no offer from another cell is
-    /// still on its way. Sent once, and in every snapshot after it.
-    Unfollowed,
 }

@@ -85,7 +85,10 @@ fn ready(peer: PeerInfo) -> CellWatchEvent {
 }
 
 fn state(state: CellState) -> CellWatchEvent {
-    CellWatchEvent::State { state }
+    CellWatchEvent::State {
+        state,
+        unfollowed: false,
+    }
 }
 
 /// The model cell's first event, in `state`, under `epoch`.
@@ -123,7 +126,7 @@ impl View {
                 self.epoch = *epoch;
                 self.state = Some(*state);
             }
-            CellWatchEvent::State { state } => self.state = Some(*state),
+            CellWatchEvent::State { state, .. } => self.state = Some(*state),
             CellWatchEvent::Ready { peer, .. } => {
                 assert!(
                     !self.retired.contains(&peer.instance_id()),
@@ -140,7 +143,7 @@ impl View {
                 let known = self.ready.remove(instance).is_some() | self.retired.remove(instance);
                 assert!(known, "an instance that left was never sent");
             }
-            CellWatchEvent::Synced | CellWatchEvent::Load { .. } | CellWatchEvent::Unfollowed => {}
+            CellWatchEvent::Synced | CellWatchEvent::Load { .. } => {}
         }
     }
 }

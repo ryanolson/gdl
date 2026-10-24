@@ -249,8 +249,19 @@ async fn run(watcher: CellWatcher, address: String, learns: watch::Sender<Learne
                 refused = None;
                 while let Some(item) = events.next().await {
                     match item {
+                        Watched::Event(CellWatchEvent::State {
+                            state: CellState::Draining,
+                            unfollowed: true,
+                        }) => {
+                            learns.send_modify(|learned| {
+                                learned.drain.get_or_insert_with(Instant::now);
+                                learned.unfollowed = true;
+                            });
+                            return;
+                        }
                         Watched::Event(
-                            CellWatchEvent::Cell { state, .. } | CellWatchEvent::State { state },
+                            CellWatchEvent::Cell { state, .. }
+                            | CellWatchEvent::State { state, .. },
                         ) if state == CellState::Draining => {
                             // The first time only: a watch begun again says so
                             // again.
@@ -259,10 +270,6 @@ async fn run(watcher: CellWatcher, address: String, learns: watch::Sender<Learne
                                 learned.drain.get_or_insert_with(Instant::now);
                                 first
                             });
-                        }
-                        Watched::Event(CellWatchEvent::Unfollowed) => {
-                            learns.send_modify(|learned| learned.unfollowed = true);
-                            return;
                         }
                         // An event of a kind this build does not know may
                         // have said that the cell drains: the cell is read

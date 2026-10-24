@@ -64,7 +64,10 @@ fn ready(peer: &PeerInfo) -> CellWatchEvent {
 }
 
 fn state(state: CellState) -> CellWatchEvent {
-    CellWatchEvent::State { state }
+    CellWatchEvent::State {
+        state,
+        unfollowed: false,
+    }
 }
 
 /// The events the watch has now.

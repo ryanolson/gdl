@@ -54,6 +54,14 @@ fn pending<T>(watch: &mut (impl Stream<Item = T> + Unpin)) -> Vec<T> {
     events
 }
 
+/// What a draining cell's watch says once no cell follows it.
+fn unfollowed() -> CellWatchEvent {
+    CellWatchEvent::State {
+        state: CellState::Draining,
+        unfollowed: true,
+    }
+}
+
 /// A watch of the model cell past its snapshot.
 async fn watching<D: CellDirectory>(cell: &CellReadiness<D>) -> CellWatch {
     let mut watch = cell.watch().await.expect("the watch begins");
@@ -140,12 +148,13 @@ async fn a_draining_cell_says_so_once_its_last_follower_lets_go() {
         *event
             == CellWatchEvent::State {
                 state: CellState::Draining,
+                unfollowed: false,
             }
     })
     .await;
-    assert!(!drained.contains(&CellWatchEvent::Unfollowed));
+    assert!(!drained.contains(&unfollowed()));
     assert!(
-        !pending(&mut watch).contains(&CellWatchEvent::Unfollowed),
+        !pending(&mut watch).contains(&unfollowed()),
         "unfollowed while a global follows the cell"
     );
 
@@ -154,7 +163,7 @@ async fn a_draining_cell_says_so_once_its_last_follower_lets_go() {
         .await
         .expect("the hub takes the acknowledgement");
     followers(&model_cell, BTreeSet::new()).await;
-    through(&mut watch, |event| *event == CellWatchEvent::Unfollowed).await;
+    through(&mut watch, |event| *event == unfollowed()).await;
     let mut later = model_cell.watch().await.expect("the watch begins");
     let snapshot = through(&mut later, |event| *event == CellWatchEvent::Synced).await;
     assert!(
@@ -165,7 +174,10 @@ async fn a_draining_cell_says_so_once_its_last_follower_lets_go() {
                     state: CellState::Draining,
                     ..
                 },
-                CellWatchEvent::Unfollowed
+                CellWatchEvent::State {
+                    state: CellState::Draining,
+                    unfollowed: true,
+                }
             ]
         ),
         "{snapshot:?}"
@@ -173,7 +185,7 @@ async fn a_draining_cell_says_so_once_its_last_follower_lets_go() {
     assert_eq!(
         snapshot
             .iter()
-            .filter(|event| **event == CellWatchEvent::Unfollowed)
+            .filter(|event| **event == unfollowed())
             .count(),
         1
     );
@@ -196,10 +208,11 @@ async fn a_cell_no_one_follows_says_so_as_it_drains() {
     let (_instances, _) = meet_the_quorum(&model_hub).await;
     let mut watch = watching(&model_cell).await;
     model_cell.drain().await.expect("the cell drains");
-    let drained = through(&mut watch, |event| *event == CellWatchEvent::Unfollowed).await;
+    let drained = through(&mut watch, |event| *event == unfollowed()).await;
     assert!(
         drained.contains(&CellWatchEvent::State {
-            state: CellState::Draining
+            state: CellState::Draining,
+            unfollowed: false,
         }),
         "{drained:?}"
     );
@@ -298,11 +311,7 @@ async fn a_late_follow_of_a_draining_cell_is_never_offered_and_let_go_at_once() 
     // No cell followed it as it began to drain, so it said so then.
     let mut watch = model_cell.watch().await.expect("the watch begins");
     let snapshot = through(&mut watch, |event| *event == CellWatchEvent::Synced).await;
-    assert_eq!(
-        snapshot.get(1),
-        Some(&CellWatchEvent::Unfollowed),
-        "{snapshot:?}"
-    );
+    assert_eq!(snapshot.get(1), Some(&unfollowed()), "{snapshot:?}");
 
     // The global sees the directory only once its chooser is a member, so
     // that the follow waits for the chooser's acknowledgement.
@@ -353,10 +362,7 @@ async fn a_late_follow_of_a_draining_cell_is_never_offered_and_let_go_at_once() 
         "offered: {closed:?}"
     );
     followers(&model_cell, BTreeSet::new()).await;
-    assert!(
-        !pending(&mut watch).contains(&CellWatchEvent::Unfollowed),
-        "said twice"
-    );
+    assert!(!pending(&mut watch).contains(&unfollowed()), "said twice");
     let mut following = global_cell.following();
     let key = ("model_x".to_string(), CELL.to_string());
     tokio::time::timeout(WAIT, following.wait_for(|cells| !cells.contains_key(&key)))
@@ -430,11 +436,12 @@ async fn an_earlier_watchs_close_leaves_a_follower_with_a_later_one() {
         *event
             == CellWatchEvent::State {
                 state: CellState::Draining,
+                unfollowed: false,
             }
     })
     .await;
     assert!(
-        !pending(&mut watch).contains(&CellWatchEvent::Unfollowed),
+        !pending(&mut watch).contains(&unfollowed()),
         "unfollowed while a later watch of the follower is open"
     );
     // The later run lets go; the earlier one never did, and its watch
@@ -448,14 +455,14 @@ async fn an_earlier_watchs_close_leaves_a_follower_with_a_later_one() {
     drop(later);
     followers(&model_cell, BTreeSet::new()).await;
     assert!(
-        !pending(&mut watch).contains(&CellWatchEvent::Unfollowed),
+        !pending(&mut watch).contains(&unfollowed()),
         "a watch lost without a release was taken as one"
     );
     watcher
         .release(&address, &run(1))
         .await
         .expect("the hub takes the release");
-    assert_eq!(next(&mut watch).await, CellWatchEvent::Unfollowed);
+    assert_eq!(next(&mut watch).await, unfollowed());
     model_hub.shutdown().await.expect("the hub stops");
 }
 
@@ -499,15 +506,16 @@ async fn a_released_watch_no_longer_counts() {
         *event
             == CellWatchEvent::State {
                 state: CellState::Draining,
+                unfollowed: false,
             }
     })
     .await;
-    assert!(!pending(&mut watch).contains(&CellWatchEvent::Unfollowed));
+    assert!(!pending(&mut watch).contains(&unfollowed()));
     watcher
         .release(&address, &follower)
         .await
         .expect("the hub takes the release");
-    assert_eq!(next(&mut watch).await, CellWatchEvent::Unfollowed);
+    assert_eq!(next(&mut watch).await, unfollowed());
     assert!(model_cell.followers().borrow().is_empty());
     model_hub.shutdown().await.expect("the hub stops");
 }
@@ -557,20 +565,56 @@ async fn a_lost_watch_is_never_taken_as_a_release() {
             *event
                 == CellWatchEvent::State {
                     state: CellState::Draining,
+                    unfollowed: false,
                 }
         })
         .await;
         let mut seen = [seen, pending(&mut watch)].concat();
         assert!(
-            !seen.contains(&CellWatchEvent::Unfollowed),
+            !seen.contains(&unfollowed()),
             "a watch lost without a release was taken as one (drained first: {drain_first})"
         );
         watcher
             .release(&address, &follower)
             .await
             .expect("the hub takes the release");
-        seen = through(&mut watch, |event| *event == CellWatchEvent::Unfollowed).await;
-        assert_eq!(seen.last(), Some(&CellWatchEvent::Unfollowed));
+        seen = through(&mut watch, |event| *event == unfollowed()).await;
+        assert_eq!(seen.last(), Some(&unfollowed()));
         model_hub.shutdown().await.expect("the hub stops");
     }
+}
+
+/// The kinds of the cell watch's events that a reader of the build before
+/// `unfollowed` knows.
+const EARLIER_KINDS: [&str; 7] = [
+    "cell", "synced", "state", "load", "ready", "retired", "left",
+];
+
+/// What a draining cell's watch says once no cell follows it is carried by
+/// an event of a kind an earlier reader knows, live and in every later
+/// snapshot: an earlier global's hub, which would fail closed for the cell
+/// at a kind it does not know and read it again, never meets one, and an
+/// earlier entry instance, which reads the state alone, keeps its bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unfollowed_is_said_in_a_kind_an_earlier_reader_knows() {
+    let directory = Resolving::new();
+    let (model_hub, model_cell) = quick_cell(&directory).await;
+    let (_instances, _) = meet_the_quorum(&model_hub).await;
+    let mut watch = watching(&model_cell).await;
+    model_cell.drain().await.expect("the cell drains");
+    let mut live = Vec::new();
+    while live.len() < 2 {
+        live.push(next(&mut watch).await);
+    }
+    let mut later = model_cell.watch().await.expect("the watch begins");
+    let snapshot = through(&mut later, |event| *event == CellWatchEvent::Synced).await;
+    for event in live.iter().chain(&snapshot) {
+        let value = serde_json::to_value(event).expect("an event serializes");
+        let kind = value["event"].as_str().expect("a tag");
+        assert!(
+            EARLIER_KINDS.contains(&kind),
+            "an earlier reader does not know {value}"
+        );
+    }
+    model_hub.shutdown().await.expect("the hub stops");
 }

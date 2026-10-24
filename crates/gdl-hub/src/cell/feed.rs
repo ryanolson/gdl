@@ -172,7 +172,7 @@ impl Feed {
         let mut shared = self.lock();
         let state = shared.state;
         if shared.followers.release(key, state) {
-            shared.send(CellWatchEvent::Unfollowed);
+            shared.send(unfollowed());
         }
     }
 
@@ -207,9 +207,12 @@ impl Feed {
         let mut shared = self.lock();
         if shared.state != state {
             shared.state = state;
-            shared.send(CellWatchEvent::State { state });
+            shared.send(CellWatchEvent::State {
+                state,
+                unfollowed: false,
+            });
             if shared.followers.settle(state) {
-                shared.send(CellWatchEvent::Unfollowed);
+                shared.send(unfollowed());
             }
         }
     }
@@ -565,7 +568,7 @@ impl Shared {
             load: self.loads.summary(),
         });
         if self.followers.unfollowed() {
-            events.push(CellWatchEvent::Unfollowed);
+            events.push(unfollowed());
         }
         events.extend(
             retired
@@ -585,6 +588,15 @@ impl Shared {
         );
         events.push(CellWatchEvent::Synced);
         events
+    }
+}
+
+/// What the draining cell's watch says once no cell follows it: its state
+/// again, with `unfollowed`, a field an earlier reader ignores.
+pub(super) fn unfollowed() -> CellWatchEvent {
+    CellWatchEvent::State {
+        state: CellState::Draining,
+        unfollowed: true,
     }
 }
 

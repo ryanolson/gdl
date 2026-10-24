@@ -881,7 +881,13 @@ impl Installed {
     ) {
         let (class, cell) = (self.class.clone(), self.cell.clone());
         match event {
-            CellWatchEvent::State { state } => {
+            // That the draining cell has no follower left is for the
+            // cell's own instances, and changes nothing a chooser sees.
+            CellWatchEvent::State {
+                state,
+                unfollowed: true,
+            } if state == self.state => {}
+            CellWatchEvent::State { state, .. } => {
                 let hidden = !self.exposes();
                 self.state = state;
                 // A withheld cell's watchers are shown it `unavailable`
@@ -958,9 +964,8 @@ impl Installed {
                 }
             }
             // A watch has one snapshot, which the link reads before it
-            // installs the cell; that the cell has no follower left is for
-            // the cell's own instances.
-            CellWatchEvent::Cell { .. } | CellWatchEvent::Synced | CellWatchEvent::Unfollowed => {}
+            // installs the cell.
+            CellWatchEvent::Cell { .. } | CellWatchEvent::Synced => {}
         }
     }
 
