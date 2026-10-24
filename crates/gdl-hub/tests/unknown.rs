@@ -9,8 +9,8 @@
 mod common;
 
 use common::{
-    CELL, Instance, Records, Resolving, WAIT, global_requiring, health, meet_the_quorum, model,
-    serve_cell, timing,
+    CELL, Instance, Records, Resolving, WAIT, global_default, global_requiring, health,
+    meet_the_quorum, model, serve_cell, timing,
 };
 use futures::{Stream, StreamExt};
 use gdl_cells::{CellDirectory, CellRecord, CellState};
@@ -462,7 +462,7 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_cell_withheld() {
     .await;
     let (_quorum, _) = meet_the_quorum(&model_hub).await;
     let (like, _) = records.until(CellState::Ready).await;
-    let (global_hub, global) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global) = serve_cell(global_default(), &directory, timing()).await;
     // A chooser that never acknowledges, so that no follow the hub stops
     // offering closes.
     let _chooser = Instance::chooser(&global_hub).await;
@@ -580,7 +580,7 @@ impl Setup {
         .await;
         let (quorum, _) = meet_the_quorum(&model_hub).await;
         let (like, _) = records.until(CellState::Ready).await;
-        let (global_hub, global) = serve_cell(global_requiring(0), &directory, timing()).await;
+        let (global_hub, global) = serve_cell(global_default(), &directory, timing()).await;
         let chooser = Instance::chooser(&global_hub).await;
         let server = Server::new().await;
         directory

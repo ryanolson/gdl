@@ -20,7 +20,7 @@ pub use errors::{FleetError, FleetErrors, FleetTable};
 /// ```toml
 /// [class.global]
 /// ready = { a = 2, b = 2, c = 2 }   # default quorum of a cell of this class, per segment
-/// requires = { model_x = 1 }         # the cell's health needs this many ready cells of each class
+/// requires = { model_x = 1 }         # optional: ready children of each class it sends to its health needs; 1 of each when unsaid
 ///
 /// [cell.model-x-01-us-east-1]
 /// layout = "regional"                # the spec's layout it runs: required when the spec has several
@@ -465,7 +465,9 @@ impl Fleet {
     /// The settings of the cell `name`, with its quorum resolved: for each
     /// segment, the cell's own `ready` if it sets that segment, else its
     /// class's default; a segment with neither is left to
-    /// [`CellSettings::quorum`]'s fallback. Its `requires` is its class's. The directory, hub
+    /// [`CellSettings::quorum`]'s fallback. Its `requires` is its class's, and
+    /// unsaid when that is, which requires one ready child of each class its
+    /// class sends to ([`CellSettings::requirements`]). The directory, hub
     /// address, and summary period are not in the fleet file and take their defaults. Meant for a fleet that
     /// [`Fleet::check`] accepted, whose `ready` keys are all segments of
     /// the cell's class.

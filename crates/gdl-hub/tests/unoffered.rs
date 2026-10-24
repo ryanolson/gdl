@@ -11,7 +11,7 @@
 mod common;
 
 use common::{
-    CELL, Instance, Records, Resolving, WAIT, global_requiring, health, meet_the_quorum, model,
+    CELL, Instance, Records, Resolving, WAIT, global_default, health, meet_the_quorum, model,
     serve_cell, timing,
 };
 use futures::{FutureExt, Stream, StreamExt};
@@ -122,7 +122,7 @@ async fn followed() -> Followed {
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
     records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
     let mut watch = global_cell.follows();
     let entry = instances[0].id();
     let installed = through(
@@ -413,7 +413,7 @@ async fn a_cell_that_recovers_as_its_follow_closes_is_followed_again() {
         refollow: std::time::Duration::from_secs(2),
         ..timing()
     };
-    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, slow).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, slow).await;
     let key = ("model_x".to_string(), CELL.to_string());
     let mut following = global_cell.following();
     let first = *tokio::time::timeout(WAIT, following.wait_for(|cells| cells.contains_key(&key)))

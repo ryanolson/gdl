@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use common::{
-    CELL, GLOBAL, Gated, Instance, Records, cell_hub, config, get, global_requiring, health,
-    hub_of, meet_the_quorum, millis_now, settings, spec, timing, usable,
+    CELL, GLOBAL, Gated, Instance, Records, cell_hub, config, get, global_default, health, hub_of,
+    meet_the_quorum, millis_now, settings, spec, timing, usable,
 };
 use gdl_cells::{CellDirectory, CellRecord, CellState, MemoryDirectory};
 use gdl_hub::{CellHealth, CellReadiness, CellTiming, GraphAdmission, SegmentHealth};
@@ -162,7 +162,7 @@ async fn a_cell_of_a_class_nothing_sends_to_names_no_parent() {
     let mut records = Records::of(&directory, "global", GLOBAL);
     let settings = CellSettings {
         home: Some("global-02-us-east-1".into()),
-        ..global_requiring(0)
+        ..global_default()
     };
     let (hub, _cell) = hub_of(settings, directory.clone(), timing()).await;
     let record = records.next().await;

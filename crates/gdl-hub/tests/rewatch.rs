@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{GLOBAL, WAIT, global_requiring, hub_of, spec, timing};
+use common::{GLOBAL, WAIT, global_default, hub_of, spec, timing};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use gdl_cells::{
@@ -107,7 +107,7 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
     };
     let mut watches = directory.watches.subscribe();
     let (hub, global) = hub_of(
-        global_requiring(0),
+        global_default(),
         directory.clone(),
         CellTiming {
             refollow: Duration::from_millis(20),
