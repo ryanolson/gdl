@@ -1,7 +1,7 @@
 //! Cell policies: how a chooser picks, once per attempt, the cell of a
 //! class it sends to, from that class's entry table. A placement names
 //! one per entered class (`[cells.<class>] policy`); the runtime provides
-//! `home_first`.
+//! `home_first` and `round_robin`.
 
 use std::sync::Arc;
 
@@ -13,6 +13,10 @@ use tokio::time::Instant;
 use super::CellTable;
 use super::damping::Damped;
 
+mod round_robin;
+
+pub(crate) use round_robin::RoundRobin;
+
 /// How a chooser picks a cell of a class it sends to.
 pub(crate) trait CellChooser: Send + Sync + 'static {
     /// The index in `cells` of the cell to send this attempt to, or `None`
@@ -21,7 +25,9 @@ pub(crate) trait CellChooser: Send + Sync + 'static {
     /// request, never chosen again for it; `damped` the cells the chooser
     /// damps, as one moment's view; `now` is the chooser's clock, on which
     /// each cell's summary arrived; `draw` is a random number drawn for
-    /// this attempt.
+    /// this attempt when the policy draws at random
+    /// ([`random`](CellChooser::random)), and the attempt's turn otherwise:
+    /// the count of the attempts its hand-off made before it.
     fn choose(
         &self,
         cells: &[Arc<CellTable>],
@@ -37,6 +43,11 @@ pub(crate) trait CellChooser: Send + Sync + 'static {
     /// on a selector is checked again with it, since the cell's summary may
     /// have gone or gone stale meanwhile.
     fn eligible(&self, cell: &CellTable, region: &str, excluded: &[u64], now: Instant) -> bool;
+
+    /// Whether the policy draws at random, and so takes a random `draw`
+    /// rather than the attempt's turn: a policy that takes turns is not
+    /// made to pay for a draw it does not read.
+    fn random(&self) -> bool;
 }
 
 /// The cell policy the placement names for `class`, refused, naming the
@@ -52,10 +63,11 @@ pub(crate) fn of(layout: &Layout, class: &str) -> Result<&'static dyn CellChoose
     };
     match policy.policy.as_str() {
         "home_first" => Ok(&HomeFirst),
+        "round_robin" => Ok(&RoundRobin),
         name => Err(Error::new(
             ErrorKind::Placement,
             format!(
-                "`[cells.{class}] policy = \"{name}\"`, but the runtime provides no cell policy of that name; it has `home_first`"
+                "`[cells.{class}] policy = \"{name}\"`, but the runtime provides no cell policy of that name; it has `home_first` and `round_robin`"
             ),
         )),
     }
@@ -156,38 +168,54 @@ impl HomeFirst {
     }
 }
 
-impl HomeFirst {
-    /// The least `cut` such that no more than `allowed` of the eligible
-    /// cells have more than `cut` milliseconds of their damping windows
-    /// left in `damped`, when `longest` is the most any has: a binary
-    /// search of counting passes, at most about 15 over a window of 30 s,
-    /// each a search of the damped cells per cell, with no allocation.
-    /// Taken only when more than `allowed` cells are damped.
-    fn cut(
-        cells: &[Arc<CellTable>],
-        region: &str,
-        excluded: &[u64],
-        (damped, now): (&Damped, Instant),
-        allowed: u64,
-        longest: u64,
-    ) -> u64 {
-        let over = |cut: u64| -> u64 {
-            let damped = cells.iter().filter(|cell| {
-                Self::tier(cell, region, excluded, now).is_some() && damped.left(cell.id, now) > cut
-            });
-            u64::try_from(damped.count()).unwrap_or(u64::MAX)
-        };
-        let (mut low, mut high) = (0, longest);
-        while low < high {
-            let mid = low + (high - low) / 2;
-            if over(mid) <= allowed {
-                high = mid;
-            } else {
-                low = mid + 1;
-            }
+/// The damping cut of a choice among `cells`, of which `eligible` says
+/// which may be chosen, at `now`: the least `cut` such that no more than
+/// half of the eligible cells, rounded down, have more than `cut`
+/// milliseconds of their damping windows left in `damped`. A cell with
+/// more left than the cut is passed over, and one with no more is chosen
+/// as if it were not damped; 0 when no more than half have any left, so
+/// that each of those is passed over. A counting pass, then, only when
+/// more than half are damped, a binary search of counting passes, at most
+/// about 15 over a window of 30 s, each a search of the damped cells per
+/// cell, with no allocation. Taken only while a window lasts.
+fn cut(
+    cells: &[Arc<CellTable>],
+    eligible: impl Fn(&CellTable) -> bool,
+    damped: &Damped,
+    now: Instant,
+) -> u64 {
+    let (mut count, mut held, mut longest) = (0u64, 0u64, 0u64);
+    for cell in cells {
+        if !eligible(cell) {
+            continue;
         }
-        high
+        count += 1;
+        let left = damped.left(cell.id, now);
+        if left > 0 {
+            held += 1;
+            longest = longest.max(left);
+        }
     }
+    let allowed = count / 2;
+    if held <= allowed {
+        return 0;
+    }
+    let over = |cut: u64| -> u64 {
+        let damped = cells
+            .iter()
+            .filter(|cell| eligible(cell) && damped.left(cell.id, now) > cut);
+        u64::try_from(damped.count()).unwrap_or(u64::MAX)
+    };
+    let (mut low, mut high) = (0, longest);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if over(mid) <= allowed {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    high
 }
 
 /// A random number for the `nth` cell of a choice from its `draw`: the
@@ -219,24 +247,8 @@ impl CellChooser for HomeFirst {
     ) -> Option<usize> {
         let lasts = damped.lasts(now);
         let cut = if lasts {
-            let (mut eligible, mut held, mut longest) = (0u64, 0u64, 0u64);
-            for cell in cells {
-                if Self::tier(cell, region, excluded, now).is_none() {
-                    continue;
-                }
-                eligible += 1;
-                let left = damped.left(cell.id, now);
-                if left > 0 {
-                    held += 1;
-                    longest = longest.max(left);
-                }
-            }
-            let allowed = eligible / 2;
-            if held <= allowed {
-                0
-            } else {
-                Self::cut(cells, region, excluded, (damped, now), allowed, longest)
-            }
+            let eligible = |cell: &CellTable| Self::tier(cell, region, excluded, now).is_some();
+            cut(cells, eligible, damped, now)
         } else {
             0
         };
@@ -294,6 +306,10 @@ impl CellChooser for HomeFirst {
     /// damping steers the next choices, not one already made.
     fn eligible(&self, cell: &CellTable, region: &str, excluded: &[u64], now: Instant) -> bool {
         Self::tier(cell, region, excluded, now).is_some()
+    }
+
+    fn random(&self) -> bool {
+        true
     }
 }
 

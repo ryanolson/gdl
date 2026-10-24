@@ -429,8 +429,8 @@ async fn a_boundary_selectors_lease_lives_as_long_as_the_response() {
 }
 
 /// A placement whose `[cells.model_x] policy` names a policy the runtime
-/// does not provide is refused when a chooser launches, naming it and the
-/// class.
+/// does not provide is refused when a chooser launches, naming it, the
+/// class, and the policies it has.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_chooser_refuses_a_cell_policy_it_does_not_have() {
     let spec = spec_of(placement().cell_policy(
@@ -455,6 +455,10 @@ async fn a_chooser_refuses_a_cell_policy_it_does_not_have() {
     let message = error.to_string();
     assert!(
         message.contains("nearest") && message.contains("model_x"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`home_first` and `round_robin`"),
         "{message}"
     );
     hub.shutdown().await.expect("valid test fixture");

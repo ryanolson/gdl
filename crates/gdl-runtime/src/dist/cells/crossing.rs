@@ -26,8 +26,9 @@ use crate::dist::runtime::Router;
 pub(crate) struct Crossing {
     target: Target,
     within: Within,
-    /// The attempts' draws for the cell policy, apart from the turns of
-    /// the instance within the cell: with one sequence and one hasher for
+    /// The attempts' turns for the cell policy, and the draws hashed from
+    /// them for a policy that draws at random, apart from the turns of the
+    /// instance within the cell: with one sequence and one hasher for
     /// both, the two choices of an attempt would be correlated.
     draws: AtomicUsize,
     random: RandomState,
@@ -184,12 +185,17 @@ impl Crossing {
     }
 
     /// The cell the policy chooses from `table` for one attempt, of those
-    /// not in `excluded`, by the summaries' ages now.
+    /// not in `excluded`, by the summaries' ages now: one relaxed increment
+    /// of the attempts' count, hashed only for a policy that draws at
+    /// random.
     fn cell<'t>(&self, table: &'t EntryTable, excluded: &[u64]) -> Option<&'t Arc<CellTable>> {
-        let draw = self
-            .random
-            .hash_one(self.draws.fetch_add(1, Ordering::Relaxed));
         let target = &self.target;
+        let turn = self.draws.fetch_add(1, Ordering::Relaxed);
+        let draw = if target.policy.random() {
+            self.random.hash_one(turn)
+        } else {
+            turn as u64
+        };
         target
             .policy
             .choose(
