@@ -66,7 +66,9 @@ impl CellWatcher {
     /// concerns the watched cell, which the reader fails closed for until
     /// it has read the cell again. A hub that has not yet published its
     /// cell's record holds the watch until it has, since the epoch it
-    /// would send is not settled before, and refuses it after 5 s.
+    /// would send is not settled before, and refuses it after 5 s. A hub
+    /// that serves as many watches of a route as its cap refuses one more
+    /// at once, with 503 and a `Retry-After`, as an error like any other.
     pub async fn watch(
         &self,
         hub: &str,

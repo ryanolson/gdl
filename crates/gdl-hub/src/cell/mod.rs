@@ -44,9 +44,12 @@ mod publish;
 mod retiring;
 mod timing;
 
+#[cfg(test)]
+mod tests;
+
 pub use feed::CellWatch;
 pub use health::{CellHealth, RequiredHealth, SegmentHealth};
-pub use timing::CellTiming;
+pub use timing::{CellTiming, RefusedWatches, WatchCaps};
 
 /// Whether a cell can take work, judged and published by the cell's own
 /// hub: the `gdl-cell` extension, beside [`crate::GraphAdmission`].
@@ -83,7 +86,12 @@ pub use timing::CellTiming;
 /// once the record is first stored, since its epoch is settled only then:
 /// one that arrives earlier waits up to 5 s, then is refused (503). Every
 /// watch ends when the hub stops, or once a drained cell's record is
-/// withdrawn.
+/// withdrawn. Each watch route, `GET watch` and the relay's two below,
+/// serves at most its cap of watches at once ([`CellTiming::watch_caps`]):
+/// one beyond it, a waiting one included, is refused with 503 and a
+/// `Retry-After`, before a snapshot is built or a subscription taken for
+/// it, and a watch that closes frees its place at once. The watches taken
+/// in process are not capped.
 ///
 /// A cell whose class sends to other classes follows their cells: for
 /// each class it sends to, it watches `directory`, and follows each child
@@ -207,6 +215,8 @@ pub struct CellReadiness<D: CellDirectory> {
     health: watch::Sender<CellHealth>,
     /// The cell's watchers.
     feed: Arc<Feed>,
+    /// The places of the watches each watch route serves.
+    places: timing::RoutePlaces,
     /// The hub's admission, whose members say who an entry instance is.
     admission: OnceLock<Arc<GraphAdmission>>,
     /// The classes the cell's class sends to, whose cells it follows.
@@ -269,6 +279,9 @@ impl<D: CellDirectory> CellReadiness<D> {
         }
         if timing.watch_buffer == 0 {
             return Err(CellError::new("the cell's watch buffer is zero"));
+        }
+        if timing.watch_caps.has_zero() {
+            return Err(CellError::new("a watch route's cap is zero"));
         }
         if timing.refollow.is_zero() {
             // A hub that refuses at once would be dialled in a loop.
@@ -343,6 +356,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             timing,
             health,
             feed: Arc::new(feed),
+            places: timing.watch_caps.places(),
             admission: OnceLock::new(),
             sends: sends.into_iter().collect(),
             summary: (!entries.is_empty()).then_some(cell.summary),
@@ -366,6 +380,7 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// events. It begins once the cell's record is stored, since its epoch
     /// is settled only then; refused if the hub stops first, and once the
     /// drained cell's record is withdrawn.
+    /// Not capped, as the route is ([`WatchCaps`]).
     pub async fn watch(&self) -> Result<CellWatch, CellWatchError> {
         self.feed.watch().await
     }
@@ -384,6 +399,7 @@ impl<D: CellDirectory> CellReadiness<D> {
 
     /// A watch of what the hub follows, in process: what `GET follows`
     /// serves, as typed events. It ends at once if the hub has stopped.
+    /// Not capped, as the route is ([`WatchCaps`]).
     pub fn follows(&self) -> FollowsWatch {
         self.relay.watch()
     }
@@ -427,6 +443,11 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// How many watches of what the hub follows are open, as it changes.
     pub fn follows_watchers(&self) -> watch::Receiver<usize> {
         self.relay.watchers()
+    }
+
+    /// How many watches each watch route has refused, its cap being met.
+    pub fn refused_watches(&self) -> RefusedWatches {
+        self.places.refused()
     }
 
     /// How many events of a kind this build does not know the watches of
@@ -591,6 +612,9 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         let releasing = Arc::clone(&self.feed);
         let avoiding = Arc::clone(&self.feed);
         let relay = Arc::clone(&self.relay);
+        let watching = Arc::clone(&self.places.cell);
+        let relaying = Arc::clone(&self.places.relay);
+        let following = Arc::clone(&self.places.follow);
         Router::new()
             .route(
                 gdl_watch::AVOIDED_ROUTE,
@@ -636,8 +660,12 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             .route(
                 gdl_watch::WATCH_ROUTE,
                 get(move |Query(query): Query<WatchQuery>| {
-                    let feed = Arc::clone(&feed);
+                    let (feed, place) = (Arc::clone(&feed), watching.take());
                     async move {
+                        let place = match place {
+                            Ok(place) => place,
+                            Err(full) => return full.into_response(),
+                        };
                         let follower = (query.class, query.cell, query.run, query.generation);
                         let watch = match follower {
                             (Some(class), Some(cell), Some(run), Some(generation)) => {
@@ -652,7 +680,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                                     "the cell has not published its record yet, so its epoch is not settled",
                                 ))
                             });
-                        serve(watch)
+                        serve(watch, place)
                     }
                 }),
             )
@@ -661,16 +689,16 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 get({
                     let relay = Arc::clone(&relay);
                     move || {
-                        let watch = relay.watch();
-                        async move { crate::fanout::serve(watch.into_events()) }
+                        let watch = relaying.take().map(|place| (relay.watch(), place));
+                        async move { serve_follows(watch) }
                     }
                 }),
             )
             .route(
                 gdl_watch::FOLLOWED_ROUTE,
                 get(move |Path((class, cell)): Path<(String, String)>| {
-                    let watch = relay.watch_of(&class, &cell);
-                    async move { crate::fanout::serve(watch.into_events()) }
+                    let watch = (following.take()).map(|place| (relay.watch_of(&class, &cell), place));
+                    async move { serve_follows(watch) }
                 }),
             )
     }
@@ -831,12 +859,23 @@ struct WatchQuery {
     generation: Option<u64>,
 }
 
-/// The watch as server-sent events, each one JSON value; a hub that has
-/// not stored its record in time, or stops first, answers 503.
-fn serve(watch: Result<CellWatch, CellWatchError>) -> Response {
+/// The watch as server-sent events, each one JSON value, in `place`; a hub
+/// that has not stored its record in time, or stops first, answers 503.
+fn serve(watch: Result<CellWatch, CellWatchError>, place: crate::fanout::Place) -> Response {
     match watch {
-        Ok(watch) => crate::fanout::serve(Box::pin(watch)),
+        Ok(watch) => crate::fanout::serve(Box::pin(watch), place),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
+}
+
+/// A watch of what the hub follows as server-sent events, in its place, or
+/// its refusal.
+fn serve_follows(
+    watch: Result<(FollowsWatch, crate::fanout::Place), crate::fanout::Full>,
+) -> Response {
+    match watch {
+        Ok((watch, place)) => crate::fanout::serve(watch.into_events(), place),
+        Err(full) => full.into_response(),
     }
 }
 

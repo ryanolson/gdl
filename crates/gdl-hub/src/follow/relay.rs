@@ -499,6 +499,14 @@ impl Relay {
         self.following.subscribe()
     }
 
+    /// How many watches of the relay, and of one follow, were served a
+    /// snapshot and a subscription, and how many of one follow are open.
+    #[cfg(test)]
+    pub(crate) fn served(&self) -> (usize, usize, watch::Receiver<usize>) {
+        let one = self.one.watchers();
+        (self.watchers.served(), self.one.served(), one)
+    }
+
     /// End every watch: the hub stops.
     pub(crate) fn close(&self) {
         self.watchers.close();

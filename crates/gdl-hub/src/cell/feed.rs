@@ -204,6 +204,12 @@ impl Feed {
         self.watchers.watchers()
     }
 
+    /// How many watches were served a snapshot and a subscription.
+    #[cfg(test)]
+    pub(super) fn served(&self) -> usize {
+        self.watchers.served()
+    }
+
     /// End every watch, and refuse those asked for from now: the hub
     /// stops, or the drained cell's record was withdrawn.
     pub(super) fn close(&self) {
