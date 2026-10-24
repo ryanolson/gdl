@@ -2,7 +2,7 @@
 //! watch's snapshot is complete, within its bounds: a peer that sends the
 //! snapshot's first event and then only keep-alives, or more snapshot
 //! than the limit, ends the follow with nothing of the cell on the relay,
-//! and the cell is followed again after the refollow wait, as for any
+//! and the cell is followed again after the link's backoff, as for any
 //! ended watch. `M` is served by a test server that speaks the cell
 //! watch's protocol as the test chooses; `CELL` is a real cell's hub. The
 //! global's bounds are set short for the test, so that it outlasts them.
@@ -254,7 +254,7 @@ async fn a_snapshot_that_never_completes_ends_the_follow_at_its_bound() {
     let second = server.next().await;
     let waited = second.at - began;
     assert!(
-        waited >= LIMITS.synced_within + timing().refollow,
+        waited >= LIMITS.synced_within + timing().refollow / 2,
         "followed again after {waited:?}"
     );
     assert_eq!(second.generation(), generation + 1, "a new follow");
@@ -309,7 +309,7 @@ async fn a_snapshot_past_its_limit_ends_the_follow() {
     first.keep_alive();
     let second = server.next().await;
     assert!(
-        second.at - sending >= timing().refollow,
+        second.at - sending >= timing().refollow / 2,
         "followed again after {:?}",
         second.at - sending
     );

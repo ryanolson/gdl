@@ -31,7 +31,9 @@ use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, CellView};
 use tokio::task::{AbortHandle, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use gdl_watch::CellWatcher;
+use gdl_watch::{Backoff, CellWatcher};
+
+use crate::CellTiming;
 
 mod avoid;
 mod link;
@@ -44,17 +46,27 @@ pub use relay::FollowsWatch;
 pub(crate) use relay::{Relay, Retirement};
 pub(crate) use release::{Release, run as release};
 
-/// How long to wait before watching the directory again after its watch
-/// ended or failed.
+/// The first wait before the directory is watched again after its watch
+/// ended or failed: as short as it always was, so that a directory that
+/// drops a watch once is watched again as quickly.
 const REWATCH: Duration = Duration::from_millis(100);
+
+/// The longest wait before the directory is watched again, however often
+/// its watches failed. Longer than an instance's cap on its own hub's
+/// watches: every hub of the fleet watches the one directory, so a
+/// directory that is down is spared their retries, and the cells already
+/// followed go on over their own links meanwhile, so only a cell new to
+/// the directory waits for it.
+const REWATCH_CAP: Duration = Duration::from_secs(10);
 
 /// The follower of one class: which of its cells this hub follows.
 pub(crate) struct Follower<D> {
     pub(crate) directory: Arc<D>,
     pub(crate) relay: Arc<Relay>,
     pub(crate) watcher: CellWatcher,
-    /// How long a follow that ended waits before the cell may be followed
-    /// again.
+    /// The first wait after a follow's link ended before the cell may be
+    /// followed again; later ones back off to
+    /// [`CellTiming::REFOLLOW_CAP`].
     pub(crate) refollow: Duration,
     /// The follower's own cell, which its watches name, so that a
     /// followed cell knows who follows it, and which its children name as
@@ -85,12 +97,19 @@ impl<D: CellDirectory> Follower<D> {
             links: JoinSet::new(),
             follower: &self,
         };
+        let mut backoff = Backoff::new(REWATCH, REWATCH_CAP);
         loop {
             let mut watch = std::pin::pin!(self.directory.watch(&self.class, None));
+            let mut synced = None;
             loop {
                 tokio::select! {
                     event = watch.next() => match event {
-                        Some(Ok(event)) => follows.directory(event),
+                        Some(Ok(event)) => {
+                            if matches!(event, CellEvent::Synced { .. }) {
+                                synced.get_or_insert_with(tokio::time::Instant::now);
+                            }
+                            follows.directory(event);
+                        }
                         Some(Err(error)) => {
                             tracing::warn!(class = self.class, %error, "the cell directory's watch failed");
                             break;
@@ -105,7 +124,7 @@ impl<D: CellDirectory> Follower<D> {
             // held when the next one's snapshot completes, or a cell
             // withdrawn meanwhile would be kept.
             follows.view.apply(CellEvent::Resnapshot, Instant::now());
-            let pause = tokio::time::sleep(REWATCH);
+            let pause = tokio::time::sleep(backoff.wait(synced, tokio::time::Instant::now()));
             tokio::pin!(pause);
             loop {
                 tokio::select! {
@@ -136,10 +155,10 @@ struct Follows<'a, D> {
     /// `seq` of its record when it closed: followed again only from a
     /// later write.
     closed: HashMap<String, (u64, u64)>,
-    /// The links' tasks, each returning its cell, its generation, and
-    /// whether the relay closed it, once it has ended and waited to follow
-    /// again. Dropping the set ends them.
-    links: JoinSet<(String, u64, bool)>,
+    /// The links' tasks, each returning its cell, its generation, whether
+    /// the relay closed it, and the backoff of the cell's links, once it
+    /// has ended and waited to follow again. Dropping the set ends them.
+    links: JoinSet<(String, u64, bool, Backoff)>,
     follower: &'a Follower<D>,
 }
 
@@ -169,7 +188,7 @@ impl<D: CellDirectory> Follows<'_, D> {
         let now = Instant::now();
         self.view.apply(event, now);
         if let Some(cell) = cell {
-            self.decide(&cell, now);
+            self.decide(&cell, now, None);
         }
     }
 
@@ -177,8 +196,10 @@ impl<D: CellDirectory> Follows<'_, D> {
     /// and it is not followed yet, unless the relay closed its last follow
     /// and the record is no later than it was then; end its follow if the
     /// record has a newer epoch than the one it began from, and follow it
-    /// anew if it can.
-    fn decide(&mut self, cell: &str, now: Instant) {
+    /// anew if it can. A follow begun after a link that ended keeps that
+    /// link's `backoff`, so that a cell whose links keep failing is
+    /// followed again less and less often; any other begins one afresh.
+    fn decide(&mut self, cell: &str, now: Instant, backoff: Option<Backoff>) {
         let record = self.view.get(cell, now).cloned();
         if let Some(following) = self.current.get_mut(cell) {
             let newer = record
@@ -213,16 +234,16 @@ impl<D: CellDirectory> Follows<'_, D> {
         }
         match record.filter(|record| self.follower.child(record) && !self.closed.contains_key(cell))
         {
-            Some(record) => self.start(record),
+            Some(record) => self.start(record, backoff),
             None => self.follower.relay.forget(&self.follower.class, cell),
         }
     }
 
     /// A link's task ended: if it is the cell's current follow, follow the
     /// cell again if its record still makes it a child that takes work.
-    fn ended(&mut self, ended: Result<(String, u64, bool), JoinError>) {
+    fn ended(&mut self, ended: Result<(String, u64, bool, Backoff), JoinError>) {
         // A task aborted for a newer epoch was replaced already.
-        let Ok((cell, generation, closed)) = ended else {
+        let Ok((cell, generation, closed, backoff)) = ended else {
             return;
         };
         if self
@@ -240,10 +261,12 @@ impl<D: CellDirectory> Follows<'_, D> {
             self.closed
                 .insert(cell.clone(), (following.epoch, following.seq));
         }
-        self.decide(&cell, Instant::now());
+        self.decide(&cell, Instant::now(), Some(backoff));
     }
 
-    fn start(&mut self, record: CellRecord) {
+    fn start(&mut self, record: CellRecord, backoff: Option<Backoff>) {
+        let backoff = backoff
+            .unwrap_or_else(|| Backoff::new(self.follower.refollow, CellTiming::REFOLLOW_CAP));
         let relay = &self.follower.relay;
         let (generation, close) = relay.begin(&record.class, &record.name);
         let name = record.name.clone();
@@ -256,7 +279,7 @@ impl<D: CellDirectory> Follows<'_, D> {
             record,
             generation,
             close,
-            self.follower.refollow,
+            backoff,
         ));
         self.current.insert(
             name,
