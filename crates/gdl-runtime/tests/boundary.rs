@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, ask, model, model_unsummarized, placement, run, spec_of,
+    Model, ModelCell, RUNTIME, Running, ask, home_first, model, model_unsummarized, placement, run,
+    spec_of,
 };
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::{Events, WAIT};
@@ -62,7 +63,8 @@ fn tables<H>(chooser: &Running<H>) -> Cells {
 }
 
 /// Whether `cell` is followed in `state` with `entries` eligible, and
-/// with a load summary: `home_first` chooses no cell without one.
+/// with a load summary, so that a test passes under `home_first` too,
+/// which chooses no cell without one.
 fn holds(cells: &Cells, cell: &str, state: CellState, entries: usize) -> bool {
     followed(cells, "f", cell)
         .is_some_and(|m| m.state == state && m.eligible.len() == entries && m.load.is_some())
@@ -177,13 +179,13 @@ async fn a_ready_cell_before_a_degraded_one_and_never_an_unavailable_one() {
     hub.shutdown().await.expect("valid test fixture");
 }
 
-/// A ready home cell whose hub has made no load summary yet is followed,
-/// with its entry instance, but not chosen: with no other cell, a request
-/// fails at once with `Routing`. Its hub's summary period is 10 s, which
-/// the test does not wait out.
+/// Under `home_first`, a ready cell whose hub has made no load summary yet
+/// is followed, with its entry instance, but not chosen: with no other
+/// cell, a request fails at once with `Routing`. Its hub's summary period
+/// is 10 s, which the test does not wait out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cell_without_a_load_summary_is_not_chosen() {
-    let spec = spec_of(placement());
+    let spec = spec_of(home_first());
     let events = Events::new();
     let directory = Resolving::new();
     let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;
@@ -429,15 +431,14 @@ async fn a_boundary_selectors_lease_lives_as_long_as_the_response() {
 }
 
 /// A placement whose `[cells.model_x] policy` names a policy the runtime
-/// does not provide is refused when a chooser launches, naming it and the
-/// class.
+/// does not provide is refused when a chooser launches, naming it, the
+/// class, and the policies it has.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_chooser_refuses_a_cell_policy_it_does_not_have() {
     let spec = spec_of(placement().cell_policy(
         "model_x",
         CellPolicy {
             policy: "nearest".into(),
-            ..CellPolicy::default()
         },
     ));
     let events = Events::new();
@@ -455,6 +456,10 @@ async fn a_chooser_refuses_a_cell_policy_it_does_not_have() {
     let message = error.to_string();
     assert!(
         message.contains("nearest") && message.contains("model_x"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`home_first` and `round_robin`"),
         "{message}"
     );
     hub.shutdown().await.expect("valid test fixture");

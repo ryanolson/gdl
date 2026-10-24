@@ -303,6 +303,11 @@ mod tests {
 
     /// `S => D`, with `S` in `a` of `global` and `D` in `d` of `model_x`.
     fn layout() -> gdl_model::Layout {
+        layout_under(gdl_model::CellPolicy::default())
+    }
+
+    /// [`layout`], choosing a cell of `model_x` by `policy`.
+    fn layout_under(policy: gdl_model::CellPolicy) -> gdl_model::Layout {
         let manifest = gdl_model::Manifest {
             name: "cells".into(),
             schema: 1,
@@ -331,7 +336,8 @@ mod tests {
             .segment("a", ["S"])
             .segment("d", ["D"])
             .class("global", ["a"])
-            .class("model_x", ["d"]);
+            .class("model_x", ["d"])
+            .cell_policy("model_x", policy);
         gdl_model::layout(&manifest, &placement).expect("valid test fixture")
     }
 
@@ -597,6 +603,11 @@ mod tests {
 
     /// [`crossing_over`], with the tables it chooses from.
     fn followed_over(names: &[&str]) -> (Crossing, Cells) {
+        followed_under(&layout(), names)
+    }
+
+    /// [`followed_over`], for the crossing of `layout`.
+    fn followed_under(layout: &gdl_model::Layout, names: &[&str]) -> (Crossing, Cells) {
         let cells = Cells::new("home", ["d"]);
         let tables = names
             .iter()
@@ -622,7 +633,7 @@ mod tests {
             })
             .collect();
         cells.store("d", EntryTable { cells: tables });
-        let mut targets = targets(&layout(), "a", &cells).expect("targets");
+        let mut targets = targets(layout, "a", &cells).expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         (
             Crossing::new(target, Router::Policy(Policy::RoundRobin)),
@@ -699,5 +710,45 @@ mod tests {
         let (_, chosen, _) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
         lone.accepted(chosen);
         assert_eq!(writes() - wrote, 2, "an undamped cell's acceptance wrote");
+    }
+
+    /// A pick allocates nothing under either policy the runtime provides,
+    /// also while a cell's damping window lasts, which takes the pass that
+    /// sets which damped cells are passed over, and with a cell excluded.
+    #[test]
+    fn a_pick_allocates_nothing_under_either_policy() {
+        let random = std::hash::RandomState::new();
+        for name in ["home_first", "round_robin"] {
+            let layout = layout_under(gdl_model::CellPolicy {
+                policy: name.into(),
+            });
+            let (crossing, cells) = followed_under(&layout, &["m1", "m2", "m3", "m4"]);
+            let excluded = [cell_id("model_x", "m4")];
+            crossing.declined(cell_id("model_x", "m1"));
+            crossing.declined(cell_id("model_x", "m2"));
+            let damped = cells.followed("d");
+            assert!(damped[0].damped.is_some() && damped[1].damped.is_some());
+            let before = COUNTED.load(Ordering::Relaxed);
+            // Made before counting, so that the record of the choices
+            // allocates nothing while it counts.
+            let mut chosen = Vec::with_capacity(1000);
+            COUNTING.with(|counting| counting.set(true));
+            for _ in 0..1000 {
+                let (_, cell, _) = crossing
+                    .pick(Policy::RoundRobin, &random, &excluded)
+                    .expect("a cell");
+                chosen.push(cell);
+            }
+            COUNTING.with(|counting| counting.set(false));
+            let chosen: std::collections::BTreeSet<u64> = chosen.into_iter().collect();
+            assert_eq!(
+                COUNTED.load(Ordering::Relaxed) - before,
+                0,
+                "a {name} pick allocated"
+            );
+            // The undamped cell is chosen, and the excluded one never.
+            assert!(chosen.contains(&cell_id("model_x", "m3")), "{name}");
+            assert!(!chosen.contains(&excluded[0]), "{name}");
+        }
     }
 }

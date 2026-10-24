@@ -386,3 +386,36 @@ fn a_layout_name_has_a_settings_keys_shape() {
         assert!(why.starts_with(&format!("layout name `{bad}`")), "{why}");
     }
 }
+
+/// A layout's hash covers each of its classes' effective cell policy, as a
+/// placement's does: a layout that spells the default policy hashes as one
+/// that leaves it unsaid, and one that names another policy does not. A
+/// layout's `[cells.<class>]` takes `policy` alone.
+#[test]
+fn a_layouts_hash_covers_its_effective_cell_policy() {
+    let unsaid = TWO.replace("[cells.model_x]\npolicy = \"home_first\"\n", "");
+    let spelled = TWO.replace("\"home_first\"", "\"round_robin\"");
+    assert_ne!(unsaid, TWO);
+    let text = nest("unsaid", &format!("{SEGMENTS}{unsaid}"))
+        + &nest("spelled", &format!("{SEGMENTS}{spelled}"))
+        + &nest("other", &format!("{SEGMENTS}{TWO}"));
+    let placements = read(&text);
+    let hash = |name: &str| placements.get(name).expect(name).hash();
+    assert_eq!(hash("unsaid"), hash("spelled"));
+    assert_ne!(hash("unsaid"), hash("other"));
+    // Each is the hash of its tables at the top of a spec.
+    assert_eq!(
+        hash("unsaid"),
+        placement(&format!("{SEGMENTS}{unsaid}")).hash()
+    );
+    let removed = nest("a", &format!("{SEGMENTS}{TWO}max_near = 4\n"));
+    let problems = Placements::from_toml(&removed).expect_err("max_near is gone");
+    assert!(
+        problems
+            .0
+            .iter()
+            .any(|p| p.table.as_deref() == Some("layout.a.cells.model_x")
+                && p.key.as_deref() == Some("max_near")),
+        "{problems:?}"
+    );
+}

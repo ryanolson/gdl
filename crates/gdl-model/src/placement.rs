@@ -327,8 +327,9 @@ impl Placement {
     }
 
     /// The placement hash changes with node placement, segment names,
-    /// request routing policies, classes, and cell policies. Node order
-    /// inside a segment, and segment order inside a class, do not matter.
+    /// request routing policies, classes, and each class's effective cell
+    /// policy, a default one included. Node order inside a segment, and
+    /// segment order inside a class, do not matter.
     pub fn hash(&self) -> u64 {
         let mut h = Fnv::new();
         for (name, spec) in &self.segments {
@@ -360,7 +361,7 @@ impl Placement {
                 h.strs(&segments.into_iter().collect::<Vec<_>>());
             }
         }
-        cells::hash(&mut h, &self.cells);
+        cells::hash(&mut h, self.classes.keys(), &self.cells);
         h.finish()
     }
 }

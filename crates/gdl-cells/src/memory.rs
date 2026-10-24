@@ -72,7 +72,8 @@ struct Class {
 
 #[derive(Debug)]
 enum Held {
-    Record(CellRecord),
+    // Boxed: a record is many times the size of a tombstone.
+    Record(Box<CellRecord>),
     // The tombstone a withdrawal leaves, so that a late publish cannot
     // bring the record back.
     Withdrawn(Version),
@@ -150,9 +151,12 @@ impl CellDirectory for MemoryDirectory {
     async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
         record.check()?;
         let (class, cell) = (record.class.clone(), record.name.clone());
-        self.write(&class, &cell, Held::Record(record.clone()), |token| {
-            CellEvent::Put { record, token }
-        })
+        self.write(
+            &class,
+            &cell,
+            Held::Record(Box::new(record.clone())),
+            |token| CellEvent::Put { record, token },
+        )
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
@@ -178,7 +182,7 @@ impl CellDirectory for MemoryDirectory {
                     .cells
                     .values()
                     .filter_map(|held| match held {
-                        Held::Record(record) => Some(record),
+                        Held::Record(record) => Some(&**record),
                         Held::Withdrawn(_) => None,
                     })
                     .collect();

@@ -31,6 +31,15 @@ fn a_placement_refuses_an_unknown_key_in_every_table() {
             "[cells.model_x]\npolicyy = 'home_first'\n",
             "line 10: [cells.model_x] policyy: unknown field `policyy`",
         ),
+        // They chose near cells, which a chooser does not follow.
+        (
+            "[cells.model_x]\npolicy = 'home_first'\nspill_rtt_ms = 80\n",
+            "line 11: [cells.model_x] spill_rtt_ms: unknown field `spill_rtt_ms`, expected `policy`",
+        ),
+        (
+            "[cells.model_x]\nmax_near = 16\n",
+            "line 10: [cells.model_x] max_near: unknown field `max_near`, expected `policy`",
+        ),
         (
             "[routing]\nD = { selector = 'least_loaded', weight = 2 }\n",
             "line 10: [routing.D] weight: unknown field `weight`, expected `selector`",

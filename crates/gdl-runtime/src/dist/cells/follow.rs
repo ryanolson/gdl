@@ -440,9 +440,8 @@ impl<R: Registry> Follows<R> {
 
     /// Swap `segment`'s table for one of its cells as they are now: a new
     /// list of the cells' tables, one pointer per followed cell. The follow
-    /// set bounds it (a region's home cells, and at most `max_near` near
-    /// ones, `agent-docs/cells.md` section 12.2); no other cell's instances
-    /// are read or copied.
+    /// set bounds it (the children of the chooser's own cell); no other
+    /// cell's instances are read or copied.
     fn store(&self, segment: &str) {
         let cells = self
             .tables
