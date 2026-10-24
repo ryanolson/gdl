@@ -17,6 +17,8 @@ pub(super) struct Changes {
     /// more is dropped when its last watch closes.
     one: HashMap<String, HashMap<String, broadcast::Sender<FollowEvent>>>,
     buffer: usize,
+    #[cfg(test)]
+    pub(super) work: crate::fanout::Work,
 }
 
 impl Changes {
@@ -25,6 +27,8 @@ impl Changes {
             all: broadcast::channel(buffer).0,
             one: HashMap::new(),
             buffer,
+            #[cfg(test)]
+            work: Default::default(),
         }
     }
 
@@ -59,6 +63,8 @@ impl Changes {
         class: &str,
         cell: &str,
     ) -> broadcast::Receiver<FollowEvent> {
+        #[cfg(test)]
+        self.work.subscription();
         let buffer = self.buffer;
         self.one
             .entry(class.to_string())
@@ -70,6 +76,8 @@ impl Changes {
 
     /// Subscribe to every change.
     pub(super) fn subscribe_all(&self) -> broadcast::Receiver<FollowEvent> {
+        #[cfg(test)]
+        self.work.subscription();
         self.all.subscribe()
     }
 

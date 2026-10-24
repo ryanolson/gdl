@@ -498,12 +498,17 @@ impl Relay {
         self.following.subscribe()
     }
 
-    /// How many watches of the relay, and of one follow, were served a
-    /// snapshot and a subscription, and how many of one follow are open.
+    /// The snapshots built and the subscriptions taken for watches of the
+    /// relay and of one follow.
     #[cfg(test)]
-    pub(crate) fn served(&self) -> (usize, usize, watch::Receiver<usize>) {
-        let one = self.one.watchers();
-        (self.watchers.served(), self.one.served(), one)
+    pub(crate) fn work(&self) -> (usize, usize) {
+        self.lock().changes.work.counted()
+    }
+
+    /// How many watches of one follow are open, as it changes.
+    #[cfg(test)]
+    pub(crate) fn one_watchers(&self) -> watch::Receiver<usize> {
+        self.one.watchers()
     }
 
     /// End every watch: the hub stops.
@@ -789,6 +794,8 @@ impl Shared {
     /// begins with them, its closing ones included, then the marker; only
     /// the marker when it has none.
     fn followed(&self, class: &str, cell: &str) -> Vec<FollowEvent> {
+        #[cfg(test)]
+        self.changes.work.snapshot();
         let mut events = Vec::new();
         self.snapshot_of(class, cell, &mut events);
         events.push(FollowEvent::Synced);
@@ -798,6 +805,8 @@ impl Shared {
     /// Every installed follow, by class and cell, each cell's closing
     /// follows before its current one, then the marker.
     fn snapshot(&self) -> Vec<FollowEvent> {
+        #[cfg(test)]
+        self.changes.work.snapshot();
         let mut cells: BTreeSet<(&str, &str)> = BTreeSet::new();
         for (class, follows) in &self.follows {
             for (cell, follow) in follows {

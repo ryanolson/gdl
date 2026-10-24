@@ -39,10 +39,6 @@ pub(crate) struct Watchers {
     closed: CancellationToken,
     /// How many watches are open.
     watching: watch::Sender<usize>,
-    /// How many watches were served a snapshot and a subscription: so that
-    /// a test counts the work a refused watch did not cost.
-    #[cfg(test)]
-    served: AtomicUsize,
 }
 
 impl Watchers {
@@ -50,15 +46,7 @@ impl Watchers {
         Self {
             closed: CancellationToken::new(),
             watching: watch::Sender::new(0),
-            #[cfg(test)]
-            served: AtomicUsize::new(0),
         }
-    }
-
-    /// How many watches were served a snapshot and a subscription.
-    #[cfg(test)]
-    pub(crate) fn served(&self) -> usize {
-        self.served.load(Ordering::Relaxed)
     }
 
     /// Count one more watch, until the returned guard is dropped.
@@ -75,8 +63,6 @@ impl Watchers {
         snapshot: Vec<E>,
         events: broadcast::Receiver<E>,
     ) -> BoxStream<'static, E> {
-        #[cfg(test)]
-        self.served.fetch_add(1, Ordering::Relaxed);
         let watch = Watch {
             snapshot: snapshot.into_iter(),
             events,
@@ -151,6 +137,35 @@ thread_local! {
     /// a copy of the change: so that a test counts a watch's work rather
     /// than timing it.
     pub(crate) static RECEIVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The snapshots built and the subscriptions taken for watches, counted
+/// where each is built and taken: so that a test counts the work a refused
+/// watch did not cost.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Work {
+    snapshots: AtomicUsize,
+    subscriptions: AtomicUsize,
+}
+
+#[cfg(test)]
+impl Work {
+    pub(crate) fn snapshot(&self) {
+        self.snapshots.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn subscription(&self) {
+        self.subscriptions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The snapshots built and the subscriptions taken.
+    pub(crate) fn counted(&self) -> (usize, usize) {
+        (
+            self.snapshots.load(Ordering::Relaxed),
+            self.subscriptions.load(Ordering::Relaxed),
+        )
+    }
 }
 
 /// One watch in the count of watchers, until it is dropped.

@@ -130,13 +130,20 @@ impl Served {
             .expect("the hub answers")
     }
 
-    /// The watches of `route` served a snapshot and a subscription.
-    fn served(&self, route: Route) -> usize {
+    /// The snapshots built and the subscriptions taken for watches of
+    /// `route`, counted where each is built and taken.
+    fn work(&self, route: Route) -> (usize, usize) {
         match route {
-            Route::Cell => self.cell.feed.served(),
-            Route::Relay => self.cell.relay.served().0,
-            Route::Follow => self.cell.relay.served().1,
+            Route::Cell => self.cell.feed.work(),
+            Route::Relay | Route::Follow => self.cell.relay.work(),
         }
+    }
+
+    /// The snapshots built and the subscriptions taken for every watch of
+    /// the hub, whatever its route.
+    fn all_work(&self) -> (usize, usize) {
+        let (cell, relay) = (self.cell.feed.work(), self.cell.relay.work());
+        (cell.0 + relay.0, cell.1 + relay.1)
     }
 
     /// The watches of `route` refused.
@@ -154,7 +161,7 @@ impl Served {
         match route {
             Route::Cell => self.cell.watchers(),
             Route::Relay => self.cell.follows_watchers(),
-            Route::Follow => self.cell.relay.served().2,
+            Route::Follow => self.cell.relay.one_watchers(),
         }
     }
 
@@ -179,7 +186,7 @@ impl Served {
     /// The next watch of `route` is refused with 503 and `Retry-After`,
     /// with no snapshot built and no subscription taken for it.
     async fn refuses(&self, route: Route) {
-        let (served, refused) = (self.served(route), self.refused(route));
+        let (work, refused) = (self.all_work(), self.refused(route));
         let channels = self.cell.relay.channels();
         // A cell no watch names yet: a subscription to it would be a new
         // channel.
@@ -197,9 +204,9 @@ impl Served {
         );
         assert_eq!(self.refused(route), refused + 1, "{route:?}");
         assert_eq!(
-            self.served(route),
-            served,
-            "{route:?}: a snapshot was built"
+            self.all_work(),
+            work,
+            "{route:?}: a snapshot was built or a subscription taken"
         );
         assert_eq!(
             self.cell.relay.channels(),
@@ -221,9 +228,14 @@ impl Served {
 async fn a_watch_beyond_its_routes_cap_is_refused_before_its_snapshot() {
     let served = Served::new().await;
     for route in ROUTES {
-        let before = served.served(route);
+        let before = served.work(route);
         let held = served.fill(route).await;
-        assert_eq!(served.served(route), before + CAP, "{route:?}");
+        let after = (before.0 + CAP, before.1 + CAP);
+        assert_eq!(
+            served.work(route),
+            after,
+            "{route:?}: one of each per watch"
+        );
         served.refuses(route).await;
         drop(held);
     }

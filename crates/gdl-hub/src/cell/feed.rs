@@ -93,6 +93,8 @@ impl Feed {
                 followers: Followers::new(lease),
                 retiring: Retiring::default(),
                 events: broadcast::channel(buffer).0,
+                #[cfg(test)]
+                work: Default::default(),
             }),
             epoch: watch::Sender::new(None),
             watchers: Watchers::new(),
@@ -157,7 +159,7 @@ impl Feed {
             }
             (
                 shared.snapshot(&self.name, &self.class, epoch),
-                shared.events.subscribe(),
+                shared.subscribe(),
             )
         };
         Ok(self.watchers.stream(counted, snapshot, events))
@@ -204,10 +206,10 @@ impl Feed {
         self.watchers.watchers()
     }
 
-    /// How many watches were served a snapshot and a subscription.
+    /// The snapshots built and the subscriptions taken for watches.
     #[cfg(test)]
-    pub(super) fn served(&self) -> usize {
-        self.watchers.served()
+    pub(super) fn work(&self) -> (usize, usize) {
+        self.lock().work.counted()
     }
 
     /// End every watch, and refuse those asked for from now: the hub
@@ -405,6 +407,8 @@ struct Shared {
     /// The entry instances' load reports.
     loads: Reports,
     events: broadcast::Sender<CellWatchEvent>,
+    #[cfg(test)]
+    work: crate::fanout::Work,
 }
 
 /// A member of an entry segment.
@@ -461,6 +465,13 @@ impl Shared {
         self.segments
             .iter()
             .position(|(name, entry)| *entry && name == segment)
+    }
+
+    /// Subscribe a watch to the changes.
+    fn subscribe(&self) -> broadcast::Receiver<CellWatchEvent> {
+        #[cfg(test)]
+        self.work.subscription();
+        self.events.subscribe()
     }
 
     /// No watcher is no error: the change is in the state the next one's
@@ -597,6 +608,8 @@ impl Shared {
     /// marker: retirements first, so that a follower that applies the
     /// events in order never makes a retired instance routable.
     fn snapshot(&self, name: &str, class: &str, epoch: u64) -> Vec<CellWatchEvent> {
+        #[cfg(test)]
+        self.work.snapshot();
         let mut retired: Vec<(usize, InstanceId, bool)> = Vec::new();
         let mut ready: Vec<(usize, InstanceId, &PeerInfo)> = Vec::new();
         for (id, entry) in &self.entries {
