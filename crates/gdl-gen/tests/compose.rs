@@ -555,7 +555,8 @@ fn compose_refuses_a_source_without_a_frontend() {
     )
     .expect("spec");
     let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
-    let Err(error) = gdl_gen::compose_files(&spec, &dir.join("out"), &dir.join("target")) else {
+    let Err(error) = gdl_gen::compose_files(&spec, None, &dir.join("out"), &dir.join("target"))
+    else {
         panic!("a deployment whose source reads stdin was accepted");
     };
     assert!(error.to_string().contains("frontend"), "{error}");

@@ -169,16 +169,20 @@ fn dockerfile(graph: &str, segment: &str, package: &str) -> String {
 fn image_problems(graph: &str, segments: &[&str]) -> Vec<String> {
     segments
         .iter()
-        .filter_map(|segment| {
-            let name = emit::package_name(graph, segment);
-            let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
-            (!edge(name.chars().next()) || !edge(name.chars().last())).then(|| {
-                format!(
-                    "segment `{segment}`: its image would be named `{name}`, which Docker refuses; name the segment with a letter or digit last"
-                )
-            })
-        })
+        .filter_map(|segment| image_problem(segment, &emit::package_name(graph, segment)))
         .collect()
+}
+
+/// Why the image of `segment`, named `name`, cannot be named so, if it
+/// cannot: Docker refuses a name that does not start and end with a
+/// lowercase letter or a digit.
+pub(crate) fn image_problem(segment: &str, name: &str) -> Option<String> {
+    let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    (!edge(name.chars().next()) || !edge(name.chars().last())).then(|| {
+        format!(
+            "segment `{segment}`: its image would be named `{name}`, which Docker refuses; name the segment with a letter or digit last"
+        )
+    })
 }
 
 /// Builds one image per segment, each from its own `Dockerfile`.

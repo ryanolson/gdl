@@ -737,6 +737,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "gdl-extract",
+ "gdl-hub",
  "gdl-message",
  "gdl-model",
  "gdl-syntax",
