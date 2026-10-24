@@ -40,28 +40,33 @@ impl Launch {
     }
 
     /// For an entry instance of a draining cell, decline offers once its
-    /// bound has passed, or at `deadline`; for any other, nothing. What it
-    /// reads is taken now, so that the wait borrows nothing of the launch
-    /// while the stop goes on beside it.
+    /// bound has passed or no other cell follows the cell, or at
+    /// `deadline`; for any other, nothing. What it reads is taken now, so
+    /// that the wait borrows nothing of the launch while the stop goes on
+    /// beside it.
     pub(super) fn cell_drain_declines<'a>(
         &self,
         segment: &'a dyn Drains,
         deadline: tokio::time::Instant,
     ) -> impl Future<Output = ()> + use<'a> {
         #[cfg(feature = "hub")]
-        let declines = self.cell_drain.as_ref().and_then(|cell| cell.declines());
+        let declining = self.cell_drain.as_ref().and_then(|cell| cell.declining());
         #[cfg(not(feature = "hub"))]
-        let declines: Option<tokio::time::Instant> = None;
+        let declining: Option<std::future::Ready<()>> = None;
         async move {
-            if let Some(at) = declines {
-                tokio::time::sleep_until(at.min(deadline)).await;
+            if let Some(declining) = declining {
+                tokio::select! {
+                    () = declining => {}
+                    () = tokio::time::sleep_until(deadline) => {}
+                }
                 segment.decline_offers();
             }
         }
     }
 
     /// For an entry instance of a draining cell: wait until its bound has
-    /// passed, or until `deadline`, decline offers, wait until it holds no
+    /// passed or no other cell follows the cell, or until `deadline`,
+    /// decline offers, wait until it holds no
     /// request, so that every request it took has been answered, and
     /// announce that it has drained, retried until `deadline`; with `hub`
     /// false (its lease is lost), nothing is announced. Any other instance

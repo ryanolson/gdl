@@ -54,7 +54,15 @@ impl Server {
                         .nth(1)
                         .unwrap_or_default()
                         .to_string();
-                    let _ = accept.send(Watch { stream, path });
+                    let (path, query) = match path.split_once('?') {
+                        Some((path, query)) => (path.to_string(), query.to_string()),
+                        None => (path, String::new()),
+                    };
+                    let _ = accept.send(Watch {
+                        stream,
+                        path,
+                        query,
+                    });
                 });
             }
         });
@@ -82,6 +90,9 @@ impl Server {
 struct Watch {
     stream: TcpStream,
     path: String,
+    /// The watch's query: the follow it names, for a hub that follows the
+    /// cell.
+    query: String,
 }
 
 impl Watch {
@@ -178,6 +189,10 @@ async fn next_of(
     }
 }
 
+/// Whether `event` is one of what the relay shows of the cell `of`: its
+/// follow, state, load, and instances. Whether the follow is offered, which
+/// a withheld cell is not, is shown apart and asserted apart
+/// ([`a_withheld_follow_is_not_offered_and_never_closes_while_read_again`]).
 fn concerns(event: &FollowEvent, of: &str) -> bool {
     match event {
         FollowEvent::Follow { cell, .. }
@@ -187,7 +202,7 @@ fn concerns(event: &FollowEvent, of: &str) -> bool {
         | FollowEvent::Retired { cell, .. }
         | FollowEvent::Left { cell, .. }
         | FollowEvent::Dropped { cell, .. } => cell == of,
-        FollowEvent::Synced => false,
+        FollowEvent::Offering { .. } | FollowEvent::Synced => false,
     }
 }
 
@@ -243,6 +258,9 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
     spare.announce(SegmentPhase::Ready).await;
     let (like, _) = records.until(CellState::Ready).await;
     let (global_hub, global) = serve_cell(global_requiring(2), &directory, timing()).await;
+    // A chooser that never acknowledges, so that no follow the hub stops
+    // offering closes.
+    let _chooser = Instance::chooser(&global_hub).await;
     let mut server = Server::new().await;
     directory
         .inner
@@ -288,14 +306,23 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
     }
     assert_eq!(
         snapshot,
-        [FollowEvent::Follow {
-            class: "model_x".into(),
-            cell: M.into(),
-            generation,
-            region: like.region.clone(),
-            state: CellState::Unavailable,
-            load: None,
-        }]
+        [
+            FollowEvent::Follow {
+                class: "model_x".into(),
+                cell: M.into(),
+                generation,
+                region: like.region.clone(),
+                state: CellState::Unavailable,
+                load: None,
+            },
+            FollowEvent::Offering {
+                class: "model_x".into(),
+                cell: M.into(),
+                generation,
+                revision: 2,
+                offered: false,
+            }
+        ]
     );
     let mut none = tokio::time::timeout(
         WAIT,
@@ -313,12 +340,22 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
         "a cell the hub does not follow"
     );
     let mut second = server.next().await;
+    // The watch that replaces the first names the same follow, so that
+    // the model cell's hub counts the follower on through the
+    // replacement, rather than one watch closed without a release.
+    assert!(
+        first.query.starts_with("class=global&cell="),
+        "{}",
+        first.query
+    );
+    assert_eq!(second.query, first.query, "the reading names its follow");
     // While the reading waits, nothing more of the first watch is read,
     // and `N`'s events apply.
     first
         .offer(
             &serde_json::to_string(&CellWatchEvent::State {
                 state: CellState::Degraded,
+                unfollowed: false,
             })
             .expect("an event serializes"),
         )
@@ -372,6 +409,7 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
     second
         .send(&CellWatchEvent::State {
             state: CellState::Degraded,
+            unfollowed: false,
         })
         .await;
     assert_eq!(
@@ -386,7 +424,10 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
             .await
             .expect("an event in time")
             .expect("the watch goes on");
-        alone_seen.push(item.event().expect("a known event"));
+        let event = item.event().expect("a known event");
+        if concerns(&event, M) {
+            alone_seen.push(event);
+        }
     }
     assert_eq!(
         alone_seen,
@@ -422,6 +463,9 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_cell_withheld() {
     let (_quorum, _) = meet_the_quorum(&model_hub).await;
     let (like, _) = records.until(CellState::Ready).await;
     let (global_hub, global) = serve_cell(global_requiring(0), &directory, timing()).await;
+    // A chooser that never acknowledges, so that no follow the hub stops
+    // offering closes.
+    let _chooser = Instance::chooser(&global_hub).await;
     let mut watch = global.follows();
     let mut server = Server::new().await;
     directory
@@ -474,6 +518,7 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_cell_withheld() {
     second
         .send(&CellWatchEvent::State {
             state: CellState::Degraded,
+            unfollowed: false,
         })
         .await;
     assert_eq!(
@@ -518,6 +563,9 @@ struct Setup {
     server: Server,
     like: CellRecord,
     _quorum: Vec<Instance>,
+    /// A chooser, which acknowledges only where a test says, so that no
+    /// follow the hub stops offering closes otherwise.
+    chooser: Instance,
 }
 
 impl Setup {
@@ -533,6 +581,7 @@ impl Setup {
         let (quorum, _) = meet_the_quorum(&model_hub).await;
         let (like, _) = records.until(CellState::Ready).await;
         let (global_hub, global) = serve_cell(global_requiring(0), &directory, timing()).await;
+        let chooser = Instance::chooser(&global_hub).await;
         let server = Server::new().await;
         directory
             .inner
@@ -546,6 +595,7 @@ impl Setup {
             server,
             like,
             _quorum: quorum,
+            chooser,
         }
     }
 
@@ -605,6 +655,7 @@ async fn what_the_replaced_watch_sends_is_not_applied_over_the_reading() {
     let mut second = setup.server.next().await;
     let degraded = serde_json::to_string(&CellWatchEvent::State {
         state: CellState::Degraded,
+        unfollowed: false,
     })
     .expect("an event serializes");
     let ready = serde_json::to_string(&CellWatchEvent::Ready {
@@ -724,6 +775,94 @@ async fn an_unknown_event_after_the_reading_withholds_the_cell_again() {
         setup.global.following().borrow()[&("model_x".to_string(), M.to_string())],
         1,
         "the same follow"
+    );
+    setup.stop().await;
+}
+
+/// Every event of the relay's watch that names `M`, its offering included,
+/// up to and including the first that `last` takes.
+async fn through_of(
+    watch: &mut gdl_hub::FollowsWatch,
+    last: impl Fn(&FollowEvent) -> bool,
+) -> Vec<FollowEvent> {
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(WAIT, watch.next())
+            .await
+            .unwrap_or_else(|_| panic!("an event of {M} in time; seen: {events:?}"))
+            .expect("the relay's watch goes on");
+        if event.cell().is_some_and(|(_, cell)| cell == M) {
+            let done = last(&event);
+            events.push(event);
+            if done {
+                return events;
+            }
+        }
+    }
+}
+
+/// A withheld cell is not offered, at the follow's next revision, so its
+/// chooser stops offering to it and acknowledges; but the follow does not
+/// close while its link reads the cell again, however every chooser has
+/// acknowledged, and once the cell is read again and takes work it is
+/// offered again, in the same generation, never dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withheld_follow_is_not_offered_and_never_closes_while_read_again() {
+    let mut setup = Setup::new().await;
+    let a = peer();
+    let (mut first, mut watch, _) = exposing(&mut setup, &a).await;
+    first.raw(r#"{"event":"paused"}"#).await;
+    let marked = through_of(&mut watch, |event| {
+        matches!(event, FollowEvent::Offering { .. })
+    })
+    .await;
+    assert_eq!(
+        marked.last(),
+        Some(&FollowEvent::Offering {
+            class: "model_x".into(),
+            cell: M.into(),
+            generation: 1,
+            revision: 2,
+            offered: false,
+        })
+    );
+    setup
+        .chooser
+        .acknowledge(&gdl_watch::Unoffered {
+            class: "model_x".into(),
+            cell: M.into(),
+            generation: 1,
+            revision: 2,
+        })
+        .await
+        .expect("the hub takes the acknowledgement");
+    let mut second = setup.server.next().await;
+    second
+        .snapshot(&setup.like, CellState::Ready, &[], &[&a])
+        .await;
+    let read = through_of(&mut watch, |event| {
+        matches!(event, FollowEvent::Offering { offered: true, .. })
+    })
+    .await;
+    assert!(
+        !read
+            .iter()
+            .any(|event| matches!(event, FollowEvent::Dropped { .. })),
+        "a withheld follow closed while its link read it again: {read:?}"
+    );
+    assert_eq!(
+        read.last(),
+        Some(&FollowEvent::Offering {
+            class: "model_x".into(),
+            cell: M.into(),
+            generation: 1,
+            revision: 3,
+            offered: true,
+        })
+    );
+    assert_eq!(
+        setup.global.following().borrow()[&("model_x".to_string(), M.to_string())],
+        1
     );
     setup.stop().await;
 }

@@ -1,6 +1,9 @@
 //! The follower's rules, without a hub: its state machine driven by
 //! events and an explicit clock, and its task driven by scripted watches.
 
+mod offered;
+mod reread;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -422,9 +425,10 @@ fn a_retired_entry_is_marked_and_never_eligible_again() {
     assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
 }
 
-/// A state that exposes nothing takes every entry out of the table, since
-/// the relay sends no `left` for an instance hidden when it leaves; a
-/// state that exposes them again is followed by an `exposed` for each.
+/// A state that exposes nothing takes every entry out of the table, and a
+/// state that exposes them again is followed by an `exposed` for each. A
+/// hidden entry stays registered until the follow is dropped, since what
+/// was offered to it may still be under way.
 #[test]
 fn a_state_that_exposes_nothing_empties_the_table() {
     let (mut follows, cells, recorded, _) = follower();
@@ -459,7 +463,17 @@ fn a_state_that_exposes_nothing_empties_the_table() {
     let draining = now + DRAIN;
     live(&mut follows, draining, [state(M1, 1, CellState::Draining)]);
     follows.forget(draining + DRAIN);
-    assert_eq!(recorded.take(), [Call::Unregister(x.instance_id())]);
+    assert_eq!(recorded.take(), [], "unregistered while its follow lives");
+    let closed = draining + DRAIN;
+    live(&mut follows, closed, [dropped(M1, 1)]);
+    follows.forget(closed + DRAIN);
+    assert_eq!(
+        recorded.take(),
+        [
+            Call::Unregister(x.instance_id()),
+            Call::Unregister(y.instance_id())
+        ]
+    );
 }
 
 /// Only the entry segments of the chooser's own hops are kept: another

@@ -1121,8 +1121,10 @@ mod tests {
 }
 
 mod cell;
+mod chooser;
 #[cfg(test)]
 mod drains;
 mod load;
 
 pub(crate) use cell::CellDrain;
+pub(crate) use chooser::ChooserHub;

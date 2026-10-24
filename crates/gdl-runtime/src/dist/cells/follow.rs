@@ -8,12 +8,28 @@
 //! cell, so no event reads another cell's instances. Only a new snapshot
 //! makes every table again.
 //!
+//! A follow the hub marks not offered keeps every instance it held
+//! registered, routable or not, until the hub drops it: what was offered
+//! to the cell may still be under way, and velo fails what is in flight to
+//! a peer it forgets. Once this instance holds no offer to it, the
+//! follower says so to its hub, at the revision of the mark
+//! ([`Follows::acknowledgements`]); the hub drops the follow once every
+//! chooser has. A lease's end does nothing but its decrement, so the
+//! follower looks for the follows whose last lease has ended every
+//! [`ack::ACK_POLL`] while it has one to acknowledge.
+//!
 //! An event of a kind this build does not know leaves the cell it names
 //! unread: its tables offer none of its instances until the follower has
 //! read the cell again, from a watch of the cell's follow alone, whose
 //! snapshot and events after it are ordered with each other
 //! ([`Follows::own`]). What the relay's watch sends of the cell from then
 //! is not applied: it is not ordered with the cell's own watch.
+//!
+//! An unread cell is not offered: [`Follow::offers`] is the one notion of
+//! whether this instance offers work to a follow, and its tables and the
+//! leases on it go by it. Acknowledging that it holds no offer goes by the
+//! hub's revision alone, since being unread is this instance's own
+//! ignorance of the cell, which has no revision to acknowledge.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -25,6 +41,7 @@ use gdl_watch::{FollowEvent, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
 
+use super::lease::Leases;
 use super::{CellTable, Cells, EntryTable, Load};
 use crate::dist::fabric::Registry;
 use crate::dist::roster::Live;
@@ -32,6 +49,15 @@ use crate::dist::roster::Live;
 /// A followed cell, by its class and its name within the class: two
 /// classes may each have a cell of one name.
 pub(super) type Key = (String, String);
+
+mod ack;
+mod own;
+
+use ack::Ack;
+#[cfg(test)]
+pub(super) use ack::{ACK_POLL, ACK_RETRY, SCANNED};
+pub(super) use own::Asked;
+use own::Own;
 
 /// An item of a watch of the relay.
 type Relayed = Watched<FollowEvent, UnknownFollowEvent>;
@@ -63,6 +89,9 @@ pub(crate) struct Follows<R> {
     /// The latest unregistration due for each instance: an earlier entry
     /// in `forget` for one asked for again is passed over.
     due: HashMap<InstanceId, Instant>,
+    /// When the follower looks again for a follow to acknowledge, while it
+    /// has one.
+    poll: Option<Instant>,
     /// The cells read from a watch of their own since an event of a kind
     /// this build does not know named them: what the relay's watch sends
     /// of them is not applied, since that watch and a cell's own are not
@@ -73,25 +102,6 @@ pub(crate) struct Follows<R> {
     asked: Vec<Asked>,
     /// The number of the last watch of its own asked for.
     watches: u64,
-}
-
-/// A watch of its own a cell is read from.
-struct Own {
-    /// Its number: an item of an earlier one is ignored.
-    watch: u64,
-    /// Its snapshot as it is filled; `None` once it is complete.
-    filling: Option<Followed>,
-    /// Whether the snapshot had an event of a kind this build does not
-    /// know.
-    unknown: bool,
-}
-
-/// A watch of its own for the task to open: the cell's, with its number,
-/// after a pause if `pause`.
-pub(super) struct Asked {
-    pub(super) key: Key,
-    pub(super) watch: u64,
-    pub(super) pause: bool,
 }
 
 impl<R: Registry> Follows<R> {
@@ -114,6 +124,7 @@ impl<R: Registry> Follows<R> {
             registered: HashSet::new(),
             forget: VecDeque::new(),
             due: HashMap::new(),
+            poll: None,
             own: HashMap::new(),
             asked: Vec::new(),
             watches: 0,
@@ -145,174 +156,13 @@ impl<R: Registry> Follows<R> {
         self.apply(event, now);
     }
 
-    /// The relay's watch sent an event of a kind this build does not know
-    /// after its snapshot: the cell it names is unread, and read from a
-    /// watch of its own from then, unless the event is of a class not sent
-    /// to, or of an earlier generation than the cell's, which changes
-    /// nothing, as a known event of it would not, or the cell is already
-    /// read from its own watch, which carries the event too.
-    pub(super) fn unknown(&mut self, event: UnknownFollowEvent) {
-        self.cells.unknown();
-        let key = (event.class, event.cell);
-        if self.own.contains_key(&key)
-            || !self.followed.unread(&self.wanted, &key, event.generation)
-        {
-            return;
-        }
-        tracing::info!(
-            class = key.0,
-            cell = key.1,
-            kind = event.kind,
-            "the relay sent an event of a kind this build does not know; the cell is not chosen until it is read again"
-        );
-        self.publish(&key);
-        self.watch_own(key, false);
-    }
-
-    /// Read `key`'s cell from a new watch of its own, after a pause if
-    /// `pause`: one that replaces any it had.
-    fn watch_own(&mut self, key: Key, pause: bool) {
-        self.watches += 1;
-        let watch = self.watches;
-        self.own.insert(
-            key.clone(),
-            Own {
-                watch,
-                filling: Some(Followed::default()),
-                unknown: false,
-            },
-        );
-        self.asked.push(Asked { key, watch, pause });
-    }
-
-    /// The watches of their own that cells were asked to be read from, and
-    /// that the task has not yet opened.
-    pub(super) fn asked(&mut self) -> Vec<Asked> {
-        std::mem::take(&mut self.asked)
-    }
-
-    /// Whether `watch` is the one `key`'s cell is read from: an older one
-    /// is let go of.
-    pub(super) fn wants(&self, key: &Key, watch: u64) -> bool {
-        self.own.get(key).is_some_and(|own| own.watch == watch)
-    }
-
-    /// The watch `watch` of `key`'s own sent `item` at `now`, or ended
-    /// (`None`), as a watch that could not begin does. Its snapshot
-    /// replaces the cell's follow, the cell no longer unread, and each
-    /// event after it is applied as any event is. The cell is unread
-    /// again, and read from a new watch, when the watch ends, after a
-    /// pause; at an event of a kind this build does not know after its
-    /// snapshot, at once; and once a snapshot with one is complete, after
-    /// a pause, the cell never shown read meanwhile, so that a hub that
-    /// sends such an event in each snapshot is not asked again and again
-    /// at once. An item of a watch it no longer reads from is ignored.
-    pub(super) fn own(&mut self, key: Key, watch: u64, item: Option<Relayed>, now: Instant) {
-        let Some(own) = self.own.get_mut(&key).filter(|own| own.watch == watch) else {
-            return;
-        };
-        match item {
-            None => {
-                self.unread_own(&key);
-                self.watch_own(key, true);
-            }
-            Some(Watched::Unknown(_)) => {
-                let filling = own.filling.is_some();
-                own.unknown |= filling;
-                self.cells.unknown();
-                if !filling {
-                    self.unread_own(&key);
-                    self.watch_own(key, false);
-                }
-            }
-            Some(Watched::Event(FollowEvent::Synced)) => {
-                let (filling, unknown) = (own.filling.take(), own.unknown);
-                match filling {
-                    Some(filling) => {
-                        self.install_own(&key, filling, unknown, now);
-                        if unknown {
-                            self.watch_own(key, true);
-                        }
-                    }
-                    // A second marker in one watch is not the protocol.
-                    None => {
-                        self.unread_own(&key);
-                        self.watch_own(key, true);
-                    }
-                }
-            }
-            Some(Watched::Event(event)) => match own.filling.as_mut() {
-                Some(filling) => {
-                    let _ = filling.apply(&self.wanted, event, now);
-                }
-                None => self.apply(event, now),
-            },
-        }
-    }
-
-    /// Leave `key`'s cell unread, if it is followed.
-    fn unread_own(&mut self, key: &Key) {
-        if let Some(follow) = self.followed.follows.get_mut(key)
-            && !follow.unread
-        {
-            follow.unread = true;
-            self.publish(key);
-        }
-    }
-
-    /// `filling`, the snapshot of `key`'s own watch, is complete at `now`:
-    /// it replaces the cell's follow, or ends it if the relay has none,
-    /// whatever its generation, and sets the generation the cell's later
-    /// events are fenced by, as a snapshot of the relay does: the watch
-    /// may be to a hub that restarted, which numbers its follows from 1
-    /// again. The cell is unread if `unread`. Its
-    /// new instances are registered before a table shows them; one it no
-    /// longer holds is unregistered after the drain.
-    fn install_own(&mut self, key: &Key, mut filling: Followed, unread: bool, now: Instant) {
-        let mut fresh = filling.follows.remove(key);
-        if let Some(follow) = &mut fresh {
-            follow.unread = unread;
-            let unreachable: Vec<InstanceId> = follow
-                .exposed
-                .iter()
-                .filter(|(_, (_, peer))| !self.register(peer))
-                .map(|(id, _)| *id)
-                .collect();
-            for id in unreachable {
-                follow.exposed.remove(&id);
-            }
-            // Held before the follow it replaces lets go, so that an
-            // instance in both is never unregistered.
-            for id in follow.held().collect::<Vec<_>>() {
-                self.hold(id);
-            }
-        }
-        let replaced = match fresh {
-            Some(mut follow) => {
-                let generation = follow.generation;
-                if let Some(held) = self.followed.follows.get(key)
-                    && held.generation == generation
-                {
-                    follow.turns.clone_from(&held.turns);
-                }
-                self.followed.generations.insert(key.clone(), generation);
-                self.followed.follows.insert(key.clone(), follow)
-            }
-            None => {
-                self.followed.generations.remove(key);
-                self.followed.follows.remove(key)
-            }
-        };
-        if let Some(replaced) = replaced {
-            self.release(&replaced, now);
-        }
-        self.publish(key);
-    }
-
     /// Apply one event of the relay after its snapshot, at `now`, by
     /// [`Followed::apply`]'s rules: what it changed is then published,
     /// with an exposed instance registered first and every instance no
-    /// follow holds any more unregistered after the drain.
+    /// follow holds any more unregistered after the drain. A follow that
+    /// is offered again takes leases again before a table shows it; one
+    /// that is not is shown so before it refuses them, so that an offer
+    /// refused a lease finds the table that no longer offers it.
     pub(crate) fn apply(&mut self, event: FollowEvent, now: Instant) {
         let (key, change) = match self.followed.apply(&self.wanted, event, now) {
             Some(changed) => changed,
@@ -321,10 +171,33 @@ impl<R: Registry> Follows<R> {
         match change {
             Change::Table => {}
             Change::Ended(follow) => self.release(&follow, now),
-            Change::Hidden(ids) => {
-                for id in ids {
-                    self.unhold(id, now);
+            Change::Replaced(earlier) => {
+                self.publish(&key);
+                earlier.unoffer();
+                self.poll = Some(now);
+                return;
+            }
+            Change::Offering {
+                leases,
+                offered: true,
+                current,
+            } => {
+                leases.offer();
+                if !current {
+                    return;
                 }
+            }
+            Change::Offering {
+                leases,
+                offered: false,
+                current,
+            } => {
+                if current {
+                    self.publish(&key);
+                }
+                leases.unoffer();
+                self.poll = Some(now);
+                return;
             }
             // Registered before it is in a table: a call by instance goes
             // only to a peer velo was told of.
@@ -346,8 +219,11 @@ impl<R: Registry> Follows<R> {
     /// follower held, at `now`. The snapshot's generations are taken as
     /// they are, never fenced by an earlier watch's, since a hub that
     /// restarted numbers its follows again from 1. Its new instances are
-    /// registered before any table shows them; an instance that no table
-    /// holds any more is unregistered after the drain.
+    /// registered before any table shows them; an instance that no follow
+    /// holds any more is unregistered after the drain. A follow shown
+    /// again in its generation keeps what this instance holds of it: its
+    /// turns, its leases, its acknowledgement of the same revision, and
+    /// the instances its state hides, which the snapshot does not show.
     pub(super) fn resnapshot(&mut self, snapshot: Snapshot, now: Instant) {
         let Snapshot {
             mut followed,
@@ -368,7 +244,11 @@ impl<R: Registry> Follows<R> {
             }
             self.watch_own(key, false);
         }
-        for follow in followed.follows.values_mut() {
+        for follow in followed
+            .follows
+            .values_mut()
+            .chain(followed.closing.values_mut())
+        {
             let mut unreachable = Vec::new();
             for (id, (_, peer)) in &follow.exposed {
                 if !self.register(peer) {
@@ -379,8 +259,18 @@ impl<R: Registry> Follows<R> {
                 follow.exposed.remove(&id);
             }
         }
+        for (key, follow) in &mut followed.follows {
+            if let Some(held) = self.followed.find(key, follow.generation) {
+                follow.carry(held);
+            }
+        }
+        for ((key, generation), follow) in &mut followed.closing {
+            if let Some(held) = self.followed.find(key, *generation) {
+                follow.carry(held);
+            }
+        }
         let mut held: HashMap<InstanceId, usize> = HashMap::new();
-        for follow in followed.follows.values() {
+        for follow in followed.follows.values().chain(followed.closing.values()) {
             for id in follow.held() {
                 *held.entry(id).or_default() += 1;
             }
@@ -395,20 +285,16 @@ impl<R: Registry> Follows<R> {
         for id in released {
             self.schedule(id, now);
         }
-        // A follow shown again in its generation keeps its turns, so that
-        // a round robin within the cell goes on across rewatches rather
-        // than starting at its first instance each time. A restarted hub
-        // numbers its follows from 1 again, so the follow may be a new one
-        // under an old number; a turn is only where a round robin starts,
-        // so carrying it then costs nothing.
-        for (key, follow) in &mut followed.follows {
-            if let Some(held) = self.followed.follows.get(key)
-                && held.generation == follow.generation
-            {
-                follow.turns.clone_from(&held.turns);
-            }
-        }
         self.followed = followed;
+        let follows = || {
+            self.followed
+                .follows
+                .values()
+                .chain(self.followed.closing.values())
+        };
+        for follow in follows().filter(|follow| follow.offers()) {
+            follow.leases.offer();
+        }
         let mut tables: BTreeMap<String, BTreeMap<Key, Arc<CellTable>>> = BTreeMap::new();
         for (key, follow) in &self.followed.follows {
             for segment in &self.wanted[&key.0] {
@@ -421,6 +307,10 @@ impl<R: Registry> Follows<R> {
         self.tables = tables;
         for segment in self.wanted.values().flatten() {
             self.store(segment);
+        }
+        for follow in follows().filter(|follow| !follow.offers()) {
+            follow.leases.unoffer();
+            self.poll = Some(now);
         }
         self.cells.changed();
     }
@@ -566,14 +456,17 @@ impl<R: Registry> Follows<R> {
 /// For each class sent to, the entry segments kept.
 pub(crate) type Wanted = BTreeMap<String, BTreeSet<String>>;
 
-/// The follows one watch has shown: each cell's current follow, and the
-/// newest generation of each cell, so that an older one is ignored even
-/// after its cell's follow was dropped. What the follower holds, and a
-/// snapshot being filled, are each one of these, changed by the same
-/// rules.
+/// The follows one watch has shown: each cell's current follow, the
+/// earlier ones the relay has yet to drop, and the newest generation of
+/// each cell, so that an older one is ignored even after its cell's follow
+/// was dropped. What the follower holds, and a snapshot being filled, are
+/// each one of these, changed by the same rules.
 #[derive(Default)]
 struct Followed {
     follows: HashMap<Key, Follow>,
+    /// Earlier follows of a cell, by generation: not offered, and holding
+    /// their instances until the relay drops them.
+    closing: HashMap<(Key, u64), Follow>,
     generations: HashMap<Key, u64>,
 }
 
@@ -581,10 +474,17 @@ struct Followed {
 enum Change {
     /// Only what the table shows.
     Table,
-    /// The follow ended: dropped, or replaced by a newer generation.
-    Ended(Follow),
-    /// A state that exposes nothing hid these.
-    Hidden(Vec<InstanceId>),
+    /// The follow was dropped: it holds nothing from now.
+    Ended(Box<Follow>),
+    /// A newer generation replaced the follow that counts these leases,
+    /// which is kept until it is dropped, and offered no more.
+    Replaced(Arc<Leases>),
+    /// The follow, current or earlier, is offered now, or not.
+    Offering {
+        leases: Arc<Leases>,
+        offered: bool,
+        current: bool,
+    },
     /// The follow exposes this instance now.
     Exposed(PeerInfo),
     /// The follow holds this instance now, retired.
@@ -596,8 +496,10 @@ enum Change {
 impl Followed {
     /// Apply one event, which arrived at `now`: the cell it changed, and
     /// how, or `None` for an event of a class or segment not sent to, or
-    /// of a generation that is not its cell's current one, which changes
-    /// nothing.
+    /// of a generation this view does not hold, which changes nothing. Of
+    /// an earlier generation that the relay has yet to drop, only whether
+    /// it is offered and its drop are applied: its link has ended, and
+    /// nothing else of it changes.
     fn apply(
         &mut self,
         wanted: &Wanted,
@@ -629,7 +531,8 @@ impl Followed {
                 }
                 self.generations.insert(key.clone(), generation);
                 // A newer generation replaces the older at once: nothing
-                // of the older one is carried over.
+                // of the older one is carried over, and it holds its
+                // instances until the relay drops it.
                 let older = self.follows.insert(
                     key.clone(),
                     Follow::new(
@@ -640,7 +543,13 @@ impl Followed {
                         segments,
                     ),
                 );
-                Some((key, older.map_or(Change::Table, Change::Ended)))
+                let Some(mut older) = older else {
+                    return Some((key, Change::Table));
+                };
+                older.offered = false;
+                let leases = Arc::clone(&older.leases);
+                self.closing.insert((key.clone(), older.generation), older);
+                Some((key, Change::Replaced(leases)))
             }
             FollowEvent::State {
                 class,
@@ -649,8 +558,8 @@ impl Followed {
                 state,
             } => {
                 let key = (class, cell);
-                let hidden = self.current(&key, generation)?.set_state(state);
-                Some((key, Change::Hidden(hidden)))
+                self.current(&key, generation)?.set_state(state);
+                Some((key, Change::Table))
             }
             FollowEvent::Load {
                 class,
@@ -661,6 +570,41 @@ impl Followed {
                 let key = (class, cell);
                 self.current(&key, generation)?.load = load.map(|load| Load::new(load, now));
                 Some((key, Change::Table))
+            }
+            FollowEvent::Offering {
+                class,
+                cell,
+                generation,
+                revision,
+                offered,
+            } => {
+                let key = (class, cell);
+                let current = self
+                    .follows
+                    .get(&key)
+                    .is_some_and(|follow| follow.generation == generation);
+                let follow = self.find_mut(&key, generation)?;
+                // A follow begins offered at revision 1, which its hub
+                // installs not offered for a cell that takes no work: a
+                // revision names one state, so only an older one, or the
+                // same one again, is ignored.
+                if revision < follow.revision
+                    || (revision == follow.revision && offered == follow.offered)
+                {
+                    return None;
+                }
+                follow.revision = revision;
+                follow.offered = offered;
+                follow.ack = Ack::None;
+                let leases = Arc::clone(&follow.leases);
+                Some((
+                    key,
+                    Change::Offering {
+                        leases,
+                        offered: follow.offers(),
+                        current,
+                    },
+                ))
             }
             FollowEvent::Exposed {
                 class,
@@ -673,13 +617,8 @@ impl Followed {
                     return None;
                 }
                 let key = (class, cell);
-                let follow = self.current(&key, generation)?;
-                let id = peer.instance_id();
-                if !follow.can_expose(id) {
-                    return None;
-                }
-                follow.exposed.insert(id, (segment, peer.clone()));
-                Some((key, Change::Exposed(peer)))
+                let change = self.current(&key, generation)?.expose(segment, peer)?;
+                Some((key, change))
             }
             FollowEvent::Retired {
                 class,
@@ -721,9 +660,12 @@ impl Followed {
                 generation,
             } => {
                 let key = (class, cell);
-                self.current(&key, generation)?;
-                let follow = self.follows.remove(&key)?;
-                Some((key, Change::Ended(follow)))
+                if self.current(&key, generation).is_some() {
+                    let follow = self.follows.remove(&key)?;
+                    return Some((key, Change::Ended(Box::new(follow))));
+                }
+                let follow = self.closing.remove(&(key.clone(), generation))?;
+                Some((key, Change::Ended(Box::new(follow))))
             }
             // The snapshot's marker, which the task reads.
             FollowEvent::Synced => None,
@@ -757,9 +699,28 @@ impl Followed {
             .get_mut(key)
             .filter(|follow| follow.generation == generation)
     }
+
+    /// `key`'s follow of `generation`, current or earlier.
+    fn find(&self, key: &Key, generation: u64) -> Option<&Follow> {
+        match self.follows.get(key) {
+            Some(follow) if follow.generation == generation => Some(follow),
+            _ => self.closing.get(&(key.clone(), generation)),
+        }
+    }
+
+    fn find_mut(&mut self, key: &Key, generation: u64) -> Option<&mut Follow> {
+        if self
+            .follows
+            .get(key)
+            .is_some_and(|follow| follow.generation == generation)
+        {
+            return self.follows.get_mut(key);
+        }
+        self.closing.get_mut(&(key.clone(), generation))
+    }
 }
 
-/// One cell's current follow.
+/// One cell's follow, current or earlier.
 #[derive(Debug)]
 struct Follow {
     generation: u64,
@@ -769,15 +730,25 @@ struct Follow {
     load: Option<Load>,
     /// Exposed entry instances that have not retired, with their segments.
     exposed: HashMap<InstanceId, (String, PeerInfo)>,
+    /// Entry instances a state that takes no work hid: not routable, and
+    /// held until they retire, leave, or are exposed again, or the follow
+    /// is dropped, since what was offered to them may still be under way.
+    hidden: HashMap<InstanceId, (String, PeerInfo)>,
     /// Retired entry instances, with their segments: never exposed again.
     retired: HashMap<InstanceId, String>,
     /// The built-in routers' turn per entry segment, carried into each
     /// table the follow makes.
     turns: BTreeMap<String, Arc<AtomicUsize>>,
+    /// The offers this instance holds to the follow.
+    leases: Arc<Leases>,
+    /// The revision of the follow's offered state, and the state.
+    revision: u64,
+    offered: bool,
+    ack: Ack,
     /// Whether the relay sent an event of a kind this build does not know
-    /// for the follow, which the follower has not read again since: its
-    /// tables then offer none of its instances, so that it is not chosen.
-    /// The one place a cell is kept from choosers for it.
+    /// for the follow, which the follower has not read again since: the
+    /// follow is then not offered ([`Follow::offers`]), so it is not
+    /// chosen and refuses leases, though nothing is acknowledged for it.
     unread: bool,
 }
 
@@ -795,11 +766,16 @@ impl Follow {
             state,
             load,
             exposed: HashMap::new(),
+            hidden: HashMap::new(),
             retired: HashMap::new(),
             turns: segments
                 .iter()
                 .map(|segment| (segment.clone(), Arc::default()))
                 .collect(),
+            leases: Arc::default(),
+            revision: 1,
+            offered: true,
+            ack: Ack::None,
             unread: false,
         }
     }
@@ -810,49 +786,91 @@ impl Follow {
         matches!(self.state, CellState::Ready | CellState::Degraded)
     }
 
-    /// Whether `id` may be exposed: the state allows it, and it is neither
-    /// exposed already nor retired.
-    fn can_expose(&self, id: InstanceId) -> bool {
-        self.exposes() && !self.exposed.contains_key(&id) && !self.retired.contains_key(&id)
+    /// Change the state; one that exposes nothing hides every exposed
+    /// instance, which the follow still holds. The relay sends no `left`
+    /// for an instance hidden when it leaves, and an `exposed` for each
+    /// ready one when a state exposes them again.
+    fn set_state(&mut self, state: CellState) {
+        self.state = state;
+        if !self.exposes() {
+            self.hidden.extend(self.exposed.drain());
+        }
     }
 
-    /// Change the state; one that exposes nothing hides every exposed
-    /// instance, and returns them. The relay sends no `left` for an
-    /// instance hidden when it leaves, and an `exposed` for each when a
-    /// state exposes them again, so a hidden instance is dropped.
-    fn set_state(&mut self, state: CellState) -> Vec<InstanceId> {
-        self.state = state;
-        if self.exposes() {
-            return Vec::new();
+    /// `peer` of `segment` is exposed: the change, if any. One the state
+    /// hid is held already; one that is exposed already, or retired, or
+    /// exposed while the state allows none, changes nothing.
+    fn expose(&mut self, segment: String, peer: PeerInfo) -> Option<Change> {
+        let id = peer.instance_id();
+        if !self.exposes() || self.exposed.contains_key(&id) || self.retired.contains_key(&id) {
+            return None;
         }
-        self.exposed.drain().map(|(id, _)| id).collect()
+        if self.hidden.remove(&id).is_some() {
+            self.exposed.insert(id, (segment, peer));
+            return Some(Change::Table);
+        }
+        self.exposed.insert(id, (segment, peer.clone()));
+        Some(Change::Exposed(peer))
     }
 
     /// Mark `id` retired: whether the follow holds it only now.
     fn retire(&mut self, id: InstanceId, segment: String) -> bool {
-        let was_exposed = self.exposed.remove(&id).is_some();
+        let was_held = self.exposed.remove(&id).is_some() | self.hidden.remove(&id).is_some();
         let newly = self.retired.insert(id, segment).is_none();
-        newly && !was_exposed
+        newly && !was_held
     }
 
     /// `id` left: whether the follow held it.
     fn leave(&mut self, id: InstanceId) -> bool {
-        self.exposed.remove(&id).is_some() | self.retired.remove(&id).is_some()
+        self.exposed.remove(&id).is_some()
+            | self.hidden.remove(&id).is_some()
+            | self.retired.remove(&id).is_some()
     }
 
     /// Every instance the follow holds.
     fn held(&self) -> impl Iterator<Item = InstanceId> + '_ {
-        self.exposed.keys().chain(self.retired.keys()).copied()
+        self.exposed
+            .keys()
+            .chain(self.hidden.keys())
+            .chain(self.retired.keys())
+            .copied()
     }
 
-    /// The follow's table for `segment`, its instances in id order.
+    /// Take over what this instance holds of the same follow from `held`,
+    /// as an earlier watch showed it: the turns, the leases, an
+    /// acknowledgement of the same revision, and, while the state hides
+    /// them, the instances it held that this view neither exposes nor
+    /// retires.
+    fn carry(&mut self, held: &Follow) {
+        self.turns.clone_from(&held.turns);
+        self.leases = Arc::clone(&held.leases);
+        if held.revision == self.revision {
+            self.ack = held.ack;
+        }
+        if !self.exposes() {
+            for (id, instance) in held.exposed.iter().chain(&held.hidden) {
+                if !self.exposed.contains_key(id) && !self.retired.contains_key(id) {
+                    self.hidden.insert(*id, instance.clone());
+                }
+            }
+        }
+    }
+
+    /// Whether this instance offers work to the follow: the hub offers it,
+    /// by its last revision, and the follow is not unread.
+    fn offers(&self) -> bool {
+        self.offered && !self.unread
+    }
+
+    /// The follow's table for `segment`, its instances in id order: none
+    /// eligible while it is not offered.
     fn table(&self, key: &Key, segment: &str) -> CellTable {
         #[cfg(test)]
         READ.with(|read| read.set(read.get() + self.exposed.len() + self.retired.len()));
         let mut eligible: Vec<InstanceId> = self
             .exposed
             .iter()
-            .filter(|(_, (of, _))| !self.unread && of == segment)
+            .filter(|(_, (of, _))| self.offers() && of == segment)
             .map(|(id, _)| *id)
             .collect();
         eligible.sort_by_key(InstanceId::as_u128);
@@ -880,6 +898,9 @@ impl Follow {
             retired: retired.into_boxed_slice(),
             unread: self.unread,
             turn: self.turns.get(segment).map(Arc::clone).unwrap_or_default(),
+            offering: self.offers(),
+            revision: self.revision,
+            leases: Arc::clone(&self.leases),
         }
     }
 }

@@ -109,4 +109,15 @@ impl Source for Scripted {
             None => futures::stream::pending().boxed(),
         })
     }
+
+    async fn declare(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn acknowledge(
+        &self,
+        _: gdl_watch::Unoffered,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
 }

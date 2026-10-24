@@ -15,14 +15,13 @@
 //! chooser's damping of a cell that declined ([`super::damping`]), written
 //! only when a cell declines, or when a damped cell accepts.
 
-use gdl::__runtime::Lease;
 use gdl::{Cx, Error, ErrorKind, Result};
 use velo::InstanceId;
 
 use super::{Crossing, Within};
 use crate::dist::envelope::{self, Accepted, Forward, WireCx};
 use crate::dist::fabric::Offered;
-use crate::dist::runtime::{Handed, Runtime};
+use crate::dist::runtime::{Handed, Held, Runtime};
 
 /// What an offer's answer means.
 pub(crate) enum Answer {
@@ -94,29 +93,30 @@ impl Runtime {
     /// Choose, for `envelope`, a cell of the class `crossing` enters that
     /// is not in `offered`, by the class's cell policy, then an instance
     /// of it by the hop's router: the instance, the cell's
-    /// [`id`](super::CellTable::id), and a selector's lease, with the
-    /// selector's meta added to `envelope`. `None` when no such cell may
-    /// take it.
+    /// [`id`](super::CellTable::id), and what the offer holds while the
+    /// request is held, a selector's lease and the lease on the cell's
+    /// follow, with the selector's meta added to `envelope`. `None` when
+    /// no such cell may take it.
     pub(crate) async fn choose_cell(
         &self,
         crossing: &Crossing,
         cx: &Cx,
         envelope: &mut Forward,
         offered: &[u64],
-    ) -> Result<Option<(InstanceId, u64, Option<Lease>)>> {
+    ) -> Result<Option<(InstanceId, u64, Held)>> {
         match crossing.within() {
             Within::Policy(policy) => Ok(crossing
                 .pick(*policy, self.random(), offered)
-                .map(|(instance, cell)| (instance, cell, None))),
+                .map(|(instance, cell, lease)| (instance, cell, Held::cell(None, lease)))),
             Within::Selector {
                 selector, encoding, ..
             } => {
                 let chosen = crossing
                     .choose(&**selector, cx, &envelope.payload, *encoding, offered)
                     .await?;
-                Ok(chosen.map(|(instance, cell, picked)| {
+                Ok(chosen.map(|(instance, cell, picked, lease)| {
                     envelope.cx.add_meta(picked.meta);
-                    (instance, cell, picked.lease)
+                    (instance, cell, Held::cell(picked.lease, lease))
                 }))
             }
         }
@@ -130,7 +130,7 @@ impl Runtime {
     /// with the last hand-off that never left. Each choice starts from the request's own
     /// context, `cx`, which `envelope`'s was made from, so a declined
     /// selector's meta is not sent to the next cell; a declined choice's
-    /// lease ends before the next choice.
+    /// leases, its selector's and its cell's, end before the next choice.
     ///
     /// A chooser never chooses itself: the entry segment is in another
     /// class, so the hand-off always crosses velo.
@@ -149,7 +149,7 @@ impl Runtime {
             if let Within::Selector { .. } = crossing.within() {
                 envelope.cx = WireCx::of(cx);
             }
-            let Some((instance, cell, lease)) = self
+            let Some((instance, cell, held)) = self
                 .choose_cell(crossing, cx, &mut envelope, &offered)
                 .await?
             else {
@@ -168,7 +168,7 @@ impl Runtime {
                     return Ok(Handed {
                         accepted,
                         sent,
-                        lease,
+                        held,
                     });
                 }
                 Answer::Failed(error) => return Err(error),
@@ -420,6 +420,9 @@ mod tests {
                     retired: Box::new([]),
                     unread: false,
                     turn: Arc::new(AtomicUsize::new(0)),
+                    offering: true,
+                    revision: 1,
+                    leases: Arc::default(),
                 })]),
             },
         );
@@ -544,6 +547,9 @@ mod tests {
                     retired: Box::new([]),
                     unread: false,
                     turn: Arc::new(AtomicUsize::new(0)),
+                    offering: true,
+                    revision: 1,
+                    leases: Arc::default(),
                 })
             })
             .collect();
@@ -609,6 +615,9 @@ mod tests {
                     retired: Box::new([]),
                     unread: false,
                     turn: Arc::new(AtomicUsize::new(0)),
+                    offering: true,
+                    revision: 1,
+                    leases: Arc::default(),
                 })
             })
             .collect();
@@ -666,7 +675,7 @@ mod tests {
         let (before, wrote) = (COUNTED.load(Ordering::Relaxed), writes());
         COUNTING.with(|counting| counting.set(true));
         for _ in 0..1000 {
-            let (_, chosen) = crossing
+            let (_, chosen, _) = crossing
                 .pick(Policy::RoundRobin, &random, &[])
                 .expect("a cell");
             crossing.accepted(chosen);
@@ -680,14 +689,14 @@ mod tests {
         assert_eq!(writes() - wrote, 0, "an accepted pick wrote damping state");
 
         let lone = crossing_over(&["m1"]);
-        let (_, chosen) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
+        let (_, chosen, _) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
         lone.declined(chosen);
         assert_eq!(writes() - wrote, 1, "a decline wrote nothing");
         // A lone cell is never damped out of the choice.
-        let (_, chosen) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
+        let (_, chosen, _) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
         lone.accepted(chosen);
         assert_eq!(writes() - wrote, 2, "the acceptance kept the damping");
-        let (_, chosen) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
+        let (_, chosen, _) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
         lone.accepted(chosen);
         assert_eq!(writes() - wrote, 2, "an undamped cell's acceptance wrote");
     }

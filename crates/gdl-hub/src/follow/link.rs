@@ -6,51 +6,70 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use gdl_cells::CellRecord;
+use tokio_util::sync::CancellationToken;
 
 use super::relay::{Installed, Relay};
-use gdl_watch::{CellWatchEvent, CellWatcher, UnknownEvent, Watched};
+use gdl_watch::{CellWatchEvent, CellWatcher, Follower, UnknownEvent, Watched};
 
 /// Follow the cell of `record` in `generation` until its watch ends or
-/// fails, then drop it from the relay at once; after `refollow`, return
-/// the cell and the generation, for the follower to decide whether to
-/// follow it again. The wait is in the link's own task, which already
-/// exists per followed cell, so a follower holds no timer per cell.
+/// fails, or until the relay closes the follow (`close`), then end it in
+/// the relay at once, which marks it not offered if the relay has not
+/// closed it; return the cell, the generation, and whether the relay
+/// closed it, for the follower to decide whether to follow it again: at
+/// once if the relay closed it, else after `refollow`. The wait is in the
+/// link's own task, which already exists per followed cell, so a follower
+/// holds no timer per cell.
 pub(super) async fn run(
     relay: Arc<Relay>,
     watcher: CellWatcher,
+    me: Follower,
     record: CellRecord,
     generation: u64,
+    close: CancellationToken,
     refollow: Duration,
-) -> (String, u64) {
-    follow(&relay, &watcher, &record, generation, refollow).await;
+) -> (String, u64, bool) {
+    let closed = tokio::select! {
+        () = follow(&relay, &watcher, &me, &record, generation, refollow) => false,
+        () = close.cancelled() => true,
+    };
     relay.end(&record.class, &record.name, generation);
-    tokio::time::sleep(refollow).await;
-    (record.name, generation)
+    // A follow the relay closed is followed again only from a later write
+    // of the cell's record, which the follower should see from the moment
+    // of the close; the delay is for a link that failed.
+    if !closed {
+        tokio::time::sleep(refollow).await;
+    }
+    (record.name, generation, closed)
 }
 
 /// One item of a cell's watch.
 type Item = Watched<CellWatchEvent, UnknownEvent>;
 
-/// Read the cell's watch: its snapshot, installed in the relay once it is
-/// complete and only if it is the cell of `record` in the record's epoch,
-/// then each change. An event of a kind this build does not know withholds
-/// the cell in the relay until the link has read it again, from a new
-/// watch of it, which replaces this one: the new watch's snapshot and the
-/// events after it are ordered by the cell's hub, so nothing sent before
-/// the snapshot is applied over it, and nothing after it is lost. A watch
-/// that does not begin or ends before its snapshot is complete ends the
-/// follow, as any watch that ends does; one whose snapshot has an event of
-/// a kind this build does not know leaves the cell withheld, and the cell
-/// is read again after `retry`.
+/// Read the cell's watch, as `me`: its snapshot, installed in the relay
+/// once it is complete and only if it is the cell of `record` in the
+/// record's epoch, then each change. An event of a kind this build does
+/// not know withholds the cell in the relay until the link has read it
+/// again, from a new watch of it, which replaces this one: the new watch's
+/// snapshot and the events after it are ordered by the cell's hub, so
+/// nothing sent before the snapshot is applied over it, and nothing after
+/// it is lost. A watch that does not begin or ends before its snapshot is
+/// complete ends the follow, as any watch that ends does; one whose
+/// snapshot has an event of a kind this build does not know leaves the
+/// cell withheld, and the cell is read again after `retry`.
 async fn follow(
     relay: &Relay,
     watcher: &CellWatcher,
+    me: &Follower,
     record: &CellRecord,
     generation: u64,
     retry: Duration,
 ) {
     let (class, cell) = (record.class.as_str(), record.name.as_str());
-    let mut events = match watcher.watch(&record.hub).await {
+    let me = Follower {
+        generation,
+        ..me.clone()
+    };
+    let mut events = match watcher.follow(&record.hub, &me).await {
         Ok(events) => events,
         Err(error) => {
             tracing::info!(cell, %error, "a followed cell's watch did not begin");
@@ -77,7 +96,7 @@ async fn follow(
             // read again from a watch of its own, which replaces it.
             drop(events);
             tokio::time::sleep(wait).await;
-            let Some((fresh, read)) = reread(watcher, record).await else {
+            let Some((fresh, read)) = reread(watcher, &me, record).await else {
                 return;
             };
             events = read;
@@ -131,7 +150,14 @@ async fn snapshot(events: &mut BoxStream<'static, Item>, record: &CellRecord) ->
             state,
             load,
         })) if name == record.name && class == record.class && epoch == record.epoch => {
-            Installed::new(name, class, record.region.clone(), state, load)
+            Installed::new(
+                name,
+                class,
+                record.region.clone(),
+                record.hub.clone(),
+                state,
+                load,
+            )
         }
         Some(Watched::Event(CellWatchEvent::Cell { name, epoch, .. })) => {
             tracing::info!(
@@ -160,16 +186,20 @@ async fn snapshot(events: &mut BoxStream<'static, Item>, record: &CellRecord) ->
     Some(Snapshot { installed, unknown })
 }
 
-/// Read the cell of `record` again, from a watch of its own: the cell as
-/// its snapshot shows it, `None` if the snapshot had an event of a kind
-/// this build does not know, and the watch, to read on from. `None` if the
-/// watch does not begin, ends before its snapshot is complete, or its hub
-/// serves another cell or epoch, which ends the follow.
+/// Read the cell of `record` again, from a watch of its own, as `me`, the
+/// follow the watch it replaces names: the cell's hub then counts the
+/// follower on through the replacement, rather than as a watch that closed
+/// without a release. The cell as its snapshot shows it, `None` if the
+/// snapshot had an event of a kind this build does not know, and the
+/// watch, to read on from. `None` if the watch does not begin, ends before
+/// its snapshot is complete, or its hub serves another cell or epoch,
+/// which ends the follow.
 async fn reread(
     watcher: &CellWatcher,
+    me: &Follower,
     record: &CellRecord,
 ) -> Option<(Option<Installed>, BoxStream<'static, Item>)> {
-    let mut events = watcher.watch(&record.hub).await.ok()?;
+    let mut events = watcher.follow(&record.hub, me).await.ok()?;
     let Snapshot { installed, unknown } = snapshot(&mut events, record).await?;
     Some(((!unknown).then_some(installed), events))
 }
