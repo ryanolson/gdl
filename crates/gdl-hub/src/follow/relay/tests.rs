@@ -91,6 +91,7 @@ fn a_retired_instance_is_never_exposed() {
         CellWatchEvent::Retired {
             segment: "f".into(),
             instance: id,
+            acknowledged: false,
         },
     );
     assert_eq!(retired.len(), 1);

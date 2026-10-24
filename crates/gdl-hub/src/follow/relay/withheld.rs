@@ -38,6 +38,7 @@ fn retired(id: InstanceId) -> CellWatchEvent {
     CellWatchEvent::Retired {
         segment: "f".into(),
         instance: id,
+        acknowledged: false,
     }
 }
 

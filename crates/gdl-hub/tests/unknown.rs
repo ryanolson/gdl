@@ -139,6 +139,7 @@ impl Watch {
             self.send(&CellWatchEvent::Retired {
                 segment: "f".into(),
                 instance: *instance,
+                acknowledged: false,
             })
             .await;
         }

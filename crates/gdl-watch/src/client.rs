@@ -11,8 +11,8 @@ use futures::{Stream, StreamExt};
 
 use super::watched::Classify;
 use super::{
-    CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower, RELEASE_ROUTE, UnknownEvent,
-    UnknownFollowEvent, WATCH_ROUTE, Watched,
+    AVOIDED_ROUTE, Avoided, CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower,
+    RELEASE_ROUTE, UnknownEvent, UnknownFollowEvent, WATCH_ROUTE, Watched,
 };
 
 /// How long a connection to a cell's hub may take to open.
@@ -101,12 +101,27 @@ impl CellWatcher {
     /// Let go, as `follower`, of the cell whose hub is at `hub`: its watch
     /// no longer counts among the cell's followers.
     pub async fn release(&self, hub: &str, follower: &Follower) -> Result<(), CellWatchError> {
+        self.post(hub, RELEASE_ROUTE, follower).await
+    }
+
+    /// Tell the hub at `hub`, `host:port`, of a cell that `avoided` names
+    /// that the follower's whole cell avoids its retired entry instance.
+    pub async fn avoided(&self, hub: &str, avoided: &Avoided) -> Result<(), CellWatchError> {
+        self.post(hub, AVOIDED_ROUTE, avoided).await
+    }
+
+    async fn post(
+        &self,
+        hub: &str,
+        route: &str,
+        body: &impl serde::Serialize,
+    ) -> Result<(), CellWatchError> {
         gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
-        let url = format!("http://{hub}/v1/ext/{EXTENSION}{RELEASE_ROUTE}");
+        let url = format!("http://{hub}/v1/ext/{EXTENSION}{route}");
         let response = self
             .http
             .post(&url)
-            .json(follower)
+            .json(body)
             .send()
             .await
             .map_err(|e| CellWatchError(format!("POST {url}: {e}")))?;

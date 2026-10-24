@@ -40,6 +40,7 @@ mod followers;
 mod judge;
 mod load;
 mod publish;
+mod retiring;
 
 pub use feed::CellWatch;
 
@@ -147,6 +148,20 @@ pub use feed::CellWatch;
 /// (its [`gdl_watch::CellWatchEvent::State`] again, with `unfollowed`),
 /// and its entry instances
 /// stop taking work from other cells then rather than at their bound.
+///
+/// An entry instance's retirement waits for the cells that follow the cell
+/// when it retires, in the same states: each follower's hub says, once
+/// every chooser of its cell avoids the instance, that its whole cell does
+/// (`POST avoided` on the public listener, with the [`gdl_watch::Avoided`]
+/// that names its watch and the instance), and a release counts too, since
+/// a follower that let go makes no new offer. A watch lost without a
+/// release never counts; one that opens after the retirement is not waited
+/// for, since its snapshot shows the instance retired. Once none is
+/// waited for, the watch sends the instance's `retired` again with
+/// `acknowledged`, once, as the first one does when no cell follows; the
+/// retiree's stop waits for it, up to a bound of its own. Like a release,
+/// `avoided` is not authenticated: anything that can reach the cell's hub
+/// can end a retiree's wait early.
 ///
 /// It publishes the cell's [`CellRecord`] through `directory` at once, on
 /// each change of state, and on every heartbeat, from a task of its own,
@@ -549,8 +564,23 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
     fn public_routes(self: Arc<Self>) -> Router {
         let feed = Arc::clone(&self.feed);
         let releasing = Arc::clone(&self.feed);
+        let avoiding = Arc::clone(&self.feed);
         let relay = Arc::clone(&self.relay);
         Router::new()
+            .route(
+                gdl_watch::AVOIDED_ROUTE,
+                post(move |Json(avoided): Json<gdl_watch::Avoided>| async move {
+                    let gdl_watch::Avoided { follower, instance } = avoided;
+                    let gdl_watch::Follower {
+                        class,
+                        cell,
+                        run,
+                        generation,
+                    } = follower;
+                    avoiding.avoided(&((class, cell), run, generation), instance);
+                    StatusCode::NO_CONTENT
+                }),
+            )
             .route(
                 gdl_watch::RELEASE_ROUTE,
                 post(move |Json(follower): Json<gdl_watch::Follower>| async move {

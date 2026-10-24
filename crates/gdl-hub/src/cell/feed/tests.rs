@@ -175,6 +175,7 @@ async fn a_retirement_seen_before_the_peer_is_known_is_kept() {
     let retired = CellWatchEvent::Retired {
         segment: "f".into(),
         instance: id,
+        acknowledged: true,
     };
     assert_eq!(pending(&mut watch), std::slice::from_ref(&retired));
     let mut again = watch_now(&feed);
@@ -212,6 +213,7 @@ async fn a_departure_waits_for_what_the_loopback_holds_before_it() {
             CellWatchEvent::Retired {
                 segment: "f".into(),
                 instance: id,
+                acknowledged: true,
             },
             CellWatchEvent::Left {
                 segment: "f".into(),
@@ -253,6 +255,7 @@ async fn a_retirement_delivered_after_the_withdrawal_and_the_departure_comes_bef
             CellWatchEvent::Retired {
                 segment: "f".into(),
                 instance: id,
+                acknowledged: true,
             },
             CellWatchEvent::Left {
                 segment: "f".into(),
@@ -336,6 +339,7 @@ async fn retirement_is_final_and_comes_before_readiness() {
     let retired = CellWatchEvent::Retired {
         segment: "f".into(),
         instance: id,
+        acknowledged: true,
     };
     assert_eq!(pending(&mut watch), std::slice::from_ref(&retired));
     let mut again = watch_now(&feed);

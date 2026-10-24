@@ -16,7 +16,9 @@
 //!
 //! The feed also counts the cells that follow this one, by the watches
 //! their hubs hold open ([`super::followers`]), and tells its watchers once
-//! the cell drains and none does any more, under the same lock.
+//! the cell drains and none does any more, under the same lock. And it
+//! tells them once every cell that followed the cell when an entry
+//! instance retired avoids it ([`super::retiring`]), under the same lock.
 //!
 //! The feed also keeps the entry instances' load reports
 //! ([`super::load`]), under the same lock, so that a report is taken only
@@ -51,6 +53,7 @@ use velo_hub::velo::{InstanceId, PeerInfo};
 use super::count::Watched;
 use super::followers::{Followers, Following, Key, WatchKey};
 use super::load::Reports;
+use super::retiring::Retiring;
 use crate::fanout::Watchers;
 use gdl_watch::{CellWatchError, CellWatchEvent};
 
@@ -88,6 +91,7 @@ impl Feed {
                 unresolved: HashMap::new(),
                 loads: Reports::new(period),
                 followers: Followers::new(lease),
+                retiring: Retiring::default(),
                 events: broadcast::channel(buffer).0,
             }),
             epoch: watch::Sender::new(None),
@@ -174,6 +178,20 @@ impl Feed {
         if shared.followers.release(key, state) {
             shared.send(unfollowed());
         }
+        for instance in shared.retiring.released(key) {
+            shared.acknowledge(instance);
+        }
+    }
+
+    /// The follower of the watch `key` says that its whole cell avoids the
+    /// retired entry instance `instance`: the instance's watchers are told
+    /// once every watch its retirement waited for has said so or been
+    /// released. A watch it does not wait for changes nothing.
+    pub(super) fn avoided(&self, key: &WatchKey, instance: InstanceId) {
+        let mut shared = self.lock();
+        if shared.retiring.avoided(key, instance) {
+            shared.acknowledge(instance);
+        }
     }
 
     /// The cells that follow this one, as they change.
@@ -257,6 +275,7 @@ impl Feed {
                         peer,
                         ready: false,
                         retired: false,
+                        acknowledged: false,
                         held,
                         departed: false,
                     },
@@ -370,6 +389,8 @@ struct Shared {
     entries: HashMap<InstanceId, Entry>,
     /// The cells that follow this one.
     followers: Followers,
+    /// The retirements those cells have yet to acknowledge.
+    retiring: Retiring,
     /// Instances the loopback shows in an entry segment's services that the
     /// hub's members do not hold, with their segment: one whose services
     /// were committed before its admission, or one whose loopback events
@@ -391,6 +412,9 @@ struct Entry {
     ready: bool,
     /// Whether it has retired.
     retired: bool,
+    /// Whether every cell that followed this one when it retired avoids
+    /// it.
+    acknowledged: bool,
     /// Which of its services the loopback shows it in now.
     held: Held,
     /// Whether the hub removed it.
@@ -513,14 +537,32 @@ impl Shared {
             }
             Watched::Retired if !entry.retired => {
                 entry.retired = true;
+                entry.acknowledged = self.retiring.retire(id, self.followers.counted());
                 CellWatchEvent::Retired {
                     segment,
                     instance: id,
+                    acknowledged: entry.acknowledged,
                 }
             }
             _ => return,
         };
         self.send(event);
+    }
+
+    /// Say that the retirement of the member `id` is acknowledged, once.
+    fn acknowledge(&mut self, id: InstanceId) {
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return;
+        };
+        if !entry.retired || std::mem::replace(&mut entry.acknowledged, true) {
+            return;
+        }
+        let segment = self.segments[entry.segment].0.clone();
+        self.send(CellWatchEvent::Retired {
+            segment,
+            instance: id,
+            acknowledged: true,
+        });
     }
 
     /// Send `left` for the departed member `id` once the loopback shows it
@@ -534,6 +576,7 @@ impl Shared {
             return;
         }
         let entry = self.entries.remove(&id).expect("the entry was just found");
+        self.retiring.left(id);
         if entry.ready || entry.retired {
             let segment = self.segments[entry.segment].0.clone();
             self.send(CellWatchEvent::Left {
@@ -548,16 +591,16 @@ impl Shared {
     /// marker: retirements first, so that a follower that applies the
     /// events in order never makes a retired instance routable.
     fn snapshot(&self, name: &str, class: &str, epoch: u64) -> Vec<CellWatchEvent> {
-        let mut retired: Vec<(usize, InstanceId)> = Vec::new();
+        let mut retired: Vec<(usize, InstanceId, bool)> = Vec::new();
         let mut ready: Vec<(usize, InstanceId, &PeerInfo)> = Vec::new();
         for (id, entry) in &self.entries {
             if entry.retired {
-                retired.push((entry.segment, *id));
+                retired.push((entry.segment, *id, entry.acknowledged));
             } else if entry.ready {
                 ready.push((entry.segment, *id, &entry.peer));
             }
         }
-        retired.sort_by_key(|(segment, id)| (*segment, id.as_u128()));
+        retired.sort_by_key(|(segment, id, _)| (*segment, id.as_u128()));
         ready.sort_by_key(|(segment, id, _)| (*segment, id.as_u128()));
         let mut events = Vec::with_capacity(retired.len() + ready.len() + 2);
         events.push(CellWatchEvent::Cell {
@@ -571,12 +614,13 @@ impl Shared {
             events.push(unfollowed());
         }
         events.extend(
-            retired
-                .into_iter()
-                .map(|(segment, instance)| CellWatchEvent::Retired {
+            retired.into_iter().map(
+                |(segment, instance, acknowledged)| CellWatchEvent::Retired {
                     segment: self.segments[segment].0.clone(),
                     instance,
-                }),
+                    acknowledged,
+                },
+            ),
         );
         events.extend(
             ready
