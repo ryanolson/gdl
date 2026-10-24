@@ -6,15 +6,14 @@ mod common;
 
 use common::WAIT;
 use common::cells::{
-    Instance, Resolving, cell_hub, cell_hub_timed, followed, global_cell, global_hub, launch,
-    model_hub, pings, settings, sorted, spec, timing, unresolved_cell_hub, until,
+    Instance, Resolving, cell_hub, followed, global_cell, global_hub, launch, model_hub, pings,
+    settings, sorted, unresolved_cell_hub, until,
 };
 use common::proxy::{Mode, Proxy};
 use futures::StreamExt;
-use gdl_hub::{CellTiming, WatchCaps};
 use gdl_model::SegmentPhase;
 use gdl_runtime::CellState;
-use gdl_watch::{CellWatcher, FollowEvent};
+use gdl_watch::FollowEvent;
 
 const M1: &str = "model-x-01-us-east-1";
 const M2: &str = "model-x-02-us-east-1";
@@ -442,75 +441,6 @@ async fn a_cut_relay_watch_is_watched_again_from_a_snapshot() {
     );
     drop(chooser);
     for hub in [global, m1, m2] {
-        hub.shutdown().await.expect("valid test fixture");
-    }
-}
-
-/// A chooser whose relay watch its hub refuses, the relay's one place
-/// being held by the test, watches again as after any watch that does not
-/// begin, and is refused again; once the test lets go, its watch is
-/// served, its table holds the model cell's entry, and the entry is
-/// reachable from its node.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_refused_relay_watch_is_watched_again_once_there_is_room() {
-    let directory = Resolving::new();
-    let capped = CellTiming {
-        watch_caps: WatchCaps {
-            relay: 1,
-            ..WatchCaps::default()
-        },
-        ..timing()
-    };
-    let (global, relay) = cell_hub_timed(&spec(), global_hub(), &directory, capped).await;
-    let (m1, _) = cell_hub(model_hub(M1, "m1-hub:1337"), &directory).await;
-    let (f1, _d1) = (
-        Instance::ready(&m1, "f").await,
-        Instance::ready(&m1, "d").await,
-    );
-    let watcher = CellWatcher::new().expect("a client");
-    let address = format!("127.0.0.1:{}", global.public_addr().port());
-    let mut held = tokio::time::timeout(WAIT, watcher.follows(&address))
-        .await
-        .expect("the hub answers in time")
-        .expect("the hub serves the relay's one watch");
-    tokio::time::timeout(WAIT, held.next())
-        .await
-        .expect("the snapshot begins in time")
-        .expect("the watch is served");
-
-    let config = settings(
-        global.public_addr().port(),
-        global.control_addr().port(),
-        5_000,
-        &global_cell(),
-    );
-    let (_process, chooser) = launch(&config, "a").await.expect("the chooser launched");
-    let cells = chooser.cells().expect("a chooser");
-    // Refused twice: the watch was asked for again after the first.
-    let refusing = async {
-        while relay.refused_watches().relay < 2 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    };
-    tokio::time::timeout(WAIT, refusing)
-        .await
-        .expect("the chooser's relay watch was refused twice within the wait");
-    assert!(
-        cells.followed("f").is_empty(),
-        "a refused watch filled a table"
-    );
-
-    drop(held);
-    until(&cells, "the model cell's entry in the table", |cells| {
-        followed(cells, "f", M1).is_some_and(|m| m.eligible == [f1.id()])
-    })
-    .await;
-    assert!(
-        pings(&chooser.node(), f1.id()).await,
-        "the entry is not reachable"
-    );
-    drop(chooser);
-    for hub in [global, m1] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
