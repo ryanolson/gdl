@@ -338,75 +338,108 @@ async fn a_real_hubs_snapshot_completes_well_inside_its_bounds() {
         instance.announce(SegmentPhase::Ready).await;
         instances.push(instance);
     }
-    let (global_hub, global) = serve_cell(global_default(), &directory, timing()).await;
+    let (global_hub, _global) = serve_cell(global_default(), &directory, timing()).await;
     let watcher = CellWatcher::new().expect("a client");
     let model = format!("127.0.0.1:{}", model_hub.public_addr().port());
     let relay = format!("127.0.0.1:{}", global_hub.public_addr().port());
 
     // The cell's watch, once it shows every entry instance.
-    let (bytes, took) = loop {
-        let start = Instant::now();
-        let mut events = watcher.watch(&model).await.expect("the watch begins");
-        let (mut bytes, mut readies) = (0, 0);
-        loop {
-            let event = tokio::time::timeout(WAIT, events.next())
-                .await
-                .expect("an event in time")
-                .expect("the watch goes on")
-                .expect("the watch does not fail")
-                .event()
-                .expect("a known event");
-            bytes += serde_json::to_string(&event).expect("serializes").len() + 8;
-            match event {
-                CellWatchEvent::Synced => break,
-                CellWatchEvent::Ready { .. } => readies += 1,
-                _ => {}
-            }
-        }
-        if readies == ENTRIES {
-            break (bytes, start.elapsed());
-        }
-    };
+    let (bytes, took) = whole(|| watcher.watch(&model), ENTRIES, WAIT).await;
     println!("a cell's snapshot of {ENTRIES} entry instances: {bytes} bytes in {took:?}");
     assert!(took < WatchLimits::SYNCED_WITHIN / 30, "{took:?}");
     assert!(bytes < WatchLimits::SNAPSHOT / 100, "{bytes} bytes");
 
     // The global's relay, once it shows them too.
-    let mut following = global.following();
-    tokio::time::timeout(
-        WAIT,
-        following.wait_for(|following| following.contains_key(&("model_x".into(), CELL.into()))),
-    )
-    .await
-    .expect("followed in time")
-    .expect("the hub lives");
-    let (bytes, took) = loop {
-        let start = Instant::now();
-        let mut events = watcher.follows(&relay).await.expect("the watch begins");
-        let (mut bytes, mut exposed) = (0, 0);
-        loop {
-            let event = tokio::time::timeout(WAIT, events.next())
-                .await
-                .expect("an event in time")
-                .expect("the watch goes on")
-                .expect("the watch does not fail")
-                .event()
-                .expect("a known event");
-            bytes += serde_json::to_string(&event).expect("serializes").len() + 8;
-            match event {
-                FollowEvent::Synced => break,
-                FollowEvent::Exposed { .. } => exposed += 1,
-                _ => {}
-            }
-        }
-        if exposed == ENTRIES {
-            break (bytes, start.elapsed());
-        }
-    };
+    let (bytes, took) = whole(|| watcher.follows(&relay), ENTRIES, WAIT).await;
     println!("a relay's snapshot of {ENTRIES} entry instances: {bytes} bytes in {took:?}");
     assert!(took < WatchLimits::SYNCED_WITHIN / 30, "{took:?}");
     assert!(bytes < WatchLimits::SNAPSHOT / 100, "{bytes} bytes");
     drop(instances);
+}
+
+/// A complete snapshot that never shows every entry instance expected
+/// fails the test within its deadline, rather than being watched again
+/// and again: here a cell of one entry instance, expected to show two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[should_panic(expected = "a snapshot of every entry instance in time")]
+async fn a_snapshot_short_of_its_entries_fails_in_time() {
+    let directory = Resolving::new();
+    let (model_hub, _model) = serve_cell(
+        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (_instances, _) = meet_the_quorum(&model_hub).await;
+    let watcher = CellWatcher::new().expect("a client");
+    let model = format!("127.0.0.1:{}", model_hub.public_addr().port());
+    whole(|| watcher.watch(&model), 2, Duration::from_millis(500)).await;
+}
+
+/// An event of a watch that may show an entry instance.
+trait Shown: serde::Serialize {
+    fn synced(&self) -> bool;
+    fn entry(&self) -> bool;
+}
+
+impl Shown for CellWatchEvent {
+    fn synced(&self) -> bool {
+        matches!(self, Self::Synced)
+    }
+
+    fn entry(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
+impl Shown for FollowEvent {
+    fn synced(&self) -> bool {
+        matches!(self, Self::Synced)
+    }
+
+    fn entry(&self) -> bool {
+        matches!(self, Self::Exposed { .. })
+    }
+}
+
+/// Watch with `open` until a complete snapshot shows `entries` entry
+/// instances, the hub having perhaps not shown them all yet, within
+/// `within` in all: that snapshot's bytes, and how long it took.
+async fn whole<E, U, F, O>(open: F, entries: usize, within: Duration) -> (usize, Duration)
+where
+    E: Shown,
+    F: Fn() -> O,
+    O: std::future::Future<
+            Output = Result<gdl_watch::WatchStream<E, U>, gdl_watch::CellWatchError>,
+        >,
+{
+    let watched = async {
+        loop {
+            let start = Instant::now();
+            let mut events = open().await.expect("the watch begins");
+            let (mut bytes, mut shown) = (0, 0);
+            loop {
+                let event = events
+                    .next()
+                    .await
+                    .expect("the watch goes on")
+                    .expect("the watch does not fail")
+                    .event()
+                    .expect("a known event");
+                bytes += serde_json::to_string(&event).expect("serializes").len() + 8;
+                if event.synced() {
+                    break;
+                }
+                shown += usize::from(event.entry());
+            }
+            if shown == entries {
+                return (bytes, start.elapsed());
+            }
+        }
+    };
+    tokio::time::timeout(within, watched)
+        .await
+        .expect("a snapshot of every entry instance in time")
 }
 
 /// A follow whose snapshot completed is never ended by the snapshot's
