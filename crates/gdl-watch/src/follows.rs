@@ -27,8 +27,8 @@ use velo::{InstanceId, PeerInfo};
 ///
 /// A watch begins with a snapshot: for each follow, the earlier
 /// generations that have yet to close first, [`FollowEvent::Follow`], its
-/// [`FollowEvent::Offering`] if it is not offered or has changed since it
-/// was installed, then its retired instances, then its exposed instances;
+/// [`FollowEvent::Offering`] if it is not offered, then its retired
+/// instances, then its exposed instances;
 /// then [`FollowEvent::Synced`], the relay's marker, which names no cell.
 /// After it, each change as it happens. A follow appears only once its
 /// cell watch's snapshot is complete, and with its state before any of
@@ -113,10 +113,16 @@ pub enum FollowEvent {
         load: Option<LoadSummary>,
     },
     /// A follow changed between offered and not offered, or, in a
-    /// snapshot, is not offered or has changed since it was installed:
-    /// its revision, which grows by one on every change, and whether it
-    /// is offered. A consumer applies each in revision order, and ignores
-    /// one older than the last it applied.
+    /// snapshot, is not offered: its revision, which grows by one on every
+    /// change, and whether it is offered. A follow shown in a snapshot
+    /// without one is offered, at a revision the consumer takes as 1, so
+    /// that it applies every later change. A consumer applies each in
+    /// revision order, and ignores one older than the last it applied.
+    ///
+    /// A reader that does not know this kind fails closed for the cell
+    /// until a snapshot of it shows the cell without one: it keeps from a
+    /// follow that is not offered, which is what this event says, and
+    /// takes the cell again once it is offered.
     Offering {
         /// The cell's class.
         class: String,

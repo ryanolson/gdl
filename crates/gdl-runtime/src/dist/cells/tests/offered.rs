@@ -320,3 +320,27 @@ fn a_hidden_instance_that_leaves_is_let_go() {
     );
     assert!(table(&cells, M1).is_some(), "the follow lives on");
 }
+
+/// A follow offered again at a later revision is shown in a later relay
+/// snapshot without its `offering`, as offered at revision 1: the follower
+/// takes it so, and the next change, of a revision greater than the one it
+/// held before the snapshot, is applied and acknowledged at its revision.
+#[test]
+fn a_follow_shown_without_its_offering_applies_every_later_revision() {
+    let (mut follows, cells, _, now) = followed();
+    live(
+        &mut follows,
+        now,
+        [offering(1, 2, false), offering(1, 3, true)],
+    );
+    let mut snapshot = follows.snapshot();
+    for event in [follow(M1, 1, CellState::Ready), exposed(M1, 1, &peer())] {
+        snapshot.apply(event, now);
+    }
+    follows.resnapshot(snapshot, now);
+    assert!(chosen_from(&cells).offering, "offered");
+    assert!(offer(&cells).is_some());
+    live(&mut follows, now, [offering(1, 4, false)]);
+    assert!(!chosen_from(&cells).offering);
+    assert_eq!(follows.acknowledgements(now), [unoffered(1, 4)]);
+}

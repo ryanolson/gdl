@@ -483,3 +483,36 @@ fn a_watch_of_one_follow_shows_its_closing_generations() {
         ]
     );
 }
+
+/// A relay snapshot shows `offering` only for a follow that is not
+/// offered: one offered again, at a later revision, shows none, so that an
+/// earlier reader, which does not know the kind and fails closed for the
+/// cell until it reads it again, reads it again as offered. A reader of
+/// this build takes a follow shown without one as offered, and applies
+/// each later revision.
+#[test]
+fn a_snapshot_shows_offering_only_for_a_follow_not_offered() {
+    let relay = Relay::new(
+        64,
+        tokio::sync::watch::Sender::new(health()),
+        super::Choosers::default(),
+        tokio::sync::mpsc::unbounded_channel().0,
+    );
+    let m = relay.begin("model_x", "m").0;
+    relay.install(m, installed("m", CellState::Ready));
+    relay.withhold("model_x", "m", m);
+    relay.restore("model_x", "m", m, installed("m", CellState::Ready));
+    let mut late = relay.watch();
+    let snapshot = pending(&mut late);
+    assert!(
+        !snapshot
+            .iter()
+            .any(|event| matches!(event, FollowEvent::Offering { .. })),
+        "{snapshot:?}"
+    );
+    let mut alone = relay.watch_of("model_x", "m");
+    assert_eq!(
+        pending(&mut alone),
+        [follow("m", m, CellState::Ready), FollowEvent::Synced]
+    );
+}

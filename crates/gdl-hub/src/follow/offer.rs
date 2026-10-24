@@ -74,10 +74,14 @@ impl Offer {
         !self.offered && self.acknowledged.len() >= choosers
     }
 
-    /// Whether a snapshot shows the offered state: it is not what a
-    /// follow is installed with by default, offered at revision 1.
+    /// Whether a snapshot shows the offered state: only while the follow
+    /// is not offered. An earlier reader, which does not know the kind,
+    /// fails closed for the cell until a snapshot of it shows none, so a
+    /// follow offered again must show none; a reader of this build takes a
+    /// follow shown without one as offered, and applies every later
+    /// revision, which is greater than the one it then holds.
     pub(super) fn shown(&self) -> bool {
-        !self.offered || self.revision > 1
+        !self.offered
     }
 
     /// The relay's event of the offered state of the follow `generation`
