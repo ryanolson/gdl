@@ -15,6 +15,47 @@ fn origin(origin: &Origin) -> String {
     format!("{} {} {}", origin.package, origin.version, origin.path)
 }
 
+#[test]
+fn message_codecs_survive_source_reading_and_exports() {
+    let workspace = workspace();
+    let protocols = workspace.extract("read-protocols").expect("package");
+    clean(&protocols);
+    let encoding = |name: &str| {
+        protocols
+            .offer
+            .messages
+            .iter()
+            .find(|m| m.name == name)
+            .expect("message found")
+            .encoding
+    };
+    assert_eq!(encoding("Words"), gdl_model::Encoding::MsgpackArray);
+    assert_eq!(encoding("Session"), gdl_model::Encoding::Json);
+    assert_eq!(encoding("Token"), gdl_model::Encoding::Msgpack);
+    assert_eq!(
+        protocols
+            .offer
+            .exports
+            .iter()
+            .find(|e| e.name == "Session")
+            .expect("message found")
+            .encoding,
+        gdl_model::Encoding::Json
+    );
+    let facade = workspace.extract("read-facade").expect("package");
+    clean(&facade);
+    assert_eq!(
+        facade
+            .offer
+            .exports
+            .iter()
+            .find(|e| e.name == "Prompt")
+            .expect("message found")
+            .encoding,
+        gdl_model::Encoding::MsgpackArray
+    );
+}
+
 fn clean(extraction: &Extraction) {
     assert!(
         extraction.problems.is_empty(),

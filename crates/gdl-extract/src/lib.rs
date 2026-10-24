@@ -378,6 +378,8 @@ pub struct MessageEntry {
     /// Whether it implements `Serialize` and `Deserialize`, by derive or by
     /// an impl the reader found.
     pub wire: bool,
+    /// The declared wire encoding, also read for messages without serde impls.
+    pub encoding: gdl_model::Encoding,
     /// Whether its definition path is public: the type and every module
     /// above it are `pub`. Code outside the crate can name it there only
     /// if so; an export gives it another path.
@@ -395,6 +397,8 @@ pub struct ExportEntry {
     pub origin: Origin,
     /// Whether the message is a wire type, as its definition shows.
     pub wire: bool,
+    /// The encoding declared at the message's definition.
+    pub encoding: gdl_model::Encoding,
     /// Whether the public path is public: every module above the `pub use`
     /// is `pub`.
     pub public: bool,

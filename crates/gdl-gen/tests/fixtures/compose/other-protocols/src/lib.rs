@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// Another crate's chunk: the same name, another type.
 #[derive(Serialize, Deserialize, gdl_message::Message)]
+#[gdl(codec = "json")]
 pub struct Chunk {
     /// The chunk's bytes.
     pub bytes: Vec<u8>,

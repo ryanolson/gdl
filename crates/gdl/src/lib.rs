@@ -15,6 +15,7 @@
 //!
 //! The design and its rulings are in `agent-docs/plan.md`.
 
+mod codec;
 mod compose;
 mod cx;
 mod error;
@@ -35,7 +36,7 @@ pub use compose::{
 pub use cx::{Cx, Deadline, RequestId};
 pub use error::{Error, ErrorKind, Result};
 pub use gdl_macros::{Config, Endpoints, Metrics};
-pub use gdl_model::{ConfigField, ConfigSchema, ConfigValue, MetricField, MetricKind};
+pub use gdl_model::{ConfigField, ConfigSchema, ConfigValue, Encoding, MetricField, MetricKind};
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 pub use metrics::Metrics;
@@ -51,6 +52,8 @@ pub use select::{
 pub use service::{Client, Endpoints, Service};
 pub use streamed::Streamed;
 
+#[doc(hidden)]
+pub use gdl_message::message_encoding;
 /// Message types, from `gdl-message`. A protocols crate depends on that
 /// crate alone; a node crate can reach the same items here.
 pub use gdl_message::{Catalogue, Identity, MessageInfo, Shape};
@@ -90,6 +93,7 @@ pub use gdl_macros::Node;
 /// request's visit records. Not a stable interface.
 #[doc(hidden)]
 pub mod __runtime {
+    pub use crate::codec::{decoder, encoder};
     pub use crate::cx::wall_now_nanos;
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
     pub use crate::meter::{

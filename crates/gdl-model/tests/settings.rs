@@ -22,8 +22,8 @@ fn manifest() -> Manifest {
         forward: vec![],
         inner: inner.into(),
         backward: vec![],
-        forward_types: vec![TypeInfo::new("T", true)],
-        backward_types: vec![TypeInfo::new("T", true)],
+        forward_types: vec![TypeInfo::new("T", true, Default::default())],
+        backward_types: vec![TypeInfo::new("T", true, Default::default())],
     };
     Manifest {
         name: "classed".into(),

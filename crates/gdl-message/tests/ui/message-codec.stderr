@@ -1,0 +1,17 @@
+error: unknown codec: expected msgpack, msgpack_array, json
+ --> tests/ui/message-codec.rs:2:15
+  |
+2 | #[gdl(codec = "bincode")]
+  |               ^^^^^^^^^
+
+error: a message declares its codec only once
+ --> tests/ui/message-codec.rs:6:23
+  |
+6 | #[gdl(codec = "json", codec = "msgpack")]
+  |                       ^^^^^
+
+error: expected codec = "...", one of: msgpack, msgpack_array, json
+  --> tests/ui/message-codec.rs:10:7
+   |
+10 | #[gdl(codex = "json")]
+   |       ^^^^^

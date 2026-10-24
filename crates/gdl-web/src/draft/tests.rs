@@ -21,6 +21,7 @@ fn catalog(dir: &std::path::Path) -> Catalog {
         name: name.into(),
         path: path.into(),
         wire: true,
+        encoding: Default::default(),
         public: true,
     };
     for offer in [
@@ -173,6 +174,7 @@ fn two_messages_of_one_name_are_named_apart_and_pinned() {
                 name: "Token".into(),
                 path: format!("{package}::Token"),
                 wire: true,
+                encoding: Default::default(),
                 public: true,
             }],
             exports: Vec::new(),
@@ -346,6 +348,7 @@ fn a_message_exported_only_by_a_facade_is_composed() {
         name: name.into(),
         path: path.into(),
         wire: true,
+        encoding: Default::default(),
         public,
     };
     let offer = |package: &str, messages, exports, nodes| Offer {
@@ -374,6 +377,7 @@ fn a_message_exported_only_by_a_facade_is_composed() {
                 path: "facade::Words".into(),
                 origin: origin("proto::inner::Words"),
                 wire: true,
+                encoding: Default::default(),
                 public: true,
             }],
             Vec::new(),
@@ -490,6 +494,7 @@ fn a_node_read_against_an_older_version_says_to_add_it_again() {
                 name: "Words".into(),
                 path: "proto::Words".into(),
                 wire: true,
+                encoding: Default::default(),
                 public: true,
             }],
             exports: Vec::new(),

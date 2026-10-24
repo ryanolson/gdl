@@ -38,6 +38,8 @@ pub struct MessageInfo {
     pub path: String,
     /// Whether the type has a codec, so an edge carrying it may cross.
     pub wire: bool,
+    /// The encoding declared on the message type.
+    pub encoding: gdl_model::Encoding,
 }
 
 /// A message's identity, as a catalogue holds it.
@@ -225,6 +227,7 @@ pub mod registry {
         pub dir: &'static str,
         pub name: &'static str,
         pub module: &'static str,
+        pub encoding: gdl_model::Encoding,
         /// Expanded where the type is concrete, as the wire probe must be.
         pub wire: fn() -> bool,
     }
@@ -238,6 +241,7 @@ pub mod registry {
                 name: self.name.to_string(),
                 path: super::plain(&format!("{}::{}", self.module, self.name)),
                 wire: (self.wire)(),
+                encoding: self.encoding,
             }
         }
     }

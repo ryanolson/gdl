@@ -18,6 +18,8 @@ pub trait Message: Send + 'static {
     const NAME: &'static str;
     /// The type's identity.
     const IDENTITY: Identity;
+    /// The encoding of this complete value when an edge crosses segments.
+    const ENCODING: gdl_model::Encoding;
 }
 
 /// The messages at a port: one message, `()`, or a streamed request's head

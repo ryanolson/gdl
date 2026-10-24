@@ -133,7 +133,12 @@ mod tests {
 
     async fn pick(selector: &Typed<LeastLoaded>, ids: &[InstanceId]) -> (usize, Picked) {
         let picked = selector
-            .select(&Cx::new(), &[], Instances::new("worker", ids))
+            .select(
+                &Cx::new(),
+                &[],
+                Default::default(),
+                Instances::new("worker", ids),
+            )
             .await
             .expect("a choice");
         (picked.index, picked)

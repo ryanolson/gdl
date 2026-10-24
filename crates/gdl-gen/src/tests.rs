@@ -21,8 +21,8 @@ fn manifest() -> Manifest {
             forward: vec![],
             inner: "D".into(),
             backward: vec![],
-            forward_types: vec![TypeInfo::new("Req", true)],
-            backward_types: vec![TypeInfo::new("Item", true)],
+            forward_types: vec![TypeInfo::new("Req", true, Default::default())],
+            backward_types: vec![TypeInfo::new("Item", true, Default::default())],
         }],
     }
 }
@@ -113,6 +113,7 @@ fn a_graph_files_manifest_is_built_as_its_contract_prints_it() {
         root.join("tests/fixtures/compose/pinned.toml"),
         root.join("tests/fixtures/compose/versions-pinned.toml"),
         root.join("tests/fixtures/compose/streamed.toml"),
+        root.join("tests/fixtures/compose/facade.toml"),
     ] {
         let spec = Spec::load(&spec).expect("spec");
         let built = prepare(&spec, None, &target, emit::Deps::Relative, Offers::Read)
@@ -121,6 +122,32 @@ fn a_graph_files_manifest_is_built_as_its_contract_prints_it() {
         let compiled = compiled_manifest(&spec, &target);
         assert_eq!(built, compiled);
         assert_eq!(built.contract_hash(), compiled.contract_hash());
+
+        let placement = gdl_model::Placement::new()
+            .segment("all", built.nodes.iter().map(|node| node.name.as_str()));
+        let deployment = gdl_model::DeploymentSpec::new(built, placement).expect("deployment");
+        let json = serde_json::to_string_pretty(&deployment).expect("deployment JSON");
+        let deployed: gdl_model::DeploymentSpec =
+            serde_json::from_str(&json).expect("read deployment JSON");
+        assert_eq!(deployed.graph, compiled);
+        assert_eq!(deployed.graph.contract_hash(), compiled.contract_hash());
+
+        if spec.file.ends_with("pinned.toml") || spec.file.ends_with("streamed.toml") {
+            let head = &compiled.hops[0].forward_types[0];
+            assert_eq!(head.encoding, gdl_model::Encoding::Json);
+            if let Some(item) = &head.stream {
+                assert_eq!(item.encoding, gdl_model::Encoding::MsgpackArray);
+            }
+            assert_eq!(
+                compiled.hops[0].backward_types[0].encoding,
+                gdl_model::Encoding::MsgpackArray
+            );
+        } else if spec.file.ends_with("facade.toml") {
+            assert_eq!(
+                compiled.hops[0].forward_types[0].encoding,
+                gdl_model::Encoding::Json
+            );
+        }
     }
 }
 
@@ -473,7 +500,7 @@ fn a_package_bound_from_two_paths_is_refused() {
     manifest.hops[0].backward.push("F".into());
     manifest.hops[0]
         .backward_types
-        .push(TypeInfo::new("Item", true));
+        .push(TypeInfo::new("Item", true, Default::default()));
     let placement = gdl_model::Placement::new()
         .segment("front", ["S", "F"])
         .segment("engine", ["D"]);
@@ -594,7 +621,14 @@ fn a_streaming_source_is_not_served_as_json_lines() {
     let out = std::path::Path::new("/work/segments");
     let spec = spec(split(), &[("D", "tiny_nodes::D")]);
     let mut manifest = manifest();
-    manifest.hops[0].forward_types = vec![TypeInfo::streamed("Req", true, "Chunk", true)];
+    manifest.hops[0].forward_types = vec![TypeInfo::streamed(
+        "Req",
+        true,
+        Default::default(),
+        "Chunk",
+        true,
+        Default::default(),
+    )];
     let files = rendered(&spec, &manifest, out).expect("render");
     let front = &files[&PathBuf::from("front/src/lib.rs")];
     assert!(!front.contains("serve_json_lines"), "{front}");
@@ -713,8 +747,8 @@ fn two_roots() -> Manifest {
         forward: vec![],
         inner: "D".into(),
         backward: vec![],
-        forward_types: vec![TypeInfo::new("Req", true)],
-        backward_types: vec![TypeInfo::new("Item", true)],
+        forward_types: vec![TypeInfo::new("Req", true, Default::default())],
+        backward_types: vec![TypeInfo::new("Item", true, Default::default())],
     });
     manifest
 }

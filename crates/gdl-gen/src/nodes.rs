@@ -290,6 +290,7 @@ mod tests {
                         origin: origin(n),
                         path: format!("chat_protocols::{n}"),
                         wire: true,
+                        encoding: Default::default(),
                     },
                 )
             })

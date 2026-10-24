@@ -298,7 +298,7 @@ fn verify_compares_the_build_with_the_source() {
         .to_string();
     assert_eq!(
         error,
-        "registered by the build, not read from source: message `Hidden` at `macro_made::Hidden`, local"
+        "registered by the build, not read from source: message `Hidden` at `macro_made::Hidden`, local (codec msgpack)"
     );
 }
 

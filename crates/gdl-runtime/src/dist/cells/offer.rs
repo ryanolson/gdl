@@ -108,9 +108,11 @@ impl Runtime {
             Within::Policy(policy) => Ok(crossing
                 .pick(*policy, self.random(), offered)
                 .map(|(instance, cell, lease)| (instance, cell, Held::cell(None, lease)))),
-            Within::Selector { selector, .. } => {
+            Within::Selector {
+                selector, encoding, ..
+            } => {
                 let chosen = crossing
-                    .choose(&**selector, cx, &envelope.payload, offered)
+                    .choose(&**selector, cx, &envelope.payload, *encoding, offered)
                     .await?;
                 Ok(chosen.map(|(instance, cell, picked, lease)| {
                     envelope.cx.add_meta(picked.meta);
@@ -321,8 +323,8 @@ mod tests {
                 forward: vec![],
                 inner: "D".into(),
                 backward: vec![],
-                forward_types: vec![gdl_model::TypeInfo::new("T", true)],
-                backward_types: vec![gdl_model::TypeInfo::new("T", true)],
+                forward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
+                backward_types: vec![gdl_model::TypeInfo::new("T", true, Default::default())],
             }],
         };
         let placement = gdl_model::Placement::new()
@@ -432,6 +434,7 @@ mod tests {
         let selector = Router::Selector {
             name: Arc::from("replacing"),
             selector: Arc::new(Typed(Arc::new(Replacing))),
+            encoding: Default::default(),
         };
         let routers = [
             policy.clone(),
@@ -448,6 +451,140 @@ mod tests {
             writes,
             "an accepted offer to an undamped cell wrote damping state"
         );
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Prompt {
+        text: String,
+    }
+
+    /// Reads the head as a `Prompt`, counts the reads, and takes the
+    /// first instance.
+    struct Reading(AtomicUsize);
+
+    impl gdl::Selector for Reading {
+        type Head = Prompt;
+
+        async fn select<'a>(
+            &'a self,
+            request: gdl::Request<'a, Prompt>,
+            instances: gdl::Instances<'a>,
+        ) -> Result<gdl::Choice<'a>> {
+            assert_eq!(request.head().text, "hello");
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(gdl::Choice::new(instances.get(0).expect("never empty")))
+        }
+    }
+
+    /// A failover chooses the next cell's instance with the selector as
+    /// the first offer did, reading the head in the edge's encoding: the
+    /// first offer, to either cell, is declined, and the other cell's
+    /// entry takes the request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failover_reads_the_head_in_the_edges_encoding() {
+        let layout = layout();
+        let chooser = bind_node(([127, 0, 0, 1], 0).into())
+            .await
+            .expect("a velo node");
+        let mut entries = Vec::new();
+        let mut roster = Roster::new();
+        for _ in 0..2 {
+            let entry = bind_node(([127, 0, 0, 1], 0).into())
+                .await
+                .expect("a velo node");
+            roster.add("d", entry.peer_info());
+            entries.push(entry);
+        }
+        let fabric = Fabric::new(chooser, None, None, Duration::from_secs(30));
+        let rt = Runtime::new(
+            fabric,
+            layout.clone(),
+            "a".into(),
+            &roster,
+            RuntimeConfig::default(),
+            None,
+        )
+        .expect("a runtime");
+        let offers = Arc::new(AtomicUsize::new(0));
+        let declined = crate::dist::envelope::encode(&Err::<Accepted, Error>(Error::new(
+            ErrorKind::Overloaded,
+            "full",
+        )))
+        .expect("encode");
+        let accepted = crate::dist::envelope::encode(&Ok::<Accepted, Error>(None)).expect("encode");
+        for entry in &entries {
+            let offers = Arc::clone(&offers);
+            let (declined, accepted) = (declined.clone(), accepted.clone());
+            Fabric::new(entry.clone(), None, None, Duration::from_secs(30))
+                .register(&rt.names().forward, move |_| {
+                    let first = offers.fetch_add(1, Ordering::SeqCst) == 0;
+                    let reply = if first {
+                        declined.clone()
+                    } else {
+                        accepted.clone()
+                    };
+                    Box::pin(async move { reply })
+                })
+                .expect("a handler");
+        }
+        let cells = Cells::new("home", ["d"]);
+        let tables = entries
+            .iter()
+            .zip(["m1", "m2"])
+            .map(|(entry, name)| {
+                let id = entry.instance_id();
+                Arc::new(CellTable {
+                    class: "model_x".into(),
+                    cell: name.into(),
+                    id: cell_id("model_x", name),
+                    generation: 1,
+                    region: "home".into(),
+                    state: CellState::Ready,
+                    load: super::super::tests::idle(),
+                    eligible: Box::new([id]),
+                    offered: Box::new([gdl::InstanceId::from_u128(id.as_u128())]),
+                    retired: Box::new([]),
+                    turn: Arc::new(AtomicUsize::new(0)),
+                    offering: true,
+                    revision: 1,
+                    leases: Arc::default(),
+                })
+            })
+            .collect();
+        cells.store("d", EntryTable { cells: tables });
+        let mut targets = targets(&layout, "a", &cells).expect("targets");
+        let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
+        let reading = Arc::new(Reading(AtomicUsize::new(0)));
+        let router = Router::Cells(Arc::new(Crossing::new(
+            target,
+            Router::Selector {
+                name: Arc::from("reading"),
+                selector: Arc::new(Typed(Arc::clone(&reading))),
+                encoding: gdl_model::Encoding::Json,
+            },
+        )));
+        let cx = Cx::new();
+        let envelope = Forward {
+            version: VERSION,
+            identity: rt.identity,
+            hop: 0,
+            pos: 1,
+            cx: WireCx::of(&cx),
+            reply: ReplyTo::test_value(7),
+            payload: serde_json::to_vec(&Prompt {
+                text: "hello".into(),
+            })
+            .expect("encoded"),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            rt.send_forward("d", &router, &cx, envelope, false),
+        )
+        .await
+        .expect("answered in time")
+        .expect("the second cell took it");
+        assert_eq!(offers.load(Ordering::SeqCst), 2, "one decline, one take");
+        assert_eq!(reading.0.load(Ordering::SeqCst), 2, "a choice per cell");
     }
 
     /// The crossing into `model_x` of [`layout`], over `cells`, each with

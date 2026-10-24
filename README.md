@@ -74,7 +74,7 @@ The macro checks the topology at compile time. An implementation with the wrong 
 - `manifest()`: the graph as data, with the wire capability of each edge type.
 - `SourceReq` and `SourceItem`: the source's request and item types.
 
-Bump `schema` when the wire form of a message type changes.
+Bump `schema` when a message's serde representation changes. Declared codec changes update the contract hash automatically.
 
 ### Streamed requests
 
@@ -107,6 +107,34 @@ pub use chat_protocols::Prompt;
 ```
 
 A crate that depends on gdl can write `gdl::Message` and `gdl::export` instead.
+
+Messages cross segments as named-field MessagePack by default. This encoding preserves omitted optional fields, including fields in nested structs. A message can select its encoding:
+
+```rust
+#[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
+#[gdl(codec = "json")]
+pub struct ChatRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    pub prompt: String,
+}
+```
+
+| Annotation | Encoding |
+|------------|----------|
+| Omitted, or `#[gdl(codec = "msgpack")]` | MessagePack maps with field names |
+| `#[gdl(codec = "msgpack_array")]` | Positional MessagePack arrays. Fields must not be conditionally omitted. |
+| `#[gdl(codec = "json")]` | JSON |
+
+The codec applies to the complete message, including nested values. Nested message annotations do not change codecs during serialization. A streamed request selects the head and item codecs separately. A third-party type can use a local wrapper with `#[serde(transparent)]` and `derive(Message)`.
+
+The catalogue records each message's encoding. The contract hash includes the encoding and its wire revision, so changing the codec changes the deployment identity. Receivers and typed routing selectors use the selected decoder. Messages need `Serialize` and `DeserializeOwned` to cross. These traits do not prove that arbitrary custom serde implementations round-trip.
+
+JSON writes nonfinite floats as `null` and rejects map keys such as tuples. Use `msgpack` for these values. Positional arrays reduce encoded size for fixed layouts, but require every field to stay present. See [codec limits](LIMITATIONS.md#graphs-and-types).
+
+MessagePack reserves a small output buffer to avoid repeated growth for token-sized values. [Codec measurements](agent-docs/perf/codecs.md) record CPU cost, allocation counts, and payload sizes for all three encodings.
+
+Catalogue entries without encoding metadata require re-extraction. Remove the entry named by the load error first. With the current `cargo-gdl`, re-add directory or registry crates using `cargo gdl extract` and the same `--catalog` directory. Re-import Git crates through the composer after removing their entries.
 
 `cargo gdl extract <crate dir | name@version>` prints what a crate offers (its messages, exports, and nodes), read from its source without building it. A `name@version` is fetched from crates.io with `cargo metadata`, which builds nothing. With `--catalog <dir>`, it adds the crate to a working catalogue instead: `<dir>/<name>/<version>.toml`, with the time it was added and the registry's checksum of the crate. A published version already there is kept, because it never changes. A crate from a directory has one entry, which adding it again replaces, since it changes as it is edited. `cargo gdl catalog <dir>` prints the catalogue's index: each entry, each message name with the messages of that name, and each node with the messages at its ports. With `--verify`, it also builds the crate and fails if what the markers register differs from what it read, for example a message that a macro makes. The generator is the `cargo-gdl` binary of `crates/gdl-gen`: install it with `cargo install --path crates/gdl-gen`, or run it with `cargo run -p gdl-gen --`.
 
@@ -636,6 +664,7 @@ The measurements and the method are in `agent-docs/perf/m3-remote.md` and `agent
 | `crates/gdl-gen` | The generator, `cargo gdl`: `extract`, `catalog`, `resolve`, `generate`, `diagram`, and `export` |
 | `examples/chat` | A graph file, the protocols crate that holds its messages, its node implementations, and the generated contract and segment crates. It is a separate Cargo workspace. |
 | `examples/asr` | A graph with a streamed request: a contract, its node implementations, the generated segment crates, and a demo that runs them in one process. It is a separate Cargo workspace. |
+| [`examples/film`](examples/film/README.md) | Two node crates with graph settings, custom metrics, a mock engine, and a vendor usage tap. Distributed and compact specs use the same graph. |
 | `agent-docs/` | The plan, review records, and measurements |
 
 ## Build and test

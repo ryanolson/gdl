@@ -39,7 +39,7 @@ const PLACEMENT: &str = r#"
 fn the_cells_graph_crosses_once_at_the_chooser() {
     let graph = Graph::parse(CELLS.parse().expect("tokens")).expect("the cells graph");
     let manifest = graph
-        .manifest(&|name| Some((name.to_string(), true)))
+        .manifest(&|name| Some(gdl_model::TypeInfo::new(name, true, Default::default())))
         .expect("manifest");
     let placement = gdl_model::Placement::from_toml(PLACEMENT).expect("placement");
     let layout = gdl_model::layout(&manifest, &placement).expect("a layout");

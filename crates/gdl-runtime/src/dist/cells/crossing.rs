@@ -39,7 +39,15 @@ impl Crossing {
     pub(crate) fn new(target: Target, router: Router) -> Self {
         let within = match router {
             Router::Policy(policy) => Within::Policy(policy),
-            Router::Selector { name, selector } => Within::Selector { name, selector },
+            Router::Selector {
+                name,
+                selector,
+                encoding,
+            } => Within::Selector {
+                name,
+                selector,
+                encoding,
+            },
             Router::Cells(crossing) => crossing.within.clone(),
         };
         Self {
@@ -93,13 +101,15 @@ impl Crossing {
     /// longer is by the cell policy (its summary went, or went stale), or
     /// its follow refuses the lease because it is no longer offered, the
     /// choice and its lease are dropped and both the cell and the instance
-    /// are chosen again. Boxed, as
+    /// are chosen again. A request that ended while its selector chose
+    /// is not handed on. Boxed, as
     /// [`Live::choose`](crate::dist::roster::Live::choose) is.
     pub(crate) fn choose<'a>(
         &'a self,
         selector: &'a dyn Erased,
         cx: &'a Cx,
         head: &'a [u8],
+        encoding: gdl_model::Encoding,
         excluded: &'a [u64],
     ) -> BoxFuture<'a, Result<Option<Chosen>>> {
         Box::pin(async move {
@@ -112,9 +122,15 @@ impl Crossing {
                     .select(
                         cx,
                         head,
+                        encoding,
                         Instances::new(&self.target.segment, &cell.offered),
                     )
                     .await?;
+                // A request that ended while its selector chose gets no
+                // instance; its lease goes with `picked`. The caller's
+                // select sees the end only at its next await, and the
+                // send can leave before that.
+                cx.check()?;
                 let chosen = cell.eligible[picked.index];
                 let target = &self.target;
                 let now = tokio::time::Instant::now();
@@ -221,6 +237,7 @@ pub(crate) enum Within {
     Selector {
         name: Arc<str>,
         selector: Arc<dyn Erased>,
+        encoding: gdl_model::Encoding,
     },
 }
 
@@ -409,13 +426,13 @@ mod tests {
         let selector = gdl::__runtime::Typed(Arc::new(gdl::LeastLoaded::new()));
         let cx = Cx::new();
         let chosen = crossing
-            .choose(&selector, &cx, &[], &[m1])
+            .choose(&selector, &cx, &[], Default::default(), &[m1])
             .await
             .expect("a choice")
             .map(|(id, cell, _, _)| (id, cell));
         assert_eq!(chosen, Some((ids[1], m2)));
         let none = crossing
-            .choose(&selector, &cx, &[], &[m1, m2])
+            .choose(&selector, &cx, &[], Default::default(), &[m1, m2])
             .await
             .expect("no error");
         assert!(none.is_none());
@@ -483,7 +500,7 @@ mod tests {
                 let selector = gdl::__runtime::Typed(waiting);
                 let cx = Cx::new();
                 crossing
-                    .choose(&selector, &cx, &[], &[])
+                    .choose(&selector, &cx, &[], Default::default(), &[])
                     .await
                     .map(|chosen| chosen.map(|(id, _, picked, _)| (id, picked.lease)))
             }
@@ -538,7 +555,7 @@ mod tests {
                 let selector = gdl::__runtime::Typed(waiting);
                 let cx = Cx::new();
                 crossing
-                    .choose(&selector, &cx, &[], &[])
+                    .choose(&selector, &cx, &[], Default::default(), &[])
                     .await
                     .map(|chosen| chosen.map(|(id, cell, _, _)| (id, cell)))
             }
@@ -582,6 +599,89 @@ mod tests {
         })
         .await;
         assert_eq!(chosen, None, "sent to a cell whose summary is stale");
+    }
+
+    /// Cancels the request it chooses for, then chooses, with a lease.
+    struct Cancelling(Arc<AtomicUsize>);
+
+    impl gdl::Selector for Cancelling {
+        type Head = gdl::Encoded;
+
+        async fn select<'a>(
+            &'a self,
+            request: gdl::Request<'a, gdl::Encoded>,
+            instances: Instances<'a>,
+        ) -> Result<gdl::Choice<'a>> {
+            request.cx().cancel();
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let chosen = instances.get(0).expect("one");
+            Ok(gdl::Choice::new(chosen).with_lease(Lease(Arc::clone(&self.0))))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_cancelled_while_its_selector_chose_gets_no_instance() {
+        let ids = ids(1);
+        let leases = Arc::new(AtomicUsize::new(0));
+        let crossing = crossing(
+            vec![cell("m", CellState::Ready, &ids)],
+            Router::Policy(Policy::RoundRobin),
+        );
+        let selector = gdl::__runtime::Typed(Arc::new(Cancelling(Arc::clone(&leases))));
+        let cx = Cx::new();
+        let error = crossing
+            .choose(&selector, &cx, &[], Default::default(), &[])
+            .await
+            .map(|chosen| chosen.map(|(id, ..)| id))
+            .expect_err("a cancelled request was given an instance");
+        assert_eq!(error.kind(), gdl::ErrorKind::Cancelled, "{error}");
+        assert_eq!(leases.load(Ordering::SeqCst), 0, "the lease was kept");
+        assert_eq!(
+            crossing.target.table.load().cells[0].leases.held(),
+            0,
+            "the lease on the cell's follow was kept"
+        );
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Prompt {
+        text: String,
+    }
+
+    /// Reads the head as a `Prompt`, then takes the first instance.
+    struct Reading;
+
+    impl gdl::Selector for Reading {
+        type Head = Prompt;
+
+        async fn select<'a>(
+            &'a self,
+            request: gdl::Request<'a, Prompt>,
+            instances: Instances<'a>,
+        ) -> Result<gdl::Choice<'a>> {
+            assert_eq!(request.head().text, "hello");
+            Ok(gdl::Choice::new(instances.get(0).expect("one")))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_selector_reads_the_head_in_its_edges_encoding() {
+        let ids = ids(1);
+        let crossing = crossing(
+            vec![cell("m", CellState::Ready, &ids)],
+            Router::Policy(Policy::RoundRobin),
+        );
+        let selector = gdl::__runtime::Typed(Arc::new(Reading));
+        let head = serde_json::to_vec(&Prompt {
+            text: "hello".into(),
+        })
+        .expect("encoded");
+        let (chosen, ..) = crossing
+            .choose(&selector, &Cx::new(), &head, gdl_model::Encoding::Json, &[])
+            .await
+            .expect("the selector read a JSON head")
+            .expect("a cell");
+        assert_eq!(chosen, ids[0]);
     }
 
     #[tokio::test]

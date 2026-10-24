@@ -180,8 +180,8 @@ async fn a_placement_without_classes_follows_nothing() {
             forward: vec![],
             inner: "D".into(),
             backward: vec![],
-            forward_types: vec![TypeInfo::new("T", true)],
-            backward_types: vec![TypeInfo::new("T", true)],
+            forward_types: vec![TypeInfo::new("T", true, Default::default())],
+            backward_types: vec![TypeInfo::new("T", true, Default::default())],
         }],
     };
     let spec = DeploymentSpec::new(
