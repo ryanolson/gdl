@@ -12,20 +12,25 @@ use gdl_cells::CellState;
 use gdl_watch::{CellWatcher, FollowEvent, WatchLimits};
 
 use super::super::served::Server;
-use super::super::task::{REWATCH, Relayed, Source, relayed};
+use super::super::task::{REWATCH, Relaying, Source, relayed};
 use super::{M1, exposed, follow, follower, peer, run, table};
 
 const WITHIN: Duration = Duration::from_millis(300);
 
 /// The relay at `address`, read by the watch client within [`WITHIN`],
 /// whose acknowledgements are all taken.
-struct Served {
+pub(super) struct Served {
     watcher: CellWatcher,
     address: String,
 }
 
 impl Served {
     fn new(server: &Server) -> Self {
+        Self::at(&server.address)
+    }
+
+    /// The relay at `address`.
+    pub(super) fn at(address: &str) -> Self {
         let watcher = CellWatcher::with_limits(WatchLimits {
             synced_within: WITHIN,
             ..WatchLimits::default()
@@ -33,17 +38,17 @@ impl Served {
         .expect("a client");
         Self {
             watcher,
-            address: server.address.clone(),
+            address: address.to_string(),
         }
     }
 }
 
 impl Source for Served {
-    async fn watch(&self) -> Result<BoxStream<'static, Relayed>, String> {
+    async fn watch(&self) -> Result<BoxStream<'static, Relaying>, String> {
         self.watcher
             .follows(&self.address)
             .await
-            .map(|events| relayed(events, "relay"))
+            .map(relayed)
             .map_err(|e| e.to_string())
     }
 
@@ -51,11 +56,11 @@ impl Source for Served {
         &self,
         class: &str,
         cell: &str,
-    ) -> Result<BoxStream<'static, Relayed>, String> {
+    ) -> Result<BoxStream<'static, Relaying>, String> {
         self.watcher
             .follows_of(&self.address, class, cell)
             .await
-            .map(|events| relayed(events, "one cell"))
+            .map(relayed)
             .map_err(|e| e.to_string())
     }
 
@@ -94,7 +99,7 @@ async fn a_relay_snapshot_that_never_completes_is_not_installed() {
     let mut second = server.next().await;
     assert_eq!(second.path, "/v1/ext/gdl-cell/follows");
     assert!(
-        second.at - began >= WITHIN + REWATCH,
+        second.at - began >= WITHIN + REWATCH / 2,
         "watched again after {:?}",
         second.at - began
     );
@@ -154,7 +159,7 @@ async fn a_cells_reading_that_never_completes_leaves_it_unread() {
     let again = server.next().await;
     assert_eq!(again.path, own_path, "the cell is read again");
     assert!(
-        again.at - began >= WITHIN + REWATCH,
+        again.at - began >= WITHIN + REWATCH / 2,
         "read again after {:?}",
         again.at - began
     );

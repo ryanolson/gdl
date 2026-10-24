@@ -66,7 +66,7 @@ fn reread(
     follows.unknown(unknown(generation));
     let Asked { key, watch, .. } = follows.asked().pop().expect("a watch of its own");
     for event in events.into_iter().chain([FollowEvent::Synced]) {
-        follows.own(key.clone(), watch, Some(Watched::Event(event)), now);
+        follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
 }
 
@@ -98,7 +98,7 @@ fn a_lease_is_carried_through_a_reading_and_refused_while_unread() {
         exposed(M1, 1, &p),
         FollowEvent::Synced,
     ] {
-        follows.own(key.clone(), watch, Some(Watched::Event(event)), now);
+        follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
     assert_eq!(
         follows.acknowledgements(now),
@@ -206,7 +206,7 @@ fn an_offered_cell_left_unread_refuses_a_lease() {
         exposed(M1, 1, &p),
         FollowEvent::Synced,
     ] {
-        follows.own(key.clone(), watch, Some(Watched::Event(event)), now);
+        follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
     assert!(offer(&cells).is_some(), "read again, it is offered");
 }
@@ -241,13 +241,13 @@ fn an_unknown_event_of_a_closing_generation_on_its_own_watch_changes_nothing() {
         exposed(M1, 2, &q),
         FollowEvent::Synced,
     ] {
-        follows.own(key.clone(), watch, Some(Watched::Event(event)), now);
+        follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
     assert!(
         offer(&cells).is_some(),
         "read again, the current follow is offered"
     );
-    follows.own(key.clone(), watch, Some(Watched::Unknown(unknown(1))), now);
+    follows.own(key.clone(), watch, Ok(Watched::Unknown(unknown(1))), now);
     assert!(offer(&cells).is_some(), "the current follow left unread");
     assert!(follows.asked().is_empty(), "the cell's own watch replaced");
     assert!(follows.wants(&key, watch));
@@ -275,7 +275,7 @@ fn an_unknown_event_of_a_closing_generation_in_its_own_snapshot_changes_nothing(
     );
     follows.unknown(unknown(2));
     let Asked { key, watch, .. } = follows.asked().pop().expect("a watch of its own");
-    let item = |event| Some(Watched::Event(event));
+    let item = |event| Ok(Watched::Event(event));
     for event in [
         follow(M1, 1, CellState::Ready),
         offering(1, 2, false),
@@ -285,7 +285,7 @@ fn an_unknown_event_of_a_closing_generation_in_its_own_snapshot_changes_nothing(
     ] {
         follows.own(key.clone(), watch, item(event), now);
     }
-    follows.own(key.clone(), watch, Some(Watched::Unknown(unknown(1))), now);
+    follows.own(key.clone(), watch, Ok(Watched::Unknown(unknown(1))), now);
     follows.own(key.clone(), watch, item(FollowEvent::Synced), now);
     assert!(offer(&cells).is_some(), "the cell left unread");
     assert!(follows.asked().is_empty(), "the cell read again");

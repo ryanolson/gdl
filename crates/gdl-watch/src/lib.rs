@@ -13,7 +13,8 @@
 //! The hub (`gdl-hub`) serves them and a segment instance reads the relay
 //! and its own cell's watch, for the cell's drain, and sends the report, so the wire types, the routes, and the client
 //! live here, where both reach them without the runtime linking the hub's
-//! server.
+//! server. So does how long a reader waits before it opens a watch again
+//! ([`Backoff`]), which the hub's follows and the instance's watches share.
 //!
 //! A reader ignores the fields of a known event that it does not know, and
 //! fails closed for the cell that an event of a kind it does not know
@@ -30,11 +31,13 @@ use gdl_cells::{CellState, LoadSummary};
 use serde::{Deserialize, Serialize};
 use velo::{InstanceId, PeerInfo};
 
+mod backoff;
 mod client;
 mod follows;
 mod limits;
 mod watched;
 
+pub use backoff::{Backoff, WatchEnd};
 pub use client::{CellWatchError, CellWatcher, WatchItem, WatchStream};
 pub use follows::FollowEvent;
 pub use limits::{WatchFailure, WatchLimits};

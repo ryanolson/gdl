@@ -30,8 +30,8 @@ async fn refused(cell: &CellReadiness<Resolving>, n: u64) {
 }
 
 /// The model cell's hub serves one watch of the cell, which the test
-/// holds: the global's link is refused, and asked for again after the
-/// refollow delay, and refused again. Once the test lets go, the global
+/// holds: the global's link is refused, and asked for again after its
+/// backoff's first wait, and refused again. Once the test lets go, the global
 /// follows the cell, its link counts among the cell's followers, and its
 /// health meets the cell it requires.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

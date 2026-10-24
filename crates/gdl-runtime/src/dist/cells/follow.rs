@@ -258,7 +258,7 @@ impl<R: Registry> Follows<R> {
             if let Some(follow) = followed.follows.get_mut(&key) {
                 follow.unread = true;
             }
-            self.watch_own(key, false);
+            self.watch_own(key, None);
         }
         for follow in followed
             .follows

@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 
 use gdl_cells::{CellState, LoadSummary};
-use gdl_watch::{FollowEvent, UnknownFollowEvent, Watched};
+use gdl_watch::{FollowEvent, UnknownFollowEvent, WatchEnd, Watched};
 use tokio::time::Instant;
 use velo::PeerInfo;
 
@@ -68,12 +68,12 @@ fn chosen(cells: &Cells, cell: &str, now: Instant) -> bool {
         .is_some_and(|table| HomeFirst.eligible(table, "r", &[], now))
 }
 
-/// The cells and watches asked for, as `(cell, watch, pause)`.
+/// The cells and watches asked for, as `(cell, watch, paused)`.
 fn asked(follows: &mut Follows<Recorded>) -> Vec<(String, u64, bool)> {
     follows
         .asked()
         .into_iter()
-        .map(|Asked { key, watch, pause }| (key.1, watch, pause))
+        .map(|Asked { key, watch, pause }| (key.1, watch, !pause.is_zero()))
         .collect()
 }
 
@@ -87,7 +87,7 @@ fn own_snapshot(
     now: Instant,
 ) {
     for event in events.into_iter().chain([FollowEvent::Synced]) {
-        follows.own(key(cell), watch, Some(Watched::Event(event)), now);
+        follows.own(key(cell), watch, Ok(Watched::Event(event)), now);
     }
 }
 
@@ -142,7 +142,7 @@ fn an_unknown_event_leaves_its_cell_unread_until_it_is_read_from_its_own_watch()
     assert_eq!(read.eligible, both);
     assert!(chosen(&cells, M1, now));
     assert_eq!(recorded.take(), [Call::Register(z.instance_id())]);
-    follows.own(key(M1), 1, Some(Watched::Event(retired(M1, 1, &x))), now);
+    follows.own(key(M1), 1, Ok(Watched::Event(retired(M1, 1, &x))), now);
     let read = table(&cells, M1).expect("followed");
     assert_eq!(
         (read.eligible.clone(), read.retired.clone()),
@@ -217,14 +217,14 @@ fn an_unknown_event_of_the_cells_own_watch_leaves_it_unread() {
     follows.unknown(unknown(M1, 1));
     let _ = asked(&mut follows);
     for event in ready(M1, 1, &[&x]) {
-        follows.own(key(M1), 1, Some(Watched::Event(event)), now);
+        follows.own(key(M1), 1, Ok(Watched::Event(event)), now);
     }
-    follows.own(key(M1), 1, Some(Watched::Unknown(unknown(M1, 1))), now);
+    follows.own(key(M1), 1, Ok(Watched::Unknown(unknown(M1, 1))), now);
     // Each table published counts one change: the snapshot is published
     // once, unread, never first as read.
     let changes = cells.changes();
     let before = *changes.borrow();
-    follows.own(key(M1), 1, Some(Watched::Event(FollowEvent::Synced)), now);
+    follows.own(key(M1), 1, Ok(Watched::Event(FollowEvent::Synced)), now);
     assert_eq!(*changes.borrow() - before, 1, "published once");
     let m1 = table(&cells, M1).expect("followed");
     assert!(m1.unread && m1.eligible.is_empty(), "{m1:?}");
@@ -232,7 +232,7 @@ fn an_unknown_event_of_the_cells_own_watch_leaves_it_unread() {
 
     own_snapshot(&mut follows, M1, 2, ready(M1, 1, &[&x]), now);
     assert!(!table(&cells, M1).expect("followed").unread);
-    follows.own(key(M1), 2, Some(Watched::Unknown(unknown(M1, 1))), now);
+    follows.own(key(M1), 2, Ok(Watched::Unknown(unknown(M1, 1))), now);
     assert!(table(&cells, M1).expect("followed").unread);
     assert_eq!(asked(&mut follows), [(M1.to_string(), 3, false)]);
     own_snapshot(&mut follows, M1, 2, ready(M1, 1, &[&x]), now);
@@ -254,7 +254,7 @@ fn a_cells_own_watch_that_ends_leaves_it_unread() {
     let _ = asked(&mut follows);
     own_snapshot(&mut follows, M1, 1, ready(M1, 1, &[&peer()]), now);
     assert!(!table(&cells, M1).expect("followed").unread);
-    follows.own(key(M1), 1, None, now);
+    follows.own(key(M1), 1, Err(WatchEnd::Closed), now);
     assert!(table(&cells, M1).expect("followed").unread);
     assert_eq!(asked(&mut follows), [(M1.to_string(), 2, true)]);
 }
@@ -437,7 +437,7 @@ fn a_cells_own_watch_to_a_restarted_hub_takes_its_generations() {
         live(&mut follows, now, ready(M1, 5, &[&x]));
         follows.unknown(unknown(M1, 5));
         own_snapshot(&mut follows, M1, 1, ready(M1, 5, &[&x]), now);
-        follows.own(key(M1), 1, None, now);
+        follows.own(key(M1), 1, Err(WatchEnd::Closed), now);
         let restarted = if empty {
             Vec::new()
         } else {
@@ -449,7 +449,7 @@ fn a_cells_own_watch_to_a_restarted_hub_takes_its_generations() {
             .filter(|_| !empty)
             .chain(ready(M1, 2, &[&z]))
         {
-            follows.own(key(M1), 2, Some(Watched::Event(event)), now);
+            follows.own(key(M1), 2, Ok(Watched::Event(event)), now);
         }
         let m1 = table(&cells, M1).unwrap_or_else(|| panic!("followed, empty: {empty}"));
         assert_eq!(

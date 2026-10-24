@@ -139,3 +139,114 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
     );
     hub.shutdown().await.expect("the hub stops");
 }
+
+/// The most watches a follower asks for in `window` while every one
+/// fails at once: each wait is at least half its step, and the steps
+/// double from `base` to `cap`.
+fn most_attempts(base: Duration, cap: Duration, window: Duration) -> usize {
+    let (mut step, mut elapsed, mut attempts) = (base, Duration::ZERO, 1);
+    loop {
+        elapsed += step / 2;
+        if elapsed > window {
+            return attempts;
+        }
+        attempts += 1;
+        step = (step * 2).min(cap);
+    }
+}
+
+/// A child whose hub takes each connection and closes it is asked for its
+/// watch a bounded number of times in 5 s, set by the follow link's cap,
+/// rather than once every refollow wait. On the real clock, since the
+/// watch client's own timers would run ahead on a paused one while it
+/// waits on the socket; the 5 s window is the measurement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_whose_hub_closes_every_watch_is_asked_a_bounded_number_of_times() {
+    const WINDOW: Duration = Duration::from_secs(5);
+    let spec = spec();
+    let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let address = listener.local_addr().expect("an address").to_string();
+    let (watched, watches) = watch::channel(0usize);
+    let closer = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let watched = watched.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut head = [0u8; 256];
+                let read = stream.read(&mut head).await.unwrap_or(0);
+                if String::from_utf8_lossy(&head[..read]).contains("/watch") {
+                    watched.send_modify(|watches| *watches += 1);
+                }
+            });
+        }
+    });
+    let directory = MemoryDirectory::new();
+    directory
+        .publish(CellRecord {
+            name: "model-x-07-us-east-1".into(),
+            class: "model_x".into(),
+            region: "us-east-1".into(),
+            home: Some(GLOBAL.into()),
+            contract: layout.contract_hash(),
+            placement: layout.placement_hash(),
+            state: CellState::Ready,
+            epoch: 1,
+            seq: 1,
+            hub: address,
+            lease: Duration::from_secs(30),
+            load: None,
+        })
+        .await
+        .expect("published");
+    let (hub, _global) = hub_of(global_default(), directory, timing()).await;
+    let mut counted = watches.clone();
+    tokio::time::timeout(WAIT, counted.wait_for(|watches| *watches >= 1))
+        .await
+        .expect("the child is followed")
+        .expect("the closer runs");
+    let began = tokio::time::Instant::now();
+    tokio::time::sleep_until(began + WINDOW).await;
+    let attempts = *watches.borrow() - 1;
+    let most = most_attempts(timing().refollow, CellTiming::REFOLLOW_CAP, WINDOW);
+    hub.shutdown().await.expect("the hub stops");
+    closer.abort();
+    assert!(
+        (2..most).contains(&attempts),
+        "{attempts} more watches in {WINDOW:?}, fewer than {most} allowed"
+    );
+}
+
+/// A directory whose every watch of the followed class fails at once is
+/// watched a bounded number of times in 5 s, rather than once every
+/// 100 ms: no more than a reader whose waits double from 100 ms to 1 s
+/// would, since the directory's cap is longer than that. On the real
+/// clock, since the hub serves over real sockets; the 5 s window is the
+/// measurement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_directory_whose_watches_fail_is_watched_a_bounded_number_of_times() {
+    const WINDOW: Duration = Duration::from_secs(5);
+    let failing = vec![Err(DirectoryError::Unavailable("down".into()))];
+    let directory = Scripted {
+        inner: MemoryDirectory::new(),
+        scripts: Arc::new(Mutex::new(std::iter::repeat_n(failing, 1000).collect())),
+        watches: Arc::new(watch::Sender::new(0)),
+    };
+    let mut watches = directory.watches.subscribe();
+    let (hub, _global) = hub_of(global_default(), directory, timing()).await;
+    tokio::time::timeout(WAIT, watches.wait_for(|watches| *watches >= 1))
+        .await
+        .expect("the directory is watched")
+        .expect("the directory lives");
+    let began = tokio::time::Instant::now();
+    tokio::time::sleep_until(began + WINDOW).await;
+    let attempts = *watches.borrow() - 1;
+    let most = most_attempts(Duration::from_millis(100), Duration::from_secs(1), WINDOW);
+    hub.shutdown().await.expect("the hub stops");
+    assert!(
+        (2..most).contains(&attempts),
+        "{attempts} more watches in {WINDOW:?}, fewer than {most} allowed"
+    );
+}

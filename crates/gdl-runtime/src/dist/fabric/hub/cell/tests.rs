@@ -10,8 +10,9 @@ use gdl_watch::{CellWatchEvent, CellWatcher, WatchLimits};
 use tokio::sync::watch;
 use velo::InstanceId;
 
-use super::{Learned, REWATCH, run};
+use super::{Learned, run};
 use crate::dist::cells::served::Server;
+use crate::dist::cells::{REWATCH, REWATCH_CAP};
 
 const WITHIN: Duration = Duration::from_millis(300);
 
@@ -64,7 +65,7 @@ async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
     first.keep_alive();
     let mut second = server.next().await;
     assert!(
-        second.at - began >= WITHIN + REWATCH,
+        second.at - began >= WITHIN + REWATCH / 2,
         "watched again after {:?}",
         second.at - began
     );
@@ -91,4 +92,87 @@ async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
         .await
         .expect("the watch ends once the cell is unfollowed")
         .expect("the watch does not panic");
+}
+
+/// An entry instance learned that its cell drains, then retired, and its
+/// hub then closes every watch, so that the instance waits between them at
+/// its cap: its drain's bound and its retirement's bound still pass on
+/// time, since neither waits on the watch. On the real clock, since the
+/// watch client's own timers would run ahead on a paused one while it
+/// waits on the socket; the bound is long enough for the waits to reach
+/// the cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
+    const BOUND: Duration = Duration::from_secs(2);
+    const LATE: Duration = Duration::from_millis(200);
+    let mut server = Server::new().await;
+    let me = InstanceId::new_v4();
+    let (learns, learned) = watch::channel(Learned::default());
+    let watcher = CellWatcher::new().expect("a client");
+    let mut drain = super::CellDrain {
+        learned,
+        role: super::Role::Entry { bound: BOUND },
+        entries: vec!["f".into()],
+        foreign: false,
+        retired: None,
+        watch: tokio::spawn(run(watcher, server.address.clone(), Some(me), learns)),
+    };
+    let mut first = server.next().await;
+    first.answer().await;
+    first.send(&cell(CellState::Draining)).await;
+    first.send(&CellWatchEvent::Synced).await;
+    let mut heard = drain.learned.clone();
+    let drained = tokio::time::timeout(
+        Duration::from_secs(5),
+        heard.wait_for(|learned| learned.drain.is_some()),
+    )
+    .await
+    .expect("the drain is learned in time")
+    .expect("the watch lives")
+    .drain
+    .expect("a drain");
+    drain.retire();
+    let retired = drain.retired.expect("retired");
+    drop(first);
+    let (asked, mut asks) = watch::channel(Vec::new());
+    let closer = tokio::spawn(async move {
+        loop {
+            let watch = server.next().await;
+            asked.send_modify(|asked: &mut Vec<tokio::time::Instant>| asked.push(watch.at));
+        }
+    });
+
+    let declining = drain
+        .declining()
+        .expect("an entry instance of a draining cell");
+    tokio::time::timeout(BOUND + LATE, declining)
+        .await
+        .expect("the drain's bound passed in time");
+    let at = tokio::time::Instant::now();
+    assert!(
+        at >= drained + BOUND,
+        "declined {:?} early",
+        drained + BOUND - at
+    );
+    let parent = drain.parent().expect("a retired entry instance");
+    tokio::time::sleep_until(retired + BOUND).await;
+    assert!(
+        parent.avoids(),
+        "the retirement's bound passed and was not seen"
+    );
+    let asks = asks
+        .wait_for(|asks| asks.len() >= 2)
+        .await
+        .expect("the closer runs")
+        .clone();
+    let longest = asks
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .max()
+        .expect("two watches");
+    assert!(
+        longest >= REWATCH_CAP / 2,
+        "the watch never waited at its cap: {asks:?}"
+    );
+    closer.abort();
 }
