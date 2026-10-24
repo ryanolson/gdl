@@ -138,6 +138,16 @@ pub enum FleetError {
         /// The cell's class.
         class: String,
     },
+    /// A parent cell has no child, a cell whose home it is, of a class its
+    /// class sends to.
+    MissingChild {
+        /// The parent cell.
+        cell: String,
+        /// The layout it runs, which its child runs too.
+        layout: String,
+        /// The class it sends to and has no child of.
+        class: String,
+    },
 }
 
 /// A table of the fleet file.
@@ -312,6 +322,17 @@ impl FleetError {
                 key("home"),
                 format!(
                     "cell `{home}` is of class `{home_class}`, which does not send to `{class}`; a home is a cell of a class that sends to the cell's"
+                ),
+            ),
+            Self::MissingChild {
+                cell: name,
+                layout,
+                class,
+            } => (
+                cell(name),
+                None,
+                format!(
+                    "no child of class `{class}` in layout `{layout}`; a cell of a class that sends to `{class}` has a child of it, a cell whose `home` is this one"
                 ),
             ),
         };

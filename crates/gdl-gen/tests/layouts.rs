@@ -385,6 +385,8 @@ fn the_readme_shows_these_layouts() {
 }
 
 /// `cargo gdl check --fleet` checks each cell against the layout it names.
+/// Both `global` and `batch` send to `model_x` in `regional`, so a cell of
+/// each has a child there.
 #[test]
 fn a_fleet_is_checked_against_each_cells_layout() {
     let dir = Dir::new(&two_layouts());
@@ -393,6 +395,7 @@ fn a_fleet_is_checked_against_each_cells_layout() {
     let good = "[cell.global-us]\nlayout = \"regional\"\nclass = \"global\"\nregion = \"us-east-1\"\n\
                 [cell.batch-us]\nlayout = \"regional\"\nclass = \"batch\"\nregion = \"us-east-1\"\n\
                 [cell.model-x-us]\nlayout = \"regional\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n\
+                [cell.model-x-us-2]\nlayout = \"regional\"\nclass = \"model_x\"\nregion = \"us-east-1\"\nhome = \"batch-us\"\n\
                 [cell.global-eu]\nlayout = \"compact\"\nclass = \"global\"\nregion = \"eu-west-1\"\n\
                 [cell.model-x-eu]\nlayout = \"compact\"\nclass = \"model_x\"\nregion = \"eu-west-1\"\nhome = \"global-eu\"\n";
     std::fs::write(&fleet, good).expect("the fleet");
