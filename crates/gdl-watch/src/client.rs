@@ -1,6 +1,8 @@
 //! The client of a cell hub's watches: its server-sent events, parsed into
 //! [`CellWatchEvent`]s or [`FollowEvent`]s, or read as events of a kind
-//! this build does not know.
+//! this build does not know, each item `Ok` until the watch ends: with no
+//! more items when it ends cleanly, or with a [`WatchFailure`] when it
+//! does not.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,8 +14,15 @@ use futures::{Stream, StreamExt};
 use super::watched::Classify;
 use super::{
     AVOIDED_ROUTE, Avoided, CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower,
-    RELEASE_ROUTE, UnknownEvent, UnknownFollowEvent, WATCH_ROUTE, Watched,
+    RELEASE_ROUTE, UnknownEvent, UnknownFollowEvent, WATCH_ROUTE, WatchFailure, WatchLimits,
+    Watched,
 };
+
+/// One item of a watch: an event, or why the watch ended, its last item.
+pub type WatchItem<E, U> = Result<Watched<E, U>, WatchFailure>;
+
+/// A watch's items.
+pub type WatchStream<E, U> = BoxStream<'static, WatchItem<E, U>>;
 
 /// How long a connection to a cell's hub may take to open.
 const CONNECT: Duration = Duration::from_secs(5);
@@ -27,18 +36,25 @@ const IDLE: Duration = Duration::from_secs(30);
 const REFUSAL: usize = 1024;
 
 /// Watches cells' hubs, over one pool of connections: their cells, and
-/// what they follow. Its clones share the pool, and the count of the
-/// events of a kind this build does not know that they have read.
+/// what they follow, each watch within its limits. Its clones share the
+/// pool, and the count of the events of a kind this build does not know
+/// that they have read.
 #[derive(Debug, Clone)]
 pub struct CellWatcher {
     http: reqwest::Client,
     unknown: Arc<AtomicU64>,
+    limits: WatchLimits,
 }
 
 impl CellWatcher {
-    /// A watcher with a connect timeout and an idle timeout longer than
-    /// the hub's keep-alive.
+    /// A watcher with a connect timeout, an idle timeout longer than the
+    /// hub's keep-alive, and the default limits.
     pub fn new() -> Result<Self, CellWatchError> {
+        Self::with_limits(WatchLimits::default())
+    }
+
+    /// [`CellWatcher::new`], each watch within `limits`.
+    pub fn with_limits(limits: WatchLimits) -> Result<Self, CellWatchError> {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT)
             .read_timeout(IDLE)
@@ -47,6 +63,7 @@ impl CellWatcher {
         Ok(Self {
             http,
             unknown: Arc::default(),
+            limits,
         })
     }
 
@@ -58,10 +75,11 @@ impl CellWatcher {
 
     /// Watch the cell whose hub is at `hub`, `host:port` as the cell's
     /// record names it. The events end when the hub ends the watch (it
-    /// stopped, this watcher fell behind, or the cell's drain ended), when
-    /// the connection fails or goes idle, or at an event that is not JSON
-    /// or is of a known kind whose fields do not parse; a follower then
-    /// watches again from a snapshot. An event of a kind this build does
+    /// stopped, this watcher fell behind, or the cell's drain ended), and
+    /// with a [`WatchFailure`] when the connection fails or goes idle, at
+    /// an event that is not JSON or is of a known kind whose fields do not
+    /// parse, or at one past the limits; a follower then watches again
+    /// from a snapshot. An event of a kind this build does
     /// not know is read as [`Watched::Unknown`], and the watch goes on: it
     /// concerns the watched cell, which the reader fails closed for until
     /// it has read the cell again. A hub that has not yet published its
@@ -70,7 +88,7 @@ impl CellWatcher {
     pub async fn watch(
         &self,
         hub: &str,
-    ) -> Result<BoxStream<'static, Watched<CellWatchEvent, UnknownEvent>>, CellWatchError> {
+    ) -> Result<WatchStream<CellWatchEvent, UnknownEvent>, CellWatchError> {
         self.open(hub, WATCH_ROUTE, None).await
     }
 
@@ -81,21 +99,21 @@ impl CellWatcher {
         &self,
         hub: &str,
         follower: &Follower,
-    ) -> Result<BoxStream<'static, Watched<CellWatchEvent, UnknownEvent>>, CellWatchError> {
+    ) -> Result<WatchStream<CellWatchEvent, UnknownEvent>, CellWatchError> {
         self.open(hub, WATCH_ROUTE, Some(follower)).await
     }
 
     /// Watch what the hub at `hub`, `host:port`, follows: its relay, each
     /// [`FollowEvent`] as it is sent. The events end as a cell's watch's
-    /// do, and also at an event of a kind this build does not know that
-    /// names no follow; one that names its follow is read as
+    /// do, and also with [`WatchFailure::Unparsed`] at an event of a kind
+    /// this build does not know that names no follow; one that names its follow is read as
     /// [`Watched::Unknown`], for the reader to fail closed for that cell
     /// alone until it has read it again ([`CellWatcher::follows_of`]). A
     /// consumer whose watch ended watches again from a snapshot.
     pub async fn follows(
         &self,
         hub: &str,
-    ) -> Result<BoxStream<'static, Watched<FollowEvent, UnknownFollowEvent>>, CellWatchError> {
+    ) -> Result<WatchStream<FollowEvent, UnknownFollowEvent>, CellWatchError> {
         self.open(hub, FOLLOWS_ROUTE, None).await
     }
     /// Let go, as `follower`, of the cell whose hub is at `hub`: its watch
@@ -144,7 +162,7 @@ impl CellWatcher {
         hub: &str,
         class: &str,
         cell: &str,
-    ) -> Result<BoxStream<'static, Watched<FollowEvent, UnknownFollowEvent>>, CellWatchError> {
+    ) -> Result<WatchStream<FollowEvent, UnknownFollowEvent>, CellWatchError> {
         gdl_model::check_class_name(class).map_err(CellWatchError)?;
         gdl_model::check_cell_name(cell).map_err(CellWatchError)?;
         self.open(hub, &super::followed_path(class, cell), None)
@@ -156,7 +174,7 @@ impl CellWatcher {
         hub: &str,
         route: &str,
         follower: Option<&Follower>,
-    ) -> Result<BoxStream<'static, Watched<T, T::Unknown>>, CellWatchError> {
+    ) -> Result<WatchStream<T, T::Unknown>, CellWatchError> {
         gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
         let url = format!("http://{hub}/v1/ext/{EXTENSION}{route}");
         let mut request = self.http.get(&url);
@@ -181,7 +199,12 @@ impl CellWatcher {
                 String::from_utf8_lossy(&body)
             )));
         }
-        Ok(events(response.bytes_stream(), Arc::clone(&self.unknown)).boxed())
+        Ok(events(
+            response.bytes_stream(),
+            Arc::clone(&self.unknown),
+            self.limits,
+        )
+        .boxed())
     }
 }
 
@@ -211,52 +234,132 @@ impl std::fmt::Debug for CellWatchError {
 
 impl std::error::Error for CellWatchError {}
 
-/// The events in a watch's bytes, ending with the bytes, at the first
-/// error, or at the first event that is neither an event this build knows
-/// nor one of a kind it does not ([`Classify::unknown`]). Each of the
-/// latter is counted in `unknown`.
+/// The events in a watch's bytes, within `limits`: each `Ok` until the
+/// bytes end, then nothing more, or until the first failure, which is the
+/// last item: of the connection, an event past the limits, or an event
+/// that is neither an event this build knows nor one of a kind it does
+/// not ([`Classify::unknown`]). Each of the latter is counted in
+/// `unknown`.
 fn events<T, S, B, E>(
     bytes: S,
     unknown: Arc<AtomicU64>,
-) -> impl Stream<Item = Watched<T, T::Unknown>> + Send + 'static
+    limits: WatchLimits,
+) -> impl Stream<Item = WatchItem<T, T::Unknown>> + Send + 'static
 where
     T: Classify,
     S: Stream<Item = Result<B, E>> + Send + 'static,
     B: AsRef<[u8]>,
+    E: std::fmt::Display,
 {
-    let state = (Box::pin(bytes), Vec::new());
-    futures::stream::unfold(state, move |(mut bytes, mut buffer)| {
-        let unknown = Arc::clone(&unknown);
-        async move {
-            loop {
-                if let Some(end) = event_end(&buffer) {
-                    let raw: Vec<u8> = buffer.drain(..end).collect();
-                    match parse::<T>(&raw) {
-                        Ok(Some(item)) => {
-                            if matches!(item, Watched::Unknown(_)) {
-                                unknown.fetch_add(1, Ordering::Relaxed);
-                            }
-                            return Some((item, (bytes, buffer)));
-                        }
-                        Ok(None) => continue,
-                        Err(()) => return None,
-                    }
-                }
-                match bytes.next().await {
-                    Some(Ok(chunk)) => buffer.extend_from_slice(chunk.as_ref()),
-                    Some(Err(_)) | None => return None,
-                }
-            }
-        }
+    let reader = Reader {
+        bytes: Box::pin(bytes),
+        buffer: Vec::new(),
+        start: 0,
+        scanned: 0,
+        limits,
+        unknown,
+        ended: false,
+        _items: std::marker::PhantomData::<fn() -> T>,
+    };
+    futures::stream::unfold(reader, |mut reader| async move {
+        let item = reader.next().await?;
+        Some((item, reader))
     })
 }
 
-/// The end of the first whole event in `buffer`, past its blank line.
-fn event_end(buffer: &[u8]) -> Option<usize> {
-    buffer
-        .windows(2)
-        .position(|pair| pair == b"\n\n")
-        .map(|at| at + 2)
+/// A watch's bytes as they are read into events. The event being read is
+/// `buffer[start..]`, searched for its end as far as `scanned`, so that a
+/// byte is looked at once however many chunks its event takes, and its
+/// length is known without a pass of its own.
+struct Reader<T, S> {
+    bytes: std::pin::Pin<Box<S>>,
+    buffer: Vec<u8>,
+    start: usize,
+    scanned: usize,
+    limits: WatchLimits,
+    unknown: Arc<AtomicU64>,
+    /// Whether the watch has ended: after a failure, nothing more is read.
+    ended: bool,
+    _items: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T, S, B, E> Reader<T, S>
+where
+    T: Classify,
+    S: Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    async fn next(&mut self) -> Option<WatchItem<T, T::Unknown>> {
+        if self.ended {
+            return None;
+        }
+        let item = self.read().await;
+        self.ended = !matches!(item, Some(Ok(_)));
+        item
+    }
+
+    async fn read(&mut self) -> Option<WatchItem<T, T::Unknown>> {
+        loop {
+            while let Some(end) = self.event_end() {
+                if end - self.start > self.limits.event {
+                    return Some(Err(self.too_large()));
+                }
+                let raw = &self.buffer[self.start..end];
+                self.start = end;
+                self.scanned = end;
+                match parse::<T>(raw) {
+                    Ok(Some(item)) => {
+                        if matches!(item, Watched::Unknown(_)) {
+                            self.unknown.fetch_add(1, Ordering::Relaxed);
+                        }
+                        return Some(Ok(item));
+                    }
+                    Ok(None) => {}
+                    Err(()) => return Some(Err(WatchFailure::Unparsed)),
+                }
+            }
+            // An event without its end in `limit` bytes ends past it: what
+            // is buffered is never more than the limit and the chunk that
+            // reached it.
+            if self.buffer.len() - self.start >= self.limits.event {
+                return Some(Err(self.too_large()));
+            }
+            // What is read is kept only from the event being read, moved
+            // once a chunk rather than once an event.
+            self.buffer.drain(..self.start);
+            self.scanned -= self.start;
+            self.start = 0;
+            match self.bytes.next().await {
+                Some(Ok(chunk)) => self.buffer.extend_from_slice(chunk.as_ref()),
+                Some(Err(error)) => return Some(Err(WatchFailure::Connection(error.to_string()))),
+                None => return None,
+            }
+        }
+    }
+
+    fn too_large(&self) -> WatchFailure {
+        WatchFailure::EventTooLarge {
+            limit: self.limits.event,
+        }
+    }
+
+    /// The end of the event being read, past its blank line, if its bytes
+    /// hold it; the search goes on from where the last one stopped, one
+    /// byte back, since a blank line may span two chunks.
+    fn event_end(&mut self) -> Option<usize> {
+        let from = self.scanned.saturating_sub(1).max(self.start);
+        match self.buffer[from..]
+            .windows(2)
+            .position(|pair| pair == b"\n\n")
+        {
+            Some(at) => Some(from + at + 2),
+            None => {
+                self.scanned = self.buffer.len();
+                None
+            }
+        }
+    }
 }
 
 /// One server-sent event: `None` for one without data (a keep-alive
@@ -290,29 +393,72 @@ fn parse<T: Classify>(raw: &[u8]) -> Result<Option<Watched<T, T::Unknown>>, ()> 
 }
 
 #[cfg(test)]
+mod bounds;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{CellWatchEvent, events};
+    use super::{CellWatchEvent, WatchItem, events};
     use crate::watched::Classify;
-    use crate::{FollowEvent, UnknownEvent, UnknownFollowEvent, Watched};
+    use crate::{
+        FollowEvent, UnknownEvent, UnknownFollowEvent, WatchFailure, WatchLimits, Watched,
+    };
     use futures::StreamExt;
     use gdl_cells::CellState;
     use velo::InstanceId;
 
+    /// A runtime for a watch's reader, whose snapshot deadline needs a
+    /// clock.
+    pub(super) fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a runtime")
+    }
+
+    /// What a watch read as: its events, the failure it ended with, if
+    /// any, and how many events were of a kind this build does not know.
+    pub(super) type Read<T> = (
+        Vec<Watched<T, <T as Classify>::Unknown>>,
+        Option<WatchFailure>,
+        u64,
+    );
+
+    /// What a watch's `chunks` read as within `limits`: the events before
+    /// it ended, the failure it ended with, if any, and how many events
+    /// were of a kind this build does not know.
+    pub(super) fn read_within<T: Classify>(
+        chunks: Vec<Result<Vec<u8>, String>>,
+        limits: WatchLimits,
+    ) -> Read<T> {
+        let unknown = Arc::new(AtomicU64::new(0));
+        let items: Vec<WatchItem<T, T::Unknown>> = runtime().block_on(
+            events::<T, _, _, _>(futures::stream::iter(chunks), Arc::clone(&unknown), limits)
+                .collect(),
+        );
+        let mut events = Vec::new();
+        let mut failed = None;
+        for item in items {
+            assert!(failed.is_none(), "an item after the watch failed");
+            match item {
+                Ok(event) => events.push(event),
+                Err(failure) => failed = Some(failure),
+            }
+        }
+        (events, failed, unknown.load(Ordering::Relaxed))
+    }
+
     /// What a watch's bytes read as, and how many of them were of a kind
     /// this build does not know.
     fn read<T: Classify>(chunks: &[&str]) -> (Vec<Watched<T, T::Unknown>>, u64) {
-        let chunks: Vec<Result<Vec<u8>, ()>> = chunks
+        let chunks = chunks
             .iter()
             .map(|chunk| Ok(chunk.as_bytes().to_vec()))
             .collect();
-        let unknown = Arc::new(AtomicU64::new(0));
-        let read = futures::executor::block_on(
-            events::<T, _, _, _>(futures::stream::iter(chunks), Arc::clone(&unknown)).collect(),
-        );
-        (read, unknown.load(Ordering::Relaxed))
+        let (events, _, unknown) = read_within::<T>(chunks, WatchLimits::default());
+        (events, unknown)
     }
 
     /// The events of a cell's watch, when all are of known kinds.
@@ -530,16 +676,15 @@ mod tests {
     fn a_failed_connection_ends_the_stream() {
         let a = InstanceId::new_v4();
         let whole = sse(&left(a));
-        let chunks: Vec<Result<Vec<u8>, ()>> = vec![
+        let chunks = vec![
             Ok(whole.clone().into_bytes()),
             Ok(whole.as_bytes()[..10].to_vec()),
-            Err(()),
+            Err("reset".to_string()),
             Ok(whole.into_bytes()),
         ];
-        let got: Vec<Watched<CellWatchEvent, UnknownEvent>> = futures::executor::block_on(
-            events(futures::stream::iter(chunks), Arc::default()).collect(),
-        );
+        let (got, failed, _) = read_within::<CellWatchEvent>(chunks, WatchLimits::default());
         assert_eq!(got, [Watched::Event(left(a))]);
+        assert_eq!(failed, Some(WatchFailure::Connection("reset".into())));
     }
 
     /// A hub address that is not `host:port` is refused before anything

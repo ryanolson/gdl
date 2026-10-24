@@ -364,8 +364,8 @@ impl Drop for CellDrain {
 /// other cell follows it, and say so too. For the entry instance
 /// `retiree`, say too once its retirement is acknowledged. A watch that
 /// ends or is refused is asked for again; a refusal is logged once, until
-/// a watch begins. An event of a kind this build does not know ends the
-/// watch too, so that the next one's first event says what the cell's
+/// a watch begins, and one that fails is logged. An event of a kind this
+/// build does not know ends the watch too, so that the next one's first event says what the cell's
 /// state is.
 async fn run(
     watcher: CellWatcher,
@@ -379,6 +379,13 @@ async fn run(
             Ok(mut events) => {
                 refused = None;
                 while let Some(item) = events.next().await {
+                    let item = match item {
+                        Ok(item) => item,
+                        Err(failure) => {
+                            tracing::info!(%failure, "this instance's cell watch failed; the cell is watched again");
+                            break;
+                        }
+                    };
                     match item {
                         Watched::Event(CellWatchEvent::State {
                             state: CellState::Draining,

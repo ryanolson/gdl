@@ -12,7 +12,9 @@ use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{FutureExt, StreamExt};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::Layout;
-use gdl_watch::{Avoids, CellWatcher, FollowEvent, UnknownFollowEvent, Unoffered, Watched};
+use gdl_watch::{
+    Avoids, CellWatcher, FollowEvent, UnknownFollowEvent, Unoffered, WatchStream, Watched,
+};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use velo::Velo;
@@ -129,6 +131,7 @@ impl Source for Hub {
         self.watcher
             .follows(&self.address)
             .await
+            .map(|events| relayed(events, "relay"))
             .map_err(|e| e.to_string())
     }
 
@@ -157,8 +160,29 @@ impl Source for Hub {
         self.watcher
             .follows_of(&self.address, class, cell)
             .await
+            .map(|events| relayed(events, "one cell"))
             .map_err(|e| e.to_string())
     }
+}
+
+/// The items of `events`, a watch of the relay, until it ends: one that
+/// fails ends there, and says why, since its reader handles every end
+/// alike, from a snapshot again.
+fn relayed(
+    events: WatchStream<FollowEvent, UnknownFollowEvent>,
+    watch: &'static str,
+) -> BoxStream<'static, Relayed> {
+    events
+        .scan((), move |(), item| {
+            futures::future::ready(match item {
+                Ok(item) => Some(item),
+                Err(failure) => {
+                    tracing::info!(watch, %failure, "a watch of the hub's relay failed");
+                    None
+                }
+            })
+        })
+        .boxed()
 }
 
 /// Follow `source` into `follows` until aborted: watch, read the snapshot

@@ -31,7 +31,11 @@ async fn follows(hub: &Hub) -> BoxStream<'static, FollowEvent> {
         .await
         .expect("the hub answers in time")
         .expect("the hub serves the relay")
-        .map(|item| item.event().expect("an event of a kind this build knows"))
+        .map(|item| {
+            item.expect("the watch does not fail")
+                .event()
+                .expect("an event of a kind this build knows")
+        })
         .boxed()
 }
 

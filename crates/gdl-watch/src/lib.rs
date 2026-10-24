@@ -32,10 +32,12 @@ use velo::{InstanceId, PeerInfo};
 
 mod client;
 mod follows;
+mod limits;
 mod watched;
 
-pub use client::{CellWatchError, CellWatcher};
+pub use client::{CellWatchError, CellWatcher, WatchItem, WatchStream};
 pub use follows::FollowEvent;
+pub use limits::{WatchFailure, WatchLimits};
 pub use watched::{UnknownEvent, UnknownFollowEvent, Watched};
 
 /// The name the cell's extension mounts its routes under, at

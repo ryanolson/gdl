@@ -125,7 +125,7 @@ async fn follow(
         .expect("the follower's watch begins");
     loop {
         let event = next(&mut events).await;
-        if event.event() == Some(CellWatchEvent::Synced) {
+        if event.expect("the watch does not fail").event() == Some(CellWatchEvent::Synced) {
             break;
         }
     }
@@ -360,7 +360,11 @@ async fn a_follower_that_starts_after_the_retirement_is_not_waited_for() {
         .expect("the follower's watch begins");
     let mut shown = Vec::new();
     loop {
-        match next(&mut later).await.event() {
+        match next(&mut later)
+            .await
+            .expect("the watch does not fail")
+            .event()
+        {
             Some(CellWatchEvent::Synced) => break,
             Some(event) => shown.push(event),
             None => panic!("an event of a kind this build does not know"),
