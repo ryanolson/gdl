@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::cell::{check_cell_name, check_region_name};
-use crate::{CellSettings, DirectoryBackend, Layout, Problems, check_layout_name, read_toml};
+use crate::{
+    CellSettings, DirectoryBackend, Layout, Problem, Problems, check_layout_name, read_toml,
+};
 
 mod errors;
 
@@ -18,7 +20,7 @@ pub use errors::{FleetError, FleetErrors, FleetTable};
 /// ```toml
 /// [class.global]
 /// ready = { a = 2, b = 2, c = 2 }   # default quorum of a cell of this class, per segment
-/// requires = { model_x = 1 }         # the cell's health needs this many ready cells of each class
+/// requires = { model_x = 1 }         # optional: ready children of each class it sends to its health needs; 1 of each when unsaid
 ///
 /// [cell.model-x-01-us-east-1]
 /// layout = "regional"                # the spec's layout it runs: required when the spec has several
@@ -124,14 +126,19 @@ impl Fleet {
     /// the spec's; a cell of a spec of one layout may leave it unsaid. Its
     /// class, its quorum, and its home are judged against that layout: a
     /// home is a cell of the same layout, whose class sends to the cell's
-    /// there. A class's defaults apply to its cells in every layout with
-    /// the class, and are judged against each. A cell whose layout or class
-    /// is unknown is reported once: its quorum, and its home, are not
-    /// judged against them. What needs a layout's classes is not judged
-    /// for a layout given without its [`Layout`], and without any layouts
-    /// (the spec did not read) only what needs none is: the cells' names,
-    /// regions, and layout names, that each home is a cell of the fleet in
-    /// the layout its cell names, and that no count is 0.
+    /// there. Every cell whose class sends to another class is a parent,
+    /// and has at least one child of each class its class sends to: a cell
+    /// of that class and of its layout whose home it is; each class it
+    /// lacks is a problem at the parent's table. A class's defaults apply
+    /// to its cells in every layout with the class, and are judged against
+    /// each. A cell whose layout or class is unknown is reported once: its
+    /// quorum, its home, and its children are not judged against them.
+    /// What needs a layout's classes is not judged for a layout given
+    /// without its [`Layout`], and without any layouts (the spec did not
+    /// read) only what needs none is: the cells' names, regions, and layout
+    /// names, that each home is a cell of the fleet in the layout its cell
+    /// names, and that no count is 0. [`Fleet::children_unchecked`] says
+    /// when that left a cell's children unjudged.
     pub fn check(
         &self,
         layouts: Option<&BTreeMap<String, Option<Layout>>>,
@@ -153,6 +160,16 @@ impl Fleet {
         for (class, defaults) in &self.classes {
             self.check_class(class, defaults, laid.as_ref(), &mut errors);
         }
+        // Each child by its home, its layout, and its class: a parent's
+        // children are the cells that name it in its own layout.
+        let children: BTreeSet<(&str, &str, &str)> = self
+            .cells
+            .iter()
+            .filter_map(|(name, cell)| {
+                let runs = self.layout_of(name, cell, laid.as_ref()).ok()??;
+                Some((cell.home.as_deref()?, runs, cell.class.as_str()))
+            })
+            .collect();
         for (name, cell) in &self.cells {
             let table = || FleetTable::Cell(name.clone());
             if let Err(reason) = check_cell_name(name) {
@@ -174,17 +191,28 @@ impl Fleet {
                     None
                 }
             };
-            match runs.and_then(|runs| laid.as_ref()?.get(runs)?.as_ref()) {
+            match runs.and_then(|runs| Some((runs, laid.as_ref()?.get(runs)?.as_ref()?))) {
                 None => zero_ready(table, &cell.ready, &mut errors),
-                Some(classes) => match classes.segments.get(cell.class.as_str()) {
-                    Some(members) => check_ready(
-                        table,
-                        &cell.class,
-                        members,
-                        &cell.ready,
-                        classes.named,
-                        &mut errors,
-                    ),
+                Some((runs, classes)) => match classes.segments.get(cell.class.as_str()) {
+                    Some(members) => {
+                        check_ready(
+                            table,
+                            &cell.class,
+                            members,
+                            &cell.ready,
+                            classes.named,
+                            &mut errors,
+                        );
+                        for &into in classes.sends.get(cell.class.as_str()).into_iter().flatten() {
+                            if !children.contains(&(name.as_str(), runs, into)) {
+                                errors.push(FleetError::MissingChild {
+                                    cell: name.clone(),
+                                    layout: runs.to_string(),
+                                    class: into.to_string(),
+                                });
+                            }
+                        }
+                    }
                     None => errors.push(FleetError::UnknownClass {
                         table: table(),
                         class: cell.class.clone(),
@@ -389,10 +417,57 @@ impl Fleet {
         }
     }
 
+    /// A note that the rule [`Fleet::check`] judges with a layout's
+    /// classes, that every parent cell has a child of each class its class
+    /// sends to, was not judged for some cell: the layouts are not known,
+    /// or a layout a cell runs has problems that leave its classes unknown. `None` when every
+    /// cell's layout is known. It is in no table: one note for the file.
+    pub fn children_unchecked(
+        &self,
+        layouts: Option<&BTreeMap<String, Option<Layout>>>,
+    ) -> Option<Problem> {
+        let because = "which class sends to which is a layout's";
+        let Some(layouts) = layouts else {
+            return (!self.cells.is_empty()).then(|| {
+                Problem::at(
+                    None,
+                    None,
+                    format!(
+                        "the cells' children are not checked: {because}, and the spec's layouts did not read"
+                    ),
+                )
+            });
+        };
+        let laid: Laid<'_> = layouts
+            .iter()
+            .map(|(name, layout)| (name.as_str(), layout.as_ref().map(|l| Classes::of(l, None))))
+            .collect();
+        let unfit: BTreeSet<&str> = self
+            .cells
+            .iter()
+            .filter_map(|(name, cell)| self.layout_of(name, cell, Some(&laid)).ok()?)
+            .filter(|runs| laid.get(runs).is_some_and(Option::is_none))
+            .collect();
+        let quoted: Vec<String> = unfit.iter().map(|name| format!("`{name}`")).collect();
+        let message = match quoted.as_slice() {
+            [] => return None,
+            [one] => format!(
+                "the cells' children are not checked in layout {one}: {because}, and the layout has problems"
+            ),
+            many => format!(
+                "the cells' children are not checked in layouts {}: {because}, and the layouts have problems",
+                many.join(", ")
+            ),
+        };
+        Some(Problem::at(None, None, message))
+    }
+
     /// The settings of the cell `name`, with its quorum resolved: for each
     /// segment, the cell's own `ready` if it sets that segment, else its
     /// class's default; a segment with neither is left to
-    /// [`CellSettings::quorum`]'s fallback. Its `requires` is its class's. The directory, hub
+    /// [`CellSettings::quorum`]'s fallback. Its `requires` is its class's, and
+    /// unsaid when that is, which requires one ready child of each class its
+    /// class sends to ([`CellSettings::requirements`]). The directory, hub
     /// address, and summary period are not in the fleet file and take their defaults. Meant for a fleet that
     /// [`Fleet::check`] accepted, whose `ready` keys are all segments of
     /// the cell's class.

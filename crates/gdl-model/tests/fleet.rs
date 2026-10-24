@@ -217,7 +217,8 @@ fn classes_and_cells_are_optional() {
     for text in [
         "",
         "[class.model_x]\nready = { e = 4 }\n",
-        "[cell.g]\nclass = 'global'\nregion = 'us-east-1'\n",
+        "[cell.g]\nclass = 'global'\nregion = 'us-east-1'\n\
+         [cell.m]\nclass = 'model_x'\nregion = 'us-east-1'\nhome = 'g'\n",
         "[class.global]\n",
     ] {
         fleet(text).check(Some(&laid())).expect("a sound fleet");
@@ -235,7 +236,13 @@ fn a_home_may_be_in_another_region() {
     .expect("a sound fleet");
 }
 
-const G: &str = "[cell.g]\nclass = 'global'\nregion = 'r'\n";
+/// A global cell `g`, with its child: a parent cell has a child of each
+/// class its class sends to.
+const G: &str = "[cell.g]\nclass = 'global'\nregion = 'r'\n\
+                 [cell.g-child]\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\n";
+
+/// A child of the global cell `h`.
+const H_CHILD: &str = "[cell.h-child]\nclass = 'model_x'\nregion = 'r'\nhome = 'h'\n";
 
 #[test]
 fn each_refusal_names_its_table_and_key() {
@@ -291,7 +298,7 @@ fn each_refusal_names_its_table_and_key() {
             "[cell.m] home: cell `n` is of class `model_x`, which does not send to `model_x`; a home is a cell of a class that sends to the cell's",
         ),
         (
-            format!("{G}[cell.h]\nclass = 'global'\nregion = 'r'\nhome = 'g'\n"),
+            format!("{G}{H_CHILD}[cell.h]\nclass = 'global'\nregion = 'r'\nhome = 'g'\n"),
             "[cell.h] home: no class sends to `global`, so its cells have no parent",
         ),
     ];
@@ -307,7 +314,8 @@ fn an_unknown_class_hides_nothing_else_and_repeats_nothing() {
     assert_eq!(
         problems(
             "[cell.m]\nclass = 'zz'\nregion = 'r'\nready = { q = 0 }\nhome = 'g'\n\
-             [cell.g]\nclass = 'global'\nregion = 'r'\n"
+             [cell.g]\nclass = 'global'\nregion = 'r'\n\
+             [cell.n]\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\n"
         ),
         ["[cell.m] class: the placement has no class `zz`"]
     );
@@ -327,6 +335,7 @@ fn every_problem_is_reported_together() {
         "[class.zz]\n\
          [class.global]\nready = { d = 1 }\nrequires = { model_x = 0 }\n\
          [cell.Global]\nclass = 'global'\nregion = 'US'\n\
+         [cell.n]\nclass = 'model_x'\nregion = 'r'\nhome = 'Global'\n\
          [cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = 'nope'\nready = { e = 0 }\n",
     );
     for expected in [
@@ -376,7 +385,10 @@ fn cell_and_region_names_are_dns_labels() {
         "a1",
         longest.as_str(),
     ] {
-        let text = format!("[cell.{good}]\nclass = 'global'\nregion = '{good}'\n");
+        let text = format!(
+            "[cell.{good}]\nclass = 'global'\nregion = '{good}'\n\
+             [cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = '{good}'\n"
+        );
         fleet(&text).check(Some(&laid())).expect("a usable name");
     }
     let too_long = format!("{longest}0");
@@ -390,7 +402,10 @@ fn cell_and_region_names_are_dns_labels() {
         "us.east",
         "",
     ] {
-        let text = format!("[cell.\"{bad}\"]\nclass = 'global'\nregion = '{bad}'\n");
+        let text = format!(
+            "[cell.\"{bad}\"]\nclass = 'global'\nregion = '{bad}'\n\
+             [cell.m]\nclass = 'model_x'\nregion = 'r'\nhome = \"{bad}\"\n"
+        );
         let rule = "must be lowercase letters, digits, and `-`, start with a letter, end with a letter or digit, and be at most 63 characters";
         assert_eq!(
             problems(&text),
@@ -443,7 +458,7 @@ fn home_is_the_cells_parent() {
             "[cell.m] home: cell `n` is of class `model_x`, which does not send to `model_x`; a home is a cell of a class that sends to the cell's",
         ),
         (
-            format!("{G}[cell.h]\nclass = 'global'\nregion = 'r'\nhome = 'g'\n"),
+            format!("{G}{H_CHILD}[cell.h]\nclass = 'global'\nregion = 'r'\nhome = 'g'\n"),
             "[cell.h] home: no class sends to `global`, so its cells have no parent",
         ),
     ];

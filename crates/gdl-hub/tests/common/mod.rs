@@ -516,16 +516,20 @@ pub fn model(name: &str, region: &str, hub: &str) -> CellSettings {
 pub const GLOBAL: &str = "global-01-us-east-1";
 
 /// The global cell in us-east-1, whose class runs `a` and sends to
-/// `model_x`, requiring `requires` ready model cells when it is not 0.
-pub fn global_requiring(requires: u32) -> CellSettings {
-    let requires = if requires == 0 {
-        String::new()
-    } else {
-        format!("[requires]\nmodel_x = {requires}\n")
-    };
+/// `model_x`, with `requires` unsaid: its health requires one ready model
+/// cell, the default.
+pub fn global_default() -> CellSettings {
     toml::from_str(&format!(
         "name = '{GLOBAL}'\nclass = 'global'\nregion = 'us-east-1'\nhub = 'global-01-hub:1337'\n\
-         directory = 'memory'\n{requires}"
+         directory = 'memory'\n"
     ))
     .expect("valid test fixture")
+}
+
+/// [`global_default`], requiring `requires` ready model cells.
+pub fn global_requiring(requires: u32) -> CellSettings {
+    CellSettings {
+        requires: [("model_x".to_string(), requires)].into(),
+        ..global_default()
+    }
 }

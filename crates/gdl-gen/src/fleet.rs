@@ -36,7 +36,9 @@ pub fn check_files(spec: &Path, fleet: Option<&Path>, target: &Path) -> Problems
 }
 
 /// Every problem with the fleet file at `path`, against the spec's
-/// `layouts` when the spec reads.
+/// `layouts` when the spec reads, and one note when a cell's children could
+/// not be judged for want of its layout. The note comes only with a spec
+/// that has problems of its own, so it never fails a check alone.
 fn check_fleet(path: &Path, layouts: Option<&BTreeMap<String, Option<Layout>>>) -> Problems {
     let located = |problems: Problems| problems.in_file(path.display());
     let text = match std::fs::read_to_string(path) {
@@ -45,9 +47,13 @@ fn check_fleet(path: &Path, layouts: Option<&BTreeMap<String, Option<Layout>>>) 
     };
     match Fleet::from_toml(&text) {
         Err(problems) => located(problems),
-        Ok(fleet) => match fleet.check(layouts) {
-            Ok(()) => Problems::default(),
-            Err(errors) => located(errors.into()),
-        },
+        Ok(fleet) => {
+            let mut problems = match fleet.check(layouts) {
+                Ok(()) => Problems::default(),
+                Err(errors) => errors.into(),
+            };
+            problems.0.extend(fleet.children_unchecked(layouts));
+            located(problems)
+        }
     }
 }

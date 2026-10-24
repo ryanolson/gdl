@@ -9,7 +9,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{
-    CELL, Instance, Records, Resolving, get, global_requiring, health, hub_of_spec,
+    CELL, Instance, Records, Resolving, get, global_default, global_requiring, health, hub_of_spec,
     meet_the_quorum, model, serve_cell, timing,
 };
 use gdl_cells::CellState;
@@ -139,10 +139,15 @@ fn two_classes() -> DeploymentSpec {
 /// The cell `name` of `class`; a model cell is a child of
 /// `global-us-east-1`.
 fn cell(name: &str, class: &str, hub: &str, requires: &str) -> CellSettings {
+    cell_of("global-us-east-1", name, class, hub, requires)
+}
+
+/// The cell `name` of `class`; a model cell is a child of `parent`.
+fn cell_of(parent: &str, name: &str, class: &str, hub: &str, requires: &str) -> CellSettings {
     let home = if class == "global" {
         String::new()
     } else {
-        "home = 'global-us-east-1'\n".to_string()
+        format!("home = '{parent}'\n")
     };
     toml::from_str(&format!(
         "name = '{name}'\nclass = '{class}'\nregion = 'us-east-1'\n{home}hub = '{hub}'\n\
@@ -208,4 +213,122 @@ async fn cells_of_two_classes_may_share_a_name() {
     for hub in [global_hub, x_hub, y_hub] {
         hub.shutdown().await.expect("the hub stops");
     }
+}
+
+/// Unsaid, a global's `requires` is one ready child of each class its
+/// class sends to: with none followed, its health answers 503 and names
+/// the class it lacks, and 200 once a ready child is followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_global_requires_a_ready_child_by_default() {
+    let directory = Resolving::new();
+    let mut records = Records::new(&directory.inner);
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
+    let mut own = Instance::join(&global_hub, "a").await;
+    own.announce(SegmentPhase::Ready).await;
+    health(&global_cell, "the global's own quorum", |h| {
+        h.state == CellState::Ready
+    })
+    .await;
+    let (code, body) = status(&global_hub).await;
+    assert_eq!(code, 503, "{body}");
+    assert_eq!(
+        body["requires"],
+        serde_json::json!({ "model_x": { "required": 1, "met": 0 } })
+    );
+    assert_eq!(body["missing"], serde_json::json!(["model_x"]), "{body}");
+
+    let (model_hub, _model_cell) = serve_cell(
+        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (_instances, _) = meet_the_quorum(&model_hub).await;
+    records.until(CellState::Ready).await;
+    let healthy = health(&global_cell, "a ready child", |h| met(h) == 1).await;
+    assert!(healthy.missing.is_empty(), "{healthy:?}");
+    let (code, body) = status(&global_hub).await;
+    assert_eq!(code, 200, "{body}");
+    assert!(body.get("missing").is_none(), "{body}");
+    for hub in [global_hub, model_hub] {
+        hub.shutdown().await.expect("the hub stops");
+    }
+}
+
+/// An explicit `requires` replaces the default: a global that sends to
+/// `model_x` and `model_y` and requires only `model_x` is healthy with a
+/// ready child of `model_x` alone, while one that leaves `requires`
+/// unsaid lacks `model_y`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_requires_overrides_the_default() {
+    let directory = Resolving::new();
+    let (unsaid_x_hub, _unsaid_x, _unsaid_x_instance) = serve_ready(
+        cell_of("global-us-east-1", "m-1", "model_x", "x1-hub:1337", ""),
+        &directory,
+        "f",
+    )
+    .await;
+    let (named_x_hub, _named_x, _named_x_instance) = serve_ready(
+        cell_of("global-us-east-2", "m-2", "model_x", "x2-hub:1337", ""),
+        &directory,
+        "f",
+    )
+    .await;
+    let (unsaid_hub, unsaid, _unsaid_own) = serve_ready(
+        cell("global-us-east-1", "global", "global-1-hub:1337", ""),
+        &directory,
+        "a",
+    )
+    .await;
+    let (named_hub, named, _named_own) = serve_ready(
+        cell(
+            "global-us-east-2",
+            "global",
+            "global-2-hub:1337",
+            "[requires]\nmodel_x = 1\n",
+        ),
+        &directory,
+        "a",
+    )
+    .await;
+
+    let lacking = health(&unsaid, "its ready child of model_x", |h| met(h) == 1).await;
+    assert_eq!(lacking.missing, ["model_y"], "{lacking:?}");
+    let (code, body) = status(&unsaid_hub).await;
+    assert_eq!(code, 503, "{body}");
+    assert_eq!(body["missing"], serde_json::json!(["model_y"]), "{body}");
+
+    let healthy = health(&named, "its ready child of model_x", |h| met(h) == 1).await;
+    assert_eq!(
+        healthy.requires.keys().collect::<Vec<_>>(),
+        ["model_x"],
+        "{healthy:?}"
+    );
+    let (code, body) = status(&named_hub).await;
+    assert_eq!(code, 200, "{body}");
+    for hub in [unsaid_hub, named_hub, unsaid_x_hub, named_x_hub] {
+        hub.shutdown().await.expect("the hub stops");
+    }
+}
+
+/// A body without `missing`, as a hub of a build before it serves, is
+/// judged by its counts: a class met by fewer cells than required leaves
+/// the cell unhealthy.
+#[test]
+fn a_body_without_missing_is_judged_by_its_counts() {
+    let body = serde_json::json!({
+        "state": "ready",
+        "segments": { "a": { "usable": 1, "quorum": 1 } },
+        "requires": { "model_x": { "required": 1, "met": 0 } },
+    });
+    let health: CellHealth = serde_json::from_value(body).expect("a body");
+    assert!(health.missing.is_empty());
+    assert!(!health.healthy(), "{health:?}");
+    let met = serde_json::json!({
+        "state": "ready",
+        "segments": { "a": { "usable": 1, "quorum": 1 } },
+        "requires": { "model_x": { "required": 1, "met": 1 } },
+    });
+    let health: CellHealth = serde_json::from_value(met).expect("a body");
+    assert!(health.healthy(), "{health:?}");
 }

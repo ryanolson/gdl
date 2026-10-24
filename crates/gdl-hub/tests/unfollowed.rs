@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use common::{
-    CELL, GLOBAL, Instance, Records, Resolving, WAIT, global_requiring, health, meet_the_quorum,
+    CELL, GLOBAL, Instance, Records, Resolving, WAIT, global_default, health, meet_the_quorum,
     model, serve_cell, timing,
 };
 use futures::{FutureExt, Stream, StreamExt};
@@ -121,7 +121,7 @@ async fn a_draining_cell_says_so_once_its_last_follower_lets_go() {
         inner: directory.clone(),
         open: Arc::new(watch::Sender::new(false)),
     };
-    let global_settings = global_requiring(0);
+    let global_settings = global_default();
     let name = global_settings.hub.clone().expect("a hub name");
     let (global_hub, global_cell) = common::hub_of(global_settings, unseen.clone(), timing()).await;
     directory.resolve(&name, &global_hub);
@@ -319,7 +319,7 @@ async fn a_late_follow_of_a_draining_cell_is_never_offered_and_let_go_at_once() 
         inner: directory.clone(),
         open: Arc::new(watch::Sender::new(false)),
     };
-    let global_settings = global_requiring(0);
+    let global_settings = global_default();
     let name = global_settings.hub.clone().expect("a hub name");
     let (global_hub, global_cell) = common::hub_of(global_settings, unseen.clone(), timing()).await;
     directory.resolve(&name, &global_hub);

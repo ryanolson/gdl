@@ -855,6 +855,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             "CellSettings::DEFAULT_QUORUM",
             CellSettings::DEFAULT_QUORUM.to_string(),
         ),
+        (
+            "CellSettings::DEFAULT_REQUIRES",
+            CellSettings::DEFAULT_REQUIRES.to_string(),
+        ),
         ("DirectoryBackend::DEFAULT", format!("{directory:?}")),
         (
             "CellSettings::DEFAULT_SUMMARY",

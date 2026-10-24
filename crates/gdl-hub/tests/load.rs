@@ -12,7 +12,7 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    GLOBAL, Instance, Records, Resolving, WAIT, global_requiring, hub_of, model, serve_cell, timing,
+    GLOBAL, Instance, Records, Resolving, WAIT, global_default, hub_of, model, serve_cell, timing,
 };
 use futures::{Stream, StreamExt};
 use gdl_cells::{LoadSummary, MemoryDirectory};
@@ -295,7 +295,7 @@ async fn a_cell_no_hop_enters_has_no_summary() {
     let global = CellSettings {
         layout: None,
         summary: PERIOD,
-        ..global_requiring(0)
+        ..global_default()
     };
     let (hub, readiness) = hub_of(global, directory.clone(), beating()).await;
     let mut records = Records::of(&directory, "global", GLOBAL);
@@ -348,7 +348,7 @@ async fn a_following_hub_relays_the_summary() {
         .expect("the hub takes it");
     load(&mut cell_watch, summary(3, 8, 1, 1), WAIT).await;
 
-    let (global_hub, global) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global) = serve_cell(global_default(), &directory, timing()).await;
     let mut follows = global.follows();
     let generation = tokio::time::timeout(WAIT, async {
         loop {
@@ -423,7 +423,7 @@ async fn a_quiet_cells_summary_is_sent_every_period() {
         instances.push(join_ready(&model_hub, segment).await);
     }
     ready(&mut cell_watch, 1).await;
-    let (global_hub, global) = serve_cell(global_requiring(0), &directory, timing()).await;
+    let (global_hub, global) = serve_cell(global_default(), &directory, timing()).await;
     let mut follows = global.follows();
     let quiet = summary(2, 8, 1, 0);
     assert_eq!(
