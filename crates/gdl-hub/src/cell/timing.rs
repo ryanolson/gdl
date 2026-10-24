@@ -26,6 +26,8 @@ pub struct CellTiming {
     /// How long after a follow's link ends the hub waits before it may
     /// follow the cell again.
     pub refollow: Duration,
+    /// What a followed cell's watch may cost before its link ends it.
+    pub watch: gdl_watch::WatchLimits,
     /// How many watches each of the hub's watch routes serves at once.
     pub watch_caps: WatchCaps,
 }
@@ -38,6 +40,7 @@ impl Default for CellTiming {
             lease: CellRecord::DEFAULT_LEASE,
             watch_buffer: 1024,
             refollow: Duration::from_millis(250),
+            watch: gdl_watch::WatchLimits::default(),
             watch_caps: WatchCaps::default(),
         }
     }

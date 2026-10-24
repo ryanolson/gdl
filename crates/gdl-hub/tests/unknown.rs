@@ -299,7 +299,8 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
         let item = tokio::time::timeout(WAIT, alone.next())
             .await
             .expect("an event in time")
-            .expect("the watch goes on");
+            .expect("the watch goes on")
+            .expect("the watch does not fail");
         match item.event().expect("a known event") {
             FollowEvent::Synced => break,
             event => snapshot.push(event),
@@ -336,7 +337,7 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
         tokio::time::timeout(WAIT, none.next())
             .await
             .expect("an event in time")
-            .and_then(gdl_watch::Watched::event),
+            .and_then(|item| item.expect("the watch does not fail").event()),
         Some(FollowEvent::Synced),
         "a cell the hub does not follow"
     );
@@ -424,7 +425,8 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
         let item = tokio::time::timeout(WAIT, alone.next())
             .await
             .expect("an event in time")
-            .expect("the watch goes on");
+            .expect("the watch goes on")
+            .expect("the watch does not fail");
         let event = item.event().expect("a known event");
         if concerns(&event, M) {
             alone_seen.push(event);

@@ -63,7 +63,8 @@ async fn a_refused_follow_link_follows_the_cell_once_there_is_room() {
     tokio::time::timeout(WAIT, held.next())
         .await
         .expect("the snapshot begins in time")
-        .expect("the watch is served");
+        .expect("the watch is served")
+        .expect("the watch's first event is not a failure");
 
     let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
     // Refused twice: the link was asked for again after the first.

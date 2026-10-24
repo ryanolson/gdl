@@ -593,7 +593,8 @@ async fn a_chooser_refused_its_relay_routes_once_there_is_room() {
     tokio::time::timeout(WAIT, held.next())
         .await
         .expect("the snapshot begins in time")
-        .expect("the watch is served");
+        .expect("the watch is served")
+        .expect("the watch's first event is not a failure");
     open(&mut relay.follows_watchers(), 1).await;
 
     let chooser = chooser(&hub, &spec, Selectors::new(), &events).await;
@@ -652,7 +653,8 @@ async fn a_parent_refused_its_childs_watch_routes_to_it_once_there_is_room() {
     tokio::time::timeout(WAIT, held.next())
         .await
         .expect("the snapshot begins in time")
-        .expect("the watch is served");
+        .expect("the watch is served")
+        .expect("the watch's first event is not a failure");
     open(&mut watching, 3).await;
 
     let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;

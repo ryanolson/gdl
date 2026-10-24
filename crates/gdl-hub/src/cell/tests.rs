@@ -11,7 +11,7 @@ use gdl_cells::MemoryDirectory;
 use gdl_model::{
     CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, TypeInfo,
 };
-use gdl_watch::CellWatcher;
+use gdl_watch::{CellWatcher, WatchFailure};
 use tokio::sync::watch;
 use velo_hub::{Hub, HubConfig};
 
@@ -82,7 +82,7 @@ impl Served {
     }
 
     /// Open a watch of `route` and read its first event: it is served.
-    async fn open(&self, route: Route) -> BoxStream<'static, ()> {
+    async fn open(&self, route: Route) -> BoxStream<'static, Result<(), WatchFailure>> {
         let (class, name) = FOLLOWED;
         let opening = async {
             match route {
@@ -90,14 +90,14 @@ impl Served {
                     .watcher
                     .watch(&self.address)
                     .await
-                    .map(|w| w.map(drop).boxed()),
+                    .map(|w| w.map(|item| item.map(drop)).boxed()),
                 Route::Relay => self
                     .watcher
                     .follows(&self.address)
                     .await
-                    .map(|w| w.map(drop).boxed()),
+                    .map(|w| w.map(|item| item.map(drop)).boxed()),
                 Route::Follow => (self.watcher.follows_of(&self.address, class, name).await)
-                    .map(|w| w.map(drop).boxed()),
+                    .map(|w| w.map(|item| item.map(drop)).boxed()),
             }
         };
         let mut watch = tokio::time::timeout(WAIT, opening)
@@ -107,7 +107,8 @@ impl Served {
         tokio::time::timeout(WAIT, watch.next())
             .await
             .expect("the snapshot begins in time")
-            .expect("the watch is served");
+            .expect("the watch is served")
+            .unwrap_or_else(|failure| panic!("the {route:?} watch failed: {failure}"));
         watch
     }
 
@@ -174,7 +175,7 @@ impl Served {
     }
 
     /// Fill `route`'s places, each watch served.
-    async fn fill(&self, route: Route) -> Vec<BoxStream<'static, ()>> {
+    async fn fill(&self, route: Route) -> Vec<BoxStream<'static, Result<(), WatchFailure>>> {
         let mut held = Vec::new();
         for _ in 0..CAP {
             held.push(self.open(route).await);

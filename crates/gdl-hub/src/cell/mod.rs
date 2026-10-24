@@ -548,9 +548,8 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         } else {
             match self.watcher.get() {
                 Some(watcher) => Ok(watcher.clone()),
-                None => {
-                    CellWatcher::new().map(|watcher| self.watcher.get_or_init(|| watcher).clone())
-                }
+                None => CellWatcher::with_limits(self.timing.watch)
+                    .map(|watcher| self.watcher.get_or_init(|| watcher).clone()),
             }
             .map(|watcher| {
                 let me = gdl_watch::Follower {

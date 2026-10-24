@@ -1,0 +1,174 @@
+//! A chooser's watches of its hub's relay, read by the watch client within
+//! a short bound set for the test, from a server that sends a snapshot's
+//! first events and then only keep-alives: the relay's watch, and a cell's
+//! reading of its own, end at the bound, the tables never hold the partial
+//! snapshot, and each is watched again as any watch that ends is.
+
+use std::time::Duration;
+
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
+use gdl_cells::CellState;
+use gdl_watch::{CellWatcher, FollowEvent, WatchLimits};
+
+use super::super::served::Server;
+use super::super::task::{REWATCH, Relayed, Source, relayed};
+use super::{M1, exposed, follow, follower, peer, run, table};
+
+const WITHIN: Duration = Duration::from_millis(300);
+
+/// The relay at `address`, read by the watch client within [`WITHIN`],
+/// whose acknowledgements are all taken.
+struct Served {
+    watcher: CellWatcher,
+    address: String,
+}
+
+impl Served {
+    fn new(server: &Server) -> Self {
+        let watcher = CellWatcher::with_limits(WatchLimits {
+            synced_within: WITHIN,
+            ..WatchLimits::default()
+        })
+        .expect("a client");
+        Self {
+            watcher,
+            address: server.address.clone(),
+        }
+    }
+}
+
+impl Source for Served {
+    async fn watch(&self) -> Result<BoxStream<'static, Relayed>, String> {
+        self.watcher
+            .follows(&self.address)
+            .await
+            .map(|events| relayed(events, "relay"))
+            .map_err(|e| e.to_string())
+    }
+
+    async fn watch_of(
+        &self,
+        class: &str,
+        cell: &str,
+    ) -> Result<BoxStream<'static, Relayed>, String> {
+        self.watcher
+            .follows_of(&self.address, class, cell)
+            .await
+            .map(|events| relayed(events, "one cell"))
+            .map_err(|e| e.to_string())
+    }
+
+    async fn declare(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn acknowledge(&self, _: gdl_watch::Unoffered) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn avoid(&self, _: gdl_watch::Avoids) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// The relay's watch sends a follow and its instance, then only
+/// keep-alives: at the bound it ends, with nothing of it in the tables or
+/// registered, and the relay is watched again; a complete snapshot then
+/// fills the tables.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_snapshot_that_never_completes_is_not_installed() {
+    let (follows, cells, recorded, _) = follower();
+    let mut server = Server::new().await;
+    // Before the watch is asked for, so that its bound has run by then.
+    let began = tokio::time::Instant::now();
+    let task = tokio::spawn(run(Served::new(&server), follows));
+    let (x, y) = (peer(), peer());
+
+    let mut first = server.next().await;
+    assert_eq!(first.path, "/v1/ext/gdl-cell/follows");
+    first.answer().await;
+    first.send(&follow(M1, 1, CellState::Ready)).await;
+    first.send(&exposed(M1, 1, &x)).await;
+    first.keep_alive();
+    let mut second = server.next().await;
+    assert_eq!(second.path, "/v1/ext/gdl-cell/follows");
+    assert!(
+        second.at - began >= WITHIN + REWATCH,
+        "watched again after {:?}",
+        second.at - began
+    );
+    assert_eq!(cells.followed("f"), [], "the partial snapshot is not held");
+    assert_eq!(recorded.take(), [], "nothing of it is registered");
+
+    second.answer().await;
+    second.send(&follow(M1, 1, CellState::Ready)).await;
+    second.send(&exposed(M1, 1, &y)).await;
+    second.send(&FollowEvent::Synced).await;
+    let mut changes = cells.changes();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        changes.wait_for(|_| table(&cells, M1).is_some()),
+    )
+    .await
+    .expect("the snapshot in time")
+    .expect("the task runs");
+    assert_eq!(
+        table(&cells, M1).expect("a table").eligible,
+        [y.instance_id()]
+    );
+    task.abort();
+}
+
+/// A cell the relay sent an event of a kind this build does not know for
+/// is read from a watch of its own, which sends the follow and another
+/// instance, then only keep-alives: at the bound the reading ends, the
+/// cell stays unread with nothing of the reading in its table, and it is
+/// read again from a new watch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cells_reading_that_never_completes_leaves_it_unread() {
+    let (follows, cells, recorded, _) = follower();
+    let mut server = Server::new().await;
+    let task = tokio::spawn(run(Served::new(&server), follows));
+    let (x, y) = (peer(), peer());
+
+    let mut relay = server.next().await;
+    relay.answer().await;
+    relay.send(&follow(M1, 1, CellState::Ready)).await;
+    relay.send(&exposed(M1, 1, &x)).await;
+    relay.send(&FollowEvent::Synced).await;
+    // Before the reading is asked for, so that its bound has run by then.
+    let began = tokio::time::Instant::now();
+    relay
+        .raw(&format!(
+            r#"{{"event":"paused","class":"model_x","cell":"{M1}","generation":1}}"#
+        ))
+        .await;
+    let own_path = format!("/v1/ext/gdl-cell/follows/model_x/{M1}");
+    let mut reading = server.next().await;
+    assert_eq!(reading.path, own_path);
+    reading.answer().await;
+    reading.send(&follow(M1, 1, CellState::Ready)).await;
+    reading.send(&exposed(M1, 1, &y)).await;
+    reading.keep_alive();
+    let again = server.next().await;
+    assert_eq!(again.path, own_path, "the cell is read again");
+    assert!(
+        again.at - began >= WITHIN + REWATCH,
+        "read again after {:?}",
+        again.at - began
+    );
+    let table = table(&cells, M1).expect("a table");
+    assert!(table.unread, "the cell stays unread");
+    assert_eq!(table.eligible, []);
+    assert!(!cells.is_registered(y.instance_id()));
+    assert!(
+        !recorded
+            .take()
+            .iter()
+            .any(|call| *call == super::Call::Register(y.instance_id())),
+        "nothing of the reading is registered"
+    );
+    drop(relay);
+    task.abort();
+}
