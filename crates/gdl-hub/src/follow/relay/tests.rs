@@ -25,7 +25,14 @@ fn health() -> CellHealth {
 
 /// The cell `cell` of `model_x`, as its watch's first event shows it.
 fn installed_cell(cell: &str, state: CellState) -> Installed {
-    Installed::new(cell.into(), "model_x".into(), "r".into(), state, None)
+    Installed::new(
+        cell.into(),
+        "model_x".into(),
+        "r".into(),
+        "hub:1".into(),
+        state,
+        None,
+    )
 }
 
 fn installed(state: CellState) -> Installed {
@@ -141,7 +148,12 @@ fn a_state_hides_and_exposes_the_ready_instances() {
 /// never acknowledges: no follow closes.
 fn held() -> Relay {
     let choosers = super::Choosers::new([("a".to_string(), vec!["model_x".to_string()])]);
-    let relay = Relay::new(16, tokio::sync::watch::Sender::new(health()), choosers);
+    let relay = Relay::new(
+        16,
+        tokio::sync::watch::Sender::new(health()),
+        choosers,
+        tokio::sync::mpsc::unbounded_channel().0,
+    );
     let (id, epoch) = (
         InstanceId::new_v4(),
         velo_hub::protocol::RegistrationEpoch::new(),
@@ -239,7 +251,12 @@ fn only_the_current_generation_writes() {
 #[test]
 fn with_no_chooser_a_follow_closes_as_it_is_not_offered() {
     let choosers = super::Choosers::new([("a".to_string(), vec!["model_x".to_string()])]);
-    let relay = Relay::new(16, tokio::sync::watch::Sender::new(health()), choosers);
+    let relay = Relay::new(
+        16,
+        tokio::sync::watch::Sender::new(health()),
+        choosers,
+        tokio::sync::mpsc::unbounded_channel().0,
+    );
     let mut watch = relay.watch();
     assert_eq!(pending(&mut watch), [FollowEvent::Synced]);
     let (first, close) = relay.begin("model_x", "m");
@@ -268,7 +285,12 @@ fn a_class_counts_its_installed_ready_cells() {
     let health = tokio::sync::watch::Sender::new(health());
     let shown = health.subscribe();
     let met = || shown.borrow().requires["model_x"].met;
-    let relay = Relay::new(16, health, super::Choosers::default());
+    let relay = Relay::new(
+        16,
+        health,
+        super::Choosers::default(),
+        tokio::sync::mpsc::unbounded_channel().0,
+    );
     let (m, n) = (relay.begin("model_x", "m").0, relay.begin("model_x", "n").0);
     relay.install(m, installed_cell("m", CellState::Ready));
     relay.install(n, installed_cell("n", CellState::Degraded));

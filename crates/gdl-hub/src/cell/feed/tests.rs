@@ -20,6 +20,7 @@ fn feed() -> Feed {
         vec![("f".into(), true), ("d".into(), false)],
         Duration::from_secs(1),
         16,
+        Duration::from_secs(30),
     );
     feed.settle(1);
     feed
@@ -415,6 +416,7 @@ async fn a_watch_waits_for_the_epoch() {
         vec![],
         Duration::from_secs(1),
         16,
+        Duration::from_secs(30),
     );
     let mut early = Box::pin(feed.watch());
     assert!(futures::poll!(early.as_mut()).is_pending());
@@ -431,6 +433,7 @@ async fn a_watch_waits_for_the_epoch() {
         vec![],
         Duration::from_secs(1),
         16,
+        Duration::from_secs(30),
     );
     let refused = stopping.watch();
     stopping.close();

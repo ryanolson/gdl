@@ -128,10 +128,16 @@ pub use feed::CellWatch;
 /// whatever its quorum, so its health endpoint answers 503, its record and
 /// its watch say so, and no chooser chooses it; a drain cannot be
 /// cancelled. A cell whose class no hop enters cannot be drained. A hub
-/// that follows the cell names its own cell in its watch's query,
-/// `?class=<class>&cell=<cell>`, and counts among the cell's followers
-/// while the watch is open ([`CellReadiness::followers`]); once the cell
-/// drains and no cell follows it, its watch says so, once
+/// that follows the cell names its watch in the query, its own cell and
+/// the follow (`?class=<class>&cell=<cell>&run=<run>&generation=<generation>`,
+/// [`gdl_watch::Follower`]), and the watch counts among the cell's
+/// followers ([`CellReadiness::followers`]) until the follower releases it
+/// (`POST release` on the public listener, with the same
+/// [`gdl_watch::Follower`]), which it does once none of its choosers holds
+/// an offer to the cell in that follow. A watch that closes without a
+/// release still counts until the cell's lease has passed since it closed,
+/// looked at once a summary period. Once the cell drains and no watch
+/// counts, its watch says so, once
 /// ([`gdl_watch::CellWatchEvent::Unfollowed`]), and its entry instances
 /// stop taking work from other cells then rather than at their bound.
 ///
@@ -175,6 +181,13 @@ pub struct CellReadiness<D: CellDirectory> {
     drain: Arc<Drain>,
     /// The state of the cell's record last stored in the directory.
     stored: watch::Sender<Option<CellState>>,
+    /// A number drawn as the hub starts, which the watches it follows
+    /// cells by carry, so that a cell's hub tells them from those of an
+    /// earlier run of this hub.
+    run: u64,
+    /// The follows the relay closed, for their cells' hubs to be told,
+    /// until the hub starts and takes them.
+    released: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<crate::follow::Release>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -250,6 +263,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             segments,
             cell.summary,
             timing.watch_buffer,
+            timing.lease,
         );
         let sends: BTreeSet<String> = layout
             .boundaries()
@@ -262,10 +276,12 @@ impl<D: CellDirectory> CellReadiness<D> {
             CellState::Unavailable,
             &cell.requires,
         ));
+        let (releases, released) = tokio::sync::mpsc::unbounded_channel();
         let relay = Arc::new(Relay::new(
             timing.watch_buffer,
             health.clone(),
             choosers(&layout, &cell.class),
+            releases,
         ));
         Ok(Self {
             directory: Arc::new(directory),
@@ -280,6 +296,8 @@ impl<D: CellDirectory> CellReadiness<D> {
             relay,
             drain: Arc::new(Drain::new(class_segments)),
             stored: watch::Sender::new(None),
+            run: velo_hub::velo::InstanceId::new_v4().as_u128() as u64,
+            released: Mutex::new(Some(released)),
             tasks: Mutex::default(),
         })
     }
@@ -439,16 +457,33 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
             Ok(())
         } else {
             CellWatcher::new().map(|watcher| {
+                let me = gdl_watch::Follower {
+                    class: self.record.class.clone(),
+                    cell: self.record.name.clone(),
+                    run: self.run,
+                    generation: 0,
+                };
+                let released = self
+                    .released
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                if let Some(released) = released {
+                    tasks.push(tokio::spawn(crate::follow::release(
+                        released,
+                        watcher.clone(),
+                        me.clone(),
+                        self.timing.lease,
+                        ctx.cancellation().clone(),
+                    )));
+                }
                 for class in &self.sends {
                     let follower = Follower {
                         directory: Arc::clone(&self.directory),
                         relay: Arc::clone(&self.relay),
                         watcher: watcher.clone(),
                         refollow: self.timing.refollow,
-                        me: gdl_watch::Follower {
-                            class: self.record.class.clone(),
-                            cell: self.record.name.clone(),
-                        },
+                        me: me.clone(),
                         class: class.clone(),
                         region: self.record.region.clone(),
                         contract: self.record.contract,
@@ -479,8 +514,22 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 
     fn public_routes(self: Arc<Self>) -> Router {
         let feed = Arc::clone(&self.feed);
+        let releasing = Arc::clone(&self.feed);
         let relay = Arc::clone(&self.relay);
         Router::new()
+            .route(
+                gdl_watch::RELEASE_ROUTE,
+                post(move |Json(follower): Json<gdl_watch::Follower>| async move {
+                    let gdl_watch::Follower {
+                        class,
+                        cell,
+                        run,
+                        generation,
+                    } = follower;
+                    releasing.release(&((class, cell), run, generation));
+                    StatusCode::NO_CONTENT
+                }),
+            )
             .route(
                 "/health",
                 get(move || {
@@ -500,9 +549,11 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 get(move |Query(query): Query<WatchQuery>| {
                     let feed = Arc::clone(&feed);
                     async move {
-                        let watch = match (query.class, query.cell) {
-                            (Some(class), Some(cell)) => {
-                                tokio::time::timeout(SETTLE, feed.follow((class, cell))).await
+                        let follower = (query.class, query.cell, query.run, query.generation);
+                        let watch = match follower {
+                            (Some(class), Some(cell), Some(run), Some(generation)) => {
+                                let key = ((class, cell), run, generation);
+                                tokio::time::timeout(SETTLE, feed.follow(key)).await
                             }
                             _ => tokio::time::timeout(SETTLE, feed.watch()).await,
                         };
@@ -654,13 +705,15 @@ fn choosers(layout: &gdl_model::Layout, class: &str) -> Choosers {
     )
 }
 
-/// The query of a watch: the follower it names, if it names one
-/// ([`gdl_watch::Follower`]); one that names only a class or only a cell
-/// names none.
+/// The query of a watch: the follower's watch it names, if it names one
+/// ([`gdl_watch::Follower`]); one that leaves out any of its parts names
+/// none.
 #[derive(Deserialize)]
 struct WatchQuery {
     class: Option<String>,
     cell: Option<String>,
+    run: Option<u64>,
+    generation: Option<u64>,
 }
 
 /// The watch as server-sent events, each one JSON value; a hub that has

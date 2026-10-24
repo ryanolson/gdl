@@ -51,7 +51,11 @@ async fn follow(
     generation: u64,
 ) {
     let cell = record.name.as_str();
-    let mut events = match watcher.follow(&record.hub, me).await {
+    let me = Follower {
+        generation,
+        ..me.clone()
+    };
+    let mut events = match watcher.follow(&record.hub, &me).await {
         Ok(events) => events,
         Err(error) => {
             tracing::info!(cell, %error, "a followed cell's watch did not begin");
@@ -70,7 +74,14 @@ async fn follow(
             state,
             load,
         }) if name == record.name && class == record.class && epoch == record.epoch => {
-            Installed::new(name, class, record.region.clone(), state, load)
+            Installed::new(
+                name,
+                class,
+                record.region.clone(),
+                record.hub.clone(),
+                state,
+                load,
+            )
         }
         Some(CellWatchEvent::Cell { name, epoch, .. }) => {
             tracing::info!(

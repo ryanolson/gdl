@@ -549,3 +549,62 @@ async fn the_bound_ends_a_drain_whose_follower_holds_an_offer() {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
+
+/// A follower whose watch is lost, here at a proxy in front of the model
+/// cell's hub that cuts every connection, has not let go of the cell: its
+/// chooser still holds an offer to it. The draining cell's entry keeps
+/// taking work, as its bound allows; once the offer has ended and the
+/// global's hub can reach the cell's hub again, the global lets go, and
+/// the entry declines offers well before its bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_watch_is_no_release() {
+    const LONGER: &str = "[runtime]\nsetup_timeout_ms = 20000\ndrain_ms = 2000\n";
+    // A setup timeout of 20 s and twice the summary period.
+    const LONGER_BOUND: Duration = Duration::from_secs(22);
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, _global) = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let (m1, proxy) = model_proxied(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        LONGER,
+        &|deployment| reference_graph(deployment, &events),
+    )
+    .await;
+    let cells = tables(&chooser);
+    offered(&cells).await;
+    let held = gated(&chooser, &events, "held").await;
+
+    proxy.set(Mode::Refuse);
+    until(&cells, "the cell not offered, its lease held", |cells| {
+        followed(cells, "f", M1).is_some_and(|m| !m.offered && m.leases == 1)
+    })
+    .await;
+    let started = std::time::Instant::now();
+    m1.readiness.drain().await.expect("the cell drains");
+    let early = tokio::time::timeout(Duration::from_secs(3), declining(&m1.entries[0], WAIT));
+    assert!(
+        early.await.is_err(),
+        "the entry declined while the follower that lost its watch holds an offer"
+    );
+
+    release(&events, "held");
+    tokio::time::timeout(WAIT, held)
+        .await
+        .expect("the held request answered in time")
+        .expect("the request's task")
+        .expect("the held request answered");
+    proxy.set(Mode::Forward);
+    declining(&m1.entries[0], LONGER_BOUND).await;
+    assert!(
+        started.elapsed() < LONGER_BOUND - Duration::from_secs(5),
+        "declined only at the bound, {:?} after the drain began",
+        started.elapsed()
+    );
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}

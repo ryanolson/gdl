@@ -49,7 +49,7 @@ use velo_hub::velo::discovery::ServiceEvent;
 use velo_hub::velo::{InstanceId, PeerInfo};
 
 use super::count::Watched;
-use super::followers::{Followers, Following, Key};
+use super::followers::{Followers, Following, Key, WatchKey};
 use super::load::Reports;
 use crate::fanout::Watchers;
 use gdl_watch::{CellWatchError, CellWatchEvent};
@@ -68,13 +68,15 @@ impl Feed {
     /// The feed of the cell `name` of `class`, whose class has `segments`
     /// in its order, each with whether it is an entry segment, and whose
     /// load summary period is `period`. A watcher that falls more than
-    /// `buffer` events behind is ended.
+    /// `buffer` events behind is ended. A follower's watch closed without
+    /// a release counts for `lease` after it closes.
     pub(super) fn new(
         name: String,
         class: String,
         segments: Vec<(String, bool)>,
         period: Duration,
         buffer: usize,
+        lease: Duration,
     ) -> Self {
         Self {
             name,
@@ -85,7 +87,7 @@ impl Feed {
                 entries: HashMap::new(),
                 unresolved: HashMap::new(),
                 loads: Reports::new(period),
-                followers: Followers::new(),
+                followers: Followers::new(lease),
                 events: broadcast::channel(buffer).0,
             }),
             epoch: watch::Sender::new(None),
@@ -109,18 +111,19 @@ impl Feed {
         })
     }
 
-    /// [`Feed::watch`], for `follower`, which counts among the cell's
-    /// followers from its snapshot until the watch is dropped.
+    /// [`Feed::watch`], as the watch `key` of a follower, which counts
+    /// among the cell's followers from its snapshot until it is released,
+    /// or its lease passes after it is dropped.
     pub(super) async fn follow(
         self: &Arc<Self>,
-        follower: Key,
+        key: WatchKey,
     ) -> Result<CellWatch, CellWatchError> {
-        let events = self.open(Some(&follower)).await?;
+        let events = self.open(Some(&key)).await?;
         Ok(CellWatch {
             events,
             _following: Some(Following {
                 feed: Arc::clone(self),
-                follower,
+                key,
             }),
         })
     }
@@ -129,7 +132,7 @@ impl Feed {
     /// is taken under the same lock.
     async fn open(
         &self,
-        follower: Option<&Key>,
+        follower: Option<&WatchKey>,
     ) -> Result<BoxStream<'static, CellWatchEvent>, CellWatchError> {
         let counted = self.watchers.count();
         let mut settled = self.epoch.subscribe();
@@ -156,12 +159,18 @@ impl Feed {
         Ok(self.watchers.stream(counted, snapshot, events))
     }
 
-    /// One of `follower`'s watches ended: the draining cell's watchers are
-    /// told if no cell follows it any more.
-    pub(super) fn unfollow(&self, follower: &Key) {
+    /// A connection of the follower's watch `key` closed: the watch still
+    /// counts, until it is released or its lease passes.
+    pub(super) fn unfollow(&self, key: &WatchKey) {
+        self.lock().followers.left(key, Instant::now());
+    }
+
+    /// The follower of the watch `key` let go of the cell in it: the
+    /// draining cell's watchers are told if no cell follows it any more.
+    pub(super) fn release(&self, key: &WatchKey) {
         let mut shared = self.lock();
         let state = shared.state;
-        if shared.followers.left(follower, state) {
+        if shared.followers.release(key, state) {
             shared.send(CellWatchEvent::Unfollowed);
         }
     }
@@ -322,6 +331,12 @@ impl Feed {
         let load = shared.loads.summary();
         if changed || load.is_some() {
             shared.send(CellWatchEvent::Load { load });
+        }
+        // The summary's period paces the followers' leases too, so a lost
+        // watch stops counting up to a period after its lease.
+        let state = shared.state;
+        if shared.followers.expire(now, state) {
+            shared.send(CellWatchEvent::Unfollowed);
         }
         load
     }

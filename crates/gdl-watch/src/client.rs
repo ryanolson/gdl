@@ -7,7 +7,9 @@ use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use serde::de::DeserializeOwned;
 
-use super::{CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower, WATCH_ROUTE};
+use super::{
+    CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower, RELEASE_ROUTE, WATCH_ROUTE,
+};
 
 /// How long a connection to a cell's hub may take to open.
 const CONNECT: Duration = Duration::from_secs(5);
@@ -53,8 +55,9 @@ impl CellWatcher {
         self.open(hub, WATCH_ROUTE, None).await
     }
 
-    /// [`CellWatcher::watch`], as `follower`: the cell's hub counts it
-    /// among the cell's followers while the watch is open.
+    /// [`CellWatcher::watch`], as `follower`: the cell's hub counts the
+    /// watch among the cell's followers until it is released
+    /// ([`CellWatcher::release`]).
     pub async fn follow(
         &self,
         hub: &str,
@@ -73,6 +76,25 @@ impl CellWatcher {
         hub: &str,
     ) -> Result<BoxStream<'static, FollowEvent>, CellWatchError> {
         self.open(hub, FOLLOWS_ROUTE, None).await
+    }
+
+    /// Let go, as `follower`, of the cell whose hub is at `hub`: its watch
+    /// no longer counts among the cell's followers.
+    pub async fn release(&self, hub: &str, follower: &Follower) -> Result<(), CellWatchError> {
+        gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
+        let url = format!("http://{hub}/v1/ext/{EXTENSION}{RELEASE_ROUTE}");
+        let response = self
+            .http
+            .post(&url)
+            .json(follower)
+            .send()
+            .await
+            .map_err(|e| CellWatchError(format!("POST {url}: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(CellWatchError(format!("POST {url}: {status}")));
+        }
+        Ok(())
     }
 
     async fn open<T: DeserializeOwned + Send + 'static>(

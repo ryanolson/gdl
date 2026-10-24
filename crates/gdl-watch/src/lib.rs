@@ -25,21 +25,41 @@ pub use follows::FollowEvent;
 /// `/v1/ext/{EXTENSION}`.
 pub const EXTENSION: &str = "gdl-cell";
 
-/// The cell watch's route, under the extension's. A follower names itself
-/// in the query, `?class=<class>&cell=<cell>`, its own cell by its class
-/// and its name within the class, and counts among the cell's followers
-/// while its watch is open; a watch that names no follower counts for
+/// The cell watch's route, under the extension's. A follower names its
+/// watch in the query, `?class=<class>&cell=<cell>&run=<run>&generation=<generation>`
+/// ([`Follower`]), and the watch counts among the cell's followers from
+/// then until the follower releases it ([`RELEASE_ROUTE`]): a watch that
+/// closes without a release still counts, until the cell's lease has
+/// passed since it closed. A watch that names no follower counts for
 /// nothing.
 pub const WATCH_ROUTE: &str = "/watch";
 
-/// A cell that follows another, as its watch of that cell names it: the
-/// query of [`WATCH_ROUTE`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The route by which a follower lets go of a cell, under the
+/// extension's, on the cell hub's public listener: `POST` with the
+/// [`Follower`] its watch named, answered `204 No Content`. The follower
+/// sends it once none of its choosers holds an offer to the cell in that
+/// follow, so that the watch no longer counts, whether it is still open or
+/// already closed.
+pub const RELEASE_ROUTE: &str = "/release";
+
+/// One watch by which a cell follows another: the follower's cell, by its
+/// class and its name within the class, which is only a label, and the
+/// follow it belongs to, by the run of the follower's hub and the follow's
+/// generation in that run. The query of [`WATCH_ROUTE`], and the body of
+/// [`RELEASE_ROUTE`]. Nothing checks the names: they are not
+/// authenticated.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Follower {
     /// The follower's class.
     pub class: String,
     /// The follower's cell, named within its class.
     pub cell: String,
+    /// A number the follower's hub draws once each time it starts, so that
+    /// the watches of a hub that restarted are told from those of the run
+    /// before, whose generations it numbers again from 1.
+    pub run: u64,
+    /// The follow's generation in that run.
+    pub generation: u64,
 }
 
 /// The relay's route, under the extension's.

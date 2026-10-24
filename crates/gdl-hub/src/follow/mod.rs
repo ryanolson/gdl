@@ -33,10 +33,12 @@ use gdl_watch::CellWatcher;
 mod link;
 mod offer;
 mod relay;
+mod release;
 
 pub(crate) use offer::Choosers;
 pub use relay::FollowsWatch;
 pub(crate) use relay::Relay;
+pub(crate) use release::{Release, run as release};
 
 /// How long to wait before watching the directory again after its watch
 /// ended or failed.

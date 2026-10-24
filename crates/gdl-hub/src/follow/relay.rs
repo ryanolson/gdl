@@ -35,13 +35,14 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use futures::stream::BoxStream;
 use gdl_cells::{CellState, LoadSummary};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use velo_hub::protocol::RegistrationEpoch;
 use velo_hub::store::{Incarnation, Removal};
 use velo_hub::velo::{InstanceId, PeerInfo};
 
 use super::offer::{Choosers, Offer};
+use super::release::Release;
 use crate::CellHealth;
 use crate::fanout::Watchers;
 use gdl_watch::{CellWatchEvent, FollowEvent, Unoffered};
@@ -62,10 +63,13 @@ impl Relay {
     /// follows in `health`, and whose follows that are not offered close
     /// once every member of `choosers` that chooses their class has
     /// acknowledged them.
+    /// Each follow it closes is sent to `releases`, for the cell's hub to
+    /// be told.
     pub(crate) fn new(
         buffer: usize,
         health: watch::Sender<CellHealth>,
         choosers: Choosers,
+        releases: mpsc::UnboundedSender<Release>,
     ) -> Self {
         Self {
             shared: Mutex::new(Shared {
@@ -76,6 +80,7 @@ impl Relay {
                 ready: HashMap::new(),
                 health,
                 choosers,
+                releases,
             }),
             watchers: Watchers::new(),
             following: watch::Sender::new(BTreeMap::new()),
@@ -332,6 +337,8 @@ struct Shared {
     health: watch::Sender<CellHealth>,
     /// The members that must acknowledge a follow before it closes.
     choosers: Choosers,
+    /// Where each follow the relay closes is sent, for its cell's hub.
+    releases: mpsc::UnboundedSender<Release>,
 }
 
 /// One cell's current follow: its generation, what it exposes once its
@@ -429,6 +436,9 @@ impl Shared {
             // Not offered, so not ready, and not counted.
             follow.close.cancel();
             let _ = self.events.send(dropped());
+            if let Some(installed) = follow.installed {
+                self.release(&installed, generation);
+            }
             return;
         }
         let Some(cells) = self.closing.get_mut(class) else {
@@ -441,12 +451,26 @@ impl Shared {
             .get(&generation)
             .is_some_and(|closing| closing.offer.closes(choosers))
         {
-            generations.remove(&generation);
+            let closing = generations
+                .remove(&generation)
+                .expect("the follow was just found");
             if generations.is_empty() {
                 cells.remove(cell);
             }
             let _ = self.events.send(dropped());
+            self.release(&closing.installed, generation);
         }
+    }
+
+    /// Tell the hub of `installed`'s cell that its follow `generation`
+    /// closed.
+    fn release(&self, installed: &Installed, generation: u64) {
+        let _ = self.releases.send(Release {
+            hub: installed.hub.clone(),
+            class: installed.class.clone(),
+            cell: installed.cell.clone(),
+            generation,
+        });
     }
 
     /// The chooser `id` of `classes` no longer counts: settle every follow
@@ -542,6 +566,8 @@ pub(crate) struct Installed {
     cell: String,
     class: String,
     region: String,
+    /// The cell's hub, as its record names it.
+    hub: String,
     state: CellState,
     load: Option<LoadSummary>,
     /// Retired entry instances, with their segments: never exposed.
@@ -561,6 +587,7 @@ impl Installed {
         cell: String,
         class: String,
         region: String,
+        hub: String,
         state: CellState,
         load: Option<LoadSummary>,
     ) -> Self {
@@ -568,6 +595,7 @@ impl Installed {
             cell,
             class,
             region,
+            hub,
             state,
             load,
             retired: HashMap::new(),
