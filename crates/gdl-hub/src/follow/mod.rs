@@ -143,6 +143,12 @@ struct Following {
     generation: u64,
     /// The epoch of the record the follow began from.
     epoch: u64,
+    /// The `seq` of the last record of the cell the follower decided on
+    /// while it followed the cell: what a write must pass to follow the
+    /// cell again once the relay has closed the follow.
+    seq: u64,
+    /// Cancelled once the relay closes the follow.
+    closed: CancellationToken,
     link: AbortHandle,
 }
 
@@ -169,11 +175,14 @@ impl<D: CellDirectory> Follows<'_, D> {
     /// anew if it can.
     fn decide(&mut self, cell: &str, now: Instant) {
         let record = self.view.get(cell, now).cloned();
-        if let Some(following) = self.current.get(cell) {
-            if record
+        if let Some(following) = self.current.get_mut(cell) {
+            let newer = record
                 .as_ref()
-                .is_none_or(|record| record.epoch <= following.epoch)
-            {
+                .is_some_and(|record| record.epoch > following.epoch);
+            if !newer && !following.closed.is_cancelled() {
+                if let Some(record) = record.as_ref().filter(|r| r.epoch == following.epoch) {
+                    following.seq = following.seq.max(record.seq);
+                }
                 return;
             }
             let following = self
@@ -181,9 +190,16 @@ impl<D: CellDirectory> Follows<'_, D> {
                 .remove(cell)
                 .expect("the follow was just found");
             following.link.abort();
-            self.follower
-                .relay
-                .end(&self.follower.class, cell, following.generation);
+            if newer {
+                self.follower
+                    .relay
+                    .end(&self.follower.class, cell, following.generation);
+            } else {
+                // The relay closed the follow before this write came: the
+                // write is news of the cell after the close.
+                self.closed
+                    .insert(cell.to_string(), (following.epoch, following.seq));
+            }
         }
         if let (Some(record), Some(closed)) = (&record, self.closed.get(cell))
             && (record.epoch, record.seq) > *closed
@@ -216,12 +232,8 @@ impl<D: CellDirectory> Follows<'_, D> {
             .remove(&cell)
             .expect("the follow was just found");
         if closed {
-            let seq = self
-                .view
-                .get(&cell, Instant::now())
-                .filter(|record| record.epoch == following.epoch)
-                .map_or(0, |record| record.seq);
-            self.closed.insert(cell.clone(), (following.epoch, seq));
+            self.closed
+                .insert(cell.clone(), (following.epoch, following.seq));
         }
         self.decide(&cell, Instant::now());
     }
@@ -230,7 +242,8 @@ impl<D: CellDirectory> Follows<'_, D> {
         let relay = &self.follower.relay;
         let (generation, close) = relay.begin(&record.class, &record.name);
         let name = record.name.clone();
-        let epoch = record.epoch;
+        let (epoch, seq) = (record.epoch, record.seq);
+        let closed = close.clone();
         let link = self.links.spawn(link::run(
             Arc::clone(relay),
             self.follower.watcher.clone(),
@@ -245,6 +258,8 @@ impl<D: CellDirectory> Follows<'_, D> {
             Following {
                 generation,
                 epoch,
+                seq,
+                closed,
                 link,
             },
         );

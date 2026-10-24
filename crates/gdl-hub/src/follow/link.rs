@@ -13,9 +13,9 @@ use gdl_watch::{CellWatchEvent, CellWatcher, Follower};
 /// Follow the cell of `record` in `generation` until its watch ends or
 /// fails, or until the relay closes the follow (`close`), then end it in
 /// the relay at once, which marks it not offered if the relay has not
-/// closed it; after `refollow`, return the cell, the generation, and
-/// whether the relay closed it, for the follower to decide whether to
-/// follow it again. The wait is in the link's own task, which already
+/// closed it; return the cell, the generation, and whether the relay
+/// closed it, for the follower to decide whether to follow it again: at
+/// once if the relay closed it, else after `refollow`. The wait is in the link's own task, which already
 /// exists per followed cell, so a follower holds no timer per cell.
 pub(super) async fn run(
     relay: Arc<Relay>,
@@ -31,7 +31,12 @@ pub(super) async fn run(
         () = close.cancelled() => true,
     };
     relay.end(&record.class, &record.name, generation);
-    tokio::time::sleep(refollow).await;
+    // A follow the relay closed is followed again only from a later write
+    // of the cell's record, which the follower should see from the moment
+    // of the close; the delay is for a link that failed.
+    if !closed {
+        tokio::time::sleep(refollow).await;
+    }
     (record.name, generation, closed)
 }
 

@@ -389,3 +389,56 @@ fn global_hub_relay(hub: &Hub) -> impl Stream<Item = FollowEvent> + Unpin {
     .flatten()
     .boxed()
 }
+
+/// A follow closed because its cell took no work is followed again from
+/// the first later write of the cell's record that makes it a home cell,
+/// also one written while the follow's link waits out its delay before a
+/// follow: the cell recovers within the global's 2 s delay, and its hub
+/// writes nothing more for the length of the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cell_that_recovers_as_its_follow_closes_is_followed_again() {
+    let directory = Resolving::new();
+    let mut records = Records::new(&directory.inner);
+    let (model_hub, _model_cell) = serve_cell(
+        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (mut instances, _) = meet_the_quorum(&model_hub).await;
+    records.until(CellState::Ready).await;
+    let slow = gdl_hub::CellTiming {
+        refollow: std::time::Duration::from_secs(2),
+        ..timing()
+    };
+    let (global_hub, global_cell) = serve_cell(global_requiring(0), &directory, slow).await;
+    let key = ("model_x".to_string(), CELL.to_string());
+    let mut following = global_cell.following();
+    let first = *tokio::time::timeout(WAIT, following.wait_for(|cells| cells.contains_key(&key)))
+        .await
+        .expect("followed in time")
+        .expect("the extension runs")
+        .get(&key)
+        .expect("followed");
+    let mut watch = global_cell.follows();
+    through(&mut watch, |event| *event == FollowEvent::Synced).await;
+
+    for instance in &mut instances[1..] {
+        instance.withdraw(SegmentPhase::Ready).await;
+    }
+    // With no chooser to wait for, the follow closes as it is marked.
+    through(&mut watch, |event| *event == dropped(first)).await;
+    for instance in &mut instances[1..] {
+        instance.announce(SegmentPhase::Ready).await;
+    }
+    records.until(CellState::Ready).await;
+    tokio::time::timeout(
+        WAIT,
+        following.wait_for(|cells| cells.get(&key).is_some_and(|g| *g > first)),
+    )
+    .await
+    .expect("followed again in time")
+    .expect("the extension runs");
+    global_hub.shutdown().await.expect("the hub stops");
+    model_hub.shutdown().await.expect("the hub stops");
+}
