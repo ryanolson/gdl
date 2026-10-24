@@ -83,7 +83,8 @@ impl<R: Registry> Follows<R> {
     /// event after it is applied as any event is. The cell is unread
     /// again, and read from a new watch, when the watch ends, after a
     /// pause; at an event of a kind this build does not know after its
-    /// snapshot, at once; and once a snapshot with one is complete, after
+    /// snapshot that names its current generation or a later one, at
+    /// once; and once a snapshot with one is complete, after
     /// a pause, the cell never shown read meanwhile, so that a hub that
     /// sends such an event in each snapshot is not asked again and again
     /// at once. An item of a watch it no longer reads from is ignored.
@@ -102,13 +103,21 @@ impl<R: Registry> Follows<R> {
                 self.unread_own(&key);
                 self.watch_own(key, true);
             }
-            Some(Watched::Unknown(_)) => {
-                let filling = own.filling.is_some();
-                own.unknown |= filling;
+            // Fenced by its generation, as on the relay's watch: one that
+            // names an earlier generation than the cell's, a closing one
+            // the same watch carries, changes nothing.
+            Some(Watched::Unknown(event)) => {
                 self.cells.unknown();
-                if !filling {
-                    self.unread_own(&key);
-                    self.watch_own(key, false);
+                match own.filling.as_mut() {
+                    Some(filling) => {
+                        own.unknown |= filling.unread(&self.wanted, &key, event.generation);
+                    }
+                    None => {
+                        if self.followed.unread(&self.wanted, &key, event.generation) {
+                            self.withhold(&key);
+                            self.watch_own(key, false);
+                        }
+                    }
                 }
             }
             Some(Watched::Event(FollowEvent::Synced)) => {

@@ -210,3 +210,83 @@ fn an_offered_cell_left_unread_refuses_a_lease() {
     }
     assert!(offer(&cells).is_some(), "read again, it is offered");
 }
+
+/// An event of a kind this build does not know that names an earlier
+/// generation, on a cell's own watch after its snapshot, changes nothing,
+/// as on the relay's watch: the current follow stays read and offered, and
+/// no watch replaces the one the cell is read from.
+#[test]
+fn an_unknown_event_of_a_closing_generation_on_its_own_watch_changes_nothing() {
+    let (mut follows, cells, _, _) = follower();
+    let now = Instant::now();
+    let (p, q) = (peer(), peer());
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &p)],
+    );
+    let held = offer(&cells).expect("offered");
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 2, CellState::Ready), exposed(M1, 2, &q)],
+    );
+    follows.unknown(unknown(2));
+    let Asked { key, watch, .. } = follows.asked().pop().expect("a watch of its own");
+    for event in [
+        follow(M1, 1, CellState::Ready),
+        offering(1, 2, false),
+        exposed(M1, 1, &p),
+        follow(M1, 2, CellState::Ready),
+        exposed(M1, 2, &q),
+        FollowEvent::Synced,
+    ] {
+        follows.own(key.clone(), watch, Some(Watched::Event(event)), now);
+    }
+    assert!(
+        offer(&cells).is_some(),
+        "read again, the current follow is offered"
+    );
+    follows.own(key.clone(), watch, Some(Watched::Unknown(unknown(1))), now);
+    assert!(offer(&cells).is_some(), "the current follow left unread");
+    assert!(follows.asked().is_empty(), "the cell's own watch replaced");
+    assert!(follows.wants(&key, watch));
+    drop(held);
+}
+
+/// In a cell's own snapshot too, an event of a kind this build does not
+/// know is fenced by its generation, as in a snapshot of the relay: one
+/// that names the closing generation once the current one is shown leaves
+/// the cell read.
+#[test]
+fn an_unknown_event_of_a_closing_generation_in_its_own_snapshot_changes_nothing() {
+    let (mut follows, cells, _, _) = follower();
+    let now = Instant::now();
+    let (p, q) = (peer(), peer());
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &p)],
+    );
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 2, CellState::Ready), exposed(M1, 2, &q)],
+    );
+    follows.unknown(unknown(2));
+    let Asked { key, watch, .. } = follows.asked().pop().expect("a watch of its own");
+    let item = |event| Some(Watched::Event(event));
+    for event in [
+        follow(M1, 1, CellState::Ready),
+        offering(1, 2, false),
+        exposed(M1, 1, &p),
+        follow(M1, 2, CellState::Ready),
+        exposed(M1, 2, &q),
+    ] {
+        follows.own(key.clone(), watch, item(event), now);
+    }
+    follows.own(key.clone(), watch, Some(Watched::Unknown(unknown(1))), now);
+    follows.own(key.clone(), watch, item(FollowEvent::Synced), now);
+    assert!(offer(&cells).is_some(), "the cell left unread");
+    assert!(follows.asked().is_empty(), "the cell read again");
+}
