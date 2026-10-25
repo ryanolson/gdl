@@ -51,7 +51,7 @@ fn nest(name: &str, text: &str) -> String {
         .collect()
 }
 
-/// The two layouts of the README: three classes in one, two in the other.
+/// The two layouts of the book's example: three classes in one, two in the other.
 fn two_layouts() -> String {
     header()
         + &nest("regional", &format!("{SEGMENTS}{THREE}"))
@@ -379,14 +379,15 @@ fn the_commands_of_one_layout_refuse_several() {
     assert!(!archive.exists());
 }
 
-/// The README's example of two layouts is the one these tests generate.
+/// The book's example of two layouts is the one these tests generate.
 #[test]
-fn the_readme_shows_these_layouts() {
-    let readme = std::fs::read_to_string(root().join("README.md")).expect("the README");
+fn the_book_shows_these_layouts() {
+    let readme = std::fs::read_to_string(root().join("docs/src/concepts/placement.md"))
+        .expect("the chapter");
     let shown = nest("regional", &format!("{SEGMENTS}{THREE}"))
         + "\n"
         + &nest("compact", &format!("{SEGMENTS}{TWO}"));
-    assert!(readme.contains(&shown), "the README lacks:\n{shown}");
+    assert!(readme.contains(&shown), "the chapter lacks:\n{shown}");
 }
 
 /// `cargo gdl check --fleet` checks each cell against the layout it names.

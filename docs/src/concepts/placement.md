@@ -93,6 +93,34 @@ The spec does not check the name against a list, because a custom policy can be 
 
 One graph can be split differently in different places. A layout is one split: its own segments, `[routing]`, classes, and cell policies. A spec holds several in `[layout.<name>]` tables, each with the same `segment`, `routing`, `class`, and `cells` tables a spec has at its top level, as in `layout.regional.segment.front`.
 
+Here `regional` gives the side source its own class, and `compact` puts it with the frontend:
+
+```toml
+[layout.regional.segment.front]
+nodes = ["Ask", "Preprocess", "Truncate", "Detokenize", "Format", "Number"]
+[layout.regional.segment.side]
+nodes = ["Tell"]
+[layout.regional.segment.engine]
+nodes = ["Engine", "Spare"]
+[layout.regional.class.global]
+segments = ["front"]
+[layout.regional.class.batch]
+segments = ["side"]
+[layout.regional.class.model_x]
+segments = ["engine"]
+
+[layout.compact.segment.front]
+nodes = ["Ask", "Preprocess", "Truncate", "Detokenize", "Format", "Number"]
+[layout.compact.segment.side]
+nodes = ["Tell"]
+[layout.compact.segment.engine]
+nodes = ["Engine", "Spare"]
+[layout.compact.class.global]
+segments = ["front", "side"]
+[layout.compact.class.model_x]
+segments = ["engine"]
+```
+
 - Every layout places the same graph under the same contract hash. Nothing else is shared.
 - Each layout is checked as a complete graph on its own. A problem names its tables (``[layout.compact.class]``), or the layout (`[layout.compact]`) when it belongs to no table.
 - Each layout has its own placement hash. Two layouts that place the graph alike have equal hashes whatever they are called.

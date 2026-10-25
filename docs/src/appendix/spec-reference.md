@@ -113,10 +113,21 @@ An instance refuses to start when its `[cell]` does not fit its deployment: the 
 | `HUB_CONTROL_PORT` | 8337 | `gdl_model` |
 | `DEFAULT_DEADLINE` | 600 s: a request's deadline when it has none, and so the default drain bound | `gdl_model` |
 | `SEGMENT_NAME_LIMIT` | 58 | `gdl_model` |
-| `RequestRouter::DEFAULT` | round robin | `gdl_model` |
-| `CellPolicy::DEFAULT_POLICY` | `round_robin` | `gdl_model` |
-| `CellSettings::DEFAULT_QUORUM`, `DEFAULT_REQUIRES` | 1, 1 | `gdl_model` |
-| `CellSettings::DEFAULT_SUMMARY`, `MIN_SUMMARY` | 10 s, 1 s | `gdl_model` |
-| `DEFAULT_BASE_IMAGE`, `DEFAULT_BUILD_IMAGE` | as above | `gdl-gen` |
 
-Every other optional key has no value unless it is set.
+### Defaults
+
+Every default of the spec's placement and deployment tables, the fleet file, and a cell's settings is a named constant. A test in `gdl-gen` checks this table against the constants.
+
+| Key | Default | Constant |
+|---|---|---|
+| spec `[routing] <node>` | `"round_robin"` | `RequestRouter::DEFAULT` |
+| spec `[cells.<class>] policy` | `"round_robin"` | `CellPolicy::DEFAULT_POLICY` |
+| spec `[deployment] base_image` | `"debian:bookworm-slim"` | `DEFAULT_BASE_IMAGE` |
+| spec `[deployment] build_image` | `"rust:1.93-slim-bookworm"` | `DEFAULT_BUILD_IMAGE` |
+| fleet `ready.<segment>`, `[cell] ready.<segment>` | `1` | `CellSettings::DEFAULT_QUORUM` |
+| fleet `requires.<class>`, `[cell] requires.<class>`, for each class the cell's class sends to, when `requires` is unsaid | `1` | `CellSettings::DEFAULT_REQUIRES` |
+| `[cell] directory` | `"relay"` | `DirectoryBackend::DEFAULT` |
+| `[cell] summary_ms` | `10000` | `CellSettings::DEFAULT_SUMMARY` |
+| `[cell] summary_ms`, its least | `1000` | `CellSettings::MIN_SUMMARY` |
+
+The constants are `gdl_model`'s, and the two images are the generator's (`gdl-gen`). Every other optional key has no value unless it is set.

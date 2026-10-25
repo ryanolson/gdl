@@ -824,7 +824,7 @@ fn a_segment_name_is_short_enough_for_its_hub_services() {
     check(&spec(placement, &[("D", "tiny_nodes::D")]), &manifest()).expect("a name at the limit");
 }
 
-/// Each default constant, as the README's table names it, and its value
+/// Each default constant, as the spec reference's table names it, and its value
 /// as the table writes it.
 fn defaults() -> Vec<(&'static str, String)> {
     use gdl_model::{CellPolicy, CellSettings, DirectoryBackend, RequestRouter};
@@ -871,7 +871,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// What differs between the defaults table of `readme` and the
+/// What differs between the defaults table in `readme` (the spec reference) and the
 /// constants: a constant the table lacks or gives another value, and a
 /// row that names no constant.
 fn defaults_drift(readme: &str) -> Vec<String> {
@@ -911,12 +911,12 @@ fn defaults_drift(readme: &str) -> Vec<String> {
     drift
 }
 
-/// The README's table of defaults names every default constant with its
-/// value, and nothing else, so that the two cannot drift.
+/// The spec reference's table of defaults names every default constant
+/// with its value, and nothing else, so that the two cannot drift.
 #[test]
-fn the_readme_names_every_default_with_its_value() {
-    let readme = include_str!("../../../README.md");
-    assert_eq!(defaults_drift(readme), Vec::<String>::new());
+fn the_spec_reference_names_every_default_with_its_value() {
+    let reference = include_str!("../../../docs/src/appendix/spec-reference.md");
+    assert_eq!(defaults_drift(reference), Vec::<String>::new());
     // Each is a constant, named as one: no function stands in for it.
     for (constant, _) in defaults() {
         let name = constant.rsplit("::").next().unwrap_or(constant);
@@ -931,17 +931,17 @@ fn the_readme_names_every_default_with_its_value() {
         );
     }
     // The control: a table that drifted is caught.
-    let drifted = readme.replacen(
+    let drifted = reference.replacen(
         "| `\"round_robin\"` | `CellPolicy::DEFAULT_POLICY` |",
         "| `\"home_first\"` | `CellPolicy::DEFAULT_POLICY` |",
         1,
     );
-    assert_ne!(drifted, readme, "the row to change");
+    assert_ne!(drifted, reference, "the row to change");
     assert_eq!(
         defaults_drift(&drifted),
         ["CellPolicy::DEFAULT_POLICY is \"round_robin\", but the table says \"home_first\""]
     );
-    let missing = readme.replacen(
+    let missing = reference.replacen(
         "| `1` | `CellSettings::DEFAULT_QUORUM` |",
         "| `1` | (none) |",
         1,

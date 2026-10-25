@@ -525,11 +525,12 @@ fn a_segment_cannot_take_the_contract_directory() {
     );
 }
 
-/// The README's class example is a valid classing of the chat spec: its
+/// The book's class example is a valid classing of the chat spec: its
 /// tables, with any segment tables it shows in place of the spec's, render.
 #[test]
-fn the_readmes_class_example_renders() {
-    let readme = std::fs::read_to_string(root().join("README.md")).expect("readme");
+fn the_books_class_example_renders() {
+    let readme =
+        std::fs::read_to_string(root().join("docs/src/concepts/cells.md")).expect("chapter");
     let block = readme
         .split("```toml\n")
         .skip(1)
