@@ -241,6 +241,12 @@ impl Live {
     }
 }
 
+/// `id` as a selector sees it ([`gdl::InstanceId`]): the same 128 bits.
+#[inline]
+pub(crate) fn selector_id(id: InstanceId) -> gdl::InstanceId {
+    gdl::InstanceId::from_u128(id.as_u128())
+}
+
 /// The index `policy` picks among `len` instances on the turn `sequence`.
 #[inline]
 pub(crate) fn turn(policy: Policy, sequence: usize, len: usize, random: &RandomState) -> usize {
@@ -252,13 +258,14 @@ pub(crate) fn turn(policy: Policy, sequence: usize, len: usize, random: &RandomS
 
 impl Live {
     /// Ask `selector` to choose an instance of `segment` for a request
-    /// with context `cx` and encoded head `head`, from the eligible
-    /// instances of one table. A selector may wait, so the table is checked
-    /// again when it returns: if it changed and the choice is no longer
-    /// eligible, the choice and its lease are dropped and the selector is
-    /// asked again. That check is the selection's pick: nothing waits after
-    /// it but the hand-off's encoding, as after `pick`. Boxed, so that a
-    /// built-in policy's hand-off does not carry this future's state.
+    /// with context `cx` and encoded head `head`, which the instances in
+    /// `declined` declined, from the eligible instances of one table. A
+    /// selector may wait, so the table is checked again when it returns:
+    /// if it changed and the choice is no longer eligible, the choice and
+    /// its lease are dropped and the selector is asked again. That check
+    /// is the selection's pick: nothing waits after it but the hand-off's
+    /// encoding, as after `pick`. Boxed, so that a built-in policy's
+    /// hand-off does not carry this future's state.
     pub(crate) fn choose<'a>(
         &'a self,
         segment: &'a str,
@@ -266,19 +273,22 @@ impl Live {
         cx: &'a Cx,
         head: &'a [u8],
         encoding: gdl_model::Encoding,
-    ) -> BoxFuture<'a, Result<(InstanceId, Picked)>> {
+        declined: &'a [gdl::InstanceId],
+    ) -> BoxFuture<'a, std::result::Result<(InstanceId, Picked), Unchosen>> {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.table.load_full();
-                let offered = route(&table, segment)?;
+                let offered = route(&table, segment).map_err(Unchosen::Unroutable)?;
                 let picked = selector
                     .select(
                         cx,
                         head,
                         encoding,
+                        declined,
                         Instances::new(segment, &offered.offered),
                     )
-                    .await?;
+                    .await
+                    .map_err(Unchosen::Failed)?;
                 let chosen = offered.eligible[picked.index];
                 let now = self.table.load();
                 if Arc::ptr_eq(&now, &table)
@@ -287,10 +297,28 @@ impl Live {
                     return Ok((chosen, picked));
                 }
             }
-            Err(Error::routing(format!(
+            Err(Unchosen::Failed(Error::routing(format!(
                 "the instances of segment `{segment}` changed under its selector {CHOICES} times"
-            )))
+            ))))
         })
+    }
+}
+
+/// Why no instance was chosen.
+pub(crate) enum Unchosen {
+    /// The routing table has no instance of the segment to route to: a
+    /// router that chooses again after a refusal fails with the refusal.
+    Unroutable(Error),
+    /// The selector failed, or the table kept changing under it: the
+    /// request's own error.
+    Failed(Error),
+}
+
+impl From<Unchosen> for Error {
+    fn from(unchosen: Unchosen) -> Self {
+        match unchosen {
+            Unchosen::Unroutable(error) | Unchosen::Failed(error) => error,
+        }
     }
 }
 
@@ -404,10 +432,7 @@ impl Members {
                 .map(|(segment, turns)| {
                     let known = self.segments.get(segment).map_or(&[][..], Vec::as_slice);
                     let eligible = eligible(known);
-                    let offered = eligible
-                        .iter()
-                        .map(|id| gdl::InstanceId::from_u128(id.as_u128()))
-                        .collect();
+                    let offered = eligible.iter().copied().map(selector_id).collect();
                     let route = Route {
                         eligible: eligible.into_boxed_slice(),
                         offered,
@@ -710,9 +735,10 @@ mod tests {
 
         async fn choose(live: &Live, selector: &dyn Erased) -> Result<InstanceId> {
             let cx = Cx::new();
-            live.choose("worker", selector, &cx, &[], Default::default())
+            live.choose("worker", selector, &cx, &[], Default::default(), &[])
                 .await
                 .map(|(id, _)| id)
+                .map_err(Error::from)
         }
 
         fn raw(ids: &[InstanceId]) -> Vec<u128> {
@@ -801,9 +827,10 @@ mod tests {
                 async move {
                     let selector = Typed(waiting);
                     let cx = Cx::new();
-                    live.choose("worker", &selector, &cx, &[], Default::default())
+                    live.choose("worker", &selector, &cx, &[], Default::default(), &[])
                         .await
                         .map(|(id, picked)| (id, picked.lease))
+                        .map_err(Error::from)
                 }
             });
             waiting.arrived.notified().await;

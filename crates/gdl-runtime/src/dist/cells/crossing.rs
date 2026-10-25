@@ -20,7 +20,7 @@ use super::lease::CellLease;
 use super::policy::{self, CellChooser};
 use super::{CellTable, Cells, EntryTable};
 use crate::dist::roster::{CHOICES, Policy, turn};
-use crate::dist::runtime::Router;
+use crate::dist::runtime::Within;
 
 /// One hand-off into another class, as a chooser sends it.
 pub(crate) struct Crossing {
@@ -36,21 +36,8 @@ pub(crate) struct Crossing {
 
 impl Crossing {
     /// The hand-off into `target`, choosing the instance within the
-    /// chosen cell as `router` chooses.
-    pub(crate) fn new(target: Target, router: Router) -> Self {
-        let within = match router {
-            Router::Policy(policy) => Within::Policy(policy),
-            Router::Selector {
-                name,
-                selector,
-                encoding,
-            } => Within::Selector {
-                name,
-                selector,
-                encoding,
-            },
-            Router::Cells(crossing) => crossing.within.clone(),
-        };
+    /// chosen cell as `within` chooses.
+    pub(crate) fn new(target: Target, within: Within) -> Self {
         Self {
             target,
             within,
@@ -125,6 +112,9 @@ impl Crossing {
                         cx,
                         head,
                         encoding,
+                        // The cells failover chooses another cell, so no
+                        // instance of this one has declined the request.
+                        &[],
                         Instances::new(&self.target.segment, &cell.offered),
                     )
                     .await?;
@@ -234,20 +224,6 @@ fn still_eligible<'t>(
 /// cell's follow.
 pub(crate) type Chosen = (InstanceId, u64, Picked, CellLease);
 
-/// How the instance within the chosen cell is chosen: the hand-off's own
-/// router.
-#[derive(Clone)]
-pub(crate) enum Within {
-    /// `round_robin` or `random`, with a turn per entry segment and cell.
-    Policy(Policy),
-    /// A selector, by the name the placement gives it.
-    Selector {
-        name: Arc<str>,
-        selector: Arc<dyn Erased>,
-        encoding: gdl_model::Encoding,
-    },
-}
-
 /// What a hand-off into another class chooses from: the class, its entry
 /// segment, the chooser's table of that segment's cells, the chooser's
 /// region, the class's cell policy, and the cells the chooser damps.
@@ -340,7 +316,8 @@ mod tests {
             eligible: eligible.into(),
             offered: eligible
                 .iter()
-                .map(|id| gdl::InstanceId::from_u128(id.as_u128()))
+                .copied()
+                .map(crate::dist::roster::selector_id)
                 .collect(),
             retired: Box::new([]),
             unread: false,
@@ -351,7 +328,7 @@ mod tests {
         })
     }
 
-    fn crossing(cells: Vec<Arc<CellTable>>, router: Router) -> Crossing {
+    fn crossing(cells: Vec<Arc<CellTable>>, within: Within) -> Crossing {
         let table = Arc::new(ArcSwap::from_pointee(EntryTable {
             cells: cells.into_boxed_slice(),
         }));
@@ -365,7 +342,7 @@ mod tests {
                 random: true,
                 damping: Arc::default(),
             },
-            router,
+            within,
         )
     }
 
@@ -380,7 +357,7 @@ mod tests {
     fn round_robin_takes_turns_within_a_cell_across_its_tables() {
         let ids = ids(2);
         let first = cell("m", CellState::Ready, &ids);
-        let crossing = crossing(vec![Arc::clone(&first)], Router::Policy(Policy::RoundRobin));
+        let crossing = crossing(vec![Arc::clone(&first)], Within::Policy(Policy::RoundRobin));
         let random = RandomState::new();
         let pick = || {
             crossing
@@ -401,7 +378,7 @@ mod tests {
     fn no_cell_to_choose_is_a_routing_error_naming_the_class() {
         let crossing = crossing(
             vec![cell("m", CellState::Unavailable, &[])],
-            Router::Policy(Policy::RoundRobin),
+            Within::Policy(Policy::RoundRobin),
         );
         assert!(
             crossing
@@ -423,7 +400,7 @@ mod tests {
                 cell("m1", CellState::Ready, &ids[..1]),
                 cell("m2", CellState::Degraded, &ids[1..]),
             ],
-            Router::Policy(Policy::RoundRobin),
+            Within::Policy(Policy::RoundRobin),
         );
         let random = RandomState::new();
         let m1 = super::super::cell_id("model_x", "m1");
@@ -504,7 +481,7 @@ mod tests {
         });
         let crossing = Arc::new(crossing(
             vec![cell("m", CellState::Ready, &ids)],
-            Router::Policy(Policy::RoundRobin),
+            Within::Policy(Policy::RoundRobin),
         ));
         let choosing = tokio::spawn({
             let crossing = Arc::clone(&crossing);
@@ -559,7 +536,7 @@ mod tests {
         });
         let crossing = Arc::new(crossing(
             vec![cell("m", CellState::Ready, &ids)],
-            Router::Policy(Policy::RoundRobin),
+            Within::Policy(Policy::RoundRobin),
         ));
         let choosing = tokio::spawn({
             let crossing = Arc::clone(&crossing);
@@ -638,7 +615,7 @@ mod tests {
         let leases = Arc::new(AtomicUsize::new(0));
         let crossing = crossing(
             vec![cell("m", CellState::Ready, &ids)],
-            Router::Policy(Policy::RoundRobin),
+            Within::Policy(Policy::RoundRobin),
         );
         let selector = gdl::__runtime::Typed(Arc::new(Cancelling(Arc::clone(&leases))));
         let cx = Cx::new();
@@ -682,7 +659,7 @@ mod tests {
         let ids = ids(1);
         let crossing = crossing(
             vec![cell("m", CellState::Ready, &ids)],
-            Router::Policy(Policy::RoundRobin),
+            Within::Policy(Policy::RoundRobin),
         );
         let selector = gdl::__runtime::Typed(Arc::new(Reading));
         let head = serde_json::to_vec(&Prompt {
@@ -701,7 +678,7 @@ mod tests {
     async fn a_choice_still_in_its_cells_newer_table_is_kept() {
         let ids = ids(2);
         let first = cell("m", CellState::Ready, &ids);
-        let crossing = crossing(vec![first], Router::Policy(Policy::RoundRobin));
+        let crossing = crossing(vec![first], Within::Policy(Policy::RoundRobin));
         let table = crossing.target.table.load_full();
         let chosen = &table.cells[0];
         // An event made the cell's table again, with the same instances.
@@ -740,7 +717,7 @@ mod tests {
                 cell("m1", CellState::Ready, &ids[..2]),
                 cell("m2", CellState::Ready, &ids[2..]),
             ],
-            Router::Policy(Policy::RoundRobin),
+            Within::Policy(Policy::RoundRobin),
         );
         let random = RandomState::new();
         let time = |pick: &dyn Fn() -> InstanceId| -> Duration {

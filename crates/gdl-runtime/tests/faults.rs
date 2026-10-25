@@ -193,8 +193,12 @@ async fn a_lost_forward_ack_ends_in_one_completion_and_no_leak() {
         .segment("front")
         .call(Cx::new(), prompt("k", plan))
         .await;
-    // The caller sees exactly one outcome: the hand-off failed.
-    assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Transport));
+    // The caller sees exactly one outcome: the hand-off failed, and may
+    // have run, as it did.
+    assert_eq!(
+        result.err().map(|e| e.kind()),
+        Some(ErrorKind::OutcomeUnknown)
+    );
     // The accepted work started, and the abandoned response stream stops it.
     events.wait_for("D:start:c(k)#0", WAIT).await;
     let stopped = |e: &str| e == "D:cancelled:c(k)#0" || e == "D:dropped:c(k)#0";

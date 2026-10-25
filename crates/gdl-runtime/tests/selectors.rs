@@ -1,8 +1,11 @@
 //! Routing selectors: a crossing's router that names a selector the
-//! sending segment registers, or one of gdl's own.
+//! sending segment registers, or one of gdl's own; and the offer every
+//! routed hand-off makes, which an instance with no room declines and the
+//! router then makes to an instance it chooses again.
 
 mod common;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::selecting::Counting;
@@ -602,5 +605,172 @@ async fn a_request_cancelled_while_its_selector_chose_is_not_handed_on() {
         [0, 0],
         "a cancelled request was handed on"
     );
+    assert!(settles(&cluster).await);
+}
+
+/// Two engine instances that admit one request each and refuse at once
+/// when full; the front and the post segment run with `front`.
+fn one_each(front: RuntimeConfig) -> impl Fn(&str) -> RuntimeConfig {
+    move |segment| match segment {
+        "engine" => RuntimeConfig {
+            admission_limit: 1,
+            admission_wait: Duration::ZERO,
+            ..front.clone()
+        },
+        _ => front.clone(),
+    }
+}
+
+/// A request that `front` routes, held open at D once it has its one
+/// item.
+async fn hold<H: gdl::Next<Prompt, common::Chunk>>(
+    front: &gdl_runtime::Segment<H>,
+    text: &str,
+) -> gdl::Items<common::Chunk> {
+    let plan = Plan {
+        tokens: 1,
+        hold_at_end: true,
+        ..Plan::default()
+    };
+    let mut out = front
+        .call(Cx::new(), prompt(text, plan))
+        .await
+        .expect("routed");
+    out.next().await.expect("an item").expect("ok");
+    out
+}
+
+/// An engine instance with no room declines a round robin hand-off, and
+/// the front offers it to the next instance it picks; with no failover,
+/// the refusal is the request's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_instance_declines_and_the_next_pick_takes_the_request() {
+    let (instances, _) = two_engines().await;
+    for failovers in [2, 0] {
+        let events = Events::new();
+        let front = RuntimeConfig {
+            instance_failovers: failovers,
+            ..RuntimeConfig::default()
+        };
+        let cluster = deploy_configured(
+            &instances,
+            &routed(RequestRouter::RoundRobin),
+            &events,
+            &one_each(front),
+        );
+        let front = cluster.segment("front");
+        // Round robin: the first engine, then the second, then the first.
+        let held = hold(front, "held").await;
+        assert_eq!(engine_forwards(&cluster), [1, 0]);
+        let out = front
+            .call(Cx::new(), prompt("next", Plan::default()))
+            .await
+            .expect("routed");
+        collect(out).await;
+        until("the second engine's admission to be released", || {
+            cluster
+                .segments
+                .iter()
+                .filter(|(name, _)| name == "engine")
+                .nth(1)
+                .is_some_and(|(_, segment)| segment.admitted() == 0)
+        })
+        .await;
+        let plain = Plan {
+            tokens: 1,
+            ..Plan::default()
+        };
+        let offered = front.call(Cx::new(), prompt("offered", plain)).await;
+        let declined: Vec<usize> = cluster
+            .segments
+            .iter()
+            .filter(|(name, _)| name == "engine")
+            .map(|(_, segment)| segment.load().declined)
+            .collect();
+        assert_eq!(declined, [1, 0], "with {failovers} failovers");
+        if failovers > 0 {
+            let out = offered.expect("the second engine took it");
+            assert_eq!(collect(out).await, expected(0..1));
+            assert_eq!(engine_forwards(&cluster), [1, 2]);
+        } else {
+            let error = match offered {
+                Err(error) => error,
+                Ok(out) => match collect(out).await.pop() {
+                    Some(Err(error)) => error,
+                    other => panic!("the request was not refused: {other:?}"),
+                },
+            };
+            assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
+            assert_eq!(engine_forwards(&cluster), [1, 1]);
+        }
+        drop(held);
+        assert!(settles(&cluster).await);
+    }
+}
+
+/// Chooses the first instance it was not told declined the request, or
+/// the first when every one did, adding its own meta, and records what it
+/// was told.
+#[derive(Clone, Default)]
+struct Avoiding {
+    told: Arc<Mutex<Vec<Vec<u128>>>>,
+}
+
+impl Selector for Avoiding {
+    type Head = Encoded;
+
+    async fn select<'a>(
+        &'a self,
+        request: Request<'a, Encoded>,
+        instances: Instances<'a>,
+    ) -> gdl::Result<Choice<'a>> {
+        let declined = request.declined();
+        let raw = declined.iter().map(|id| id.as_u128()).collect();
+        self.told.lock().expect("lock").push(raw);
+        let chosen = instances
+            .iter()
+            .find(|instance| !declined.contains(&instance.id()))
+            .unwrap_or_else(|| instances.get(0).expect("never empty"));
+        let key = if declined.is_empty() {
+            "first"
+        } else {
+            "again"
+        };
+        Ok(Choice::new(chosen).with_meta(key, chosen.id().to_string()))
+    }
+}
+
+/// A selector whose choice declines is asked again and told which
+/// instance declined; the receiving context carries the second choice's
+/// meta and the request's own, not the first choice's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_selector_is_told_which_instance_declined() {
+    let (instances, engines) = two_engines().await;
+    let events = Events::new();
+    let avoiding = Avoiding::default();
+    let cluster = deploy_configured(
+        &instances,
+        &routed(selector("avoiding")),
+        &events,
+        &one_each(with("avoiding", &avoiding)),
+    );
+    let front = cluster.segment("front");
+    let held = hold(front, "held").await;
+    let mut cx = Cx::new();
+    cx.insert_meta("caller", "kept");
+    let out = front
+        .call(cx, prompt("offered", Plan::default()))
+        .await
+        .expect("the other engine took it");
+    collect(out).await;
+    let told = avoiding.told.lock().expect("lock").clone();
+    assert_eq!(told, [vec![], vec![], vec![engines[0].as_u128()]]);
+    let seen = events.cx_of("D:c(offered)#0");
+    let second = format!("{:032x}", engines[1].as_u128());
+    assert_eq!(seen.meta().get("again"), Some(&second));
+    assert_eq!(seen.meta().get("caller").map(String::as_str), Some("kept"));
+    assert!(!seen.meta().contains_key("first"), "{:?}", seen.meta());
+    assert_eq!(engine_forwards(&cluster), [1, 1]);
+    drop(held);
     assert!(settles(&cluster).await);
 }

@@ -14,6 +14,10 @@ use crate::role::Build;
 /// still holds (until the response it returns ends, a relay has sent its
 /// input, or the hand-off is acknowledged). Equal counts take turns.
 ///
+/// After instances decline a request ([`Request::declined`]), the least
+/// loaded of those that have not is chosen; when every one has declined,
+/// the least loaded overall.
+///
 /// It sees only its own sender's requests, not the instance's whole load.
 /// Where the lease ends at the acknowledgement (a forward run that hands
 /// on, with nothing of the response passing it), the counts stay near
@@ -85,31 +89,51 @@ impl Selector for LeastLoaded {
 
     async fn select<'a>(
         &'a self,
-        _request: Request<'a, Encoded>,
+        request: Request<'a, Encoded>,
         instances: Instances<'a>,
     ) -> Result<Choice<'a>> {
         let counts = self.counts(&instances);
-        let n = instances.len();
-        let start = self.turn.fetch_add(1, Ordering::Relaxed) % n;
-        let mut best: Option<(usize, usize, &Arc<AtomicUsize>)> = None;
-        for step in 0..n {
-            let index = (start + step) % n;
-            let Some(instance) = instances.get(index) else {
-                continue;
-            };
-            let Some(count) = find(&counts, instance.id()) else {
-                continue;
-            };
-            let held = count.load(Ordering::Relaxed);
-            if best.is_none_or(|(_, least, _)| held < least) {
-                best = Some((index, held, count));
-            }
-        }
-        let (index, _, count) = best.expect("every instance has a count");
+        let start = self.turn.fetch_add(1, Ordering::Relaxed) % instances.len();
+        // The first choice, with nothing declined, skips nothing: an empty
+        // slice's check is its length.
+        let declined = request.declined();
+        let (index, count) = least(&instances, &counts, start, declined)
+            .or_else(|| least(&instances, &counts, start, &[]))
+            .expect("every instance has a count");
         count.fetch_add(1, Ordering::Relaxed);
         let chosen = instances.get(index).expect("an index from the scan");
         Ok(Choice::new(chosen).with_lease(Release(Arc::clone(count))))
     }
+}
+
+/// The index and count of the instance of `instances` with the fewest
+/// leases, of those not in `skipped`, scanning from `start` so that equal
+/// counts take turns; `None` when `skipped` holds them all.
+fn least<'c>(
+    instances: &Instances<'_>,
+    counts: &'c [(InstanceId, Arc<AtomicUsize>)],
+    start: usize,
+    skipped: &[InstanceId],
+) -> Option<(usize, &'c Arc<AtomicUsize>)> {
+    let n = instances.len();
+    let mut best: Option<(usize, usize, &Arc<AtomicUsize>)> = None;
+    for step in 0..n {
+        let index = (start + step) % n;
+        let Some(instance) = instances.get(index) else {
+            continue;
+        };
+        if skipped.contains(&instance.id()) {
+            continue;
+        }
+        let Some(count) = find(counts, instance.id()) else {
+            continue;
+        };
+        let held = count.load(Ordering::Relaxed);
+        if best.is_none_or(|(_, least, _)| held < least) {
+            best = Some((index, held, count));
+        }
+    }
+    best.map(|(index, _, count)| (index, count))
 }
 
 /// Gives back one count when the sending segment lets the request go.
@@ -132,11 +156,21 @@ mod tests {
     }
 
     async fn pick(selector: &Typed<LeastLoaded>, ids: &[InstanceId]) -> (usize, Picked) {
+        pick_after(selector, ids, &[]).await
+    }
+
+    /// [`pick`], for a request that the instances in `declined` declined.
+    async fn pick_after(
+        selector: &Typed<LeastLoaded>,
+        ids: &[InstanceId],
+        declined: &[InstanceId],
+    ) -> (usize, Picked) {
         let picked = selector
             .select(
                 &Cx::new(),
                 &[],
                 Default::default(),
+                declined,
                 Instances::new("worker", ids),
             )
             .await
@@ -232,6 +266,39 @@ mod tests {
             .filter(|(id, _)| id.as_u128() == high.as_u128())
             .count();
         assert_eq!(highs, 1, "{} counts for one instance", highs);
+        drop(held);
+    }
+
+    /// After a decline, the least loaded instance that has not declined is
+    /// chosen, though one that declined holds fewer leases; when every
+    /// instance has declined, the least loaded overall is chosen again.
+    #[tokio::test]
+    async fn a_declined_instance_gives_way_to_the_next_least_loaded() {
+        let selector = Typed(Arc::new(LeastLoaded::new()));
+        let ids = ids(3);
+        // Leases held: none on the first, one on the second, two on the
+        // third, each taken through a view of that instance alone.
+        let mut held = Vec::new();
+        for (at, leases) in [(1, 1), (2, 2)] {
+            for _ in 0..leases {
+                let (_, lease) = pick(&selector, &ids[at..=at]).await;
+                held.push(lease);
+            }
+        }
+        assert_eq!(
+            (0..3)
+                .map(|at| selector.0.held(ids[at]))
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        for _ in 0..4 {
+            let (index, _) = pick_after(&selector, &ids, &[ids[0]]).await;
+            assert_eq!(index, 1, "a declined instance was chosen over another");
+            let (index, _) = pick_after(&selector, &ids, &[ids[0], ids[1]]).await;
+            assert_eq!(index, 2);
+            let (index, _) = pick_after(&selector, &ids, &[ids[2], ids[0], ids[1]]).await;
+            assert_eq!(index, 0, "every instance declined");
+        }
         drop(held);
     }
 }

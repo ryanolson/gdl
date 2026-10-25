@@ -19,3 +19,11 @@ Drafts found while building the gdl runtime on velo 0.19.0. Not filed: each need
 **Observed.** With default settings, two velo 0.19 nodes in one process over loopback TCP move one stream of small items (about 12 bytes each, `Vec<u8>` items, the server sending in a loop and finalizing) at about 12 K items/s, about 83 us per item. A one-item request (unary request carrying an anchor handle, then attach and stream) takes about 330 us. Setup: `crates/gdl-runtime/benches/remote.rs` in dynamo-gdl, `velo-direct` cases; 4 tokio worker threads.
 
 **Ask.** Is this the expected single-stream rate with the default mux settings (initial credit 32, auto flush on admission, no linger)? If not, which setting is the intended lever?
+
+## 3. A bound on a receiver's ingress before dispatch
+
+**Observed** (velo `cee2834`). An arriving message goes into an unbounded transport channel (`lib/velo-ext/src/transport.rs`, the receive channel) before the dispatcher runs. An ordered lane's `max_queue_depth` with `OverflowPolicy::Reject` acts only later, in ordered dispatch (`messenger/server/dispatcher.rs`). A sender's `FireResult` completes when its own transport admits the frame (`messenger/client/builders/results.rs`), so a sender that awaits it cannot limit what waits at the receiver. Payloads over the staging threshold (256 KiB) are resolved by tasks spawned before ordered dispatch (`messenger/server/mod.rs`), also outside the lane's bound.
+
+**Why it matters.** gdl's proposed event ports (`agent-docs/events.md`, 4.5) send small state events at a bounded rate per publisher. If a receiver's dispatch falls behind, its memory grows without limit, and the events delay requests that share the channel. gdl can bound only the rate.
+
+**Ask.** A bound before dispatch, for example credits from the receiver per sender or per handler, or a bounded receive channel whose overflow sheds fire-and-forget frames for handlers that ask for it.

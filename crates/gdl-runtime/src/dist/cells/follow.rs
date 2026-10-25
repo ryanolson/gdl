@@ -44,7 +44,7 @@ use velo::{InstanceId, PeerInfo};
 use super::lease::Leases;
 use super::{CellTable, Cells, EntryTable, Load};
 use crate::dist::fabric::Registry;
-use crate::dist::roster::Live;
+use crate::dist::roster::{Live, selector_id};
 
 /// A followed cell, by its class and its name within the class: two
 /// classes may each have a cell of one name.
@@ -897,10 +897,7 @@ impl Follow {
             .map(|(id, _)| *id)
             .collect();
         retired.sort_by_key(InstanceId::as_u128);
-        let offered = eligible
-            .iter()
-            .map(|id| gdl::InstanceId::from_u128(id.as_u128()))
-            .collect();
+        let offered = eligible.iter().copied().map(selector_id).collect();
         CellTable {
             class: key.0.clone(),
             cell: key.1.clone(),

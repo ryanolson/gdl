@@ -147,7 +147,8 @@ mod tests {
             load: None,
             offered: eligible
                 .iter()
-                .map(|id| gdl::InstanceId::from_u128(id.as_u128()))
+                .copied()
+                .map(crate::dist::roster::selector_id)
                 .collect(),
             eligible,
             retired: Box::new([]),

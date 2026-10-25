@@ -10,10 +10,11 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 
 use super::admission::{Admission, Egress};
-#[cfg(feature = "hub")]
-use super::cells::{Answer, Within};
 use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
+#[cfg(feature = "hub")]
+use super::offers::Answer;
+use super::offers::{Offer, Refused};
 use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
 use gdl::__runtime::{Erased, Lease};
@@ -45,6 +46,12 @@ pub struct RuntimeConfig {
     /// this instance: only for a hand-off into another class, from an
     /// instance in a cell. 0 offers each request to one cell.
     pub cell_failovers: usize,
+    /// How many more times a crossing's router chooses an instance after
+    /// the one it chose declined a hand-off (no room, or retired), or the
+    /// hand-off to it provably never left this instance: for every
+    /// hand-off a policy or a selector routes. The same instance may be
+    /// chosen again. 0 makes each refusal final.
+    pub instance_failovers: usize,
     /// Override how long an ordinary anchor waits for its producer; `None` uses Velo defaults.
     pub anchor_timeout: Option<Duration>,
     /// Cadence for batching held reply reservations. Defaults to 30 seconds.
@@ -68,8 +75,9 @@ pub struct RuntimeConfig {
     pub drain: Option<Duration>,
     /// Where the runtime records what each request does in this segment:
     /// its request path, the response streams it sends on, and, at the
-    /// source, the request end to end; `None` records nothing. Not a setting: a segment binary gives its process's
-    /// registry when its system listener can serve it.
+    /// source, the request end to end; `None` records nothing. Not a
+    /// setting: a segment binary gives its process's registry when its
+    /// system listener can serve it.
     pub metrics: Option<prometheus::Registry>,
     /// The selectors a crossing's router can name, by name. A name the
     /// placement uses that is not here is gdl's own selector of that name,
@@ -136,6 +144,7 @@ impl Default for RuntimeConfig {
             attempt_limit: 16,
             setup_timeout: Duration::from_secs(10),
             cell_failovers: 2,
+            instance_failovers: 2,
             anchor_timeout: None,
             reservation_renew_interval: Duration::from_secs(30),
             clock_skew: Duration::from_millis(50),
@@ -160,6 +169,7 @@ struct Settings {
     attempt_limit: usize,
     setup_timeout_ms: u64,
     cell_failovers: usize,
+    instance_failovers: usize,
     anchor_timeout_ms: Option<u64>,
     reservation_renew_interval_ms: u64,
     clock_skew_ms: u64,
@@ -179,6 +189,7 @@ impl Default for Settings {
             attempt_limit: config.attempt_limit,
             setup_timeout_ms: ms(config.setup_timeout),
             cell_failovers: config.cell_failovers,
+            instance_failovers: config.instance_failovers,
             anchor_timeout_ms: config.anchor_timeout.map(ms),
             reservation_renew_interval_ms: ms(config.reservation_renew_interval),
             clock_skew_ms: ms(config.clock_skew),
@@ -200,6 +211,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             attempt_limit: s.attempt_limit,
             setup_timeout: Duration::from_millis(s.setup_timeout_ms),
             cell_failovers: s.cell_failovers,
+            instance_failovers: s.instance_failovers,
             anchor_timeout: s.anchor_timeout_ms.map(Duration::from_millis),
             reservation_renew_interval: Duration::from_millis(s.reservation_renew_interval_ms),
             clock_skew: Duration::from_millis(s.clock_skew_ms),
@@ -273,7 +285,7 @@ impl RuntimeConfig {
 
 /// A forward hand-off arriving at this instance.
 pub(crate) type ForwardEntry =
-    Arc<dyn Fn(Forward) -> BoxFuture<'static, Result<Accepted>> + Send + Sync>;
+    Arc<dyn Fn(Forward) -> BoxFuture<'static, Result<Accepted, Refused>> + Send + Sync>;
 
 /// A request to open a backward run on this instance.
 pub(crate) type OpenEntry = Arc<dyn Fn(Open) -> BoxFuture<'static, Result<ReplyTo>> + Send + Sync>;
@@ -496,8 +508,12 @@ impl Runtime {
         &self.names
     }
 
+    /// Whom to route to: the table every crossing reads.
+    pub(crate) fn routes(&self) -> &Live {
+        &self.routes
+    }
+
     /// What the built-in routers draw from.
-    #[cfg(feature = "hub")]
     pub(crate) fn random(&self) -> &RandomState {
         &self.random
     }
@@ -524,7 +540,7 @@ impl Runtime {
         let _ = self.entries.set(Arc::downgrade(entries));
     }
 
-    fn entries(&self) -> Result<Arc<Entries>> {
+    pub(crate) fn entries(&self) -> Result<Arc<Entries>> {
         self.entries
             .get()
             .and_then(std::sync::Weak::upgrade)
@@ -537,32 +553,32 @@ impl Runtime {
     /// for a chooser's hand-off into another class, a cell of that class
     /// first, then an instance within it by the same.
     pub(crate) fn router(&self, hop: usize, pos: usize, encoding: gdl_model::Encoding) -> Router {
-        let router = self.instance_router(hop, pos, encoding);
+        let within = self.within(hop, pos, encoding);
         #[cfg(feature = "hub")]
         if let Some(target) = self.crossings.get(&(hop, pos)) {
             return Router::Cells(Arc::new(super::cells::Crossing::new(
                 target.clone(),
-                router,
+                within,
             )));
         }
-        router
+        Router::Roster(within)
     }
 
     /// The placement's router of the hand-off at forward position `pos`
     /// of hop `hop`, which chooses an instance.
-    fn instance_router(&self, hop: usize, pos: usize, encoding: gdl_model::Encoding) -> Router {
+    fn within(&self, hop: usize, pos: usize, encoding: gdl_model::Encoding) -> Within {
         match self.layout.request_router(hop, pos) {
-            RequestRouter::RoundRobin => Router::Policy(Policy::RoundRobin),
-            RequestRouter::Random => Router::Policy(Policy::Random),
+            RequestRouter::RoundRobin => Within::Policy(Policy::RoundRobin),
+            RequestRouter::Random => Within::Policy(Policy::Random),
             RequestRouter::Selector(name) => match self.selectors.get(name) {
-                Some(selector) => Router::Selector {
+                Some(selector) => Within::Selector {
                     name: Arc::from(name.as_str()),
                     selector: Arc::clone(selector),
                     encoding,
                 },
                 // Resolved for every crossing this instance sends; another
                 // segment's crossing is never sent from here.
-                None => Router::Policy(Policy::RoundRobin),
+                None => Within::Policy(Policy::RoundRobin),
             },
         }
     }
@@ -572,117 +588,103 @@ impl Runtime {
     /// items. `router` chooses the instance: a policy picks at once; a
     /// selector is given `cx` and the head, and what it chose comes back
     /// with its lease, for the caller to hold while it holds the request.
-    /// A chooser's hand-off into another class first chooses a cell, then
+    ///
+    /// The hand-off is an offer ([`super::offers`]): when the instance
+    /// declines it, or it never left, the router chooses again, up to
+    /// `instance_failovers` more times ([`Runtime::offer_again`]). A
+    /// chooser's hand-off into another class first chooses a cell, then
     /// an instance of it the same way, and offers the request to another
     /// cell when that one declines it ([`Runtime::fail_over`]); which
     /// hand-offs those are was settled when the runtime was built.
     ///
-    /// When the chosen instance is this one, the entry runs by a direct
-    /// call: velo is not relied on to deliver a message to its own sender.
-    ///
     /// With `timed`, it also returns when the hand-off left: after the
     /// wait for the roster, the routing, and the encoding, which are the
     /// sender's work, and before anything the receiver does.
-    pub(crate) async fn send_forward(
-        &self,
-        segment: &str,
-        router: &Router,
-        cx: &Cx,
+    ///
+    /// Not an `async fn`: one moves its arguments into locals of its body,
+    /// so its future holds the envelope twice, as the argument it captured
+    /// and as the local. The block below uses the captured envelope itself.
+    #[allow(
+        clippy::manual_async_fn,
+        reason = "an `async fn` would hold the envelope twice"
+    )]
+    pub(crate) fn send_forward<'a>(
+        &'a self,
+        segment: &'a str,
+        router: &'a Router,
+        cx: &'a Cx,
         mut envelope: Forward,
         timed: bool,
-    ) -> Result<Handed> {
-        self.released().await?;
-        #[cfg_attr(not(feature = "hub"), allow(unused_variables))]
-        let (instance, held, offering): (_, _, Offering<'_>) = match router {
-            Router::Policy(policy) => (
-                self.routes
-                    .pick(segment, Picker::Request, *policy, &self.random)?,
-                Held::default(),
-                None,
-            ),
-            Router::Selector {
-                selector, encoding, ..
-            } => {
-                let (instance, picked) = self
-                    .routes
-                    .choose(segment, &**selector, cx, &envelope.payload, *encoding)
-                    .await?;
-                // A request that ended while its selector chose is not
-                // handed on; its lease goes with `picked`. The caller's
-                // select sees the end only at its next await, and the
-                // send can leave before that.
-                cx.check()?;
-                envelope.cx.add_meta(picked.meta);
-                (instance, Held::selector(picked.lease), None)
-            }
-            #[cfg(feature = "hub")]
-            Router::Cells(crossing) => {
-                let (instance, cell, held) = self
-                    .choose_cell(crossing, cx, &mut envelope, &[])
-                    .await?
-                    .ok_or_else(|| crossing.no_cell())?;
-                (instance, held, Some((crossing, cell)))
-            }
-        };
-        // An offer to a cell, always remote: a chooser never chooses
-        // itself, since the cell's entry is of another class.
-        #[cfg(feature = "hub")]
-        if let Some((crossing, cell)) = offering {
-            let bytes = super::envelope::encode(&envelope)?;
-            let sent = timed.then(tokio::time::Instant::now);
-            let offered = self
-                .fabric
-                .offer(
-                    instance,
-                    &self.names.forward,
-                    bytes,
-                    self.config.setup_timeout,
+    ) -> impl Future<Output = Result<Handed>> + 'a {
+        async move {
+            self.released().await?;
+            #[cfg_attr(
+                not(feature = "hub"),
+                allow(
+                    clippy::infallible_destructuring_match,
+                    reason = "a hand-off into another class is under `hub`"
                 )
-                .await;
-            return match super::cells::answer(offered, crossing, cell) {
-                Answer::Accepted(accepted) => Ok(Handed {
+            )]
+            let within = match router {
+                Router::Roster(within) => within,
+                // A chooser's hand-off into another class: a cell of the class,
+                // then an instance of it, always remote, since a chooser never
+                // chooses itself (the cell's entry is of another class). Inline,
+                // as the first offer to an instance is below: an `async` call
+                // keeps its own state beside this future's, rather than in the
+                // room the other path's state takes when this one is not running.
+                #[cfg(feature = "hub")]
+                Router::Cells(crossing) => {
+                    let (instance, cell, held) = self
+                        .choose_cell(crossing, cx, &mut envelope, &[])
+                        .await?
+                        .ok_or_else(|| crossing.no_cell())?;
+                    let (offering, sent) = self.deliver(instance, &envelope, timed)?;
+                    return match super::cells::answer(offering.await, crossing, cell) {
+                        Answer::Accepted(accepted) => Ok(Handed {
+                            accepted,
+                            sent,
+                            held,
+                        }),
+                        Answer::Failed(error) => Err(error),
+                        // Boxed, and only here, as for an instance.
+                        Answer::Missed(missed) => {
+                            drop(held);
+                            let failover =
+                                self.fail_over(crossing, cx, &mut envelope, timed, cell, missed);
+                            Box::pin(failover).await
+                        }
+                    };
+                }
+            };
+            let (instance, held) = self.choose(segment, within, cx, &mut envelope, &[]).await?;
+            // Inline rather than a call that takes the envelope: an `async`
+            // call holds what it takes in its own future, so every hand-off's
+            // future would hold the envelope twice.
+            let offer = if instance == self.fabric.instance() {
+                let entering = self.enter(envelope)?;
+                let sent = timed.then(tokio::time::Instant::now);
+                Offer::entered(entering.await, sent)?
+            } else {
+                let (offering, sent) = self.deliver(instance, &envelope, timed)?;
+                Offer::delivered(offering.await, sent, envelope)?
+            };
+            match offer {
+                Offer::Accepted(accepted, sent) => Ok(Handed {
                     accepted,
                     sent,
                     held,
                 }),
-                Answer::Failed(error) => Err(error),
                 // Boxed, and only here: inline, the failover's state would
                 // grow this future, and so every hand-off's task.
-                Answer::Missed(missed) => {
+                Offer::Missed(missed, envelope) => {
                     drop(held);
-                    let failover = self.fail_over(crossing, cx, envelope, timed, cell, missed);
+                    let failover =
+                        self.offer_again(segment, within, cx, envelope, timed, instance, missed);
                     Box::pin(failover).await
                 }
-            };
+            }
         }
-        if instance == self.fabric.instance() {
-            let entries = self.entries()?;
-            let entry = Arc::clone(entries.forward(envelope.hop, envelope.pos)?);
-            let sent = timed.then(tokio::time::Instant::now);
-            let accepted = entry(envelope).await?;
-            return Ok(Handed {
-                accepted,
-                sent,
-                held,
-            });
-        }
-        let bytes = super::envelope::encode(&envelope)?;
-        let sent = timed.then(tokio::time::Instant::now);
-        let reply = self
-            .fabric
-            .call(
-                instance,
-                &self.names.forward,
-                bytes,
-                self.config.setup_timeout,
-            )
-            .await?;
-        let accepted = super::envelope::decode::<Result<Accepted, Error>>(&reply)??;
-        Ok(Handed {
-            accepted,
-            sent,
-            held,
-        })
     }
 
     /// Ask an instance of `segment` to open a backward run.
@@ -734,9 +736,40 @@ impl Runtime {
     }
 }
 
-/// How a crossing chooses its instance.
+/// How a crossing chooses where a hand-off goes.
 #[derive(Clone)]
 pub(crate) enum Router {
+    /// An instance of the next segment, from the roster's routing table.
+    Roster(Within),
+    /// A chooser's hand-off into another class: a cell by the class's
+    /// cell policy, then an instance of it by the placement's router.
+    #[cfg(feature = "hub")]
+    Cells(Arc<super::cells::Crossing>),
+}
+
+impl Router {
+    /// How the instance is chosen: in the roster, or within the chosen
+    /// cell.
+    fn within(&self) -> &Within {
+        match self {
+            Self::Roster(within) => within,
+            #[cfg(feature = "hub")]
+            Self::Cells(crossing) => crossing.within(),
+        }
+    }
+
+    /// The selector that chooses the instance, by name, if one does.
+    pub(crate) fn selector(&self) -> Option<(&Arc<str>, &Arc<dyn Erased>)> {
+        match self.within() {
+            Within::Policy(_) => None,
+            Within::Selector { name, selector, .. } => Some((name, selector)),
+        }
+    }
+}
+
+/// How an instance is chosen: the placement's router of a crossing.
+#[derive(Clone)]
+pub(crate) enum Within {
     /// `round_robin` or `random`: `pick`, and nothing else.
     Policy(Policy),
     /// A selector, by the name the placement gives it.
@@ -745,33 +778,7 @@ pub(crate) enum Router {
         selector: Arc<dyn Erased>,
         encoding: gdl_model::Encoding,
     },
-    /// A chooser's hand-off into another class: a cell by the class's
-    /// cell policy, then an instance of it by the placement's router.
-    #[cfg(feature = "hub")]
-    Cells(Arc<super::cells::Crossing>),
 }
-
-impl Router {
-    /// The selector that chooses the instance, by name, if one does.
-    pub(crate) fn selector(&self) -> Option<(&Arc<str>, &Arc<dyn Erased>)> {
-        match self {
-            Self::Policy(_) => None,
-            Self::Selector { name, selector, .. } => Some((name, selector)),
-            #[cfg(feature = "hub")]
-            Self::Cells(crossing) => match crossing.within() {
-                Within::Policy(_) => None,
-                Within::Selector { name, selector, .. } => Some((name, selector)),
-            },
-        }
-    }
-}
-
-/// The cell a chooser's hand-off is offered to, and the crossing that
-/// chose it; never one without the `hub` feature, which has no cells.
-#[cfg(feature = "hub")]
-type Offering<'a> = Option<(&'a super::cells::Crossing, u64)>;
-#[cfg(not(feature = "hub"))]
-type Offering<'a> = Option<std::marker::PhantomData<&'a ()>>;
 
 /// A hand-off the next segment accepted.
 pub(crate) struct Handed {
@@ -805,11 +812,15 @@ pub(crate) struct Held {
 
 impl Held {
     /// A selector's lease, if it gave one.
-    fn selector(selector: Option<Lease>) -> Self {
-        Self {
+    pub(crate) fn selector(selector: Option<Lease>) -> Self {
+        #[cfg(feature = "hub")]
+        let held = Self {
             selector,
-            ..Self::default()
-        }
+            cell: None,
+        };
+        #[cfg(not(feature = "hub"))]
+        let held = Self { selector };
+        held
     }
 
     /// A chooser's offer to a cell: the selector's lease, if it gave one,
@@ -936,6 +947,15 @@ mod tests {
         assert_eq!(defaults.cell_failovers, 2);
         let none: RuntimeConfig = toml::from_str("cell_failovers = 0\n").expect("none");
         assert_eq!(none.cell_failovers, 0);
+    }
+
+    #[test]
+    fn instance_failovers_are_two_by_default_and_may_be_none() {
+        let defaults: RuntimeConfig = toml::from_str("").expect("defaults");
+        assert_eq!(defaults.instance_failovers, 2);
+        let none: RuntimeConfig = toml::from_str("instance_failovers = 0\n").expect("none");
+        assert_eq!(none.instance_failovers, 0);
+        assert_eq!(none.cell_failovers, 2, "the two bounds are apart");
     }
 
     #[test]

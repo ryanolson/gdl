@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use common::{Events, Plan, collect, expected, prompt, reference_graph, reference_manifest};
 use figment::providers::{Format, Toml};
-use gdl::{Cx, ErrorKind};
+use gdl::Cx;
 use gdl_runtime::{
     Deployment, DeploymentSpec, Drains, Hosted, Launch, Placement, Process, ProcessConfig,
     RuntimeConfig,
@@ -1069,11 +1069,12 @@ async fn a_sender_held_at_its_rendezvous_still_avoids_a_retired_instance() {
 }
 
 /// A hand-off the front sent to an engine before it stopped routing there,
-/// held on its way until the engine has closed, is refused with
-/// `Overloaded` rather than admitted and cut. A request the engine had
-/// already admitted finishes, and the engine leaves after it.
+/// held on its way until the engine has closed, is declined with
+/// `Overloaded` rather than admitted and cut, and the front offers it to
+/// the other engine. A request the engine had already admitted finishes,
+/// and the engine leaves after it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_hand_off_arriving_after_the_close_is_refused() {
+async fn a_hand_off_arriving_after_the_close_is_offered_again() {
     let placement = two();
     let hub = hub(&placement).await;
     let config = settings(&hub, 20_000, "[min_replicas]\nengine = 2\n");
@@ -1179,19 +1180,21 @@ async fn a_hand_off_arriving_after_the_close_is_refused() {
     }
     let served = a_segment.served().forwards;
     gate.release.notify_one();
-    let refused = tokio::time::timeout(WAIT, late)
-        .await
-        .expect("answered in time")
-        .expect("the request's task");
-    assert_eq!(
-        refused.err().map(|error| error.kind()),
-        Some(ErrorKind::Overloaded),
-        "a hand-off after the close was not refused"
+    whole(
+        tokio::time::timeout(WAIT, late)
+            .await
+            .expect("answered in time")
+            .expect("the request's task"),
     );
     assert_eq!(
         a_segment.served().forwards,
         served,
-        "the late hand-off was taken"
+        "the late hand-off was taken after the close"
+    );
+    assert_eq!(a_segment.load().declined, 1);
+    assert!(
+        b_events.has("D:done:c(late)#0"),
+        "the other engine did not take the late hand-off"
     );
     held_cx.request_stop();
     let answer = tokio::time::timeout(WAIT, admitted)

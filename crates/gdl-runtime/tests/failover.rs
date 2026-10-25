@@ -572,6 +572,7 @@ async fn an_unanswered_hand_off_is_an_unknown_outcome_and_not_retried() {
         .await
         .expect_err("the outcome is not known");
     assert_eq!(error.kind(), ErrorKind::OutcomeUnknown, "{error}");
+    assert!(error.message().contains("into class `"), "{error}");
     e1.wait_for("B:start:across", WAIT).await;
     assert_eq!(started(&e1), 1);
     assert_eq!(offered(&[&m1, &m2]), [1, 0], "another cell was offered it");

@@ -3,6 +3,8 @@
 mod admission;
 #[cfg(feature = "hub")]
 mod cells;
+#[cfg(test)]
+mod counting;
 mod envelope;
 mod fabric;
 mod hop;

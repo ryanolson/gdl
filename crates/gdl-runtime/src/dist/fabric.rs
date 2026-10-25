@@ -280,11 +280,13 @@ impl Fabric {
     /// transport, which provably never left this process, from one that
     /// may have left. velo says the first through the send's admission: the
     /// peer is not registered, its handshake failed or showed no such
-    /// handler, or no response slot was free. A peer that cannot be
-    /// connected to is not among them: velo's TCP transport reports a
-    /// connection it could not open after admitting the frame, as it does
-    /// a write that failed.
-    #[cfg(feature = "hub")]
+    /// handler, or no response slot was free. velo shakes hands with a peer
+    /// on first contact, before it admits any send to it, so a peer that
+    /// cannot be connected to then is among them, when its handshake fails
+    /// within `timeout`. One that can no longer be connected to after its
+    /// handshake is not: velo's TCP transport reports a connection it could
+    /// not open again after admitting the frame, as it does a write that
+    /// failed, so that send's outcome is unknown.
     pub(crate) async fn offer(
         &self,
         instance: InstanceId,
@@ -307,13 +309,11 @@ impl Fabric {
 
 /// A unary send, its admission, then its answer: a future of its own,
 /// rather than an `async` block, so that it is as large as the send and
-/// no larger, and a chooser's hand-off keeps every hand-off's size. velo
+/// no larger, and an offer costs what a call does. velo
 /// keeps the send's admission once it has it, so asking again on every
 /// poll costs a read of its state.
-#[cfg(feature = "hub")]
 struct Offering(velo::UnaryResult);
 
-#[cfg(feature = "hub")]
 impl std::future::Future for Offering {
     type Output = Offered;
 
@@ -332,7 +332,6 @@ impl std::future::Future for Offering {
 }
 
 /// What became of a payload [`Fabric::offer`] offered.
-#[cfg(feature = "hub")]
 pub(crate) enum Offered {
     /// The handler answered, with these bytes.
     Answered(Vec<u8>),
@@ -581,7 +580,7 @@ impl Outbound {
     }
 }
 
-#[cfg(all(test, feature = "hub"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -649,5 +648,25 @@ mod tests {
             .offer(id, "probe", vec![7], Duration::from_secs(1))
             .await;
         assert!(matches!(offered, Offered::Unknown(_)), "a stopped peer");
+    }
+
+    /// A peer that stopped before this node's first contact with it is
+    /// proven unsent: velo admits a send only after the peer's handshake,
+    /// and the handshake fails when no connection opens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_peer_gone_before_its_first_contact_is_proven_unsent() {
+        let sender = node().await;
+        let fabric = fabric(&sender);
+        let peer = answering().await;
+        let id = peer.instance_id();
+        fabric.register_peer(peer.peer_info()).expect("registered");
+        shut_down(&peer, Duration::from_millis(100)).await;
+        drop(peer);
+        let offered = fabric.offer(id, "probe", vec![7], WAIT).await;
+        match offered {
+            Offered::Unsent(_) => {}
+            Offered::Unknown(error) => panic!("unknown: {error}"),
+            Offered::Answered(_) => panic!("answered"),
+        }
     }
 }

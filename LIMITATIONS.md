@@ -36,7 +36,7 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### An unknown outcome is refused by an instance built before it, so this build rolls out at once
 
-- **What happens:** an error of the kind `OutcomeUnknown` (a hand-off whose answer did not come, so the receiver may have run it) is sent as its own kind. An instance built before the kind existed refuses it, and with it the stream item that carries it. So every cell moves to this build at once, not one cell at a time.
+- **What happens:** an error of the kind `OutcomeUnknown` (a hand-off whose answer did not come, so the receiver may have run it) is sent as its own kind. An instance built before the kind existed refuses it, and with it the stream item that carries it. So every cell moves to this build at once, not one cell at a time. Any forward hand-off that goes unanswered raises it, inside a class too, so the instances of one deployment move to this build together as well.
 - **Why:** the earlier builds refuse an error kind they do not know. This build does not: it reads such a kind as `Transport` and keeps the kind's name (`Error::unknown_kind`, and the error's `Display`: `transport error (unknown kind <name>): <message>`), and sends it on under that name. A kind sent as its index in msgpack is read the same way, an unknown index named by its decimal.
 - **Would lift it:** nothing, for the builds before this one. Error kinds added after this one need no such step: the builds from this one on read them as `Transport`.
 - **See:** `crates/gdl/src/error.rs`.
@@ -62,11 +62,19 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Workaround:** start a new instance first: once it is ready, the peers avoid the retired one, which then leaves.
 - **See:** rulings 112 and 140.
 
-### A hand-off that reaches a retired instance after it closed is refused
+### A hand-off that reaches a retired instance after it closed costs an offer
 
-- **What happens:** a request whose hand-off was sent to an instance before a peer heard of its retirement, and that arrives only after the instance has stopped taking work, fails with `Overloaded`. It is not routed again, except by a chooser's hand-off into another class, which offers it to another cell.
+- **What happens:** a hand-off sent to an instance before its sender heard of the instance's retirement, that arrives only after the instance has stopped taking work, is declined with `Overloaded`, and the sender's router chooses again: a round trip more. Inside a class, the request fails only when every offer misses, at most `[runtime] instance_failovers` more after the first (2 by default), or at once with `instance_failovers = 0`; it then fails with the last refusal, `Overloaded` here, or `Placement` from an instance of another deployment. A chooser's hand-off into another class is offered to another cell instead, at most `[runtime] cell_failovers` times, and its selector sees no declined instance.
 - **When:** the hand-off takes longer than the setup timeout to arrive (a slow network, a sender with a longer `setup_timeout` than the retired instance, a sending thread held between its pick and its send).
-- **See:** ruling 150.
+- **See:** rulings 150, 185 to 188, and 190.
+
+### A hand-off to an instance that can no longer be reached is not offered again
+
+- **What happens:** a hand-off sent to an instance that its sender has completed a handshake with, and can no longer connect to (it stopped, or its address no longer answers), fails with `OutcomeUnknown`, and no other instance, or cell, is offered it, though it never ran.
+- **Not affected:** an instance the sender has not yet had contact with. velo shakes hands with a peer before it admits the first send to it, so when that handshake fails within the setup timeout, the hand-off provably never left: another instance is offered it, and with none left the request fails as unsent (`Transport`). A handshake that takes longer than the setup timeout leaves the outcome unknown.
+- **Why:** after the handshake, velo reports a connection that it could not open only after it has admitted the frame, as it reports a write that failed after the frame left. The sender cannot tell the two apart, so it treats the outcome as unknown.
+- **Would lift it:** a velo signal for a send that never left this process, such as a connection that could not be opened.
+- **See:** rulings 185 and 188; `Fabric::offer` in `crates/gdl-runtime/src/dist/fabric.rs`.
 
 ### A segment does not outlive a hub restart
 

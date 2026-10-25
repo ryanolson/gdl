@@ -10,6 +10,7 @@ use futures::{Future, Stream, StreamExt};
 use super::admission::{EgressPermit, Share};
 use super::envelope::{Accepted, Forward, Open, VERSION, WireCx, WireItem};
 use super::fabric::{Canceller, Frame, Inbound, Outbound, ReplyTo, Retirer};
+use super::offers::Refused;
 use super::runtime::{Entries, Handed, Held, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use gdl::__runtime as meter;
@@ -428,8 +429,8 @@ where
                         let hop = Arc::clone(&hop);
                         Box::pin(async move {
                             let accepted = hop.accept_forward(envelope).await;
-                            if let Err(error) = &accepted
-                                && error.kind() == ErrorKind::Overloaded
+                            if let Err(refused) = &accepted
+                                && refused.error.kind() == ErrorKind::Overloaded
                             {
                                 hop.rt
                                     .served
@@ -692,11 +693,15 @@ where
     /// reply and must deliver any failure to it. For a streamed request the
     /// acknowledgement names the input anchor this stage minted.
     ///
-    /// Every refusal returns before the request's task is spawned, and
-    /// after it only the acknowledgement does: a chooser takes an
-    /// `Overloaded` or `Placement` answer as its offer declined, and offers
-    /// the request to another cell.
-    async fn accept_forward(self: &Arc<Self>, envelope: Forward) -> Result<Accepted> {
+    /// Every refusal returns before the request's task is spawned, with the
+    /// envelope ([`HopCore::admit`]), and after it only the acknowledgement
+    /// does: a sender takes an `Overloaded` or `Placement` answer as its
+    /// offer declined, and offers the request to another instance, or a
+    /// chooser to another cell.
+    async fn accept_forward(
+        self: &Arc<Self>,
+        mut envelope: Forward,
+    ) -> std::result::Result<Accepted, Refused> {
         let rt = &self.rt;
         let pos = usize::from(envelope.pos);
         // The request's visit to this segment begins at its arrival, but
@@ -716,31 +721,14 @@ where
             gate.arrived.notify_one();
             gate.release.notified().await;
         }
-        rt.check_identity(envelope.version, envelope.identity)?;
-        // The context first: an expired request is refused before it takes
-        // anything, and every wait below ends at its deadline.
-        let root = envelope.cx.root();
-        let cx = envelope.cx.arrive(rt.config.clock_skew, || rt.wall_now())?;
-        let share = setup(
-            &cx,
-            rt.config.setup_timeout,
-            "admission",
-            rt.admission.admit(root),
-        )
-        .await?;
-        // A retiring instance that has closed refuses, releasing the share
-        // it just took; so does a draining cell's entry, for an offer.
-        rt.check_open()?;
-        if self.offer {
-            rt.check_offer()?;
-        }
-        // A run that will produce a stream (the inner end's output, or a
-        // relay's onward input) takes its egress permit before
-        // acknowledging, so a full instance refuses instead of stalling.
-        let egress = if self.plan.reaches_inner(pos) || self.plan.relays(pos) {
-            Some(setup(&cx, rt.config.setup_timeout, "egress", rt.egress.acquire()).await?)
-        } else {
-            None
+        let (cx, share, egress) = match self.admit(&mut envelope).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return Err(Refused {
+                    error,
+                    envelope: Box::new(envelope),
+                });
+            }
         };
         // Minted last, after everything that can refuse: a refusal leaves
         // no anchor behind.
@@ -888,6 +876,44 @@ where
             tokio::time::sleep(delay).await;
         }
         Ok(accepted)
+    }
+
+    /// Everything that may refuse a forward hand-off, in order: the
+    /// deployment, the request's deadline, admission, a retired instance or
+    /// a draining cell's entry, and egress. Takes `envelope`'s context,
+    /// and leaves the rest of it, so that a refused envelope goes back
+    /// whole but for that.
+    async fn admit(&self, envelope: &mut Forward) -> Result<(Cx, Share, Option<EgressPermit>)> {
+        let rt = &self.rt;
+        let pos = usize::from(envelope.pos);
+        rt.check_identity(envelope.version, envelope.identity)?;
+        // The context first: an expired request is refused before it takes
+        // anything, and every wait below ends at its deadline.
+        let wire = std::mem::take(&mut envelope.cx);
+        let root = wire.root();
+        let cx = wire.arrive(rt.config.clock_skew, || rt.wall_now())?;
+        let share = setup(
+            &cx,
+            rt.config.setup_timeout,
+            "admission",
+            rt.admission.admit(root),
+        )
+        .await?;
+        // A retiring instance that has closed refuses, releasing the share
+        // it just took; so does a draining cell's entry, for an offer.
+        rt.check_open()?;
+        if self.offer {
+            rt.check_offer()?;
+        }
+        // A run that will produce a stream (the inner end's output, or a
+        // relay's onward input) takes its egress permit before
+        // acknowledging, so a full instance refuses instead of stalling.
+        let egress = if self.plan.reaches_inner(pos) || self.plan.relays(pos) {
+            Some(setup(&cx, rt.config.setup_timeout, "egress", rt.egress.acquire()).await?)
+        } else {
+            None
+        };
+        Ok((cx, share, egress))
     }
 
     /// A request to open a backward run arrived.

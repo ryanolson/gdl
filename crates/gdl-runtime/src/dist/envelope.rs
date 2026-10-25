@@ -22,8 +22,9 @@ pub(crate) struct Identity {
     pub(crate) placement: u64,
 }
 
-/// The part of a [`Cx`] that crosses segments.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The part of a [`Cx`] that crosses segments. Its default is what an
+/// entry leaves in an envelope whose context it took.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct WireCx {
     id: u128,
     meta: BTreeMap<String, String>,

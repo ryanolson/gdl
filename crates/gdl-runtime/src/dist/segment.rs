@@ -120,7 +120,7 @@ impl Deployment {
 async fn forward(entries: &Weak<Entries>, bytes: &[u8]) -> Result<super::envelope::Accepted> {
     let envelope: Forward = decode(bytes)?;
     let entry = Arc::clone(upgrade(entries)?.forward(envelope.hop, envelope.pos)?);
-    entry(envelope).await
+    entry(envelope).await.map_err(|refused| refused.error)
 }
 
 async fn open(entries: &Weak<Entries>, bytes: &[u8]) -> Result<super::fabric::ReplyTo> {
@@ -196,6 +196,12 @@ impl<H> Segment<H> {
         H: Next<Req, Item>,
     {
         self.root.generate(cx, req).await
+    }
+
+    /// The runtime the segment's hops share, for the runtime's own tests.
+    #[cfg(test)]
+    pub(crate) fn runtime(&self) -> &Arc<Runtime> {
+        &self.rt
     }
 
     /// Root requests this instance currently admits. Returns to zero when

@@ -7,6 +7,17 @@
 //! excludes. The runtime checks the choice against the table again when
 //! the selector returns, since a selector may wait and membership may
 //! change while it does.
+//!
+//! Inside a class, the hand-off is an offer: the chosen instance may
+//! decline it (it has no room, or it is retiring), and then the runtime
+//! asks the selector again, up to `[runtime] instance_failovers` more
+//! times, telling it which instances declined ([`Request::declined`]). It
+//! may choose one of them again: a decline can come from a state that its
+//! view did not show yet, and the view catches up. A chooser's hand-off
+//! into another class is the exception: when the cell chosen for it
+//! declines, another cell is chosen, at most `[runtime] cell_failovers`
+//! times, and the selector chooses within that cell with nothing
+//! declined.
 
 use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
@@ -38,7 +49,14 @@ pub use least::LeastLoaded;
 ///
 /// `select` may wait, for an index or for room on an instance, until the
 /// request's deadline or cancel ends it. It runs in the sending segment,
-/// once per hand-off, and nothing else runs for it.
+/// once per choice: once for each hand-off, and again when the instance
+/// it chose stopped being eligible before the send (a selector may
+/// wait), and, inside a class, again each time the chosen instance
+/// declines the hand-off or the hand-off to it never left, up to
+/// `[runtime] instance_failovers` more times (a hand-off into another
+/// class is offered to other cells, up to `cell_failovers`). Each
+/// choice's lease is its own, and a choice that is not sent to drops its
+/// lease before the next. Nothing else runs for it.
 pub trait Selector: Send + Sync + 'static {
     /// What the selector reads of the request's head: the head's own type,
     /// which the runtime checks against the crossing's edge when the
@@ -109,11 +127,12 @@ mod sealed {
 }
 
 /// What a selector sees of one request: the context its hand-off carries,
-/// its head, and the head's encoded bytes.
+/// its head, the head's encoded bytes, and the instances that declined it.
 pub struct Request<'a, H> {
     cx: &'a Cx,
     head: &'a H,
     bytes: &'a [u8],
+    declined: &'a [InstanceId],
 }
 
 impl<'a, H> Request<'a, H> {
@@ -130,6 +149,18 @@ impl<'a, H> Request<'a, H> {
     /// The head as it crosses, encoded by the edge's codec.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// The instances that declined this request so far, in the order they
+    /// declined it, with an instance that declined twice named twice:
+    /// empty when the selector chooses for it the first time. An instance
+    /// declines a hand-off it has no room for, or that reaches it after it
+    /// stopped taking work; a hand-off that never left this instance is
+    /// not a decline. Nothing is excluded from [`Instances`] for it.
+    /// Always empty for a chooser's hand-off into another class, which
+    /// offers the request to another cell instead.
+    pub fn declined(&self) -> &'a [InstanceId] {
+        self.declined
     }
 }
 
@@ -265,14 +296,17 @@ impl<'a> Choice<'a> {
     /// is dropped, when a relay has sent its input on, or when the
     /// hand-off is acknowledged where nothing of the response passes this
     /// segment. Also dropped when the runtime asks again because the
-    /// chosen instance stopped being eligible, and when the hand-off fails.
+    /// chosen instance stopped being eligible or declined the hand-off,
+    /// and when the hand-off fails.
     pub fn with_lease(mut self, lease: impl Send + 'static) -> Self {
         self.lease = Some(Lease(Box::new(lease)));
         self
     }
 
     /// Add `key = value` to the metadata of the context the hand-off
-    /// carries: the receiving segment sees it in `cx.meta()`.
+    /// carries: the receiving segment sees it in `cx.meta()`. A choice
+    /// whose instance declines the hand-off sends none of it on: the next
+    /// choice starts from the request's own metadata.
     pub fn with_meta(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.meta.push((key.into(), value.into()));
         self
@@ -310,6 +344,7 @@ pub trait Erased: Send + Sync + 'static {
         cx: &'a Cx,
         head: &'a [u8],
         encoding: gdl_model::Encoding,
+        declined: &'a [InstanceId],
         instances: Instances<'a>,
     ) -> BoxFuture<'a, Result<Picked>>;
 
@@ -327,6 +362,7 @@ impl<S: Selector> Erased for Typed<S> {
         cx: &'a Cx,
         bytes: &'a [u8],
         encoding: gdl_model::Encoding,
+        declined: &'a [InstanceId],
         instances: Instances<'a>,
     ) -> BoxFuture<'a, Result<Picked>> {
         Box::pin(async move {
@@ -335,6 +371,7 @@ impl<S: Selector> Erased for Typed<S> {
                 cx,
                 head: &head,
                 bytes,
+                declined,
             };
             Ok(self.0.select(request, instances).await?.picked())
         })

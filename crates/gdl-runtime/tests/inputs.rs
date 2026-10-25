@@ -145,8 +145,12 @@ async fn a_lost_forward_ack_with_streamed_input_ends_in_one_completion_and_no_le
         .segment("front")
         .call(Cx::new(), ask("k", Script::default(), input))
         .await;
-    // The hand-off failed; the sender never learned where to send input.
-    assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Transport));
+    // The hand-off failed, and may have run, as it did; the sender never
+    // learned where to send input.
+    assert_eq!(
+        result.err().map(|e| e.kind()),
+        Some(ErrorKind::OutcomeUnknown)
+    );
     events.wait_for("D:start:c(b(k))#0", WAIT).await;
     events.wait_for("input:dropped", WAIT).await;
     // The receiver's input anchor, never attached, is retired with its run.
@@ -178,7 +182,10 @@ async fn an_input_held_past_its_run_is_retired_when_the_run_ends() {
         .segment("front")
         .call(Cx::new(), ask("dt", script, input))
         .await;
-    assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Transport));
+    assert_eq!(
+        result.err().map(|e| e.kind()),
+        Some(ErrorKind::OutcomeUnknown)
+    );
     events
         .wait_for("D:detached-input-ended:c(b(dt))#0", WAIT)
         .await;
@@ -1420,4 +1427,93 @@ async fn a_stop_a_relay_asks_for_as_it_finishes_waits_for_the_deadline() {
         .map(|r| r.as_ref().map_err(Error::kind))
         .collect();
     assert_eq!(kinds, vec![Err(ErrorKind::DeadlineExceeded)]);
+}
+
+/// A streamed hand-off that a full engine declines is offered to the
+/// other engine, and its input goes to the anchor the other engine
+/// minted: every word reaches it, and the engine that declined minted
+/// none for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declined_streamed_hand_off_sends_its_input_where_it_was_taken() {
+    let nodes = nodes(4).await;
+    let instances: Vec<(String, velo::Velo)> = ["front", "engine", "engine", "post"]
+        .into_iter()
+        .map(String::from)
+        .zip(nodes.iter().cloned())
+        .collect();
+    let events = Events::new();
+    // Each engine admits one request, and refuses at once when full.
+    let config = |segment: &str| match segment {
+        "engine" => RuntimeConfig {
+            admission_limit: 1,
+            admission_wait: Duration::ZERO,
+            ..RuntimeConfig::default()
+        },
+        _ => RuntimeConfig::default(),
+    };
+    let cluster = streamed::deploy_configured(&instances, &three_segments(), &events, &config);
+    let front = cluster.segment("front");
+    let engines = || {
+        cluster
+            .segments
+            .iter()
+            .filter(|(name, _)| name == "engine")
+            .map(|(_, segment)| (segment.served(), segment.load().declined))
+            .collect::<Vec<_>>()
+    };
+    // Round robin: the first engine holds a request whose input stays
+    // open; the second takes one that ends.
+    let mut held = front
+        .call(
+            Cx::new(),
+            ask("held", Script::default(), words(&events, &["h"], true)),
+        )
+        .await
+        .expect("routed");
+    assert_eq!(
+        held.next().await.expect("an item"),
+        replies("held", &["h"]).remove(0)
+    );
+    let out = front
+        .call(
+            Cx::new(),
+            ask("next", Script::default(), words(&events, &["n"], false)),
+        )
+        .await
+        .expect("routed");
+    assert_eq!(collect(out).await, replies("next", &["n"]));
+    let before = engines();
+    assert_eq!(
+        (before[0].0.inputs, before[1].0.inputs),
+        (1, 1),
+        "the turns were not as expected"
+    );
+
+    // The first engine's turn: it is full, declines, and the second takes
+    // the request and its input.
+    let out = front
+        .call(
+            Cx::new(),
+            ask(
+                "offered",
+                Script::default(),
+                words(&events, &["x", "y", "z"], false),
+            ),
+        )
+        .await
+        .expect("the second engine took it");
+    assert_eq!(collect(out).await, replies("offered", &["x", "y", "z"]));
+    let after = engines();
+    assert_eq!(after[0].1, 1, "the first engine did not decline");
+    assert_eq!(
+        (after[0].0.forwards, after[0].0.inputs),
+        (before[0].0.forwards, before[0].0.inputs),
+        "the first engine took the hand-off or minted an input for it"
+    );
+    assert_eq!(
+        (after[1].0.forwards, after[1].0.inputs),
+        (before[1].0.forwards + 1, before[1].0.inputs + 1),
+    );
+    drop(held);
+    assert!(settles(&cluster).await);
 }

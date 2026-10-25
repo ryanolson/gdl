@@ -17,6 +17,11 @@ use crate::role::Build;
 /// the highest score wins. A join or a retirement therefore moves only the
 /// keys of the instance that came or went, and every sender, whatever order
 /// it lists the instances in, chooses the same one.
+///
+/// After instances decline a request ([`Request::declined`]), the highest
+/// score among those that have not wins, so that each failover moves to
+/// the key's next instance, the same from every sender; when every one
+/// has declined, the highest score overall.
 #[derive(Debug, Default)]
 pub struct Affinity {
     key: Option<String>,
@@ -69,9 +74,15 @@ impl Selector for Affinity {
         instances: Instances<'a>,
     ) -> Result<Choice<'a>> {
         let key = self.key(&request);
+        let ranked = |instance: &super::Instance<'_>| (score(key, instance.id()), instance.id());
+        let declined = request.declined();
+        // The first choice, with nothing declined, filters nothing: an
+        // empty slice's check is its length.
         let chosen = instances
             .iter()
-            .max_by_key(|instance| (score(key, instance.id()), instance.id()))
+            .filter(|instance| !declined.contains(&instance.id()))
+            .max_by_key(ranked)
+            .or_else(|| instances.iter().max_by_key(ranked))
             .expect("a selector is never asked to choose from nothing");
         Ok(Choice::new(chosen))
     }
@@ -117,8 +128,25 @@ mod tests {
         head: &[u8],
         ids: &[InstanceId],
     ) -> InstanceId {
+        choose_after(selector, cx, head, ids, &[]).await
+    }
+
+    /// [`choose`], for a request that the instances in `declined` declined.
+    async fn choose_after(
+        selector: &Typed<Affinity>,
+        cx: &Cx,
+        head: &[u8],
+        ids: &[InstanceId],
+        declined: &[InstanceId],
+    ) -> InstanceId {
         let picked = selector
-            .select(cx, head, Default::default(), Instances::new("worker", ids))
+            .select(
+                cx,
+                head,
+                Default::default(),
+                declined,
+                Instances::new("worker", ids),
+            )
             .await
             .expect("a choice");
         ids[picked.index]
@@ -199,5 +227,41 @@ mod tests {
             }
         }
         assert!(moved > 0 && moved < 100, "{moved} of 200 keys moved");
+    }
+
+    /// After a decline, the next offer goes to the instance with the next
+    /// highest score among those that have not declined, the same one
+    /// from every sender, whatever order it lists the instances in; when
+    /// every instance has declined, the highest score is chosen again.
+    #[tokio::test]
+    async fn a_declined_instance_gives_way_to_the_next_score() {
+        let first = Typed(Arc::new(Affinity::default()));
+        let second = Typed(Arc::new(Affinity::default()));
+        let ids = ids(5);
+        let mut reversed = ids.clone();
+        reversed.reverse();
+        let cx = Cx::new();
+        for key in 0..32u32 {
+            let head = key.to_be_bytes();
+            let mut ranked = ids.clone();
+            let hashed = fnv(&head);
+            ranked.sort_by_key(|id| std::cmp::Reverse((score(hashed, *id), *id)));
+            let top = choose(&first, &cx, &head, &ids).await;
+            assert_eq!(top, ranked[0]);
+            let next = choose_after(&first, &cx, &head, &ids, &[top]).await;
+            assert_eq!(next, ranked[1], "key {key}");
+            assert_eq!(
+                choose_after(&second, &cx, &head, &reversed, &[top]).await,
+                next,
+                "the senders disagree on key {key}"
+            );
+            let third = choose_after(&first, &cx, &head, &ids, &[top, next, top]).await;
+            assert_eq!(third, ranked[2], "key {key}");
+            assert_eq!(
+                choose_after(&second, &cx, &head, &reversed, &ranked).await,
+                top,
+                "every instance declined key {key}"
+            );
+        }
     }
 }
