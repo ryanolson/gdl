@@ -1,3 +1,0 @@
-- **P2 — [crates/gdl/src/dist/hop.rs:297](/home/ryan/repos/dynamo-gdl/crates/gdl/src/dist/hop.rs:297): Local inner-end egress bypasses the setup timeout.** With placement `{A,B,C,D,G}` / `{F,E}`, an endless request can hold the front segment’s only egress permit. A second request provisions the remote backward run, then waits here for the full `admission_wait`. With `setup_timeout=200ms` and `admission_wait=3s`, it retains that remote run’s task, anchor, admission share, and egress permit for roughly three seconds. The other two egress acquisition sites use `setup(...)`; this one remains unbounded by the setup timeout. Apply the same wrapper here and add a regression covering this placement and saturated local egress.
-
-ACTIONABLE: 1

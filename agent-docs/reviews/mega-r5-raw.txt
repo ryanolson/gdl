@@ -1,5 +1,0 @@
-- **P2 — `crates/gdl-macros/src/expand.rs:297`: Generated string construction is not hygienic.** A caller trait defining `from(&str) -> Self` and implemented for `String` makes an otherwise valid `graph!` fail with E0034. Reproduced with read-only compiler probes; renaming the caller’s method makes the control compile. Emit fully qualified `From<&str>::from` calls and add a compile-pass regression fixture.
-
-- **P3 — `crates/gdl/src/dist/hop.rs:866`: Remove the unreachable stop-forwarding layer.** Both `inbound_items` callers pass `None`, so its stopping future, `StopSource` trait, two implementations, and polling branch are unused. Stop propagation already belongs to the watcher and pump. Remove this parameter and state, and retain a plain frame-to-item adapter.
-
-ACTIONABLE: 2

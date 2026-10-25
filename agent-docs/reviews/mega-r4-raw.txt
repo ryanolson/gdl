@@ -1,7 +1,0 @@
-- **P2 — [crates/gdl/src/wire.rs:83](/home/ryan/repos/dynamo-gdl/crates/gdl/src/wire.rs:83): Caller traits break macro hygiene.** A caller with `trait MyCodec { fn codec(&self) {} } impl<T> MyCodec for T {}` makes a valid `graph!` fail with E0034: the probe’s `.codec()` competes with the caller’s method. Reproduced with a compiler probe using existing artifacts. Rename the probe method into the reserved `__gdl` namespace and add a compile-pass regression covering this collision.
-
-- **P3 — [crates/gdl-gen/src/dump.rs:117](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/dump.rs:117): The lock regression test can pass without locking.** Three seconds without a result may mean Cargo is rebuilding or waiting for its own lock. Warming the build does not eliminate this: each manifest invocation rewrites its source. Add an observable synchronization point at lock acquisition and verify that removing the dump lock reliably fails the test.
-
-- **P3 — [README.md:79](/home/ryan/repos/dynamo-gdl/README.md:79): JSON-lines serving is promised unconditionally.** For a valid source contract whose request or response type lacks a wire codec, the generated binary waits for Ctrl-C and never reads stdin. `emit.rs::serves` requires both source types to be wire-capable. Document that condition and direct other source contracts to the generated library.
-
-ACTIONABLE: 3

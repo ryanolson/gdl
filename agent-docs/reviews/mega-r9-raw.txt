@@ -1,5 +1,0 @@
-- **P2 — [crates/gdl-gen/src/emit.rs:306](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/emit.rs:306): Contract-module paths still break with leading whitespace.** `[contract] module = "  ::chat_contract "` produces valid manifest-dump code, but segment emission generates `pub use ::  ::chat_contract as contract;`, which rustfmt rejects. Trim whitespace before stripping `::`, and add a regression covering whitespace-padded rooted module paths. Confirmed with read-only rustfmt probes; mega-r8’s equivalent binding-type fix missed this path.
-
-- **P2 — [crates/gdl/src/diagram.rs:151](/home/ryan/repos/dynamo-gdl/crates/gdl/src/diagram.rs:151): Both renderers silently accept a layout belonging to another graph.** Drawing `X => Y` using a checked layout for `A => D` drops both node declarations; the crossing check then treats their two missing placements as equal. The diagram contains anonymous implicit nodes and hides placement errors. Validate the layout’s contract hash against the manifest before rendering, return an error on mismatch, and cover both formats. Statically verified.
-
-ACTIONABLE: 2

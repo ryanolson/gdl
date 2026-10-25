@@ -57,8 +57,8 @@ The [public snapshot](https://github.com/ryanolson/gdl-demo/tree/d0d911b4424aa6b
 Extract each package separately. The virtual workspace root does not identify a package:
 
 ```bash
-cargo run -p gdl-gen -- extract examples/film/gdl-demo-nodes --catalog tools/video/work/film-catalog
-cargo run -p gdl-gen -- extract examples/film/acme-gdl-nodes --catalog tools/video/work/film-catalog
+cargo run -p gdl-gen -- extract examples/film/gdl-demo-nodes --catalog target/film-catalog
+cargo run -p gdl-gen -- extract examples/film/acme-gdl-nodes --catalog target/film-catalog
 ```
 
 The composer's Message types view lists message declarations but does not display marked re-exports. The resolver still reads ACME's marked exports and preserves their reference identity. The reference messages live at the crate root so the composer can select their public canonical types.

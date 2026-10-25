@@ -8,20 +8,16 @@
 
 | Path | Contents |
 |------|----------|
-| `LIMITATIONS.md` | Known limitations a user can run into, each with its cause and what lifts it |
-| `agent-docs/plan.md` | The design and milestone plan, including design rulings |
-| `agent-docs/reviews/` | Review records for each milestone |
-| `agent-docs/perf/` | Measurements, with the command that produced them |
-| `agent-docs/cells.md` | Proposal: one graph across several deployments (cells) and regions, each with its own hub; how they discover each other and route |
-| `agent-docs/dynamo.md` | How gdl relates to dynamo's runtime: the compatibility surface, node metrics, and what both need from velo |
-| `agent-docs/velo/` | Changes proposed to velo, with their prototypes and measurements; `agent-docs/velo-issues.md` lists the issues |
-| `crates/` | `gdl` (what a node crate depends on: role traits, request context, local composition, selectors, metrics, and the derives; never links velo), `gdl-runtime` (runtime: segments, crossings over velo, discovery, the segment binary, `graph!`, the load reports an entry instance in a cell sends its hub, and a chooser's tables of the cells its hub follows, read from the hub's relay, and its routing across the class boundary by them: a cell by the class's cell policy, then an instance of it, and another cell when one declines; and an instance's part in its cell's drain, and an entry instance's wait, as it retires, for the cells that follow its cell), `gdl-model` (manifest, placement, layout, diagrams, the fleet file, a cell's settings, and the names of a segment's hub services, without the runtime; builds for wasm), `gdl-cells` (the cell plane's shared types: the cell record, the `CellDirectory` trait, its `memory` and `dir` backends, the reader's view, and the directory conformance suite behind the `conformance` feature; never links velo, so that directory backends and `gdl-hub` can depend on it), `gdl-watch` (the watches a cell's hub serves, the cell watch and the relay, as typed events, and their client, and the load report an entry instance sends its hub; shared by `gdl-hub` and `gdl-runtime`'s `hub` feature, so that the runtime never links the hub's server), `gdl-hub` (the discovery hub, and a cell's quorum, health endpoint, record, load summary, and watch, and the following of its children in the classes its class sends to and their relay, and the closing of a follow once its choosers acknowledge that it is not offered, and the acknowledgement of a child's retired entry instance once its choosers avoid it), `gdl-syntax` (graph parser shared by the macro and the generator), `gdl-message` (`derive(Message)` and the message catalogue, without the runtime), `gdl-extract` (reads what a crate offers from its source, without building it, and the working catalogue), `gdl-macros` (`graph!`, `derive(Message)`, `derive(Node)`, `#[export]`), `gdl-web` (the composer's page and server, on axum), `gdl-gen` (the `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `export`, `compose`) |
+| `docs/` | The book (mdBook): how gdl works and why, measurements with their setup, rejected designs, known limitations (`docs/src/operations/limitations.md`). Start at `docs/src/SUMMARY.md`. The crate map is `docs/src/development/architecture.md`; the rules for documentation are `docs/src/development/documentation.md` |
+| `crates/` | The workspace crates; see the crate map in the book |
 | `examples/chat` | A separate workspace: a graph file (`chat.gdl`), its protocols crate, node crates that mark their nodes with `derive(gdl::Node)`, and the generated contract and segments. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/chat/gdl.toml --out examples/chat/segments`; never edit `segments/` by hand |
 | `examples/asr` | A separate workspace with a streamed request, generated segments, and a demo that runs them. Regenerate with `cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr/segments` |
 | `examples/http` | A separate workspace: a hosted `Frontend` on axum, its graph, and a test that drives the generated service over HTTP |
 | `examples/api` | A separate workspace: a `Service` with three typed entry points sharing one engine, and the deployment spec that `cargo gdl compose` and the composer's Deploy tab use |
 | `examples/film` | Two reference/vendor node crates with configuration and metrics, distributed and compact specs, and native proof in `crates/gdl-gen/tests/film.rs` |
-| `crates/gdl-hub` | The discovery hub: velo-hub with admission restricted to one deployment's graph and placement (`GraphAdmission`), and, for a cell's hub, the `gdl-cell` extension (`CellReadiness`), which counts the cell's usable instances against its quorum, serves the cell health endpoint, publishes the cell's record, takes its entry instances' load reports and sums them into the cell's load summary, serves the cell's watch (its state, epoch, entry instances, and load summary) to the hubs that follow it, drains the cell when asked, tells its instances once no cell follows the draining cell, tells a retired entry instance once every cell that followed the cell as it retired avoids it, and withdraws its record once its instances have left, and, for a class that sends to others, follows its children, the cells whose record names its cell as their parent, over their watches and relays them to its instances (`GET /v1/ext/gdl-cell/follows`), marks a follow not offered when its cell takes no work or its link is lost, and closes it once every chooser has acknowledged that (`POST /v1/ext/gdl-cell/instances/{id}/unoffered`). The watches' events (`CellWatchEvent`, `FollowEvent`) and their client (`CellWatcher`) are `gdl-watch`'s |
+| `agent-docs/` | Ignored by git: local scratch for work in progress. Nothing in it is read by the build or the tests |
+
+Plans, remaining work, and follow-ups live in the work tracker, not in this repository (see the `linear-work` skill). Never write tracker names, ticket identifiers, or tracker URLs into the repository, a commit, or a PR.
 
 ## Build, lint, test
 
@@ -35,6 +31,7 @@ timeout <limit> cargo test -p <crate> --test <t>   # one target
 node --test crates/gdl-web/tests/editor.cjs       # the composer's page, outside cargo
 (cd examples/http && timeout <limit> cargo test)  # the example workspaces are outside the root workspace
 (cd examples/api && timeout <limit> cargo test)
+bash scripts/build-book.sh                         # the book, with its link check (INSTALL_TOOLS=1 fetches or builds the tools)
 ```
 
 - Always run tests under `timeout`, and size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once; a large fixed one hides it. Build first with `--no-run`, so that the limit does not have to cover compilation. Keep the measured times in agent memory, not here: they change as the suite does. Cargo prints each target's time (`finished in`).
@@ -55,12 +52,13 @@ The suite runs on every change, so its speed is part of its correctness.
 ## Rules
 
 - Write the failing test first, then the fix. Keep the test.
-- A change that adds a known limitation, or lifts one, updates `LIMITATIONS.md` in the same commit.
+- A change to behavior updates the book chapters that describe it and `README.md` in the same commit. A change that adds a known limitation, or lifts one, updates `docs/src/operations/limitations.md`.
+- The book keeps only what lasts: how it works, why (with the rejected alternative), numbers with the command that produced them, and negative results. No plans, milestone labels, ruling numbers, review ids, or PR numbers in the book or in code comments.
 - No names containing `legacy`, `old`, `v1`, `v2`, `compat`, `deprecated`, or `_unused`. Change an interface and its callers together; no forwarding shims.
 - At most one `_` in a file name; use subdirectories to disambiguate.
 - Private modules with a curated `pub use` surface. Expose only what dependents import.
 - Primary struct and its impl first in a file; supporting types below or in private submodules.
-- Comments explain why, not what. No plan, phase, or milestone references in code comments.
+- Comments explain why, not what. A comment that needs a long reason points to the book chapter (`docs/src/...`), never to a plan.
 - Every velo call lives in the runtime's velo module. `gdl` never depends on velo: a node crate must build without the transport (`crates/gdl/tests/dependencies.rs`). Generated code and node implementations never call velo directly.
 - Responses are never correlated through a map or a request id. They reach their consumer through a minted stream anchor or a return value.
 - Performance is a correctness property: no global locks on the hot path; per-request bookkeeping (the admission ledger) is sharded and touched only at segment entry and retirement; measure before claiming a speedup.

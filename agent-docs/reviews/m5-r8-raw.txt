@@ -1,5 +1,0 @@
-- **P2 — [crates/gdl-gen/src/emit.rs:298](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/emit.rs:298): Generated alias shadows an implementation crate.** A hosted library named `contract`, bound with `type = "contract::Engine"`, passes validation. Generated `pub use chat_contract as contract` then redirects that path into the graph contract, producing E0425. Reproduced with existing example artifacts. Qualify implementation paths through the extern prelude, or reject collisions with generated aliases during validation. Add a compilation regression test.
-
-- **P2 — [crates/gdl-gen/src/emit.rs:260](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/emit.rs:260): Dependency-key collisions still produce invalid manifests.** A hosted package named `tokio` with `[lib] name = "engine_impl"` passes the library-name checks, but emission writes both `tokio = { path = … }` and the fixed `tokio` dependency. TOML rejects the duplicate key before compilation. Validate dependency keys separately from library names, covering both contract and implementation packages. Add a regression case using a reserved dependency package name with a distinct library name.
-
-ACTIONABLE: 2

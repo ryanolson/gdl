@@ -1,5 +1,0 @@
-# The load summary, from entry instances to the chooser's tables: review round 2
-
-Reviewer: the same reviewer as round 1, read-only (2026-10-23). Target: `9c70c8e..b4b6386`. Verdict: APPROVE, no findings.
-
-Checked and fine: round 1's finding 1 is withdrawn under the brief's intent; findings 2 to 4 are fixed, each regression covering the reported case (finding 2 both the completed departure and the renewal). The ledger's counters add work to a request's path: one shard index and one relaxed atomic increment at a root's first admission, one decrement at its last retirement, none for a reentrant entry; no allocation, lock, or reference count. Five interleaved benchmark runs per build gave medians of 24.66 and 23.12 µs per request (one segment), 252.26 and 236.53 (two), 560.90 and 579.13 (three), with overlapping ranges: no change detectable in wall time; the 1%-in-instructions gate is not yet verified on this machine (`kernel.perf_event_paranoid = 4`, no valgrind). The call future stays at 11,376 bytes. The workspace suite passed (918; the known selector intermittent passed on rerun).

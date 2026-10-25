@@ -1,7 +1,0 @@
-VERDICT: APPROVE-WITH-CHANGES
-
-1. **R3.1 captured:** `Open` activates backward runs independently of application data; pending-upstream and prefix tests are specified (`plan.md:159–169,344`).
-2. **R3.2 captured as an M3 gate**, including byte measurements under delayed cleanup (`plan.md:214,344`). **One contradiction remains:** ruling 10 still claims source admission bounds buffered bytes (`plan.md:372`). Explicitly mark that claim superseded by ruling 14.
-3. **R3.3 captured:** configurable outstanding-attempt limit with an `Overloaded` acceptance test (`plan.md:213,344`).
-4. **R3.4 captured:** conservative conversion, pairwise-skew assumption, and tests in both clock-offset directions (`plan.md:80,344`).
-5. **R3.5 captured:** direct creation on O is separated from attachment selection by destination worker (`plan.md:155–158`). No other material edit-induced contradiction found; M1 remains clear to start.

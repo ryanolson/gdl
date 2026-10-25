@@ -1,7 +1,0 @@
-- **Major — `crates/gdl/src/items.rs:50`: backward filtering can defeat cancellation and deadlines indefinitely.** An always-ready sink feeding `input.filter_map(|_| ready(None))` loops inside one outer `poll_next`. `Fuse` never yields, so `Bounded` never reaches its interruption checks again; the request monopolizes a worker even after cancellation or deadline expiry. Add a cooperative polling budget at node boundaries that yields back to the attempt boundary. Add regressions for filtering and batching, preserving the existing per-item cost constraints.
-
-- **Major — `crates/gdl/src/compose.rs:168`: interruption checks still allow subsequent forward stages to run.** With two forward stages, if the first calls `cx.cancel()` and returns `Ok`, the second executes immediately through `self.1.run`. The biased outer select cannot intervene within that poll, and the check after the complete forward chain runs too late to prevent side effects. This leaves the m1-r3 fix incomplete. Check the context between forward stages and extend the regression to assert that neither the second forward stage nor the sink starts.
-
-Both findings are from static inspection; the read-only filesystem blocked regression execution and the required independent verification runner.
-
-ACTIONABLE: 2

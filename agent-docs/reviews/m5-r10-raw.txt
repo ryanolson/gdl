@@ -1,3 +1,0 @@
-- **P2 — [crates/gdl-gen/src/lib.rs:136](/home/ryan/repos/dynamo-gdl/crates/gdl-gen/src/lib.rs:136): Reserve `std` during crate-name validation.** A hosted implementation with `[lib] name = "std"` and binding `type = "std::Engine"` passes validation, but shadows the standard library when compiling the generated segment. Its implicit prelude and explicit `std::sync::Arc` references then fail. Add `std` to the reserved library names and add a regression test that rejects this binding during generation. This completes the namespace protection added in review r7.
-
-ACTIONABLE: 1
