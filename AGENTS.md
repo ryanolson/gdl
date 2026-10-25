@@ -17,7 +17,7 @@
 | `examples/film` | Two reference/vendor node crates with configuration and metrics, distributed and compact specs, and native proof in `crates/gdl-gen/tests/film.rs` |
 | `agent-docs/` | Ignored by git: local scratch for work in progress. Nothing in it is read by the build or the tests |
 
-Plans, remaining work, and follow-ups live in the work tracker, not in this repository (see the `linear-work` skill). Never write tracker names, ticket identifiers, or tracker URLs into the repository, a commit, or a PR.
+Plans: Linear. Plans, remaining work, and follow-ups live in the work tracker, not in this repository (see the `linear-work` skill). Never write tracker names, ticket identifiers, or tracker URLs into the repository, a commit, or a PR.
 
 ## Build, lint, test
 
