@@ -94,7 +94,7 @@ A stream holds its request's admission share and egress permit until velo's `Str
 
 The wait runs in the pump task that already sends the stream, raced against the request's `done` future that the pump already holds. No task or timer is added per stream, and no request holds anything past its deadline or cancel. A failure delivery waits within its existing 100 ms bound.
 
-**Rejected: a consumer acknowledgement in gdl's own protocol.** It needs a per-stream table on the producer, which the rule against correlation maps forbids. In the velo prototype's benchmark it also cost more and came later. The setup: two velo nodes in one process over loopback TCP, 200,000 streams of four 16-byte items, 64 at once, instructions from `/usr/bin/time -l`, on a loaded laptop. Per run, `retired()` used 22.86 to 23.08 G instructions and the acknowledgement 29.76 to 30.11 G, about 30% more. The median time a stream was held was 114 to 149 µs with `retired()` and 504 to 636 µs with the acknowledgement, about 4 to 5 times later. [What gdl relies on in velo](velo.md) describes the velo change.
+**Rejected: a consumer acknowledgement in gdl's own protocol.** It needs a per-stream table on the producer, which the rule against correlation maps forbids. It also cost more and held streams longer; [What gdl relies on in velo](velo.md) has the measurement and describes the velo change.
 
 `Sent` means that the output left the node, not that the consumer read it. An item larger than velo's eager budget is an exception ([Known limitations](../operations/limitations.md)).
 

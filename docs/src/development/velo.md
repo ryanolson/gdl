@@ -49,10 +49,10 @@ gdl uses it in `Outbound::finish`. The pump awaits `retired()` in the work it al
 | `retired()` awaited | 113.8k instructions per stream |
 | Producer shuts down right after `finalize` | The end of 10 of 10 streams lost |
 | Producer shuts down after `retired()` resolves `Sent` | 0 of 150 lost |
-| Consumer acknowledgement instead (`ack`) | 29.8e9 to 30.1e9 instructions per run against 22.6e9 to 23.2e9 for `plain`: **31% more** |
+| Consumer acknowledgement instead (`ack`) | 29.8e9 to 30.1e9 instructions per run against 22.6e9 to 23.2e9 for `plain`: **about 30% more** |
 | Time a stream is held, median | `retired` 114 to 149 us, `ack` 504 to 636 us, over five runs |
 
-**The rejected alternative** is a consumer acknowledgement in gdl's own protocol. It costs 31% more instructions per short stream and resolves about 4 times later at the median. It also needs a per-stream table on the producer to match acknowledgements to streams. gdl's rule is that responses are never correlated through a map or a request id.
+**The rejected alternative** is a consumer acknowledgement in gdl's own protocol. It costs about 30% more instructions per short stream, and a stream is held 4 to 5 times longer at the median (114 to 149 µs against 504 to 636 µs). It also needs a per-stream table on the producer to match acknowledgements to streams. gdl's rule is that responses are never correlated through a map or a request id.
 
 The velo change that was merged with it makes TCP and UDS teardown write admitted frames instead of failing them. Without it, a stream reported sent would not survive a shutdown in the microseconds after.
 
