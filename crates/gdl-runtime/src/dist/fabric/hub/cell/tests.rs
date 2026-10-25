@@ -99,11 +99,11 @@ async fn nothing_a_snapshot_that_never_completes_says_is_learned() {
 /// its cap: its drain's bound and its retirement's bound still pass on
 /// time, since neither waits on the watch. On the real clock, since the
 /// watch client's own timers would run ahead on a paused one while it
-/// waits on the socket; the bound is long enough for the waits to reach
-/// the cap.
+/// waits on the socket. The failed watches establish the cap before the
+/// drain starts, so its bound fits inside even the shortest capped wait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
-    const BOUND: Duration = Duration::from_secs(2);
+    const BOUND: Duration = Duration::from_millis(100);
     const LATE: Duration = Duration::from_millis(200);
     let mut server = Server::new().await;
     let me = InstanceId::new_v4();
@@ -117,6 +117,11 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
         retired: None,
         watch: tokio::spawn(run(watcher, server.address.clone(), Some(me), learns)),
     };
+    let mut step = REWATCH;
+    while step < REWATCH_CAP {
+        drop(server.next().await);
+        step = (step * 2).min(REWATCH_CAP);
+    }
     let mut first = server.next().await;
     first.answer().await;
     first.send(&cell(CellState::Draining)).await;
@@ -134,13 +139,6 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
     drain.retire();
     let retired = drain.retired.expect("retired");
     drop(first);
-    let (asked, mut asks) = watch::channel(Vec::new());
-    let closer = tokio::spawn(async move {
-        loop {
-            let watch = server.next().await;
-            asked.send_modify(|asked: &mut Vec<tokio::time::Instant>| asked.push(watch.at));
-        }
-    });
 
     let declining = drain
         .declining()
@@ -160,19 +158,13 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
         parent.avoids(),
         "the retirement's bound passed and was not seen"
     );
-    let asks = asks
-        .wait_for(|asks| asks.len() >= 2)
-        .await
-        .expect("the closer runs")
-        .clone();
-    let longest = asks
-        .windows(2)
-        .map(|pair| pair[1] - pair[0])
-        .max()
-        .expect("two watches");
+    let again = server.next().await;
     assert!(
-        longest >= REWATCH_CAP / 2,
-        "the watch never waited at its cap: {asks:?}"
+        again.at - retired >= REWATCH_CAP / 2,
+        "the watch did not wait at its cap: {:?}",
+        again.at - retired
     );
-    closer.abort();
+    // Use the deadlines because this task can resume after the retry.
+    let due = drained.max(retired) + BOUND;
+    assert!(due < again.at, "the bounds did not precede the next watch");
 }

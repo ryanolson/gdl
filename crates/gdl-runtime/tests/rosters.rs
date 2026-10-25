@@ -649,12 +649,18 @@ async fn a_joiner_ends_a_lone_instances_retirement() {
     let placement = two();
     let hub = hub(&placement).await;
     let config = settings(&hub, 20_000, "");
+    let control = common::proxy::Proxy::new(hub.control_addr()).await;
+    let front_config = ProcessConfig::from_figment(figment::Figment::from(Toml::string(&format!(
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n[runtime]\ndrain_ms = 20000\nsetup_timeout_ms = 300\n",
+        hub.public_addr().port(),
+        control.port,
+    ))))
+    .expect("front settings");
     let events = Events::quiet();
     let ((front_process, front), (old_process, old)) = tokio::join!(
-        launch(&config, "front", &placement),
+        launch(&front_config, "front", &placement),
         launch(&config, "engine", &placement),
     );
-    let (front_id, old_id) = (front.node().instance_id(), old.node().instance_id());
     let front_segment = start(&front, "front", &placement, &events, quick());
     let old_segment = start(&old, "engine", &placement, &events, quick());
     let (front_rx, front_served) = serve(front, front_segment);
@@ -664,6 +670,8 @@ async fn a_joiner_ends_a_lone_instances_retirement() {
 
     let traffic = Traffic::start(&front_segment, 4);
     traffic.more(10).await;
+    // The next service PUT is the front's promise to avoid the retiree.
+    control.hold(b"PUT ");
     let stopped = Instant::now();
     old_process.stop();
     traffic.more(10).await;
@@ -671,15 +679,32 @@ async fn a_joiner_ends_a_lone_instances_retirement() {
     let new_segment = start(&new, "engine", &placement, &events, quick());
     let (new_rx, new_served) = serve(new, new_segment);
     let new_segment = ready(new_rx).await;
-    let promised = avoided(&hub, old_id, &[front_id]).await;
+    tokio::time::timeout(WAIT, control.holding())
+        .await
+        .expect("the avoidance promise reaches the gate");
+    assert!(
+        !old_served.is_finished(),
+        "the instance left before its sender could publish its promise"
+    );
+    // Publication cannot precede the release, even if this task resumes late.
+    let released = Instant::now();
+    control.release();
     let exited = left(old_served).await;
-    assert!(exited >= promised);
+    assert!(exited >= released, "the instance left before the release");
     assert!(
         exited - stopped < Duration::from_secs(10),
         "it waited for its bound"
     );
     let before = new_segment.served().forwards;
-    traffic.more(20).await;
+    let deadline = Instant::now() + WAIT;
+    // Completions can belong to requests already included in `before`.
+    while new_segment.served().forwards < before + 20 {
+        assert!(
+            Instant::now() < deadline,
+            "the joiner took no more requests"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(new_segment.served().forwards >= before + 20);
     assert_eq!(traffic.stop().await, 0, "a request failed");
 
