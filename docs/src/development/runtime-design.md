@@ -28,7 +28,7 @@ Every gdl anchor and envelope carries one concrete velo type, `WireItem`, and ea
 
 The cost is one extra copy per item at a crossing, into and out of the `WireItem` frame. On velo 0.19, the codec added 80 ns per item at 16 B and 402 ns at 16 KiB, per crossing, over velo's own encoding. [Crossing performance](../operations/crossing-performance.md) has the full table and the command.
 
-The graph macro picks a streamed edge's codec from the syntax (`stream_codec!` for `Head + stream Item`, `wire_codec!` otherwise). The wire probe is autoref specialization with two levels. A third level that recognized `Streamed` by type was not built: the syntax already says which edges are streamed.
+The graph macro picks a streamed edge's codec from the syntax (`stream_codec!` for `Head + stream Item`, `wire_codec!` otherwise). The wire probe is autoref specialization with two levels. A third autoref level that recognized `Streamed` by type was not built, because the syntax already marks each streamed edge (`Head + stream Item`).
 
 ## Who provisions the backward path
 
@@ -99,7 +99,7 @@ Each attempt spends one unit of tokio's cooperative budget. An operator that ret
 
 **The receiver retires its input anchor when its run ends.** Nothing else ends that anchor promptly: a sender whose acknowledgement was lost never attaches, a node may hold its input unread, and velo removes an unattached anchor only after its reservation lifetime (180 s for a prebound one, by default).
 
-**Replay is the operator's job.** `Streamed` is not `Clone`. Retry, hedging, and migration of a streamed request need a buffer, and only the operator knows how much to keep.
+**Replay is the operator's job.** `Streamed` is not `Clone`, because its items can be read only once. An operator that retries, hedges, or migrates a streamed request keeps its own copy of the items it needs.
 
 **No cross-direction deadlock detection.** Input pumps run on their own tasks and are never driven by response reads, so the runtime adds no coupling. A deadlock the application builds is bounded by its deadline.
 

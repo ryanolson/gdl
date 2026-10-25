@@ -43,7 +43,7 @@ Next, a node crate would ship its declarations in graph syntax, such as `sink En
 
 ### A generated `catalog.toml` shipped in the crate
 
-Next, `cargo gdl extract` would build the crate on the author's machine, where CUDA is, and write `gdl/catalog.toml` into the published package, kept current by `cargo gdl extract --check` in CI. It was dropped before it shipped. It needs every crate's author to run gdl's tool and publish its output. The composer must read any crate version a user picks, so crates ship nothing for gdl, and the code is the only source.
+Next, `cargo gdl extract` would build the crate on the author's machine, where CUDA is, and write `gdl/catalog.toml` into the published package, kept current by `cargo gdl extract --check` in CI. It was dropped before it shipped. The composer must read any crate version a user picks, so crates ship nothing for gdl, and the code is the only source.
 
 ### `#[gdl::node]` on the role impl
 
