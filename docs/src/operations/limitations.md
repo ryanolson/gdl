@@ -36,6 +36,19 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** in a roster directory, `[instances]` gives exact counts, and an extra instance fails its launch. Retiring one works there. Adding one does not.
 - **Workaround:** use a hub (`[hub]`). An instance that starts while the others serve joins once it is ready. See [Discovery](../concepts/hub.md) and [Segment lifecycle](../concepts/lifecycle.md).
 
+### Under a hub, an unspecified `listen` needs `HOSTNAME`
+- **What:** when `listen` is `0.0.0.0:<port>`, a segment binds the IPv4 address its `HOSTNAME` resolves to. The launch fails if `HOSTNAME` is unset or has no IPv4 address.
+- **When:** a native run under a hub outside a container.
+- **Workaround:** set `listen` to a routable address, or set `HOSTNAME`. See [Discovery](../concepts/hub.md).
+
+### The `gdl-hub` binary has fixed ports and takes no settings file
+- **What:** it always serves on 1337 (public) and 8337 (control). A segment's `[hub] public_port` and `control_port` apply only to a hub embedded in that segment.
+- **Workaround:** map the ports at the container. See [Discovery](../concepts/hub.md).
+
+### A hub that does not take `ready` leaves the instance unrouted
+- **What:** if the `ready` announcement fails within `rendezvous_ms`, the instance prints a line and serves on. Instances already serving never add it. Joiners still route to it, since their rosters come from `loaded`.
+- **Workaround:** restart the instance once the hub is healthy. See [Segment lifecycle](../concepts/lifecycle.md).
+
 ### A retirement takes at least the setup timeout
 - **What:** an instance stopped while its peers serve leaves no sooner than `[runtime] setup_timeout_ms` (10 s by default) after its peers promised to avoid it, even with nothing in flight.
 - **Entry instances of a cell:** an instance whose segment holds the inner end of a hop from another class waits for the cells that follow its cell. It leaves a setup timeout after its hub reports that they avoid it, or when the wait's bound passes. With no cell following, its hub says so at once, and it waits the setup timeout alone.
@@ -62,7 +75,9 @@ These are the limits a user can run into today. Each entry says what happens, wh
 
 ### In a roster directory, a crashed instance holds drains until the bound
 - **What:** a crashed instance writes no `left/` file. A peer whose drain waits for it waits until the drain's bound, which is the request deadline by default (600 s).
-- **Workaround:** set a shorter `[runtime] drain_ms`, stop the remaining peers twice (a second stop ends a drain at once), or use a hub, where a crashed instance's lease lapses in about 30 s.
+- **Failed launch:** an instance that published itself and then failed its rendezvous leaves no `left/` file either. Under a hub, the registration stays until its lease lapses, in about 30 s.
+- **Reuse:** a roster directory belongs to one deployment. Files are never removed, so a reused directory names instances that are gone. Requests to them fail, or the launch fails with "the directory must be fresh".
+- **Workaround:** set a shorter `[runtime] drain_ms`, stop the remaining peers twice (a second stop ends a drain at once), or use a hub, where a crashed instance's lease lapses in about 30 s. Use a fresh directory for each deployment. See [Segment lifecycle](../concepts/lifecycle.md).
 
 ### A drain is bounded, and a stop while starting exits with code 1
 - **What:** when `[runtime] drain_ms` runs out, the instance ends, even if a request is still in flight. A request whose deadline is longer than the bound is cut at the bound.
@@ -202,10 +217,16 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** generation and composition do not fetch gdl. A `[gdl] path` and the composer's `--gdl-path` are read, and must name the package `gdl-runtime`.
 - **Workaround:** name revision `869699d` or later.
 
+### A misspelled first key in a `GDL_` variable is ignored
+- **What:** only variables whose first key is a settings key are read. `GDL_RUNTIM__DRAIN_MS` is dropped without a word, while `GDL_RUNTIME__DRAIN_M` is refused.
+- **Why:** the build scripts' own variables (`GDL_PROFILE`, `GDL_IMAGE_PREFIX`) must not stop a segment.
+- **Workaround:** check the settings the segment reports at start. See [Configuration](configuration.md).
+
 ### Only Docker Compose is generated, and the composer applies only on its own host
 - **What:** `cargo gdl compose` writes a Compose bundle and no Kubernetes manifests. The Deploy tab reports whether the server's host has `kubectl`, a kubeconfig, and a current context, but offers nothing to apply there.
 - **Apply:** **Build and apply** runs `docker compose up --build --detach` on the host that runs `gdl-web`, with that host's Docker, and only when the server started with `--docker`. A second apply while one runs is refused. The page shows the output of the build and start, not the segments' health. The segments can still be loading when the command returns.
 - **Why:** an apply builds images and publishes ports, so it is opt-in, as local imports are. A wait for health would hold the request for the segments' start period (30 minutes, to cover model loading).
+- **Scaling:** a segment that publishes a host port cannot scale, since two containers cannot bind one port. See [Deploy with Docker Compose](../guides/compose-deploy.md).
 - **Workaround:** for another Docker host, download the bundle and run it there. Follow a started project with `docker compose -p gdl-<graph> logs -f` and stop it with `docker compose -p gdl-<graph> down`.
 
 ### A spec of several layouts is composed only by cell
@@ -226,6 +247,7 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 
 ### A fleet deploys on one host, with Docker Compose and the `dir` directory
 - **What:** `cargo gdl compose --fleet fleet.toml` writes one Compose bundle: per cell, one hub and the cell's segments, configured through `GDL_CELL__*` variables. Every hub publishes to the `dir` cell directory on one shared volume and reaches the others by service name on one network. A hub container is named, so Compose refuses to scale it, and a host runs one copy of a fleet's bundle at a time. A segment that names a host port (`HOST:CONTAINER`) can run in one cell only. A fleet that runs it in several is refused. Docker-chosen host ports work in several.
+- **Hub directory:** a hub with cell settings and no `directory` key refuses to start, since the default is `relay`.
 - **Not generated:** Kubernetes or other targets, a network across hosts, and TLS. The composer's Deploy tab writes bundles without cells only. A cell's hub refuses the `relay` backend (the default, which is not built) and `memory` (which no other process can read), so the bundle sets `GDL_CELL__DIRECTORY=dir` and `GDL_CELL__DIR`.
 - **Why:** `dir` is the only backend a hub process publishes to, and it is a directory that all hubs read and write, so they share a host. The `relay` backend, which would carry records between hosts, and the transport between regions are not built.
 - **Workaround:** none for cells on several machines.
@@ -235,7 +257,7 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **What:** a fleet file refuses a cell of a class that is sent to without a `home`, a `home` that names no cell or a cell of a class that does not send to this one, a `home` on a cell of a class nothing sends to, and a parent without a child of each class its class sends to. It cannot judge a parent's children in a layout whose classes it does not know, and says so. Cell settings given without a fleet file are not checked: a cell of a class that is sent to with no `home`, or with a `home` that names no cell, is followed by no hub and never chosen. A hub publishes no `home` for a cell of a class nothing sends to.  A hub follows its children only. Region plays no part in following, and no round trip is measured.
 
 ### The cell policies cannot be extended, and the built-in ones read only admission
-- **What:** `round_robin` (the default) gives each attempt the next cell in the chooser's table that is `ready` (or `degraded`, while none is), has an entry instance, is not excluded for the request, and is not damped. It reads no load and no region, so a full cell is found by its refusal, which costs one round trip and damps the cell. `home_first` chooses by the cells' load summaries: home cells until all are saturated, a cell in another region only while its admitted roots are under 80% of its limit, `ready` before `degraded`, and the lower ratio of two random picks. A cell whose summary is missing or older than three periods is not chosen. A placement that names any other policy is refused when a chooser launches.
+- **What:** `round_robin` (the default) gives each attempt the next cell in the chooser's table that is `ready` (or `degraded`, while none is), has an entry instance, is not excluded for the request, and is not damped. It reads no load and no region, so a full cell is found by its refusal, which costs one round trip and damps the cell. `home_first` chooses by the cells' load summaries: home cells until all are saturated, a cell in another region only while its admitted roots are under 80% of its limit, `ready` before `degraded`, and the lower ratio of two random picks. With exactly two eligible cells in a tier, both are drawn, so the lighter cell wins every time and the cells can herd. A cell whose summary is missing or older than three periods is not chosen. A placement that names any other policy is refused when a chooser launches.
 - **Summary scope:** the summary counts admission, not engine work: the roots admitted against the admission limit, and the hand-offs declined. A cell whose engines are saturated while its entries have room looks idle.
 - **Timing:** a refusal waits for the next report, and an instance's first report comes one period (`summary_ms`, 10 s by default) after it is ready. The saturation threshold, spill bound, and three periods are constants.
 - **Lifts:** load-aware choice by default, engine load in the summary, thresholds as settings, an early summary on refusal, registered custom policies, near cells, and spill to other regions.
@@ -257,7 +279,7 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **Lifts:** retiring interior instances across cells, cancelling a drain, and draining a global cell.
 
 ### The names a watch, a release, and an acknowledgement carry are not authenticated
-- **What:** nothing checks the class, cell, run, and generation a caller names. Anyone who can reach a cell's hub can hold a draining cell's early end off until the bound, or bring it forward by releasing a watch it did not open. It can also tell the hub that the cells following it avoid a retired entry instance when they do not. A chooser that still picks the instance after it stopped taking work is refused and offers the request to another cell.
+- **What:** nothing checks the class, cell, run, and generation a caller names. Anyone who can reach a cell's hub can hold a draining cell's early end off until the bound, or bring it forward by releasing a watch it did not open. It can also tell the hub that the cells following it avoid a retired entry instance when they do not. `POST /drain` on the control listener and `POST /release` and `POST /avoided` on the public listener need no credential. A chooser that still picks the instance after it stopped taking work is refused and offers the request to another cell.
 - **Lifts:** a credential across cells, which waits for the private CA. Hub listeners have no TLS. See [Cell hub routes and watch events](../appendix/hub-api.md).
 
 ### A follow can report `left` without `retired`
