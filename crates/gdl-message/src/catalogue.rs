@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 /// Everything the markers register in this program, in whatever crate:
 /// each type that derives [`Message`](crate::Message), each export, and
-/// each node type.
+/// each node type. An instantiation of a generic message or node that an
+/// exported alias names is an export or a node of the alias's name.
 ///
 /// `cargo gdl extract --verify` builds a program that links a crate, prints
 /// [`Catalogue::linked`] as TOML, and compares it with what the source
@@ -77,7 +78,8 @@ fn plain(path: &str) -> String {
         .join("::")
 }
 
-/// A message offered under another public path.
+/// A message offered under another public path, or an instantiation of a
+/// generic message offered under an alias's.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ExportInfo {
     /// The package that exports it.
@@ -92,9 +94,15 @@ pub struct ExportInfo {
     pub path: String,
     /// The message it is.
     pub origin: Origin,
+    /// Whether the message has a codec, probed where it is exported: an
+    /// instantiation has no message entry of its own to say so.
+    pub wire: bool,
+    /// The encoding the message declares.
+    pub encoding: gdl_model::Encoding,
 }
 
-/// A type that derives `Node`, with each role trait it implements.
+/// A type that derives `Node`, or an instantiation of a generic one that
+/// an exported alias names, with each role trait it implements.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeInfo {
     /// Graph-affecting configuration fields.
@@ -106,7 +114,7 @@ pub struct NodeInfo {
     pub version: String,
     /// That package's directory when it was built.
     pub dir: String,
-    /// The node's name: the type's name.
+    /// The node's name: the type's name, or the alias's.
     pub name: String,
     /// The type's path at its crate's root.
     pub path: String,
@@ -178,11 +186,17 @@ impl Catalogue {
             .iter()
             .map(registry::Export::info)
             .collect();
-        exports.sort();
         let mut nodes: Vec<NodeInfo> = registry::GDL_NODE_CATALOGUE
             .iter()
             .map(registry::Node::info)
             .collect();
+        for alias in registry::GDL_ALIAS_CATALOGUE.iter() {
+            match alias.info() {
+                registry::Aliased::Message(export) => exports.push(export),
+                registry::Aliased::Node(node) => nodes.push(node),
+            }
+        }
+        exports.sort();
         nodes.sort();
         Self {
             messages,
@@ -207,6 +221,7 @@ impl Catalogue {
 #[doc(hidden)]
 pub mod registry {
     use super::{EndpointInfo, ExportInfo, MessageInfo, NodeInfo, PortInfo, RoleInfo};
+    use crate::__private::Instantiation;
     use crate::{Identity, Shape};
 
     /// One entry per type that derives `Message`, collected at link time:
@@ -256,7 +271,12 @@ pub mod registry {
         pub dir: &'static str,
         pub name: &'static str,
         pub module: &'static str,
-        pub origin: Identity,
+        /// The message's: an instantiation of a generic message has no
+        /// constant identity.
+        pub origin: fn() -> Identity,
+        pub encoding: gdl_model::Encoding,
+        /// Probed where the export is, as the derive's wire probe is.
+        pub wire: fn() -> bool,
     }
 
     impl Export {
@@ -267,7 +287,69 @@ pub mod registry {
                 dir: self.dir.to_string(),
                 name: self.name.to_string(),
                 path: super::plain(&format!("{}::{}", self.module, self.name)),
-                origin: self.origin.into(),
+                origin: (self.origin)().into(),
+                wire: (self.wire)(),
+                encoding: self.encoding,
+            }
+        }
+    }
+
+    /// One entry per `pub type` marked `#[export]`: an instantiation of a
+    /// generic message or node, named by the alias. The derive on the
+    /// generic type cannot register it, since it is not concrete there; the
+    /// alias is where it is.
+    #[linkme::distributed_slice]
+    pub static GDL_ALIAS_CATALOGUE: [Alias];
+
+    pub struct Alias {
+        pub package: &'static str,
+        pub version: &'static str,
+        pub dir: &'static str,
+        pub name: &'static str,
+        pub module: &'static str,
+        pub krate: &'static str,
+        /// What the generic type's derive states: `Generic::instantiation`.
+        pub instantiation: fn() -> Instantiation,
+        /// A message's, probed where the alias is.
+        pub wire: fn() -> bool,
+        /// A node's, probed where the alias is; none through `gdl_message`,
+        /// which offers only messages.
+        pub metrics: fn() -> Vec<gdl_model::MetricField>,
+        pub roles: fn() -> Vec<Role>,
+    }
+
+    /// What an alias registers.
+    pub(super) enum Aliased {
+        Message(ExportInfo),
+        Node(NodeInfo),
+    }
+
+    impl Alias {
+        pub(super) fn info(&self) -> Aliased {
+            match (self.instantiation)() {
+                Instantiation::Message { identity, encoding } => Aliased::Message(ExportInfo {
+                    package: self.package.to_string(),
+                    version: self.version.to_string(),
+                    dir: self.dir.to_string(),
+                    name: self.name.to_string(),
+                    path: super::plain(&format!("{}::{}", self.module, self.name)),
+                    origin: identity.into(),
+                    wire: (self.wire)(),
+                    encoding,
+                }),
+                Instantiation::Node { config } => Aliased::Node(
+                    Node {
+                        config,
+                        metrics: self.metrics,
+                        package: self.package,
+                        version: self.version,
+                        dir: self.dir,
+                        name: self.name,
+                        krate: self.krate,
+                        roles: self.roles,
+                    }
+                    .info(),
+                ),
             }
         }
     }
@@ -329,8 +411,8 @@ pub mod registry {
         Port {
             streamed: T::STREAMED,
             nested: T::NESTED,
-            head: T::HEAD,
-            item: T::ITEM,
+            head: T::head(),
+            item: T::item(),
         }
     }
 

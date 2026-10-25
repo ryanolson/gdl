@@ -1,0 +1,10 @@
+[package]
+name = "generic-misread"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gdl-message = { path = "../../../../../gdl-message" }
+# Not serde, under serde's name: the source reader takes it for serde.
+serde = { package = "generic-fake-serde", path = "../fake-serde" }

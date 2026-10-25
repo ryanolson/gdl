@@ -201,8 +201,10 @@ impl Extracted {
 /// compare what its markers register with what the reader found. Each
 /// difference is an error: something the reader missed (a type a macro
 /// made, code a build script wrote) or something the build does not
-/// register.
-pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
+/// register. An alias the reader leaves out on purpose, with the reason
+/// in the offer's `skipped`, is no difference: it is returned, with that
+/// reason, for the caller to report.
+pub fn verify(extracted: &Extracted, target: &Path) -> Result<Vec<String>, Error> {
     let located = &extracted.located;
     let message = extracted.workspace.locate("gdl-message").map_err(|_| {
         Error::new(format!(
@@ -253,7 +255,7 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
     let mine = |d: &str| std::fs::canonicalize(d).is_ok_and(|d| d == dir);
     let problems = differences(&registered, &mine, &extracted.offer);
     if problems.is_empty() {
-        Ok(())
+        Ok(left_out(&registered, &mine, &extracted.offer))
     } else {
         Err(Error::all(problems))
     }
@@ -262,22 +264,17 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<(), Error> {
 /// Each difference between what a build registered for the crate whose
 /// registrations `mine` picks, and what the reader found in it, `offer`.
 /// Entries are compared as lines that hold everything an entry claims: a
-/// message's wire capability, an export's origin and that message's wire
-/// capability, and each port's messages and shape.
+/// message's wire capability, an export's origin and the wire capability
+/// the build probes where it exports the message, and each port's
+/// messages and shape.
 fn differences(
     registered: &gdl_message::Catalogue,
     mine: &dyn Fn(&str) -> bool,
     offer: &Offer,
 ) -> Vec<String> {
-    // An export's capability is its message's, registered by the crate
-    // that defines it, which the program links too.
-    let capability = |origin: &gdl_message::Origin| {
-        registered
-            .messages
-            .iter()
-            .find(|m| m.dir == origin.dir && m.path == origin.path)
-            .map_or_else(|| "unregistered".into(), |m| wire(m.wire, m.encoding))
-    };
+    // An alias the reader leaves out on purpose is reported by
+    // `left_out`, not compared.
+    let ours = |dir: &str, name: &str| mine(dir) && !offer.skipped.iter().any(|s| s.name == name);
     let built: BTreeSet<String> = registered
         .messages
         .iter()
@@ -290,72 +287,90 @@ fn differences(
                 wire(m.wire, m.encoding)
             )
         })
-        .chain(registered.exports.iter().filter(|e| mine(&e.dir)).map(|e| {
-            format!(
-                "export `{}` at `{}`, of `{}` ({} {}), {}",
-                e.name,
-                e.path,
-                e.origin.path,
-                e.origin.package,
-                e.origin.version,
-                capability(&e.origin)
-            )
-        }))
-        .chain(registered.nodes.iter().filter(|n| mine(&n.dir)).map(|n| {
-            let roles: Vec<String> = n
-                .roles
+        .chain(
+            registered
+                .exports
                 .iter()
-                .map(|r| {
-                    let ports: Vec<String> = r
-                        .ports
+                .filter(|e| ours(&e.dir, &e.name))
+                .map(|e| {
+                    format!(
+                        "export `{}` at `{}`, of `{}` ({} {}), {}",
+                        e.name,
+                        e.path,
+                        e.origin.path,
+                        e.origin.package,
+                        e.origin.version,
+                        wire(e.wire, e.encoding)
+                    )
+                }),
+        )
+        .chain(
+            registered
+                .nodes
+                .iter()
+                .filter(|n| ours(&n.dir, &n.name))
+                .map(|n| {
+                    let roles: Vec<String> = n
+                        .roles
                         .iter()
-                        .map(|p| {
-                            port(
-                                &p.port,
-                                p.head.as_ref().map(|o| (&o.package, &o.version, &o.path)),
-                                p.streamed.then(|| {
-                                    p.item.as_ref().map(|o| (&o.package, &o.version, &o.path))
-                                }),
-                                p.nested,
-                            )
+                        .map(|r| {
+                            let ports: Vec<String> = r
+                                .ports
+                                .iter()
+                                .map(|p| {
+                                    port(
+                                        &p.port,
+                                        p.head.as_ref().map(|o| (&o.package, &o.version, &o.path)),
+                                        p.streamed.then(|| {
+                                            p.item
+                                                .as_ref()
+                                                .map(|o| (&o.package, &o.version, &o.path))
+                                        }),
+                                        p.nested,
+                                    )
+                                })
+                                .collect();
+                            let entries: Vec<_> = r
+                                .entries
+                                .iter()
+                                .map(|e| {
+                                    let shape = |p: &gdl_message::PortInfo| {
+                                        port(
+                                            "",
+                                            p.head
+                                                .as_ref()
+                                                .map(|o| (&o.package, &o.version, &o.path)),
+                                            p.streamed.then(|| {
+                                                p.item
+                                                    .as_ref()
+                                                    .map(|o| (&o.package, &o.version, &o.path))
+                                            }),
+                                            p.nested,
+                                        )
+                                    };
+                                    format!(
+                                        "{} {} {} {} {}",
+                                        e.name,
+                                        e.path,
+                                        e.enabled,
+                                        shape(&e.request),
+                                        shape(&e.response)
+                                    )
+                                })
+                                .collect();
+                            format!("{}({}) entries {:?}", r.role, ports.join(", "), entries)
                         })
                         .collect();
-                    let entries: Vec<_> = r
-                        .entries
-                        .iter()
-                        .map(|e| {
-                            let shape = |p: &gdl_message::PortInfo| {
-                                port(
-                                    "",
-                                    p.head.as_ref().map(|o| (&o.package, &o.version, &o.path)),
-                                    p.streamed.then(|| {
-                                        p.item.as_ref().map(|o| (&o.package, &o.version, &o.path))
-                                    }),
-                                    p.nested,
-                                )
-                            };
-                            format!(
-                                "{} {} {} {} {}",
-                                e.name,
-                                e.path,
-                                e.enabled,
-                                shape(&e.request),
-                                shape(&e.response)
-                            )
-                        })
-                        .collect();
-                    format!("{}({}) entries {:?}", r.role, ports.join(", "), entries)
-                })
-                .collect();
-            format!(
-                "node `{}` at `{}`: {} config {:?} metrics {:?}",
-                n.name,
-                n.path,
-                roles.join(" "),
-                n.config,
-                n.metrics
-            )
-        }))
+                    format!(
+                        "node `{}` at `{}`: {} config {:?} metrics {:?}",
+                        n.name,
+                        n.path,
+                        roles.join(" "),
+                        n.config,
+                        n.metrics
+                    )
+                }),
+        )
         .collect();
     let read: BTreeSet<String> = offer
         .messages
@@ -441,6 +456,31 @@ fn differences(
             .map(|entry| format!("read from source, not registered by the build: {entry}")),
     );
     problems
+}
+
+/// Each alias the reader leaves out on purpose that the build registers,
+/// as an export or a node of the crate `mine` picks, with the reader's
+/// reason.
+fn left_out(
+    registered: &gdl_message::Catalogue,
+    mine: &dyn Fn(&str) -> bool,
+    offer: &Offer,
+) -> Vec<String> {
+    offer
+        .skipped
+        .iter()
+        .filter(|s| {
+            let named = |dir: &str, name: &str| mine(dir) && name == s.name;
+            registered.exports.iter().any(|e| named(&e.dir, &e.name))
+                || registered.nodes.iter().any(|n| named(&n.dir, &n.name))
+        })
+        .map(|s| {
+            format!(
+                "left out by the reader on purpose, registered by the build: `{}`: {}",
+                s.name, s.problem
+            )
+        })
+        .collect()
 }
 
 fn wire(wire: bool, encoding: gdl_model::Encoding) -> String {
@@ -550,6 +590,7 @@ mod tests {
             version: "0.1.0".into(),
             source: format!("path+file://{PROTOCOLS}"),
             path: path.into(),
+            arguments: Vec::new(),
         }
     }
 
@@ -573,6 +614,8 @@ mod tests {
                 name: "Words".into(),
                 path: "facade::Words".into(),
                 origin: built_origin("protocols::Words"),
+                wire: words_wire,
+                encoding: Default::default(),
             }],
             nodes: vec![NodeInfo {
                 config: Vec::new(),
@@ -642,6 +685,7 @@ mod tests {
                     },
                 ],
             }],
+            skipped: Vec::new(),
         }
     }
 
@@ -663,6 +707,29 @@ mod tests {
         assert!(!differences(&registered(true, false), &facade, &offer).is_empty());
     }
 
+    /// An alias the reader leaves out on purpose, which the build
+    /// registers, is not a difference.
+    #[test]
+    fn an_alias_the_reader_leaves_out_is_no_difference() {
+        let mut offer = read();
+        offer.exports.clear();
+        offer.skipped.push(gdl_extract::Skipped {
+            name: "Words".into(),
+            problem: "src/lib.rs:3:10: `Arc < Words >`: the reader names a crate's own types"
+                .into(),
+        });
+        assert_eq!(
+            differences(&registered(true, false), &facade, &offer),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            left_out(&registered(true, false), &facade, &offer),
+            [
+                "left out by the reader on purpose, registered by the build: `Words`: src/lib.rs:3:10: `Arc < Words >`: the reader names a crate's own types"
+            ]
+        );
+    }
+
     #[test]
     fn a_build_that_agrees_has_no_differences() {
         assert_eq!(
@@ -673,8 +740,8 @@ mod tests {
 
     /// The reader may take a message for a wire type that is not one (its
     /// serde impls borrow, say); the export's entry claims the capability,
-    /// so it is compared with the build's, though another crate defines
-    /// the message.
+    /// so it is compared with the one the build probes where it exports
+    /// the message, though another crate defines it.
     #[test]
     fn an_exports_wire_capability_is_compared() {
         let problems = differences(&registered(false, false), &facade, &read());
@@ -688,9 +755,10 @@ mod tests {
     }
 
     #[test]
-    fn an_exports_encoding_is_compared_with_its_defining_message() {
+    fn an_exports_encoding_is_compared() {
         let mut catalogue = registered(true, false);
         catalogue.messages[0].encoding = gdl_model::Encoding::Json;
+        catalogue.exports[0].encoding = gdl_model::Encoding::Json;
         let problems = differences(&catalogue, &facade, &read());
         assert_eq!(problems.len(), 2);
         assert!(problems[0].contains("codec json"), "{problems:?}");

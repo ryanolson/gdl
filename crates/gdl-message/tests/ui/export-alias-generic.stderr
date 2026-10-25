@@ -1,0 +1,5 @@
+error: an alias names one instantiation: it takes no parameters of its own
+  --> tests/ui/export-alias-generic.rs:11:15
+   |
+11 | pub type Carry<T> = Carried<T, u8>;
+   |               ^

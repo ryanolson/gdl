@@ -1,0 +1,25 @@
+error[E0277]: `Rc<str>` cannot be sent between threads safely
+  --> tests/ui/export-alias-not-send.rs:10:10
+   |
+10 | pub type Shared = Carried<std::rc::Rc<str>>;
+   |          ^^^^^^ `Rc<str>` cannot be sent between threads safely
+   |
+   = help: within `Carried<Rc<str>>`, the trait `Send` is not implemented for `Rc<str>`
+help: the trait `Generic` is implemented for `Carried<P>`
+  --> tests/ui/export-alias-not-send.rs:4:10
+   |
+ 4 | #[derive(gdl_message::Message)]
+   |          ^^^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `Carried<Rc<str>>`
+  --> tests/ui/export-alias-not-send.rs:5:12
+   |
+ 5 | pub struct Carried<P> {
+   |            ^^^^^^^
+note: required for `Carried<Rc<str>>` to implement `Generic`
+  --> tests/ui/export-alias-not-send.rs:4:10
+   |
+ 4 | #[derive(gdl_message::Message)]
+   |          ^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound introduced in this `derive` macro
+ 5 | pub struct Carried<P> {
+   |            ^^^^^^^^^^
+   = note: this error originates in the derive macro `gdl_message::Message` (in Nightly builds, run with -Z macro-backtrace for more info)

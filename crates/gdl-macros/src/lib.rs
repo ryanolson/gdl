@@ -57,13 +57,23 @@ pub fn gdl_message(input: TokenStream) -> TokenStream {
 /// The expansion behind `gdl_message::export`.
 #[proc_macro_attribute]
 pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
-    result(export::expand(attr.into(), item.into(), &through_message()))
+    result(export::expand(
+        attr.into(),
+        item.into(),
+        &through_message(),
+        export::Offers::Messages,
+    ))
 }
 
 /// The same attribute, reached as `gdl::export`.
 #[proc_macro_attribute]
 pub fn gdl_export(attr: TokenStream, item: TokenStream) -> TokenStream {
-    result(export::expand(attr.into(), item.into(), &through_gdl()))
+    result(export::expand(
+        attr.into(),
+        item.into(),
+        &through_gdl(),
+        export::Offers::MessagesAndNodes,
+    ))
 }
 
 /// The expansion behind `gdl::Node`.
@@ -85,6 +95,25 @@ fn result(expansion: syn::Result<Tokens>) -> TokenStream {
     match expansion {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Refuse a generic type's lifetime and const parameters: an alias names
+/// an instantiation by its types, every port type is `'static`, and the
+/// source reader compares types, not const values.
+fn type_parameters_only(generics: &syn::Generics, what: &str) -> syn::Result<()> {
+    match generics
+        .params
+        .iter()
+        .find(|p| !matches!(p, syn::GenericParam::Type(_)))
+    {
+        Some(param) => Err(syn::Error::new_spanned(
+            param,
+            format!(
+                "a generic {what} takes type parameters only: an alias names each instantiation by its types"
+            ),
+        )),
+        None => Ok(()),
     }
 }
 
@@ -148,7 +177,13 @@ mod tests {
         );
         let expansions = [
             message::expand(&input, &through_gdl()).expect("message"),
-            export::expand(Tokens::new(), use_item, &through_gdl()).expect("export"),
+            export::expand(
+                Tokens::new(),
+                use_item,
+                &through_gdl(),
+                export::Offers::MessagesAndNodes,
+            )
+            .expect("export"),
             node::expand(&input, &through_gdl()).expect("node"),
         ];
         for expansion in expansions {

@@ -25,6 +25,17 @@ nodes = ["Frontend", "Preprocess", "Truncate", "Number"]
 nodes = ["Detokenize", "Format"]
 "#;
 
+// Each message this segment sends or receives across a cut, or that
+// returns through an anchor in it, is a wire type: an edge that carries
+// one that is not fails to build here, naming the message and the edge.
+// Compile time only.
+#[allow(non_camel_case_types)]
+type Truncate_to_Engine = <contract::nodes::Engine as gdl_runtime::SinkDecl>::Req;
+const _: () = gdl_runtime::gdl::__private::crosses::<Truncate_to_Engine>();
+#[allow(non_camel_case_types)]
+type Engine_to_Detokenize = <contract::nodes::Detokenize as gdl_runtime::BackwardDecl>::In;
+const _: () = gdl_runtime::gdl::__private::crosses::<Engine_to_Detokenize>();
+
 /// The implementations of the nodes this segment hosts.
 pub struct Nodes {
     /// Node `Engine`.

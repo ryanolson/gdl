@@ -1,11 +1,11 @@
-error: a message cannot be generic: a graph names it by its name alone, so it must be one concrete type
- --> tests/ui/message-generic.rs:5:15
+error: a generic message takes type parameters only: an alias names each instantiation by its types
+ --> tests/ui/message-generic.rs:7:17
   |
-5 | struct Wrapper<T> {
-  |               ^
+7 | struct Borrowed<'a> {
+  |                 ^^
 
-error: a message cannot be generic: a graph names it by its name alone, so it must be one concrete type
-  --> tests/ui/message-generic.rs:10:16
+error: a generic message takes type parameters only: an alias names each instantiation by its types
+  --> tests/ui/message-generic.rs:12:14
    |
-10 | struct Borrowed<'a> {
-   |                ^
+12 | struct Fixed<const N: usize> {
+   |              ^^^^^^^^^^^^^^

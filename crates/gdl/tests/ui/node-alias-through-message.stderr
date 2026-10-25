@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `gdl_message::export` offers messages: export a node's instantiation with `gdl::export`
+ --> tests/ui/node-alias-through-message.rs:7:1
+  |
+7 | #[gdl_message::export]
+  | ^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed here

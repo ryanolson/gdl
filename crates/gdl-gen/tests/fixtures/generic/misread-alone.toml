@@ -1,0 +1,16 @@
+# The source and the sink in one segment: the misread carrier crosses no
+# cut, and only the segment's binary reads it, as JSON lines.
+[graph]
+path = "misread.gdl"
+
+[messages]
+crates = ["carrier", "misread"]
+
+[nodes]
+crates = ["misread-nodes"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front", "Take"]

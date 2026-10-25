@@ -1,0 +1,7 @@
+// A response the reader misreads, carried by an anchor: the sink beside
+// the source, a forward node elsewhere.
+name = "anchored", schema = 1;
+source  Front: Request -> stream ByteReply;
+forward Relay: Request -> Request;
+sink    Take: Request -> stream ByteReply;
+topology: Front => Relay => Take;

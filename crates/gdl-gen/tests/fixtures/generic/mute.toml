@@ -1,0 +1,16 @@
+# The source and the sink in one segment: the misread item crosses no
+# cut, and only the segment's binary writes it, as JSON lines.
+[graph]
+path = "mute.gdl"
+
+[messages]
+crates = ["anchored"]
+
+[nodes]
+crates = ["anchored"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front", "Hush"]

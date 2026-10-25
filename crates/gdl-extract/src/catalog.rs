@@ -270,6 +270,7 @@ impl std::fmt::Display for Catalog {
                     version: offer.version.clone(),
                     source: offer.source.clone(),
                     path: m.path.clone(),
+                    arguments: Vec::new(),
                 });
             }
             for e in &offer.exports {

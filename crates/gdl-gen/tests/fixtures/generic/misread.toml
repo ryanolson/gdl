@@ -1,0 +1,19 @@
+# The source and the sink in two segments: the misread carrier crosses
+# between them, and each segment's crossing check refuses it.
+[graph]
+path = "misread.gdl"
+
+[messages]
+crates = ["carrier", "misread"]
+
+[nodes]
+crates = ["misread-nodes"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front"]
+
+[segment.back]
+nodes = ["Take"]

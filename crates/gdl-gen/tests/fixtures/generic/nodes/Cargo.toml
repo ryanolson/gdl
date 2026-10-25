@@ -1,0 +1,11 @@
+[package]
+name = "generic-nodes"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+futures = "0.3"
+gdl = { path = "../../../../../gdl" }
+generic-carrier = { path = "../carrier" }
+serde = { version = "1", features = ["derive"] }

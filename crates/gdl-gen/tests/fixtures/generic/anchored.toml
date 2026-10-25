@@ -1,0 +1,20 @@
+# The source and the sink in one segment, the relay in another: the
+# response returns to the source through an anchor, and the segment's
+# crossing check refuses the misread response there.
+[graph]
+path = "anchored.gdl"
+
+[messages]
+crates = ["anchored"]
+
+[nodes]
+crates = ["anchored"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front", "Take"]
+
+[segment.relay]
+nodes = ["Relay"]

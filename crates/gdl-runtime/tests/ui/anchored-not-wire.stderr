@@ -1,0 +1,17 @@
+error[E0277]: `Opaque` returns through an anchor but is not a wire type
+  --> tests/ui/anchored-not-wire.rs:20:54
+   |
+20 | const _: () = gdl_runtime::gdl::__private::anchors::<B_to_A>();
+   |                                                      ^^^^^^ this hop's response carries `Opaque`
+   |
+help: the trait `Anchored` is not implemented for `Opaque`
+  --> tests/ui/anchored-not-wire.rs:9:1
+   |
+ 9 | pub struct Opaque;
+   | ^^^^^^^^^^^^^^^^^
+   = note: the hop's ends share this segment, but its forward path leaves the segment and comes back, so its response returns through an anchor, which needs `serde::Serialize` and `serde::de::DeserializeOwned`: the source reader took it for one; check its serde impls with `cargo gdl extract --verify`, or place the whole hop in one segment
+note: required by a bound in `anchors`
+  --> $WORKSPACE/crates/gdl/src/lib.rs
+   |
+   |     pub const fn anchors<T: Anchored>() {}
+   |                             ^^^^^^^^ required by this bound in `anchors`

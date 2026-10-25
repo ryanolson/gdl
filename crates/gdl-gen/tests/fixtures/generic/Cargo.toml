@@ -1,0 +1,11 @@
+# Generic messages and nodes, end to end: a generic carrier and a generic
+# forward node, each written once, and a graph that names one
+# instantiation of each by its alias, cut so that the carrier crosses;
+# and crates of cases that the reader must read as their builds register
+# them.
+# Its own workspace: read and built by `tests/generic.rs`, never by the
+# repository's. Each crate names its dependencies itself, as a crate that
+# a generated segment or a verify program depends on by path must.
+[workspace]
+members = ["aliased", "anchored", "carrier", "configured", "fake-serde", "misread", "misread-nodes", "nodes", "service", "unit", "wire"]
+resolver = "3"

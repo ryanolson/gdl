@@ -649,44 +649,55 @@ impl Names {
                 });
                 problems.push(match now {
                     Some(now) => format!(
-                        "message `{}`: it was read from {key}, and the catalogue now holds that directory as {}: add again the crates that use it",
-                        origin.path,
+                        "message {}: it was read from {key}, and the catalogue now holds that directory as {}: add again the crates that use it",
+                        origin.shown(),
                         now.key()
                     ),
                     None => format!(
-                        "message `{}`: its crate, {key}, is not in the catalogue: add it first",
-                        origin.path
+                        "message {}: its crate, {key}, is not in the catalogue: add it first",
+                        origin.shown()
                     ),
                 });
                 continue;
             };
-            let Some(message) = own.offer.messages.iter().find(|m| m.path == origin.path) else {
-                problems.push(format!(
-                    "message `{}`: {key} does not define it",
-                    origin.path
-                ));
-                continue;
-            };
-            let offered_at = if message.public {
-                Some((key.clone(), message.path.as_str()))
-            } else {
+            let exported = || {
                 public_export(own, origin)
-                    .map(|e| (key.clone(), e.path.as_str()))
+                    .map(|e| (key.clone(), e))
                     .or_else(|| {
                         entries.iter().find_map(|(key, entry)| {
-                            public_export(entry, origin).map(|e| (key.clone(), e.path.as_str()))
+                            public_export(entry, origin).map(|e| (key.clone(), e))
                         })
                     })
             };
+            let offered_at = match own.offer.messages.iter().find(|m| m.path == origin.path) {
+                Some(message) if message.public => {
+                    Some((key.clone(), message.path.as_str(), message.name.as_str()))
+                }
+                Some(message) => {
+                    exported().map(|(listed, e)| (listed, e.path.as_str(), message.name.as_str()))
+                }
+                // No definition entry: an export offers it, and names it, as
+                // an alias does an instantiation of a generic message.
+                None => match exported() {
+                    Some((listed, e)) => Some((listed, e.path.as_str(), e.name.as_str())),
+                    None => {
+                        problems.push(format!(
+                            "message {}: no crate in the catalogue defines or exports it",
+                            origin.shown()
+                        ));
+                        continue;
+                    }
+                },
+            };
             match offered_at {
-                Some((listed, path)) => {
+                Some((listed, path, name)) => {
                     names.crates.insert(listed);
                     public.insert(origin, path);
-                    defined.push((origin, &message.name));
+                    defined.push((origin, name));
                 }
                 None => problems.push(format!(
-                    "message `{}` has no public path in the catalogue's crates: export it",
-                    origin.path
+                    "message {} has no public path in the catalogue's crates: export it",
+                    origin.shown()
                 )),
             }
         }
@@ -701,6 +712,7 @@ impl Names {
                     version: offer.version.clone(),
                     source: offer.source.clone(),
                     path: m.path.clone(),
+                    arguments: Vec::new(),
                 });
             }
             for e in &offer.exports {

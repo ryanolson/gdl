@@ -66,6 +66,7 @@ pub(crate) fn resolve(
                     version: offer.version.clone(),
                     source: offer.source.clone(),
                     path: m.path.clone(),
+                    arguments: Vec::new(),
                 },
                 path: m.path.clone(),
                 wire: m.wire,
@@ -137,10 +138,21 @@ pub(crate) fn resolve(
         origins.sort();
         origins.dedup();
         match origins.as_slice() {
-            [] => problems.push(format!(
-                "message `{name}` ({users}) is in no listed crate{}",
-                missing_hint(name, &candidates)
-            )),
+            [] => {
+                // An alias a crate leaves out says why, rather than a near
+                // name.
+                let left_out = offers.iter().find_map(|offer| {
+                    let skipped = offer.skipped.iter().find(|s| s.name == *name)?;
+                    Some(format!(
+                        "; crate `{}` leaves `{name}` out: {}",
+                        offer.package, skipped.problem
+                    ))
+                });
+                problems.push(format!(
+                    "message `{name}` ({users}) is in no listed crate{}",
+                    left_out.unwrap_or_else(|| missing_hint(name, &candidates))
+                ));
+            }
             [origin] => {
                 // An export first: its path is public, though the
                 // definition's may not be; the defining package's own
@@ -176,11 +188,7 @@ pub(crate) fn resolve(
             }
             several => problems.push(format!(
                 "message `{name}` ({users}) is more than one message in the listed crates: {}; choose one under [messages] pin",
-                several
-                    .iter()
-                    .map(|o| format!("`{}` ({} {})", o.path, o.package, o.version))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                Origin::shown_apart(several).join(", ")
             )),
         }
     }
@@ -290,6 +298,7 @@ pub(crate) mod tests {
                         version: "0.1.0".into(),
                         source: format!("path+file:///crates/{from}"),
                         path: (*origin).to_string(),
+                        arguments: Vec::new(),
                     },
                     wire: true,
                     encoding: Default::default(),
@@ -297,6 +306,7 @@ pub(crate) mod tests {
                 })
                 .collect(),
             nodes: Vec::new(),
+            skipped: Vec::new(),
         }
     }
 
@@ -323,6 +333,97 @@ pub(crate) mod tests {
             .iter()
             .map(|(n, r)| (n.as_str(), r.path.as_str(), r.origin.path.as_str()))
             .collect()
+    }
+
+    /// Two instantiations of one carrier, over two versions of the package
+    /// that defines their argument, share a path: the problem that the
+    /// name is both tells them apart by those versions, and names no
+    /// source. Over one version from two sources, or of a carrier of one
+    /// version from two sources, it names the sources, which alone tell
+    /// them apart.
+    #[test]
+    fn two_instantiations_of_one_path_read_apart() {
+        let registry = "registry+https://github.com/rust-lang/crates.io-index";
+        let path = "path+file:///work/api";
+        let over = |package: &str, carrier: &str, version: &str, source: &str| {
+            let mut offer = offer(
+                package,
+                &[],
+                &[(
+                    "Request",
+                    &format!("{}::Request", package.replace('-', "_")),
+                    "app",
+                    "app::Carried<api::Request>",
+                )],
+            );
+            let origin = &mut offer.exports[0].origin;
+            origin.source = carrier.into();
+            origin.arguments = vec![gdl_extract::Argument {
+                package: "api".into(),
+                version: version.into(),
+                source: source.into(),
+            }];
+            offer
+        };
+        let problem = |a: Offer, b: Offer| {
+            let problems = resolve(&uses(&[("Request", &["A"])]), &[a, b], &BTreeMap::new())
+                .expect_err("two messages");
+            assert_eq!(problems.len(), 1, "{problems:?}");
+            problems[0].clone()
+        };
+        let carrier = "path+file:///crates/app";
+        let versions = problem(
+            over("deploy-a", carrier, "1.0.0", registry),
+            over("deploy-b", carrier, "2.0.0", path),
+        );
+        assert!(
+            versions.contains(
+                "`app::Carried<api::Request>` (app 0.1.0; arguments from api 1.0.0), \
+                 `app::Carried<api::Request>` (app 0.1.0; arguments from api 2.0.0)"
+            ),
+            "{versions}"
+        );
+        assert!(!versions.contains("file://"), "{versions}");
+        let sources = problem(
+            over("deploy-a", carrier, "1.0.0", registry),
+            over("deploy-b", carrier, "1.0.0", path),
+        );
+        for source in [registry, path] {
+            assert!(
+                sources.contains(&format!(
+                    "`app::Carried<api::Request>` (app 0.1.0 from {carrier}; arguments from api 1.0.0 from {source})"
+                )),
+                "{sources}"
+            );
+        }
+        let carriers = problem(
+            over("deploy-a", carrier, "1.0.0", registry),
+            over("deploy-b", "path+file:///elsewhere/app", "1.0.0", registry),
+        );
+        assert!(
+            carriers.contains(
+                "(app 0.1.0 from path+file:///elsewhere/app; arguments from api 1.0.0 from"
+            ),
+            "{carriers}"
+        );
+    }
+
+    /// A graph that names an alias a listed crate leaves out is told why.
+    #[test]
+    fn a_name_a_crate_leaves_out_says_why() {
+        let mut offer = offer("app", &["app::Words"], &[]);
+        offer.skipped.push(gdl_extract::Skipped {
+            name: "Shared".into(),
+            problem: "src/lib.rs:3:10: `Arc < Words >`: the reader names a crate's own types and primitives".into(),
+        });
+        let problems = resolve(&uses(&[("Shared", &["A"])]), &[offer], &BTreeMap::new())
+            .expect_err("left out");
+        assert_eq!(
+            problems,
+            [
+                "message `Shared` (A) is in no listed crate; crate `app` leaves `Shared` out: src/lib.rs:3:10: `Arc < Words >`: the reader names a crate's own types and primitives"
+            ]
+        );
     }
 
     /// The common case: one protocols crate holds every message, and a type

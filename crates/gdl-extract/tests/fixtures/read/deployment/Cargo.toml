@@ -1,0 +1,11 @@
+[package]
+name = "read-deployment"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gdl = { workspace = true }
+carrier = { package = "read-generic", path = "../generic" }
+protocols = { package = "read-protocols", path = "../protocols" }
+serde = { workspace = true }

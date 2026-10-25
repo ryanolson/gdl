@@ -1,0 +1,6 @@
+// A carrier the source reader takes for a wire type, which it is not,
+// across a cut.
+name = "misread", schema = 1;
+source Front: MisreadByte -> stream Reply;
+sink   Take: MisreadByte -> stream Reply;
+topology: Front => Take;

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-use gdl_model::{Layout, Manifest, Role};
+use gdl_model::{Layout, Leg, Manifest, Role, WireReason};
 
 mod binary;
 
@@ -83,7 +83,7 @@ pub(crate) fn files(
     for (segment, nodes) in placement.segments() {
         let crate_dir = out.join(&dir).join(segment);
         let regenerate = regenerate_command(spec, &spec_dir, &crate_dir, out, deps);
-        let unit = Unit {
+        let mut unit = Unit {
             spec,
             placement,
             package: laid.package(&manifest.name, segment),
@@ -96,7 +96,29 @@ pub(crate) fn files(
             out,
             deps,
             regenerate: &regenerate,
+            crossings: Vec::new(),
+            fed: Vec::new(),
         };
+        unit.crossings = crossings(manifest, layout, segment)?;
+        // The source's request and item the binary reads and writes as
+        // JSON lines, which its codec does not bound: each is asserted
+        // here, unless a crossing already asserts more of it, so that a
+        // type gives one error in a segment, not two.
+        if let Some(hop) = manifest.hops.first()
+            && unit.serves()
+        {
+            let crossed = |name: &str| unit.crossings.iter().any(|c| c.message == name);
+            if let Some(req) = hop.forward_types.first()
+                && !crossed(&req.name)
+            {
+                unit.fed.push("reads_json::<contract::SourceReq>");
+            }
+            if let Some(item) = hop.backward_types.last()
+                && !crossed(&item.name)
+            {
+                unit.fed.push("writes_json::<contract::SourceItem>");
+            }
+        }
         let path = dir.join(segment);
         files.insert(path.join("Cargo.toml"), unit.cargo_toml());
         files.insert(path.join("src/lib.rs"), rustfmt(&unit.lib_rs())?);
@@ -111,6 +133,95 @@ pub(crate) fn files(
         ),
     );
     Ok(files)
+}
+
+/// The messages segment `segment` sends or receives across a cut under
+/// `layout`, or that an anchor carries in it, each once, for its assertion
+/// that each is a wire type: a type alias named by the first edge that
+/// carries it, `{sender}_to_{receiver}`, and the port type the receiver's
+/// declaration in the contract gives it. The edges are the ones the
+/// placement's check needs wire types on, `HopLayout::wire_edges`.
+/// A streamed request crosses as its head and its item, each asserted
+/// apart; a head of `()` needs no assertion. A response an anchor carries
+/// is asserted by `anchors`, whose error says so, and a crossing by
+/// `crosses`.
+fn crossings(manifest: &Manifest, layout: &Layout, segment: &str) -> Result<Vec<Crossing>, Error> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    // A name joined from two that hold `_` can be joined from two others,
+    // `A_to` to `B` as `A` to `to_B`: a second takes a number.
+    let mut named = std::collections::BTreeSet::new();
+    let mut add = |message: &str, name: String, port: String, check: &'static str| {
+        if message != "()" && seen.insert(message.to_string()) {
+            let mut alias = name.clone();
+            let mut n = 2;
+            while !named.insert(alias.clone()) {
+                alias = format!("{name}_{n}");
+                n += 1;
+            }
+            out.push(Crossing {
+                alias,
+                port,
+                message: message.to_string(),
+                check,
+            });
+        }
+    };
+    for (hop, laid) in manifest.hops.iter().zip(layout.hops()) {
+        let forward: Vec<&str> = hop.forward_path().collect();
+        let backward: Vec<&str> = hop.backward_path().collect();
+        for wire in laid.wire_edges() {
+            let (stages, types, inward) = match wire.leg {
+                Leg::Forward => (&forward, &hop.forward_types, true),
+                Leg::Backward => (&backward, &hop.backward_types, false),
+            };
+            let edge = wire.edge;
+            let (sender, receiver) = (stages[edge], stages[edge + 1]);
+            // A crossing between two segments is asserted in both; a
+            // response an anchor carries, in the segment that holds both
+            // its ends.
+            if layout.segment_of(sender) != Some(segment)
+                && layout.segment_of(receiver) != Some(segment)
+            {
+                continue;
+            }
+            // The layout was made from this manifest: a stage it lacks is a
+            // defect of the generator's, which must not drop an assertion.
+            let Some(role) = manifest.node(receiver).map(|n| n.role) else {
+                return Err(Error::new(format!(
+                    "the crossing from `{sender}` to `{receiver}` has no node `{receiver}` in the manifest (a gdl-gen bug)"
+                )));
+            };
+            let (decl, port) = match (inward, role) {
+                (true, Role::Forward) => ("ForwardDecl", "In"),
+                (true, Role::Sink) => ("SinkDecl", "Req"),
+                (true, _) => ("OperatorDecl", "UpReq"),
+                (false, Role::Backward) => ("BackwardDecl", "In"),
+                (false, Role::Source) => ("SourceDecl", "Item"),
+                (false, _) => ("OperatorDecl", "DownItem"),
+            };
+            let port = format!("<contract::nodes::{receiver} as gdl_runtime::{decl}>::{port}");
+            let name = format!("{sender}_to_{receiver}");
+            // A response an anchor carries inside one segment is told
+            // apart, so that its error does not say that it crosses.
+            let check = match wire.reason {
+                WireReason::Crossing => "crosses",
+                WireReason::AnchorCarried => "anchors",
+            };
+            let ty = &types[edge];
+            match &ty.stream {
+                None => add(&ty.name, name, port, check),
+                Some(item) => {
+                    let part = |part: &str| {
+                        format!("<{port} as gdl_runtime::gdl::__private::Parts>::{part}")
+                    };
+                    add(&ty.name, format!("{name}_head"), part("Head"), check);
+                    add(&item.name, format!("{name}_item"), part("Item"), check);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Format generated Rust as `cargo fmt` would, so formatting the generated
@@ -238,10 +349,28 @@ struct Unit<'a> {
     segment: &'a str,
     segments: &'a [&'a str],
     nodes: &'a [String],
+    /// The messages it sends or receives across a cut: [`crossings`].
+    crossings: Vec<Crossing>,
+    /// The source's types its binary reads or writes as JSON lines, and no
+    /// crossing asserts: each `gdl_runtime` function that asserts one.
+    fed: Vec<&'static str>,
     crate_dir: &'a Path,
     out: &'a Path,
     deps: Deps,
     regenerate: &'a str,
+}
+
+/// A message a segment asserts is a wire type: the alias named for the
+/// crossing that carries it, and the port type the alias stands for.
+#[derive(Debug)]
+struct Crossing {
+    alias: String,
+    port: String,
+    /// The message, as the graph names it.
+    message: String,
+    /// The `gdl::__private` function that asserts it: `crosses`, or
+    /// `anchors` for a response an anchor carries inside one segment.
+    check: &'static str,
 }
 
 /// One hosted node that takes an implementation.
@@ -482,6 +611,50 @@ impl Unit<'_> {
             raw_string(&placement)
         );
         let _ = writeln!(text);
+        if !self.crossings.is_empty() {
+            let _ = writeln!(
+                text,
+                "// Each message this segment sends or receives across a cut, or that"
+            );
+            let _ = writeln!(
+                text,
+                "// returns through an anchor in it, is a wire type: an edge that carries"
+            );
+            let _ = writeln!(
+                text,
+                "// one that is not fails to build here, naming the message and the edge."
+            );
+            let _ = writeln!(text, "// Compile time only.");
+            for Crossing {
+                alias: name,
+                port,
+                check,
+                ..
+            } in &self.crossings
+            {
+                let _ = writeln!(text, "#[allow(non_camel_case_types)]");
+                let _ = writeln!(text, "type {name} = {port};");
+                let _ = writeln!(
+                    text,
+                    "const _: () = gdl_runtime::gdl::__private::{check}::<{name}>();"
+                );
+            }
+            let _ = writeln!(text);
+        }
+        if !self.fed.is_empty() {
+            let _ = writeln!(
+                text,
+                "// The source's types the binary reads or writes as JSON lines: a type"
+            );
+            let _ = writeln!(
+                text,
+                "// the binary cannot read or write fails to build here. Compile time only."
+            );
+            for assertion in &self.fed {
+                let _ = writeln!(text, "const _: () = gdl_runtime::{assertion}();");
+            }
+            let _ = writeln!(text);
+        }
         let _ = writeln!(
             text,
             "/// The implementations of the nodes this segment hosts."
@@ -595,6 +768,92 @@ mod tests {
             Deps::Relative.path(&from, &out.join("nodes")),
             "\"../nodes\""
         );
+    }
+
+    /// `S => D` in two segments, `s` and `d`, and the manifest and layout.
+    fn cut() -> (Manifest, Layout) {
+        use gdl_model::{HopInfo, NodeInfo, TypeInfo};
+        let node = |name: &str, role| NodeInfo {
+            name: name.into(),
+            role,
+            binding: None,
+        };
+        let manifest = Manifest {
+            name: "tiny".into(),
+            schema: 1,
+            nodes: vec![node("S", Role::Source), node("D", Role::Sink)],
+            hops: vec![HopInfo {
+                outer: "S".into(),
+                forward: vec![],
+                inner: "D".into(),
+                backward: vec![],
+                forward_types: vec![TypeInfo::new("Req", true, Default::default())],
+                backward_types: vec![TypeInfo::new("Item", true, Default::default())],
+            }],
+        };
+        let placement = gdl_model::Placement::from_toml(
+            "[segment.s]\nnodes = [\"S\"]\n\n[segment.d]\nnodes = [\"D\"]\n",
+        )
+        .expect("a placement");
+        let layout = gdl_model::layout(&manifest, &placement).expect("a layout");
+        (manifest, layout)
+    }
+
+    /// A crossing whose receiver the manifest does not hold is an error of
+    /// the generator's, not an assertion left out.
+    #[test]
+    fn a_crossing_whose_receiver_the_manifest_lacks_is_an_error() {
+        let (mut manifest, layout) = cut();
+        assert!(crossings(&manifest, &layout, "s").is_ok());
+        manifest.nodes.retain(|n| n.name != "D");
+        let error = crossings(&manifest, &layout, "s").expect_err("no `D`");
+        assert!(error.to_string().contains("`D`"), "{error}");
+    }
+
+    /// Two crossings whose names join alike, `A` to `to_B` and `A_to` to
+    /// `B`, get two aliases: a type alias of one name twice would not
+    /// build.
+    #[test]
+    fn crossings_whose_names_join_alike_get_aliases_of_their_own() {
+        use gdl_model::{HopInfo, NodeInfo, TypeInfo};
+        // A binding each but the source's: a forward node without one is
+        // an identity.
+        let node = |name: &str, role| NodeInfo {
+            name: name.into(),
+            role,
+            binding: (role != Role::Source).then(|| name.to_lowercase()),
+        };
+        let ty = |name: &str| TypeInfo::new(name, true, Default::default());
+        let manifest = Manifest {
+            name: "joined".into(),
+            schema: 1,
+            nodes: vec![
+                node("A", Role::Source),
+                node("to_B", Role::Forward),
+                node("A_to", Role::Forward),
+                node("B", Role::Sink),
+            ],
+            hops: vec![HopInfo {
+                outer: "A".into(),
+                forward: vec!["to_B".into(), "A_to".into()],
+                inner: "B".into(),
+                backward: vec![],
+                forward_types: vec![ty("One"), ty("Two"), ty("Three")],
+                backward_types: vec![ty("Item")],
+            }],
+        };
+        let placement = gdl_model::Placement::from_toml(
+            "[segment.a]\nnodes = [\"A\"]\n\n[segment.m]\nnodes = [\"to_B\", \"A_to\"]\n\n[segment.b]\nnodes = [\"B\"]\n",
+        )
+        .expect("a placement");
+        let layout = gdl_model::layout(&manifest, &placement).expect("a layout");
+        let aliases: Vec<String> = crossings(&manifest, &layout, "m")
+            .expect("crossings")
+            .into_iter()
+            .map(|crossing| crossing.alias)
+            .collect();
+        let unique: std::collections::BTreeSet<&String> = aliases.iter().collect();
+        assert_eq!(unique.len(), aliases.len(), "{aliases:?}");
     }
 
     /// A spec's path may hold any character; the comment that names it

@@ -52,6 +52,7 @@ fn the_vendor_catalog_carries_the_reference_message_identity_and_its_own_schema(
         version: reference.version.clone(),
         source: reference.source.clone(),
         path: chunk.path.clone(),
+        arguments: Vec::new(),
     };
     let exported = vendor
         .exports

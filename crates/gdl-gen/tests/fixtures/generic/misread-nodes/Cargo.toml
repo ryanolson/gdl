@@ -1,0 +1,10 @@
+[package]
+name = "generic-misread-nodes"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gdl = { path = "../../../../../gdl" }
+generic-carrier = { path = "../carrier" }
+generic-misread = { path = "../misread" }

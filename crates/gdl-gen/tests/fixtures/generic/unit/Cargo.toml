@@ -1,0 +1,9 @@
+[package]
+name = "generic-unit"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gdl = { path = "../../../../../gdl" }
+serde = { version = "1", features = ["derive"] }

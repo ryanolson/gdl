@@ -424,7 +424,65 @@ pub struct Run {
     pub stages: Vec<String>,
 }
 
+/// A path of a hop: the forward one, from the outer end to the inner end,
+/// or the backward one, back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leg {
+    /// [`HopInfo::forward_path`], whose edges carry
+    /// [`HopInfo::forward_types`].
+    Forward,
+    /// [`HopInfo::backward_path`], whose edges carry
+    /// [`HopInfo::backward_types`].
+    Backward,
+}
+
+/// An edge of a hop whose type must be a wire type under a placement:
+/// edge `edge` of path `leg`, from its stage `edge` to its stage
+/// `edge + 1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireEdge {
+    /// The path.
+    pub leg: Leg,
+    /// The edge's index in the path's types.
+    pub edge: usize,
+    /// Why it must be.
+    pub reason: WireReason,
+}
+
 impl HopLayout {
+    /// The edges whose types must be wire types under this layout: every
+    /// edge between two runs, and, when the hop is not local but its
+    /// response never leaves one segment, the inner end's first edge,
+    /// whose items reach the outer end through an anchor. The placement's
+    /// check and the generated segments' crossing checks both read this,
+    /// so that they cannot disagree.
+    pub fn wire_edges(&self) -> Vec<WireEdge> {
+        let mut edges = Vec::new();
+        for (leg, runs) in [
+            (Leg::Forward, &self.forward_runs),
+            (Leg::Backward, &self.backward_runs),
+        ] {
+            for pair in runs.windows(2) {
+                edges.push(WireEdge {
+                    leg,
+                    edge: pair[1].start - 1,
+                    reason: WireReason::Crossing,
+                });
+            }
+        }
+        if !self.local && self.backward_runs.len() == 1 {
+            // The response never crosses, but the inner end runs in a task
+            // the forward path reached from another segment, so its output
+            // still returns to the outer end through an anchor.
+            edges.push(WireEdge {
+                leg: Leg::Backward,
+                edge: 0,
+                reason: WireReason::AnchorCarried,
+            });
+        }
+        edges
+    }
+
     /// Segment crossings one request makes on this hop.
     pub fn crossings(&self) -> usize {
         if self.local {
@@ -760,27 +818,12 @@ fn hop_layout(
         && backward_runs.len() == 1
         && forward_runs[0].segment == backward_runs[0].segment;
 
-    require_wire_at_crossings(&forward, &hop.forward_types, segment_of, errors);
-    require_wire_at_crossings(&backward, &hop.backward_types, segment_of, errors);
-    if !local && backward_runs.len() == 1 {
-        // The response never crosses, but the inner end runs in a task the
-        // forward path reached from another segment, so its output still
-        // returns to the outer end through an anchor.
-        require_wire(
-            backward[0],
-            backward[1],
-            &hop.backward_types[0],
-            WireReason::AnchorCarried,
-            errors,
-        );
-    }
-
     let provisioning = if local || backward_runs.len() < 3 {
         Vec::new()
     } else {
         (1..backward_runs.len() - 1).rev().collect()
     };
-    HopLayout {
+    let layout = HopLayout {
         local,
         forward_runs,
         backward_runs,
@@ -790,7 +833,21 @@ fn hop_layout(
             .iter()
             .map(|t| t.stream.is_some())
             .collect(),
+    };
+    for wire in layout.wire_edges() {
+        let (path, types) = match wire.leg {
+            Leg::Forward => (&forward, &hop.forward_types),
+            Leg::Backward => (&backward, &hop.backward_types),
+        };
+        require_wire(
+            path[wire.edge],
+            path[wire.edge + 1],
+            &types[wire.edge],
+            wire.reason,
+            errors,
+        );
     }
+    layout
 }
 
 fn runs(path: &[&str], segment_of: &BTreeMap<String, String>) -> Vec<Run> {
@@ -807,19 +864,6 @@ fn runs(path: &[&str], segment_of: &BTreeMap<String, String>) -> Vec<Run> {
         }
     }
     runs
-}
-
-fn require_wire_at_crossings(
-    path: &[&str],
-    types: &[TypeInfo],
-    segment_of: &BTreeMap<String, String>,
-    errors: &mut Vec<PlacementError>,
-) {
-    for (edge, ty) in path.windows(2).zip(types) {
-        if segment_of[edge[0]] != segment_of[edge[1]] {
-            require_wire(edge[0], edge[1], ty, WireReason::Crossing, errors);
-        }
-    }
 }
 
 fn require_wire(

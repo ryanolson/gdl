@@ -46,7 +46,10 @@ pub use gdl_model::{
     SegmentRegistration, SelectorInfo, TypeInfo, WireReason, layout, resolve_config,
 };
 #[cfg(feature = "json-lines")]
-pub use json::serve_json_lines;
+#[doc(hidden)]
+pub use json::probe as __json;
+#[cfg(feature = "json-lines")]
+pub use json::{Json, JsonItem, JsonRequest, reads_json, serve_json_lines, writes_json};
 pub use process::{Drains, Hosted, Launch, Process, ProcessConfig};
 /// The velo version this runtime is built on: a deployment's nodes are
 /// velo nodes, and generated segment crates reach velo through here so they

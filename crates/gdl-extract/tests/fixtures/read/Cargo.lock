@@ -334,6 +334,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "read-deployment"
+version = "0.0.0"
+dependencies = [
+ "gdl",
+ "read-generic",
+ "read-protocols",
+ "serde",
+]
+
+[[package]]
 name = "read-engine"
 version = "0.0.0"
 dependencies = [
@@ -347,6 +357,15 @@ version = "0.0.0"
 dependencies = [
  "gdl-message",
  "read-protocols",
+]
+
+[[package]]
+name = "read-generic"
+version = "0.0.0"
+dependencies = [
+ "gdl",
+ "read-protocols",
+ "serde",
 ]
 
 [[package]]

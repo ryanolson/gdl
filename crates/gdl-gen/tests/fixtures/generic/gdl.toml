@@ -1,0 +1,19 @@
+# The stamp in one segment and the sink in another: the carrier crosses
+# between them.
+[graph]
+path = "generic.gdl"
+
+[messages]
+crates = ["carrier"]
+
+[nodes]
+crates = ["nodes"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[segment.front]
+nodes = ["Front", "PlainStamp"]
+
+[segment.back]
+nodes = ["Echo"]

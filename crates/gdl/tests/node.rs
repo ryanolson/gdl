@@ -164,13 +164,75 @@ impl Sink for Measured {
     }
 }
 
+/// A generic carrier: an instantiation is a message where an alias names
+/// it.
+#[derive(serde::Serialize, serde::Deserialize, gdl::Message)]
+#[gdl(codec = "json")]
+pub struct Carried<P, B> {
+    /// What it carries.
+    pub payload: P,
+    /// How it is built.
+    pub builder: B,
+}
+
+/// The settings of every `Relay`.
+#[derive(serde::Deserialize, gdl::Config)]
+pub struct RelaySettings {
+    /// Whether it relays at all.
+    #[gdl(graph, default = true, label = "Enabled", subtext = "Relays")]
+    #[allow(dead_code)]
+    pub enabled: bool,
+}
+
+/// What every `Relay` reports.
+#[derive(gdl::Metrics)]
+#[expect(
+    dead_code,
+    reason = "registered, never counted: only the catalogue is read"
+)]
+pub struct RelayMetrics {
+    /// Requests relayed.
+    relayed_total: gdl::prometheus::IntCounter,
+}
+
+/// A generic forward node, written once: each instantiation that an alias
+/// names is a node of the alias's name.
+#[derive(gdl::Node)]
+#[gdl(config = RelaySettings, metrics = RelayMetrics)]
+pub struct Relay<B>(std::marker::PhantomData<fn() -> B>);
+
+impl<B: Send + Sync + 'static> gdl::Build for Relay<B> {
+    type Config = RelaySettings;
+    type Metrics = RelayMetrics;
+    async fn build(_config: RelaySettings, _metrics: RelayMetrics) -> Result<Self> {
+        Ok(Self(std::marker::PhantomData))
+    }
+}
+
+impl<B: Send + Sync + 'static> Forward for Relay<B> {
+    type In = Carried<Words, B>;
+    type Out = Carried<Words, B>;
+
+    async fn forward(&self, _cx: &Cx, req: Self::In) -> Result<Self::Out> {
+        Ok(req)
+    }
+}
+
+/// One instantiation of the node.
+#[gdl::export]
+pub type TokenRelay = Relay<Token>;
+
+/// Another, of the same implementation.
+#[gdl::export]
+pub type PieceRelay = Relay<Piece>;
+
+/// The carrier its ports carry, named for the graph.
+#[gdl::export]
+pub type TokenCarried = Carried<Words, Token>;
+
 fn summary(catalogue: &Catalogue) -> Vec<String> {
-    // The type's last path segment, `()` for none.
-    let short = |path: Option<&str>| {
-        path.map_or("()".to_string(), |p| {
-            p.rsplit("::").next().unwrap_or("").to_string()
-        })
-    };
+    // The type without this crate's paths, `()` for none.
+    let short = |path: Option<&str>| path.map_or("()".to_string(), |p| p.replace("node::", ""));
     catalogue
         .nodes
         .iter()
@@ -222,6 +284,9 @@ fn a_node_registers_its_roles_and_ports() {
             "Nested node::Nested: sink(Req=Words + stream Token nested, Item=Token)",
             "Plain node::Plain: ",
             "Resample node::Resample: forward(In=Words + stream Token, Out=() + stream Token)",
+            // A node with graph configuration sorts after those without.
+            "PieceRelay node::PieceRelay: forward(In=Carried<Words, Piece>, Out=Carried<Words, Piece>)",
+            "TokenRelay node::TokenRelay: forward(In=Carried<Words, Token>, Out=Carried<Words, Token>)",
         ]
     );
     let engine = catalogue
@@ -253,6 +318,37 @@ fn a_node_registers_the_metrics_its_build_registers() {
     };
     assert_eq!(metrics("Measured"), ["passed_total"]);
     assert!(metrics("Engine").is_empty(), "no Build, no metrics");
+}
+
+/// An instantiation of a generic node is registered under its alias, with
+/// its generic type's configuration and the metrics its build registers,
+/// and its ports carry the instantiation of the message, by type: the
+/// carrier alias offers the same message.
+#[test]
+fn an_alias_registers_an_instantiation_of_a_generic_node() {
+    let catalogue = Catalogue::linked();
+    assert!(catalogue.nodes.iter().all(|n| n.name != "Relay"));
+    let relay = catalogue
+        .nodes
+        .iter()
+        .find(|n| n.name == "TokenRelay")
+        .expect("TokenRelay");
+    let fields: Vec<&str> = relay.config.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(fields, ["enabled"]);
+    let metrics: Vec<&str> = relay.metrics.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(metrics, ["relayed_total"]);
+    let carried = catalogue
+        .exports
+        .iter()
+        .find(|e| e.name == "TokenCarried")
+        .expect("TokenCarried");
+    assert_eq!(relay.roles[0].ports[0].head.as_ref(), Some(&carried.origin));
+    assert_eq!(
+        carried.origin.path,
+        "node::Carried<node::Words, node::Token>"
+    );
+    assert_eq!(carried.encoding, gdl::Encoding::Json);
+    assert!(!carried.wire, "Words and Token have no serde impls");
 }
 
 /// `gdl::Message` registers through gdl: this crate names no other.

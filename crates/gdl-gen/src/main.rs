@@ -199,7 +199,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let target = target(&beside);
             let extracted = gdl_gen::extract(krate, &target, &gdl_extract::Cargo::trusted())?;
             if *verify {
-                gdl_gen::verify(&extracted, &target)?;
+                for note in gdl_gen::verify(&extracted, &target)? {
+                    eprintln!("cargo gdl: {note}");
+                }
             }
             match catalog {
                 Some(catalog) => {

@@ -1,5 +1,11 @@
-error: a node type cannot be generic: a graph names one type per node
- --> tests/ui/node-generic.rs:4:18
+error: a generic node takes type parameters only: an alias names each instantiation by its types
+ --> tests/ui/node-generic.rs:5:19
   |
-4 | pub struct Engine<T>(T);
-  |                  ^
+5 | pub struct Engine<'a>(&'a str);
+  |                   ^^
+
+error: a generic node takes type parameters only: an alias names each instantiation by its types
+ --> tests/ui/node-generic.rs:8:18
+  |
+8 | pub struct Fixed<const N: usize>([u8; N]);
+  |                  ^^^^^^^^^^^^^^

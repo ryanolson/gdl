@@ -147,12 +147,54 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Workaround:** write `gdl::Streamed<H, T>` out at the port.
 - **See:** plan 7.9, "Streaming requests" ("Codec").
 
-### A generic type cannot be a message
+### An instantiation's arguments are the crates' own types, primitives, `()`, and a few of the standard library's
 
-- **What happens:** `derive(gdl::Message)` refuses a generic type.
-- **Why:** the catalogue registers concrete types.
-- **Workaround:** a concrete wrapper or alias per instantiation.
-- **See:** plan 9.6, "Composition" ("Catalogue").
+- **What happens:** the source reader names, of the standard library's types, `String`, `Vec<T>`, `VecDeque<T>`, `Option<T>`, `Box<T>`, `HashMap<K, V>`, and `BTreeMap<K, V>`, by the prelude's name where nothing in the module binds it, or by a path from `std`, `alloc`, or `core`, or a `use` of one. It takes a map for a wire type only where its key is a `String`, `()`, or a primitive other than a float, whose `Eq`, `Hash`, and `Ord` it knows. It leaves out an exported alias whose instantiation of a generic message or node has another argument from the standard library (`Arc<T>`, `Rc<T>`, which serde implements only with its `rc` feature), a reference, an array, a tuple other than `()`, or a projection (`<RB as Builder>::Output`), or leaves an argument to its default, as a map's hasher is. It leaves out that alias alone, and says why in the offer's `skipped`, which `cargo gdl extract --verify` reports apart from its differences; the rest of the crate is read, and a graph that names the alias is told why it is not offered. A port whose type has such an argument is a problem of the crate's, which names the argument.
+- **Why:** an instantiation is identified by its type, as `core::any::type_name` writes it, each argument by the path where it is defined. The reader finds a definition only in the crates it reads, and it does not read defaults.
+- **Workaround:** a type of your own for the argument, such as a `#[serde(transparent)]` wrapper; write every argument.
+- **Would lift it:** more of the standard library's types in the reader, and defaults read from the generic type.
+
+### A generic message or node takes type parameters only, and is one or the other
+
+- **What happens:** `derive(Message)` and `derive(gdl::Node)` refuse a lifetime or const parameter, and `#[export]` refuses an alias with parameters of its own. A generic type that derives both does not compile: both derives implement one hidden trait for it.
+- **Why:** an alias names an instantiation by its types, every port type is `'static`, and the reader compares types, not const values.
+- **Workaround:** a type parameter in place of a const one; one alias per instantiation.
+
+### The reader judges an instantiation's wire capability, and refuses what it cannot judge
+
+- **What happens:** the reader takes an instantiation for a wire type only when it can show it. In each direction, its generic type derives serde's trait, or its crate implements it for that instantiation, and each type that direction bounds is a wire type, or `Default` where it is bounded by `Default`.
+  - A derived direction bounds what serde's derive infers: an argument that a field's or a variant's own `#[serde(bound)]` for it names, whether serde skips it or not; then one that the container's bound for it names, or, without one, one that a field names outside a `PhantomData` when neither the field nor its variant skips that direction or has a bound of its own for it. Deserializing, it bounds by `Default` an argument that a field it fills with its default names, `#[serde(default)]` or a field it does not deserialize, and, under a container `#[serde(default)]`, the type itself.
+  - A direction written by hand bounds what its impl bounds, each bound on one of its parameters: serde's traits need a wire type, `Default` a `Default` one, `Sized` a sized one, and `?Sized` and lifetimes nothing. A parameter without `?Sized` needs a sized argument, as rustc's implicit bound does. A `Deserialize` written by hand must hold for every input lifetime, as `DeserializeOwned` needs: its trait's lifetime is one of the impl's own parameters, which nothing bounds and which bounds nothing (`impl<'de, T> Deserialize<'de>`). A type is sized unless its last field is `[T]`, `str`, a `dyn` trait, or a type that is not; a field of a type the reader cannot name, from the standard library, is judged by its name, and only `str`, `Path`, `OsStr`, and `CStr` are taken for unsized.
+  - An argument is `Default` when it is a primitive or `()`, an enum that derives `Default`, a struct that derives it each of whose arguments is `Default`, or a type whose crate implements `Default` for it by an impl whose bounds are all on `Default` and met.
+  - An argument bounded in one direction only must still be a wire type.
+  - A message that is not generic, offered as itself, is judged as before generic messages: it derives traits of serde's names, or its crate implements traits of those names for it, whatever they resolve to and whatever its serde attributes. A segment's crossing check catches one that is not a wire type at build time. As an argument of an instantiation, the same type is judged by the rules above.
+- **What it refuses:** an instantiation is local when the reader meets what it cannot judge. That is a bound on another trait (`Copy`, `Send`, `Sync`), in an impl written by hand or in a `#[serde(bound)]`, or a bound on a type that is not one of the impl's parameters; a bound on a type that names a parameter but is not one (`Vec<T>: Serialize`), or a bound the reader cannot parse; a field of an associated type of a parameter (`T::Out`), or of a macro's type; a serde attribute it does not read (`remote`, and, on a type with arguments, `from`, `into`, and `try_from`, which route through another type that serde bounds by its own trait where the type has none); a `Deserialize` for one input lifetime (`Deserialize<'static>`), or for a `'de` that a bound ties to another lifetime (`'de: 'a`), written by hand or in a `#[serde(bound)]`; and a trait, a derive, or a bound of serde's name, or of `Default`'s or `Sized`'s, that the reader cannot follow to serde or to the standard library. It follows a path whose first name nothing in the module binds, or a `use` of one; a local `mod serde` or `trait Default`, a glob of the crate's own modules that brings one, or a glob of another crate's module, which might, makes the name another's. A field with `with` or `serialize_with`, which serde bounds nothing for, is bounded by what its type names. Each of these refuses at worst a crossing that would work: the generator then refuses the cut, and `--verify` reports the difference.
+- **What can mislead it (ruling 195):** a deliberate name trick, which the reader does not chase: a dependency renamed `serde`, `std`, or `core` in its manifest, which it takes for that crate; and, for sizedness, a struct whose last field is an unsized type of the standard library other than `str`, `Path`, `OsStr`, and `CStr`, such as `Mutex<[u8]>`, which it takes for sized. Then the reader takes for a wire type one that is not, and each segment that sends or receives it across a cut fails to build with ``error[E0277]: `T` crosses between segments but is not a wire type``, at the alias named for the crossing.
+- **Why:** the reader builds nothing; the build's probe is per instantiation, and a crossing the reader allows where the build does not would fail to build.
+- **Workaround:** `cargo gdl extract --verify` compares each instantiation's capability with the one the build probes where its alias is.
+
+### Some rare patterns are misread, and left as they are
+
+- **What happens:** the reader misreads these, and is not changed for them:
+  - A glob of an enum's variants (`use Kind::*`) hides the prelude's names in its module, so `Vec`, `String`, `Option`, and `Default` there are names the reader cannot follow: an alias in that module whose argument names one is left out, and says so in the offer's `skipped`.
+  - A variant's `#[serde(borrow)]` on a field of a `'static` type, such as `Cow<'static, str>`, does not make the reader take the type for one that borrows, so it reads a type the build takes for local as a wire type. The build before generic messages did the same. A segment that sends or receives it across a cut fails to build with ``error[E0277]: `T` crosses between segments but is not a wire type``.
+  - Serde's derives through `#[macro_use] extern crate serde_derive`, or serde re-exported by another crate (`rocket::serde`), are not followed to serde, so an instantiation of such a type, or with such an argument, reads as local.
+  - Aliases that name their parameter more than once, nested (`type D<T> = Pair<T, T>`, then `D<D<D<u8>>>`), grow the type the reader builds exponentially, as they grow the type that `core::any::type_name` writes.
+- **Why:** each is a rare way to write a message, and following it would cost more of the reader than it finds. The reader errs towards local, or leaves the alias out, except for the borrowed `'static` field, which the segment's crossing check catches at build time.
+- **Workaround:** name the variants or the standard library's types by path; derive serde's traits by `serde::Serialize` and `serde::Deserialize` from a dependency on serde; check a crate with `cargo gdl extract --verify`.
+- **See:** ruling 195.
+
+### `--verify` does not check the packages of an instantiation's arguments
+
+- **What happens:** `cargo gdl extract --verify` compares an instantiation by its path, as `core::any::type_name` writes it, and not by the packages that define its arguments, which the reader reads and generation uses.
+- **Why:** `type_name` writes an argument by its path alone, and nothing in the build names the package of an arbitrary type.
+- **See:** ruling 182.
+
+### The reader does not check the bounds of a generic node's role impl
+
+- **What happens:** the reader gives an alias of a generic node the role of the impl whose self type matches its instantiation, with that impl's ports, even when the alias's arguments do not meet the impl's bounds. For a node without configuration, the alias's crate builds and registers the node with no role, and the generator plans the graph on the role the reader found, and the segment that holds the node does not build. For a node with `#[gdl(config = ..)]`, the alias's crate itself does not build: the alias fails with the `Build` impl's unmet bound (``error[E0277]: the trait bound `NotBuilder: Builder` is not satisfied``).
+- **Why:** the reader builds nothing and does not judge trait bounds. The build probes each role where the alias is, and finds none whose bounds fail.
+- **Workaround:** `cargo gdl extract --verify` reports the node as read with its role and registered without one.
 
 ### A type that deserializes only by borrowing is a compile error at the wire probe
 
@@ -230,7 +272,7 @@ These are the limits a user of gdl can run into today. Each section says what ha
 
 ### The composer does not list marked message re-exports
 
-- **What happens:** the catalog reader and generator resolve marked message re-exports. The composer omits them from its message list. A frontend can have empty message selectors when its canonical messages are private, even with public marked exports.
+- **What happens:** the catalog reader and generator resolve marked message re-exports. The composer omits them from its message list. A frontend can have empty message selectors when its canonical messages are private, even with public marked exports. An instantiation of a generic message is offered only by the alias that exports it, so the composer does not list it either; a node whose ports carry it still composes, and the graph file names it by the alias.
 - **Why:** the composer populates these controls from public `messages` entries, without adding `exports` entries and their canonical identities.
 - **What lifts it:** include marked exports in the message controls and retain their original message identities. The film's reference package defines its messages at the crate root; its vendor extension still demonstrates marked re-exports through source extraction and generation.
 
@@ -245,6 +287,16 @@ These are the limits a user of gdl can run into today. Each section says what ha
 - **Why:** separating them would copy Cargo's feature resolver (ruling 40).
 - **Workaround:** `cargo gdl extract --verify` reports any difference.
 - **See:** review `m13-r1`, finding 3.
+
+### `--verify` cannot build a crate that takes `gdl-message` from git
+
+- **What happens:** `--verify` takes `gdl-message` by version from crates.io unless the crate takes it by path, so for a crate that takes it from git it fails with "no matching package named `gdl-message` found"; ruling 196 queues the fix.
+
+### `--verify` cannot read the exports of a crate that pins an earlier `gdl-message`
+
+- **What happens:** `cargo gdl extract --verify` stops at "reading the crate's registrations", with a missing field `wire`, for a crate that exports a message and pins a `gdl-message` whose export entries do not carry `wire` and `encoding`.
+- **Why:** the program `--verify` builds links the crate's own `gdl-message`, which writes the registrations in its own form. An export now carries the wire capability and encoding probed where it exports the message (ruling 181). A default for either would show as a difference, not a match.
+- **Workaround:** run `--verify` with a `cargo-gdl` of the same revision as the crate's `gdl-message`, or move the crate's pin.
 
 ### Some source shapes cost the reader more than linear time
 

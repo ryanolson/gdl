@@ -42,6 +42,27 @@ pub(crate) fn bind(
         .enumerate()
         .flat_map(|(i, o)| o.nodes.iter().map(move |n| (i, n)))
         .collect();
+    // An alias a crate leaves out, of the name or the path a pin gives,
+    // says why: the reader could not name its argument.
+    let left_out = |name: &str, pin: Option<&String>| {
+        offers.iter().enumerate().find_map(|(i, offer)| {
+            let skipped = offer.skipped.iter().find(|s| match pin {
+                Some(path) => {
+                    let at = format!(
+                        "{}::{}",
+                        gdl_syntax::identifier(&crates[i].lib),
+                        gdl_syntax::identifier(&s.name)
+                    );
+                    unraw(&at) == unraw(path)
+                }
+                None => s.name == name,
+            })?;
+            Some(format!(
+                "crate `{}` leaves `{}` out: {}",
+                offer.package, skipped.name, skipped.problem
+            ))
+        })
+    };
     let mut problems = Vec::new();
     for name in pins.keys() {
         let bindable = graph.nodes.iter().any(|n| n.ident == name);
@@ -80,7 +101,10 @@ pub(crate) fn bind(
             ([one], _) => **one,
             ([], Some(path)) => {
                 problems.push(format!(
-                    "[nodes] pin.{name}: no [nodes] crate offers `{path}`"
+                    "[nodes] pin.{name}: no [nodes] crate offers `{path}`{}",
+                    left_out(&name, Some(path))
+                        .map(|why| format!("; {why}"))
+                        .unwrap_or_default()
                 ));
                 continue;
             }
@@ -91,6 +115,10 @@ pub(crate) fn bind(
                 continue;
             }
             ([], None) => {
+                if let Some(why) = left_out(&name, None) {
+                    problems.push(format!("node `{name}`: no [nodes] crate offers it; {why}"));
+                    continue;
+                }
                 let mut names: Vec<String> = offered
                     .iter()
                     .map(|(_, n)| format!("`{}`", n.name))
@@ -221,25 +249,34 @@ fn check(
             (None, offered) => offered.is_none(),
         };
         if !(same(&head, &offered.head) && item_same) {
+            // By versions, unless only the sources tell the two apart.
+            let (mut graph, mut crate_) = (
+                graph_side(&head, &item, false),
+                crate_side(&offered.head, &offered.item, false),
+            );
+            if graph == crate_ {
+                graph = graph_side(&head, &item, true);
+                crate_ = crate_side(&offered.head, &offered.item, true);
+            }
             problems.push(format!(
-                "node `{name}`: port `{port}`: the graph has {}, but `{bound}` takes {}",
-                graph_side(&head, &item),
-                crate_side(&offered.head, &offered.item)
+                "node `{name}`: port `{port}`: the graph has {graph}, but `{bound}` takes {crate_}"
             ));
         }
     }
 }
 
-/// A message by its path and its package, so that two messages of one
-/// path in two packages read apart.
-fn shown(origin: &Origin) -> String {
-    format!("`{}` ({} {})", origin.path, origin.package, origin.version)
+fn shown(origin: &Origin, sources: bool) -> String {
+    if sources {
+        origin.shown_with_sources()
+    } else {
+        origin.shown()
+    }
 }
 
-fn graph_side(head: &Option<Named>, item: &Option<Option<Named>>) -> String {
+fn graph_side(head: &Option<Named>, item: &Option<Option<Named>>, sources: bool) -> String {
     let one = |m: &Option<Named>| match m {
         None => "`()`".to_string(),
-        Some((_, Some(origin))) => shown(origin),
+        Some((_, Some(origin))) => shown(origin, sources),
         Some((name, None)) => format!("`{name}`"),
     };
     match item {
@@ -248,8 +285,8 @@ fn graph_side(head: &Option<Named>, item: &Option<Option<Named>>) -> String {
     }
 }
 
-fn crate_side(head: &Option<Origin>, item: &Option<Origin>) -> String {
-    let one = |o: &Option<Origin>| o.as_ref().map_or("`()`".to_string(), shown);
+fn crate_side(head: &Option<Origin>, item: &Option<Origin>, sources: bool) -> String {
+    let one = |o: &Option<Origin>| o.as_ref().map_or("`()`".to_string(), |o| shown(o, sources));
     match item {
         None => one(head),
         Some(_) => format!("{} + stream {}", one(head), one(item)),
@@ -276,6 +313,7 @@ mod tests {
             version: "0.1.0".into(),
             source: "path+file:///crates/protocols".into(),
             path: format!("chat_protocols::{path}"),
+            arguments: Vec::new(),
         }
     }
 
@@ -336,6 +374,7 @@ mod tests {
             messages: Vec::new(),
             exports: Vec::new(),
             nodes,
+            skipped: Vec::new(),
         }
     }
 
@@ -427,6 +466,27 @@ mod tests {
         assert_eq!(
             binds["Engine"].source,
             CrateSource::Path(PathBuf::from("/nodes/engine"))
+        );
+    }
+
+    /// A port whose message differs from the graph's only in the source
+    /// of its package names both sources: the versions read alike.
+    #[test]
+    fn a_port_of_one_version_from_another_source_names_the_sources() {
+        let (crates, mut offers) = chat();
+        let mut other = node(
+            Role::Backward,
+            "Format",
+            &[("In", "Piece", None), ("Out", "Text", None)],
+        );
+        other.ports[1].head.as_mut().expect("Text").source = "path+file:///elsewhere".into();
+        offers[2].nodes[1] = other;
+        let problems = bound(&crates, &offers, &BTreeMap::new()).expect_err("mismatch");
+        assert_eq!(
+            problems,
+            [
+                "node `Format`: port `Out`: the graph has `chat_protocols::Text` (chat-protocols 0.1.0 from path+file:///crates/protocols), but `post::Format` takes `chat_protocols::Text` (chat-protocols 0.1.0 from path+file:///elsewhere)",
+            ]
         );
     }
 
@@ -531,6 +591,34 @@ mod tests {
         }
     }
 
+    /// A node whose alias a crate leaves out, with an argument the reader
+    /// cannot name, says why, rather than which names the crates offer,
+    /// whether the graph binds it by name or by a pin.
+    #[test]
+    fn a_node_a_crate_leaves_out_says_why() {
+        let (crates, mut offers) = chat();
+        offers[1].nodes.clear();
+        offers[1].package = "engine".into();
+        offers[1].skipped.push(gdl_extract::Skipped {
+            name: "Engine".into(),
+            problem: "src/lib.rs:3:10: `Arc < Builder >`: the reader names a crate's own types and primitives".into(),
+        });
+        let why = "crate `engine` leaves `Engine` out: src/lib.rs:3:10: `Arc < Builder >`: the reader names a crate's own types and primitives";
+        let problems = bound(&crates, &offers, &BTreeMap::new()).expect_err("left out");
+        assert_eq!(
+            problems,
+            [format!("node `Engine`: no [nodes] crate offers it; {why}")]
+        );
+        let pins = BTreeMap::from([("Engine".to_string(), "engine::Engine".to_string())]);
+        let problems = bound(&crates, &offers, &pins).expect_err("left out");
+        assert_eq!(
+            problems,
+            [format!(
+                "[nodes] pin.Engine: no [nodes] crate offers `engine::Engine`; {why}"
+            )]
+        );
+    }
+
     #[test]
     fn every_unbound_node_and_bad_pin_is_reported() {
         let (crates, mut offers) = chat();
@@ -599,6 +687,7 @@ mod frontend_tests {
             messages: vec![],
             exports: vec![],
             nodes: vec![node],
+            skipped: Vec::new(),
         };
         let (bindings, problems) = bind(
             &graph,

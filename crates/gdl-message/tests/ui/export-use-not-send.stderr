@@ -1,0 +1,17 @@
+error[E0277]: `Rc<str>` cannot be sent between threads safely
+  --> tests/ui/export-use-not-send.rs:12:21
+   |
+12 | pub use Unmarked as Shared;
+   |                     ^^^^^^ `Rc<str>` cannot be sent between threads safely
+   |
+   = help: within `Carried<Rc<str>>`, the trait `Send` is not implemented for `Rc<str>`
+note: required because it appears within the type `Carried<Rc<str>>`
+  --> tests/ui/export-use-not-send.rs:5:12
+   |
+ 5 | pub struct Carried<P> {
+   |            ^^^^^^^
+note: required by a bound in `sent`
+  --> src/lib.rs
+   |
+   |     pub const fn sent<T: Send + 'static>() {}
+   |                          ^^^^ required by this bound in `sent`

@@ -1,19 +1,27 @@
 //! The three markers, found in a crate's modules, and the entries they make.
+//! An exported `pub type` that names an instantiation of a generic message
+//! or node makes an export or a node of the alias's name.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use quote::ToTokens as _;
+use syn::ext::IdentExt as _;
 use syn::punctuated::Punctuated;
 use syn::{Meta, Token};
 
 use gdl_model::Role;
 
+use crate::canon::{Env, Ty, canonical};
 use crate::cfg::Settings;
+use crate::impls::{ImplOf, Impls, TraitName, Traits, matching};
 use crate::metadata::Graph;
 use crate::resolve::{Def, Resolver, segments};
 use crate::tree::{Location, TypeDef, UsePath, Vis};
-use crate::{ExportEntry, Extraction, MessageEntry, NodeEntry, Offer, Origin, PortEntry};
+use crate::wire::{plain_wire, ty_wire};
+use crate::{
+    Argument, ExportEntry, Extraction, MessageEntry, NodeEntry, Offer, Origin, PortEntry, Skipped,
+};
 
 /// What package `package` offers.
 pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Extraction {
@@ -26,6 +34,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
         messages: Vec::new(),
         exports: Vec::new(),
         nodes: Vec::new(),
+        skipped: Vec::new(),
     };
     let mut problems = Vec::new();
     let mut impls = Impls::default();
@@ -40,7 +49,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
         // Messages: types that derive `Message`.
         for index in 0..resolver.crates[krate].modules[module].types.len() {
             if let Some(origin) = message(&mut resolver, Def::Type(krate, module, index)) {
-                let wire = wire(&mut resolver, &mut impls, krate, module, index);
+                let wire = plain_wire(&mut resolver, &mut impls, Def::Type(krate, module, index));
                 let ty = &resolver.crates[krate].modules[module].types[index];
                 let encoding = match gdl_syntax::message_encoding(&ty.attrs) {
                     Ok(encoding) => encoding,
@@ -96,33 +105,66 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                 ));
                 continue;
             };
-            let found = resolver
-                .resolve(krate, module, path.segments(), absolute)
-                .and_then(|def| Some((message(&mut resolver, def)?, def)));
+            let found = match resolver.resolve(krate, module, path.segments(), absolute) {
+                Some(def) => ty_of(&mut resolver, def).and_then(|ty| match ty {
+                    Some(ty) => Ok(offered(&mut resolver, &ty)?.map(|message| (message, ty))),
+                    None => Ok(None),
+                }),
+                None => Ok(None),
+            };
             match found {
-                Some((origin, Def::Type(c, m, i))) => {
-                    let ty = &resolver.crates[c].modules[m].types[i];
-                    let encoding = match gdl_syntax::message_encoding(&ty.attrs) {
-                        Ok(encoding) => encoding,
-                        Err(error) => {
-                            problems.push(format!("{}: {error}", ty.at));
-                            continue;
+                Ok(Some((message, ty))) => offer.exports.push(ExportEntry {
+                    path: public_path(&resolver, krate, module, &name),
+                    name,
+                    origin: message.origin,
+                    wire: match &ty {
+                        Ty::Def(def, args) if args.is_empty() => {
+                            plain_wire(&mut resolver, &mut impls, *def)
                         }
+                        _ => ty_wire(&mut resolver, &mut impls, &ty),
+                    },
+                    encoding: message.encoding,
+                    public,
+                }),
+                Ok(None) => {
+                    let generic = matches!(
+                        resolver.resolve(krate, module, path.segments(), absolute),
+                        Some(Def::Type(c, m, i))
+                            if !resolver.crates[c].modules[m].types[i].params.is_empty()
+                    );
+                    let what = if generic {
+                        "names a generic type: export an instantiation of it with `#[export] pub type`"
+                    } else {
+                        "names no type that derives `Message`"
                     };
-                    offer.exports.push(ExportEntry {
-                        path: public_path(&resolver, krate, module, &name),
-                        name,
-                        origin,
-                        wire: wire(&mut resolver, &mut impls, c, m, i),
-                        encoding,
-                        public,
-                    });
+                    problems.push(format!(
+                        "{at}: export `{name}`: `{}` {what}",
+                        path.segments().join("::")
+                    ));
                 }
-                Some(_) => unreachable!("a message is a type"),
-                None => problems.push(format!(
-                    "{at}: export `{name}`: `{}` names no type that derives `Message`",
-                    path.segments().join("::")
-                )),
+                Err(problem) => problems.push(format!("{at}: export `{name}`: {problem}")),
+            }
+        }
+        // Aliases marked `#[export]`: an instantiation, under the alias's name.
+        for index in 0..resolver.crates[krate].modules[module].types.len() {
+            let ty = &resolver.crates[krate].modules[module].types[index];
+            if ty.alias.is_none()
+                || !marked(
+                    &ty.attrs,
+                    "export",
+                    &["gdl_message", "gdl"],
+                    &resolver,
+                    krate,
+                    module,
+                )
+            {
+                continue;
+            }
+            match alias(&mut resolver, &mut impls, krate, module, index, reachable) {
+                Ok(Aliased::Message(entry)) => offer.exports.push(entry),
+                Ok(Aliased::Node(entry)) => offer.nodes.push(entry),
+                Ok(Aliased::Skipped(skipped)) => offer.skipped.push(skipped),
+                Err(problem) => problems.push(problem),
             }
         }
     }
@@ -130,10 +172,15 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
     // in the crate that is.
     for module in 0..resolver.crates[krate].modules.len() {
         for index in 0..resolver.crates[krate].modules[module].types.len() {
-            if !derives(&resolver.crates[krate].modules[module].types[index], "Node") {
+            let ty = &resolver.crates[krate].modules[module].types[index];
+            // A generic node is offered by the aliases of its
+            // instantiations.
+            if !derives(ty, "Node") || !ty.params.is_empty() || ty.other_params {
                 continue;
             }
-            match node(&mut resolver, &mut impls, krate, module, index) {
+            let (name, at) = (ty.name.clone(), ty.at.clone());
+            let def = Def::Type(krate, module, index);
+            match node(&mut resolver, &mut impls, def, Vec::new(), (name, at, def)) {
                 Ok(entry) => offer.nodes.push(entry),
                 Err(problem) => problems.push(problem),
             }
@@ -157,7 +204,8 @@ fn message(resolver: &mut Resolver<'_>, def: Def) -> Option<Origin> {
         return None;
     };
     let ty = &resolver.crates[krate].modules[module].types[index];
-    if !derives(ty, "Message") {
+    // A generic message is offered by the aliases of its instantiations.
+    if !derives(ty, "Message") || !ty.params.is_empty() || ty.other_params {
         return None;
     }
     let package = &resolver.graph.packages[resolver.crates[krate].package];
@@ -166,6 +214,7 @@ fn message(resolver: &mut Resolver<'_>, def: Def) -> Option<Origin> {
         version: package.version.clone(),
         source: package.source.clone(),
         path: public_path(resolver, krate, module, &ty.name),
+        arguments: Vec::new(),
     })
 }
 
@@ -188,7 +237,12 @@ fn public(resolver: &Resolver<'_>, krate: usize, module: usize) -> bool {
 }
 
 /// `<crate>::<module path>::<name>`.
-fn public_path(resolver: &Resolver<'_>, krate: usize, module: usize, name: &str) -> String {
+pub(crate) fn public_path(
+    resolver: &Resolver<'_>,
+    krate: usize,
+    module: usize,
+    name: &str,
+) -> String {
     let krate = &resolver.crates[krate];
     let mut names = vec![name];
     let mut at = module;
@@ -204,7 +258,7 @@ fn public_path(resolver: &Resolver<'_>, krate: usize, module: usize, name: &str)
 /// Whether a type derives a trait of this last name. The derive is matched
 /// by name, not resolved: a derive macro's path leads into a proc-macro
 /// crate, which the reader does not follow.
-fn derives(ty: &TypeDef, name: &str) -> bool {
+pub(crate) fn derives(ty: &TypeDef, name: &str) -> bool {
     ty.attrs.iter().any(|meta| {
         let Meta::List(list) = meta else {
             return false;
@@ -218,30 +272,6 @@ fn derives(ty: &TypeDef, name: &str) -> bool {
                         .any(|p| p.segments.last().is_some_and(|s| s.ident == name))
                 })
     })
-}
-
-/// Whether a type is a wire type: it derives `Serialize` and `Deserialize`,
-/// or its crate implements them for it. A derived `Deserialize` of a type
-/// that borrows is not `DeserializeOwned`, so it gives no codec.
-fn wire(
-    resolver: &mut Resolver<'_>,
-    impls: &mut Impls,
-    krate: usize,
-    module: usize,
-    index: usize,
-) -> bool {
-    let ty = &resolver.crates[krate].modules[module].types[index];
-    let derived = |name| derives(ty, name);
-    let (mut serialize, mut deserialize) =
-        (derived("Serialize"), derived("Deserialize") && !ty.borrows);
-    if serialize && deserialize {
-        return true;
-    }
-    for found in impls.of(resolver, Traits::Serde, Def::Type(krate, module, index)) {
-        serialize |= found.name == TraitName::Serialize;
-        deserialize |= found.name == TraitName::Deserialize;
-    }
-    serialize && deserialize
 }
 
 /// Whether `attrs` hold the marker `name`: written `<krate>::<name>` for
@@ -273,67 +303,74 @@ fn marked(
     })
 }
 
-/// The node entry of type `index` of a module, which derives `Node`.
+/// A node's name, where its name is written, and the type the crate root
+/// must reach publicly under that name: the node's type, or an alias of
+/// an instantiation of it.
+type Named = (String, Location, Def);
+
+/// The node entry of `def`, a type that derives `Node`, with `args` for its
+/// type parameters, named `named`.
 fn node(
     resolver: &mut Resolver<'_>,
     impls: &mut Impls,
-    krate: usize,
-    module: usize,
-    index: usize,
+    def: Def,
+    args: Vec<Ty>,
+    (name, at, named): Named,
 ) -> Result<NodeEntry, String> {
-    let def = Def::Type(krate, module, index);
+    let Def::Type(krate, module, index) = def else {
+        unreachable!("a node is a type");
+    };
     let ty_def = &resolver.crates[krate].modules[module].types[index];
-    let (name, at) = (ty_def.name.clone(), ty_def.at.clone());
-    let ty = format!("{}::{name}", resolver.crates[krate].name);
+    let (Def::Type(named_krate, ..) | Def::Module(named_krate, _)) = named;
+    let ty = format!("{}::{name}", resolver.crates[named_krate].name);
     let attrs: Vec<syn::Attribute> = ty_def
         .attrs
         .iter()
         .map(|meta| syn::parse_quote!(#[#meta]))
         .collect();
     let types = gdl_syntax::node_types(&attrs).map_err(|e| format!("{at}: {e}"))?;
-    let config = if let Some(path) = &types.config {
-        let (path, absolute) = segments(path);
-        let Some(Def::Type(c, m, i)) = resolver.resolve(krate, module, &path, absolute) else {
-            return Err(format!("{at}: config type cannot be resolved"));
-        };
-        let definition = &resolver.crates[c].modules[m].types[i];
-        if !derives(definition, "Config") {
-            return Err(format!("{at}: config type must derive Config"));
-        }
-        let fields = definition
-            .fields
-            .as_ref()
-            .ok_or_else(|| format!("{at}: config must be a struct"))?;
-        gdl_syntax::graph_fields(fields).map_err(|e| format!("{at}: {e}"))?
-    } else {
-        Vec::new()
+    // The types the derive names, with its parameters standing for this
+    // instantiation's arguments: `config = C` names each alias's own.
+    let env: Env = ty_def
+        .params
+        .iter()
+        .cloned()
+        .zip(args.iter().cloned())
+        .collect();
+    let path_type = |path: &syn::Path| {
+        syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: path.clone(),
+        })
     };
-    let metrics = if let Some(path) = &types.metrics {
-        let (path, absolute) = segments(path);
-        let Some(Def::Type(c, m, i)) = resolver.resolve(krate, module, &path, absolute) else {
-            return Err(format!("{at}: metrics type cannot be resolved"));
-        };
-        let definition = &resolver.crates[c].modules[m].types[i];
-        if !derives(definition, "Metrics") {
-            return Err(format!("{at}: metrics type must derive Metrics"));
+    let config = match &types.config {
+        Some(path) => {
+            let ty = path_type(path);
+            let (_, fields) =
+                derived_struct(resolver, krate, module, &ty, &env, Derived::Config, &at)?;
+            gdl_syntax::graph_fields(&fields).map_err(|e| format!("{at}: {e}"))?
         }
-        let fields = definition
-            .fields
-            .as_ref()
-            .ok_or_else(|| format!("{at}: metrics must be a struct"))?;
-        gdl_syntax::metric_fields(fields).map_err(|e| format!("{at}: {e}"))?
-    } else {
-        Vec::new()
+        None => Vec::new(),
+    };
+    let metrics = match &types.metrics {
+        Some(path) => {
+            let ty = path_type(path);
+            let (_, fields) =
+                derived_struct(resolver, krate, module, &ty, &env, Derived::Metrics, &at)?;
+            gdl_syntax::metric_fields(&fields).map_err(|e| format!("{at}: {e}"))?
+        }
+        None => Vec::new(),
     };
     // The generated segments name the type at the crate root.
-    if resolver.public_member(krate, 0, &name) != Some(def) {
+    if resolver.public_member(named_krate, 0, &name) != Some(named) {
         return Err(format!(
             "{at}: node `{name}`: the crate root does not reach it publicly as `{ty}`"
         ));
     }
 
-    // Its role trait impls: the one that makes it a node.
-    let found: Vec<(Role, ImplOf)> = impls
+    // Its role trait impls: the one that makes it a node, of those for
+    // this instantiation, with the impl's parameters bound by it.
+    let candidates: Vec<(Role, ImplOf)> = impls
         .of(resolver, Traits::Role, def)
         .iter()
         .filter_map(|found| match found.name {
@@ -341,21 +378,29 @@ fn node(
             _ => None,
         })
         .collect();
-    let (impl_module, role, types) = match found.as_slice() {
+    let target = Ty::Def(def, args);
+    let mut found: Vec<(Role, ImplOf, Env)> = Vec::new();
+    for (role, of) in candidates {
+        if let Some(env) = matching(resolver, krate, of, &target) {
+            found.push((role, of, env));
+        }
+    }
+    let (impl_module, role, types, env) = match found.as_slice() {
         [] => {
             return Err(format!(
                 "{at}: node `{name}`: the crate implements no role trait for it"
             ));
         }
-        [(role, found)] => (
+        [(role, found, env)] => (
             found.module,
             *role,
             resolver.crates[krate].modules[found.module].impls[found.index]
                 .types
                 .clone(),
+            env.clone(),
         ),
         several => {
-            let roles: Vec<&str> = several.iter().map(|(role, _)| role.name()).collect();
+            let roles: Vec<&str> = several.iter().map(|(role, ..)| role.name()).collect();
             return Err(format!(
                 "{at}: node `{name}` implements more than one role trait: {}",
                 roles.join(", ")
@@ -363,59 +408,11 @@ fn node(
         }
     };
 
-    let (clients, service_entries) = if let Some((_, ty, _)) =
-        types.iter().find(|(n, _, _)| n == "Clients")
-    {
-        let syn::Type::Path(path) = ty else {
-            return Err(format!("{at}: Clients must name a public Endpoints struct"));
-        };
-        let (path, absolute) = segments(&path.path);
-        let Some(Def::Type(c, m, i)) = resolver.resolve(krate, impl_module, &path, absolute) else {
-            return Err(format!("{at}: Clients cannot be resolved"));
-        };
-        let definition = &resolver.crates[c].modules[m].types[i];
-        if !derives(definition, "Endpoints") {
-            return Err(format!("{at}: Clients must derive Endpoints"));
-        }
-        let fields = definition
-            .fields
-            .as_ref()
-            .ok_or_else(|| format!("{at}: Clients must be a struct"))?;
-        let descriptors = gdl_syntax::endpoints(fields).map_err(|e| format!("{at}: {e}"))?;
-        let client_path = public_path(resolver, c, m, &definition.name);
-        let mut entries = Vec::new();
-        for entry in descriptors {
-            if !config.iter().any(|f| {
-                f.name == entry.enabled && matches!(f.default, gdl_model::ConfigValue::Bool(_))
-            }) {
-                return Err(format!(
-                    "{at}: endpoint `{}` enabling field `{}` is not a graph boolean",
-                    entry.name, entry.enabled
-                ));
-            }
-            let request = message_type(resolver, c, m, &entry.request)
-                .ok_or_else(|| format!("{at}: endpoint request must be a Message"))?;
-            let response = message_type(resolver, c, m, &entry.response)
-                .ok_or_else(|| format!("{at}: endpoint response must be a Message"))?;
-            entries.push(crate::EndpointEntry {
-                name: entry.name.to_string(),
-                path: entry.path,
-                enabled: entry.enabled,
-                request: PortEntry {
-                    port: "Req".into(),
-                    head: Some(request),
-                    item: None,
-                },
-                response: PortEntry {
-                    port: "Item".into(),
-                    head: Some(response),
-                    item: None,
-                },
-            });
-        }
-        (Some(client_path), entries)
-    } else {
-        (None, Vec::new())
+    let (clients, service_entries) = match types.iter().find(|(n, _, _)| n == "Clients") {
+        // With the impl's parameters bound by the instantiation: `type
+        // Clients = C` names each alias's own.
+        Some((_, ty, _)) => service(resolver, (krate, impl_module, &env), ty, &config, &at)?,
+        None => (None, Vec::new()),
     };
     let ports = if clients.is_some() {
         &[][..]
@@ -429,27 +426,51 @@ fn node(
                 "{at}: node `{name}`: its impl has no `type {port}`"
             ));
         };
-        let (head, item) = match streamed(resolver, krate, impl_module, port_ty) {
-            Some((head, item)) => (head, Some(item)),
-            None => (port_ty, None),
-        };
         let unresolved = |ty: &syn::Type| {
             format!(
                 "{port_at}: node `{name}`: port `{port}`: `{}` names no type that derives `Message`",
                 ty.to_token_stream()
             )
         };
+        let read = |resolver: &mut Resolver<'_>, ty: &syn::Type| {
+            canonical(resolver, krate, impl_module, ty, &env).map_err(|_| unresolved(ty))
+        };
+        // The head and the item, with the impl's parameters bound, each
+        // with the syntax a problem names it by. gdl's `Streamed`, written
+        // at the port or bound to a parameter it names, is told by its
+        // definition, so that a crate's own type of that name is not taken
+        // for it; by the name it is imported under only where the reader
+        // cannot resolve the port's type, as when it does not read gdl.
+        let (head, item) = match (
+            canonical(resolver, krate, impl_module, port_ty, &env),
+            streamed(resolver, krate, impl_module, port_ty),
+        ) {
+            (Ok(ty), _) => match streamed_ty(resolver, &ty) {
+                Some((head, item)) => ((head, port_ty), Some((item, port_ty))),
+                None => ((ty, port_ty), None),
+            },
+            (Err(_), Some((head, item))) => (
+                (read(resolver, head)?, head),
+                Some((read(resolver, item)?, item)),
+            ),
+            (Err(_), None) => return Err(unresolved(port_ty)),
+        };
+        let message = |resolver: &mut Resolver<'_>, (ty, written): (Ty, &syn::Type)| {
+            offered(resolver, &ty)
+                .ok()
+                .flatten()
+                .map(|o| o.origin)
+                .ok_or_else(|| unresolved(written))
+        };
+        // `()` is no message, whether written at the port or bound to the
+        // parameter the port names.
         let head = match head {
-            syn::Type::Tuple(t) if t.elems.is_empty() => None,
-            ty => {
-                Some(message_type(resolver, krate, impl_module, ty).ok_or_else(|| unresolved(ty))?)
-            }
+            (Ty::Unit, _) => None,
+            head => Some(message(resolver, head)?),
         };
         let item = match item {
             None => None,
-            Some(ty) => {
-                Some(message_type(resolver, krate, impl_module, ty).ok_or_else(|| unresolved(ty))?)
-            }
+            Some(item) => Some(message(resolver, item)?),
         };
         entries.push(PortEntry {
             port: port.to_string(),
@@ -469,104 +490,126 @@ fn node(
     })
 }
 
-/// The impls of serde's traits and of the role traits in each crate read,
-/// by the type they are for: each crate's impls of one kind are resolved
-/// once, since walking them for every type costs types times impls.
-#[derive(Default)]
-struct Impls(HashMap<(usize, Traits), HashMap<Def, Vec<ImplOf>>>);
+/// A service's client bundle, its `type Clients` written in module
+/// `module` of crate `krate` with the parameters `env` binds, and its
+/// typed entries: each must be enabled by a graph boolean of `config`.
+fn service(
+    resolver: &mut Resolver<'_>,
+    (krate, module, env): (usize, usize, &Env),
+    ty: &syn::Type,
+    config: &[gdl_model::ConfigField],
+    at: &Location,
+) -> Result<(Option<String>, Vec<crate::EndpointEntry>), String> {
+    let syn::Type::Path(_) = ty else {
+        return Err(format!("{at}: Clients must name a public Endpoints struct"));
+    };
+    let (Def::Type(c, m, i), fields) =
+        derived_struct(resolver, krate, module, ty, env, Derived::Clients, at)?
+    else {
+        unreachable!("a struct is a type");
+    };
+    let descriptors = gdl_syntax::endpoints(&fields).map_err(|e| format!("{at}: {e}"))?;
+    let client_path = public_path(resolver, c, m, &resolver.crates[c].modules[m].types[i].name);
+    let mut entries = Vec::new();
+    for entry in descriptors {
+        if !config.iter().any(|f| {
+            f.name == entry.enabled && matches!(f.default, gdl_model::ConfigValue::Bool(_))
+        }) {
+            return Err(format!(
+                "{at}: endpoint `{}` enabling field `{}` is not a graph boolean",
+                entry.name, entry.enabled
+            ));
+        }
+        let request = message_type(resolver, c, m, &entry.request, &Env::new())
+            .ok_or_else(|| format!("{at}: endpoint request must be a Message"))?;
+        let response = message_type(resolver, c, m, &entry.response, &Env::new())
+            .ok_or_else(|| format!("{at}: endpoint response must be a Message"))?;
+        let port = |port: &str, head: Origin| PortEntry {
+            port: port.into(),
+            head: Some(head),
+            item: None,
+        };
+        entries.push(crate::EndpointEntry {
+            name: entry.name.to_string(),
+            path: entry.path,
+            enabled: entry.enabled,
+            request: port("Req", request),
+            response: port("Item", response),
+        });
+    }
+    Ok((Some(client_path), entries))
+}
 
-impl Impls {
-    /// The impls of the traits of `traits` for `def`, in the order of its
-    /// crate's modules.
-    fn of(&mut self, resolver: &mut Resolver<'_>, traits: Traits, def: Def) -> &[ImplOf] {
-        let (Def::Type(krate, ..) | Def::Module(krate, _)) = def;
-        let by_type = self
-            .0
-            .entry((krate, traits))
-            .or_insert_with(|| index(resolver, krate, traits));
-        by_type.get(&def).map_or(&[], Vec::as_slice)
+/// A struct a node's derive or impl names, for what its fields declare.
+#[derive(Clone, Copy)]
+enum Derived {
+    /// `#[gdl(config = ..)]`.
+    Config,
+    /// `#[gdl(metrics = ..)]`.
+    Metrics,
+    /// A service's `type Clients`.
+    Clients,
+}
+
+impl Derived {
+    /// What a problem calls it, and the derive it must have.
+    fn named(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Config => ("config type", "Config"),
+            Self::Metrics => ("metrics type", "Metrics"),
+            Self::Clients => ("Clients", "Endpoints"),
+        }
     }
 }
 
-/// Crate `krate`'s impls of the traits of `traits`, by the type they are
-/// for. Only those impls are resolved, as before there was an index.
-fn index(resolver: &mut Resolver<'_>, krate: usize, traits: Traits) -> HashMap<Def, Vec<ImplOf>> {
-    let mut by_type: HashMap<Def, Vec<ImplOf>> = HashMap::new();
-    for module in 0..resolver.crates[krate].modules.len() {
-        let found: Vec<(usize, TraitName, syn::Type)> = resolver.crates[krate].modules[module]
-            .impls
-            .iter()
-            .enumerate()
-            .filter_map(|(index, i)| {
-                let name = imported_as(resolver, krate, module, i.trait_path.as_ref()?)?;
-                Some((index, traits.name(&name)?, i.self_ty.clone()))
-            })
-            .collect();
-        for (index, name, self_ty) in found {
-            let syn::Type::Path(path) = &self_ty else {
-                continue;
-            };
-            let (path, absolute) = segments(&path.path);
-            if let Some(target) = resolver.resolve(krate, module, &path, absolute) {
-                by_type.entry(target).or_default().push(ImplOf {
-                    name,
-                    module,
-                    index,
-                });
+/// The struct `ty`, written in module `module` with the parameters `env`
+/// binds, names, and its fields: it must derive what `kind` needs. A
+/// problem, at `at`, otherwise.
+///
+/// Only the struct's fields are read, so its arguments are not: a
+/// parameter left to its default, or an argument the reader cannot name,
+/// such as `Arc<u8>`, names the struct all the same. A path is resolved
+/// as it is written, and a parameter of a generic node (`config = C`) as
+/// the type its alias binds it to.
+fn derived_struct(
+    resolver: &mut Resolver<'_>,
+    krate: usize,
+    module: usize,
+    ty: &syn::Type,
+    env: &Env,
+    kind: Derived,
+    at: &Location,
+) -> Result<(Def, syn::Fields), String> {
+    let (what, derive) = kind.named();
+    let found = match ty {
+        syn::Type::Path(p) if p.qself.is_none() => {
+            let parameter = p
+                .path
+                .get_ident()
+                .and_then(|ident| env.get(&ident.unraw().to_string()));
+            match parameter {
+                Some(Ty::Def(def, _)) => Some(*def),
+                Some(_) => None,
+                None => {
+                    let (path, absolute) = segments(&p.path);
+                    resolver.resolve(krate, module, &path, absolute)
+                }
             }
         }
-    }
-    by_type
-}
-
-/// The traits an impl index holds: serde's, for the wire check, or the
-/// role traits, for a node. Indexed apart, so that each resolves only the
-/// impls it did before there was an index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Traits {
-    Serde,
-    Role,
-}
-
-impl Traits {
-    /// The trait of this kind with this name, if there is one.
-    fn name(self, name: &str) -> Option<TraitName> {
-        match (self, name) {
-            (Self::Serde, "Serialize") => Some(TraitName::Serialize),
-            (Self::Serde, "Deserialize") => Some(TraitName::Deserialize),
-            (Self::Serde, _) => None,
-            (Self::Role, name) => role_of(name).map(TraitName::Role),
-        }
-    }
-}
-
-/// A trait an index holds.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TraitName {
-    Serialize,
-    Deserialize,
-    Role(Role),
-}
-
-/// An impl of a trait for a type: the trait, and the impl's module and its
-/// index among the module's impls.
-#[derive(Clone, Copy)]
-struct ImplOf {
-    name: TraitName,
-    module: usize,
-    index: usize,
-}
-
-/// The role whose trait has this name.
-fn role_of(name: &str) -> Option<Role> {
-    match name {
-        "Frontend" | "Service" => Some(Role::Source),
-        "Sink" => Some(Role::Sink),
-        "Forward" => Some(Role::Forward),
-        "Backward" => Some(Role::Backward),
-        "Operator" => Some(Role::Operator),
         _ => None,
+    };
+    let Some(def @ Def::Type(c, m, i)) = found else {
+        return Err(format!("{at}: {what} cannot be resolved"));
+    };
+    let definition = &resolver.crates[c].modules[m].types[i];
+    if !derives(definition, derive) {
+        return Err(format!("{at}: {what} must derive {derive}"));
     }
+    let fields = definition
+        .fields
+        .clone()
+        .ok_or_else(|| format!("{at}: {what} must be a struct"))?;
+    Ok((def, fields))
 }
 
 /// A streamed request's head and item: `Streamed<H, T>`, in module
@@ -601,30 +644,201 @@ fn streamed<'t>(
     }
 }
 
-/// The origin of the message a port type names.
+/// A streamed request's head and item, when `ty` is gdl's `Streamed`.
+fn streamed_ty(resolver: &Resolver<'_>, ty: &Ty) -> Option<(Ty, Ty)> {
+    let Ty::Def(Def::Type(c, m, i), args) = ty else {
+        return None;
+    };
+    let package = &resolver.graph.packages[resolver.crates[*c].package];
+    match args.as_slice() {
+        [head, item]
+            if package.name == "gdl"
+                && resolver.crates[*c].modules[*m].types[*i].name == "Streamed" =>
+        {
+            Some((head.clone(), item.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The origin of the message a port type names, written in a module with
+/// the parameters `env` binds: a message, or an instantiation of a generic
+/// one, through aliases.
 fn message_type(
     resolver: &mut Resolver<'_>,
     krate: usize,
     module: usize,
     ty: &syn::Type,
+    env: &Env,
 ) -> Option<Origin> {
-    let syn::Type::Path(path) = ty else {
-        return None;
+    let ty = canonical(resolver, krate, module, ty, env).ok()?;
+    Some(offered(resolver, &ty).ok()??.origin)
+}
+
+/// A message a type is. Its wire capability is read where an export
+/// offers it, not here: a port, which needs its identity alone, would
+/// read the serde attributes of every field of its message.
+struct Offered {
+    origin: Origin,
+    encoding: gdl_model::Encoding,
+}
+
+/// The message `ty` is, if it is one: a type that derives `Message`, or an
+/// instantiation of a generic one, identified by its generic type's
+/// package and by its type.
+fn offered(resolver: &mut Resolver<'_>, ty: &Ty) -> Result<Option<Offered>, String> {
+    let Ty::Def(def @ Def::Type(c, m, i), args) = ty else {
+        return Ok(None);
     };
-    if path.qself.is_some() {
-        return None;
+    let definition = &resolver.crates[*c].modules[*m].types[*i];
+    if !derives(definition, "Message") {
+        return Ok(None);
     }
-    let (path, absolute) = segments(&path.path);
-    let def = resolver.resolve(krate, module, &path, absolute)?;
-    message(resolver, def)
+    let encoding = gdl_syntax::message_encoding(&definition.attrs)
+        .map_err(|error| format!("{}: {error}", definition.at))?;
+    let origin = if args.is_empty() {
+        let Some(origin) = message(resolver, *def) else {
+            return Ok(None);
+        };
+        origin
+    } else {
+        let package = &resolver.graph.packages[resolver.crates[*c].package];
+        let mut arguments = Vec::new();
+        for arg in args {
+            defining(resolver, arg, &mut arguments);
+        }
+        Origin {
+            package: package.name.clone(),
+            version: package.version.clone(),
+            source: package.source.clone(),
+            path: ty.render(resolver),
+            arguments,
+        }
+    };
+    Ok(Some(Offered { origin, encoding }))
+}
+
+/// Push the package that defines `ty`, and each of its arguments, in the
+/// order `Ty::render` writes them.
+fn defining(resolver: &Resolver<'_>, ty: &Ty, out: &mut Vec<Argument>) {
+    let (krate, args) = match ty {
+        Ty::Def(Def::Type(krate, ..), args) => (krate, args),
+        // The standard library's is no package's, but what it holds is.
+        Ty::Std(_, args) => {
+            for arg in args {
+                defining(resolver, arg, out);
+            }
+            return;
+        }
+        _ => return,
+    };
+    let package = &resolver.graph.packages[resolver.crates[*krate].package];
+    out.push(Argument {
+        package: package.name.clone(),
+        version: package.version.clone(),
+        source: package.source.clone(),
+    });
+    for arg in args {
+        defining(resolver, arg, out);
+    }
+}
+
+/// The type `def` names on its own: a type without parameters, or the
+/// type an alias without parameters names; none for a generic type, which
+/// names no one type.
+fn ty_of(resolver: &mut Resolver<'_>, def: Def) -> Result<Option<Ty>, String> {
+    let Def::Type(c, m, i) = def else {
+        return Ok(None);
+    };
+    let definition = &resolver.crates[c].modules[m].types[i];
+    if !definition.params.is_empty() || definition.other_params {
+        return Ok(None);
+    }
+    match definition.alias.clone() {
+        Some(target) => canonical(resolver, c, m, &target, &Env::new()).map(Some),
+        None => Ok(Some(Ty::Def(def, Vec::new()))),
+    }
+}
+
+/// What an exported alias offers.
+enum Aliased {
+    Message(ExportEntry),
+    Node(NodeEntry),
+    /// An instantiation the reader cannot name: left out, with why, and no
+    /// problem of the crate's.
+    Skipped(Skipped),
+}
+
+/// The instantiation that alias `index` of a module names, which is
+/// marked `#[export]`, offered under the alias's name. `reachable` is
+/// whether code outside the crate can name the module.
+fn alias(
+    resolver: &mut Resolver<'_>,
+    impls: &mut Impls,
+    krate: usize,
+    module: usize,
+    index: usize,
+    reachable: bool,
+) -> Result<Aliased, String> {
+    let alias = &resolver.crates[krate].modules[module].types[index];
+    let (name, at, vis) = (alias.name.clone(), alias.at.clone(), alias.vis);
+    if !alias.params.is_empty() || alias.other_params {
+        return Err(format!(
+            "{at}: `{name}`: an alias names one instantiation: it takes no parameters of its own"
+        ));
+    }
+    if vis != Vis::Public {
+        return Err(format!(
+            "{at}: `{name}`: an export offers a public path: write `pub type`"
+        ));
+    }
+    let target = alias.alias.clone().expect("an alias names a type");
+    let ty = match canonical(resolver, krate, module, &target, &Env::new()) {
+        Ok(ty) => ty,
+        Err(problem) => {
+            return Ok(Aliased::Skipped(Skipped {
+                name,
+                problem: format!("{at}: {problem}"),
+            }));
+        }
+    };
+    let none = || {
+        format!(
+            "{at}: `{name}` names no instantiation of a generic message or node; a message that is not generic is offered under another path with `#[export] pub use`"
+        )
+    };
+    let Ty::Def(def @ Def::Type(c, m, i), args) = &ty else {
+        return Err(none());
+    };
+    if args.is_empty() {
+        return Err(none());
+    }
+    let definition = &resolver.crates[*c].modules[*m].types[*i];
+    if derives(definition, "Node") {
+        let named = (name, at, Def::Type(krate, module, index));
+        return node(resolver, impls, *def, args.clone(), named).map(Aliased::Node);
+    }
+    let message = offered(resolver, &ty)
+        .map_err(|problem| format!("{at}: `{name}`: {problem}"))?
+        .ok_or_else(none)?;
+    Ok(Aliased::Message(ExportEntry {
+        path: public_path(resolver, krate, module, &name),
+        name,
+        origin: message.origin,
+        wire: ty_wire(resolver, impls, &ty),
+        encoding: message.encoding,
+        public: reachable,
+    }))
 }
 
 /// The name a trait or type path ends in, through a rename: `Stage` after
-/// `use gdl::Forward as Stage` is `Forward`. Role traits, `Streamed`, and
-/// serde's traits are matched by name, as derives are; this follows one
-/// `use` of a single-name path in its module, so a rename does not hide
-/// them.
-fn imported_as(
+/// `use gdl::Forward as Stage` is `Forward`. It follows one `use` of a
+/// single-name path in its module, so a rename does not hide a name. Role
+/// traits, a port's `Streamed` whose path cannot be resolved, and the
+/// serde traits of a message that is not generic are matched by this name
+/// alone; serde's traits, `Default`, and `Sized` elsewhere start from it
+/// and are then resolved to their identity (`identity::known_trait`).
+pub(crate) fn imported_as(
     resolver: &Resolver<'_>,
     krate: usize,
     module: usize,

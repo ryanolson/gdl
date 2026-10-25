@@ -551,3 +551,30 @@ fn the_readmes_class_example_renders() {
         panic!("{error}\n{text}");
     }
 }
+
+/// A response that returns to its outer end through an anchor needs a wire
+/// type though its ends share a segment: with `Truncate` alone in another
+/// segment, `Engine`'s `Token`s reach `Detokenize` through one, and the
+/// segment that holds them asserts it, as the placement check does.
+#[test]
+fn a_response_an_anchor_carries_is_asserted() {
+    let spec = std::fs::read_to_string(example().join("gdl.toml")).expect("spec");
+    let (head, _) = spec.split_once("[segment.").expect("segments");
+    let text = format!(
+        "{head}[segment.core]\nnodes = [\"Frontend\", \"Preprocess\", \"Engine\", \"Detokenize\", \"Format\", \"Number\"]\n\n\
+         [segment.trunc]\nnodes = [\"Truncate\"]\n"
+    );
+    let graph = std::fs::read_to_string(example().join("chat.gdl")).expect("graph");
+    let spec = gdl_gen::Spec::from_text(&text, &graph, &example()).expect("spec");
+    let files = gdl_gen::render(&spec, &example().join("segments"), &target("gdl-gen-tests"))
+        .expect("render");
+    let lib = files
+        .iter()
+        .find(|(path, _)| path.ends_with("core/src/lib.rs"))
+        .map(|(_, text)| text)
+        .expect("the core segment");
+    assert!(
+        lib.contains("type Engine_to_Detokenize = <contract::nodes::Detokenize as gdl_runtime::BackwardDecl>::In;"),
+        "{lib}"
+    );
+}

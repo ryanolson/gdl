@@ -14,7 +14,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::time::Duration;
 
-use gdl_extract::{Cargo, Workspace};
+use gdl_extract::{Cargo, Extraction, Workspace};
 
 /// The system allocator, counting per thread the bytes live, their peak,
 /// and the number of allocations. Per thread, so tests that run at once
@@ -74,23 +74,56 @@ struct Cost {
 /// bounded in time, so a reader that runs away fails the test instead of
 /// hanging it. Returns the cost of the extraction alone and its problems.
 fn read(name: &str, files: &[(String, String)]) -> (Cost, Vec<String>) {
+    read_beside(name, files, None)
+}
+
+/// [`read`], with a path dependency `dep`, named `dep`, of these files.
+fn read_beside(
+    name: &str,
+    files: &[(String, String)],
+    dep: Option<&[(String, String)]>,
+) -> (Cost, Vec<String>) {
+    let (cost, extraction) = extract_beside(name, files, dep);
+    (cost, extraction.problems)
+}
+
+/// [`read_beside`], with the whole extraction: what the crate offers, too.
+fn extract_beside(
+    name: &str,
+    files: &[(String, String)],
+    dep: Option<&[(String, String)]>,
+) -> (Cost, Extraction) {
     let temp = tempfile::Builder::new()
         .prefix(&format!("gdl-cost-{name}-"))
         .tempdir()
         .expect("dir");
-    let dir = temp.path();
-    std::fs::create_dir_all(dir.join("src")).expect("dir");
-    std::fs::write(
-        dir.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n"
-        ),
-    )
-    .expect("manifest");
-    for (path, source) in files {
-        let path = dir.join("src").join(path);
-        std::fs::create_dir_all(path.parent().expect("a parent")).expect("dir");
-        std::fs::write(path, source).expect("source");
+    let write = |dir: &std::path::Path, name: &str, files: &[(String, String)], deps: &str| {
+        std::fs::create_dir_all(dir.join("src")).expect("dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n{deps}"
+            ),
+        )
+        .expect("manifest");
+        for (path, source) in files {
+            let path = dir.join("src").join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("dir");
+            std::fs::write(path, source).expect("source");
+        }
+    };
+    let dir = temp.path().join("crate");
+    match dep {
+        Some(dep) => {
+            write(&temp.path().join("dep"), "dep", dep, "");
+            write(
+                &dir,
+                name,
+                files,
+                "[dependencies]\ndep = { path = \"../dep\" }\n",
+            );
+        }
+        None => write(&dir, name, files, ""),
     }
     let workspace = Workspace::load(&dir.join("Cargo.toml"), &Cargo::trusted()).expect("metadata");
     let (done, finished) = std::sync::mpsc::channel();
@@ -105,7 +138,7 @@ fn read(name: &str, files: &[(String, String)]) -> (Cost, Vec<String>) {
                 allocations: COUNT.with(Cell::get),
                 elapsed: started.elapsed(),
             };
-            let _ = done.send((cost, extraction.problems));
+            let _ = done.send((cost, extraction));
         })
         .expect("thread");
     finished
@@ -211,6 +244,115 @@ fn the_wire_check_finds_a_types_impls_without_walking_the_crate() {
             vec![("lib.rs".into(), source)]
         },
         500,
+    );
+}
+
+/// A chain of the crate's own generic message, each level an alias of the
+/// one below (`L1 = Carry<L0>`, `L2 = Carry<L1>`, ...): the wire check
+/// judged each argument once per serde direction, so each level doubled
+/// the work while the type grew by one. 24 levels took minutes. The
+/// export at the top must still read as a wire type, so that the check
+/// walks the whole chain.
+#[test]
+fn a_nested_instantiation_is_judged_once_per_level() {
+    let chain = |n: usize| {
+        let mut source = String::from(
+            "use serde::{Deserialize, Serialize};\n\
+             #[derive(Serialize, Deserialize, gdl_message::Message)]\n\
+             pub struct Carry<T> {\n    pub value: T,\n}\n\
+             pub type L0 = u8;\n",
+        );
+        for level in 1..=n {
+            source.push_str(&format!("pub type L{level} = Carry<L{}>;\n", level - 1));
+        }
+        source.push_str(&format!("#[gdl_message::export]\npub type Deep = L{n};\n"));
+        vec![("lib.rs".to_string(), source)]
+    };
+    grows_linearly("nested", chain, 12);
+    let (cost, extraction) = extract_beside("nested-deep", &chain(24), None);
+    assert!(extraction.problems.is_empty(), "{:?}", extraction.problems);
+    let wire: Vec<(&str, bool)> = extraction
+        .offer
+        .exports
+        .iter()
+        .map(|e| (e.name.as_str(), e.wire))
+        .collect();
+    assert_eq!(wire, [("Deep", true)]);
+    assert!(
+        cost.elapsed < Duration::from_secs(5),
+        "24 levels took {:?}",
+        cost.elapsed
+    );
+}
+
+/// Many nodes whose ports carry one instantiation of a generic message of
+/// many fields: each port ran the wire check, which read the serde
+/// attributes of every field of the message to find what it bounds, so
+/// the work grew with ports times fields. A port needs only the message's
+/// identity. The message is generic, since the check reads no fields of a
+/// type without arguments.
+#[test]
+fn a_port_does_not_read_its_messages_fields() {
+    grows_linearly(
+        "ports",
+        |n| {
+            let mut source = String::from(
+                "use serde::{Deserialize, Serialize};\n\
+                 #[derive(Serialize, Deserialize, gdl_message::Message)]\npub struct Big<T> {\n",
+            );
+            for i in 0..n {
+                source.push_str(&format!(
+                    "    #[serde(rename = \"x{i}\")]\n    pub f{i}: T,\n"
+                ));
+            }
+            source.push_str("}\n");
+            for i in 0..n {
+                source.push_str(&format!(
+                    "#[derive(gdl::Node)]\npub struct N{i};\n\
+                     impl gdl::Forward for N{i} {{ type In = Big<u8>; type Out = Big<u8>; }}\n"
+                ));
+            }
+            vec![("lib.rs".into(), source)]
+        },
+        300,
+    );
+}
+
+/// A serde impl for an alias of a type whose argument a dependency
+/// defines, beside a message whose wire check builds the crate's index of
+/// serde impls: indexing the impl read the alias whole, and so read the
+/// dependency, which nothing else names. Reading the crate must not cost
+/// more as the dependency grows.
+#[test]
+fn indexing_an_impl_for_an_alias_does_not_read_its_arguments_crates() {
+    let source: Vec<(String, String)> = vec![(
+        "lib.rs".into(),
+        "use serde::{Deserialize, Serialize};\n\
+         pub struct Wrapper<T>(pub T);\n\
+         pub type Unrelated = Wrapper<dep::Payload>;\n\
+         impl Serialize for Unrelated {}\n\
+         #[derive(gdl_message::Message)]\npub struct Words;\n\
+         impl Serialize for Words {}\n\
+         impl<'de> Deserialize<'de> for Words {}\n"
+            .into(),
+    )];
+    let dep = |n: usize| {
+        let mut files = vec![("lib.rs".to_string(), String::from("pub struct Payload;\n"))];
+        for i in 0..n {
+            files[0].1.push_str(&format!("pub mod m{i};\n"));
+            let structs: String = (0..50).map(|j| format!("pub struct S{j};\n")).collect();
+            files.push((format!("m{i}.rs"), structs));
+        }
+        files
+    };
+    let (small, problems) = read_beside("alias-small", &source, Some(&dep(50)));
+    assert!(problems.is_empty(), "{problems:?}");
+    let (large, problems) = read_beside("alias-large", &source, Some(&dep(400)));
+    assert!(problems.is_empty(), "{problems:?}");
+    let work = large.allocations as f64 / small.allocations as f64;
+    assert!(
+        work < 1.5,
+        "an eightfold dependency multiplied the allocations by {work:.1}\n  small: {small:?}\n  large: {large:?}"
     );
 }
 

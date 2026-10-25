@@ -476,7 +476,7 @@ impl Unit<'_> {
             // second signal ends the process.
             let _ = writeln!(
                 text,
-                "            gdl_runtime::serve_json_lines(input, tokio::io::stdout(), shutdown.cancelled(), call)"
+                "            gdl_runtime::serve_json_lines(input, tokio::io::stdout(), shutdown.cancelled(), gdl_runtime::json_codec!(contract::SourceReq, contract::SourceItem), call)"
             );
             let _ = writeln!(text, "                .await");
             let _ = writeln!(

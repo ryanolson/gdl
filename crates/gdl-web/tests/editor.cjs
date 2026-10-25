@@ -48,6 +48,14 @@ test('a response mismatch or an unfinished nested hop cannot unlock segments', (
   assert.equal(run('flowComplete(hop, request, response)'), true);
 });
 
+test('two instantiations whose arguments come from two packages are two messages', () => {
+  const run = editor();
+  run(`const instantiation = (version, source) => ({package:'app', version:'0.1.0', source:'local', path:'app::Carried<api::Request>', arguments:[{package:'api', version, source}]});`);
+  assert.equal(run("same(instantiation('1.0.0', 'path'), instantiation('1.0.0', 'path'))"), true);
+  assert.equal(run("same(instantiation('1.0.0', 'path'), instantiation('2.0.0', 'path'))"), false);
+  assert.equal(run("same(instantiation('1.0.0', 'path'), instantiation('1.0.0', 'git'))"), false);
+  assert.equal(run("same({package:'p', version:'1', path:'p::Prompt'}, {package:'p', version:'1', path:'p::Prompt', arguments:[]})"), true);
+});
 
 test('only the latest server validation can unlock segments', async () => {
   const run = editor();

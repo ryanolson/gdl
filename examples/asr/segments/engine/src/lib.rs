@@ -25,6 +25,20 @@ nodes = ["Recognizer", "Punctuate"]
 nodes = ["Client", "Gateway"]
 "#;
 
+// Each message this segment sends or receives across a cut, or that
+// returns through an anchor in it, is a wire type: an edge that carries
+// one that is not fails to build here, naming the message and the edge.
+// Compile time only.
+#[allow(non_camel_case_types)]
+type Resample_to_Recognizer_head = <<contract::nodes::Recognizer as gdl_runtime::SinkDecl>::Req as gdl_runtime::gdl::__private::Parts>::Head;
+const _: () = gdl_runtime::gdl::__private::crosses::<Resample_to_Recognizer_head>();
+#[allow(non_camel_case_types)]
+type Resample_to_Recognizer_item = <<contract::nodes::Recognizer as gdl_runtime::SinkDecl>::Req as gdl_runtime::gdl::__private::Parts>::Item;
+const _: () = gdl_runtime::gdl::__private::crosses::<Resample_to_Recognizer_item>();
+#[allow(non_camel_case_types)]
+type Punctuate_to_Gateway = <contract::nodes::Gateway as gdl_runtime::OperatorDecl>::DownItem;
+const _: () = gdl_runtime::gdl::__private::crosses::<Punctuate_to_Gateway>();
+
 /// The implementations of the nodes this segment hosts.
 pub struct Nodes {
     /// Node `Recognizer`.

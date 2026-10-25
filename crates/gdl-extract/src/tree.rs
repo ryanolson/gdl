@@ -1,7 +1,7 @@
 //! A crate's module tree, read from its source: the items the reader needs
 //! in each module, with `cfg` applied.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -39,11 +39,30 @@ pub(crate) struct Module {
     uses_named: HashMap<String, Vec<usize>>,
     /// The uses that are globs, in order.
     globs: Vec<usize>,
+    /// The names of the traits it declares, of which the tree keeps
+    /// nothing else: a local `trait Default` hides the prelude's.
+    others: HashSet<String>,
 }
 
-/// A struct, an enum, or a union.
+/// A struct, an enum, a union, or a type alias.
+#[derive(Clone)]
 pub(crate) struct TypeDef {
     pub(crate) fields: Option<syn::Fields>,
+    /// Every field of a generic struct, or of a generic enum's variants,
+    /// with `cfg` applied: what serde bounds its parameters by. Empty for a
+    /// type without type parameters, which has none to bound.
+    pub(crate) members: Vec<Member>,
+    /// The attributes of each of a generic enum's variants that `cfg`
+    /// keeps, with `cfg_attr` applied: a variant's serde bound and skip
+    /// hold for its fields.
+    pub(crate) variants: Vec<Vec<Meta>>,
+    /// Its type parameters, by name; a lifetime or const parameter is
+    /// none of them.
+    pub(crate) params: Vec<String>,
+    /// Whether it has a lifetime or const parameter.
+    pub(crate) other_params: bool,
+    /// An alias's type; none for a struct, an enum, or a union.
+    pub(crate) alias: Option<syn::Type>,
     pub(crate) name: String,
     pub(crate) vis: Vis,
     pub(crate) attrs: Vec<Meta>,
@@ -52,6 +71,14 @@ pub(crate) struct TypeDef {
     /// `DeserializeOwned`, and the type has no codec.
     pub(crate) borrows: bool,
     pub(crate) at: Location,
+}
+
+/// A field of a struct, or of an enum's variant.
+#[derive(Clone)]
+pub(crate) struct Member {
+    pub(crate) field: syn::Field,
+    /// Its variant's index in [`TypeDef::variants`]; none in a struct.
+    pub(crate) variant: Option<usize>,
 }
 
 /// Who can see an item: anyone, its crate (`pub(crate)`, `pub(super)`,
@@ -186,10 +213,20 @@ impl Dir {
 }
 
 pub(crate) struct Impl {
+    /// Its generics, with their bounds: its type parameters, and what a
+    /// serde impl written by hand bounds.
+    pub(crate) generics: syn::Generics,
     pub(crate) trait_path: Option<syn::Path>,
     pub(crate) self_ty: syn::Type,
     /// Its associated types: name, type, and where.
     pub(crate) types: Vec<(String, syn::Type, Location)>,
+}
+
+impl Impl {
+    /// Its type parameters, by name.
+    pub(crate) fn params(&self) -> Vec<String> {
+        params(&self.generics)
+    }
 }
 
 /// A place in a source file.
@@ -264,7 +301,17 @@ impl Module {
             types_named: HashMap::new(),
             uses_named: HashMap::new(),
             globs: Vec::new(),
+            others: HashSet::new(),
         }
+    }
+
+    /// Whether it declares an item named `name` in the type namespace: a
+    /// type, a module, or a trait. A `use`, `extern crate` among them, is
+    /// not a declaration: [`Module::uses_named`].
+    pub(crate) fn declares(&self, name: &str) -> bool {
+        !self.types_named(name).is_empty()
+            || self.children.contains_key(name)
+            || self.others.contains(name)
     }
 
     /// The types named `name`, in order.
@@ -454,6 +501,23 @@ impl Reader<'_> {
         serde("borrow") || reference(&field.ty)
     }
 
+    /// The fields `cfg` keeps, with `cfg_attr` applied to their attributes,
+    /// of variant `variant`, or of a struct.
+    fn members(&self, fields: &syn::Fields, variant: Option<usize>) -> Vec<Member> {
+        fields
+            .iter()
+            .filter_map(|f| {
+                let attrs = self.settings.attributes(&f.attrs, self.features)?;
+                let mut field = f.clone();
+                field.attrs = attrs
+                    .into_iter()
+                    .map(|meta| syn::parse_quote!(#[#meta]))
+                    .collect();
+                Some(Member { field, variant })
+            })
+            .collect()
+    }
+
     /// Read `items` of module `module`, which is in `file`; its child
     /// modules' files are under `dir`, and a `#[path]` on one is relative
     /// to `base`: the file's directory at the top of a file, and `dir` in
@@ -498,35 +562,93 @@ impl Reader<'_> {
                 continue;
             };
             match item {
-                Item::Struct(s) => krate.modules[module].add_type(TypeDef {
-                    fields: Some(s.fields.clone()),
-                    name: s.ident.unraw().to_string(),
-                    vis: Vis::of(&s.vis),
-                    attrs,
-                    borrows: s.fields.iter().any(|f| self.borrows(f)),
-                    at: at(s.ident.span()),
-                }),
-                Item::Enum(e) => krate.modules[module].add_type(TypeDef {
-                    fields: None,
-                    name: e.ident.unraw().to_string(),
-                    vis: Vis::of(&e.vis),
-                    attrs,
-                    borrows: e
+                Item::Struct(s) => {
+                    let params = params(&s.generics);
+                    let members = if params.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.members(&s.fields, None)
+                    };
+                    krate.modules[module].add_type(TypeDef {
+                        fields: Some(s.fields.clone()),
+                        members,
+                        variants: Vec::new(),
+                        params,
+                        other_params: other_params(&s.generics),
+                        alias: None,
+                        name: s.ident.unraw().to_string(),
+                        vis: Vis::of(&s.vis),
+                        attrs,
+                        borrows: s.fields.iter().any(|f| self.borrows(f)),
+                        at: at(s.ident.span()),
+                    })
+                }
+                Item::Enum(e) => {
+                    let kept: Vec<(Vec<Meta>, &syn::Fields)> = e
                         .variants
                         .iter()
-                        // A variant `cfg` removes has no fields.
-                        .filter(|v| self.settings.attributes(&v.attrs, self.features).is_some())
-                        .flat_map(|v| &v.fields)
-                        .any(|f| self.borrows(f)),
-                    at: at(e.ident.span()),
-                }),
+                        .filter_map(|v| {
+                            Some((
+                                self.settings.attributes(&v.attrs, self.features)?,
+                                &v.fields,
+                            ))
+                        })
+                        .collect();
+                    // A variant `cfg` removes has no fields.
+                    let borrows = kept
+                        .iter()
+                        .flat_map(|(_, fields)| fields.iter())
+                        .any(|f| self.borrows(f));
+                    let params = params(&e.generics);
+                    let (members, variants) = if params.is_empty() {
+                        (Vec::new(), Vec::new())
+                    } else {
+                        let members = kept
+                            .iter()
+                            .enumerate()
+                            .flat_map(|(index, (_, fields))| self.members(fields, Some(index)))
+                            .collect();
+                        (members, kept.into_iter().map(|(attrs, _)| attrs).collect())
+                    };
+                    krate.modules[module].add_type(TypeDef {
+                        fields: None,
+                        members,
+                        variants,
+                        params,
+                        other_params: other_params(&e.generics),
+                        alias: None,
+                        name: e.ident.unraw().to_string(),
+                        vis: Vis::of(&e.vis),
+                        attrs,
+                        borrows,
+                        at: at(e.ident.span()),
+                    })
+                }
                 Item::Union(u) => krate.modules[module].add_type(TypeDef {
                     fields: None,
+                    members: Vec::new(),
+                    variants: Vec::new(),
+                    params: params(&u.generics),
+                    other_params: other_params(&u.generics),
+                    alias: None,
                     name: u.ident.unraw().to_string(),
                     vis: Vis::of(&u.vis),
                     attrs,
                     borrows: u.fields.named.iter().any(|f| self.borrows(f)),
                     at: at(u.ident.span()),
+                }),
+                Item::Type(t) => krate.modules[module].add_type(TypeDef {
+                    fields: None,
+                    members: Vec::new(),
+                    variants: Vec::new(),
+                    params: params(&t.generics),
+                    other_params: other_params(&t.generics),
+                    alias: Some((*t.ty).clone()),
+                    name: t.ident.unraw().to_string(),
+                    vis: Vis::of(&t.vis),
+                    attrs,
+                    borrows: false,
+                    at: at(t.ident.span()),
                 }),
                 Item::Use(u) => {
                     let mut uses = Vec::new();
@@ -582,6 +704,7 @@ impl Reader<'_> {
                         })
                         .collect();
                     krate.modules[module].impls.push(Impl {
+                        generics: i.generics.clone(),
                         trait_path: i.trait_.as_ref().map(|(_, path, _)| path.clone()),
                         self_ty: (*i.self_ty).clone(),
                         types,
@@ -640,6 +763,16 @@ impl Reader<'_> {
                         }
                     }
                 }
+                Item::Trait(t) => {
+                    krate.modules[module]
+                        .others
+                        .insert(t.ident.unraw().to_string());
+                }
+                Item::TraitAlias(t) => {
+                    krate.modules[module]
+                        .others
+                        .insert(t.ident.unraw().to_string());
+                }
                 _ => {}
             }
         }
@@ -651,12 +784,29 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
         Item::Struct(i) => &i.attrs,
         Item::Enum(i) => &i.attrs,
         Item::Union(i) => &i.attrs,
+        Item::Type(i) => &i.attrs,
         Item::Use(i) => &i.attrs,
         Item::ExternCrate(i) => &i.attrs,
         Item::Impl(i) => &i.attrs,
         Item::Mod(i) => &i.attrs,
         _ => &[],
     }
+}
+
+/// The names of a declaration's type parameters.
+fn params(generics: &syn::Generics) -> Vec<String> {
+    generics
+        .type_params()
+        .map(|p| p.ident.unraw().to_string())
+        .collect()
+}
+
+/// Whether a declaration has a lifetime or const parameter.
+fn other_params(generics: &syn::Generics) -> bool {
+    generics
+        .params
+        .iter()
+        .any(|p| !matches!(p, syn::GenericParam::Type(_)))
 }
 
 /// Each name a use tree binds, with its full path; a glob as `None`.

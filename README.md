@@ -90,7 +90,7 @@ A streamed request can cross segments like any other request. The stage that rec
 
 A graph file holds the body of a `graph!` invocation. Where `graph!` has Rust types, the file has message names. In a message position, the file accepts a bare name such as `Prompt`, or `()`.
 
-The message types are in one or more protocols crates. A protocols crate depends on `gdl-message`, a small crate without the gdl runtime, and offers a type to graph files with `derive(gdl_message::Message)`. The type must be `Send + 'static`, and it must not be generic:
+The message types are in one or more protocols crates. A protocols crate depends on `gdl-message`, a small crate without the gdl runtime, and offers a type to graph files with `derive(gdl_message::Message)`. The type must be `Send + 'static`:
 
 ```rust
 #[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
@@ -164,6 +164,49 @@ First, the generator makes sure that the names agree on each edge. Each error gi
 
 From a `[graph]` spec, the generator also generates the contract crate, in `contract/` under the output directory. Its `graph!` invocation names each message by a public path through a listed crate: an export's path if there is one, else the definition's. The contract hash covers that path, so it changes when a name resolves to another message. A message that is defined in a private module must be exported: resolution reports it, read from source. The chat example uses a graph file. The ASR example uses a contract crate that holds its own `graph!` invocation.
 
+### Generic messages and nodes
+
+One generic type can serve many graphs: a carrier generic over the request it carries, or a node written once for every builder an endpoint chooses. A graph names one type per message and per node, so the generic type offers nothing itself. Each instantiation that a graph uses is named by a `pub type` marked `#[export]`, and the alias's name is what the graph file writes:
+
+```rust
+// A protocols crate: the carrier, and the instantiations a deployment uses.
+#[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
+#[gdl(codec = "json")]
+pub struct Ingress<P, RB> {
+    pub request: P,
+    pub builder: RB,
+}
+
+#[gdl_message::export]
+pub type MessagesIngress = Ingress<MessagesRequest, InferenceRequestBuilder>;
+
+// A node crate: the stage, written once, and its instantiations.
+#[derive(gdl::Node)]
+#[gdl(config = SignalSettings, metrics = SignalMetrics)]
+pub struct ClaudeCodeSignals<RB>(std::marker::PhantomData<fn() -> RB>);
+
+impl<RB: RequestBuilder> gdl::Forward for ClaudeCodeSignals<RB> {
+    type In = Ingress<MessagesRequest, RB>;
+    type Out = Ingress<MessagesRequest, RB>;
+    // ..
+}
+
+#[gdl::export]
+pub type MessagesSignals = ClaudeCodeSignals<InferenceRequestBuilder>;
+```
+
+```text
+forward MessagesSignals: MessagesIngress -> MessagesIngress;
+```
+
+- A generic message or node takes type parameters only. The derive registers nothing; it implements a hidden trait for every instantiation, which the alias reads where the instantiation is concrete.
+- An alias of a message offers its instantiation under the alias's path and name, as an export does. The instantiation's codec is the generic type's `#[gdl(codec = ..)]`. It is a wire type when that instantiation implements `Serialize` and `DeserializeOwned`, so one instantiation can cross segments and another not.
+- An instantiation is one message, identified by its generic type's package, by its type, each argument by the path where it is defined, and by the package that defines each argument, so that two versions of a package, or one version from two sources, make two messages. A port, an alias, and an export that name it agree however each spells it: `MessagesSignals`'s ports carry `Ingress<MessagesRequest, InferenceRequestBuilder>`, which is `MessagesIngress`. Two aliases of one instantiation are one message under two names.
+- An alias of a node, through `gdl::export`, offers a node of the alias's name, implemented by the alias's type. It must be at the crate root, as a node type must; the reader refuses one that is not, though the alias's build does not check it. Its role, and the messages at its ports, come from the generic type's role impl, with the impl's parameters bound by the alias's arguments; an impl for one instantiation alone serves only that one. The `config` and `metrics` the generic type's derive names must be its `Build`'s for every instantiation an alias names: an alias of one whose build takes others does not compile. They may be its parameters, `#[gdl(config = C, metrics = M)]`, so that each alias's instantiation has its own arguments' fields. `gdl_message::export` offers messages only.
+- The alias takes no parameters of its own, and writes every argument. Its arguments are types the reader can name: see [`LIMITATIONS.md`](LIMITATIONS.md#graphs-and-types).
+
+`cargo gdl extract --verify` compares each instantiation the reader finds with what the alias registers in the build, its identity included, except the packages of its arguments, which the build's `core::any::type_name` does not write. An alias the reader leaves out on purpose, which the build registers, is no difference: it prints a line on stderr that names the alias and why. `crates/gdl-gen/tests/generic.rs` generates the graph of `crates/gdl-gen/tests/fixtures/generic`, a generic carrier and a generic stamp each instantiated twice, cuts it so that the carrier crosses, and runs it.
+
 ## Split a graph into segments
 
 A spec file names the graph, the placement, and the implementation of each node. `examples/chat/gdl.toml` is a full spec. It names the graph file, the crate that holds its messages, the crates that implement its nodes, and the placement in three segments:
@@ -204,7 +247,7 @@ impl gdl::Sink for Engine {
 }
 ```
 
-Each graph node binds to the node of its name that a listed crate offers. Its implementation is the type of that name at the crate's root, here `chat_engine_mock::Engine`. If two crates offer one name, add `pin = { Engine = "chat_engine_mock::Engine" }` to `[nodes]` to choose one. The node must have the role that the graph gives it, and at each port the message that the graph's name for the port resolves to. The generator reads the node crates' source and does not compile them, so a crate that needs CUDA, for example, does not have to build there. When the node crate compiles, the derive makes sure that the type is `pub` and sits at the crate root.
+Each graph node binds to the node of its name that a listed crate offers. Its implementation is the type of that name at the crate's root, here `chat_engine_mock::Engine`, or an alias there of an instantiation of a generic node (see [Generic messages and nodes](#generic-messages-and-nodes)). If two crates offer one name, add `pin = { Engine = "chat_engine_mock::Engine" }` to `[nodes]` to choose one. The node must have the role that the graph gives it, and at each port the message that the graph's name for the port resolves to. The generator reads the node crates' source and does not compile them, so a crate that needs CUDA, for example, does not have to build there. When the node crate compiles, the derive makes sure that the type is `pub` and sits at the crate root.
 
 A spec with a contract crate binds each node with a table instead:
 
@@ -342,7 +385,7 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 
 The constants are `gdl_model`'s, and the two images are the generator's (`gdl-gen`). A fleet cell's quorum for a segment is its own `ready`, else its class's, else the default. A placement and a fleet file leave a default unsaid when they are written, and a spec that spells a default of its placement out has the placement, and the hash, of one that leaves it unsaid. Every other optional key has no value unless it is set, except `[deployment] hub_image`, which is the `base_image`, and `[contract] module`, which is the contract library's name.
 
-For a graph spec, the generator compiles nothing: it builds the contract's manifest from the graph file and what the source reader found, including which messages are wire types. For a contract spec, it compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`. If the reader takes a type for a wire type that is not one, the segment's build or its deployment, which checks the placement against the compiled contract, fails. If it misses a wire type's serde impls (for example, impls that a macro writes), the generator refuses a cut that would work. `cargo gdl extract --verify` finds both.
+For a graph spec, the generator compiles nothing: it builds the contract's manifest from the graph file and what the source reader found, including which messages are wire types. For a contract spec, it compiles only the contract crate to read its manifest. Then it checks the placement and the bindings against the manifest, and it reports every error that it finds. A message type that crosses between segments must implement `Serialize` and `Deserialize`. If the reader takes a type for a wire type that is not one, the segment's build fails with one error that names it: each generated segment asserts, at compile time, that every message it sends or receives across a cut is a wire type, through a type alias named for the crossing that carries it (`Sender_to_Receiver`), and the error reads ``error[E0277]: `T` crosses between segments but is not a wire type``, pointing at that alias. A response that returns through an anchor inside one segment, because its hop leaves the segment and comes back, is asserted the same way, and its error reads ``error[E0277]: `T` returns through an anchor but is not a wire type``. The source's segment also asserts the request and item type that its binary reads and writes as JSON lines (`gdl_runtime::reads_json` and `writes_json`), unless a crossing already asserts them. If it misses a wire type's serde impls (for example, impls that a macro writes), the generator refuses a cut that would work. `cargo gdl extract --verify` finds both.
 
 For each segment, the generator writes a crate with:
 

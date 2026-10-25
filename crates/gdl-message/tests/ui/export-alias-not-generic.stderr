@@ -1,0 +1,12 @@
+error[E0277]: `Prompt` is not an instantiation of a generic message or node
+ --> tests/ui/export-alias-not-generic.rs:8:10
+  |
+8 | pub type Other = Prompt;
+  |          ^^^^^ an exported alias names an instantiation of a type that derives `Message` or `gdl::Node`
+  |
+help: the trait `Generic` is not implemented for `Prompt`
+ --> tests/ui/export-alias-not-generic.rs:5:1
+  |
+5 | pub struct Prompt;
+  | ^^^^^^^^^^^^^^^^^
+  = note: a message that is not generic is offered under another path with `#[export] pub use`

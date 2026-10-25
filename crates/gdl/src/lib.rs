@@ -70,6 +70,19 @@ pub use gdl_message::__private::MessageTrait as Message;
 /// types, it keeps the `use` and registers each name with the identity of
 /// the message it names. The same attribute as `gdl_message::export`,
 /// named through gdl.
+///
+/// On a `pub type` that names an instantiation of a generic message or a
+/// generic node, it offers the instantiation under the alias's name:
+///
+/// ```ignore
+/// #[gdl::export]
+/// pub type PromptCarried = Carried<Prompt, Plain>;
+/// #[gdl::export]
+/// pub type PlainRelay = Relay<Plain>;
+/// ```
+///
+/// A node's alias is at the crate root, where generated segments name it,
+/// as a node type is.
 pub use gdl_macros::gdl_export as export;
 
 /// Mark the type that implements a node.
@@ -80,12 +93,17 @@ pub use gdl_macros::gdl_export as export;
 /// impl gdl::Sink for Engine { type Req = Words; type Item = Token; .. }
 /// ```
 ///
-/// The node's name is the type's name. The type must be `pub`, not generic,
-/// and reachable at the crate root under its name, because generated
-/// segments name it there. The derive registers the type with each role
-/// trait it implements and the messages at its ports, for
+/// The node's name is the type's name. The type must be `pub` and
+/// reachable at the crate root under its name, because generated segments
+/// name it there. The derive registers the type with each role trait it
+/// implements and the messages at its ports, for
 /// `cargo gdl extract --verify`; the source reader finds the same impl in
 /// the crate's source. A node implements exactly one role trait.
+///
+/// A generic type, with type parameters only, registers nothing itself: a
+/// graph names one type per node, so each instantiation is a node where an
+/// [`export`]ed `pub type` names it, under the alias's name. Its
+/// `config` and `metrics` must be every such instantiation's `Build`'s.
 pub use gdl_macros::Node;
 
 /// What `gdl-runtime` uses of the definitions' internals: the request
@@ -110,6 +128,61 @@ pub mod __private {
     pub use gdl_model::__private::*;
 
     use crate::{Backward, Forward, Frontend, Operator, Sink};
+
+    /// A message a generated segment sends or receives across a cut: a
+    /// wire type. Each segment asserts it of every message that crosses
+    /// from or into it, at compile time, so that one the source reader took
+    /// for a wire type, and that is not, fails the segment's build with
+    /// this message and the crossing's name, rather than deep in the
+    /// runtime's codecs or at deployment.
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` crosses between segments but is not a wire type",
+        label = "this crossing carries `{Self}`",
+        note = "a message that crosses between segments must implement `serde::Serialize` and `serde::de::DeserializeOwned`: the source reader took it for one; check its serde impls with `cargo gdl extract --verify`, or place both ends of the crossing in one segment"
+    )]
+    pub trait Crossing {}
+
+    // Not recommended, so that a type that fails it is reported as not a
+    // `Crossing`, with the message above, once, rather than as each serde
+    // trait it lacks, with a list of the types that have them.
+    #[diagnostic::do_not_recommend]
+    impl<T: serde::Serialize + serde::de::DeserializeOwned> Crossing for T {}
+
+    /// Compiles only for a [`Crossing`]: what a segment's assertion calls.
+    pub const fn crosses<T: Crossing>() {}
+
+    /// A hop's response that returns to its outer end through an anchor,
+    /// though both ends are in one segment: the hop is not local, since
+    /// its forward path leaves the segment and comes back, so the inner
+    /// end's output is sent to the outer end's anchor, and must be a wire
+    /// type. Asserted as [`Crossing`] is, with advice that fits the case.
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` returns through an anchor but is not a wire type",
+        label = "this hop's response carries `{Self}`",
+        note = "the hop's ends share this segment, but its forward path leaves the segment and comes back, so its response returns through an anchor, which needs `serde::Serialize` and `serde::de::DeserializeOwned`: the source reader took it for one; check its serde impls with `cargo gdl extract --verify`, or place the whole hop in one segment"
+    )]
+    pub trait Anchored {}
+
+    // Not recommended, as for `Crossing`.
+    #[diagnostic::do_not_recommend]
+    impl<T: serde::Serialize + serde::de::DeserializeOwned> Anchored for T {}
+
+    /// Compiles only for an [`Anchored`]: what a segment's assertion calls.
+    pub const fn anchors<T: Anchored>() {}
+
+    /// A streamed request's head and item, which cross apart: a segment
+    /// names each through this, from the port type its contract declares.
+    pub trait Parts {
+        /// The head.
+        type Head;
+        /// The item.
+        type Item;
+    }
+
+    impl<H, T> Parts for crate::Streamed<H, T> {
+        type Head = H;
+        type Item = T;
+    }
 
     /// The type whose role traits `derive(Node)` probes. For each role, the
     /// bounded impl is on `RoleProbe<T>` and the fallback on

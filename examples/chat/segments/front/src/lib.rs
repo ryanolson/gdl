@@ -25,6 +25,22 @@ nodes = ["Frontend", "Preprocess", "Truncate", "Number"]
 nodes = ["Detokenize", "Format"]
 "#;
 
+// Each message this segment sends or receives across a cut, or that
+// returns through an anchor in it, is a wire type: an edge that carries
+// one that is not fails to build here, naming the message and the edge.
+// Compile time only.
+#[allow(non_camel_case_types)]
+type Truncate_to_Engine = <contract::nodes::Engine as gdl_runtime::SinkDecl>::Req;
+const _: () = gdl_runtime::gdl::__private::crosses::<Truncate_to_Engine>();
+#[allow(non_camel_case_types)]
+type Format_to_Preprocess = <contract::nodes::Preprocess as gdl_runtime::OperatorDecl>::DownItem;
+const _: () = gdl_runtime::gdl::__private::crosses::<Format_to_Preprocess>();
+
+// The source's types the binary reads or writes as JSON lines: a type
+// the binary cannot read or write fails to build here. Compile time only.
+const _: () = gdl_runtime::reads_json::<contract::SourceReq>();
+const _: () = gdl_runtime::writes_json::<contract::SourceItem>();
+
 /// The implementations of the nodes this segment hosts.
 pub struct Nodes {
     /// Node `Preprocess`.
@@ -155,6 +171,7 @@ impl gdl_runtime::SegmentBinary for Binary {
                     input,
                     tokio::io::stdout(),
                     shutdown.cancelled(),
+                    gdl_runtime::json_codec!(contract::SourceReq, contract::SourceItem),
                     call,
                 )
                 .await

@@ -13,19 +13,34 @@
 //! - `#[derive(Node)]` on a type: a node, with the port types of the one
 //!   role trait impl the crate has for it.
 //!
+//! A generic type that derives `Message` or `Node` offers nothing itself.
+//! `#[export]` on a `pub type` that names an instantiation of one offers
+//! that instantiation under the alias's name: a message as an export, and
+//! a node with the port types of its role impl, the impl's parameters
+//! bound by the alias's arguments.
+//!
 //! It resolves only the paths those markers need, through `use`
-//! declarations, globs, re-exports, `crate`, `self`, `super`, and
-//! dependencies by the names Cargo gives them, to a marked definition. A
-//! path it cannot follow is a problem that says so, never a guess. It does
-//! not see items that macros make, code that build scripts generate, or
-//! `cfg` that depends on compiler flags.
+//! declarations, globs, re-exports, aliases, `crate`, `self`, `super`, and
+//! dependencies by the names Cargo gives them, to a marked definition. An
+//! instantiation is identified by its type, each argument by its
+//! definition, not by how it is spelled. A path it cannot follow is a
+//! problem that says so, never a guess. It does not see items that macros
+//! make, code that build scripts generate, or `cfg` that depends on
+//! compiler flags. Of the standard library's types, it names the
+//! primitives, `()`, `String`, `Vec`, `VecDeque`, `Option`, `Box`,
+//! `HashMap`, and `BTreeMap`, and no other.
 
+mod attrs;
+mod canon;
 mod catalog;
 mod cfg;
+mod identity;
+mod impls;
 mod markers;
 mod metadata;
 mod resolve;
 mod tree;
+mod wire;
 
 use std::fmt;
 use std::path::Path;
@@ -353,6 +368,21 @@ pub struct Offer {
     /// The nodes it implements, by name.
     #[serde(default)]
     pub nodes: Vec<NodeEntry>,
+    /// The exported aliases it leaves out: their instantiations name an
+    /// argument the reader cannot, such as `Arc<T>`. One is no problem of
+    /// the crate's, whose other offers stand; a graph that names it is
+    /// told why it is not offered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<Skipped>,
+}
+
+/// An exported alias an offer leaves out, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skipped {
+    /// The alias's name.
+    pub name: String,
+    /// Why, with where.
+    pub problem: String,
 }
 
 impl Offer {
@@ -415,6 +445,85 @@ pub struct Origin {
     pub source: String,
     /// The definition path.
     pub path: String,
+    /// For an instantiation of a generic message, the package that
+    /// defines each argument that is a type, nested ones included, in the
+    /// order `path` writes them; none for `()`, a primitive, or a message
+    /// that is not generic. `path` writes an argument by its path alone, as
+    /// `core::any::type_name` does, which two versions of a package, or one
+    /// version from two sources, share.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<Argument>,
+}
+
+impl Origin {
+    /// The message as a problem names it: its path and its package's
+    /// version, and an instantiation's arguments' packages by theirs.
+    pub fn shown(&self) -> String {
+        self.shown_with(false)
+    }
+
+    /// Each of `origins` as a problem that names them together names it:
+    /// as [`Origin::shown`] does, and with the sources of its packages
+    /// where that alone reads as another of them does, since only the
+    /// sources then tell them apart.
+    pub fn shown_apart(origins: &[&Origin]) -> Vec<String> {
+        let plain: Vec<String> = origins.iter().map(|o| o.shown()).collect();
+        origins
+            .iter()
+            .zip(&plain)
+            .map(|(origin, shown)| {
+                let alike = origins
+                    .iter()
+                    .zip(&plain)
+                    .any(|(other, text)| text == shown && other != origin);
+                if alike {
+                    origin.shown_with_sources()
+                } else {
+                    shown.clone()
+                }
+            })
+            .collect()
+    }
+
+    /// As [`Origin::shown`], with the source of each package.
+    pub fn shown_with_sources(&self) -> String {
+        self.shown_with(true)
+    }
+
+    fn shown_with(&self, sources: bool) -> String {
+        let package = |name: &str, version: &str, source: &str| {
+            if sources {
+                format!("{name} {version} from {source}")
+            } else {
+                format!("{name} {version}")
+            }
+        };
+        let own = package(&self.package, &self.version, &self.source);
+        if self.arguments.is_empty() {
+            return format!("`{}` ({own})", self.path);
+        }
+        let arguments: Vec<String> = self
+            .arguments
+            .iter()
+            .map(|a| package(&a.package, &a.version, &a.source))
+            .collect();
+        format!(
+            "`{}` ({own}; arguments from {})",
+            self.path,
+            arguments.join(", ")
+        )
+    }
+}
+
+/// The package that defines an argument of an instantiation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Argument {
+    /// The package.
+    pub package: String,
+    /// Its version.
+    pub version: String,
+    /// Its source, as [`Offer::source`].
+    pub source: String,
 }
 
 /// A node a crate implements.

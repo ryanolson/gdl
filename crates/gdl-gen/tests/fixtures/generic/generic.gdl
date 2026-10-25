@@ -1,0 +1,7 @@
+// The graph names the carrier's and the stamp's instantiations by their
+// aliases.
+name = "generic", schema = 1;
+source  Front: PlainCarried -> stream Reply;
+forward PlainStamp: PlainCarried -> PlainCarried;
+sink    Echo: PlainCarried -> stream Reply;
+topology: Front => PlainStamp => Echo;

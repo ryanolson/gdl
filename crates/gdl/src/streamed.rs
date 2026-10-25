@@ -57,8 +57,12 @@ impl<H: fmt::Debug, T> fmt::Debug for Streamed<H, T> {
 impl<H: gdl_message::Shape, T: gdl_message::Shape> gdl_message::Shape for Streamed<H, T> {
     const STREAMED: bool = true;
     const NESTED: bool = H::STREAMED || T::STREAMED || H::NESTED || T::NESTED;
-    const HEAD: Option<gdl_message::Identity> = H::HEAD;
-    const ITEM: Option<gdl_message::Identity> = T::HEAD;
+    fn head() -> Option<gdl_message::Identity> {
+        H::head()
+    }
+    fn item() -> Option<gdl_message::Identity> {
+        T::head()
+    }
 }
 
 #[cfg(test)]

@@ -12,6 +12,160 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use gdl::Items;
 use gdl::Result;
 
+/// The source's request, as a segment's binary reads it from JSON lines:
+/// `DeserializeOwned`, reported by name and once where it is not, rather
+/// than as each serde trait it lacks with a list of the types that have
+/// them. The source reader took it for a wire type, or the generator
+/// would not have written the binary that reads it.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is the source's request, which this segment's binary reads as JSON lines, but is not a wire type",
+    label = "the binary reads `{Self}` here",
+    note = "the source reader took it for a wire type; check its serde impls with `cargo gdl extract --verify`"
+)]
+pub trait JsonRequest: DeserializeOwned {}
+
+#[diagnostic::do_not_recommend]
+impl<T: DeserializeOwned> JsonRequest for T {}
+
+/// The source's response item, as a segment's binary writes it as JSON
+/// lines: `Serialize`, reported as [`JsonRequest`] is.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is the source's response item, which this segment's binary writes as JSON lines, but is not a wire type",
+    label = "the binary writes `{Self}` here",
+    note = "the source reader took it for a wire type; check its serde impls with `cargo gdl extract --verify`"
+)]
+pub trait JsonItem: Serialize {}
+
+#[diagnostic::do_not_recommend]
+impl<T: Serialize> JsonItem for T {}
+
+/// How [`serve_json_lines`] reads a request and writes an item. Made by
+/// [`Json::new`], whose bounds are the only place the feeder needs serde:
+/// a source's types that are not wire types are reported there, once,
+/// rather than at the call and again where its future is awaited. A
+/// generated segment makes it with [`json_codec!`](crate::json_codec),
+/// which needs no bound at all: the segment asserts its types on its own,
+/// each once, with the crossings it asserts.
+pub struct Json<Req, Item> {
+    decode: fn(&str) -> serde_json::Result<Req>,
+    encode: fn(&Item) -> serde_json::Result<String>,
+}
+
+impl<Req, Item> Json<Req, Item> {
+    /// The JSON form of a source's request and response items.
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self
+    where
+        Req: JsonRequest,
+        Item: JsonItem,
+    {
+        Self {
+            decode: |text| serde_json::from_str(text),
+            // Serialized straight to text: going through
+            // `serde_json::Value` would refuse integers beyond 64 bits,
+            // which JSON text holds.
+            encode: |item| serde_json::to_string(&ItemLine { item }),
+        }
+    }
+
+    /// Of these functions: what [`json_codec!`](crate::json_codec) makes.
+    #[doc(hidden)]
+    pub fn from_fns(
+        decode: fn(&str) -> serde_json::Result<Req>,
+        encode: fn(&Item) -> serde_json::Result<String>,
+    ) -> Self {
+        Self { decode, encode }
+    }
+}
+
+/// Compiles only for a [`JsonRequest`]: what a generated segment asserts of
+/// the source's request it reads, where no crossing check asserts more.
+pub const fn reads_json<T: JsonRequest>() {}
+
+/// Compiles only for a [`JsonItem`]: what a generated segment asserts of
+/// the source's response item it writes, where no crossing check asserts
+/// more.
+pub const fn writes_json<T: JsonItem>() {}
+
+/// The JSON codec of a source's request and item, with no bound on either:
+/// where the type is concrete, an autoref probe takes serde's functions
+/// where it has them, and else ones that fail. A generated segment asserts
+/// the types apart, so that a type that is not a wire type is reported
+/// once, by the assertion that names it, and never by this.
+#[macro_export]
+macro_rules! json_codec {
+    ($req:ty, $item:ty) => {{
+        #[allow(unused_imports)]
+        use $crate::__json::{DecodeNo as _, DecodeYes as _, EncodeNo as _, EncodeYes as _};
+        $crate::Json::<$req, $item>::from_fns(
+            (&$crate::__json::Probe::<$req>::new()).__gdl_decode(),
+            (&$crate::__json::Probe::<$item>::new()).__gdl_encode(),
+        )
+    }};
+}
+
+/// The probes [`json_codec!`](crate::json_codec) calls: the bounded impl on
+/// `Probe<T>`, the fallback on `&Probe<T>`, so that method lookup on
+/// `&Probe<T>` finds the bounded one where `T` has serde's traits.
+#[doc(hidden)]
+pub mod probe {
+    use std::marker::PhantomData;
+
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
+    use super::ItemLine;
+
+    pub struct Probe<T>(PhantomData<fn() -> T>);
+
+    impl<T> Probe<T> {
+        #[allow(clippy::new_without_default)]
+        pub const fn new() -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    pub trait DecodeYes<T> {
+        fn __gdl_decode(&self) -> fn(&str) -> serde_json::Result<T>;
+    }
+
+    impl<T: DeserializeOwned> DecodeYes<T> for Probe<T> {
+        fn __gdl_decode(&self) -> fn(&str) -> serde_json::Result<T> {
+            |text| serde_json::from_str(text)
+        }
+    }
+
+    pub trait DecodeNo<T> {
+        fn __gdl_decode(&self) -> fn(&str) -> serde_json::Result<T>;
+    }
+
+    impl<T> DecodeNo<T> for &Probe<T> {
+        fn __gdl_decode(&self) -> fn(&str) -> serde_json::Result<T> {
+            |_| Err(serde::de::Error::custom("the request is not a wire type"))
+        }
+    }
+
+    pub trait EncodeYes<T> {
+        fn __gdl_encode(&self) -> fn(&T) -> serde_json::Result<String>;
+    }
+
+    impl<T: Serialize> EncodeYes<T> for Probe<T> {
+        fn __gdl_encode(&self) -> fn(&T) -> serde_json::Result<String> {
+            |item| serde_json::to_string(&ItemLine { item })
+        }
+    }
+
+    pub trait EncodeNo<T> {
+        fn __gdl_encode(&self) -> fn(&T) -> serde_json::Result<String>;
+    }
+
+    impl<T> EncodeNo<T> for &Probe<T> {
+        fn __gdl_encode(&self) -> fn(&T) -> serde_json::Result<String> {
+            |_| Err(serde::ser::Error::custom("the item is not a wire type"))
+        }
+    }
+}
+
 /// Answer one JSON request per line of `input`, one request at a time.
 ///
 /// Each item is written as `{"item": ...}` on its own line. The answer ends
@@ -29,11 +183,10 @@ pub async fn serve_json_lines<Req, Item, R, W, S, F, Fut>(
     input: R,
     mut output: W,
     stop: S,
+    json: Json<Req, Item>,
     mut call: F,
 ) -> std::io::Result<()>
 where
-    Req: DeserializeOwned,
-    Item: Serialize,
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
     S: Future<Output = ()>,
@@ -64,14 +217,12 @@ where
         }
         let parsed = std::str::from_utf8(&bytes)
             .map_err(|e| format!("bad request: {e}"))
-            .and_then(|text| {
-                serde_json::from_str::<Req>(text).map_err(|e| format!("bad request: {e}"))
-            });
+            .and_then(|text| (json.decode)(text).map_err(|e| format!("bad request: {e}")));
         let end = match parsed {
             Err(error) => failure(error),
             Ok(request) => match call(request).await {
                 Err(error) => failure(error.to_string()),
-                Ok(items) => answer(items, &mut output).await?,
+                Ok(items) => answer(items, json.encode, &mut output).await?,
             },
         };
         write_line(&mut output, &end).await?;
@@ -79,9 +230,11 @@ where
     }
 }
 
-/// Write each item; return the line that ends the answer.
-async fn answer<Item: Serialize, W: AsyncWrite + Unpin>(
+/// Write each item, each as `encode` writes it; return the line that ends
+/// the answer.
+async fn answer<Item, W: AsyncWrite + Unpin>(
     mut items: Items<Item>,
+    encode: fn(&Item) -> serde_json::Result<String>,
     output: &mut W,
 ) -> std::io::Result<serde_json::Value> {
     while let Some(item) = items.next().await {
@@ -89,9 +242,7 @@ async fn answer<Item: Serialize, W: AsyncWrite + Unpin>(
             Ok(item) => item,
             Err(error) => return Ok(failure(error.to_string())),
         };
-        // Serialized straight to text: going through `serde_json::Value`
-        // would refuse integers beyond 64 bits, which JSON text holds.
-        match serde_json::to_string(&ItemLine { item: &item }) {
+        match encode(&item) {
             // Flushed per item: a stream that stays open after an item must
             // not keep that item in a buffered writer.
             Ok(mut line) => {
@@ -106,7 +257,7 @@ async fn answer<Item: Serialize, W: AsyncWrite + Unpin>(
 }
 
 #[derive(Serialize)]
-struct ItemLine<'a, T> {
+pub(crate) struct ItemLine<'a, T> {
     item: &'a T,
 }
 
@@ -146,6 +297,22 @@ mod tests {
         }
     }
 
+    /// The codec a generated segment makes takes serde's functions for a
+    /// wire type, and for any other type builds all the same, with
+    /// functions that fail: the segment's own assertion reports that type.
+    #[test]
+    fn the_codec_of_a_type_that_is_not_a_wire_type_builds_and_fails() {
+        struct Opaque;
+        let wire = crate::json_codec!(u32, u32);
+        assert_eq!((wire.decode)("7").expect("decodes"), 7);
+        assert_eq!((wire.encode)(&7).expect("encodes"), r#"{"item":7}"#);
+        let opaque = crate::json_codec!(Opaque, Opaque);
+        let error = (opaque.decode)("7").err().expect("refused");
+        assert!(error.to_string().contains("the request is not a wire type"));
+        let error = (opaque.encode)(&Opaque).expect_err("refused");
+        assert!(error.to_string().contains("the item is not a wire type"));
+    }
+
     #[tokio::test]
     async fn each_item_reaches_the_reader_as_it_is_produced() {
         // The second item waits until the reader has the first: through a
@@ -167,7 +334,14 @@ mod tests {
         };
         let serving = tokio::spawn(async move {
             let output = tokio::io::BufWriter::new(writer);
-            serve_json_lines(&b"1\n"[..], output, std::future::pending(), call).await
+            serve_json_lines(
+                &b"1\n"[..],
+                output,
+                std::future::pending(),
+                Json::new(),
+                call,
+            )
+            .await
         });
         let mut lines = tokio::io::BufReader::new(reader).lines();
         let first = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
@@ -213,7 +387,14 @@ mod tests {
             let stop = async move {
                 let _ = stopped.await;
             };
-            serve_json_lines(tokio::io::BufReader::new(reader), writer, stop, call).await
+            serve_json_lines(
+                tokio::io::BufReader::new(reader),
+                writer,
+                stop,
+                Json::new(),
+                call,
+            )
+            .await
         });
         input.write_all(b"1\n").await.expect("write");
         let mut lines = tokio::io::BufReader::new(output).lines();
@@ -255,6 +436,7 @@ mod tests {
                 tokio::io::BufReader::new(reader),
                 Vec::new(),
                 std::future::ready(()),
+                Json::new(),
                 call,
             ),
         )
@@ -267,9 +449,15 @@ mod tests {
         let call =
             |_: u32| async { Ok(items(futures::stream::iter([Ok((u128::MAX, i128::MIN))]))) };
         let mut output = Vec::new();
-        serve_json_lines(&b"1\n"[..], &mut output, std::future::pending(), call)
-            .await
-            .expect("serve");
+        serve_json_lines(
+            &b"1\n"[..],
+            &mut output,
+            std::future::pending(),
+            Json::new(),
+            call,
+        )
+        .await
+        .expect("serve");
         assert_eq!(
             std::str::from_utf8(&output).expect("utf8"),
             format!(
@@ -284,9 +472,15 @@ mod tests {
     async fn every_request_gets_one_answer_and_serving_goes_on() {
         let input: &[u8] = b"2\n\n0\nnot json\n99\n\xff\n1\n";
         let mut output = Vec::new();
-        serve_json_lines(input, &mut output, std::future::pending(), call)
-            .await
-            .expect("serve");
+        serve_json_lines(
+            input,
+            &mut output,
+            std::future::pending(),
+            Json::new(),
+            call,
+        )
+        .await
+        .expect("serve");
         let lines: Vec<&str> = std::str::from_utf8(&output)
             .expect("utf8")
             .lines()

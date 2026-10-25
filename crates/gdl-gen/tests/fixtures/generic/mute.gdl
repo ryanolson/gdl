@@ -1,0 +1,6 @@
+// A response item the reader misreads, which the source's binary writes
+// as JSON lines and nothing carries across a cut.
+name = "mute", schema = 1;
+source Front: Request -> stream ByteMute;
+sink   Hush: Request -> stream ByteMute;
+topology: Front => Hush;

@@ -32,7 +32,10 @@ function newHop() {
 }
 
 const $ = (id) => document.getElementById(id);
-const key = (origin) => origin ? `${origin.package}@${origin.version} ${origin.path}` : "()";
+// An instantiation's path writes each argument by its path alone: the
+// packages that define them tell apart two versions, or two sources, of one.
+const argumentsKey = (origin) => (origin.arguments || []).map((a) => ` ${a.package}@${a.version} ${a.source}`).join("");
+const key = (origin) => origin ? `${origin.package}@${origin.version} ${origin.path}${argumentsKey(origin)}` : "()";
 const same = (a, b) => key(a) === key(b);
 const samePort = (a, b) => same(a.head, b.head) && same(a.item, b.item);
 
@@ -734,8 +737,9 @@ function slot(label, candidates, choose, edge) {
 }
 
 // A message as an arrow names it: its type's name, and a streamed
-// request's item.
-const short = (origin) => origin ? origin.path.split("::").pop() : "()";
+// request's item. An instantiation of a generic message keeps its
+// arguments, each by its name: `Carried<Prompt, Plain>`.
+const short = (origin) => origin ? origin.path.replace(/(?:[A-Za-z_][A-Za-z0-9_]*::)+/g, "") : "()";
 const carried = (p) => p.item ? `${p.head ? short(p.head) + " + " : ""}stream ${short(p.item)}` : short(p.head);
 
 const scissors = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m8 8 12 12M8 16 20 4"/></svg>';
