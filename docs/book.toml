@@ -1,0 +1,22 @@
+[book]
+title = "dynamo-gdl"
+authors = ["dynamo-gdl contributors"]
+language = "en"
+src = "src"
+
+[build]
+# A chapter listed in SUMMARY.md but missing on disk is an error, not an empty page.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/NVIDIA-dev/dynamo-gdl"
+edit-url-template = "https://github.com/NVIDIA-dev/dynamo-gdl/edit/main/docs/{path}"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.linkcheck]
+follow-web-links = false
