@@ -481,8 +481,8 @@ impl<H> ProcessConfig<H> {
                 }
                 // Membership is followed from just before `loaded`, into the
                 // roster this instance will route with, so that a retirement
-                // is acknowledged even while the rendezvous waits (ruling
-                // 143); the roster read is merged into it, keeping what the
+                // is acknowledged even while the rendezvous waits; the
+                // roster read is merged into it, keeping what the
                 // follower learned.
                 let mut roster = Roster::new();
                 roster.hold();
@@ -995,7 +995,7 @@ impl Launch {
     }
 
     /// Say that this instance has retired, so that its peers stop routing
-    /// to it (ruling 141): at the hub, `retired`, then `ready` and `loaded`
+    /// to it: at the hub, `retired`, then `ready` and `loaded`
     /// withdrawn; in a roster directory, a file in `retired/`. Bounded by
     /// `deadline`; what does not get through leaves the drain to (B) or its
     /// bound.
@@ -1016,7 +1016,7 @@ impl Launch {
         let _ = deadline;
     }
 
-    /// The drain after the serving body has returned (ruling 140). A
+    /// The drain after the serving body has returned. A
     /// source's instance announces that it has drained, then the instance
     /// waits for the first of: (A) every instance of the segments that send
     /// to this one has promised to avoid it, or left, and `setup` has
@@ -1026,7 +1026,7 @@ impl Launch {
     /// counts (A) only once the cells that follow its cell avoid it too, or
     /// its bound has passed, and outside its cell's drain never counts (B)
     /// while a source of another class reaches it. Then it closes its
-    /// entries (ruling 150) and waits until it holds no request; a stream
+    /// entries and waits until it holds no request; a stream
     /// holds its share until velo has handed its output on. Each wait ends at `deadline`.
     /// While its cell drains, an entry instance first waits out its bound,
     /// declines offers, waits until it holds no request, and announces

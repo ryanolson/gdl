@@ -84,7 +84,7 @@ impl Crossing {
     /// Choose a cell for one attempt, then ask `selector` to choose among
     /// that cell's eligible entry instances alone; `None` when no cell but
     /// those in `excluded` may take it. A selector may wait, so the choice
-    /// is checked when it returns (ruling 154): if the instance is no
+    /// is checked when it returns: if the instance is no
     /// longer eligible in the cell's current table, or the cell itself no
     /// longer is by the cell policy (it stopped taking work, or, under
     /// `home_first`, its summary went or went stale), or

@@ -1,5 +1,6 @@
-//! The graph of `agent-docs/cells.md` section 3.1, parsed from its text,
-//! under the placement and classes of section 3.2: one class boundary, at
+//! The graph of a model served in cells (docs/src/concepts/cells.md), parsed
+//! from its text, under a placement of one segment per stage in two classes
+//! (A to C, then D to F): one class boundary, at
 //! the chooser's hop, and one WAN round trip when a request spills.
 
 use gdl_syntax::Graph;

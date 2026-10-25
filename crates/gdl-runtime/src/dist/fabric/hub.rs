@@ -212,7 +212,7 @@ impl HubSession {
     }
 
     /// Announce that this instance retired, then withdraw `ready` and
-    /// `loaded`, each answered by the hub before the next (ruling 141): a
+    /// `loaded`, each answered by the hub before the next: a
     /// roster read afterwards leaves it out, and a peer that follows
     /// membership afterwards never adds it. Bounded by `deadline`; what the
     /// hub did not answer is left to the drain's bound.
@@ -268,7 +268,7 @@ impl HubSession {
 
     /// Follow membership into `live`, the state of the roster this instance
     /// routes with, until the session ends: one task for the instance, not
-    /// one per request or per peer (ruling 151). `segments` are every
+    /// one per request or per peer. `segments` are every
     /// segment of the deployment, `inner` those this instance sends to.
     /// See [`follow`].
     pub(crate) fn follow(
@@ -495,8 +495,8 @@ async fn members(client: &HubClient, registration: &SegmentRegistration) -> Resu
     Ok(members)
 }
 
-/// Applies the hub's membership to the roster an instance routes with
-/// (ruling 143). It watches, for each segment this instance sends to, the
+/// Applies the hub's membership to the roster an instance routes with.
+/// It watches, for each segment this instance sends to, the
 /// instances that retired (marked retired, never made routable by it), and
 /// for every segment the instances that are ready (registered with velo and
 /// added to routing) and those that serve (one removed has left: dropped at
@@ -734,7 +734,7 @@ impl Follower {
     }
 
     /// Promise to avoid each retired instance this instance no longer
-    /// routes to: marked first (ruling 142), then served.
+    /// routes to: marked first, then served.
     async fn acknowledge(&mut self) {
         self.unsent.extend(self.live.take_acknowledgements());
         let mut unsent = Vec::new();
@@ -843,7 +843,7 @@ struct Member {
 /// or, for an unspecified address, at the address the container's
 /// `HOSTNAME` resolves to, on `listen`'s port (binding to an unspecified
 /// address would advertise `0.0.0.0` to peers). The node resolves a peer it
-/// has not registered through the hub (ruling 143); the client that does
+/// has not registered through the hub; the client that does
 /// so holds no registration.
 pub(crate) async fn bind_under_hub(
     listen: std::net::SocketAddr,

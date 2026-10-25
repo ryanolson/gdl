@@ -135,7 +135,7 @@ const POLL: Duration = Duration::from_millis(50);
 
 /// Apply a roster directory's membership to `roster`, the roster this
 /// instance routes with, until the task is dropped: one task for the
-/// instance (ruling 151). Every 50 ms it reads `retired/` and `left/`.
+/// instance. Every 50 ms it reads `retired/` and `left/`.
 /// A retired instance of a segment in `inner` (those this instance sends
 /// to) is marked retired; one that left is dropped from routing at once,
 /// and unregistered from velo after `drain`, since it may have left

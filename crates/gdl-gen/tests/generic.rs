@@ -421,7 +421,7 @@ fn a_misread_response_an_anchor_carries_fails_to_build_by_name() {
 }
 
 /// A carrier whose "serde" impls are another crate's traits under serde's
-/// name, a trick the source reader does not chase (ruling 195), reads as
+/// name, a trick the source reader does not chase because the segment's crossing check catches it, reads as
 /// a wire type, so the generator lets it cross a cut; each segment's
 /// crossing check then refuses it at build time, naming the message and
 /// the crossing, where the deployment would have refused it at start.

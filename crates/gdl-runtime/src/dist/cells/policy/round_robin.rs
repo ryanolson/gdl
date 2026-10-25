@@ -26,7 +26,7 @@ use super::CellChooser;
 ///    left, and the `degraded` ones only when none is.
 ///
 /// So a damped `ready` cell that is passed over leaves its turns to a
-/// `degraded` one: a cell that just declined does not fit (ruling Q9), and
+/// `degraded` one: a cell that just declined does not fit, and
 /// damping stays as it is for every policy.
 ///
 /// The attempt's turn is the crossing's count of the attempts before it:

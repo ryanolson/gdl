@@ -36,7 +36,7 @@ pub(crate) enum Ty {
 
 /// The types of the standard library's the reader names and judges, by
 /// their names alone where the prelude or a `use` of the standard library
-/// brings them (ruling 195 caps a name trick).
+/// brings them (a name trick is not chased).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Std {
     String,

@@ -1,6 +1,6 @@
 //! A response the reader takes for a wire type, which serializes but does
 //! not deserialize: serde's `Serialize`, and another crate's `Deserialize`
-//! under serde's name, a trick the reader does not chase (ruling 195).
+//! under serde's name, a trick the reader does not chase, since the segment's crossing check catches it.
 //! With the sink beside the source and a forward node elsewhere, it
 //! returns through an anchor, which needs both.
 

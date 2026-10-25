@@ -1,4 +1,4 @@
-//! Feasibility spike for the typed graph structure (plan section 6).
+//! Feasibility spike for the typed graph structure.
 //!
 //! One generic dispatcher, written once, must:
 //! - accept a bindings struct whose slots are differently typed `Absent<N>`
@@ -11,7 +11,7 @@
 //! - reject a crossing over an edge whose type has no codec.
 //!
 //! The crossing here is a loopback (encode, then decode); the velo runtime
-//! replaces it, and nothing else, in milestone 3.
+//! replaces it, and nothing else.
 
 mod common;
 

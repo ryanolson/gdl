@@ -275,7 +275,7 @@ async fn messages_are_encoded_only_where_an_edge_crosses_segments() {
 
     // Only C apart: the request leaves the source's segment and comes back,
     // so no response edge crosses, but the items return through the outer
-    // end's anchor, which encodes them (plan section 7.2).
+    // end's anchor, which encodes them.
     let out_and_back = Placement::new()
         .segment("front", ["A", "D", "F"])
         .segment("side", ["C"]);

@@ -2,7 +2,7 @@
 //! by a path from the crate's root, or a single name that a `use`, or the
 //! prelude, brings, where nothing in the module binds the name otherwise.
 //! A name the reader cannot follow is another's, so the wire check refuses
-//! it (ruling 194); a name trick it does not chase is capped (ruling 195).
+//! it; a name trick it does not chase is capped, since the segment's crossing check catches it.
 
 use std::collections::HashSet;
 

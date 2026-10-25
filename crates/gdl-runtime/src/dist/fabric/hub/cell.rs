@@ -6,7 +6,7 @@
 //! once it retired. Nothing about either is on a request's path.
 //!
 //! The cell's entry instances are the drain sources of its interior ones
-//! (`agent-docs/cells.md`, section 5): a chooser in another class reaches
+//! (see docs/src/development/cells-design.md): a chooser in another class reaches
 //! only the entry instances, so an interior instance's own sources are
 //! not members of its hub, and without this rule it would count them as
 //! drained and close at once, while an entry instance still holds a

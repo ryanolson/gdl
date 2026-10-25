@@ -168,7 +168,7 @@ impl Admission {
 /// removed: it capped an instance at `limit / grace` requests per second
 /// (measured: 1,024 permits and 5 s refused traffic within seconds at
 /// benchmark rates) and still bounded nothing for a consumer that stalls
-/// longer than the grace. See `agent-docs/plan.md`, rulings 15 and 145.
+/// longer than the grace. See docs/src/development/runtime-design.md.
 pub(crate) struct Egress {
     permits: Arc<Semaphore>,
     limit: usize,

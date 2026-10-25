@@ -90,7 +90,7 @@ pub(crate) fn of(layout: &Layout, class: &str) -> Result<&'static dyn CellChoose
 /// 3. home cells that are `ready` and saturated;
 /// 4. to 6. the `degraded` cells, in the same three tiers.
 ///
-/// So a state outranks a region (ruling Q9), home cells take the work
+/// So a state outranks a region, home cells take the work
 /// until every one is saturated, and another region's cell takes it only
 /// while it has room; a cell elsewhere at or over the spill bound is never
 /// chosen. Within the tier, two cells drawn at random, and the one with

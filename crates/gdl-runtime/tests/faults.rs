@@ -616,7 +616,7 @@ async fn remote_deadlines_never_run_late_with_clocks_off_either_way() {
     }
 }
 
-// ----- milestone 3 review, pass 1 -----
+// ----- cancel, stop, and deadline across a crossing -----
 
 /// Outcome of one call: an error from the call itself, or the items.
 fn outcome(
@@ -901,7 +901,7 @@ async fn completed_requests_leave_no_tasks_behind() {
     }
 }
 
-// ----- milestone 3 review, pass 2 -----
+// ----- a held stream and a delayed hand-off ack at the deadline -----
 
 fn two_segments() -> Placement {
     Placement::new()
@@ -1060,7 +1060,7 @@ async fn a_zero_limit_is_refused_at_deployment() {
     }
 }
 
-// ----- milestone 3 review, pass 3 -----
+// ----- a stop and egress while a hand-off is unacknowledged -----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_reaches_the_remote_sink_while_its_hand_off_is_unacknowledged() {
@@ -1135,7 +1135,7 @@ async fn an_entry_waiting_for_egress_does_not_hold_its_share_past_the_deadline()
     }
 }
 
-// ----- milestone 3 review, pass 4 -----
+// ----- the setup timeout bounds opening a backward run -----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn opening_a_local_backward_run_is_bounded_by_the_setup_timeout() {
@@ -1192,7 +1192,7 @@ async fn opening_a_local_backward_run_is_bounded_by_the_setup_timeout() {
     );
 }
 
-// ----- milestone 3 review, pass 5 -----
+// ----- an outer backward node's context ends at the deadline -----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_outer_backward_node_context_ends_at_the_deadline_while_the_stream_is_held() {
@@ -1222,7 +1222,7 @@ async fn an_outer_backward_node_context_ends_at_the_deadline_while_the_stream_is
     }
 }
 
-// ----- milestone 3 review, pass 7 -----
+// ----- a refused hand-off keeps its admission -----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stage_delivering_a_refused_hand_off_keeps_its_admission() {
@@ -1289,7 +1289,7 @@ async fn a_stage_delivering_a_refused_hand_off_keeps_its_admission() {
     );
 }
 
-// ----- milestone 3 review, pass 11 -----
+// ----- a receiver waiting for egress gives up at the setup timeout -----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_receiver_waiting_for_egress_gives_up_at_the_setup_timeout() {
@@ -1346,7 +1346,7 @@ async fn a_receiver_waiting_for_egress_gives_up_at_the_setup_timeout() {
     }
 }
 
-// ----- milestone 3 review, pass 12 -----
+// ----- a local inner end waits for egress within the setup timeout -----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_local_inner_end_waits_for_egress_within_the_setup_timeout() {

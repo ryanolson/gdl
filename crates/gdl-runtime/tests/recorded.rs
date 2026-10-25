@@ -694,7 +694,7 @@ async fn a_cancel_ends_a_crossing_sources_visit_though_its_caller_does_not_read(
 
 /// The source's visit ends at a cancel though its caller holds the stream
 /// unread, as the owner's rule says a cancelled request does.
-#[ignore = "LIMITATIONS.md, the source's count after a cancel: where the source's own hop stays \
+#[ignore = "docs/src/operations/limitations.md, the source's count after a cancel: where the source's own hop stays \
             in its segment, the source's visit ends when its caller reads the cancel or drops \
             the stream; nothing runs for it before then"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -9,7 +9,7 @@ use gdl_model::{
     Placements, Role, TypeInfo, layout,
 };
 
-/// The graph of `agent-docs/cells.md` section 3.1,
+/// The graph of a model served in cells (docs/src/concepts/cells.md),
 /// `Http => Pre { Route { Model { Engine => Detok } } }`.
 fn manifest() -> Manifest {
     let node = |name: &str, role| NodeInfo {

@@ -37,7 +37,7 @@ fn manifest(nodes: &[(&str, Role)], hops: &[Hop]) -> Manifest {
     }
 }
 
-/// The graph of `agent-docs/cells.md` section 3.1,
+/// The graph of a model served in cells (docs/src/concepts/cells.md),
 /// `Http => Pre { Route { Model { Engine => Detok } } }`, with its roles
 /// and types, and with `forward` and `backward` stages added to Route's
 /// hop. `gdl-syntax`'s `tests/classes.rs` parses the same graph from its
@@ -114,7 +114,7 @@ fn both(
     [parsed, built]
 }
 
-/// The segments of `agent-docs/cells.md` section 3.2, with room for the
+/// The segments of that graph, one per stage (docs/src/concepts/cells.md), with room for the
 /// stages the counterexamples add: Post and Tok in B, Fix in C.
 const CELL_SEGMENTS: Segments = &[
     ("A", &["Http"]),

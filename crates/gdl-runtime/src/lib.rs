@@ -6,7 +6,7 @@
 //! graph, and the generated segment crates depend on this crate, which
 //! re-exports the `gdl` it was built with as [`gdl`].
 //!
-//! The design and its rulings are in `agent-docs/plan.md`.
+//! The design is described in the book under `docs/src`, starting at `docs/src/introduction.md`.
 
 mod binary;
 mod config;

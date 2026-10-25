@@ -380,7 +380,7 @@ const FILE_LIMIT: u64 = 16 << 20;
 
 /// The most one extraction reads in all. The reader's peak is about a
 /// hundred and twenty times a source byte on a crate of messages
-/// (`agent-docs/perf/reader-cost.md`), so this bounds what it stores near
+/// (see docs/src/operations/reader-cost.md), so this bounds what it stores near
 /// two gigabytes. Work that repeats a resolution chain per query is not
 /// bounded by it; the composer's limits on the process that reads an
 /// import bound that.

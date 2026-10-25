@@ -16,7 +16,7 @@
 //! `two-affinity` route it through those selectors. Only the setup named
 //! is built. `requests sizes 0` prints the size of the front's call future
 //! over one, two, and three segments: a larger future is moved whole on
-//! every request. See `agent-docs/perf/benchmarking.md` for the method.
+//! every request. See docs/src/operations/benchmarking.md for the method.
 
 #![allow(missing_docs)]
 

@@ -357,7 +357,7 @@ where
         // The root's visit, when this hop's outer end is the source, noted
         // at each exit of this one function. A wrapping function would put
         // this future inside another, and moving it whole cost a request
-        // 8,000 instructions (`agent-docs/perf/m21-metrics.md`).
+        // 8,000 instructions (see docs/src/operations/feature-costs.md).
         let called = core.figures.source.map(|figures| (figures, Instant::now()));
         // As in local composition: every attempt spends cooperative budget.
         tokio::task::coop::consume_budget().await;

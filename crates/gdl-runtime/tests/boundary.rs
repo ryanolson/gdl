@@ -389,7 +389,7 @@ async fn a_selector_sees_only_the_chosen_cells_instances() {
 }
 
 /// A boundary selector's lease is held while the response it chose for is
-/// open, and released when the caller drops it (ruling 157).
+/// open, and released when the caller drops it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_boundary_selectors_lease_lives_as_long_as_the_response() {
     let spec = spec_of(placement().route("B", RequestRouter::Selector("recording".into())));

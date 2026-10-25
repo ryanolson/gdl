@@ -13,7 +13,7 @@
 //! `gdl-runtime`. A node crate depends on this crate alone, so it
 //! does not link the runtime's transport.
 //!
-//! The design and its rulings are in `agent-docs/plan.md`.
+//! The design is described in the book under `docs/src`, starting at `docs/src/introduction.md`.
 
 mod codec;
 mod compose;

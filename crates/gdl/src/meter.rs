@@ -18,7 +18,7 @@
 //! is scraped. A prometheus metric is one atomic that every thread
 //! touches: measured on the laptop, 32 requests in flight on four workers
 //! took 27% longer with one per figure, against 4% for one request at a
-//! time (`agent-docs/perf/m21-metrics.md`). Nothing is counted per item.
+//! time (see docs/src/operations/feature-costs.md). Nothing is counted per item.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{

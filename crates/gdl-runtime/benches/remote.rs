@@ -18,7 +18,7 @@
 //! - **Metrics:** the reference rows again with the runtime's per-segment
 //!   figures recorded (`-metrics`), and 32 reference requests at once, each
 //!   a task of its own (`concurrent-32x1-reference`), where a figure every
-//!   thread touches would contend (`agent-docs/perf/m21-metrics.md`).
+//!   thread touches would contend (see docs/src/operations/feature-costs.md).
 //! - **Upload:** a streamed request (`S => D`, `n` blobs of `size` bytes in,
 //!   one count back) over two segments, against the same exchange on velo
 //!   alone: the server mints the input anchor and answers with its ticket.

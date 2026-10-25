@@ -693,7 +693,7 @@ async fn egress_hold_and_wait_at_the_limit_is_refused_not_hung() {
     let events = Events::new();
     // The forward path leaves at C and returns to D on `front`. The outer
     // end holds its input pump's permit while D, on the same instance,
-    // waits for another (ruling 29).
+    // waits for another.
     let placement = Placement::new()
         .segment("front", ["A", "B", "D", "F", "E", "G"])
         .segment("mid", ["C"]);
@@ -1117,7 +1117,7 @@ async fn a_stop_a_relay_asks_for_reaches_the_sink_locally() {
     assert_eq!(got, vec![Ok(1)]);
 }
 
-/// The accepted limit of ruling 26: once a relay's own input has ended, no
+/// The accepted limit on a relay's stop: once a relay's own input has ended, no
 /// stage is left upstream to carry a stop it asks for, and velo gives a
 /// producer no way to signal its consumer outside the data. The stop does
 /// not reach the sink; the deadline ends the request.
