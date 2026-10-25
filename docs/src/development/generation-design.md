@@ -1,1 +1,79 @@
 # Generation design
+
+This chapter records why the language, the manifest, and the generator work as they do, and what was rejected. [Code generation](../concepts/generation.md) says what they do. [Messages and encodings](../concepts/messages.md) covers the message rules.
+
+## A graph file, with one parser
+
+`graph!` takes Rust types, so the compiler is its only resolver, and a mistake appears as a type error in expanded code. A composed graph needs names checked before anything compiles: do the edges agree, does each name mean one message, which line is wrong. A graph file has the body of `graph!` with message names in place of types.
+
+- **One parser.** `graph!` and the generator read the same grammar through `gdl-syntax`. `gdl-macros` is a proc-macro crate, and a crate cannot import from one, so the parser is a separate crate. Two parsers would accept different graphs.
+- **The generated contract writes the resolved path.** It prints the `graph!` body from the checked model, never by replacing names in the file's text, because a node can be named like a message. Each message is a rooted path (`::chat_protocols::Words`), with a keyword segment escaped. The contract hash covers the type as written, so a name that resolves to a different crate changes the hash. A test holds that.
+- **Public paths only.** The contract names a path that code outside the crate can use. A type defined in a private module must be exported, and resolution says so. A contract that named a private path would fail to compile (E0603) in a file the user did not write.
+- **Open.** The graph's author sets `schema`, and the owner of an external protocols crate can change a wire form without that author knowing. Nothing detects it.
+
+## Names the macro introduces
+
+The port types are the caller's tokens, so a name the expansion adds could capture or be captured by them.
+
+- Every name the expansion introduces starts with `__gdl` or `__Gdl`, parameters included. A parameter is a pattern, and a caller's constant of that name would turn into a constant pattern. Each kind of introduced name (slot generics, setter generics, node locals, hop locals) has its own prefix, so a node's name cannot make two equal.
+- The expansion writes the caller's port types only at the invocation's own level, never inside the generated `nodes` module, where `super::` and a node marker change what a type names.
+- Every other path is rooted: `::std`, `::core`, or the path `graph!` passes as `$crate`.
+- The wire probe's method is `__gdl_codec`, not `codec`. The probe call sits in the caller's scope, and a caller's trait with a `codec` method made the call ambiguous.
+- The probe runs only at concrete types. Inside a generic helper, autoref selection would always take the fallback.
+- A diagram uses generated identifiers (`n0`, `s0`) and puts names only in labels. A node may be named like a keyword of either format (`end` in Mermaid), and a segment name may hold any character. In DOT the edge back into each hop's outer end has `constraint=false`, so the response path does not decide the ranks. Mermaid styles a link by its position, so one `linkStyle` line lists the positions of the crossing links.
+
+## A portable model
+
+The composer applies the generator's rules while the user draws. Those rules were in `gdl`, which depends on velo and tokio. They now live in `gdl-model` (serde and toml only): the roles, the manifest, placement, layouts, the crossing report, the diagrams, and the hashes. `gdl-syntax` depends on `gdl-model`, so there is one `Role`, and `syn` stays out of the runtime and every segment binary. `gdl-model` and `gdl-syntax` build for `wasm32-unknown-unknown`.
+
+- **The composer's rules run on the server.** The wasm build stays tested and is not shipped, because `wasm-bindgen-cli` is not available offline. There is still one copy of each rule. A dependency test, which runs everywhere, catches a runtime dependency creeping in. The wasm build test runs when the target is installed and says how to add it when it is not.
+- **`gdl-message` does not build for wasm.** `linkme` has no wasm support, so the portable crates must not depend on it. The generator depends on `gdl-model`, not `gdl`, so it builds without the runtime.
+
+## A graph spec compiles nothing
+
+The manifest of a contract spec comes from compiling the contract, because the macro produces it. A server that cannot build a crate that needs CUDA could then not build any contract that names one of its messages. For a graph spec the manifest is built from the graph file, the resolution, and the reader's wire capability and encoding. The builder spells each type as the compiler prints a rooted path, because the hash covers that spelling.
+
+- **Rejected: a token walk that `graph!` would share.** It would remove the second copy of the spelling. It would also risk the hashes of contracts that name types other than messages, which `graph!` spells as the compiler does. The model's builder writes only message paths and `()`, whose spelling it controls. A test compiles the generated contract and holds its manifest, hash included, equal to the model's.
+- **Accepted regression.** The reader decides wire capability, not the probe. If it misses a type's serde impls, for example impls that a macro writes, the generator refuses a cut that would work. The opposite error is covered by the crossing assertions, which fail the segment's build and name the crossing.
+- **The dump program.** A contract spec still builds a throwaway program that depends on the contract and prints the manifest as TOML, so the program needs no dependency but the contract. Every dump in a target directory builds the same program path. A private source directory per run did not stop a concurrent dump from replacing the program between its build and its run. A lock file in the target directory (`gdl-gen/dump.lock`) is now held from writing the program until it has run, with one fixed source path under the lock. A test holds the lock and checks a second dump waits.
+
+## Crates, not Cargo features
+
+Native link requirements apply whenever a crate is a dependency, and Cargo unifies features across packages built together. A segment that should not link an implementation's native library cannot be protected by a feature. Separate implementation crates, one set per segment crate, are the only reliable isolation. A sentinel crate stands in for a heavy native dependency of the engine in `examples/chat`, and a test checks that only the engine segment's dependency tree contains it.
+
+Emitted code is checked only when a generated crate builds. The segment `main` once named `Arc` without importing it, and no test built the crate. The lifecycle every `main` repeats is therefore one runtime function, tested once. [Lifecycle design](lifecycle-design.md) has the rest.
+
+## Hub discovery on request
+
+Hub discovery brings the hub client and its HTTP stack. Only a spec with a `[deployment]` table, or `compose`, asks the generated crates for the `hub` feature. An export without one carries no hub client.
+
+## Export
+
+- **One crate per segment, each its own workspace.** A shared workspace would unify features and resolve one dependency set for all segments, which is the failure above. The cost is one `cargo build` per segment. `build-all.sh` runs them into one `CARGO_TARGET_DIR` so they share a cache.
+- **Dependencies as the spec gives them.** Versions and revisions stay as written. A directory becomes an absolute path. Which crate is inside the archive is decided by what was generated, never by a path's place on disk. Rejected: vendoring, which breaks crates that inherit from their workspace, and refusing directories, which makes export useless for local development.
+- **Reproducible bytes.** A `.tar.gz` with sorted entries, zero times and owners, and a gzip header without a time. Two exports of one spec can then be tested by equality, and are the same on every machine.
+- **An empty `[workspace]` in each manifest.** An archive expanded inside another workspace must still build.
+- **No lockfile.** The first build writes one per segment. The cost is that images built later can resolve newer dependencies. Pinning is not done.
+- **`export` is its own command.** It renders in memory with no temporary directory, so each command has one path policy.
+- **`gdl` by `git` and `rev`.** gdl is not published, and an archive that a server writes must name it from anywhere.
+
+### Images
+
+An image needs everything in its build context. A directory on the exporting machine is not in the context, so an archive gets Dockerfiles only when gdl and every listed crate can be fetched anywhere, by a version or a revision. A contract spec's contract is a directory, so such a spec never gets them. The Dockerfile builds in the Rust image and runs the binary in a slim Debian image. The runtime image may need more than the binary, such as CA certificates for TLS, which a first real build will show. Publishing is not built: the registry, the credentials, and whether to push at all are open.
+
+An earlier Compose design copied non-ignored files of a Git worktree into the bundle, and kept the original absolute path inside the builder so path dependencies resolved. It was replaced. A local source does not travel to a Docker host, and a bundle should hold only generated files. Deploy now accepts only Git or crates.io packages, and names the local ones to re-import.
+
+## Encodings
+
+Each application message selects named MessagePack (the default), positional MessagePack, or JSON. The envelope version is 3, which separates this wire contract from earlier builds.
+
+- **Named maps are the default** because they keep an omitted optional field, including in nested structs. Positional arrays stay opt-in because they need a fixed layout, and the wire probe checks serde traits, not that each value round-trips.
+- **One parser** reads the annotation for the derive and for the source reader, so the catalogue, resolution, exports, and manifests carry the same encoding.
+- **The hash covers the encoding and its revision**, so a codec change cannot meet a peer that expects another one.
+- **A streamed request selects head and items apart**, by syntax.
+- **Typed selectors take the head's encoding from the edge's codec,** including when the destination slot is absent.
+- **Edges pick monomorphized function pointers once.** No item pays for a lookup or a boxed value.
+
+## Service clients
+
+A service with several entries gets one typed client for each entry. `Client` erases the generated pipeline type at the service boundary, which adds one boxed future to each public call. Pipeline stages keep their concrete types. This is a construction and API choice, not a performance claim. The composer lowers each enabled endpoint to a public typed source root followed by ordinary graph nodes, so the compiler and the runtime check the topology the cutter shows. [Hosted frontends](../guides/frontends.md) has the user-facing form.
