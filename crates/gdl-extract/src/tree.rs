@@ -39,9 +39,21 @@ pub(crate) struct Module {
     uses_named: HashMap<String, Vec<usize>>,
     /// The uses that are globs, in order.
     globs: Vec<usize>,
-    /// The names of the traits it declares, of which the tree keeps
-    /// nothing else: a local `trait Default` hides the prelude's.
+    /// The names of the traits and trait aliases it declares: a local
+    /// `trait Default` hides the prelude's.
     others: HashSet<String>,
+    /// The traits it declares, which a path can resolve to, as a cell
+    /// policy's trait does.
+    pub(crate) traits: Vec<TraitDef>,
+    traits_named: HashMap<String, Vec<usize>>,
+}
+
+/// A trait a module declares: its name and visibility, all a path to it
+/// needs.
+#[derive(Clone)]
+pub(crate) struct TraitDef {
+    pub(crate) name: String,
+    pub(crate) vis: Vis,
 }
 
 /// A struct, an enum, a union, or a type alias.
@@ -302,6 +314,8 @@ impl Module {
             uses_named: HashMap::new(),
             globs: Vec::new(),
             others: HashSet::new(),
+            traits: Vec::new(),
+            traits_named: HashMap::new(),
         }
     }
 
@@ -317,6 +331,11 @@ impl Module {
     /// The types named `name`, in order.
     pub(crate) fn types_named(&self, name: &str) -> &[usize] {
         self.types_named.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// The traits named `name`, in order.
+    pub(crate) fn traits_named(&self, name: &str) -> &[usize] {
+        self.traits_named.get(name).map_or(&[], Vec::as_slice)
     }
 
     /// The uses that bind `name`, in order.
@@ -764,9 +783,17 @@ impl Reader<'_> {
                     }
                 }
                 Item::Trait(t) => {
-                    krate.modules[module]
-                        .others
-                        .insert(t.ident.unraw().to_string());
+                    let name = t.ident.unraw().to_string();
+                    let m = &mut krate.modules[module];
+                    m.others.insert(name.clone());
+                    m.traits_named
+                        .entry(name.clone())
+                        .or_default()
+                        .push(m.traits.len());
+                    m.traits.push(TraitDef {
+                        name,
+                        vis: Vis::of(&t.vis),
+                    });
                 }
                 Item::TraitAlias(t) => {
                     krate.modules[module]
@@ -789,6 +816,8 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
         Item::ExternCrate(i) => &i.attrs,
         Item::Impl(i) => &i.attrs,
         Item::Mod(i) => &i.attrs,
+        Item::Trait(i) => &i.attrs,
+        Item::TraitAlias(i) => &i.attrs,
         _ => &[],
     }
 }

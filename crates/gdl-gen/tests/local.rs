@@ -890,3 +890,44 @@ fn the_http_example_answers_from_a_local_bundle() {
         (started.elapsed() - built).as_secs_f64()
     );
 }
+
+/// A spec that binds a cell policy by path: with `--local`, the chooser's
+/// image builds the policy's crate from the context, and only the chooser
+/// depends on it; without, the bundle is refused and names the crate, as
+/// a node crate by path is.
+#[test]
+fn a_local_bundle_builds_a_bound_policy_into_its_chooser() {
+    let spec = spec("crates/gdl-gen/tests/fixtures/policy/gdl.toml");
+    let fleet = gdl_model::Fleet::from_toml(
+        "[class.global]\nready = { front = 1 }\n[class.model]\nready = { model = 1 }\n\
+         [cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+         [cell.llama-01]\nclass = \"model\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n",
+    )
+    .expect("a fleet");
+    let compose = |sources| {
+        gdl_gen::compose_files(
+            &spec,
+            Some(&fleet),
+            &root().join("target/gdl-local-policy"),
+            &target("gdl-gen-tests"),
+            sources,
+        )
+    };
+    let files = compose(gdl_gen::Sources::Local).expect("a bundle");
+    let manifest = &files[Path::new("front/Cargo.toml")];
+    assert!(
+        manifest.contains(
+            "policy-router = { path = \"../../../crates/gdl-gen/tests/fixtures/policy/router\" }"
+        ),
+        "{manifest}"
+    );
+    assert!(
+        files[Path::new("front/src/lib.rs")]
+            .contains("builder.cell_policy(\"by_model\", policy)?;")
+    );
+    assert!(!files[Path::new("model/Cargo.toml")].contains("policy-router"));
+    let refused = compose(gdl_gen::Sources::Fetched)
+        .expect_err("a crate by path")
+        .to_string();
+    assert!(refused.contains("policy-router"), "{refused}");
+}

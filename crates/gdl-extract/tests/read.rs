@@ -1397,3 +1397,76 @@ fn an_alias_of_an_argument_the_reader_cannot_name_is_left_out_alone() {
         skipped[0].1
     );
 }
+
+/// A crate's cell policies, each with what it reads of the request's
+/// head: the message whole, no head, its bytes, or a projection of it and
+/// the message its derive names. A policy no segment could name, one not
+/// reached from the crate root or a generic one, is left out, and the
+/// crate is read without a problem. An impl of a local trait of gdl's
+/// trait's name, also one a local module named `gdl` holds, is no policy
+/// at all, even after a glob of gdl; the trait reached through a parent's
+/// `use` or rename of it, or through `use gdl::{self}`, is gdl's.
+#[test]
+fn a_crate_offers_its_cell_policies_with_their_heads() {
+    use gdl_extract::PolicyHead;
+
+    let extraction = workspace().extract("read-policies").expect("package");
+    clean(&extraction);
+    let offer = &extraction.offer;
+    let words = "read-protocols 0.0.0 read_protocols::Words".to_string();
+    let policies: Vec<(&str, &str, String)> = offer
+        .policies
+        .iter()
+        .map(|p| {
+            let head = match &p.head {
+                PolicyHead::Message(of) => format!("message {}", origin(of)),
+                PolicyHead::Unit => "unit".to_string(),
+                PolicyHead::Encoded => "encoded".to_string(),
+                PolicyHead::Projected { projection, of } => {
+                    format!("projected {projection} of {}", origin(of))
+                }
+            };
+            (p.name.as_str(), p.ty.as_str(), head)
+        })
+        .collect();
+    assert_eq!(
+        policies,
+        [
+            ("Bytes", "read_policies::Bytes", "encoded".to_string()),
+            (
+                "FromParent",
+                "read_policies::FromParent",
+                "unit".to_string()
+            ),
+            ("Globbed", "read_policies::Globbed", "encoded".to_string()),
+            (
+                "Parted",
+                "read_policies::Parted",
+                format!("projected read_policies::Part of {words}")
+            ),
+            ("Renamed", "read_policies::Renamed", "encoded".to_string()),
+            (
+                "ThroughCrate",
+                "read_policies::ThroughCrate",
+                "unit".to_string()
+            ),
+            ("Unit", "read_policies::Unit", "unit".to_string()),
+            ("Whole", "read_policies::Whole", format!("message {words}")),
+        ]
+    );
+    let skipped: Vec<&str> = offer
+        .skipped_policies
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(
+        skipped,
+        ["Generic", "Hidden"],
+        "{:?}",
+        offer.skipped_policies
+    );
+    assert!(offer.skipped.is_empty(), "{:?}", offer.skipped);
+    // A catalogue entry keeps them.
+    let read = gdl_extract::Offer::from_toml(&offer.to_toml()).expect("an entry");
+    assert_eq!(&read, offer);
+}

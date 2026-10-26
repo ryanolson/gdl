@@ -228,13 +228,14 @@ impl Bundle {
             .chain(
                 spec.bind
                     .values()
+                    .chain(spec.cell_policies.values())
                     .filter(|binding| matches!(binding.source, CrateSource::Path(_)))
                     .map(|binding| binding.package.as_str()),
             )
             .collect();
         if !local.is_empty() && sources == Sources::Fetched {
             return Err(Error::new(format!(
-                "Deploy requires Git or crates.io node and message packages. Re-import these local packages from Git or crates.io: {}",
+                "Deploy requires Git or crates.io node, message, and cell policy packages. Re-import these local packages from Git or crates.io: {}",
                 local.join(", ")
             )));
         }

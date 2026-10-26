@@ -37,7 +37,7 @@ fn wire_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usize
     match ty {
         // Each primitive, and `()`, is a wire type.
         Ty::Prim(_) | Ty::Unit => return true,
-        Ty::Param(_) | Ty::Def(Def::Module(..), _) => return false,
+        Ty::Param(_) | Ty::Def(Def::Module(..) | Def::Trait(..) | Def::Opaque, _) => return false,
         Ty::Std(std, args) => {
             return match std {
                 Std::String => true,
@@ -350,7 +350,7 @@ fn defaults_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: u
     let (krate, def, args) = match ty {
         // Each primitive, and `()`, is `Default`.
         Ty::Prim(_) | Ty::Unit => return true,
-        Ty::Param(_) | Ty::Def(Def::Module(..), _) => return false,
+        Ty::Param(_) | Ty::Def(Def::Module(..) | Def::Trait(..) | Def::Opaque, _) => return false,
         // Each is `Default` whatever it holds, but a box: it holds a
         // default value.
         Ty::Std(Std::Box, args) => return defaults_at(resolver, impls, &args[0], depth + 1),

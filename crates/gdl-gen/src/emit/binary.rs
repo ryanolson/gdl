@@ -122,6 +122,12 @@ impl Unit<'_> {
                 format!("optional: {}'s Build::Config", node.name),
             ));
         }
+        for (name, _) in &self.policies {
+            rows.push((
+                format!("[cell_policy.{name}]"),
+                format!("optional: cell policy {name}'s Build::Config"),
+            ));
+        }
         if frontend.is_some() {
             rows.push((
                 "[frontend]".to_string(),
@@ -197,7 +203,7 @@ impl Unit<'_> {
         let hosted = self.hosted();
         let frontend = self.frontend();
         let service = self.service();
-        let mut text = settings_types(&hosted, frontend, service);
+        let mut text = settings_types(&hosted, frontend, service, !self.policies.is_empty());
         let built = Built::new(&hosted, frontend, service);
         if built.extra() {
             let _ = writeln!(text);
@@ -274,7 +280,10 @@ impl Unit<'_> {
         built: &Built,
     ) -> String {
         let mut text = String::new();
-        let takes = !hosted.is_empty() || frontend.is_some() || service.is_some();
+        let takes = !hosted.is_empty()
+            || frontend.is_some()
+            || service.is_some()
+            || !self.policies.is_empty();
         let _ = writeln!(
             text,
             "    async fn build(settings: Settings, {}: &gdl_runtime::Builder) -> Result<{}, gdl_runtime::Failure> {{",
@@ -287,6 +296,9 @@ impl Unit<'_> {
         }
         if service.is_some() {
             fields.push("mut adapter");
+        }
+        if !self.policies.is_empty() {
+            fields.push("mut cell_policy");
         }
         let _ = writeln!(
             text,
@@ -333,12 +345,45 @@ impl Unit<'_> {
                 );
             }
         }
+        text.push_str(&self.policies_built());
         if built.extra() {
             let _ = writeln!(text, "        Ok(Hosts {{ {} }})", built.fields.join(", "));
         } else {
             let _ = writeln!(text, "        Ok(nodes)");
         }
         let _ = writeln!(text, "    }}");
+        text
+    }
+
+    /// Each cell policy this segment chooses cells by, built from its
+    /// settings table and registered under its name. The policy is moved
+    /// into the registration, so it is ready before it is registered, and
+    /// the instance announces itself only after `build`.
+    fn policies_built(&self) -> String {
+        let mut text = String::new();
+        if self.policies.is_empty() {
+            return text;
+        }
+        let names: Vec<&str> = self.policies.iter().map(|(name, _)| *name).collect();
+        let _ = writeln!(text, "        let policies: &[&str] = &{names:?};");
+        let _ = writeln!(
+            text,
+            "        if let Some(unknown) = cell_policy.keys().find(|key| !policies.contains(&key.as_str())) {{ return Err(format!(\"[cell_policy.{{unknown}}]: this segment chooses cells by no policy of that name\").into()); }}"
+        );
+        for (name, bind) in &self.policies {
+            let _ = writeln!(text, "        {{");
+            let _ = writeln!(
+                text,
+                "            let policy = builder.build::<::{}>({name:?}, cell_policy.remove({name:?})).await?;",
+                rooted(&bind.ty)
+            );
+            let _ = writeln!(
+                text,
+                "            gdl_runtime::gdl::Build::ready(&policy).await?;"
+            );
+            let _ = writeln!(text, "            builder.cell_policy({name:?}, policy)?;");
+            let _ = writeln!(text, "        }}");
+        }
         text
     }
 
@@ -555,6 +600,7 @@ fn settings_types(
     hosted: &[Hosted<'_>],
     frontend: Option<&Bind>,
     service: Option<&ServiceBinding>,
+    policies: bool,
 ) -> String {
     let mut text = String::new();
     let _ = writeln!(
@@ -579,6 +625,14 @@ fn settings_types(
             "    adapter: std::collections::BTreeMap<String, toml::Table>,"
         );
         keys.push("adapter");
+    }
+    if policies {
+        let _ = writeln!(text, "    #[serde(default)]");
+        let _ = writeln!(
+            text,
+            "    cell_policy: std::collections::BTreeMap<String, toml::Table>,"
+        );
+        keys.push("cell_policy");
     }
     let _ = writeln!(text, "}}");
     let _ = writeln!(text);

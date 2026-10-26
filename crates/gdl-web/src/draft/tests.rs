@@ -36,7 +36,9 @@ fn catalog(dir: &std::path::Path) -> Catalog {
             ],
             exports: Vec::new(),
             nodes: Vec::new(),
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         },
         Offer {
             package: "nodes".into(),
@@ -65,7 +67,9 @@ fn catalog(dir: &std::path::Path) -> Catalog {
                     },
                 ],
             }],
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         },
     ] {
         catalog
@@ -146,7 +150,9 @@ fn a_crate_from_another_registry_is_refused() {
             messages: Vec::new(),
             exports: Vec::new(),
             nodes: Vec::new(),
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         },
     };
     let mut problems = Vec::new();
@@ -183,7 +189,9 @@ fn two_messages_of_one_name_are_named_apart_and_pinned() {
             }],
             exports: Vec::new(),
             nodes: Vec::new(),
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         };
         catalog
             .add(Entry {
@@ -276,7 +284,9 @@ fn a_node_two_crates_offer_is_pinned() {
             ty: "cuda::Engine".into(),
             ..engine
         }],
+        policies: Vec::new(),
         skipped: Vec::new(),
+        skipped_policies: Vec::new(),
     };
     catalog
         .add(Entry {
@@ -364,7 +374,9 @@ fn a_message_exported_only_by_a_facade_is_composed() {
         messages,
         exports,
         nodes,
+        policies: Vec::new(),
         skipped: Vec::new(),
+        skipped_policies: Vec::new(),
     };
     for offer in [
         offer(
@@ -494,7 +506,9 @@ fn an_instantiation_an_alias_offers_is_composed_by_the_alias_name() {
         messages,
         exports,
         nodes,
+        policies: Vec::new(),
         skipped: Vec::new(),
+        skipped_policies: Vec::new(),
     };
     for offer in [
         offer(
@@ -626,7 +640,9 @@ fn a_message_no_crate_defines_or_exports_is_named() {
         messages,
         exports: Vec::new(),
         nodes,
+        policies: Vec::new(),
         skipped: Vec::new(),
+        skipped_policies: Vec::new(),
     };
     let port = |port: &str, head: &Origin| PortEntry {
         port: port.into(),
@@ -745,7 +761,9 @@ fn a_node_read_against_an_older_version_says_to_add_it_again() {
             }],
             exports: Vec::new(),
             nodes: Vec::new(),
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         },
         Offer {
             package: "nodes".into(),
@@ -774,7 +792,9 @@ fn a_node_read_against_an_older_version_says_to_add_it_again() {
                     },
                 ],
             }],
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         },
     ] {
         catalog

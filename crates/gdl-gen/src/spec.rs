@@ -36,6 +36,11 @@
 //! crate = "front-nodes"          # the implementation's package
 //! path = "front-nodes"           # relative to this file
 //! type = "front_nodes::Preprocess"
+//!
+//! [cell_policy.by_model]         # optional: a cell policy that a
+//! crate = "router"               # `[cells.<class>] policy` names, and the
+//! path = "router"                # segments that choose cells of that
+//! type = "router::ByModel"       # class build and register
 //! ```
 
 use std::collections::BTreeMap;
@@ -70,6 +75,9 @@ pub struct Spec {
     pub(crate) placements: gdl_model::Placements,
     /// Node name to implementation.
     pub(crate) bind: BTreeMap<String, Bind>,
+    /// Cell policy name to implementation: what the segments that choose
+    /// cells of a class whose policy has that name build and register.
+    pub(crate) cell_policies: BTreeMap<String, Bind>,
     /// What inspecting the bound crates found wrong. Reported with every
     /// other problem when the spec is validated, not one at a time here.
     pub(crate) problems: Vec<String>,
@@ -235,7 +243,7 @@ impl GdlDep {
     }
 }
 
-/// One node's implementation.
+/// One node's implementation, or one cell policy's.
 #[derive(Debug, Clone)]
 pub(crate) struct Bind {
     /// The implementation's package name.
@@ -287,6 +295,8 @@ struct Raw {
     cells: toml::Table,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     bind: BTreeMap<String, RawBind>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    cell_policy: BTreeMap<String, RawBind>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -455,15 +465,31 @@ impl Spec {
             _ => PathBuf::from("."),
         };
         let mut spec = Self::parse(&text, file, &dir)?;
-        let mut problems = Vec::new();
-        for (node, bind) in &mut spec.bind {
+        spec.read_bound_crates();
+        Ok(spec)
+    }
+
+    /// Check that each bound crate's manifest names the package its table
+    /// gives, and take its library's name from it. What is wrong joins the
+    /// spec's problems.
+    fn read_bound_crates(&mut self) {
+        let tables = (self
+            .bind
+            .iter_mut()
+            .map(|(node, bind)| (format!("bind.{node}"), bind)))
+        .chain(
+            self.cell_policies
+                .iter_mut()
+                .map(|(name, bind)| (format!("cell_policy.{name}"), bind)),
+        );
+        for (table, bind) in tables {
             let CrateSource::Path(path) = &bind.source else {
                 continue;
             };
             match crate_names(path) {
-                Err(error) => problems.push(format!("[bind.{node}]: {error}")),
-                Ok(names) if names.package != bind.package => problems.push(format!(
-                    "[bind.{node}]: {} holds package `{}`, not `{}`",
+                Err(error) => self.problems.push(format!("[{table}]: {error}")),
+                Ok(names) if names.package != bind.package => self.problems.push(format!(
+                    "[{table}]: {} holds package `{}`, not `{}`",
                     path.display(),
                     names.package,
                     bind.package
@@ -471,16 +497,15 @@ impl Spec {
                 Ok(names) => bind.lib = names.lib,
             }
         }
-        spec.problems = problems;
-        Ok(spec)
     }
 
     /// A graph spec given as text, with its graph file's text: the spec as
     /// if it were `gdl.toml` in `dir`, which paths in it are relative to.
-    /// Nothing is read from disk but the listed crates.
+    /// Nothing is read from disk but the listed and bound crates.
     pub fn from_text(spec: &str, graph: &str, dir: &Path) -> Result<Self, Error> {
         let text = spec.to_string();
         let mut spec = Self::parse(spec, &dir.join("gdl.toml"), dir)?;
+        spec.read_bound_crates();
         spec.text = Some(text);
         match &mut spec.source {
             Source::Graph(source) => source.text = Some(graph.to_string()),
@@ -551,20 +576,23 @@ impl Spec {
             }
         };
         let placements = gdl_model::Placements::from_toml(text).map_err(located)?;
-        let bind = raw
-            .bind
-            .into_iter()
-            .map(|(node, b)| {
-                let bind = Bind {
-                    // Read from the crate's manifest when the spec is loaded.
-                    lib: b.package.replace('-', "_"),
-                    package: b.package,
-                    source: CrateSource::Path(dir.join(b.path)),
-                    ty: b.ty,
-                };
-                (node, bind)
-            })
-            .collect();
+        let bound = |tables: BTreeMap<String, RawBind>| -> BTreeMap<String, Bind> {
+            tables
+                .into_iter()
+                .map(|(name, b)| {
+                    let bind = Bind {
+                        // Read from the crate's manifest when the spec is loaded.
+                        lib: b.package.replace('-', "_"),
+                        package: b.package,
+                        source: CrateSource::Path(dir.join(b.path)),
+                        ty: b.ty,
+                    };
+                    (name, bind)
+                })
+                .collect()
+        };
+        let bind = bound(raw.bind);
+        let cell_policies = bound(raw.cell_policy);
         Ok(Self {
             deployment: raw.deployment,
             pipeline_names: raw.pipeline_names,
@@ -578,6 +606,7 @@ impl Spec {
             gdl,
             placements,
             bind,
+            cell_policies,
             problems: Vec::new(),
         })
     }

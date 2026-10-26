@@ -127,6 +127,12 @@ impl Lines {
         self.0.recv_timeout(within).expect("a line within the wait")
     }
 
+    /// The next line, within `within`; none once the stream has closed or
+    /// the wait has passed.
+    pub fn try_next(&self, within: Duration) -> Option<String> {
+        self.0.recv_timeout(within).ok()
+    }
+
     /// The first line that contains `text`, within `within`; the lines
     /// before it are dropped.
     pub fn find(&self, text: &str, within: Duration) -> String {

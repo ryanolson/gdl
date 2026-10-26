@@ -107,6 +107,7 @@ pub(crate) fn files(
             regenerate: &regenerate,
             crossings: Vec::new(),
             fed: Vec::new(),
+            policies: crate::policies::registered(spec, layout, segment),
         };
         unit.crossings = crossings(manifest, layout, segment)?;
         // The source's request and item the binary reads and writes as
@@ -370,6 +371,9 @@ struct Unit<'a> {
     /// The source's types its binary reads or writes as JSON lines, and no
     /// crossing asserts: each `gdl_runtime` function that asserts one.
     fed: Vec<&'static str>,
+    /// The bound cell policies it builds and registers, by name: those of
+    /// the classes it chooses cells of.
+    policies: Vec<(&'a str, &'a crate::spec::Bind)>,
     crate_dir: &'a Path,
     out: &'a Path,
     deps: Deps,
@@ -541,6 +545,9 @@ impl Unit<'_> {
             for node in service.nodes() {
                 implementations.insert(&node.bind.package, &node.bind.source);
             }
+        }
+        for (_, policy) in &self.policies {
+            implementations.insert(&policy.package, &policy.source);
         }
         for (package, source) in implementations {
             let source = source.source(&|path| self.path_to(path));

@@ -197,7 +197,9 @@ mod tests {
             }],
             exports: Vec::new(),
             nodes: Vec::new(),
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         };
         let version = spec::CrateSource::Version("0.1.0".into());
         let error = given_offer(&[&offer], "proto", "proto", &version).expect_err("renamed");
@@ -224,7 +226,9 @@ mod tests {
             messages: Vec::new(),
             exports: Vec::new(),
             nodes: Vec::new(),
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         };
         let git = offer("git+https://example.com/proto#abc");
         let registry = offer("registry+https://github.com/rust-lang/crates.io-index");

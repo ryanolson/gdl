@@ -637,6 +637,23 @@ impl Layout {
             .collect()
     }
 
+    /// The classes `segment` chooses cells of: those a hop crosses into
+    /// whose outer end `segment` holds. Each needs its cell policy where
+    /// `segment` runs. Empty for a segment that is not a chooser, and for a
+    /// placement without classes.
+    pub fn chosen_classes(&self, segment: &str) -> BTreeSet<&str> {
+        self.boundaries
+            .iter()
+            .filter(|boundary| {
+                self.hops[boundary.hop]
+                    .forward_runs
+                    .first()
+                    .is_some_and(|outer| outer.segment == segment)
+            })
+            .map(|boundary| boundary.into.as_str())
+            .collect()
+    }
+
     /// Crossings and anchors for one request through each root and, when
     /// the placement has classes, the WAN round trips each class boundary
     /// adds when the request spills to a cell in another region.

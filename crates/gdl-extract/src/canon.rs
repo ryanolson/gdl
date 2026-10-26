@@ -118,7 +118,9 @@ impl Ty {
                     format!("{path}<{}>", args.join(", "))
                 }
             }
-            Self::Def(Def::Module(..), _) => unreachable!("a type is a type"),
+            Self::Def(Def::Module(..) | Def::Trait(..) | Def::Opaque, _) => {
+                unreachable!("a type is a type")
+            }
             Self::Prim(name) => name.clone(),
             Self::Unit => "()".to_string(),
             Self::Param(name) => name.clone(),

@@ -57,6 +57,7 @@ fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
                 ((*node).to_string(), bind)
             })
             .collect(),
+        cell_policies: BTreeMap::new(),
         problems: Vec::new(),
     }
 }
@@ -952,5 +953,178 @@ fn the_spec_reference_names_every_default_with_its_value() {
             "CellSettings::DEFAULT_QUORUM is not in the table",
             "the table's (none) is no default constant"
         ]
+    );
+}
+
+/// `S` in `front`, of class `global`, sends into `D` in `engine`, of class
+/// `model_x`, whose cells `policy` chooses.
+fn classed(policy: &str) -> gdl_model::Placement {
+    gdl_model::Placement::from_toml(&format!(
+        "[segment.front]\nnodes = [\"S\"]\n[segment.engine]\nnodes = [\"D\"]\n\
+         [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
+         [cells.model_x]\npolicy = \"{policy}\"\n"
+    ))
+    .expect("a placement")
+}
+
+/// A policy's binding: its crate, `tiny-router`, and its type.
+fn router(ty: &str) -> Bind {
+    Bind {
+        package: "tiny-router".into(),
+        lib: "tiny_router".into(),
+        source: spec::CrateSource::Path("/work/router".into()),
+        ty: ty.into(),
+    }
+}
+
+/// Only the chooser depends on a bound policy's crate, builds the policy
+/// from its `[cell_policy.<name>]` settings table, and registers it; the
+/// segment it chooses cells for does not know the crate.
+#[test]
+fn only_the_chooser_registers_a_bound_policy() {
+    let mut spec = spec(classed("by_model"), &[("D", "tiny_nodes::Engine")]);
+    spec.cell_policies
+        .insert("by_model".into(), router("tiny_router::ByModel"));
+    let out = Path::new("/out");
+    let files = rendered(&spec, &manifest(), out).expect("rendered");
+    let file = |path: &str| files[Path::new(path)].as_str();
+    assert!(
+        file("front/Cargo.toml").contains("tiny-router = { path = \"../../work/router\" }"),
+        "{}",
+        file("front/Cargo.toml")
+    );
+    let front = file("front/src/lib.rs");
+    for line in [
+        "const KEYS: &'static [&'static str] = &[\"node\", \"cell_policy\"];",
+        ".build::<::tiny_router::ByModel>(\"by_model\", cell_policy.remove(\"by_model\"))",
+        "gdl_runtime::gdl::Build::ready(&policy).await?;",
+        "builder.cell_policy(\"by_model\", policy)?;",
+    ] {
+        assert!(front.contains(line), "{line} in:\n{front}");
+    }
+    assert!(file("front/src/main.rs").contains("[cell_policy.by_model]"));
+    for path in [
+        "engine/Cargo.toml",
+        "engine/src/lib.rs",
+        "engine/src/main.rs",
+    ] {
+        assert!(!file(path).contains("router"), "{path}");
+        assert!(!file(path).contains("cell_policy"), "{path}");
+    }
+}
+
+/// gdl's own policies, and a policy no table binds, generate as they did:
+/// no crate, no settings key, and no registration. A placement may name a
+/// policy that a program registers itself, through the generated library.
+#[test]
+fn an_unbound_policy_generates_no_registration() {
+    for policy in ["home_first", "by_model"] {
+        let spec = spec(classed(policy), &[("D", "tiny_nodes::Engine")]);
+        let files = rendered(&spec, &manifest(), Path::new("/out")).expect("rendered");
+        let front = &files[Path::new("front/src/lib.rs")];
+        assert!(!front.contains("cell_policy"), "{policy}:\n{front}");
+        assert!(front.contains("_builder: &gdl_runtime::Builder"), "{front}");
+    }
+}
+
+/// A chooser that enters two classes by one policy registers it once, as
+/// the builder takes each name once.
+#[test]
+fn a_policy_two_classes_share_is_registered_once() {
+    let node = |name: &str, role, binding: Option<&str>| NodeInfo {
+        name: name.into(),
+        role,
+        binding: binding.map(str::to_string),
+    };
+    let hop = |outer: &str, inner: &str| HopInfo {
+        outer: outer.into(),
+        forward: vec![],
+        inner: inner.into(),
+        backward: vec![],
+        forward_types: vec![TypeInfo::new("Req", true, Default::default())],
+        backward_types: vec![TypeInfo::new("Item", true, Default::default())],
+    };
+    let manifest = Manifest {
+        name: "tiny".into(),
+        schema: 1,
+        nodes: vec![
+            node("S", Role::Source, None),
+            node("A", Role::Sink, Some("a")),
+            node("T", Role::Source, None),
+            node("B", Role::Sink, Some("b")),
+        ],
+        hops: vec![hop("S", "A"), hop("T", "B")],
+    };
+    let placement = gdl_model::Placement::from_toml(
+        "[segment.front]\nnodes = [\"S\", \"T\"]\n[segment.a]\nnodes = [\"A\"]\n[segment.b]\nnodes = [\"B\"]\n\
+         [class.global]\nsegments = [\"front\"]\n[class.model_a]\nsegments = [\"a\"]\n[class.model_b]\nsegments = [\"b\"]\n\
+         [cells.model_a]\npolicy = \"by_model\"\n[cells.model_b]\npolicy = \"by_model\"\n",
+    )
+    .expect("a placement");
+    let mut spec = spec(placement, &[("A", "tiny_nodes::A"), ("B", "tiny_nodes::B")]);
+    spec.cell_policies
+        .insert("by_model".into(), router("tiny_router::ByModel"));
+    let files = rendered(&spec, &manifest, Path::new("/out")).expect("rendered");
+    let front = &files[Path::new("front/src/lib.rs")];
+    assert_eq!(
+        front
+            .matches("builder.cell_policy(\"by_model\", policy)?;")
+            .count(),
+        1,
+        "{front}"
+    );
+}
+
+/// Each table is checked before any crate is read: its name must be one a
+/// placement can use and not gdl's own or a node's, its type must be in its
+/// crate, and some placement must name it.
+#[test]
+fn every_bad_policy_table_is_found() {
+    let cases = [
+        (
+            "By-Model",
+            "tiny_router::ByModel",
+            "[cell_policy.By-Model]: ",
+        ),
+        (
+            "round_robin",
+            "tiny_router::ByModel",
+            "`round_robin` is gdl's own policy",
+        ),
+        (
+            "by_model",
+            "other::ByModel",
+            "type `other::ByModel` is not in crate `tiny_router`",
+        ),
+        ("by_model", "", "[cell_policy.by_model]: `type` is empty"),
+        (
+            "unused",
+            "tiny_router::ByModel",
+            "no `[cells.<class>] policy` names `unused`",
+        ),
+    ];
+    for (name, ty, expected) in cases {
+        let mut spec = spec(classed("by_model"), &[("D", "tiny_nodes::Engine")]);
+        spec.cell_policies.insert(name.into(), router(ty));
+        let error = check(&spec, &manifest()).expect_err(name).to_string();
+        assert!(error.contains(expected), "{name}: {expected} in {error}");
+    }
+    // A node of the policy's name: the builder would build both under it.
+    let mut named = manifest();
+    named.nodes[1].name = "by_model".into();
+    named.hops[0].inner = "by_model".into();
+    let placement = gdl_model::Placement::from_toml(
+        "[segment.front]\nnodes = [\"S\"]\n[segment.engine]\nnodes = [\"by_model\"]\n\
+         [class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n\
+         [cells.model_x]\npolicy = \"by_model\"\n",
+    )
+    .expect("a placement");
+    let mut spec = spec(placement, &[("by_model", "tiny_nodes::Engine")]);
+    spec.cell_policies
+        .insert("by_model".into(), router("tiny_router::ByModel"));
+    let error = check(&spec, &named).expect_err("a node's name").to_string();
+    assert!(
+        error.contains("builds a node or entry adapter `by_model`"),
+        "{error}"
     );
 }

@@ -382,6 +382,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "read-policies"
+version = "0.0.0"
+dependencies = [
+ "gdl",
+ "read-protocols",
+ "serde",
+]
+
+[[package]]
 name = "read-protocols"
 version = "0.0.0"
 dependencies = [

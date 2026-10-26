@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use gdl_extract::{Cargo, Extraction, Workspace};
 
-/// The system allocator, counting per thread the bytes live, their peak,
-/// and the number of allocations. Per thread, so tests that run at once
+/// The system allocator, counting per thread live bytes, their peak,
+/// the allocation count, and total allocated bytes. Per thread, so tests that run at once
 /// do not count each other.
 struct Counting;
 
@@ -25,6 +25,7 @@ thread_local! {
     static LIVE: Cell<isize> = const { Cell::new(0) };
     static PEAK: Cell<isize> = const { Cell::new(0) };
     static COUNT: Cell<u64> = const { Cell::new(0) };
+    static ALLOCATED: Cell<u64> = const { Cell::new(0) };
 }
 
 fn grew(by: isize) {
@@ -39,6 +40,7 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         grew(layout.size() as isize);
         let _ = COUNT.try_with(|count| count.set(count.get() + 1));
+        let _ = ALLOCATED.try_with(|total| total.set(total.get() + layout.size() as u64));
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.alloc(layout) }
     }
@@ -52,6 +54,7 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         grew(new_size as isize - layout.size() as isize);
         let _ = COUNT.try_with(|count| count.set(count.get() + 1));
+        let _ = ALLOCATED.try_with(|total| total.set(total.get() + new_size as u64));
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -60,12 +63,13 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// What one extraction cost: its peak live bytes, its allocations, and how
-/// long it took.
+/// What one extraction cost: peak live bytes, the allocation count and
+/// volume, and elapsed time.
 #[derive(Debug, Clone, Copy)]
 struct Cost {
     peak: isize,
     allocations: u64,
+    allocated: u64,
     elapsed: Duration,
 }
 
@@ -136,6 +140,7 @@ fn extract_beside(
             let cost = Cost {
                 peak: PEAK.with(Cell::get),
                 allocations: COUNT.with(Cell::get),
+                allocated: ALLOCATED.with(Cell::get),
                 elapsed: started.elapsed(),
             };
             let _ = done.send((cost, extraction));
@@ -554,5 +559,27 @@ fn locations_share_their_files_path() {
         "a longer path to the file multiplied the peak by {ratio:.2}: {:?} then {:?}",
         near.0,
         far.0
+    );
+}
+
+#[test]
+fn the_policy_scan_does_not_expand_a_shared_import_prefix_per_name() {
+    let shape = |n: usize| {
+        let path: Vec<String> = (0..n).map(|i| format!("p{i}")).collect();
+        let names: Vec<String> = (0..n).map(|i| format!("n{i}")).collect();
+        vec![(
+            "lib.rs".into(),
+            format!("pub use {}::{{{}}};\n", path.join("::"), names.join(", ")),
+        )]
+    };
+    let (small, problems) = read("policy-prefix-small", &shape(2048));
+    assert!(problems.is_empty(), "{problems:?}");
+    let (large, problems) = read("policy-prefix-large", &shape(4096));
+    assert!(problems.is_empty(), "{problems:?}");
+    let ratio = large.allocated as f64 / small.allocated as f64;
+    eprintln!("shared import prefix: n {small:?}; 2n {large:?}; allocated {ratio:.2}x");
+    assert!(
+        ratio < 3.0,
+        "doubling a shared import prefix and its names multiplies allocated bytes by {ratio:.2}:\n  n: {small:?}\n  2n: {large:?}"
     );
 }

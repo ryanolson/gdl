@@ -6,7 +6,7 @@ The reader serves three callers. `cargo gdl generate`, `check`, and `resolve` re
 
 ## What a crate offers
 
-A crate offers three kinds of entry. Each one comes from a marker in the crate's source. Nothing else is written by hand.
+A crate offers three kinds of entry. Each one comes from a marker in the crate's source. Nothing else is written by hand. It also offers its cell policies, which need no marker.
 
 | Marker | On | Offers |
 |---|---|---|
@@ -18,6 +18,8 @@ A crate offers three kinds of entry. Each one comes from a marker in the crate's
 Each marker has two spellings. A protocols crate depends on `gdl-message` alone and writes `gdl_message::Message` and `gdl_message::export`. A node crate depends on `gdl` and writes `gdl::Message`, `gdl::export`, and `gdl::Node`. Both spellings are the same macro. A proc macro has no `$crate`, so each spelling names its own crate in its expansion.
 
 A node's name is its type's name. Its role is the role trait the type implements: `Sink`, `Forward`, `Backward`, `Operator`, or, for a source, `Frontend` or `Service`. Its ports are that trait's associated types. Each port must name a marked message, `()`, or `gdl::Streamed<H, T>` of those. [Write nodes](../guides/write-nodes.md) gives the rules a node type must follow.
+
+A cell policy is a type that implements `gdl::CellPolicy` and that the crate's root reaches by its name. The reader follows the impl's trait path to its definition, through `use`s, renames, and globs, as it follows a port's type, and takes only gdl's `CellPolicy`. The offer holds the policy's type and its `Head`: a message, `()`, `gdl::Encoded`, or `gdl::Projected<P>` with the message that `P`'s `derive(Projection)` names in `#[gdl(of = ...)]`. The reader leaves out a generic policy and one that the root does not reach, and says why to a spec that names it. A spec's `[cell_policy.<name>]` table names one ([Write a cell policy](../guides/write-a-cell-policy.md)).
 
 The offer also holds, for each node, the graph-visible fields of its `derive(Config)` type, the metrics of its `derive(Metrics)` type, and, for a `Service`, each endpoint of its `derive(Endpoints)` bundle. The reader takes all of these from the derives' attributes. This is why `gdl::ConfigSchema` and `gdl::Metrics` can be implemented only by their derives.
 

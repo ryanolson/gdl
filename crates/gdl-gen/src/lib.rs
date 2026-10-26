@@ -46,6 +46,7 @@ mod nodes;
 mod offers;
 mod output;
 mod paths;
+mod policies;
 mod resolve;
 mod service;
 mod spec;
@@ -142,9 +143,26 @@ fn render_with(
 }
 
 /// `spec` with its graph's nodes bound to the nodes its node crates offer,
-/// in place of the `[bind.*]` tables of a contract spec, which is returned
-/// as it is.
+/// in place of the `[bind.*]` tables of a contract spec, which keeps its
+/// own; and with what is wrong with its cell policies' crates among its
+/// problems.
 fn bound<'s>(
+    spec: &'s Spec,
+    prepared: &Prepared,
+    target: &Path,
+    from: Offers<'_>,
+) -> Result<std::borrow::Cow<'s, Spec>, Error> {
+    let mut spec = bound_nodes(spec, prepared, target, from)?;
+    if !spec.cell_policies.is_empty() {
+        let problems = policies::resolve(&spec, target, from);
+        spec.to_mut().problems.extend(problems);
+    }
+    Ok(spec)
+}
+
+/// `spec` with its graph's nodes bound to the nodes its node crates offer;
+/// a contract spec as it is.
+fn bound_nodes<'s>(
     spec: &'s Spec,
     prepared: &Prepared,
     target: &Path,

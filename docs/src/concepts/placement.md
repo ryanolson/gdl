@@ -87,7 +87,7 @@ With classes, the crossing report also counts the WAN round trips that each boun
 
 A class that a boundary enters can set how the hop's outer end picks a cell, in `[cells.<class>] policy` (`home_first`, for example).
 
-The spec checks only the name's shape. gdl provides `home_first` and `round_robin`, and a deployment can register others ([Write a cell policy](../guides/write-a-cell-policy.md)). A chooser given a name that nothing registers and gdl does not have refuses to launch.
+The placement checks only the name's shape. gdl provides `home_first` and `round_robin`. A spec's `[cell_policy.<name>]` table binds another name to its crate, and a program can register one ([Write a cell policy](../guides/write-a-cell-policy.md)). A chooser given a name that nothing registers and gdl does not have refuses to launch.
 
 ## Layouts
 

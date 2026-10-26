@@ -194,6 +194,13 @@ fn the_recommended_shape_crosses_once_at_the_choosers_hop() {
             "Model, the hop's inner end, is the class's entry"
         );
         assert!(laid.entry_segments("global").is_empty());
+        for (segment, chosen) in [("C", &["model_x"][..]), ("A", &[]), ("D", &[])] {
+            assert_eq!(
+                laid.chosen_classes(segment).into_iter().collect::<Vec<_>>(),
+                chosen,
+                "Route, the hop's outer end, chooses the cells of model_x"
+            );
+        }
         let report = laid.report();
         assert_eq!(report.wan_round_trips(), 1);
         assert_eq!(
@@ -339,6 +346,13 @@ fn two_boundaries_into_one_class_are_not_a_cycle() {
             ["m", "n"]
         );
         assert!(laid.entry_segments("global").is_empty());
+        for (segment, chosen) in [("a", &["model_x"][..]), ("b", &["model_x"]), ("m", &[])] {
+            assert_eq!(
+                laid.chosen_classes(segment).into_iter().collect::<Vec<_>>(),
+                chosen,
+                "{segment}"
+            );
+        }
         assert_eq!(
             laid.report().to_string(),
             "hop 0: 2 crossings, 1 anchors, 1 WAN round trips (global -> model_x)\n\

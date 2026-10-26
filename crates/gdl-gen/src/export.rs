@@ -119,12 +119,14 @@ pub(crate) fn refusals(spec: &Spec, graph: &str) -> Vec<String> {
 
 /// Whether every crate the archive depends on can be fetched anywhere: gdl
 /// and each listed crate by a version or a git revision. A contract spec's
-/// contract is a directory, so it never is.
+/// contract is a directory, so it never is, and neither is a cell policy's
+/// crate, which a spec names by its directory.
 fn portable(spec: &Spec) -> bool {
     let Source::Graph(source) = &spec.source else {
         return false;
     };
     !matches!(spec.gdl, GdlDep::Path(_))
+        && spec.cell_policies.is_empty()
         && source
             .crates
             .iter()

@@ -34,7 +34,9 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
         messages: Vec::new(),
         exports: Vec::new(),
         nodes: Vec::new(),
+        policies: Vec::new(),
         skipped: Vec::new(),
+        skipped_policies: Vec::new(),
     };
     let mut problems = Vec::new();
     let mut impls = Impls::default();
@@ -186,6 +188,9 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
             }
         }
     }
+    let (policies, left_out) = crate::policies::policies(&mut resolver, krate);
+    offer.policies = policies;
+    offer.skipped_policies = left_out;
     offer.messages.sort_by(|a, b| a.name.cmp(&b.name));
     offer.exports.sort_by(|a, b| a.name.cmp(&b.name));
     offer.nodes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -321,7 +326,11 @@ fn node(
         unreachable!("a node is a type");
     };
     let ty_def = &resolver.crates[krate].modules[module].types[index];
-    let (Def::Type(named_krate, ..) | Def::Module(named_krate, _)) = named;
+    let (Def::Type(named_krate, ..) | Def::Module(named_krate, _) | Def::Trait(named_krate, ..)) =
+        named
+    else {
+        unreachable!("a node is named by its type or its alias");
+    };
     let ty = format!("{}::{name}", resolver.crates[named_krate].name);
     let attrs: Vec<syn::Attribute> = ty_def
         .attrs
@@ -678,15 +687,15 @@ fn message_type(
 /// A message a type is. Its wire capability is read where an export
 /// offers it, not here: a port, which needs its identity alone, would
 /// read the serde attributes of every field of its message.
-struct Offered {
-    origin: Origin,
+pub(crate) struct Offered {
+    pub(crate) origin: Origin,
     encoding: gdl_model::Encoding,
 }
 
 /// The message `ty` is, if it is one: a type that derives `Message`, or an
 /// instantiation of a generic one, identified by its generic type's
 /// package and by its type.
-fn offered(resolver: &mut Resolver<'_>, ty: &Ty) -> Result<Option<Offered>, String> {
+pub(crate) fn offered(resolver: &mut Resolver<'_>, ty: &Ty) -> Result<Option<Offered>, String> {
     let Ty::Def(def @ Def::Type(c, m, i), args) = ty else {
         return Ok(None);
     };

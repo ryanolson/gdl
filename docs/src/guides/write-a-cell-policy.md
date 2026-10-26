@@ -1,6 +1,6 @@
 # Write a cell policy
 
-A cell policy chooses the cell of a class that a hand-off goes to, when a hop crosses into that class. This guide writes one that reads a routing hint from the request, tests it without a runtime, registers it, and names it in a placement. [Following and choosing cells](../concepts/cell-routing.md#choosing-a-cell) explains when a policy runs and what gdl's own policies do. Try `round_robin` and `home_first` first: they need no code.
+A cell policy chooses the cell of a class that a hand-off goes to, when a hop crosses into that class. This guide writes one that reads a routing hint from the request, tests it without a runtime, binds it in the spec or registers it, and names it in a placement. [Following and choosing cells](../concepts/cell-routing.md#choosing-a-cell) explains when a policy runs and what gdl's own policies do. Try `round_robin` and `home_first` first: they need no code.
 
 ## 1. Read only what you route by
 
@@ -150,13 +150,48 @@ assert_eq!(ByModel.choose(request, &cells).map(|choice| choice.at()), Some(1));
 
 Both versions of `ByModel` choose `qwen-1` here. The `home_first` version takes no cell whose summary is missing, or has no period (`LoadSummary::default()` has none). `with_excluded`, `with_damped` (a `gdl::Damped`), and `with_turn` set the rest. `crates/gdl/tests/policies.rs` has more.
 
-## 4. Register it
+## 4. Bind it in the spec
 
-In an in-process deployment, add it to the `RuntimeConfig` with `config.cell_policies.add("by_model", ByModel)?`. A chooser launched through a `ProcessConfig` checks the placement's names against that config's `runtime.cell_policies`, so register it there too. In a hand-written `SegmentBinary`, call `builder.cell_policy("by_model", ByModel)?` in `build`. A generated binary chooses cells only by gdl's own policies (see [Known limitations](../operations/limitations.md)).
+For a generated binary, implement `gdl::Build` too: the segment builds the policy from its settings, as it builds a node.
+
+```rust
+use gdl::Build;
+
+#[derive(serde::Deserialize)]
+struct ByModelSettings {}
+
+impl Build for ByModel {
+    type Config = ByModelSettings;
+    type Metrics = ();
+
+    async fn build(_: ByModelSettings, (): ()) -> gdl::Result<Self> {
+        Ok(ByModel)
+    }
+}
+```
+
+Then name its crate and type in the spec, under the name the placement uses:
+
+```toml
+[cell_policy.by_model]
+crate = "router"
+path = "router"
+type = "router::ByModel"
+```
+
+- `cargo gdl check` reads the crate and refuses a type that the crate does not offer as a cell policy. Write the type from the crate's root, as `router::ByModel`, and make it reachable there.
+- Each segment that chooses cells of a class named `by_model` in `[cells.<class>] policy` depends on the crate. No other segment does.
+- That segment builds the policy from the `[cell_policy.by_model]` table of its settings file, or `GDL_CELL_POLICY__BY_MODEL__<KEY>` variables. A table for a policy that the segment does not register stops it at start.
+- The segment waits for the policy's `ready` before it registers it, so before the instance announces itself to its peers.
+- The spec names the crate by its directory. `cargo gdl compose` needs `--local` for it.
+
+## 5. Or register it in code
+
+In an in-process deployment, add it to the `RuntimeConfig` with `config.cell_policies.add("by_model", ByModel)?`. A chooser launched through a `ProcessConfig` checks the placement's names against that config's `runtime.cell_policies`, so register it there too. In a hand-written `SegmentBinary`, call `builder.cell_policy("by_model", ByModel)?` in `build`.
 
 A name is lowercase letters and digits in words joined by single `_`s, starts with a letter, and has at most 64 characters. It cannot be `home_first` or `round_robin`, and it can be registered once.
 
-## 5. Name it in the placement
+## 6. Name it in the placement
 
 ```toml
 [cells.model]

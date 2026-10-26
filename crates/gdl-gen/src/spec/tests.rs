@@ -330,6 +330,55 @@ fn every_bad_binding_is_found() {
     );
 }
 
+/// A `[cell_policy.<name>]` table names a policy's crate and type, as a
+/// `[bind.<node>]` table names a node's, in a contract spec and in a graph
+/// spec; its crate must be the package the table names.
+#[test]
+fn a_spec_binds_a_cell_policy_to_its_crate() {
+    let temp = contract_dir("policy");
+    let dir = temp.path();
+    for (path, package) in [("router", "policy-router"), ("other", "other-router")] {
+        std::fs::create_dir_all(dir.join(path)).expect("dir");
+        std::fs::write(
+            dir.join(path).join("Cargo.toml"),
+            format!("[package]\nname = \"{package}\"\n[lib]\nname = \"router\"\n"),
+        )
+        .expect("write");
+    }
+    let table = "[cell_policy.by_model]\ncrate = \"policy-router\"\npath = \"router\"\ntype = \"router::ByModel\"\n";
+    for head in [
+        "[contract]\npath = \"contract\"\n",
+        "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"p@1.0.0\"]\n",
+    ] {
+        let file = dir.join("gdl.toml");
+        std::fs::write(&file, format!("{head}[gdl]\nversion = \"0.1\"\n{table}")).expect("write");
+        let spec = Spec::load(&file).expect("spec");
+        assert!(spec.problems.is_empty(), "{:?}", spec.problems);
+        let policy = &spec.cell_policies["by_model"];
+        assert_eq!(policy.package, "policy-router");
+        assert_eq!(policy.lib, "router", "the library its manifest names");
+        assert_eq!(policy.source, CrateSource::Path(dir.join("router")));
+        assert_eq!(policy.ty, "router::ByModel");
+    }
+    let file = dir.join("gdl.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "[contract]\npath = \"contract\"\n[gdl]\nversion = \"0.1\"\n{}",
+            table.replace("path = \"router\"", "path = \"other\"")
+        ),
+    )
+    .expect("write");
+    let spec = Spec::load(&file).expect("the spec itself parses");
+    assert_eq!(spec.problems.len(), 1, "{:?}", spec.problems);
+    assert!(
+        spec.problems[0].starts_with("[cell_policy.by_model]: ")
+            && spec.problems[0].ends_with("holds package `other-router`, not `policy-router`"),
+        "{}",
+        spec.problems[0]
+    );
+}
+
 #[test]
 fn gdl_needs_one_source() {
     let temp = contract_dir("gdl");
@@ -694,7 +743,8 @@ fn a_spec_reads_back_what_it_writes() {
         [pipeline_names]\nA = \"chat\"\n";
     let contract = "[contract]\npath = \"contract\"\nmodule = \"chat_contract::graph\"\n\
         [gdl]\nversion = \"0.1\"\n[segment.front]\nnodes = [\"A\"]\n\
-        [bind.A]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::A\"\n";
+        [bind.A]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::A\"\n\
+        [cell_policy.by_model]\ncrate = \"router\"\npath = \"router\"\ntype = \"router::ByModel\"\n";
     // The graph spec's placement as two layouts' tables.
     let layouts = {
         let (head, tail) = graph.split_at(graph.find("[segment.front]").expect("segments"));
@@ -744,6 +794,7 @@ fn a_spec_reads_back_what_it_writes() {
         "pipeline_names",
         "pin",
         "bind",
+        "cell_policy",
         "nodes",
         "contract",
     ] {

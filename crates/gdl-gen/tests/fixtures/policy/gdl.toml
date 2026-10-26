@@ -1,0 +1,36 @@
+# The source in the global class and the model in a class of its own: a
+# chooser in `front` picks a model cell by the policy `by_model`, which
+# the crate `policy-router` implements.
+[graph]
+path = "policy.gdl"
+
+[messages]
+crates = ["messages"]
+
+[nodes]
+crates = ["nodes"]
+
+[gdl]
+path = "../../../../gdl-runtime"
+
+[deployment]
+
+[segment.front]
+nodes = ["Front"]
+
+[segment.model]
+nodes = ["Model"]
+
+[class.global]
+segments = ["front"]
+
+[class.model]
+segments = ["model"]
+
+[cells.model]
+policy = "by_model"
+
+[cell_policy.by_model]
+crate = "policy-router"
+path = "router"
+type = "policy_router::ByModel"

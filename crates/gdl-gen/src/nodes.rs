@@ -374,7 +374,9 @@ mod tests {
             messages: Vec::new(),
             exports: Vec::new(),
             nodes,
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         }
     }
 
@@ -687,7 +689,9 @@ mod frontend_tests {
             messages: vec![],
             exports: vec![],
             nodes: vec![node],
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         };
         let (bindings, problems) = bind(
             &graph,

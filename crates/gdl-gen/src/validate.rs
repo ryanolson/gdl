@@ -111,6 +111,7 @@ pub(crate) fn validate(
 ) -> Result<BTreeMap<String, gdl_model::Layout>, Error> {
     let mut problems = spec.problems.clone();
     let (layouts, placed) = unbound(spec, manifest);
+    problems.extend(crate::policies::problems(spec, manifest, &layouts));
     let entry_nodes = spec.service.as_ref().map(|s| s.nodes()).unwrap_or_default();
     let entry_names: BTreeSet<_> = entry_nodes.iter().map(|n| n.name.as_str()).collect();
     let bindings: BTreeMap<_, _> = spec
@@ -201,8 +202,12 @@ pub(crate) fn validate(
                 }
             }
         }
+        let layout = layouts.get(laid.name).and_then(Option::as_ref);
         for (segment, nodes) in laid.placement.segments() {
             let at = laid.table(&format!("segment.{segment}"));
+            let policies = layout
+                .map(|layout| crate::policies::registered(spec, layout, segment))
+                .unwrap_or_default();
             let mut hosted: BTreeSet<&str> = nodes.iter().map(String::as_str).collect();
             if hosted.contains(source_name) {
                 hosted.extend(entry_names.iter().copied());
@@ -226,6 +231,13 @@ pub(crate) fn validate(
                 problems.push(format!(
                     "[{at}]: segment `{segment}` becomes package `{package}`, the contract's name"
                 ));
+            }
+            for (name, bind) in &policies {
+                if package == bind.package {
+                    problems.push(format!(
+                        "[{at}]: segment `{segment}` becomes package `{package}`, the name of [cell_policy.{name}]'s crate"
+                    ));
+                }
             }
             for (node, bind) in &bindings {
                 if package == bind.package {
@@ -277,6 +289,13 @@ pub(crate) fn validate(
                     );
                 }
             }
+            for (_, bind) in &policies {
+                see(
+                    &bind.lib,
+                    format!("package `{}`", bind.package),
+                    &mut problems,
+                );
+            }
             // Cargo names dependencies by package: each key in the generated
             // manifest must be distinct too, whatever the libraries are called.
             let mut keys: BTreeMap<String, String> = BTreeMap::new();
@@ -308,6 +327,25 @@ pub(crate) fn validate(
                     );
                 }
             }
+            // A policy's crate may implement a hosted node or another policy
+            // too: it is one dependency then, whose sources are compared
+            // below.
+            for (name, bind) in &policies {
+                let hosts_it = bindings
+                    .iter()
+                    .any(|(n, b)| hosted.contains(n.as_str()) && b.package == bind.package);
+                let first = policies
+                    .iter()
+                    .find(|(_, b)| b.package == bind.package)
+                    .map_or(*name, |(n, _)| *n);
+                if !hosts_it {
+                    key(
+                        &bind.package,
+                        format!("[cell_policy.{first}]'s package"),
+                        &mut problems,
+                    );
+                }
+            }
             match packages.insert(package.clone(), (laid.name, segment)) {
                 Some((layout, other)) if layout == laid.name => problems.push(format!(
                     "[{at}]: segments `{other}` and `{segment}` both become package `{package}`"
@@ -319,7 +357,25 @@ pub(crate) fn validate(
             }
         }
     }
-    let mut sources: BTreeMap<&str, (spec::CrateSource, &str)> = BTreeMap::new();
+    let mut sources: BTreeMap<String, (spec::CrateSource, String)> = BTreeMap::new();
+    let mut give = |table: String, bind: &'_ spec::Bind, problems: &mut Vec<String>| {
+        let path = match &bind.source {
+            spec::CrateSource::Path(path) => spec::CrateSource::Path(
+                dump::absolute(path).unwrap_or_else(|_| paths::normalize(path)),
+            ),
+            version => version.clone(),
+        };
+        match sources.get(bind.package.as_str()) {
+            Some((first, other)) if *first != path => problems.push(format!(
+                "{other} and {table} give package `{}` two sources",
+                bind.package
+            )),
+            Some(_) => {}
+            None => {
+                sources.insert(bind.package.clone(), (path, table));
+            }
+        }
+    };
     for (node, bind) in &bindings {
         if manifest.node(node).is_some_and(|n| n.is_identity()) {
             problems.push(format!(
@@ -353,24 +409,10 @@ pub(crate) fn validate(
                 Some(_) => {}
             }
         }
-        let path = match &bind.source {
-            spec::CrateSource::Path(path) => spec::CrateSource::Path(
-                dump::absolute(path).unwrap_or_else(|_| paths::normalize(path)),
-            ),
-            version => version.clone(),
-        };
-        match sources.get(bind.package.as_str()) {
-            Some((first, other)) if *first != path => problems.push(format!(
-                "{} and {} give package `{}` two sources",
-                bound_by(other),
-                bound_by(node),
-                bind.package
-            )),
-            Some(_) => {}
-            None => {
-                sources.insert(&bind.package, (path, node));
-            }
-        }
+        give(bound_by(node), bind, &mut problems);
+    }
+    for (name, bind) in &spec.cell_policies {
+        give(format!("[cell_policy.{name}]"), bind, &mut problems);
     }
     // A graph spec has reported each node that did not bind already.
     for node in &manifest.nodes {

@@ -1,0 +1,5 @@
+// A source in the global class sends into a class of model cells.
+name = "policy", schema = 1;
+source Front: Ask -> stream Answer;
+sink   Model: Ask -> stream Answer;
+topology: Front => Model;

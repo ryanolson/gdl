@@ -1,0 +1,10 @@
+[package]
+name = "read-policies"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gdl = { workspace = true }
+read-protocols = { workspace = true }
+serde = { workspace = true }

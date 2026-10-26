@@ -685,7 +685,9 @@ mod tests {
                     },
                 ],
             }],
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         }
     }
 

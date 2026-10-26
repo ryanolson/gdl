@@ -29,7 +29,9 @@ impl Impls {
         traits: Traits,
         def: Def,
     ) -> &[ImplOf] {
-        let (Def::Type(krate, ..) | Def::Module(krate, _)) = def;
+        let (Def::Type(krate, ..) | Def::Module(krate, _) | Def::Trait(krate, ..)) = def else {
+            return &[];
+        };
         let by_type = self
             .0
             .entry((krate, traits))

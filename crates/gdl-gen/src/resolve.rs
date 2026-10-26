@@ -306,7 +306,9 @@ pub(crate) mod tests {
                 })
                 .collect(),
             nodes: Vec::new(),
+            policies: Vec::new(),
             skipped: Vec::new(),
+            skipped_policies: Vec::new(),
         }
     }
 

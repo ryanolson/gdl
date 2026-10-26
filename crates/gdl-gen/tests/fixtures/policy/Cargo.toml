@@ -1,0 +1,9 @@
+# A cell policy from a crate of its own, bound by the spec: a graph whose
+# source sends into a class of two model cells, and a policy that chooses
+# the cell by the request's model.
+# Its own workspace: read and built by `tests/policy.rs`, never by the
+# repository's. Each crate names its dependencies itself, as a crate that
+# a generated segment depends on by path must.
+[workspace]
+members = ["messages", "nodes", "router"]
+resolver = "3"

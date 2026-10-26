@@ -17,6 +17,11 @@ pub(crate) enum Def {
     Module(usize, usize),
     /// A type: crate, module, and its index among the module's types.
     Type(usize, usize, usize),
+    /// A trait: crate, module, and its index among the module's traits.
+    Trait(usize, usize, usize),
+    /// A crate the resolver may not enter ([`Resolver::admit`]): the name
+    /// is bound, to something the reader does not read.
+    Opaque,
 }
 
 /// The crates read so far, and the means to read more.
@@ -34,6 +39,9 @@ pub(crate) struct Resolver<'a> {
     /// each other, so a lookup met again on the way finds nothing new,
     /// and one met again by another path is answered once.
     known: HashMap<Lookup, Option<Def>>,
+    /// The packages a path may enter, by index, when set: the reader
+    /// looking for one crate's trait reads no package that cannot hold it.
+    pub(crate) admit: Option<Vec<bool>>,
 }
 
 /// A lookup: crate, module, name, and the viewer, if a glob looks.
@@ -53,6 +61,7 @@ impl<'a> Resolver<'a> {
             problems: Vec::new(),
             budget: crate::tree::TOTAL_LIMIT,
             known: HashMap::new(),
+            admit: None,
         }
     }
 
@@ -167,6 +176,11 @@ impl<'a> Resolver<'a> {
             .iter()
             .find(|(n, _)| n == name)
             .map(|&(_, p)| p)?;
+        // Bound, not missing: a name a `use` renames to such a crate must
+        // not fall through to a crate of that name.
+        if self.admit.as_ref().is_some_and(|admit| !admit[dep]) {
+            return Some(Def::Opaque);
+        }
         let c = self.krate(dep)?;
         Some(Def::Module(c, 0))
     }
@@ -224,6 +238,13 @@ impl<'a> Resolver<'a> {
             .find(|&&i| sees(self, m.types[i].vis))
         {
             return Some(Def::Type(krate, module, i));
+        }
+        if let Some(&i) = m
+            .traits_named(name)
+            .iter()
+            .find(|&&i| sees(self, m.traits[i].vis))
+        {
+            return Some(Def::Trait(krate, module, i));
         }
         if let Some(&child) = m.children.get(name)
             && sees(self, self.crates[krate].modules[child].vis)

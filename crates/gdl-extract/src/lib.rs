@@ -38,6 +38,7 @@ mod identity;
 mod impls;
 mod markers;
 mod metadata;
+mod policies;
 mod resolve;
 mod tree;
 mod wire;
@@ -368,15 +369,25 @@ pub struct Offer {
     /// The nodes it implements, by name.
     #[serde(default)]
     pub nodes: Vec<NodeEntry>,
+    /// The cell policies it implements, by name; left out when it has
+    /// none, so an entry written before policies were read reads and
+    /// writes the same.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<PolicyEntry>,
     /// The exported aliases it leaves out: their instantiations name an
     /// argument the reader cannot, such as `Arc<T>`. One is no problem of
     /// the crate's, whose other offers stand; a graph that names it is
     /// told why it is not offered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Skipped>,
+    /// The cell policies it leaves out, since no segment could name them:
+    /// a generic one, or one the crate root does not reach. As with an
+    /// alias, a spec that names one is told why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_policies: Vec<Skipped>,
 }
 
-/// An exported alias an offer leaves out, and why.
+/// An exported alias or a cell policy an offer leaves out, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skipped {
     /// The alias's name.
@@ -553,6 +564,38 @@ pub struct NodeEntry {
     pub ty: String,
     /// Its ports, in the order the role trait declares them.
     pub ports: Vec<PortEntry>,
+}
+
+/// A cell policy a crate implements: a type, reached from the crate root,
+/// that implements `gdl::CellPolicy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyEntry {
+    /// The policy's name: its type's name.
+    pub name: String,
+    /// The implementing type, at the crate root.
+    #[serde(rename = "type")]
+    pub ty: String,
+    /// What it reads of the request's head.
+    pub head: PolicyHead,
+}
+
+/// What a cell policy reads of the request's head: its `type Head`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyHead {
+    /// The message, decoded whole.
+    Message(Origin),
+    /// No head: the request is `()`.
+    Unit,
+    /// The bytes only: `gdl::Encoded`.
+    Encoded,
+    /// A part of the message: `gdl::Projected<P>`.
+    Projected {
+        /// The projection `P`, by its path.
+        projection: String,
+        /// The message `P` is a part of: its `Projection::Of`.
+        of: Origin,
+    },
 }
 
 /// One independently typed public entry of a hosted service.

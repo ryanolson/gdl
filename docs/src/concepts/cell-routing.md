@@ -148,7 +148,7 @@ Each hand-off of a hop into another class goes to a cell, then to an instance of
 
 If the chosen instance leaves the cell's table while a selector waits, or the cell stops taking work, both choices are made again. With no cell to choose, the request fails at once with `Routing`, naming the class. It never waits for a cell to appear.
 
-gdl provides two policies, `round_robin` and `home_first`. A deployment can register others by name ([Write a cell policy](../guides/write-a-cell-policy.md)). A chooser whose placement names a policy that nothing registers and gdl does not have refuses to launch, and names the policy and the class.
+gdl provides two policies, `round_robin` and `home_first`. A spec can bind others by name to their crates, and a program can register them ([Write a cell policy](../guides/write-a-cell-policy.md)). A chooser whose placement names a policy that nothing registers and gdl does not have refuses to launch, and names the policy and the class.
 
 ### `round_robin`
 
