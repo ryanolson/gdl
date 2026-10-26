@@ -9,7 +9,10 @@ use gdl_model::{CellSettings, DirectoryBackend, Fleet, HUB_PUBLIC_PORT, Manifest
 use serde_json::{Map, Value, json};
 
 use super::variables::{cell_variables, string};
-use super::{Bundle, check_segment_name, hub_healthcheck, io, segment_healthcheck};
+use super::{
+    Bundle, check_segment_name, hosts, hub_healthcheck, io, keep_stdin_open, segment_healthcheck,
+    stdin_readme,
+};
 use crate::{Error, Files, Spec, emit, export::image_problem, validate::Layouts};
 
 /// Where every hub of the bundle reads and writes the cell directory: the
@@ -42,13 +45,15 @@ pub(super) fn by_cell(spec: &Spec) -> Option<String> {
 }
 
 /// The bundle of `fleet`'s cells, which [`Fleet::check`] accepted against
-/// `spec`'s `layouts`.
+/// `spec`'s `layouts`. `stdin` is the source that reads requests on stdin,
+/// if one does.
 pub(super) fn bundle(
     spec: &Spec,
     fleet: &Fleet,
     mut bundle: Bundle,
     manifest: &Manifest,
     layouts: &Layouts,
+    stdin: Option<String>,
 ) -> Result<Files, Error> {
     let cells: Vec<CellSettings> = fleet.cells().collect();
     if cells.is_empty() {
@@ -62,6 +67,8 @@ pub(super) fn bundle(
     // The cells that run each segment, by its name, which its deployment
     // settings, and so its ports, are keyed by in every layout.
     let mut runs: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    // The services whose source reads requests on stdin.
+    let mut sources = BTreeSet::new();
     for laid in spec.layouts() {
         let ours: Vec<&CellSettings> = cells
             .iter()
@@ -95,7 +102,12 @@ pub(super) fn bundle(
         };
         // Each segment that a cell of the layout runs, built once.
         let mut images = BTreeMap::new();
-        for (segment, _) in laid.placement.segments() {
+        let source = laid
+            .placement
+            .segments()
+            .find(|(_, nodes)| hosts(nodes, stdin.as_ref()))
+            .map(|(segment, _)| segment);
+        for (segment, nodes) in laid.placement.segments() {
             check_segment_name(segment)?;
             let class = layout.class_of(segment);
             if !ours.iter().any(|cell| class == Some(cell.class.as_str())) {
@@ -105,12 +117,14 @@ pub(super) fn bundle(
             if let Some(problem) = image_problem(segment, &package) {
                 return Err(Error::new(problem));
             }
-            let grace = bundle.segment_image(&dir, segment, &package, None)?;
+            // A cell waits only for the segments of its own class.
+            let unawaited = source.filter(|source| layout.class_of(source) == class);
+            let grace = bundle.segment_image(&dir, segment, &package, None, unawaited)?;
             let image = Image {
                 name: package,
                 dockerfile: dir.join(segment).join("Dockerfile").display().to_string(),
             };
-            images.insert(segment, (image, grace));
+            images.insert(segment, (image, grace, hosts(nodes, stdin.as_ref())));
         }
         let mut built = BTreeSet::new();
         for cell in ours {
@@ -126,7 +140,7 @@ pub(super) fn bundle(
             });
             hub.build(&mut service, &mut built);
             services.insert(cell.name.clone(), service);
-            for (segment, (image, grace)) in &images {
+            for (segment, (image, grace, reads)) in &images {
                 if layout.class_of(segment) != Some(cell.class.as_str()) {
                     continue;
                 }
@@ -145,6 +159,10 @@ pub(super) fn bundle(
                     "healthcheck": segment_healthcheck(),
                     "ports": bundle.ports(segment),
                 });
+                if *reads {
+                    keep_stdin_open(&mut service);
+                    sources.insert(format!("{}_{segment}", cell.name));
+                }
                 image.build(&mut service, &mut built);
                 services.insert(format!("{}_{segment}", cell.name), service);
             }
@@ -169,7 +187,11 @@ pub(super) fn bundle(
         serde_json::to_string_pretty(&json!({"services": services, "volumes": {VOLUME: volume()}}))
             .map_err(io)?,
     );
-    files.insert("README.md".into(), README.into());
+    let mut readme = String::from(README);
+    for source in &sources {
+        readme.push_str(&stdin_readme(source));
+    }
+    files.insert("README.md".into(), readme);
     Ok(files)
 }
 

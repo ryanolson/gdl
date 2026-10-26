@@ -8,7 +8,7 @@ A bundle builds on a Docker host from the bundle alone, so Cargo must be able to
 
 - The spec is a graph spec. Its message and node crates come from Git or crates.io. A local `path` crate is refused, with the names of the crates to import again.
 - `[gdl]` names `gdl-runtime` by `git` and `rev`, or by `version`. The hub is installed from the same source. The revision must carry the runtime that the generator emits for, so move the pin when the generator and the runtime change together.
-- The source is pinned to a `Frontend`. A source without one reads requests from stdin, which a container does not have.
+- The source is pinned to a `Frontend`, or its binary reads JSON requests on stdin. A binary reads stdin when its graph has one source, the source's request is one value, and both its request and its item cross segments ([Code generation](../concepts/generation.md)). A source with neither is refused, since its segment serves nothing that a container can reach.
 
 ## 1. Set the images
 
@@ -57,6 +57,17 @@ docker compose up --build
 The hub starts first. Every segment starts once the hub's health check passes, and `depends_on` nothing else. No segment waits on another's health: segments whose paths return wait for each other, and an order over them deadlocks. [Segment lifecycle](../concepts/lifecycle.md) describes the barrier.
 
 Each segment's health check runs `segment --healthcheck /etc/gdl/config` every 5 s, with a start period of 1800 s to cover loading models. The hub's health check asks its own `/v1/health` every 2 s.
+
+### A source that reads stdin
+
+When no frontend is pinned, the source's service keeps its stdin open (`stdin_open: true`), and the other segments start without it (`[min_replicas] <source> = 0` in their settings). Start the other services, then run the source with the requests as its input:
+
+```bash
+docker compose up --build --detach --scale front=0
+docker compose run --rm -T front < requests.jsonl
+```
+
+Each run is one more instance of the source. It joins through the hub, writes each answer's items as JSON lines, and leaves at the end of its input. So repeated runs need no `docker compose down` between them. The bundle's `README.md` names the source's service.
 
 ## 4. Scale and stop
 

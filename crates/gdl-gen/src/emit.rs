@@ -436,28 +436,12 @@ impl Unit<'_> {
             .any(|node| node.role == Role::Source && self.nodes.contains(&node.name))
     }
 
-    /// Whether the binary can serve the source over JSON lines: both of the
-    /// source's types must be serde types, and its request one value. One
-    /// line cannot carry a streamed request.
+    /// Whether the binary serves the source over JSON lines: it hosts the
+    /// source that [`json_lines_source`] names, and no frontend.
     fn serves(&self) -> bool {
-        let Some(hop) = self.manifest.hops.first() else {
-            return false;
-        };
-        let req = hop
-            .forward_types
-            .first()
-            .is_some_and(|t| t.wire && t.stream.is_none());
-        let item = hop.backward_types.last().is_some_and(|t| t.wire);
-        self.manifest
-            .nodes
-            .iter()
-            .filter(|n| n.role == Role::Source)
-            .count()
-            == 1
-            && self.hosts_source()
+        json_lines_source(self.manifest)
+            .is_some_and(|source| self.nodes.iter().any(|n| n == source))
             && self.frontend().is_none()
-            && req
-            && item
     }
 
     /// Whether the source takes a streamed request.
@@ -733,6 +717,24 @@ impl Unit<'_> {
         text.push_str(&self.binary_rs());
         text
     }
+}
+
+/// The source that the binary of its segment serves over JSON lines on
+/// stdin, unless a frontend is pinned on it: the graph's only source, when
+/// its request is one value and both its request and its item are serde
+/// types. One line cannot carry a streamed request.
+pub(crate) fn json_lines_source(manifest: &Manifest) -> Option<&str> {
+    let mut sources = manifest.nodes.iter().filter(|n| n.role == Role::Source);
+    let (Some(source), None) = (sources.next(), sources.next()) else {
+        return None;
+    };
+    let hop = manifest.hops.first()?;
+    let req = hop
+        .forward_types
+        .first()
+        .is_some_and(|t| t.wire && t.stream.is_none());
+    let item = hop.backward_types.last().is_some_and(|t| t.wire);
+    (req && item).then_some(source.name.as_str())
 }
 
 fn list(nodes: &[String]) -> String {

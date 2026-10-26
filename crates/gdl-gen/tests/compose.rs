@@ -537,11 +537,11 @@ fn an_archive_of_fetchable_crates_builds_images() {
     );
 }
 
-/// A Compose deployment needs a frontend: a source without one takes its
-/// requests on stdin, and a container gives it none, so the segment would
-/// stop at once, ready.
+/// A source without a frontend takes its requests on stdin, which
+/// `docker compose run -T` gives it: its service keeps stdin open, and the
+/// other segments start without it.
 #[test]
-fn compose_refuses_a_source_without_a_frontend() {
+fn compose_serves_a_source_without_a_frontend_on_stdin() {
     let temp = offline_registry("compose-no-frontend");
     let dir = temp.path();
     std::fs::write(
@@ -555,11 +555,20 @@ fn compose_refuses_a_source_without_a_frontend() {
     )
     .expect("spec");
     let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
-    let Err(error) = gdl_gen::compose_files(&spec, None, &dir.join("out"), &dir.join("target"))
-    else {
-        panic!("a deployment whose source reads stdin was accepted");
-    };
-    assert!(error.to_string().contains("frontend"), "{error}");
+    let files = gdl_gen::compose_files(&spec, None, &dir.join("out"), &dir.join("target"))
+        .expect("a deployment whose source reads stdin");
+    let compose: serde_json::Value =
+        serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
+    assert_eq!(
+        compose["services"]["front"]["stdin_open"], true,
+        "{compose}"
+    );
+    assert!(compose["services"]["engine"].get("stdin_open").is_none());
+    assert!(
+        files[Path::new("engine/config.toml")].contains("[min_replicas]\nfront = 0\n"),
+        "{}",
+        files[Path::new("engine/config.toml")]
+    );
 }
 
 /// Generation, a check, and an export each write the `[gdl]` path into

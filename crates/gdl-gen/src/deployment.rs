@@ -103,8 +103,8 @@ pub fn compose_files(
     if by_cell.is_none() {
         return single(&spec, bundle, target);
     }
-    frontend(&spec, &checked.manifest)?;
-    cells::bundle(&spec, fleet, bundle, &checked.manifest, &layouts)
+    let stdin = stdin_source(&spec, &checked.manifest)?;
+    cells::bundle(&spec, fleet, bundle, &checked.manifest, &layouts, stdin)
 }
 
 /// What every bundle of a spec starts from: its deployment settings, how
@@ -202,7 +202,8 @@ impl Bundle {
 
     /// Segment `segment`'s image, from its crate in `dir`, which builds
     /// package `package`: its Dockerfile and its settings, with `[hub]
-    /// host` when `hub` names it. Returns how long Docker must let a
+    /// host` when `hub` names it, and no wait for the instances of segment
+    /// `unawaited` when it names one. Returns how long Docker must let a
     /// container of it stop, in seconds.
     fn segment_image(
         &mut self,
@@ -210,6 +211,7 @@ impl Bundle {
         segment: &str,
         package: &str,
         hub: Option<&str>,
+        unawaited: Option<&str>,
     ) -> Result<u64, Error> {
         let settings = &self.settings;
         let files = &mut self.files;
@@ -233,10 +235,16 @@ impl Bundle {
         let hub = hub.map_or(String::new(), |host| {
             format!("[hub]\nhost = \"{host}\"\n\n")
         });
+        // The source that reads stdin runs once per `docker compose run`,
+        // so the others start without it; a launch that waited for it
+        // would give up after `rendezvous_ms`.
+        let unawaited = unawaited.map_or(String::new(), |source| {
+            format!("\n[min_replicas]\n{source} = 0\n")
+        });
         files.insert(
             path.clone(),
             format!(
-                "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n{hub}[system]\nport = 9090\n",
+                "# {}\nlisten = \"0.0.0.0:9000\"\nrendezvous_ms = 60000\n\n{hub}[system]\nport = 9090\n{unawaited}",
                 emit::MARKER
             ),
         );
@@ -274,7 +282,7 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
     let laid = spec.only_layout("`compose`")?;
     let placement = laid.placement;
     let checked = crate::check(spec, target, Offers::Read)?;
-    frontend(spec, &checked.manifest)?;
+    let stdin = stdin_source(spec, &checked.manifest)?;
     let deployment = gdl_model::DeploymentSpec::new(checked.manifest, placement.clone())
         .map_err(|e| Error::new(e.to_string()))?;
     bundle.files.insert(
@@ -289,14 +297,24 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
     );
     let hub = bundle.hub_dockerfile("deployment.json");
     bundle.files.insert("hub/Dockerfile".into(), hub);
-    for (segment, _) in placement.segments() {
+    let source = placement
+        .segments()
+        .find(|(_, nodes)| hosts(nodes, stdin.as_ref()))
+        .map(|(segment, _)| segment);
+    let mut reads_stdin = None;
+    for (segment, nodes) in placement.segments() {
         check_segment_name(segment)?;
         let package = emit::package_name(&bundle.graph, segment);
-        let grace = bundle.segment_image(Path::new(""), segment, &package, Some("hub"))?;
+        let grace = bundle.segment_image(Path::new(""), segment, &package, Some("hub"), source)?;
         // Health is reported, never waited on: no segment depends on another's, since segments
         // whose paths return wait for each other, and an order over them deadlocks. The start
         // period covers loading models.
-        services.insert(segment.into(),json!({"build":{"context":".","dockerfile":format!("{segment}/Dockerfile")},"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"stop_grace_period":format!("{grace}s"),"healthcheck":segment_healthcheck(),"ports":bundle.ports(segment)}));
+        let mut service = json!({"build":{"context":".","dockerfile":format!("{segment}/Dockerfile")},"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"stop_grace_period":format!("{grace}s"),"healthcheck":segment_healthcheck(),"ports":bundle.ports(segment)});
+        if hosts(nodes, stdin.as_ref()) {
+            keep_stdin_open(&mut service);
+            reads_stdin = Some(segment);
+        }
+        services.insert(segment.into(), service);
     }
     let mut files = bundle.files;
     files.insert(
@@ -304,28 +322,68 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
         serde_json::to_string_pretty(&json!({"services":services}))
             .map_err(|e| Error::new(e.to_string()))?,
     );
-    files.insert("README.md".into(), "# Docker Compose deployment\n\nRun `docker compose up --build` from this directory. The hub starts first; every segment registers its compiled contract and waits for all handlers to be ready.\n\nConfigure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.\n\nEach segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that starts later joins: once it is ready, the segments already running route to it, so `docker compose up --scale <segment>=N` adds instances. Scaling works only for a segment that publishes no host port: two containers cannot bind one port. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.\n".into());
+    let mut readme = String::from(
+        "# Docker Compose deployment\n\nRun `docker compose up --build` from this directory. The hub starts first; every segment registers its compiled contract and waits for all handlers to be ready.\n\nConfigure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.\n\nEach segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that starts later joins: once it is ready, the segments already running route to it, so `docker compose up --scale <segment>=N` adds instances. Scaling works only for a segment that publishes no host port: two containers cannot bind one port. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.\n",
+    );
+    if let Some(source) = reads_stdin {
+        readme.push_str(&stdin_readme(source));
+    }
+    files.insert("README.md".into(), readme);
     Ok(files)
 }
 
-/// A source without a frontend is served on stdin, which a container has
-/// none of: the segment would read end of file and stop, ready. A graph
-/// spec pins in its `[nodes]` table, a contract spec in `[bind]`.
-fn frontend(spec: &Spec, manifest: &gdl_model::Manifest) -> Result<(), Error> {
+/// The source whose segment reads JSON requests on stdin, or none when a
+/// frontend is pinned on a source. A graph spec pins in its `[nodes]`
+/// table, a contract spec in `[bind]`. A source with neither is refused:
+/// its segment would serve nothing that a container can reach.
+fn stdin_source(spec: &Spec, manifest: &gdl_model::Manifest) -> Result<Option<String>, Error> {
     let pinned = |name: &str| {
         spec.bind.contains_key(name)
             || matches!(&spec.source, Source::Graph(g) if g.node_pins.contains_key(name))
     };
-    if !manifest
+    reads_stdin(manifest, pinned)
+}
+
+/// [`stdin_source`], with the pins as `pinned` says.
+fn reads_stdin(
+    manifest: &gdl_model::Manifest,
+    pinned: impl Fn(&str) -> bool,
+) -> Result<Option<String>, Error> {
+    if manifest
         .nodes
         .iter()
         .any(|n| n.role == gdl_model::Role::Source && pinned(&n.name))
     {
-        return Err(Error::new(
-            "Deploy requires a frontend pinned on a source: without one, the source segment reads requests from stdin, which a container does not provide",
-        ));
+        return Ok(None);
     }
-    Ok(())
+    match emit::json_lines_source(manifest) {
+        Some(source) => Ok(Some(source.to_string())),
+        None => Err(Error::new(
+            "Deploy requires a frontend pinned on a source, or a source that reads JSON requests on stdin: the graph's only source, whose request is one value, and whose request and item cross segments",
+        )),
+    }
+}
+
+/// Whether a segment of `nodes` hosts the source that reads stdin.
+fn hosts(nodes: &[String], stdin: Option<&String>) -> bool {
+    stdin.is_some_and(|source| nodes.contains(source))
+}
+
+/// Keep the service's stdin open, so that its source waits for requests
+/// under `up` rather than reading the end of its input and stopping.
+/// `docker compose run -T` gives it the input instead.
+fn keep_stdin_open(service: &mut serde_json::Value) {
+    if let Some(service) = service.as_object_mut() {
+        service.insert("stdin_open".into(), true.into());
+    }
+}
+
+/// What a bundle's README says about the source service `service`, which
+/// reads JSON requests on stdin.
+fn stdin_readme(service: &str) -> String {
+    format!(
+        "\nService `{service}` reads JSON requests on stdin, one per line, and writes each answer's items as JSON lines. Start the other services, then run it with the requests as its input:\n\n```bash\ndocker compose up --build --detach --scale {service}=0\ndocker compose run --rm -T {service} < requests.jsonl\n```\n\nEach run is one more instance of `{service}`: it joins through the hub, answers, and leaves at the end of its input.\n"
+    )
 }
 
 /// Whether `segment` can name a segment's directory and service.
@@ -453,4 +511,56 @@ pub fn compose_bundle(spec: &Spec, target: &Path) -> Result<ComposeBundle, Error
     archive.append_dir_all("deployment", &out).map_err(io)?;
     let archive = archive.into_inner().map_err(io)?.finish().map_err(io)?;
     Ok(ComposeBundle { files, archive })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gdl_model::{HopInfo, Manifest, NodeInfo, Role, TypeInfo};
+
+    /// A graph of one hop, source `S` to sink `D`, whose request and item
+    /// are `request` and `item`.
+    fn graph(request: TypeInfo, item: TypeInfo) -> Manifest {
+        let node = |name: &str, role| NodeInfo {
+            name: name.into(),
+            role,
+            binding: None,
+        };
+        Manifest {
+            name: "g".into(),
+            schema: 1,
+            nodes: vec![node("S", Role::Source), node("D", Role::Sink)],
+            hops: vec![HopInfo {
+                outer: "S".into(),
+                forward: vec![],
+                inner: "D".into(),
+                backward: vec![],
+                forward_types: vec![request],
+                backward_types: vec![item],
+            }],
+        }
+    }
+
+    fn wire(wire: bool) -> TypeInfo {
+        TypeInfo::new("T", wire, Default::default())
+    }
+
+    /// A source reads stdin when its binary can serve it there; a pinned
+    /// frontend takes its place; and a source with neither serves nothing a
+    /// container can reach, so it is refused.
+    #[test]
+    fn a_source_is_served_by_a_frontend_or_on_stdin() {
+        let served = graph(wire(true), wire(true));
+        assert_eq!(reads_stdin(&served, |_| false), Ok(Some("S".into())));
+        assert_eq!(reads_stdin(&served, |name| name == "S"), Ok(None));
+        let local = graph(wire(false), wire(true));
+        let refused = reads_stdin(&local, |_| false).expect_err("no way in");
+        assert!(
+            refused
+                .to_string()
+                .contains("a source that reads JSON requests on stdin"),
+            "{refused}"
+        );
+        assert_eq!(reads_stdin(&local, |name| name == "S"), Ok(None));
+    }
 }

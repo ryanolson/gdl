@@ -183,6 +183,79 @@ fn deployment_rejects_local_node_and_message_crates() {
     );
 }
 
+/// The chat example with its crates from the mirror commit the api
+/// deployment pins: a source with no pinned frontend, whose binary reads
+/// JSON requests on stdin.
+fn chat_spec() -> gdl_gen::Spec {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let rev = pinned_rev();
+    let git = |package: &str| {
+        format!(
+            "{{ package = \"{package}\", git = \"https://github.com/ryanolson/gdl\", rev = \"{rev}\" }}"
+        )
+    };
+    let text = std::fs::read_to_string(root.join("examples/chat/gdl.toml"))
+        .expect("the chat spec")
+        .replace(
+            "crates = [\"protocols\"]",
+            &format!("crates = [{}]", git("chat-protocols")),
+        )
+        .replace(
+            "crates = [\"front-nodes\", \"engine-mock\", \"post-nodes\"]",
+            &format!(
+                "crates = [{}, {}, {}]",
+                git("chat-front-nodes"),
+                git("chat-engine-mock"),
+                git("chat-post-nodes")
+            ),
+        )
+        .replace(
+            "path = \"../../crates/gdl-runtime\"",
+            &format!("git = \"https://github.com/ryanolson/gdl\"\nrev = \"{rev}\""),
+        );
+    let graph = std::fs::read_to_string(root.join("examples/chat/chat.gdl")).expect("the graph");
+    gdl_gen::Spec::from_text(&text, &graph, &root.join("examples/chat")).expect("a spec")
+}
+
+/// A source with no pinned frontend reads JSON requests on stdin, which
+/// `docker compose run -T <source>` gives it. Its service keeps stdin open,
+/// so that it also waits for requests under `up`, rather than reading the
+/// end of its input and stopping. It still waits for the hub alone.
+#[test]
+fn a_source_that_reads_stdin_keeps_it_open() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-stdin-")
+        .tempdir()
+        .expect("a directory");
+    let files = gdl_gen::compose_files(&chat_spec(), None, temp.path(), &root.join("target"))
+        .expect("a bundle");
+    let compose: serde_json::Value =
+        serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
+    let services = &compose["services"];
+    assert_eq!(services["front"]["stdin_open"], true, "{compose}");
+    for other in ["engine", "post", "hub"] {
+        assert!(
+            services[other].get("stdin_open").is_none(),
+            "{other}: {compose}"
+        );
+    }
+    assert_liveness(&compose, |_| "hub".into());
+    // Each segment starts without the source, which comes with each run.
+    for segment in ["front", "engine", "post"] {
+        let config = &files[&Path::new(segment).join("config.toml")];
+        assert!(
+            config.contains("\n[min_replicas]\nfront = 0\n"),
+            "{segment}: {config}"
+        );
+    }
+    let readme = &files[Path::new("README.md")];
+    assert!(
+        readme.contains("docker compose run --rm -T front < requests.jsonl"),
+        "{readme}"
+    );
+}
+
 /// The mirror commit that `examples/api/deploy.toml` pins gdl and the
 /// example package to, read from that file so that a pin is moved in one
 /// place.
