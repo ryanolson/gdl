@@ -744,6 +744,7 @@ dependencies = [
  "gdl-message",
  "gdl-model",
  "gdl-syntax",
+ "icu_normalizer",
  "proc-macro2",
  "quote",
  "serde",

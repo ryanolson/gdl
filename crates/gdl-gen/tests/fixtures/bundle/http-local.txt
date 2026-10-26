@@ -82,7 +82,7 @@ ENV CARGO_TARGET_DIR=/build
 RUN cargo install --path '/app/crates/gdl-hub' --locked --root /build-tools gdl-hub
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /build-tools/bin/gdl-hub /usr/local/bin/segment
-COPY ["target/gdl-local-golden/deployment.json", "/etc/gdl/config"]
+COPY ["./target/gdl-local-golden/deployment.json", "/etc/gdl/config"]
 ENTRYPOINT ["/usr/local/bin/segment","/etc/gdl/config"]
 
 ==> hub/Dockerfile.dockerignore <==
@@ -129,7 +129,7 @@ ENV CARGO_TARGET_DIR=/build
 RUN cp '/app/Cargo.lock' '/app/target/gdl-local-golden/main/Cargo.lock' && cargo build --release --manifest-path '/app/target/gdl-local-golden/main/Cargo.toml'
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /build/release/http-main /usr/local/bin/segment
-COPY ["target/gdl-local-golden/main/config.toml", "/etc/gdl/config"]
+COPY ["./target/gdl-local-golden/main/config.toml", "/etc/gdl/config"]
 ENTRYPOINT ["/usr/local/bin/segment","/etc/gdl/config"]
 
 ==> main/Dockerfile.dockerignore <==

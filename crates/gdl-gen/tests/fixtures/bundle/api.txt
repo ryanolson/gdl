@@ -208,7 +208,7 @@ ENV CARGO_TARGET_DIR=/build
 RUN cargo build --release --manifest-path '/app/engine/Cargo.toml'
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /build/release/api-engine /usr/local/bin/segment
-COPY ["engine/config.toml", "/etc/gdl/config"]
+COPY ["./engine/config.toml", "/etc/gdl/config"]
 ENTRYPOINT ["/usr/local/bin/segment","/etc/gdl/config"]
 
 ==> engine/config.toml <==
@@ -430,7 +430,7 @@ ENV CARGO_TARGET_DIR=/build
 RUN cargo build --release --manifest-path '/app/front/Cargo.toml'
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /build/release/api-front /usr/local/bin/segment
-COPY ["front/config.toml", "/etc/gdl/config"]
+COPY ["./front/config.toml", "/etc/gdl/config"]
 ENTRYPOINT ["/usr/local/bin/segment","/etc/gdl/config"]
 
 ==> front/config.toml <==
@@ -737,6 +737,6 @@ ENV CARGO_TARGET_DIR=/build
 RUN cargo install --git 'https://github.com/ryanolson/gdl' --rev '<rev>' --locked --root /build-tools gdl-hub
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /build-tools/bin/gdl-hub /usr/local/bin/segment
-COPY ["deployment.json", "/etc/gdl/config"]
+COPY ["./deployment.json", "/etc/gdl/config"]
 ENTRYPOINT ["/usr/local/bin/segment","/etc/gdl/config"]
 

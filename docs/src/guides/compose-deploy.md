@@ -38,7 +38,7 @@ A runtime image must run the binary built in `build_image` and supply its librar
 cargo gdl compose --spec examples/api/deploy.toml --out /tmp/deployment
 ```
 
-The output directory must not exist. The bundle holds:
+The output directory must not exist, and Compose must be able to run a project from it ([limitations](../operations/limitations.md#compose-runs-a-bundle-only-from-some-directory-names)). The bundle holds:
 
 - `deployment.json`: the manifest and placement the hub admits.
 - `hub/Dockerfile`: installs `gdl-hub` from the `[gdl]` source.
@@ -55,7 +55,7 @@ cd target/http-bundle
 docker compose up --build
 ```
 
-The build context is the nearest directory that holds the bundle, every crate that the generated manifests name by path, and the Cargo workspace of each. Write the bundle inside that directory, for example under the repository's `target/`. If the bundle and the crates share no directory but `/`, the command fails. The bundle names the context only by a relative path. `compose.yaml` says, in its field `x-gdl-local-sources`, that the bundle builds only on this machine, and the command says so on stderr, with the context's path. Each Dockerfile has an ignore file beside it, which leaves build output and Git history out of the context. A spec that names gdl by Git or version builds without `--local`. The composer does not offer this mode. With `--fleet`, each cell's hub and segments build the same way ([Deploy a fleet of cells](fleet.md#run-local-sources)).
+The build context is the nearest directory that holds the bundle, every crate that the generated manifests name by path, and the Cargo workspace of each. Write the bundle inside that directory, for example under the repository's `target/`. If the bundle and the crates share no directory but `/`, the command fails. The bundle names the context only by a relative path. `compose.yaml` says, in its field `x-gdl-local-sources`, that the bundle builds only on this machine, and the command says so on stderr, with the context's path. Each Dockerfile has an ignore file beside it, which leaves build output and Git history out of the context. The bundle's files escape the characters that Compose or Docker read as syntax in its path, such as `$`, `*`, `?`, and `[`. A path that holds a line break is refused ([limitations](../operations/limitations.md#a-bundle-of-local-sources-builds-only-on-the-machine-that-wrote-it)). A spec that names gdl by Git or version builds without `--local`. The composer does not offer this mode. With `--fleet`, each cell's hub and segments build the same way ([Deploy a fleet of cells](fleet.md#run-local-sources)).
 
 ## 3. Start it
 

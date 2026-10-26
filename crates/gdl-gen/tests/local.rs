@@ -85,8 +85,9 @@ const FLEET: &str = "[class.global]\nready = { front = 1 }\n[class.model_x]\nrea
 /// only for it, and every image builds from the local context, the hub
 /// from `[gdl] path` and the segments from the crates the spec names by
 /// path.
-#[test]
-fn a_local_fleet_builds_each_cells_images_from_local_sources() {
+/// The api example split into classes, deployed by [`FLEET`] into `out`
+/// from local sources.
+fn local_fleet(out: &Path) -> (gdl_model::Fleet, gdl_gen::Files) {
     let dir = root().join("examples/api");
     let text = std::fs::read_to_string(dir.join("gdl.toml")).expect("the spec");
     let graph = std::fs::read_to_string(dir.join("api.gdl")).expect("the graph");
@@ -98,11 +99,17 @@ fn a_local_fleet_builds_each_cells_images_from_local_sources() {
     let files = gdl_gen::compose_files(
         &spec,
         Some(&fleet),
-        &root().join("target/gdl-local-fleet"),
+        out,
         &target("gdl-gen-tests"),
         gdl_gen::Sources::Local,
     )
     .expect("a bundle");
+    (fleet, files)
+}
+
+#[test]
+fn a_local_fleet_builds_each_cells_images_from_local_sources() {
+    let (fleet, files) = local_fleet(&root().join("target/gdl-local-fleet"));
     let compose: serde_json::Value =
         serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
     let services = compose["services"].as_object().expect("services");
@@ -256,7 +263,8 @@ fn a_local_preview_accepts_a_relative_output_directory() {
 
 /// Each image copies its settings by one path, though a local bundle's
 /// path from its context can hold spaces: the `COPY` takes its JSON form,
-/// which Docker does not split.
+/// which Docker does not split, and writes each space as a class, which
+/// Docker does not trim.
 #[test]
 fn a_local_bundle_copies_its_settings_by_one_path() {
     let out = root().join("target/gdl-local-spaced/bundle with spaces");
@@ -275,12 +283,253 @@ fn a_local_bundle_copies_its_settings_by_one_path() {
         assert_eq!(
             args,
             [
-                format!("target/gdl-local-spaced/bundle with spaces/{config}"),
+                format!("./target/gdl-local-spaced/bundle[ ]with[ ]spaces/{config}"),
                 "/etc/gdl/config".into()
             ],
             "{dockerfile}"
         );
     }
+}
+
+/// The name of a bundle directory that holds each character Compose or
+/// Docker reads as syntax in a path: `$` for Compose, `*`, `?`, `[`, `]`,
+/// and `\` for Docker's patterns, `^`, `!`, `+`, `(`, `)`, `{`, `}`, and
+/// `|` for the regular expressions it builds from them, quotes and `$` for
+/// the Dockerfile, and spaces, which Docker trims at the ends of a pattern.
+const SYNTAX: &str = r#" bundle $X [dev] *?\ '" ^!+(a){2}| "#;
+
+/// A bundle whose path holds Compose and Docker syntax names it literally
+/// in each file that names it: `compose.yaml` doubles `$`, each `COPY`
+/// and the ignore file write Docker's pattern characters as classes of
+/// one escaped character and whitespace as a class, and the `COPY` also
+/// escapes what the Dockerfile reads in a word. Paths that hold none of
+/// them are written as they are
+/// ([`a_local_bundle_builds_from_a_context_that_holds_its_crates`]).
+#[test]
+fn a_local_bundle_writes_compose_and_docker_syntax_in_its_path_literally() {
+    let parent = "target/gdl-local-syntax";
+    let out = root().join(parent).join(SYNTAX);
+    let compose_path = format!("{parent}/{}", r#" bundle $$X [dev] *?\ '" ^!+(a){2}| "#);
+    let copy_path = format!(
+        "./{parent}/{}",
+        r#"[ ]bundle[ ]\$X[ ][\\[]dev[\\]][ ][\\*][\\?][\\\\][ ]\'\"[ ][\\^][\\!][\\+][\\(]a[\\)][\\{]2[\\}][\\|][ ]"#
+    );
+    let ignore = format!(
+        "!{parent}/{}\n",
+        r#"[ ]bundle[ ]$X[ ][\[]dev[\]][ ][\*][\?][\\][ ]'"[ ][\^][\!][\+][\(]a[\)][\{]2[\}][\|][ ]"#
+    );
+    let copy = |files: &gdl_gen::Files, dockerfile: &str| -> String {
+        let line = files[Path::new(dockerfile)]
+            .lines()
+            .find(|line| line.starts_with("COPY [") && line.contains("/etc/gdl/config"))
+            .unwrap_or_else(|| panic!("{dockerfile} copies its settings"))
+            .to_owned();
+        let args: Vec<String> =
+            serde_json::from_str(&line["COPY ".len()..]).expect("the JSON form");
+        args[0].clone()
+    };
+    let dockerfiles = |files: &gdl_gen::Files| -> Vec<String> {
+        let compose: serde_json::Value =
+            serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
+        let mut found: Vec<String> = compose["services"]
+            .as_object()
+            .expect("services")
+            .values()
+            .filter_map(|service| service["build"]["dockerfile"].as_str())
+            .map(str::to_owned)
+            .collect();
+        found.sort();
+        found
+    };
+
+    let files = local(&spec("examples/http/gdl.toml"), &out).expect("a bundle");
+    assert_eq!(
+        dockerfiles(&files),
+        [
+            format!("{compose_path}/hub/Dockerfile"),
+            format!("{compose_path}/main/Dockerfile")
+        ]
+    );
+    assert_eq!(
+        copy(&files, "hub/Dockerfile"),
+        format!("{copy_path}/deployment.json")
+    );
+    assert_eq!(
+        copy(&files, "main/Dockerfile"),
+        format!("{copy_path}/main/config.toml")
+    );
+    for name in ["hub", "main"] {
+        let text = &files[&Path::new(name).join("Dockerfile.dockerignore")];
+        assert!(text.ends_with(&ignore), "{name}: {text}");
+    }
+
+    let (_, files) = local_fleet(&out);
+    assert_eq!(
+        dockerfiles(&files),
+        [
+            format!("{compose_path}/engine/Dockerfile"),
+            format!("{compose_path}/front/Dockerfile"),
+            format!("{compose_path}/hub/Dockerfile")
+        ]
+    );
+    assert_eq!(
+        copy(&files, "engine/Dockerfile"),
+        format!("{copy_path}/engine/config.toml")
+    );
+    assert!(
+        files[Path::new("hub/Dockerfile.dockerignore")].ends_with(&ignore),
+        "{}",
+        files[Path::new("hub/Dockerfile.dockerignore")]
+    );
+}
+
+/// A line break cannot be written in a Dockerfile or an ignore file, and a
+/// path that is not UTF-8 cannot be written in any of the bundle's files:
+/// `--local` refuses either rather than write another path.
+#[cfg(unix)]
+#[test]
+fn a_local_bundle_refuses_a_path_it_cannot_write() {
+    use std::os::unix::ffi::OsStrExt;
+    let error = local(
+        &spec("examples/http/gdl.toml"),
+        &root().join("target/gdl-local-line\nbreak"),
+    )
+    .expect_err("a line break")
+    .to_string();
+    assert!(
+        error.starts_with("`--local`: the bundle's path from its build context, \"target/gdl-local-line\\nbreak\", holds a line break"),
+        "{error}"
+    );
+    let error = local(
+        &spec("examples/http/gdl.toml"),
+        &root()
+            .join("target")
+            .join(std::ffi::OsStr::from_bytes(b"gdl-local-\xff")),
+    )
+    .expect_err("not UTF-8")
+    .to_string();
+    assert!(
+        error.starts_with("`--local`: the bundle's path from its build context, \"target/gdl-local-\\xFF\", is not UTF-8"),
+        "{error}"
+    );
+}
+
+/// A bundle that Docker Compose cannot run from where it is written is
+/// refused before anything is written, in either mode: a path that is not
+/// UTF-8 or not in Unicode normal form C, a control character, a `%` that
+/// does not start an escape, or `${` anywhere in its directory's path, as
+/// given or with symlinks resolved, and a name that gives an empty project
+/// name. A `%` with two hex digits is accepted.
+#[test]
+fn a_bundle_that_compose_cannot_run_is_refused_before_it_is_written() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-unloadable-")
+        .tempdir_in(root().join("target"))
+        .expect("a directory in the context");
+    let spec = spec("examples/http/gdl.toml");
+    let compose =
+        |out: &Path, sources| gdl_gen::compose(&spec, None, out, &target("gdl-gen-tests"), sources);
+    for (path, why) in [
+        ("bundle%", "holds a `%` that two hex digits do not follow"),
+        ("bundle%GG", "holds a `%` that two hex digits do not follow"),
+        ("bundle\t", "holds a control character"),
+        ("bundle\u{1b}", "holds a control character"),
+        ("bundle\u{7f}", "holds a control character"),
+        ("a${X}/bundle", "holds `${`"),
+        (
+            "a%{X}/bundle",
+            "holds a `%` that two hex digits do not follow",
+        ),
+        ("部署", "has a name with no ASCII letter or digit"),
+        ("---", "has a name with no ASCII letter or digit"),
+        ("cafe\u{301}/bundle", "is not in Unicode normal form C"),
+        ("bundle-\u{212a}", "is not in Unicode normal form C"),
+    ] {
+        for sources in [gdl_gen::Sources::Local, gdl_gen::Sources::Fetched] {
+            let out = holder.path().join(path);
+            let error = compose(&out, sources).expect_err(path).to_string();
+            assert!(
+                error.starts_with(&format!("Compose output {:?} {why}", out.as_os_str())),
+                "{path:?}: {error}"
+            );
+            let first = path.split('/').next().expect("a name");
+            assert!(!holder.path().join(first).exists(), "{path:?} is written");
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let out = holder
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"bundle-\xff"));
+        let error = compose(&out, gdl_gen::Sources::Fetched)
+            .expect_err("not UTF-8")
+            .to_string();
+        assert!(
+            error.starts_with(&format!(
+                "Compose output {:?} is not UTF-8",
+                out.as_os_str()
+            )),
+            "{error}"
+        );
+        assert!(!out.exists());
+        // Compose loads the directory as the shell names it, through a
+        // symlink's name.
+        let real = holder.path().join("real");
+        std::fs::create_dir(&real).expect("a directory");
+        std::os::unix::fs::symlink(&real, holder.path().join("alias%")).expect("a symlink");
+        let out = holder.path().join("alias%/bundle");
+        let error = compose(&out, gdl_gen::Sources::Local)
+            .expect_err("a `%` in the symlink's name")
+            .to_string();
+        assert!(
+            error.starts_with(&format!(
+                "Compose output {:?} holds a `%` that two hex digits do not follow",
+                out.as_os_str()
+            )),
+            "{error}"
+        );
+        assert!(!real.join("bundle").exists());
+    }
+    let out = holder.path().join("bundle%41");
+    compose(&out, gdl_gen::Sources::Local).expect("an escape that Compose reads");
+    assert!(out.join("compose.yaml").exists());
+}
+
+/// `compose.yaml` is JSON, and Compose reads it as YAML, which folds U+0085
+/// into a space and refuses U+FFFE: each is written as a `\u` escape,
+/// which JSON and YAML read alike. Other characters stay as they are.
+#[test]
+fn a_local_bundle_escapes_in_compose_yaml_what_yaml_reads_otherwise() {
+    let name = "bundle\u{85}\u{fffe}\u{2028}\u{e9}\u{1f600}";
+    let files = local(
+        &spec("examples/http/gdl.toml"),
+        &root().join("target/gdl-local-yaml").join(name),
+    )
+    .expect("a bundle");
+    let text = &files[Path::new("compose.yaml")];
+    assert!(
+        text.contains("bundle\\u0085\\ufffe\\u2028\u{e9}\u{1f600}/hub/Dockerfile"),
+        "{text}"
+    );
+    let compose: serde_json::Value = serde_json::from_str(text).expect("JSON");
+    assert_eq!(
+        compose["services"]["hub"]["build"]["dockerfile"],
+        format!("target/gdl-local-yaml/{name}/hub/Dockerfile")
+    );
+}
+
+/// A bundle under a `.git` directory, which the ignore file leaves out of
+/// the context as it does `target`, is let back in the same way.
+#[test]
+fn a_local_bundle_under_a_git_directory_keeps_itself_in_its_context() {
+    let files = local(
+        &spec("examples/http/gdl.toml"),
+        &root().join("gdl-local-git/.git/bundle"),
+    )
+    .expect("a bundle");
+    let ignore = &files[Path::new("hub/Dockerfile.dockerignore")];
+    assert!(ignore.ends_with("!gdl-local-git/.git/bundle\n"), "{ignore}");
 }
 
 /// The same, with Docker: the hub's generated `COPY` copies its settings
@@ -346,6 +595,189 @@ fn a_local_bundle_copies_configuration_from_a_path_with_spaces() {
     }
 }
 
+/// The same, with Docker: Compose finds each Dockerfile, and the image
+/// build copies the settings, from a bundle whose path holds [`SYNTAX`].
+/// `docker compose config` cannot show this: it writes `$` back as `$$`,
+/// and Compose builds through `buildx bake`, which reads the Dockerfile's
+/// path again. So the hub builds for real, its Dockerfile cut to the copy
+/// of its settings. A decoy directory, which each pattern character would
+/// match unescaped, holds other settings.
+#[test]
+#[ignore = "needs docker; run with --ignored"]
+fn a_local_bundle_builds_from_a_path_with_compose_and_docker_syntax() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-syntax-")
+        .tempdir_in(root().join("target"))
+        .expect("a directory in the context");
+    let out = holder.path().join(SYNTAX);
+    gdl_gen::compose(
+        &spec("examples/http/gdl.toml"),
+        None,
+        &out,
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect("a bundle")
+    .expect("a local context");
+    let decoy = holder.path().join(
+        SYNTAX
+            .replace('*', "A")
+            .replace('?', "B")
+            .replace("[dev]", "d")
+            .replace("\\ ", " "),
+    );
+    std::fs::create_dir(&decoy).expect("the decoy");
+    std::fs::write(decoy.join("deployment.json"), "decoy").expect("the decoy settings");
+    let dockerfile = out.join("hub/Dockerfile");
+    let text = std::fs::read_to_string(&dockerfile).expect("the hub's Dockerfile");
+    let copy = text
+        .lines()
+        .find(|line| line.starts_with("COPY [") && line.contains("/etc/gdl/config"))
+        .expect("the hub copies its settings");
+    std::fs::write(&dockerfile, format!("FROM scratch\n{copy}\n")).expect("a Dockerfile");
+
+    let project = holder
+        .path()
+        .file_name()
+        .expect("a name")
+        .to_string_lossy()
+        .to_lowercase();
+    let image = format!("{project}-hub");
+    let docker = |args: &[&str], dir: &Path| {
+        let result = Command::new("timeout")
+            .arg("120")
+            .arg("docker")
+            .args(args)
+            .current_dir(dir)
+            .env_remove("X")
+            .output()
+            .expect("docker");
+        assert!(
+            result.status.success(),
+            "docker {args:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8_lossy(&result.stdout).trim().to_owned()
+    };
+    // The image goes however the test ends.
+    struct Image(String);
+    impl Drop for Image {
+        fn drop(&mut self) {
+            let _ = Command::new("docker")
+                .args(["image", "rm", "--force", &self.0])
+                .output();
+        }
+    }
+    let _image = Image(image.clone());
+    docker(
+        &["compose", "--project-name", &project, "build", "hub"],
+        &out,
+    );
+    let container = docker(&["create", &image, "none"], &out);
+    let copied = holder.path().join("copied");
+    let result = Command::new("timeout")
+        .arg("30")
+        .args(["docker", "cp"])
+        .arg(format!("{container}:/etc/gdl/config"))
+        .arg(&copied)
+        .output()
+        .expect("docker cp");
+    let _ = Command::new("docker")
+        .args(["rm", "--force", &container])
+        .output();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(copied).expect("the copied settings"),
+        std::fs::read_to_string(out.join("deployment.json")).expect("the settings")
+    );
+}
+
+/// Docker treats brackets as patterns even in a JSON-form COPY and in
+/// the ignore file's exception for a bundle under target.
+#[test]
+#[ignore = "needs docker; run with --ignored"]
+fn a_local_bundle_copies_configuration_from_a_bracketed_path() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-bracket-")
+        .tempdir_in(root().join("target"))
+        .expect("a directory in the context");
+    let out = holder.path().join("bundle[dev]");
+    let files = local(&spec("examples/http/gdl.toml"), &out).expect("a bundle");
+    let context = tempfile::Builder::new()
+        .prefix("gdl-bracket-context-")
+        .tempdir()
+        .expect("a context");
+    let exported = tempfile::Builder::new()
+        .prefix("gdl-bracket-export-")
+        .tempdir()
+        .expect("the exported files");
+    let deployment = out
+        .strip_prefix(root())
+        .expect("the bundle is under the repository")
+        .join("deployment.json");
+    let source = context.path().join(&deployment);
+    std::fs::create_dir_all(source.parent().expect("a parent")).expect("the source directory");
+    std::fs::write(&source, &files[Path::new("deployment.json")]).expect("the config");
+    let generated = files[Path::new("hub/Dockerfile")]
+        .lines()
+        .find(|line| line.starts_with("COPY ") && line.contains("/etc/gdl/config"))
+        .expect("the hub copies its config");
+    let generated_ignore = &files[Path::new("hub/Dockerfile.dockerignore")];
+    let escaped = deployment.to_str().expect("a path").replace('[', "[[]");
+    let control = format!(
+        "COPY {}",
+        serde_json::to_string(&[escaped, "/etc/gdl/config".into()]).expect("COPY arguments")
+    );
+    let mut failures = Vec::new();
+    for (case, copy, ignore) in [
+        ("control", control.as_str(), ""),
+        ("generated-copy", generated, ""),
+        (
+            "generated-ignore",
+            control.as_str(),
+            generated_ignore.as_str(),
+        ),
+    ] {
+        let dockerfile = context.path().join("Dockerfile");
+        std::fs::write(&dockerfile, format!("FROM scratch\n{copy}\n")).expect("a Dockerfile");
+        std::fs::write(context.path().join("Dockerfile.dockerignore"), ignore)
+            .expect("an ignore file");
+        let destination = exported.path().join(case);
+        let result = Command::new("timeout")
+            .args([
+                "30",
+                "docker",
+                "build",
+                "--network=none",
+                "--progress=plain",
+                "--output",
+            ])
+            .arg(format!("type=local,dest={}", destination.display()))
+            .arg("--file")
+            .arg(&dockerfile)
+            .arg(context.path())
+            .output()
+            .expect("docker build");
+        if !result.status.success() {
+            failures.push(format!(
+                "{case}: {copy}\n{ignore}\n{}",
+                String::from_utf8_lossy(&result.stderr)
+            ));
+            continue;
+        }
+        assert_eq!(
+            std::fs::read_to_string(destination.join("etc/gdl/config")).expect("the copied config"),
+            files[Path::new("deployment.json")]
+        );
+        eprintln!("{case}: copied the expected settings");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Removes what one run of a bundle made, its containers, network, volume,
 /// and images, and the bundle, however the test ends.
 struct Project {
@@ -375,8 +807,9 @@ impl Drop for Project {
 
 /// The http example, from the sources in this checkout, under Docker
 /// Compose: the hub and the segment build from the repository, and the
-/// frontend answers on a port Docker chooses. Building the images takes a
-/// minute or more.
+/// frontend answers on a port Docker chooses. The bundle's path holds
+/// [`SYNTAX`], so each file that names it, and each command the image
+/// builds run on it, is proved. Building the images takes a minute or more.
 #[test]
 #[ignore = "needs docker; run with --ignored"]
 fn the_http_example_answers_from_a_local_bundle() {
@@ -392,11 +825,15 @@ fn the_http_example_answers_from_a_local_bundle() {
     let graph = std::fs::read_to_string(example.join("http.gdl")).expect("the graph");
     let spec = gdl_gen::Spec::from_text(&text, &graph, &example).expect("a spec");
     let id = std::process::id();
+    // Dropped after the project, which stops it from the bundle.
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-test-")
+        .tempdir_in(root().join("target"))
+        .expect("a directory in the context");
     let project = Project {
         name: format!("gdl-local-test-{id}"),
-        dir: root().join(format!("target/gdl-local-test-{id}")),
+        dir: holder.path().join(SYNTAX),
     };
-    let _ = std::fs::remove_dir_all(&project.dir);
     gdl_gen::compose(
         &spec,
         None,

@@ -770,7 +770,7 @@ fn a_fleet_of_two_layouts_builds_each_layouts_images_once() {
         for needle in [
             format!("--manifest-path '/app/{layout}/{segment}/Cargo.toml'"),
             format!("COPY --from=build /build/release/api-{layout}-{segment} "),
-            format!("COPY [\"{layout}/{segment}/config.toml\", \"/etc/gdl/config\"]"),
+            format!("COPY [\"./{layout}/{segment}/config.toml\", \"/etc/gdl/config\"]"),
         ] {
             assert!(dockerfile.contains(&needle), "{needle}\nin:\n{dockerfile}");
         }
@@ -780,7 +780,7 @@ fn a_fleet_of_two_layouts_builds_each_layouts_images_once() {
         let hub = &files[&Path::new(layout).join("hub/Dockerfile")];
         assert!(
             hub.contains(&format!(
-                "COPY [\"{layout}/deployment.json\", \"/etc/gdl/config\"]"
+                "COPY [\"./{layout}/deployment.json\", \"/etc/gdl/config\"]"
             )),
             "{hub}"
         );

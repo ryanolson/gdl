@@ -68,12 +68,18 @@ impl Context {
             )));
         }
         let from = |path: &Path| relative(&root, path);
-        Ok(Self {
+        let context = Self {
             bundle: from(out),
             hub: from(&hub),
             lock: lock.as_deref().map(from),
             root,
-        })
+        };
+        writable("the bundle's path", &context.bundle)?;
+        writable("the hub's crate's path", &context.hub)?;
+        if let Some(lock) = &context.lock {
+            writable("the lock file's path", lock)?;
+        }
+        Ok(context)
     }
 
     /// The context's root, absolute.
@@ -105,17 +111,63 @@ impl Context {
 
     /// The ignore file of each of the bundle's Dockerfiles: build output
     /// and git history stay out of the context, and the bundle stays in
-    /// even when it is written under a `target` directory.
+    /// even when it is written under a `target` or `.git` directory.
     pub(super) fn ignore(&self) -> String {
         let mut text = format!(
             "# {}\n# What the build context leaves out: build output and git history.\n**/target\n**/.git\n",
             emit::MARKER
         );
-        if self.bundle.components().any(|c| c.as_os_str() == "target") {
-            text.push_str(&format!("!{}\n", display(&self.bundle)));
+        if self
+            .bundle
+            .components()
+            .any(|c| c.as_os_str() == "target" || c.as_os_str() == ".git")
+        {
+            text.push_str(&format!("!{}\n", pattern(&display(&self.bundle))));
         }
         text
     }
+}
+
+/// `path` as a Docker path pattern that matches only `path`, for a `COPY`
+/// source or an ignore file. Docker matches a component that holds a `*`,
+/// `?`, or `[` as a Go regular expression built from it, which keeps
+/// `^`, `+`, `(`, `)`, `{`, `}`, and `|` as regex syntax. It reads a
+/// leading `!` as a negation and trims whitespace at the ends of a
+/// pattern. Each of these characters, and
+/// `*`, `?`, `[`, `]`, and `\`, becomes a class of that one character,
+/// escaped: `[\*]`. Whitespace becomes a class unescaped: `[ ]`. The escape
+/// alone does not work: Docker takes a component without a `*`, `?`, or
+/// `[` that is not escaped as it is, backslash and all.
+pub(super) fn pattern(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if "*?[]\\^!+(){}|".contains(c) {
+            out.extend(['[', '\\', c, ']']);
+        } else if c.is_whitespace() {
+            out.extend(['[', c, ']']);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Refuse `path`, which `what` names, when a bundle's files cannot name
+/// it: when it is not UTF-8, which the files are, or holds a line break,
+/// which ends a line of a Dockerfile or an ignore file.
+fn writable(what: &str, path: &Path) -> Result<(), Error> {
+    let shown = format!("{:?}", path.as_os_str());
+    let Some(text) = path.to_str() else {
+        return Err(Error::new(format!(
+            "`--local`: {what} from its build context, {shown}, is not UTF-8, which the bundle's files cannot name; choose a directory whose path is UTF-8"
+        )));
+    };
+    if text.contains(['\n', '\r']) {
+        return Err(Error::new(format!(
+            "`--local`: {what} from its build context, {shown}, holds a line break, which a Dockerfile or an ignore file cannot name; choose a directory without one"
+        )));
+    }
+    Ok(())
 }
 
 /// The `gdl-hub` crate of the workspace that holds the `gdl-runtime` crate

@@ -22,6 +22,7 @@ gdl-model = { path = "../gdl-model" }
 gdl-extract = { path = "../gdl-extract" }
 gdl-message = { path = "../gdl-message" }
 gdl-syntax = { path = "../gdl-syntax" }
+icu_normalizer = { version = "2.3", default-features = false, features = ["compiled_data"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 serde = { workspace = true }

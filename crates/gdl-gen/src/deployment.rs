@@ -141,7 +141,30 @@ fn bundle_files(
     if local.is_some() {
         mark_local(&mut files)?;
     }
+    if let Some(compose) = files.get_mut(Path::new("compose.yaml")) {
+        *compose = yaml_safe(compose);
+    }
     Ok((files, local))
+}
+
+/// `compose.yaml`, which is JSON, with each character that Compose's YAML
+/// parser refuses or reads as a line break written as a `\u` escape, which
+/// JSON and YAML read alike: the C1 controls, U+2028, U+2029, the byte
+/// order mark, U+FFFE, and U+FFFF. Only strings, such as a path, can hold
+/// them.
+fn yaml_safe(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if matches!(
+            c,
+            '\u{80}'..='\u{9f}' | '\u{2028}' | '\u{2029}' | '\u{feff}' | '\u{fffe}' | '\u{ffff}'
+        ) {
+            out.push_str(&format!("\\u{:04x}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Say, in the bundle's `compose.yaml` and its README, that its images
@@ -267,7 +290,10 @@ impl Bundle {
         let mut ignore = dockerfile.as_os_str().to_owned();
         ignore.push(".dockerignore");
         self.files.insert(ignore.into(), context.ignore());
-        json!({"context": context.seen_from_bundle(), "dockerfile": context.in_bundle(dockerfile)})
+        // Compose reads `$` as a variable, and `$$` as `$`. [`compose`]
+        // refuses the `${` that no escape keeps.
+        let dockerfile = context.in_bundle(dockerfile).replace('$', "$$");
+        json!({"context": context.seen_from_bundle(), "dockerfile": dockerfile})
     }
 
     /// `path`, a path in the bundle, as the image build sees it under
@@ -566,7 +592,16 @@ fn drain_bound(config: &toml::Table) -> std::time::Duration {
 /// into `base`.
 fn dockerfile(build: &str, binary: &str, config: &str, builder: &str, base: &str) -> String {
     // The JSON form keeps a path with spaces, which a local bundle's can
-    // hold, one source.
+    // hold, one source. Docker still reads the source as a word, where `\`,
+    // `$`, and quotes are syntax, and then as a pattern. `./` keeps a path
+    // such as `git@host:dir` from reading as a Git source.
+    let config: String = context::pattern(&format!("./{config}"))
+        .chars()
+        .flat_map(|c| match c {
+            '\\' | '$' | '"' | '\'' => vec!['\\', c],
+            c => vec![c],
+        })
+        .collect();
     let config = serde_json::Value::from(config);
     format!(
         "# {}\nFROM {builder} AS build\nWORKDIR /app\nCOPY . /app\nENV CARGO_TARGET_DIR=/build\nRUN {build}\nFROM {base}\nCOPY --from=build {binary} /usr/local/bin/segment\nCOPY [{config}, \"/etc/gdl/config\"]\nENTRYPOINT [\"/usr/local/bin/segment\",\"/etc/gdl/config\"]\n",
@@ -592,10 +627,72 @@ pub fn compose(
             "Compose output already exists; choose a fresh directory",
         ));
     }
+    // Compose loads the project from the directory as the shell names it,
+    // which can be a symlink's name.
+    loadable(&std::path::absolute(out).map_err(io)?)?;
     let out = crate::dump::absolute(out)?;
+    loadable(&out)?;
     let (files, local) = bundle_files(spec, fleet, &out, target, sources)?;
     crate::write(&out, &files)?;
     Ok(local)
+}
+
+/// Refuse an output directory, absolute, from which Docker Compose cannot
+/// run the bundle with `docker compose up`. `buildx bake`, which Compose v5
+/// always builds with, reads the build context's path, which is absolute,
+/// as UTF-8 in Unicode normal form C, and changes a path that is not. It
+/// also reads `${` and `%{` in that path as templates. Compose makes a
+/// `file:` URL of the directory, which a control character or a `%` that
+/// does not start an escape breaks; `%{` is such a `%`. And Compose names
+/// the project from the directory's name, keeping only `a-z`, `0-9`, `_`,
+/// and `-`.
+fn loadable(out: &Path) -> Result<(), Error> {
+    let refuse = |what: &str| {
+        Err(Error::new(format!(
+            "Compose output {:?} {what}; choose another directory",
+            out.as_os_str()
+        )))
+    };
+    let Some(text) = out.to_str() else {
+        return refuse("is not UTF-8, which `buildx bake` replaces in the build context's path");
+    };
+    if !icu_normalizer::ComposingNormalizerBorrowed::new_nfc().is_normalized(text) {
+        return refuse(
+            "is not in Unicode normal form C, to which `buildx bake` changes the build context's path, so that it names another directory",
+        );
+    }
+    if text.chars().any(|c| c.is_ascii_control()) {
+        return refuse(
+            "holds a control character, which Docker Compose cannot load a project from",
+        );
+    }
+    let bytes = text.as_bytes();
+    let bare = bytes.iter().enumerate().any(|(i, &b)| {
+        b == b'%'
+            && !bytes
+                .get(i + 1..i + 3)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+    });
+    if bare {
+        return refuse(
+            "holds a `%` that two hex digits do not follow, which Docker Compose cannot load a project from",
+        );
+    }
+    if text.contains("${") {
+        return refuse(
+            "holds `${`, which `buildx bake` reads as a template in the build context's path, and no escape in `compose.yaml` reads as `${` in each of Compose's builders",
+        );
+    }
+    let name = out
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if !name.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return refuse(
+            "has a name with no ASCII letter or digit, from which Docker Compose derives an empty project name",
+        );
+    }
+    Ok(())
 }
 fn io(e: impl std::fmt::Display) -> Error {
     Error::new(e.to_string())
