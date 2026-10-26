@@ -53,6 +53,15 @@ pub(crate) fn counted() -> u64 {
     COUNTED.load(Ordering::Relaxed)
 }
 
+/// Held by each test that counts, while it counts: [`counted`] is one
+/// number for the whole binary, so a test that counts while another does
+/// sees the other's allocations as its own.
+pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Count this thread's allocations from now on, or stop.
 pub(crate) fn counting(on: bool) {
     COUNTING.with(|counting| counting.set(on));

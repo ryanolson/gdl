@@ -48,8 +48,8 @@ pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 pub use metrics::Metrics;
 pub use policy::{
-    Cell, CellPolicies, CellPolicy, CellRequest, CellState, Damped, HomeFirst, Load, LoadSummary,
-    RoundRobin,
+    Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, CellState, ChoiceLease, Damped,
+    HomeFirst, Load, LoadSummary, RoundRobin,
 };
 /// The prometheus version node metrics are built with: a node crate names
 /// its metric types through here, so they are the types the runtime
@@ -135,7 +135,7 @@ pub mod __runtime {
     pub use crate::meter::{
         END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit, ended, note,
     };
-    pub use crate::policy::{ErasedPolicy, TypedPolicy, Window, cell_id};
+    pub use crate::policy::{ChoiceHeld, ErasedPolicy, TypedPolicy, Window, cell_id};
     pub use crate::select::{Erased, Lease, Picked, Typed};
 }
 

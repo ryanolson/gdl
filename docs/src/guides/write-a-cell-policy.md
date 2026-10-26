@@ -44,7 +44,7 @@ The derive refuses `#[serde(deny_unknown_fields)]` on a projection, which skips 
 ## 2. Implement `gdl::CellPolicy`
 
 ```rust
-use gdl::{Cell, CellPolicy, CellRequest, Projected};
+use gdl::{Cell, CellChoice, CellPolicy, CellRequest, Projected};
 
 /// The first cell that serves the request's model.
 struct ByModel;
@@ -52,18 +52,19 @@ struct ByModel;
 impl CellPolicy for ByModel {
     type Head = Projected<Hinted>;
 
-    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<usize> {
+    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<CellChoice> {
         let model = &request.head().hint.model;
-        cells.iter().position(|cell| {
+        let at = cells.iter().position(|cell| {
             cell.name().starts_with(model.as_str())
                 && cell.takes_work()
                 && !request.is_excluded(cell)
-        })
+        })?;
+        Some(CellChoice::new(at))
     }
 }
 ```
 
-- Return the index in `cells` of the cell to offer this attempt to, or `None` when no cell may take it. `None` fails the request with `Routing`.
+- Return a `CellChoice` of the index in `cells` of the cell to offer this attempt to, or `None` when no cell may take it. `None` fails the request with `Routing`.
 - Skip a cell that `request.is_excluded` names: it declined this request.
 - `request` also gives the chooser's region, the clock, the damped cells (`request.damped()`), the attempt's turn, and a random draw (`request.draw()`).
 - `choose` is not `async`, and it runs once per attempt. Take no lock and allocate nothing in it.
@@ -80,9 +81,10 @@ use tokio::time::Instant;
 impl CellPolicy for ByModel {
     type Head = Projected<Hinted>;
 
-    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<usize> {
+    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<CellChoice> {
         let model = request.head().hint.model.as_str();
-        HomeFirst.choose_where(request, cells, |cell| cell.name().starts_with(model))
+        let at = HomeFirst.choose_where(request, cells, |cell| cell.name().starts_with(model))?;
+        Some(CellChoice::new(at))
     }
 
     fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
@@ -95,6 +97,35 @@ impl CellPolicy for ByModel {
 - The filter is called more than once for a cell within one choice. It must answer the same each time.
 - A policy that chooses as `home_first` does should also override `eligible` as above. The default does not check that a cell's summary is fresh.
 - Both take a request of any `Head`, since neither reads the head.
+
+### Learn which cell took the request
+
+A choice is only a proposal: the cell may decline the offer, and then the runtime chooses again. A policy that must know which cell took the request, to record it for the next request of a session for example, gives its choice a lease:
+
+```rust
+use gdl::ChoiceLease;
+
+/// Records the cell that took a session's request.
+struct Record {
+    store: Arc<Store>,
+    fingerprint: [u8; 16],
+    cell: String,
+}
+
+impl ChoiceLease for Record {
+    fn accepted(&mut self) {
+        self.store.insert(self.fingerprint, &self.cell);
+    }
+}
+
+// In `choose`:
+Some(CellChoice::new(at).with_lease(Record { store, fingerprint, cell: cells[at].name().into() }))
+```
+
+- The runtime calls `accepted` once if the chosen cell accepts the offer. Then it holds the lease while the sending segment holds the request, as it holds a selector's lease, and drops it.
+- It drops the lease without calling `accepted` when the cell declines the offer, when the offer never left, and when the outcome is unknown. An unknown outcome means no answer came, so the cell may have run the request, but it did not say that it took it. A request that no cell accepts tells none of its leases.
+- Each attempt has its own lease. After a decline, the first attempt's lease is dropped before the next choice is made.
+- A choice without a lease allocates nothing. A lease allocates twice, so give one only to the choices that need it. A router that records a session's cell needs one on a first turn, on a turn that finds no record, and on a failover (`request.excluded()` is not empty). It does not need one on a turn that goes to its recorded cell.
 
 ## 3. Test it without a runtime
 
@@ -114,7 +145,7 @@ let cells = [
 let cx = Cx::new();
 let head = Projected(Hinted { hint: Hint { model: "qwen".into(), fingerprint: [0; 16], first_turn: true } });
 let request = CellRequest::new(&cx, &head, "us-east-1", now);
-assert_eq!(ByModel.choose(request, &cells), Some(1));
+assert_eq!(ByModel.choose(request, &cells).map(|choice| choice.at()), Some(1));
 ```
 
 Both versions of `ByModel` choose `qwen-1` here. The `home_first` version takes no cell whose summary is missing, or has no period (`LoadSummary::default()` has none). `with_excluded`, `with_damped` (a `gdl::Damped`), and `with_turn` set the rest. `crates/gdl/tests/policies.rs` has more.

@@ -23,15 +23,19 @@ use crate::dist::fabric::Offered;
 use crate::dist::offers::{Answer, Missed, delivered};
 use crate::dist::runtime::{Handed, Held, Runtime, Within};
 
-/// What became of an offer, as `crossing` sent it to the cell `cell`.
-/// A cell that declined it is damped, and a damped cell that accepted it
-/// is no longer; a hand-off that never left says nothing of the cell, and
-/// changes nothing. An unknown outcome names the class, since it is not
-/// offered to another cell.
-pub(crate) fn answer(offered: Offered, crossing: &Crossing, cell: u64) -> Answer {
+/// What became of an offer, as `crossing` sent it to the cell `cell`
+/// with `held`. A cell that declined it is damped, and a damped cell that
+/// accepted it is no longer; an acceptance is told to the cell policy's
+/// lease in `held`, if it gave one. A hand-off that never left says
+/// nothing of the cell, and changes nothing. An unknown outcome names the
+/// class, since it is not offered to another cell.
+pub(crate) fn answer(offered: Offered, crossing: &Crossing, cell: u64, held: &mut Held) -> Answer {
     let answer = delivered(offered, Some(crossing.class()));
     match &answer {
-        Answer::Accepted(_) => crossing.accepted(cell),
+        Answer::Accepted(_) => {
+            crossing.accepted(cell);
+            held.accepted();
+        }
         Answer::Missed(Missed::Declined(_)) => crossing.declined(cell),
         Answer::Missed(Missed::Unsent(_)) | Answer::Failed(_) => {}
     }
@@ -99,13 +103,13 @@ impl Runtime {
             if let Within::Selector { .. } = crossing.within() {
                 envelope.cx = WireCx::of(cx);
             }
-            let Some((instance, cell, held)) =
+            let Some((instance, cell, mut held)) =
                 self.choose_cell(crossing, cx, envelope, &offered).await?
             else {
                 break;
             };
             let (offering, sent) = self.deliver(instance, envelope, timed)?;
-            match answer(offering.await, crossing, cell) {
+            match answer(offering.await, crossing, cell, &mut held) {
                 Answer::Accepted(accepted) => {
                     return Ok(Handed {
                         accepted,
@@ -137,7 +141,7 @@ mod tests {
 
     use super::super::{CellTable, Cells, EntryTable, cell_id, targets};
     use super::*;
-    use crate::dist::counting::{Counted, counted, counting};
+    use crate::dist::counting::{Counted, counted, counting, exclusive};
     use crate::dist::envelope::{Accepted, VERSION, WireCx};
     use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
     use crate::dist::roster::{Policy, Roster};
@@ -203,7 +207,12 @@ mod tests {
     /// is accepted, from the instance of `a` that `rt` is to the one
     /// entry instance of `d`: the fewest over a few sends, after a first
     /// that meets the peer.
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the lock keeps other tests from counting meanwhile"
+    )]
     async fn allocations(rt: &Runtime, routers: &[Router]) -> Vec<u64> {
+        let _counting = exclusive();
         let mut fewest = vec![u64::MAX; routers.len()];
         for round in 0..31 {
             for (at, router) in routers.iter().enumerate() {
@@ -464,9 +473,12 @@ mod tests {
             &self,
             request: gdl::CellRequest<'_, Prompt>,
             cells: &[gdl::Cell],
-        ) -> Option<usize> {
+        ) -> Option<gdl::CellChoice> {
             let text = &request.head().text;
-            cells.iter().position(|cell| cell.name() == text)
+            cells
+                .iter()
+                .position(|cell| cell.name() == text)
+                .map(gdl::CellChoice::new)
         }
     }
 
@@ -698,6 +710,7 @@ mod tests {
     /// that ends a cell's damping, once.
     #[test]
     fn an_accepted_pick_allocates_nothing_and_writes_no_damping() {
+        let _counting = exclusive();
         let cx = Cx::new();
         let writes = || super::super::damping::WRITES.with(Cell::get);
         let random = std::hash::RandomState::new();
@@ -870,13 +883,14 @@ mod tests {
             &self,
             request: gdl::CellRequest<'_, gdl::Encoded>,
             cells: &[gdl::Cell],
-        ) -> Option<usize> {
+        ) -> Option<gdl::CellChoice> {
             let keep = |cell: &gdl::Cell| cell.name() != "m2";
-            if self.0 {
+            let at = if self.0 {
                 gdl::HomeFirst.choose_where(request, cells, keep)
             } else {
                 gdl::RoundRobin.choose_where(request, cells, keep)
-            }
+            };
+            at.map(gdl::CellChoice::new)
         }
     }
 
@@ -887,6 +901,7 @@ mod tests {
     /// excluded.
     #[test]
     fn a_pick_allocates_nothing_under_either_policy() {
+        let _counting = exclusive();
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
         let mut policies = gdl::CellPolicies::new();
@@ -933,5 +948,55 @@ mod tests {
                 assert!(!chosen.contains(&cell_id("model_x", "m2")), "{name}");
             }
         }
+    }
+
+    /// Gives every choice a lease that does nothing.
+    struct Leasing;
+
+    /// Not zero-sized, so that it takes an allocation of its own.
+    struct Idle(#[allow(dead_code, reason = "held for its size")] u64);
+
+    impl gdl::ChoiceLease for Idle {
+        fn accepted(&mut self) {}
+    }
+
+    impl gdl::CellPolicy for Leasing {
+        type Head = gdl::Encoded;
+
+        fn choose(
+            &self,
+            request: gdl::CellRequest<'_, gdl::Encoded>,
+            cells: &[gdl::Cell],
+        ) -> Option<gdl::CellChoice> {
+            let at = gdl::RoundRobin.choose_where(request, cells, |_| true)?;
+            Some(gdl::CellChoice::new(at).with_lease(Idle(0)))
+        }
+    }
+
+    /// A choice with a lease allocates twice per pick, the lease and the
+    /// thin box it is held in, and the pick nothing more.
+    #[test]
+    fn a_choice_with_a_lease_allocates_twice() {
+        let _counting = exclusive();
+        let cx = Cx::new();
+        let random = std::hash::RandomState::new();
+        let mut policies = gdl::CellPolicies::new();
+        policies.add("leasing", Leasing).expect("registered");
+        let layout = layout_under(gdl_model::CellPolicy {
+            policy: "leasing".into(),
+        });
+        let (crossing, _cells) = followed_with(&layout, &["m1", "m2"], &policies);
+        let before = counted();
+        counting(true);
+        for _ in 0..1000 {
+            let (_, cell, lease) = crossing
+                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .expect("a pick")
+                .expect("a cell");
+            crossing.accepted(cell);
+            drop(lease);
+        }
+        counting(false);
+        assert_eq!(counted() - before, 2000);
     }
 }

@@ -14,8 +14,8 @@ use common::cells::{
 };
 use common::{WAIT, collect};
 use gdl::{
-    Cell, CellPolicies, CellPolicy, CellRequest, Cx, Items, Next, Projected, Projection, Sink,
-    items,
+    Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, Cx, Items, Next, Projected,
+    Projection, Sink, items,
 };
 use gdl_model::CellSettings;
 use gdl_runtime::{
@@ -65,13 +65,20 @@ struct ByModel;
 impl CellPolicy for ByModel {
     type Head = Projected<Hinted>;
 
-    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<usize> {
+    fn choose(
+        &self,
+        request: CellRequest<'_, Projected<Hinted>>,
+        cells: &[Cell],
+    ) -> Option<CellChoice> {
         let model = &request.head().hint.model;
-        cells.iter().position(|cell| {
-            cell.name().starts_with(model.as_str())
-                && cell.takes_work()
-                && !request.is_excluded(cell)
-        })
+        cells
+            .iter()
+            .position(|cell| {
+                cell.name().starts_with(model.as_str())
+                    && cell.takes_work()
+                    && !request.is_excluded(cell)
+            })
+            .map(CellChoice::new)
     }
 }
 
@@ -88,7 +95,7 @@ struct Misreading;
 impl CellPolicy for Misreading {
     type Head = Projected<Misread>;
 
-    fn choose(&self, _: CellRequest<'_, Projected<Misread>>, _: &[Cell]) -> Option<usize> {
+    fn choose(&self, _: CellRequest<'_, Projected<Misread>>, _: &[Cell]) -> Option<CellChoice> {
         None
     }
 }

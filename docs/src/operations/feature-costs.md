@@ -133,6 +133,29 @@ taskset -c 17 target/release/deps/gdl_runtime-<hash> the_cost_of_a_boundary_pick
 
 The change and the control agree in every row, so the 2 to 4 ns over the base comes from where the test binary places the code, not from the pick. A first version built the filter as a closure that two other closures called. It kept `RoundRobin::rank` out of line, and its `round_robin` pick took 106 ns. A pick through a registered policy that calls `choose_where` allocates nothing either (`a_pick_allocates_nothing_under_either_policy`).
 
+### A lease on a cell choice
+
+A policy's `choose` returns a `CellChoice`, which may carry a lease that learns whether the chosen cell accepted. The runtime holds it in the offer's lease on the cell's follow. Same host and method, pinned to one core, load average 8 to 11. Base: the change before it, `65db589`.
+
+| Measure | Base | A fat lease pointer | Change (thin pointer) |
+|---|---|---|---|
+| pick, `round_robin`, four idle cells | 102.4 to 102.7 ns | 104.0 to 104.1 ns | 100.4 to 100.6 ns |
+| pick, `home_first`, four idle cells | 129.0 to 129.2 ns | 132.6 to 135.2 ns | 129.5 to 129.7 ns |
+| boundary pick | 109 ns | 113 ns | 109 ns |
+| boundary pick and acceptance | 125 to 126 ns | 128 to 132 ns | 124 ns |
+| accepted first offer over loopback, cells | 19.4 to 19.7 us | 19.4 to 19.7 us | 19.6 to 19.9 us |
+
+The same comparison on a quiet host (gb300, aarch64 Neoverse-V2, 72 cores, load average under 5, rustc 1.93.1), pinned to core 8, three runs each, with a spread under 0.3 ns per row. Base `5d8c312`, the change before this one `657c639`, this change `dd2ced4`, and the same change with a fat pointer:
+
+| Measure | Base | Change before | Fat lease pointer | Change |
+|---|---|---|---|---|
+| pick, `round_robin`, four idle cells | 123.0 ns | 120.8 to 120.9 ns | 125.1 to 125.3 ns | 122.1 to 122.2 ns |
+| pick, `home_first`, four idle cells | 164.2 to 164.3 ns | 158.5 to 158.7 ns | 162.6 to 162.7 ns | 161.5 to 161.7 ns |
+| boundary pick | 133 ns | 132 ns | 137 to 138 ns | 132 ns |
+| boundary pick and acceptance | 152 ns | 152 ns | 156 ns | 151 ns |
+
+With the lease as a `Box<dyn ChoiceLease>`, a choice and the offer's lease were three words each. Every pick paid for that, with or without a lease. Behind one more box, each is two words, and a choice costs what an index did. A lease then allocates twice. `send_forward`'s future went from 896 to 848 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`), and the front's call future stayed at 11,504 bytes (`requests sizes 0`).
+
 ## Reading the followed cells
 
 A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by, then, in the bench, one cell found by name among four and one withdrawal looked up. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`). Measured on the aarch64 Linux host above, shared, rustc 1.93.1, at `03be278` with the change, in four runs at load averages from 10 to 24:

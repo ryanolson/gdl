@@ -262,7 +262,7 @@ mod tests {
             let request = CellRequest::new(&cx, &Encoded, HOME, now)
                 .with_damped(damped)
                 .with_turn(turn);
-            HomeFirst.choose(request, cells)
+            HomeFirst.choose(request, cells).map(|choice| choice.at())
         }
 
         /// The cells chosen at `now` over many turns, by name.

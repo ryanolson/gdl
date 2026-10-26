@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use gdl::__runtime::Typed;
 use gdl::{Cx, Error, ErrorKind, Result};
 
-use crate::dist::counting::{Counted, counted};
+use crate::dist::counting::{Counted, counted, exclusive};
 use crate::dist::envelope::{self, Accepted, Forward, VERSION, WireCx};
 use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
 use crate::dist::offers::Refused;
@@ -592,10 +592,15 @@ async fn a_refusal_here_that_is_not_a_decline_is_final() {
 /// The allocations each of `routers` makes to send one hand-off that is
 /// accepted, from `fixture`'s sender to its one entry, done by `send`:
 /// the fewest over a few sends, after a first that meets the peer.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the lock keeps other tests from counting meanwhile"
+)]
 async fn allocations<'a, F>(fixture: &'a Fixture, routers: &'a [Router], send: F) -> Vec<u64>
 where
     F: Fn(&'a Runtime, &'a Router, Cx, Forward) -> BoxFuture<'a, Result<()>>,
 {
+    let _counting = exclusive();
     let mut fewest = vec![u64::MAX; routers.len()];
     for round in 0..31 {
         for (at, router) in routers.iter().enumerate() {

@@ -53,8 +53,8 @@ mod tests {
     impl gdl::CellPolicy for Last {
         type Head = Encoded;
 
-        fn choose(&self, _: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<usize> {
-            cells.len().checked_sub(1)
+        fn choose(&self, _: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<gdl::CellChoice> {
+            cells.len().checked_sub(1).map(gdl::CellChoice::new)
         }
     }
 
@@ -137,7 +137,8 @@ mod tests {
         assert_eq!(
             policy
                 .choose(request, Default::default(), &cells)
-                .expect("no head to read"),
+                .expect("no head to read")
+                .map(|choice| choice.at()),
             Some(1)
         );
     }

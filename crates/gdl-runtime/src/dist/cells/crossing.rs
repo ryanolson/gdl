@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arc_swap::ArcSwap;
 use futures::future::BoxFuture;
-use gdl::__runtime::{Erased, ErasedPolicy, Picked};
-use gdl::{CellPolicies, CellRequest, Cx, Error, ErrorKind, Instances, Result};
+use gdl::__runtime::{ChoiceHeld, Erased, ErasedPolicy, Picked};
+use gdl::{CellChoice, CellPolicies, CellRequest, Cx, Error, ErrorKind, Instances, Result};
 use gdl_model::{Encoding, Layout};
 use velo::InstanceId;
 
@@ -57,7 +57,8 @@ impl Crossing {
 
     /// Choose a cell for one attempt of the request with context `cx`
     /// and head `head`, then an instance of it by `policy`, with the
-    /// chosen cell's [`id`](CellTable::id) and a lease on its follow, or
+    /// chosen cell's [`id`](CellTable::id) and a lease on its follow,
+    /// which holds the cell policy's lease on the choice, if it gave one, or
     /// `None` when no cell but those in `excluded` may take it: one load
     /// of the table, a read of the clock, two counter increments, the cell
     /// policy's read of the head and its passes over the followed cells,
@@ -75,7 +76,7 @@ impl Crossing {
     ) -> Result<Option<(InstanceId, u64, CellLease)>> {
         for _ in 0..CHOICES {
             let table = self.target.table.load();
-            let Some(cell) = self.cell(&table, cx, head, excluded)? else {
+            let Some((cell, choice)) = self.cell(&table, cx, head, excluded)? else {
                 return Ok(None);
             };
             let Some(lease) = CellLease::take(&cell.leases) else {
@@ -85,7 +86,7 @@ impl Crossing {
             return Ok(Some((
                 cell.eligible[turn(policy, sequence, cell.eligible.len(), random)],
                 cell.id,
-                lease,
+                lease.with_choice(choice),
             )));
         }
         Ok(None)
@@ -114,9 +115,10 @@ impl Crossing {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.target.table.load_full();
-                let Some(cell) = self.cell(&table, cx, head, excluded)?.map(Arc::clone) else {
+                let Some((cell, choice)) = self.cell(&table, cx, head, excluded)? else {
                     return Ok(None);
                 };
+                let cell = Arc::clone(cell);
                 let picked = selector
                     .select(
                         cx,
@@ -142,7 +144,7 @@ impl Crossing {
                 let lease = still_eligible(&current, &cell, chosen, policy)
                     .and_then(|now| CellLease::take(&now.leases));
                 if let Some(lease) = lease {
-                    return Ok(Some((chosen, cell.id, picked, lease)));
+                    return Ok(Some((chosen, cell.id, picked, lease.with_choice(choice))));
                 }
             }
             Err(Error::routing(format!(
@@ -184,16 +186,17 @@ impl Crossing {
 
     /// The cell the policy chooses from `table` for one attempt of the
     /// request with context `cx` and head `head`, of those not in
-    /// `excluded`, by the summaries' ages now: one relaxed increment of
-    /// the attempts' count, which a policy that draws at random hashes
-    /// when it asks. Fails when the policy cannot read the head.
+    /// `excluded`, by the summaries' ages now, with the policy's lease on
+    /// the choice, if it gave one: one relaxed increment of the attempts'
+    /// count, which a policy that draws at random hashes when it asks.
+    /// Fails when the policy cannot read the head.
     fn cell<'t>(
         &self,
         table: &'t EntryTable,
         cx: &Cx,
         head: &[u8],
         excluded: &[u64],
-    ) -> Result<Option<&'t Arc<CellTable>>> {
+    ) -> Result<Option<(&'t Arc<CellTable>, Option<ChoiceHeld>)>> {
         let target = &self.target;
         let turn = self.draws.fetch_add(1, Ordering::Relaxed) as u64;
         let damped = target.damping.view();
@@ -203,11 +206,17 @@ impl Crossing {
             .with_damped(&damped)
             .with_turn(turn)
             .with_random(&self.random);
-        let at = target.policy.choose(request, self.encoding, &table.views)?;
+        let Some((at, choice)) = target
+            .policy
+            .choose(request, self.encoding, &table.views)?
+            .map(CellChoice::into_parts)
+        else {
+            return Ok(None);
+        };
         // A policy names a cell by its place in the views it was given,
         // which are the table's, index for index; a place past them is
         // no cell.
-        Ok(at.and_then(|at| table.cells.get(at)))
+        Ok(table.cells.get(at).map(|cell| (cell, choice)))
     }
 
     /// Refuse a cell policy that reads the head as a type the crossing's
@@ -422,7 +431,7 @@ mod tests {
             &self,
             _: CellRequest<'_, gdl::Projected<Hinted>>,
             _: &[gdl::Cell],
-        ) -> Option<usize> {
+        ) -> Option<gdl::CellChoice> {
             None
         }
     }

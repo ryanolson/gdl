@@ -652,12 +652,12 @@ impl Runtime {
                 // room the other path's state takes when this one is not running.
                 #[cfg(feature = "hub")]
                 Router::Cells(crossing) => {
-                    let (instance, cell, held) = self
+                    let (instance, cell, mut held) = self
                         .choose_cell(crossing, cx, &mut envelope, &[])
                         .await?
                         .ok_or_else(|| crossing.no_cell())?;
                     let (offering, sent) = self.deliver(instance, &envelope, timed)?;
-                    return match super::cells::answer(offering.await, crossing, cell) {
+                    return match super::cells::answer(offering.await, crossing, cell, &mut held) {
                         Answer::Accepted(accepted) => Ok(Handed {
                             accepted,
                             sent,
@@ -811,12 +811,14 @@ pub(crate) struct Handed {
 /// What a hand-off holds while its sender holds the request: the lease of
 /// the selector that chose where it went, if one did, and, for a
 /// chooser's offer to a cell, the lease on the cell's follow, by which the
-/// chooser knows when it no longer holds an offer to it.
+/// chooser knows when it no longer holds an offer to it, with the cell
+/// policy's lease on its choice.
 ///
 /// Under the `hub` feature the cell's lease makes it, and so every
-/// hand-off's [`Handed`], 8 bytes larger: 24 bytes against the selector's
-/// lease's 16, computed from the fields (a boxed lease is two words, an
-/// `Arc` one, each `Option` niched), not measured. A hand-off that is not
+/// hand-off's [`Handed`], 16 bytes larger: 32 bytes against the
+/// selector's lease's 16, computed from the fields (a boxed lease is two
+/// words, an `Arc` one, the policy's thin lease one, each `Option`
+/// niched), not measured. A hand-off that is not
 /// a chooser's offer to a cell carries `None` there: making it and
 /// dropping it take no atomic operation, only the empty check on drop.
 #[derive(Default)]
@@ -847,6 +849,16 @@ impl Held {
         Self {
             selector,
             cell: Some(cell),
+        }
+    }
+
+    /// The cell this offer went to accepted it: tell the cell policy's
+    /// lease, if it gave one.
+    #[cfg(feature = "hub")]
+    #[inline]
+    pub(crate) fn accepted(&mut self) {
+        if let Some(cell) = &mut self.cell {
+            cell.accepted();
         }
     }
 }

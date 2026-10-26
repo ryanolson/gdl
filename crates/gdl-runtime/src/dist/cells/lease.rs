@@ -13,6 +13,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use gdl::__runtime::ChoiceHeld;
+
 /// The bit of a follow's word that says it is not offered; the rest count
 /// the leases.
 const UNOFFERED: usize = 1 << (usize::BITS - 1);
@@ -46,9 +48,12 @@ impl Leases {
 
 /// One offer to a follow, held for as long as the chooser holds the
 /// request: until the response stream ends or is dropped, as a selector's
-/// lease is.
-#[derive(Debug)]
-pub(crate) struct CellLease(Arc<Leases>);
+/// lease is. It also holds the cell policy's lease on the choice, if the
+/// policy gave one, which lives as long.
+pub(crate) struct CellLease {
+    follow: Arc<Leases>,
+    choice: Option<ChoiceHeld>,
+}
 
 impl CellLease {
     /// A lease on the follow `leases` counts for, unless it is not
@@ -59,13 +64,42 @@ impl CellLease {
             leases.0.fetch_sub(1, Ordering::AcqRel);
             return None;
         }
-        Some(Self(Arc::clone(leases)))
+        Some(Self {
+            follow: Arc::clone(leases),
+            choice: None,
+        })
+    }
+
+    /// The lease, holding the cell policy's lease on the choice it was
+    /// taken for.
+    #[inline]
+    pub(crate) fn with_choice(mut self, choice: Option<ChoiceHeld>) -> Self {
+        self.choice = choice;
+        self
+    }
+
+    /// The cell accepted the offer: tell the cell policy's lease, if it
+    /// gave one.
+    #[inline]
+    pub(crate) fn accepted(&mut self) {
+        if let Some(choice) = &mut self.choice {
+            choice.accepted();
+        }
     }
 }
 
 impl Drop for CellLease {
     fn drop(&mut self) {
-        self.0.0.fetch_sub(1, Ordering::AcqRel);
+        self.follow.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl std::fmt::Debug for CellLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CellLease")
+            .field("follow", &self.follow)
+            .field("choice", &self.choice.is_some())
+            .finish()
     }
 }
 

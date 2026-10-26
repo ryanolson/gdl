@@ -357,7 +357,8 @@ fn a_gate_reads_the_availability_of_the_entry_it_sends_to() {
             &gdl::RoundRobin,
             gdl::CellRequest::new(&cx, &gdl::Encoded, "r", now),
             &routed.views,
-        ),
+        )
+        .map(|choice| choice.at()),
         Some(0),
         "g's cell policy can choose the cell"
     );

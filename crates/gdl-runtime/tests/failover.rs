@@ -24,7 +24,10 @@ use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, s
 use common::streamed::{self, Script, replies, words};
 use common::{Chunk, Events, Plan, Prompt, WAIT, collect, prompt, reference_graph};
 use futures::StreamExt;
-use gdl::{Choice, Cx, Encoded, ErrorKind, Instances, Next, Request, Selector, Selectors};
+use gdl::{
+    Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, Choice, ChoiceLease, Cx, Encoded,
+    ErrorKind, Instances, Next, Request, RoundRobin, Selector, Selectors,
+};
 use gdl_runtime::{
     CellState, Cells, Deployment, DeploymentSpec, Register, RequestRouter, RuntimeConfig,
 };
@@ -69,15 +72,30 @@ async fn chooser<H: Register + Send + Sync + 'static>(
     selectors: Selectors,
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> Running<H> {
+    chooser_with(spec, hub, runtime, selectors, CellPolicies::new(), assemble).await
+}
+
+/// [`chooser`], with `cell_policies` registered.
+async fn chooser_with<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    hub: &Hub,
+    runtime: &str,
+    selectors: Selectors,
+    cell_policies: CellPolicies,
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> Running<H> {
     let extra = format!("{}{RUNTIME}{runtime}", global_cell());
-    let config = settings(
+    let mut config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
         5_000,
         &extra,
     );
+    // The launch checks the placement's policy names against these.
+    config.runtime.cell_policies = cell_policies.clone();
     let runtime = RuntimeConfig {
         selectors,
+        cell_policies,
         ..config.runtime.clone()
     };
     run_graph(&config, "a", spec, runtime, assemble)
@@ -784,6 +802,234 @@ async fn a_cell_that_declines_is_damped_and_the_lighter_cell_is_preferred() {
     );
     drop(held);
     for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// Chooses as `round_robin` does, with a lease on each choice that logs
+/// `accepted <cell>` when its cell accepts the offer and `dropped <cell>`
+/// when the runtime lets it go.
+#[derive(Clone, Default)]
+struct Outcomes(Arc<Mutex<Vec<String>>>);
+
+impl Outcomes {
+    /// The placement's `model_x` chooses its cells by this policy.
+    fn placement(placement: gdl_runtime::Placement) -> gdl_runtime::Placement {
+        placement.cell_policy(
+            "model_x",
+            gdl_model::CellPolicy {
+                policy: "outcomes".into(),
+            },
+        )
+    }
+
+    fn policies(&self) -> CellPolicies {
+        let mut policies = CellPolicies::new();
+        policies.add("outcomes", self.clone()).expect("registered");
+        policies
+    }
+
+    fn log(&self) -> Vec<String> {
+        self.0.lock().expect("lock").clone()
+    }
+
+    /// Wait until the log is `expected`: a lease is dropped when the
+    /// chooser lets the request go, which may follow the end of the call
+    /// by a step of its task.
+    async fn until(&self, expected: &[String]) {
+        let waited = tokio::time::timeout(WAIT, async {
+            while self.log() != expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "{:?}, not {expected:?}", self.log());
+    }
+}
+
+struct Told {
+    log: Arc<Mutex<Vec<String>>>,
+    cell: String,
+}
+
+impl ChoiceLease for Told {
+    fn accepted(&mut self) {
+        let told = format!("accepted {}", self.cell);
+        self.log.lock().expect("lock").push(told);
+    }
+}
+
+impl Drop for Told {
+    fn drop(&mut self) {
+        let told = format!("dropped {}", self.cell);
+        self.log.lock().expect("lock").push(told);
+    }
+}
+
+impl CellPolicy for Outcomes {
+    type Head = Encoded;
+
+    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<CellChoice> {
+        let at = RoundRobin.choose_where(request, cells, |_| true)?;
+        Some(CellChoice::new(at).with_lease(Told {
+            log: Arc::clone(&self.0),
+            cell: cells[at].name().to_string(),
+        }))
+    }
+}
+
+fn accepted(cell: &str) -> String {
+    format!("accepted {cell}")
+}
+
+fn dropped(cell: &str) -> String {
+    format!("dropped {cell}")
+}
+
+/// A cell policy's lease learns which cell took the request: the full
+/// cell's lease is dropped untold when it declines, before the next cell
+/// is chosen, and the other cell's is told it accepted, then dropped once
+/// the request ends. The held request's lease, told when its cell took
+/// it, is dropped when that request ends. Alike when a selector chooses
+/// the instance within the cell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_choice_lease_is_told_which_cell_accepted() {
+    for routed in [
+        placement(),
+        placement().route("B", RequestRouter::Selector("recording".into())),
+    ] {
+        let spec = spec_of(Outcomes::placement(routed));
+        let directory = Resolving::new();
+        let outcomes = Outcomes::default();
+        let mut selectors = Selectors::new();
+        selectors
+            .add("recording", Recording::default())
+            .expect("a selector");
+        let hub = global_hub_of(&spec, &directory).await;
+        let chooser = chooser_with(
+            &spec,
+            &hub,
+            "",
+            selectors,
+            outcomes.policies(),
+            &|deployment| reference_graph(deployment, &Events::quiet()),
+        )
+        .await;
+        let quiet = Events::quiet();
+        let m1 = reference_cell(
+            &spec,
+            &directory,
+            ready(M1, "m1-hub:1337"),
+            &one_at_a_time,
+            &quiet,
+        )
+        .await;
+        let m2 = reference_cell(
+            &spec,
+            &directory,
+            degraded(M2, "m2-hub:1337"),
+            &|r| r,
+            &quiet,
+        )
+        .await;
+        following(
+            &tables(&chooser),
+            &[(M1, CellState::Ready), (M2, CellState::Degraded)],
+        )
+        .await;
+        let held = hold(&chooser, "held").await;
+        assert_eq!(outcomes.log(), [accepted(M1)]);
+
+        ask(&chooser.segment).await.expect("another cell answered");
+        assert_eq!((m1.forwards(), m2.forwards()), (1, 1));
+        let asked = [accepted(M1), dropped(M1), accepted(M2), dropped(M2)];
+        outcomes.until(&asked).await;
+        drop(held);
+        let mut ended = asked.to_vec();
+        ended.push(dropped(M1));
+        outcomes.until(&ended).await;
+        for hub in [hub, m1.hub, m2.hub] {
+            hub.shutdown().await.expect("valid test fixture");
+        }
+    }
+}
+
+/// No lease is told when no cell takes the request: not when every cell
+/// declines it, and not when the outcome is unknown, though the cell may
+/// have run it. Each is dropped. Runs for a setup timeout (1 s): the
+/// unknown outcome is a wait for an answer that does not come.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_choice_lease_is_told_when_no_cell_accepts() {
+    let spec = spec_of(Outcomes::placement(placement()));
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let assemble = |deployment: &Deployment| reference_graph(deployment, &quiet);
+    let hub = global_hub_of(&spec, &directory).await;
+    let full = Outcomes::default();
+    let filled = chooser_with(
+        &spec,
+        &hub,
+        "",
+        Selectors::new(),
+        full.policies(),
+        &assemble,
+    )
+    .await;
+    let m1 = reference_cell(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        &one_at_a_time,
+        &quiet,
+    )
+    .await;
+    let m2 = reference_cell(
+        &spec,
+        &directory,
+        degraded(M2, "m2-hub:1337"),
+        &one_at_a_time,
+        &quiet,
+    )
+    .await;
+    let expected = [(M1, CellState::Ready), (M2, CellState::Degraded)];
+    following(&tables(&filled), &expected).await;
+    let held = [hold(&filled, "held-1").await, hold(&filled, "held-2").await];
+    let both = [accepted(M1), dropped(M1), accepted(M2)];
+    full.until(&both).await;
+    let error = ask(&filled.segment).await.expect_err("every cell is full");
+    assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
+    // M1 declined `held-2`, so it is damped, and M2 is offered first.
+    let mut declined = both.to_vec();
+    declined.extend([dropped(M2), dropped(M1)]);
+    full.until(&declined).await;
+    drop(held);
+
+    let late = |runtime: RuntimeConfig| {
+        let mut runtime = runtime;
+        runtime.faults.delay_forward_ack = Some(runtime.setup_timeout * 3 / 2);
+        runtime
+    };
+    let unknown = Outcomes::default();
+    let spec = spec_of(Outcomes::placement(placement()));
+    let directory = Resolving::new();
+    let hub_late = global_hub_of(&spec, &directory).await;
+    let chooser = chooser_with(
+        &spec,
+        &hub_late,
+        "",
+        Selectors::new(),
+        unknown.policies(),
+        &assemble,
+    )
+    .await;
+    let m3 = reference_cell(&spec, &directory, ready(M3, "m3-hub:1337"), &late, &quiet).await;
+    following(&tables(&chooser), &[(M3, CellState::Ready)]).await;
+    let error = ask(&chooser.segment)
+        .await
+        .expect_err("the outcome is not known");
+    assert_eq!(error.kind(), ErrorKind::OutcomeUnknown, "{error}");
+    unknown.until(&[dropped(M3)]).await;
+    for hub in [hub, m1.hub, m2.hub, hub_late, m3.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }

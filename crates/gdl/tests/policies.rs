@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use gdl::{
-    Cell, CellPolicies, CellPolicy, CellRequest, CellState, Cx, Damped, HomeFirst, Load,
-    LoadSummary, Projected, Projection, RoundRobin,
+    Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, CellState, Cx, Damped, HomeFirst,
+    Load, LoadSummary, Projected, Projection, RoundRobin,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -47,9 +47,15 @@ struct ByModel;
 impl CellPolicy for ByModel {
     type Head = Projected<Hinted>;
 
-    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<usize> {
+    fn choose(
+        &self,
+        request: CellRequest<'_, Projected<Hinted>>,
+        cells: &[Cell],
+    ) -> Option<CellChoice> {
         let model = request.head().hint.model.as_str();
-        HomeFirst.choose_where(request, cells, |cell| cell.name().starts_with(model))
+        HomeFirst
+            .choose_where(request, cells, |cell| cell.name().starts_with(model))
+            .map(CellChoice::new)
     }
 
     /// As `home_first` checks it, since it chooses as `home_first` does.
@@ -100,7 +106,9 @@ fn the_hint_chooses_the_cell() {
     let cx = Cx::new();
     let chosen = |model: &str| {
         let head = hinted(model);
-        ByModel.choose(CellRequest::new(&cx, &head, HOME, now), &cells)
+        ByModel
+            .choose(CellRequest::new(&cx, &head, HOME, now), &cells)
+            .map(|choice| choice.at())
     };
     assert_eq!(chosen("llama"), Some(0));
     assert_eq!(chosen("qwen"), Some(1));
@@ -123,10 +131,10 @@ fn a_policy_sees_what_the_runtime_gives_it() {
     let request = CellRequest::new(&cx, &head, HOME, now).with_excluded(&excluded);
     assert_eq!(request.region(), HOME);
     assert_eq!(request.now(), now);
-    assert_eq!(ByModel.choose(request, &cells), Some(1));
+    assert_eq!(ByModel.choose(request, &cells).map(|c| c.at()), Some(1));
     let excluded = [cells[0].id(), cells[1].id()];
     let request = CellRequest::new(&cx, &head, HOME, now).with_excluded(&excluded);
-    assert_eq!(ByModel.choose(request, &cells), None, "a draining cell");
+    assert!(ByModel.choose(request, &cells).is_none(), "a draining cell");
     // A cell is named the same in every table: its class and name.
     assert_eq!(
         cells[0].id(),
@@ -166,7 +174,7 @@ fn a_policy_chooses_as_gdls_own_among_the_cells_it_keeps() {
         (0..64)
             .filter_map(|turn| {
                 let request = CellRequest::new(&cx, &head, HOME, now).with_turn(turn);
-                ByModel.choose(request, &cells)
+                ByModel.choose(request, &cells).map(|choice| choice.at())
             })
             .collect()
     };
@@ -218,7 +226,7 @@ fn the_guide_fixture_works_with_home_first() {
         Some(1),
         "the guide's first policy works with this fixture"
     );
-    assert_eq!(ByModel.choose(request, &cells), Some(1));
+    assert_eq!(ByModel.choose(request, &cells).map(|c| c.at()), Some(1));
 }
 
 /// gdl's own policies take the same inputs that a policy crate builds:
@@ -239,7 +247,7 @@ fn home_first_runs_on_inputs_a_policy_crate_builds() {
                 let request = CellRequest::new(&cx, &gdl::Encoded, HOME, now)
                     .with_damped(damped)
                     .with_turn(turn);
-                HomeFirst.choose(request, &cells)
+                HomeFirst.choose(request, &cells).map(|choice| choice.at())
             })
             .map(|at| cells[at].name())
             .collect()
@@ -255,7 +263,7 @@ fn home_first_runs_on_inputs_a_policy_crate_builds() {
         .with_entries(1)
         .with_load(idle(now - Duration::from_secs(31)))];
     let request = CellRequest::new(&cx, &gdl::Encoded, HOME, now);
-    assert_eq!(HomeFirst.choose(request, &stale), None);
+    assert!(HomeFirst.choose(request, &stale).is_none());
     assert!(!HomeFirst.eligible(&stale[0], HOME, now));
     assert!(HomeFirst.eligible(&cells[0], HOME, now));
 }
@@ -302,8 +310,12 @@ struct ByUnrenamed;
 impl CellPolicy for ByUnrenamed {
     type Head = Projected<Unrenamed>;
 
-    fn choose(&self, request: CellRequest<'_, Projected<Unrenamed>>, _: &[Cell]) -> Option<usize> {
-        (!request.head().hint.model.is_empty()).then_some(0)
+    fn choose(
+        &self,
+        request: CellRequest<'_, Projected<Unrenamed>>,
+        _: &[Cell],
+    ) -> Option<CellChoice> {
+        (!request.head().hint.model.is_empty()).then(|| CellChoice::new(0))
     }
 }
 

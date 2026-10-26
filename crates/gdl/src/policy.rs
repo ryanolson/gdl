@@ -47,11 +47,12 @@ pub trait CellPolicy: Send + Sync + 'static {
     /// the segment starts.
     type Head: Head;
 
-    /// The index in `cells` of the cell to send this attempt to, or
-    /// `None` when no cell may take it, which fails the request with
-    /// `Routing`. `cells` are the class's cells the chooser follows, in a
-    /// fixed order: by class and cell.
-    fn choose(&self, request: CellRequest<'_, Self::Head>, cells: &[Cell]) -> Option<usize>;
+    /// The cell in `cells` to send this attempt to, or `None` when no
+    /// cell may take it, which fails the request with `Routing`. `cells`
+    /// are the class's cells the chooser follows, in a fixed order: by
+    /// class and cell. A choice with a lease learns whether its cell
+    /// accepted the offer ([`CellChoice::with_lease`]).
+    fn choose(&self, request: CellRequest<'_, Self::Head>, cells: &[Cell]) -> Option<CellChoice>;
 
     /// Whether `cell`, which this policy chose, may still be sent to at
     /// `now`: a choice that waited on a selector is checked again with
@@ -61,6 +62,85 @@ pub trait CellPolicy: Send + Sync + 'static {
         let _ = (region, now);
         cell.takes_work()
     }
+}
+
+/// What a cell policy chose for one attempt: the index of a cell in the
+/// cells it was given, and, if it asks, a lease that learns whether that
+/// cell accepted the offer.
+pub struct CellChoice {
+    at: usize,
+    lease: Option<ChoiceHeld>,
+}
+
+/// A choice's lease behind one thin pointer, so that a choice is two words
+/// and a choice without a lease costs the pick what an index did: a fat
+/// pointer cost each pick 2 to 4 ns more
+/// (`docs/src/operations/feature-costs.md`). A lease is two allocations.
+#[doc(hidden)]
+pub struct ChoiceHeld(Box<Box<dyn ChoiceLease>>);
+
+impl ChoiceHeld {
+    /// The chosen cell accepted the offer.
+    #[inline]
+    pub fn accepted(&mut self) {
+        self.0.accepted();
+    }
+}
+
+impl CellChoice {
+    /// Send this attempt to the cell at `at` in the cells the policy was
+    /// given.
+    #[inline]
+    pub fn new(at: usize) -> Self {
+        Self { at, lease: None }
+    }
+
+    /// Keep `lease` with the choice. The runtime calls its
+    /// [`accepted`](ChoiceLease::accepted) when the chosen cell accepts
+    /// the offer, then holds it while the sending segment holds the
+    /// request, as a selector's lease is held. It drops `lease` without
+    /// telling it when the cell declines the offer, when the offer is
+    /// never sent, when the outcome is unknown (no answer came, so the
+    /// cell may have run the request but did not say it took it), and
+    /// when the runtime chooses again because the cell stopped taking
+    /// work. So a request that no cell accepts tells none of its leases.
+    /// The lease is boxed, twice: a choice without one allocates nothing.
+    pub fn with_lease(mut self, lease: impl ChoiceLease) -> Self {
+        self.lease = Some(ChoiceHeld(Box::new(Box::new(lease))));
+        self
+    }
+
+    /// The index of the chosen cell.
+    #[inline]
+    pub fn at(&self) -> usize {
+        self.at
+    }
+
+    /// The index and the lease, for the runtime.
+    #[doc(hidden)]
+    #[inline]
+    pub fn into_parts(self) -> (usize, Option<ChoiceHeld>) {
+        (self.at, self.lease)
+    }
+}
+
+impl fmt::Debug for CellChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CellChoice")
+            .field("at", &self.at)
+            .field("lease", &self.lease.is_some())
+            .finish()
+    }
+}
+
+/// What a cell policy keeps with its choice to learn its outcome
+/// ([`CellChoice::with_lease`]): told once if the chosen cell accepts the
+/// offer, and dropped when the runtime lets it go.
+pub trait ChoiceLease: Send + 'static {
+    /// The cell this lease's choice went to accepted the offer: it admitted
+    /// the request and will answer it. Called at most once, on the
+    /// sending segment's task, before the request's response starts.
+    fn accepted(&mut self);
 }
 
 /// One followed cell of the class a hand-off enters, as a policy sees it:
@@ -415,7 +495,7 @@ pub trait ErasedPolicy: Send + Sync + 'static {
         request: CellRequest<'_, ()>,
         encoding: Encoding,
         cells: &[Cell],
-    ) -> Result<Option<usize>>;
+    ) -> Result<Option<CellChoice>>;
 
     fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool;
 
@@ -437,7 +517,7 @@ impl<P: CellPolicy> ErasedPolicy for TypedPolicy<P> {
         request: CellRequest<'_, ()>,
         encoding: Encoding,
         cells: &[Cell],
-    ) -> Result<Option<usize>> {
+    ) -> Result<Option<CellChoice>> {
         let head = <P::Head as Sealed>::decode(request.bytes, encoding)?;
         Ok(self.0.choose(request.with_head(&head), cells))
     }
@@ -624,10 +704,47 @@ mod tests {
             &self,
             request: CellRequest<'_, Projected<Hinted>>,
             cells: &[Cell],
-        ) -> Option<usize> {
+        ) -> Option<CellChoice> {
             let model = &request.head().hint.model;
-            cells.iter().position(|cell| cell.name() == model)
+            cells
+                .iter()
+                .position(|cell| cell.name() == model)
+                .map(CellChoice::new)
         }
+    }
+
+    /// A choice's lease reaches the runtime through `into_parts`, is told
+    /// there, and is dropped with it; a choice without one has none.
+    #[test]
+    fn a_choice_carries_its_lease_to_the_runtime() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Told(Arc<AtomicUsize>);
+
+        impl ChoiceLease for Told {
+            fn accepted(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl Drop for Told {
+            fn drop(&mut self) {
+                self.0.fetch_add(10, Ordering::SeqCst);
+            }
+        }
+
+        let told = Arc::new(AtomicUsize::new(0));
+        let choice = CellChoice::new(3).with_lease(Told(Arc::clone(&told)));
+        assert_eq!(format!("{choice:?}"), "CellChoice { at: 3, lease: true }");
+        let (at, lease) = choice.into_parts();
+        assert_eq!(at, 3);
+        let mut lease = lease.expect("a lease");
+        lease.accepted();
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+        drop(lease);
+        assert_eq!(told.load(Ordering::SeqCst), 11);
+        assert!(CellChoice::new(0).into_parts().1.is_none());
+        assert_eq!(std::mem::size_of::<CellChoice>(), 16);
     }
 
     /// A projection reads its fields from the whole request in either
@@ -649,7 +766,10 @@ mod tests {
             let bytes = crate::codec::encoder::<Routed>(encoding)(&routed).expect("encoded");
             let request = CellRequest::new(&cx, &(), "r", Instant::now()).with_bytes(&bytes);
             assert_eq!(
-                policy.choose(request, encoding, &cells).expect("read"),
+                policy
+                    .choose(request, encoding, &cells)
+                    .expect("read")
+                    .map(|choice| choice.at()),
                 Some(1),
                 "{encoding:?}"
             );

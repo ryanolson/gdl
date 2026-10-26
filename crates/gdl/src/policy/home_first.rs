@@ -1,6 +1,6 @@
 use tokio::time::Instant;
 
-use super::{Cell, CellPolicy, CellRequest, CellState, LoadSummary, cut, mix};
+use super::{Cell, CellChoice, CellPolicy, CellRequest, CellState, LoadSummary, cut, mix};
 use crate::select::Encoded;
 
 /// `home_first`: by state, region, and admission, from each cell's load
@@ -187,9 +187,11 @@ impl CellPolicy for HomeFirst {
     /// It reads no request data.
     type Head = Encoded;
 
-    /// [`choose_where`](HomeFirst::choose_where), keeping every cell.
-    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<usize> {
+    /// [`choose_where`](HomeFirst::choose_where), keeping every cell, with
+    /// no lease.
+    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<CellChoice> {
         self.choose_where(request, cells, |_| true)
+            .map(CellChoice::new)
     }
 
     /// Whether `cell` is in a tier: a damped cell is still eligible, since
@@ -306,7 +308,7 @@ mod tests {
             .with_excluded(excluded)
             .with_damped(damped)
             .with_turn(turn);
-        HomeFirst.choose(request, cells)
+        HomeFirst.choose(request, cells).map(|choice| choice.at())
     }
 
     /// The cells `home_first` chooses at `now` over many turns, by name.
@@ -692,6 +694,7 @@ mod tests {
                         .map(|at| cells[at].name.clone());
                     let alone = HomeFirst
                         .choose(request, &copy)
+                        .map(|choice| choice.at())
                         .map(|at| copy[at].name.clone());
                     assert_eq!(whole, alone, "mask {mask:06b}, turn {turn}");
                 }
