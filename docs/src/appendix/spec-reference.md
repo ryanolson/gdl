@@ -108,6 +108,7 @@ The fleet file fills in each cell's `[cell]` table in its segments' settings. Th
 | `layout` | the layout the cell runs. Read and checked for its shape. Nothing else in an instance or hub reads it. | none |
 | `home` | the parent cell | none |
 | `directory` | where cell records are published: `relay`, `memory` (one directory per process, for tests), or `dir` | `relay` |
+| `parent_hub` | the parent cell's hub, `host:port`, where the cell's hub reports its record. With `relay`, a hub of a class that another class sends to needs it. Refused for a class that nothing sends to, and with the other backends. A fleet bundle sets it to `<home>:1337`. | none |
 | `dir` | the shared directory. Required with `directory = "dir"` and refused with the others. | none |
 | `hub` | the address, `host:port`, at which other cells' hubs reach this cell's hub. Only the hub reads it. | none |
 | `summary_ms` | the load summary's period. Least 1000. | 10000 |

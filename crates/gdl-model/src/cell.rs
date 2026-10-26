@@ -20,6 +20,7 @@ use crate::{Layout, Problem, Problems, check_layout_name};
 /// region = "us-east-1"
 /// home = "global-us-east-1"    # the parent cell, for a class that another sends to: whose hub follows this one
 /// directory = "relay"          # optional: "relay" (the default), "memory", or "dir"
+/// parent_hub = "global-hub:1337" # with "relay", for a class that another sends to: the parent's hub
 /// # dir = "/var/lib/gdl/cells" # with "dir", and only with it: the shared directory
 /// hub = "model-x-01-hub:1337"  # optional: where other cells' hubs reach this cell's hub
 /// summary_ms = 10000           # optional: the load summary's period, at least 1000
@@ -55,8 +56,10 @@ pub struct CellSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
     /// Where the cell's record is published and the other cells are found:
-    /// the `directory` key, with the `dir` key for [`DirectoryBackend::Dir`];
-    /// [`DirectoryBackend::DEFAULT`] when it is not set.
+    /// the `directory` key, with the `parent_hub` key for
+    /// [`DirectoryBackend::Relay`] and the `dir` key for
+    /// [`DirectoryBackend::Dir`]; [`DirectoryBackend::DEFAULT`] when it is
+    /// not set.
     pub directory: DirectoryBackend,
     /// Usable instances each segment of the class needs for the cell to be
     /// ready; see [`CellSettings::quorum`].
@@ -84,10 +87,15 @@ pub struct CellSettings {
 /// settings arrive with the backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectoryBackend {
-    /// Each cell reports to the global cells of its region, and the global
-    /// cells relay what they receive to each other:
-    /// [`DirectoryBackend::DEFAULT`].
-    Relay,
+    /// Each cell's hub reports its record to its parent cell's hub, which
+    /// holds the records of its children: [`DirectoryBackend::DEFAULT`].
+    /// A cell of a class that nothing sends to reports nowhere.
+    Relay {
+        /// The parent cell's hub, `host:port`: where the cell's hub reports
+        /// its record. A cell's hub needs it when another class sends to
+        /// the cell's class, and it is refused for any other class.
+        parent_hub: Option<String>,
+    },
     /// One directory in the process, shared by every hub in it: for tests
     /// that run several cells in one process.
     Memory,
@@ -101,8 +109,9 @@ pub enum DirectoryBackend {
 }
 
 impl DirectoryBackend {
-    /// The backend when `directory` is not set: the relay.
-    pub const DEFAULT: Self = Self::Relay;
+    /// The backend when `directory` is not set: the relay, with no parent's
+    /// hub.
+    pub const DEFAULT: Self = Self::Relay { parent_hub: None };
 }
 
 impl Default for DirectoryBackend {
@@ -169,8 +178,25 @@ impl CellSettings {
     /// Whether these settings fit the cell's hub in `layout`: the rule of
     /// [`CellSettings::check`] without an instance's own segment, since a
     /// hub has none. Every problem is reported.
+    ///
+    /// A hub also needs `parent_hub` with the `relay` backend when another
+    /// class sends to its cell's class, since it reports there.
     pub fn check_hub(&self, layout: &Layout) -> Result<(), Problems> {
-        refuse(self.problems(layout, None))
+        let mut problems = self.problems(layout, None);
+        let entered = sent_to(layout, &self.class);
+        if let (DirectoryBackend::Relay { parent_hub: None }, Some(parent)) =
+            (&self.directory, entered)
+        {
+            problems.push(Problem::at(
+                Some("cell".into()),
+                Some("parent_hub".into()),
+                format!(
+                    "missing: class `{parent}` sends to class `{}`, so with directory = \"relay\" the cell's hub reports its record to its parent's hub, at this address",
+                    self.class
+                ),
+            ));
+        }
+        refuse(problems)
     }
 
     /// Read a `[cell]` table from `deserializer`, a TOML table or a
@@ -244,9 +270,36 @@ impl CellSettings {
                     None
                 }
             });
-            own.into_iter().chain(strays).chain(requires).collect()
+            let reports = match (&self.directory, sent_to(layout, class)) {
+                (
+                    DirectoryBackend::Relay {
+                        parent_hub: Some(_),
+                    },
+                    None,
+                ) => Some(at(
+                    "parent_hub".into(),
+                    format!(
+                        "no class sends to class `{class}`, so its cell has no parent to report to"
+                    ),
+                )),
+                _ => None,
+            };
+            own.into_iter()
+                .chain(strays)
+                .chain(requires)
+                .chain(reports)
+                .collect()
         }
     }
+}
+
+/// A class that sends to `class` in `layout`, if any.
+fn sent_to<'a>(layout: &'a Layout, class: &str) -> Option<&'a str> {
+    layout
+        .boundaries()
+        .iter()
+        .find(|boundary| boundary.into == class)
+        .map(|boundary| boundary.from.as_str())
 }
 
 /// The classes `class` sends to in `layout`.
@@ -351,10 +404,10 @@ fn check_label(kind: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The `[cell]` table as written. `directory` and `dir` are two keys of
-/// one choice, so that the settings read flat (`GDL_CELL__DIR`), and they
-/// are joined here, where a path given to a backend that reads none can be
-/// refused rather than left unread.
+/// The `[cell]` table as written. `directory`, `parent_hub`, and `dir` are
+/// keys of one choice, so that the settings read flat (`GDL_CELL__DIR`),
+/// and they are joined here, where a key given to a backend that reads
+/// none can be refused rather than left unread.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Table {
@@ -367,6 +420,8 @@ struct Table {
     home: Option<String>,
     #[serde(default)]
     directory: Backend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_hub: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -414,8 +469,22 @@ impl TryFrom<Table> for CellSettings {
         let at = |key: &str, message: String| {
             Problem::at(Some("cell".into()), Some(key.into()), message)
         };
+        if let Some(parent_hub) = &table.parent_hub {
+            if !matches!(table.directory, Backend::Relay) {
+                return Err(at(
+                    "parent_hub",
+                    format!(
+                        "{parent_hub:?} is read only by the `relay` backend, not by directory = \"{}\"",
+                        table.directory.name()
+                    ),
+                ));
+            }
+            check_hub_address(parent_hub).map_err(|why| at("parent_hub", why))?;
+        }
         let directory = match (table.directory, table.dir) {
-            (Backend::Relay, None) => DirectoryBackend::Relay,
+            (Backend::Relay, None) => DirectoryBackend::Relay {
+                parent_hub: table.parent_hub,
+            },
             (Backend::Memory, None) => DirectoryBackend::Memory,
             (Backend::Dir, Some(path)) if !path.as_os_str().is_empty() => {
                 DirectoryBackend::Dir { path }
@@ -461,10 +530,10 @@ impl TryFrom<Table> for CellSettings {
 
 impl From<CellSettings> for Table {
     fn from(settings: CellSettings) -> Self {
-        let (directory, dir) = match settings.directory {
-            DirectoryBackend::Relay => (Backend::Relay, None),
-            DirectoryBackend::Memory => (Backend::Memory, None),
-            DirectoryBackend::Dir { path } => (Backend::Dir, Some(path)),
+        let (directory, parent_hub, dir) = match settings.directory {
+            DirectoryBackend::Relay { parent_hub } => (Backend::Relay, parent_hub, None),
+            DirectoryBackend::Memory => (Backend::Memory, None, None),
+            DirectoryBackend::Dir { path } => (Backend::Dir, None, Some(path)),
         };
         Self {
             name: settings.name,
@@ -473,6 +542,7 @@ impl From<CellSettings> for Table {
             region: settings.region,
             home: settings.home,
             directory,
+            parent_hub,
             dir,
             ready: settings.ready,
             requires: settings.requires,

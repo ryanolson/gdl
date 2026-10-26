@@ -879,7 +879,7 @@ fn defaults() -> Vec<(&'static str, String)> {
     use gdl_model::{CellPolicy, CellSettings, DirectoryBackend, RequestRouter};
     let millis = |d: std::time::Duration| d.as_millis().to_string();
     let directory = match DirectoryBackend::DEFAULT {
-        DirectoryBackend::Relay => "relay",
+        DirectoryBackend::Relay { .. } => "relay",
         DirectoryBackend::Memory => "memory",
         DirectoryBackend::Dir { .. } => "dir",
     };

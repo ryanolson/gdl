@@ -8,7 +8,9 @@
 //! acknowledgements of a followed cell's retired entry instance: the one a
 //! chooser sends its own hub once its tables hold the instance retired
 //! ([`Avoids`]), and the one its hub sends the cell's hub once every
-//! chooser of its cell has ([`Avoided`]).
+//! chooser of its cell has ([`Avoided`]). And, under the `relay`
+//! directory backend, the report a child cell's hub sends its parent's
+//! hub of its record ([`Report`]).
 //!
 //! The hub (`gdl-hub`) serves them and a segment instance reads the relay
 //! and its own cell's watch, for the cell's drain, and sends the report, so the wire types, the routes, and the client
@@ -35,12 +37,14 @@ mod backoff;
 mod client;
 mod follows;
 mod limits;
+mod report;
 mod watched;
 
 pub use backoff::{Backoff, WatchEnd};
 pub use client::{CellWatchError, CellWatcher, WatchItem, WatchStream};
 pub use follows::FollowEvent;
 pub use limits::{WatchFailure, WatchLimits};
+pub use report::{REPORT_ROUTE, Report, ReportRefusal, ReportReply};
 pub use watched::{UnknownEvent, UnknownFollowEvent, Watched};
 
 /// The name the cell's extension mounts its routes under, at

@@ -104,7 +104,7 @@ For each segment of the cell's class, the hub counts the instances usable for fr
 
 ### The record
 
-The hub publishes the cell's record to the cell directory when the state changes and every 10 s. The record carries the cell's name, class, region, parent, contract and placement hashes, state, hub address, load summary, an epoch, a sequence number, and a lease of 30 s.
+The hub publishes the cell's record to the cell directory when the state changes and every 10 s. Under the `relay` backend, it writes the record at the cadence its parent's hub answers with ([The relay backend](#the-relay-backend)). The record carries the cell's name, class, region, parent, contract and placement hashes, state, hub address, load summary, an epoch, a sequence number, and a lease of 30 s.
 
 The epoch is the hub process's incarnation. A restarted hub takes a new epoch, which orders after every write of the one before. A write that is not newer than what the directory holds for the cell is refused.
 
@@ -141,8 +141,28 @@ The cell directory holds one record per cell, keyed by class and name. Each reco
 | Backend | Where | Use |
 |---|---|---|
 | `memory` (`MemoryDirectory`) | one directory shared by every hub in one process | tests |
-| `dir` (`DirDirectory`) | one file per cell, `<dir>/<class>/<cell>.json`, in a directory every hub on one host shares | Docker Compose on one host |
+| `dir` (`DirDirectory`) | one file per cell, `<dir>/<class>/<cell>.json`, in a directory every hub on one host shares | hubs on one host |
+| `relay` (`gdl_hub::HubDirectory`) | each child cell's hub reports its record to its parent cell's hub, which holds its children's records in memory (`RelayDirectory`) | the default; cells on several hosts, and every fleet bundle |
 
-A hub process publishes only to `dir`, set with `directory = "dir"` and the path in `dir`. The default backend, `relay`, is not built, and a hub refuses it at start. `memory` is refused too, since no other process can read it.
+A hub process publishes to `relay` or to `dir`, which needs `directory = "dir"` and the path in `dir`. It refuses `memory`, since no other process can read it.
 
 The `dir` backend writes a temporary file and renames it over the cell's file, so a reader in any process finds a whole file. A watch polls the class's directory every 50 ms, only while the class has a watch in that process. Two writes of one cell between two polls are seen as one, the later. A resume token is valid only in the process whose watch made it. A file the backend cannot read or write is `DirectoryError::Unavailable`. Behind the `conformance` feature, `gdl_cells::conformance::run` is the suite every backend must pass.
+
+### The relay backend
+
+Under `relay`, the default, a child cell's hub reports its record to its parent cell's hub, at `[cell] parent_hub` (`GDL_CELL__PARENT_HUB`). A hub of a class that another class sends to needs `parent_hub`. A hub of a class that nothing sends to refuses it, and reports nowhere. The report is `POST /v1/ext/gdl-cell/report` on the parent's public listener. It carries the record, on each change of state and each heartbeat, or the withdrawal once the cell's drain has ended.
+
+The parent's hub keeps its children's records in a directory in its own memory, and its follow watches that directory as it watches any other. A cell in the middle of a chain of classes does both: it reports to its parent, and holds its own children's records. A record goes one hop, to the parent, and no further.
+
+The parent writes a report only once it has checked it (`gdl_hub::VerifiedReport`, which nothing else can make):
+
+- the record is well formed;
+- its `home` is the parent's cell;
+- its contract and placement hashes are the parent's own, since a parent and its children share one layout;
+- its `(epoch, seq)` is newer than what the parent holds for the cell.
+
+A withdrawal is written only over a record the parent holds. Any other withdrawal is answered and writes nothing, so a withdrawal cannot block a cell's records before the cell reports. The parent takes reports whether or not its own health answers 200: its health waits for a ready child, so a parent that refused them would never become healthy.
+
+Two leases stay apart. The record's own lease drops a child that stops reporting: once no newer report has come for the length of the lease, on the parent's clock, the parent's follow drops the cell, and a new watch of the parent's directory leaves it out. The parent's answer to each report gives the interval at which it expects the next one: its own heartbeat, but at most a third of the record's lease, so that a child that reports at that cadence is not dropped. The child writes its record at that cadence from the first answer on, and changes it when the answer changes.
+
+No credential crosses cells. The report route trusts the private network, as an instance's registration and velo's traffic do. [Limitations](../operations/limitations.md#a-childs-report-to-its-parents-hub-carries-no-credential) lists what that allows, and what else the relay does not do yet.

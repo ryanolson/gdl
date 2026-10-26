@@ -337,7 +337,7 @@ fn a_cell_table_is_read_from_a_file() {
             class: "global".into(),
             region: "us-east-1".into(),
             home: Some("g".into()),
-            directory: DirectoryBackend::Relay,
+            directory: DirectoryBackend::DEFAULT,
             ready: BTreeMap::from([("front".into(), 3)]),
             requires: BTreeMap::new(),
             hub: None,
@@ -407,7 +407,7 @@ fn a_cell_table_is_read_from_the_environment() {
         let cell = config.cell().expect("a cell");
         assert_eq!(cell.name, "model-x-01-us-east-1");
         assert_eq!(cell.home.as_deref(), Some("global-us-east-1"));
-        assert_eq!(cell.directory, DirectoryBackend::Relay);
+        assert_eq!(cell.directory, DirectoryBackend::DEFAULT);
         assert_eq!(cell.quorum("back"), 2);
         Ok(())
     });

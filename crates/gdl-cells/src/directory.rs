@@ -138,7 +138,13 @@ pub enum DirectoryError {
         offered: Version,
     },
     /// The backend could not do what was asked: for the `dir` backend, a
-    /// file or directory it could not read or write.
+    /// file or directory it could not read or write; for the `relay`
+    /// backend, a parent's hub it could not reach.
     #[error("the directory is unavailable: {0}")]
     Unavailable(String),
+    /// A well-formed write the backend refused for a rule of its own: the
+    /// `relay` backend's parent hub refuses a record whose parent is
+    /// another cell, or whose hashes are not its own.
+    #[error("{0}")]
+    Refused(String),
 }

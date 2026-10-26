@@ -2,7 +2,7 @@
 
 This guide deploys one graph as three cells on one Docker host: a global cell that runs the frontend, and two model cells that run the engine. It uses the `api` example. [Classes and cells](../concepts/cells.md) explains the terms. [Deploy with Docker Compose](compose-deploy.md) covers a bundle without cells.
 
-You need Docker with Compose, and a spec whose node and message crates come from Git or crates.io, as `examples/api/deploy.toml` does. To run crates that are not pushed, see [Run local sources](#run-local-sources). The fleet runs on one host, because the only directory backend a hub process publishes to is `dir`, a directory that every hub shares.
+You need Docker with Compose, and a spec whose node and message crates come from Git or crates.io, as `examples/api/deploy.toml` does. To run crates that are not pushed, see [Run local sources](#run-local-sources). The bundle is one Compose project, so it runs on one host. Its hubs share no volume: each child cell's hub reports its record to its parent's hub over the bundle's network ([The relay backend](../concepts/cells.md#the-relay-backend)).
 
 ## 1. Split the graph into classes
 
@@ -66,11 +66,11 @@ Each service is configured as its cell through the environment, so cells of one 
 GDL_CELL__NAME=model-x-02          GDL_CELL__CLASS=model_x
 GDL_CELL__REGION=us-east-1         GDL_CELL__HOME=global-us
 GDL_CELL__READY__ENGINE=2          GDL_CELL__SUMMARY_MS=10000
-GDL_CELL__DIRECTORY=dir            GDL_CELL__DIR=/var/lib/gdl/cells
+GDL_CELL__DIRECTORY=relay          GDL_CELL__PARENT_HUB=global-us:1337
 GDL_CELL__HUB=model-x-02:1337
 ```
 
-Every hub mounts the volume `cells` at `/var/lib/gdl/cells`. A segment gets the same variables, plus `GDL_HUB__HOST` naming its cell's hub.
+`GDL_CELL__PARENT_HUB` is the parent's hub, named for its service. The global cell's hub has none: it reports nowhere. A segment gets the same variables, plus `GDL_HUB__HOST` naming its cell's hub.
 
 ## 4. Run it
 
@@ -85,7 +85,7 @@ The bundle publishes no hub port. To read a cell's health, ask from a container 
 docker run --rm --network fleet_default curlimages/curl:8.10.1 -s http://global-us:1337/v1/ext/gdl-cell/health
 ```
 
-The global cell answers 200 once its own quorum holds and a model cell is `ready` and followed. `docker compose down` stops the fleet. The cell directory's volume is on tmpfs, open to every user: it is empty again once no container uses it, so the next deployment starts with a fresh directory.
+The global cell answers 200 once its own quorum holds and a model cell is `ready` and followed. `docker compose down` stops the fleet. A parent's hub keeps its children's records in memory, so each deployment starts with none.
 
 ## Run local sources
 
@@ -101,6 +101,7 @@ The bundle has the same services, hubs, and variables as above. Each image build
 
 ## How the bundle starts
 
+- **Children report to their parent.** A child cell's hub reports its record to its parent's hub at `<parent>:1337`. A parent's hub takes reports before its own health answers 200, so the start order of the hubs does not matter. A child whose parent's hub is not up yet reports again on its next change of state or heartbeat.
 - **One hub per cell.** A cell's record has one writer. Each hub's service names its container (`<graph>-<cell>`), so Compose refuses to scale it, and a host runs one copy of a bundle at a time. Compose's default recreate stops the old hub before it starts the new one.
 - **Waits are on liveness.** A segment waits only for its own cell's hub to be healthy, by the hub's own liveness check (`--healthcheck`). Nothing waits for cell health: a parent's cell health answers 503 until its children are ready, so a wait on it would deadlock a fleet that starts together.
 - **Ports.** A segment that publishes a fixed, nonzero host port (`HOST:CONTAINER`) may run in one cell only. One whose host port Docker chooses (`CONTAINER`, `0:CONTAINER`, or `IP::CONTAINER`) runs in any number. `[deployment.segment.<name>] config` cannot set `[cell]`.
@@ -116,7 +117,7 @@ cd /tmp/fleet-2
 docker compose -p fleet up -d --build
 ```
 
-No other cell's configuration changes. The new cell's hub publishes its record once its quorum has held for 2 s. Its parent's hub then follows it, and the parent's choosers start offering to it.
+No other cell's configuration changes. The new cell's hub reports its record to its parent's hub at once, and again when its quorum has held for 2 s. Its parent's hub then follows it, and the parent's choosers start offering to it.
 
 ## Drain a cell
 

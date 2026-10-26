@@ -14,9 +14,10 @@ use futures::{Stream, StreamExt};
 use super::watched::Classify;
 use super::{
     AVOIDED_ROUTE, Avoided, CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower,
-    RELEASE_ROUTE, UnknownEvent, UnknownFollowEvent, WATCH_ROUTE, WatchFailure, WatchLimits,
-    Watched,
+    RELEASE_ROUTE, REPORT_ROUTE, Report, ReportRefusal, ReportReply, UnknownEvent,
+    UnknownFollowEvent, WATCH_ROUTE, WatchFailure, WatchLimits, Watched,
 };
+use gdl_cells::DirectoryError;
 
 /// One item of a watch: an event, or why the watch ended, its last item.
 pub type WatchItem<E, U> = Result<Watched<E, U>, WatchFailure>;
@@ -134,6 +135,38 @@ impl CellWatcher {
     /// that the follower's whole cell avoids its retired entry instance.
     pub async fn avoided(&self, hub: &str, avoided: &Avoided) -> Result<(), CellWatchError> {
         self.post(hub, AVOIDED_ROUTE, avoided).await
+    }
+
+    /// Report to the parent cell's hub at `hub`, `host:port`, the record
+    /// or withdrawal `report` carries ([`crate::REPORT_ROUTE`]), and return
+    /// the interval at which the parent expects the next report. A refusal
+    /// is the directory error the parent's directory gave; a parent that
+    /// cannot be reached, or answers anything else, is
+    /// [`DirectoryError::Unavailable`].
+    pub async fn report(&self, hub: &str, report: &Report) -> Result<Duration, DirectoryError> {
+        gdl_model::check_hub_address(hub).map_err(DirectoryError::Unavailable)?;
+        let url = format!("http://{hub}/v1/ext/{EXTENSION}{REPORT_ROUTE}");
+        let unavailable =
+            |e: &dyn std::fmt::Display| DirectoryError::Unavailable(format!("POST {url}: {e}"));
+        let response = self
+            .http
+            .post(&url)
+            .json(report)
+            .send()
+            .await
+            .map_err(|e| unavailable(&e))?;
+        let status = response.status();
+        let body = response.bytes().await.map_err(|e| unavailable(&e))?;
+        if status.is_success() {
+            return serde_json::from_slice::<ReportReply>(&body)
+                .map(|reply| reply.interval())
+                .map_err(|e| unavailable(&e));
+        }
+        let (class, cell) = report.cell();
+        match serde_json::from_slice::<ReportRefusal>(&body) {
+            Ok(refusal) if status.is_client_error() => Err(refusal.into_error(class, cell)),
+            _ => Err(unavailable(&status)),
+        }
     }
 
     async fn post(

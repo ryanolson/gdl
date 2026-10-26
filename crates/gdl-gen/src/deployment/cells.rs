@@ -15,13 +15,6 @@ use super::{
 };
 use crate::{Error, Files, Spec, emit, export::image_problem, validate::Layouts};
 
-/// Where every hub of the bundle reads and writes the cell directory: the
-/// one volume they share.
-const CELLS: &str = "/var/lib/gdl/cells";
-
-/// The volume that holds the cell directory.
-const VOLUME: &str = "cells";
-
 /// Why `spec` deploys only by cell, if it does: its placement has classes,
 /// or it has several layouts, each of which only a cell names.
 pub(super) fn by_cell(spec: &Spec) -> Option<String> {
@@ -136,7 +129,6 @@ pub(super) fn bundle(
                 // named, and a cell's record has one writer.
                 "container_name": emit::package_name(&graph, &cell.name),
                 "environment": variables,
-                "volumes": [format!("{VOLUME}:{CELLS}")],
                 "healthcheck": hub_healthcheck(),
             });
             hub.build(&mut service, &mut built);
@@ -183,7 +175,7 @@ pub(super) fn bundle(
             )));
         }
     }
-    let mut compose = json!({"services": services, "volumes": {VOLUME: volume()}});
+    let mut compose = json!({"services": services});
     if !secrets.is_empty() {
         compose["secrets"] = bundle.declare_secrets(&secrets);
     }
@@ -222,12 +214,18 @@ impl Image {
 }
 
 /// The `GDL_CELL__*` variables of `cell`'s hub and segments: its settings
-/// as its fleet gives them, publishing to the bundle's shared directory,
-/// with its hub where other cells' hubs reach it, at the service named for
-/// the cell.
+/// as its fleet gives them, with its hub where other cells' hubs reach it,
+/// at the service named for the cell, and under the `relay` backend, a
+/// child's parent hub, at the service named for its parent. So the bundle
+/// shares no volume, and its cells may run on several hosts.
 fn variables(cell: &CellSettings) -> Result<Map<String, Value>, Error> {
     let mut cell = cell.clone();
-    cell.directory = DirectoryBackend::Dir { path: CELLS.into() };
+    cell.directory = DirectoryBackend::Relay {
+        parent_hub: cell
+            .home
+            .as_ref()
+            .map(|home| format!("{home}:{HUB_PUBLIC_PORT}")),
+    };
     cell.hub = Some(format!("{}:{HUB_PUBLIC_PORT}", cell.name));
     let toml::Value::Table(table) = toml::Value::try_from(&cell).map_err(io)? else {
         return Err(Error::new("a cell's settings are a table"));
@@ -249,22 +247,12 @@ fn binds_host_port(port: &str) -> bool {
     !host.is_empty() && host.parse::<u16>() != Ok(0)
 }
 
-/// The volume of the cell directory: on tmpfs, open to every user. A new
-/// named volume takes the owner of the directory it is mounted on, and a
-/// hub image need not have that directory, so the volume would be root's
-/// and a hub that is not root could not publish its record. On tmpfs it is
-/// also empty again once no container uses it, so that each deployment
-/// starts with a fresh directory.
-fn volume() -> Value {
-    json!({"driver_opts": {"type": "tmpfs", "device": "tmpfs", "o": "mode=1777"}})
-}
-
 /// The README of a fleet's bundle.
 const README: &str = "# Docker Compose deployment of a fleet\n\n\
 Run `docker compose up --build` from this directory, on one host. Each cell of the fleet has one hub, the service named for the cell, and a service for each segment of its class in its layout, named `<cell>_<segment>`. A cell's hub and segments take the cell's settings from `GDL_CELL__*` variables, and a segment finds its own cell's hub through `GDL_HUB__HOST`.\n\n\
 A segment starts once its own cell's hub is healthy, and waits for nothing else. A hub's health check is its own liveness. Nothing waits for a cell's health, or for another cell: a parent cell's health answers 503 until its children are ready, so a wait on it would deadlock a fleet that starts together.\n\n\
 A cell's hub must never run as two at once: a cell's record has one writer, its hub. Each hub's service names its container, so Compose refuses to scale it. Container names are global on the Docker host, so a host runs one copy of this bundle at a time. Compose's default recreate stops the old container before it starts the new one, so `docker compose up` after a change replaces a hub without two running at once.\n\n\
-Every hub publishes its cell's record to the `dir` cell directory, on the volume `cells`, which every hub of the bundle shares. So the bundle is for one host: cells that run on several machines wait for the `relay` directory backend. The volume is on tmpfs, open to every user: it is empty again once no container uses it, so each deployment starts with a fresh directory after `docker compose down`.\n\n\
+Each cell's hub publishes its record under the `relay` directory backend: a child cell's hub reports it to its parent cell's hub (`GDL_CELL__PARENT_HUB`), and the parent's hub holds its children's records. The hubs share no volume, so the cells can run on several hosts, if each hub reaches its parent's hub by the name the bundle gives it. A parent's hub holds no records when it starts: a parent that restarts finds each child again at the child's next report.\n\n\
 Each image is built once, from one Dockerfile per layout and segment, and every cell of that layout and class runs it. A segment's image is named for its package (`<graph>-<segment>`, or `<graph>-<layout>-<segment>` for a spec of several layouts), and a hub's is `<graph>-hub`, tagged with its layout for a spec of several.\n\n\
 Each segment takes its roster from its cell's hub when it starts: the loaded instances of every segment of its class, at least `min_replicas` of each (one by default). An instance that starts later joins, so `docker compose up --scale <cell>_<segment>=N` adds instances of a segment that publishes no host port. A segment that publishes a host port it names (`HOST:CONTAINER`) runs in one cell; one whose host ports Docker chooses (`CONTAINER`, or host port 0) runs in several. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.\n";
 
@@ -285,11 +273,11 @@ mod tests {
         let variables = variables(&cell).expect("variables");
         let expected = [
             ("GDL_CELL__CLASS", "model_x"),
-            ("GDL_CELL__DIR", CELLS),
-            ("GDL_CELL__DIRECTORY", "dir"),
+            ("GDL_CELL__DIRECTORY", "relay"),
             ("GDL_CELL__HOME", "global-us"),
             ("GDL_CELL__HUB", "model-x-01:1337"),
             ("GDL_CELL__NAME", "model-x-01"),
+            ("GDL_CELL__PARENT_HUB", "global-us:1337"),
             ("GDL_CELL__READY__ENGINE", "2"),
             ("GDL_CELL__REGION", "us-east-1"),
             ("GDL_CELL__SUMMARY_MS", "10000"),

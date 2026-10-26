@@ -13,9 +13,9 @@ The root workspace has twelve crates. Each example is its own workspace, outside
 | `gdl-extract` | `gdl-model`, `gdl-syntax` | The source reader and the working catalogue |
 | `gdl-gen` | `gdl-model`, `gdl-syntax`, `gdl-message`, `gdl-extract` | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | `gdl-gen`, `gdl-extract`, `gdl-model`, `gdl-syntax` | The composer: a page and its axum server |
-| `gdl-cells` | `gdl-model` | The cell plane's shared types: the cell record, the `CellDirectory` trait, its `memory` and `dir` backends, the reader's view, and the conformance suite (the `conformance` feature). It never links velo, so `gdl` takes `CellState` and `LoadSummary` from it |
+| `gdl-cells` | `gdl-model` | The cell plane's shared types: the cell record, the `CellDirectory` trait, its `memory` and `dir` backends and the `relay` backend's directory of reported records, the reader's view, and the conformance suite (the `conformance` feature). It never links velo, so `gdl` takes `CellState` and `LoadSummary` from it |
 | `gdl-watch` | `gdl-cells`, `gdl-model`, velo's peer types | The watches a cell's hub serves, as typed events, and the client that reads them. It never links velo-hub's server |
-| `gdl-hub` | `gdl-cells`, `gdl-watch`, velo-hub | The discovery hub: velo-hub with admission restricted to one deployment, and for a cell's hub the `gdl-cell` extension. See [Discovery](../concepts/hub.md) and [Classes and cells](../concepts/cells.md) |
+| `gdl-hub` | `gdl-cells`, `gdl-watch`, velo-hub | The discovery hub: velo-hub with admission restricted to one deployment, and for a cell's hub the `gdl-cell` extension, with the `relay` backend's reports to a parent's hub. See [Discovery](../concepts/hub.md) and [Classes and cells](../concepts/cells.md) |
 
 ## The `gdl` and `gdl-runtime` split
 

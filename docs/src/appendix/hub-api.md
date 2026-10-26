@@ -12,6 +12,7 @@ A cell's hub serves the `gdl-cell` extension's routes under `/v1/ext/gdl-cell`. 
 | `GET /follows/{class}/{cell}` | public | none | none | one cell's follows: its closing generations, then its current one, then `synced`, then each relay event that names the cell |
 | `POST /release` | public | none | `Follower` | 204; the watch no longer counts as a follower |
 | `POST /avoided` | public | none | `Avoided` | 204; counted only from a watch that counted when the instance retired |
+| `POST /report` | public | none | `Report`: a child's record or withdrawal | 200 with a `ReportReply` (`interval_ms`, when the parent expects the next report); 400 with a `ReportRefusal` for a malformed one; 409 with a `ReportRefusal` for one the parent refuses. Served only by a hub under the `relay` backend, whether or not its cell is healthy |
 | `POST /drain` | control | none | none | 202 with the health body; 409 for a cell whose class no hop enters |
 | `POST /instances/{id}/load` | control | the instance's | `LoadReport` | 204; 409 unless the instance is a usable entry instance |
 | `POST /instances/{id}/chooser` | control | the instance's | none | 204; 409 unless the instance is of a segment that chooses cells |
@@ -20,6 +21,7 @@ A cell's hub serves the `gdl-cell` extension's routes under `/v1/ext/gdl-cell`. 
 
 - Refusals on the credentialed routes are 409, not 401 or 404, because velo-hub's client drops its registration on those.
 - `release` and `avoided` are not authenticated. Nothing checks the names in a `Follower`.
+- `report` carries no credential either. The parent writes only what it verifies: a record of the right shape whose `home` is the parent's cell, whose contract and placement hashes are the parent's, and that is newer than what it holds. A withdrawal is written only over a record the parent holds. Any other withdrawal is answered 200 and writes nothing.
 - A watch that names no follower counts for nothing in the drain and retirement waits. A watch that closes without a release still counts. Once the cell's lease has passed since it closed, it no longer shows as a follower, but it never counts as a release.
 - A watch that arrives before the hub first stores the cell's record waits up to 5 s, then gets 503. Every watch ends when the hub stops, or once a drained cell's record is withdrawn. A watch after that gets 503.
 - `GraphAdmission` serves `GET /v1/ext/gdl/members`, whose `PeerInfo` values the watch events carry.

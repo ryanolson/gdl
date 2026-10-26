@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/ui/verified-built.rs:12:13
+   |
+12 |     let _ = gdl_hub::VerifiedReport(report);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/report.rs
+   |
+   | pub struct VerifiedReport(Report);
+   |                           ^^^^^^ private field

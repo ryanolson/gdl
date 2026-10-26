@@ -1,6 +1,7 @@
 //! The cell's record, published on each change of the judged state and
 //! on the heartbeat, with the load summary as it is when it is written,
-//! and withdrawn once the cell's drain has ended.
+//! and withdrawn once the cell's drain has ended. Under the `relay`
+//! backend the heartbeat is the cadence the parent last answered with.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,6 +25,9 @@ pub(super) struct Publisher<D> {
     pub(super) directory: Arc<D>,
     pub(super) record: CellRecord,
     pub(super) heartbeat: Duration,
+    /// The cadence a parent asks the record to be written at, once it has
+    /// answered: it replaces `heartbeat` from then.
+    pub(super) cadence: Option<watch::Receiver<Option<Duration>>>,
     /// Told the epoch once a write is stored under it, and closed once
     /// the record is withdrawn.
     pub(super) feed: Arc<Feed>,
@@ -74,9 +78,8 @@ impl<D: CellDirectory> Publisher<D> {
         writer
             .publish(directory, (feed, stored), &self.record, state, load)
             .await;
-        let mut heartbeat =
-            tokio::time::interval_at(tokio::time::Instant::now() + self.heartbeat, self.heartbeat);
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut cadence = self.cadence.clone();
+        let mut heartbeat = beat(self.heartbeat);
         let ended = self.drain.ended();
         tokio::pin!(ended);
         loop {
@@ -89,6 +92,14 @@ impl<D: CellDirectory> Publisher<D> {
                     heartbeat.reset();
                 }
                 () = &mut ended => break,
+                period = answered(&mut cadence) => {
+                    // A new cadence counts from the write it answered, and
+                    // bounds each write, so that a stalled report is
+                    // overtaken by the next within the record's lease.
+                    heartbeat = beat(period);
+                    writer.bound = period;
+                    continue;
+                }
                 _ = heartbeat.tick() => {}
             }
             state = *states.borrow_and_update();
@@ -112,6 +123,26 @@ impl<D: CellDirectory> Publisher<D> {
         writer.withdraw(directory, &self.record).await;
         feed.close();
     }
+}
+
+/// A heartbeat of `period`, whose first tick is a period from now.
+fn beat(period: Duration) -> tokio::time::Interval {
+    let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat
+}
+
+/// The next cadence a parent answers with that differs from the last; it
+/// never resolves without a parent, or once the answers end.
+async fn answered(cadence: &mut Option<watch::Receiver<Option<Duration>>>) -> Duration {
+    while let Some(answers) = cadence.as_mut() {
+        if answers.changed().await.is_err() {
+            *cadence = None;
+        } else if let Some(period) = *answers.borrow_and_update() {
+            return period;
+        }
+    }
+    std::future::pending().await
 }
 
 /// The version of the cell's writes.

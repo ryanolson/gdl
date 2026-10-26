@@ -590,28 +590,21 @@ fn running<'a>(compose: &'a serde_json::Value, image: &str) -> (Vec<&'a str>, Ve
     (run, build)
 }
 
-/// The directory every hub of a fleet's bundle publishes to.
-const CELLS: &str = "/var/lib/gdl/cells";
-
-/// The cell directory's volume is writable whatever user a hub runs as. A
-/// new named volume takes the owner of the directory it is mounted on, and
-/// a distroless image has no `/var/lib/gdl/cells`, so the volume was
-/// root's, and a hub that is not root could not publish its cell's record.
-/// On tmpfs it is also empty again once no container uses it, so that each
-/// deployment starts with a fresh directory.
+/// A fleet's bundle shares no volume: each child cell's hub reports its
+/// record to its parent's hub, so its cells may run on several hosts.
 #[test]
-fn the_cell_directory_is_writable_by_a_hub_that_is_not_root() {
+fn a_fleets_bundle_shares_no_volume() {
     let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
     let (_, compose) = fleet_bundle(&placed(SPLIT), &fleet);
-    assert_eq!(
-        compose["volumes"],
-        serde_json::json!({"cells": {"driver_opts": {"type": "tmpfs", "device": "tmpfs", "o": "mode=1777"}}})
-    );
+    assert!(compose.get("volumes").is_none(), "{compose}");
+    for (name, service) in compose["services"].as_object().expect("services") {
+        assert!(service.get("volumes").is_none(), "{name}: {service}");
+    }
 }
 
 /// A fleet of one layout: a hub per cell, and each cell's segments of its
-/// class, configured as that cell and waiting only for its hub; one
-/// directory, shared by every hub; one image per segment, which both
+/// class, configured as that cell and waiting only for its hub; each
+/// child reporting to its parent's hub; one image per segment, which both
 /// model cells run.
 #[test]
 fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
@@ -632,15 +625,11 @@ fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
     for cell in fleet.cells() {
         let hub = &services[&cell.name];
         assert_eq!(hub["image"], "api-hub", "{}", cell.name);
-        assert_eq!(
-            hub["volumes"],
-            serde_json::json!([format!("cells:{CELLS}")])
-        );
         let env = hub["environment"].as_object().expect("the hub's variables");
         assert_eq!(env["GDL_CELL__NAME"], cell.name.as_str());
         assert_eq!(env["GDL_CELL__CLASS"], cell.class.as_str());
-        assert_eq!(env["GDL_CELL__DIRECTORY"], "dir");
-        assert_eq!(env["GDL_CELL__DIR"], CELLS);
+        assert_eq!(env["GDL_CELL__DIRECTORY"], "relay");
+        assert!(env.get("GDL_CELL__DIR").is_none(), "{env:?}");
         assert_eq!(env["GDL_CELL__HUB"], format!("{}:1337", cell.name));
         let segment = if cell.class == "global" {
             "front"
@@ -668,12 +657,12 @@ fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
     assert_eq!(env("model-x-02", "GDL_CELL__READY__ENGINE"), "2");
     assert_eq!(env("model-x-02", "GDL_CELL__HOME"), "global-us");
     assert_eq!(env("global-us", "GDL_CELL__HOME"), serde_json::Value::Null);
-    // One directory, on one volume.
+    // A child reports to its parent's hub, under the name of its service;
+    // the global cell reports nowhere.
+    assert_eq!(env("model-x-02", "GDL_CELL__PARENT_HUB"), "global-us:1337");
     assert_eq!(
-        compose["volumes"]
-            .as_object()
-            .map(|v| v.keys().map(String::as_str).collect::<Vec<_>>()),
-        Some(vec!["cells"])
+        env("global-us", "GDL_CELL__PARENT_HUB"),
+        serde_json::Value::Null
     );
     // One image per segment, built once, which both model cells run.
     assert_eq!(
@@ -828,9 +817,9 @@ fn no_hub_can_be_scaled() {
             "must never run as two at once",
             "a cell's record has one writer",
             "stops the old container before it starts the new one",
-            "for one host",
+            "share no volume",
             "`relay`",
-            "fresh directory after `docker compose down`",
+            "finds each child again at the child's next report",
         ] {
             assert!(readme.contains(needle), "{needle}\nin:\n{readme}");
         }
@@ -839,7 +828,8 @@ fn no_hub_can_be_scaled() {
 
 /// Each hub's `GDL_CELL__*` variables, read as the hub reads them against
 /// its layout's deployment, are its cell's settings as the fleet gives
-/// them, with the shared directory and the address other hubs reach it at.
+/// them, with the address other hubs reach it at and, for a child, its
+/// parent's: the `relay` backend, which needs no shared volume.
 #[test]
 fn each_hub_reads_its_cells_settings_as_the_fleet_gives_them() {
     assert_each_hub_reads_its_cell(&placed(SPLIT), ONE_FLEET);
@@ -893,7 +883,9 @@ fn assert_each_hub_reads_its_cell(spec: &gdl_gen::Spec, fleet: &str) {
             .unwrap_or_else(|error| panic!("{}: {error}", cell.name))
             .expect("a cell");
         let mut expected = cell.clone();
-        expected.directory = gdl_model::DirectoryBackend::Dir { path: CELLS.into() };
+        expected.directory = gdl_model::DirectoryBackend::Relay {
+            parent_hub: cell.home.as_ref().map(|home| format!("{home}:1337")),
+        };
         expected.hub = Some(format!("{}:1337", cell.name));
         assert_eq!(read, expected);
         // Each of its segments reads the same `[cell]`, which fits an
@@ -1250,7 +1242,7 @@ fn each_cells_segment_mounts_its_secrets() {
         compose["secrets"]["fingerprint"]["file"],
         keys.path().join("fingerprint").to_str().expect("UTF-8")
     );
-    assert!(compose["volumes"]["cells"].is_object(), "{compose}");
+    assert!(compose.get("volumes").is_none(), "{compose}");
 }
 
 /// A secret is refused, before anything is written, when Compose cannot

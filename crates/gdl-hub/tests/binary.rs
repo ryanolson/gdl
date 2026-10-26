@@ -58,12 +58,9 @@ fn the_binary_refuses_a_backend_it_cannot_publish_to() {
         serde_json::to_vec(&spec()).expect("valid test fixture"),
     )
     .expect("written");
-    // `relay` is the default.
+    // `relay` is the default; a child's hub reports to its parent's.
     for (directory, expected) in [
-        (
-            None,
-            "[cell] directory = \"relay\", the default, is not built yet",
-        ),
+        (None, "GDL_CELL__PARENT_HUB: missing"),
         (
             Some("memory"),
             "[cell] directory = \"memory\" is a directory inside one process",
@@ -83,7 +80,7 @@ fn the_binary_refuses_a_backend_it_cannot_publish_to() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "started with {directory:?}");
         assert!(stderr.contains(expected), "{stderr}");
-        assert!(stderr.contains("GDL_CELL__DIRECTORY=dir"), "{stderr}");
+        assert!(stderr.contains("GDL_CELL__PARENT_HUB"), "{stderr}");
     }
 }
 

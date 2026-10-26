@@ -23,7 +23,8 @@ use velo_hub::{
 };
 
 use crate::follow::{Choosers, Follower, FollowsWatch, Relay, Retirement};
-use crate::{GraphAdmission, Quorum};
+use crate::report::Reports;
+use crate::{GraphAdmission, HubDirectory, Quorum};
 use drain::Drain;
 use feed::Feed;
 use gdl_watch::{CellWatchError, CellWatcher, LoadReport, Unoffered};
@@ -240,6 +241,12 @@ pub struct CellReadiness<D: CellDirectory> {
     /// The follows the relay closed, for their cells' hubs to be told,
     /// until the hub starts and takes them.
     released: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<crate::follow::Release>>>,
+    /// Under the `relay` backend, the gate by which the cell's children
+    /// report to it.
+    reports: Option<Arc<Reports>>,
+    /// Under the `relay` backend, the cadence of the parent's answers to
+    /// the cell's reports, which the record is written at.
+    cadence: Option<watch::Receiver<Option<Duration>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -366,8 +373,31 @@ impl<D: CellDirectory> CellReadiness<D> {
             stored: watch::Sender::new(None),
             run: velo_hub::velo::InstanceId::new_v4().as_u128() as u64,
             released: Mutex::new(Some(released)),
+            reports: None,
+            cadence: None,
             tasks: Mutex::default(),
         })
+    }
+
+    /// The extension under the `relay` backend, whose `directory` is the
+    /// one it was made with or one in front of it: its hub takes its
+    /// children's reports into `directory`
+    /// (`POST /v1/ext/gdl-cell/report` on the public listener, a
+    /// [`gdl_watch::Report`]), whether or not the cell is healthy, since
+    /// its health waits for its children; and it writes its record at the
+    /// cadence its parent answers with, from the first answer on, rather
+    /// than at its own heartbeat. Its children's reports carry no
+    /// credential: the route trusts the private network, as registration
+    /// and velo's traffic do, and writes only what it verifies
+    /// ([`crate::VerifiedReport`]).
+    pub fn with_reports(mut self, directory: &HubDirectory) -> Self {
+        self.reports = Some(Arc::new(Reports::new(
+            directory.children().clone(),
+            &self.record,
+            self.timing.heartbeat,
+        )));
+        self.cadence = Some(directory.cadence());
+        self
     }
 
     /// The cell's health as it changes: its state, and each segment's
@@ -526,6 +556,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 directory: Arc::clone(&self.directory),
                 record: self.record.clone(),
                 heartbeat: self.timing.heartbeat,
+                cadence: self.cadence.clone(),
                 feed: Arc::clone(&self.feed),
                 drain: Arc::clone(&self.drain),
                 stored: self.stored.clone(),
@@ -614,7 +645,26 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         let watching = Arc::clone(&self.places.cell);
         let relaying = Arc::clone(&self.places.relay);
         let following = Arc::clone(&self.places.follow);
+        let reports = self.reports.clone().map_or_else(Router::new, |reports| {
+            Router::new().route(
+                gdl_watch::REPORT_ROUTE,
+                post(move |Json(report): Json<gdl_watch::Report>| async move {
+                    match reports.take(report).await {
+                        Ok(reply) => Json(reply).into_response(),
+                        Err(refused) => {
+                            let status = match refused {
+                                gdl_cells::DirectoryError::Malformed(_) => StatusCode::BAD_REQUEST,
+                                _ => StatusCode::CONFLICT,
+                            };
+                            let refusal = gdl_watch::ReportRefusal::of(refused);
+                            (status, Json(refusal)).into_response()
+                        }
+                    }
+                }),
+            )
+        });
         Router::new()
+            .merge(reports)
             .route(
                 gdl_watch::AVOIDED_ROUTE,
                 post(move |Json(avoided): Json<gdl_watch::Avoided>| async move {

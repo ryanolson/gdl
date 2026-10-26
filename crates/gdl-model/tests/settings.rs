@@ -94,7 +94,7 @@ fn a_cells_settings_are_read_whole() {
 fn only_name_class_and_region_are_required() {
     let least = settings("name = 'g'\nclass = 'global'\nregion = 'r'\n");
     assert_eq!(least.home, None);
-    assert_eq!(least.directory, DirectoryBackend::Relay);
+    assert_eq!(least.directory, DirectoryBackend::DEFAULT);
     assert!(least.ready.is_empty());
     assert_eq!(least.hub, None);
     for missing in [
@@ -207,7 +207,7 @@ fn a_cells_hub_checks_its_settings_against_the_class() {
         ),
         (
             classed(),
-            "name = 'm'\nclass = 'model_x'\nregion = 'r'\nready = { d = 1, a = 2, b = 1 }\n",
+            "name = 'm'\nclass = 'model_x'\nregion = 'r'\ndirectory = 'memory'\nready = { d = 1, a = 2, b = 1 }\n",
             "[cell] ready.a: not a segment of class `model_x`\n\
              [cell] ready.b: not a segment of class `model_x`",
         ),
@@ -218,6 +218,78 @@ fn a_cells_hub_checks_its_settings_against_the_class() {
         };
         assert_eq!(error.to_string(), expected, "{text}");
     }
+}
+
+/// The `relay` backend's parent hub is the `parent_hub` key: a hub
+/// address, refused with any other backend, so that it never sits
+/// unread. A cell's hub needs it when another class sends to its class,
+/// since it reports there, and it is refused for a class that nothing
+/// sends to, whose cell has no parent.
+#[test]
+fn the_relay_backend_takes_the_parent_hub_where_a_class_is_sent_to() {
+    const CHILD: &str = "name = 'm'\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\n";
+    let cell = settings(&format!("{CHILD}parent_hub = 'global-hub:1337'\n"));
+    assert_eq!(
+        cell.directory,
+        DirectoryBackend::Relay {
+            parent_hub: Some("global-hub:1337".into())
+        }
+    );
+    let text = toml::to_string(&cell).expect("toml");
+    assert_eq!(settings(&text), cell, "{text}");
+    cell.check_hub(&classed())
+        .expect("a child with its parent's hub");
+    cell.check(&classed(), "d")
+        .expect("an instance of the child");
+
+    for (backend, expected) in [
+        ("directory = 'memory'\n", "read only by the `relay` backend"),
+        (
+            "directory = 'dir'\ndir = '/srv/cells'\n",
+            "read only by the `relay` backend",
+        ),
+        ("", "must be `host:port`"),
+    ] {
+        let parent = if backend.is_empty() {
+            "parent_hub = 'http://global-hub'\n"
+        } else {
+            "parent_hub = 'global-hub:1337'\n"
+        };
+        let text = format!("{CHILD}{backend}{parent}");
+        let error = toml::from_str::<CellSettings>(&text).expect_err(&text);
+        assert!(error.to_string().contains("parent_hub"), "{error}");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+
+    // A hub needs it; an instance, which reports nothing, does not.
+    let orphan = settings(CHILD);
+    orphan
+        .check(&classed(), "d")
+        .expect("an instance reads no parent hub");
+    let Err(error) = orphan.check_hub(&classed()) else {
+        panic!("a child's hub without its parent's");
+    };
+    assert_eq!(
+        error.to_string(),
+        "[cell] parent_hub: missing: class `global` sends to class `model_x`, so with directory = \"relay\" the cell's hub reports its record to its parent's hub, at this address"
+    );
+
+    // A cell of a class that nothing sends to reports nowhere.
+    let top = settings("name = 'g'\nclass = 'global'\nregion = 'r'\nparent_hub = 'other:1337'\n");
+    for error in [
+        top.check_hub(&classed())
+            .expect_err("a parent hub for a top cell"),
+        top.check(&classed(), "a")
+            .expect_err("a parent hub for a top cell"),
+    ] {
+        assert_eq!(
+            error.to_string(),
+            "[cell] parent_hub: no class sends to class `global`, so its cell has no parent to report to"
+        );
+    }
+    settings("name = 'g'\nclass = 'global'\nregion = 'r'\n")
+        .check_hub(&classed())
+        .expect("a top cell reports nowhere");
 }
 
 /// A segment the settings give no quorum needs one usable instance.
@@ -337,7 +409,7 @@ fn a_requirement_of_a_class_not_sent_to_or_of_zero_is_refused() {
             "[cell] requires.model_x: is 0; a requirement is at least 1",
         ),
         (
-            "name = 'm'\nclass = 'model_x'\nregion = 'r'\n[requires]\nglobal = 1\n".to_string(),
+            "name = 'm'\nclass = 'model_x'\nregion = 'r'\ndirectory = 'memory'\n[requires]\nglobal = 1\n".to_string(),
             "d",
             "[cell] requires.global: not a class that `model_x` sends to",
         ),

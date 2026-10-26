@@ -9,7 +9,7 @@ use gdl_cells::DirDirectory;
 use gdl_model::{CellSettings, DeploymentSpec, DirectoryBackend, Origin, Problems, cell_variable};
 use velo_hub::{Hub, HubBuilder, HubConfig};
 
-use crate::{CellError, CellReadiness, CellTiming, GraphAdmission};
+use crate::{CellError, CellReadiness, CellTiming, GraphAdmission, HubDirectory};
 
 /// A cell's settings for its hub, from the environment: `GDL_CELL__NAME`,
 /// `GDL_CELL__READY__<SEGMENT>`, and so on, as an instance reads its
@@ -68,9 +68,9 @@ pub fn cell_from_vars(
 
 /// The hub of `spec`: [`GraphAdmission`], and with `cell`, the cell's
 /// [`CellReadiness`] publishing to the directory its settings name, with
-/// the default [`CellTiming`]. Only the `dir` backend runs in a hub
-/// process: `memory` is one directory inside one process, which no other
-/// hub could read, and `relay` is not built yet.
+/// the default [`CellTiming`]: `relay`, reporting to its parent's hub
+/// ([`HubDirectory`]), or `dir`. `memory` is one directory inside one
+/// process, which no other hub could read, so a hub process refuses it.
 pub fn hub_builder(
     config: HubConfig,
     spec: DeploymentSpec,
@@ -79,23 +79,24 @@ pub fn hub_builder(
     let Some(cell) = cell else {
         return Ok(Hub::builder(config).extension(GraphAdmission::new(spec)));
     };
-    let directory = match &cell.directory {
-        DirectoryBackend::Dir { path } => DirDirectory::new(path.clone()),
-        DirectoryBackend::Memory => {
-            return Err(CellError::new(
-                "[cell] directory = \"memory\" is a directory inside one process, which no other hub can read: a hub process publishes with GDL_CELL__DIRECTORY=dir and GDL_CELL__DIR=<a directory every hub on the host shares>",
-            ));
+    let builder = Hub::builder(config).extension(GraphAdmission::new(spec.clone()));
+    match &cell.directory {
+        DirectoryBackend::Relay { parent_hub } => {
+            let directory = HubDirectory::new(parent_hub.clone())?;
+            let readiness =
+                CellReadiness::new(&spec, cell, directory.clone(), CellTiming::default())?
+                    .with_reports(&directory);
+            Ok(builder.extension(readiness))
         }
-        DirectoryBackend::Relay => {
-            return Err(CellError::new(
-                "[cell] directory = \"relay\", the default, is not built yet: a hub process publishes with GDL_CELL__DIRECTORY=dir and GDL_CELL__DIR=<a directory every hub on the host shares>",
-            ));
+        DirectoryBackend::Dir { path } => {
+            let directory = DirDirectory::new(path.clone());
+            let readiness = CellReadiness::new(&spec, cell, directory, CellTiming::default())?;
+            Ok(builder.extension(readiness))
         }
-    };
-    let readiness = CellReadiness::new(&spec, cell, directory, CellTiming::default())?;
-    Ok(Hub::builder(config)
-        .extension(GraphAdmission::new(spec))
-        .extension(readiness))
+        DirectoryBackend::Memory => Err(CellError::new(
+            "[cell] directory = \"memory\" is a directory inside one process, which no other hub can read: a hub process publishes with GDL_CELL__DIRECTORY=relay, the default, and GDL_CELL__PARENT_HUB=<its parent cell's hub> for a class that another sends to",
+        )),
+    }
 }
 
 /// The `GDL_CELL__` variables of `vars`, one provider to each, in their

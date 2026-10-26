@@ -364,19 +364,45 @@ async fn a_hub_without_a_cell_runs_admission_alone() {
     hub.shutdown().await.expect("the hub stops");
 }
 
-/// `memory` is one directory inside one process, and `relay` is not built:
-/// a hub binary refuses both before it serves, and says what to set.
+/// `memory` is one directory inside one process: a hub binary refuses it
+/// before it serves, and says what to set.
 #[test]
-fn the_memory_and_relay_backends_are_refused() {
-    for (directory, expected) in [
-        (DirectoryBackend::Memory, "\"memory\""),
-        (DirectoryBackend::Relay, "\"relay\""),
-    ] {
-        let Err(error) = hub_builder(config(), spec(), Some(settings(directory))) else {
-            panic!("accepted {expected}");
-        };
-        let error = error.to_string();
-        assert!(error.contains(expected), "{error}");
-        assert!(error.contains("GDL_CELL__DIRECTORY=dir"), "{error}");
-    }
+fn the_memory_backend_is_refused() {
+    let Err(error) = hub_builder(config(), spec(), Some(settings(DirectoryBackend::Memory))) else {
+        panic!("accepted memory");
+    };
+    let error = error.to_string();
+    assert!(error.contains("\"memory\""), "{error}");
+    assert!(error.contains("GDL_CELL__PARENT_HUB"), "{error}");
+}
+
+/// With `relay`, the default, a child cell's hub needs its parent's hub
+/// to report to, and serves once it has one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cell_with_the_relay_backend_needs_its_parents_hub() {
+    let Err(error) = hub_builder(config(), spec(), Some(settings(DirectoryBackend::DEFAULT)))
+    else {
+        panic!("a child without its parent's hub");
+    };
+    assert!(
+        error.to_string().contains("[cell] parent_hub: missing"),
+        "{error}"
+    );
+
+    let parent = hub_builder(config(), spec(), None)
+        .expect("no cell")
+        .serve()
+        .await
+        .expect("the hub serves");
+    let relay = DirectoryBackend::Relay {
+        parent_hub: Some(format!("127.0.0.1:{}", parent.public_addr().port())),
+    };
+    let hub = hub_builder(config(), spec(), Some(settings(relay)))
+        .expect("a relay cell")
+        .serve()
+        .await
+        .expect("the hub serves");
+    assert_eq!(status(&hub, "/v1/ext/gdl-cell/health").await, 503);
+    hub.shutdown().await.expect("the hub stops");
+    parent.shutdown().await.expect("the hub stops");
 }

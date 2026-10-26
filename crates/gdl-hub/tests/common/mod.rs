@@ -542,3 +542,58 @@ pub fn global_requiring(requires: u32) -> CellSettings {
         ..global_default()
     }
 }
+
+/// Another directory with its cell's hub named as DNS would name it: the
+/// record's `hub` is a name, which the test resolves once the hub serves,
+/// since a hub's port is assigned only then. A publish waits until its
+/// hub's name is resolved, and goes on with the address in its place.
+#[derive(Clone)]
+pub struct Named<D> {
+    pub inner: D,
+    names: Arc<watch::Sender<HashMap<String, String>>>,
+}
+
+impl<D: CellDirectory> Named<D> {
+    pub fn new(inner: D) -> Self {
+        Self {
+            inner,
+            names: Arc::new(watch::Sender::new(HashMap::new())),
+        }
+    }
+
+    /// The hub named `name` serves as `hub`.
+    pub fn resolve(&self, name: &str, hub: &Hub) {
+        let address = format!("127.0.0.1:{}", hub.public_addr().port());
+        self.names.send_modify(|names| {
+            names.insert(name.to_string(), address);
+        });
+    }
+}
+
+impl<D: CellDirectory> CellDirectory for Named<D> {
+    type Watch = D::Watch;
+
+    async fn publish(&self, mut record: CellRecord) -> Result<(), DirectoryError> {
+        let mut names = self.names.subscribe();
+        let address = names
+            .wait_for(|names| names.contains_key(&record.hub))
+            .await
+            .expect("the names live")[&record.hub]
+            .clone();
+        record.hub = address;
+        self.inner.publish(record).await
+    }
+
+    async fn withdraw(&self, withdrawal: gdl_cells::Withdrawal) -> Result<(), DirectoryError> {
+        self.inner.withdraw(withdrawal).await
+    }
+
+    fn watch(&self, class: &str, from: Option<ResumeToken>) -> D::Watch {
+        self.inner.watch(class, from)
+    }
+}
+
+/// The public listener of `hub`, as another hub reaches it.
+pub fn address(hub: &Hub) -> String {
+    format!("127.0.0.1:{}", hub.public_addr().port())
+}

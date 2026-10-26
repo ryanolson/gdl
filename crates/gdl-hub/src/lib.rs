@@ -40,6 +40,7 @@ mod cell;
 mod fanout;
 mod follow;
 mod quorum;
+mod report;
 mod setup;
 
 pub use cell::{
@@ -48,6 +49,7 @@ pub use cell::{
 };
 pub use follow::FollowsWatch;
 pub use quorum::Quorum;
+pub use report::{HubDirectory, VerifiedReport};
 pub use setup::{cell_from_env, cell_from_vars, hub_builder};
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};
