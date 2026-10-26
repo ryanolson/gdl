@@ -2,13 +2,15 @@
 //! when its stages share a segment. Everything here is a plain nested call;
 //! there is no anchor and no map on this path.
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 use crate::Cx;
 use crate::Items;
 use crate::Result;
-use crate::items::{bound, fuse};
+use crate::items::{Producer, bound, fuse};
 use crate::{Backward, Forward, Next, Operator, Sink};
 
 /// A hop: a forward chain, an inner end, and a backward chain. As the `next`
@@ -55,18 +57,43 @@ where
             // still holds that item, and a node that cancels its own context
             // gets the same outcome whether or not backward nodes follow.
             let scope = attempt.child();
-            let items = self.inner.call(scope.clone(), req).await?;
-            let items = fuse(items, &scope);
+            let producer = Producer::of(&scope);
+            let items = self.inner.call(scope, req).await?;
+            let items = producer.fuse(items);
             // As before the inner end: no backward stage starts for an
             // attempt interrupted while the inner end was finishing.
             attempt.check()?;
             Ok::<_, crate::Error>(self.bwd.apply(&attempt, items))
         };
-        let items = tokio::select! {
-            biased;
-            reason = attempt.done() => return Err(reason),
-            result = run => result?,
-        };
+        let mut run = pin!(run);
+        let mut done = pin!(attempt.done());
+        // The first pass polls `run` before the cancel, so an attempt that
+        // finishes at once never registers a waiter (two more locks of the
+        // attempt's token); the checks inside `run` and below still see a
+        // cancel that came first. Later passes poll the cancel first, and no
+        // pass polls `run` twice. As in `tokio::select!`, a pass with the
+        // task's budget spent yields at once: the cancel would yield for it
+        // and `run`, polled alone, could finish a cancelled attempt.
+        let mut first = true;
+        let items = poll_fn(|task| {
+            if !tokio::task::coop::has_budget_remaining() {
+                task.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if !first && let Poll::Ready(reason) = done.as_mut().poll(task) {
+                return Poll::Ready(Err(reason));
+            }
+            if let Poll::Ready(result) = run.as_mut().poll(task) {
+                return Poll::Ready(result);
+            }
+            if std::mem::take(&mut first)
+                && let Poll::Ready(reason) = done.as_mut().poll(task)
+            {
+                return Poll::Ready(Err(reason));
+            }
+            Poll::Pending
+        })
+        .await?;
         // Success is reported only for a live attempt; dropping `items` on
         // the error path ends whatever the inner end started.
         attempt.check()?;
@@ -137,7 +164,11 @@ where
     type Item = O::UpItem;
 
     async fn call(&self, cx: Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
-        self.op.generate(cx, req, self.next.clone()).await
+        // The operator's future holds the future of the hop it calls, and
+        // that one the hops below it. Held inline, the hop above would carry
+        // all of them, and a future is moved whole: one allocation here costs
+        // less than the moves it saves (docs/src/operations/feature-costs.md).
+        Box::pin(self.op.generate(cx, req, self.next.clone())).await
     }
 }
 
@@ -282,6 +313,7 @@ impl<N: Clone, Item> Clone for Join<N, Item> {
 impl<Req: Send + 'static, Item: Send + 'static, N: Next<Req, Item>> Inner<Req> for Join<N, Item> {
     type Item = Item;
     async fn call(&self, cx: Cx, request: Req) -> Result<Items<Item>> {
-        self.next.generate(cx, request).await
+        // On the heap for the reason `OperatorStage::call` gives.
+        Box::pin(self.next.generate(cx, request)).await
     }
 }

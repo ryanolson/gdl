@@ -91,13 +91,34 @@ impl<T> Stream for UntilError<T> {
 /// an attempt boundary: whether a backward node follows must not change the
 /// outcome.
 pub fn fuse<T: Send + 'static>(inner: Items<T>, scope: &Cx) -> Items<T> {
-    Box::pin(Fuse {
-        inner: Some(inner),
-        guard: Some(scope.cancel_on_drop()),
-        token: scope.cancel_token(),
-        deadline_at: scope.deadline().map(|deadline| deadline.instant()),
-        ready_run: 0,
-    })
+    Producer::of(scope).fuse(inner)
+}
+
+/// What a node boundary keeps of its producer's scope. Taken before the
+/// scope moves into the producer, it spares a clone of the whole context:
+/// each clone and drop of a cancel token takes the token's lock.
+pub(crate) struct Producer {
+    token: CancellationToken,
+    deadline_at: Option<Instant>,
+}
+
+impl Producer {
+    pub(crate) fn of(scope: &Cx) -> Self {
+        Self {
+            token: scope.cancel_token(),
+            deadline_at: scope.deadline().map(|deadline| deadline.instant()),
+        }
+    }
+
+    /// The node boundary [`fuse`] describes, over the producer's stream.
+    pub(crate) fn fuse<T: Send + 'static>(self, inner: Items<T>) -> Items<T> {
+        Box::pin(Fuse {
+            inner: Some(inner),
+            token: Some(self.token),
+            deadline_at: self.deadline_at,
+            ready_run: 0,
+        })
+    }
 }
 
 /// Consecutive ready items a node boundary passes before it yields.
@@ -105,10 +126,17 @@ const YIELD_INTERVAL: u16 = 1024;
 
 struct Fuse<T> {
     inner: Option<Items<T>>,
-    guard: Option<DropGuard>,
-    token: CancellationToken,
+    // The producer's scope, cancelled at any ending or drop; `None` once
+    // the stream has ended. One token does what a guard and a clone did.
+    token: Option<CancellationToken>,
     deadline_at: Option<Instant>,
     ready_run: u16,
+}
+
+impl<T> Drop for Fuse<T> {
+    fn drop(&mut self) {
+        end(&mut self.inner, &mut self.token);
+    }
 }
 
 impl<T> Stream for Fuse<T> {
@@ -130,11 +158,11 @@ impl<T> Stream for Fuse<T> {
         let polled = inner.as_mut().poll_next(cx);
         match &polled {
             Poll::Ready(Some(Ok(_))) => this.ready_run += 1,
-            Poll::Ready(Some(Err(_))) => end(&mut this.inner, &mut this.guard),
+            Poll::Ready(Some(Err(_))) => end(&mut this.inner, &mut this.token),
             Poll::Ready(None) => {
                 // Checked before ending: ending cancels the scope itself.
-                let interruption = interrupted(&this.token, this.deadline_at);
-                end(&mut this.inner, &mut this.guard);
+                let interruption = interrupted(this.token.as_ref(), this.deadline_at);
+                end(&mut this.inner, &mut this.token);
                 return Poll::Ready(interruption.map(Err));
             }
             Poll::Pending => this.ready_run = 0,
@@ -150,7 +178,8 @@ impl<T> Stream for Fuse<T> {
 /// ending, including a normal one, drops `guard`, which cancels the attempt:
 /// a producer still running after its stream has ended (for example, a sink
 /// waiting after it reported an error) must stop even while the consumer
-/// keeps the ended stream. Dropping the stream drops `guard` too.
+/// keeps the ended stream. Dropping the stream drops `guard` too. `guard`
+/// is `cx`'s own ([`Cx::cancel_on_drop`]).
 pub(crate) fn bound<T: Send + 'static>(cx: &Cx, guard: DropGuard, inner: Items<T>) -> Items<T> {
     bound_measured(cx, guard, inner, None)
 }
@@ -163,13 +192,13 @@ pub fn bound_measured<T: Send + 'static>(
     inner: Items<T>,
     response: Option<Owner>,
 ) -> Items<T> {
-    let token = cx.cancel_token();
     let deadline_at = cx.deadline().map(|deadline| deadline.instant());
     Box::pin(Bounded {
         inner: Some(inner),
-        guard: Some(guard),
-        cancelled: token.clone().cancelled_owned(),
-        token,
+        // The guard's token is `cx`'s: the stream cancels it itself, and
+        // needs no clone of it to read it.
+        token: Some(guard.disarm()),
+        cancelled: None,
         deadline: deadline_at.map(tokio::time::sleep_until),
         deadline_at,
         since_check: 0,
@@ -194,11 +223,13 @@ pin_project! {
         // `None` once the stream has ended; dropping the inner stream drops
         // the attempt's node streams.
         inner: Option<Items<T>>,
-        // `None` once the stream has ended; dropping it cancels the attempt.
-        guard: Option<DropGuard>,
+        // The attempt's, cancelled at any ending or drop; `None` once the
+        // stream has ended.
+        token: Option<CancellationToken>,
+        // Made the first time the producer waits: a stream whose items are
+        // all ready never pays for the clone and the waiter.
         #[pin]
-        cancelled: WaitForCancellationFutureOwned,
-        token: CancellationToken,
+        cancelled: Option<WaitForCancellationFutureOwned>,
         #[pin]
         deadline: Option<Sleep>,
         deadline_at: Option<Instant>,
@@ -213,6 +244,13 @@ pin_project! {
         // The root's visit, when the runtime records it; dropped with the
         // stream, it ends as given up.
         response: Option<Owner>,
+    }
+
+    impl<T> PinnedDrop for Bounded<T> {
+        fn drop(this: Pin<&mut Self>) {
+            let this = this.project();
+            end(this.inner, this.token);
+        }
     }
 }
 
@@ -233,9 +271,9 @@ impl<T> Stream for Bounded<T> {
         *this.since_check += 1;
         if *this.since_check >= CHECK_INTERVAL {
             *this.since_check = 0;
-            if let Some(error) = interrupted(this.token, *this.deadline_at) {
+            if let Some(error) = interrupted(this.token.as_ref(), *this.deadline_at) {
                 ended(this.response.as_ref(), Ending::Failed(&error));
-                end(this.inner, this.guard);
+                end(this.inner, this.token);
                 return Poll::Ready(Some(Err(error)));
             }
         }
@@ -253,7 +291,7 @@ impl<T> Stream for Bounded<T> {
             }
             Poll::Ready(Some(Err(error))) => {
                 ended(this.response.as_ref(), Ending::Failed(&error));
-                end(this.inner, this.guard);
+                end(this.inner, this.token);
                 return Poll::Ready(Some(Err(error)));
             }
             Poll::Ready(None) => {
@@ -261,12 +299,12 @@ impl<T> Stream for Bounded<T> {
                 // cleanly; the end must still be reported as the interruption
                 // it was, not as success. One check per stream, off the
                 // per-item path.
-                let interruption = interrupted(this.token, *this.deadline_at);
+                let interruption = interrupted(this.token.as_ref(), *this.deadline_at);
                 let ending = interruption
                     .as_ref()
                     .map_or(Ending::Finished, Ending::Failed);
                 ended(this.response.as_ref(), ending);
-                end(this.inner, this.guard);
+                end(this.inner, this.token);
                 return Poll::Ready(interruption.map(Err));
             }
             Poll::Pending => *this.ready_run = 0,
@@ -279,36 +317,48 @@ impl<T> Stream for Bounded<T> {
         {
             let error = Error::deadline_exceeded();
             ended(this.response.as_ref(), Ending::Failed(&error));
-            end(this.inner, this.guard);
+            end(this.inner, this.token);
             return Poll::Ready(Some(Err(error)));
         }
-        if this.cancelled.poll(cx).is_ready() {
+        let mut cancelled = this.cancelled;
+        if cancelled.is_none()
+            && let Some(token) = this.token.as_ref()
+        {
+            cancelled.set(Some(token.clone().cancelled_owned()));
+        }
+        if let Some(cancelled) = cancelled.as_pin_mut()
+            && cancelled.poll(cx).is_ready()
+        {
             // The deadline timer fires on a whole-millisecond tick, and an
             // exhausted cooperative budget can hold it back; a deadline that
             // has passed is the cause to report even if its timer has not
             // fired yet.
-            let error = interrupted(this.token, *this.deadline_at).unwrap_or_else(Error::cancelled);
+            let error = interrupted(this.token.as_ref(), *this.deadline_at)
+                .unwrap_or_else(Error::cancelled);
             ended(this.response.as_ref(), Ending::Failed(&error));
-            end(this.inner, this.guard);
+            end(this.inner, this.token);
             return Poll::Ready(Some(Err(error)));
         }
         Poll::Pending
     }
 }
 
-fn interrupted(token: &CancellationToken, deadline_at: Option<Instant>) -> Option<Error> {
+fn interrupted(token: Option<&CancellationToken>, deadline_at: Option<Instant>) -> Option<Error> {
     if deadline_at.is_some_and(|at| Instant::now() >= at) {
         Some(Error::deadline_exceeded())
-    } else if token.is_cancelled() {
+    } else if token.is_some_and(CancellationToken::is_cancelled) {
         Some(Error::cancelled())
     } else {
         None
     }
 }
 
-fn end<T>(inner: &mut Option<Items<T>>, guard: &mut Option<DropGuard>) {
+/// Drop the producer's stream, then cancel its scope, in the order a
+/// stream that held a drop guard used. The guard is made first, so the
+/// cancel happens even when the stream's destructor panics.
+fn end<T>(inner: &mut Option<Items<T>>, token: &mut Option<CancellationToken>) {
+    let _cancel = token.take().map(CancellationToken::drop_guard);
     *inner = None;
-    drop(guard.take());
 }
 
 #[cfg(test)]

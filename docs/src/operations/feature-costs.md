@@ -1,6 +1,6 @@
 # Feature costs
 
-This chapter reports what runtime metrics, live rosters, routing selectors, and registered cell policies add to a request. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
+This chapter reports what runtime metrics, live rosters, routing selectors, and registered cell policies add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
 
 ## Method
 
@@ -235,3 +235,48 @@ On the shared aarch64 host above (Cortex-X925 and Cortex-A725), load average 13 
 | `request_id/mint_contended` | 28.1 ns, 26.8 ns | 26.4 ns, 28.4 ns |
 
 On the same host, the precise wall clock (`SystemTime::now`) costs 23 to 30 ns a read, and the coarse one (`CLOCK_REALTIME_COARSE`) 6 ns. With the precise clock, `mint` took 37.6 ns. The stamp must have its own cache line: when it shared one with the pointer the clock read loads, `mint_contended` took 46 ns.
+
+## Local hop
+
+What one local hop costs a request, over the stages it runs, from dynamo-http-endpoints' pipeline bench at its commit `c4d9021`, built against each gdl commit by path. A chat request with one message goes through `Translate` and `Build` to an engine that answers at once. `Build direct` calls `Build` from `Translate` with no inner hop; `empty hop` puts the same call inside an inner hop with no stages; `Build as a stage` runs `Build` as the inner hop's forward stage. The time is the middle of three runs, which agreed within 2%. The bench's requests have no deadline.
+
+On a quiet host, gb300 (Neoverse-V2, 72 cores), pinned to core 9, load average 2 to 4, rustc 1.93.1. Base `7010e3e`:
+
+```bash
+cargo bench -p dynamo-protocol-adapters --bench pipeline -- 'hop'
+```
+
+| gdl | Build direct | empty hop | Build as a stage | Allocations (direct, hop) | Request future |
+|---|---|---|---|---|---|
+| base | 5.06 us | 6.95 us | 7.38 us | 44, 54 | 10,448 to 12,944 B |
+| nested hop futures boxed | 4.64 us | 6.29 us | 6.56 us | 45, 56 | 4,816 B |
+| fewer locks of the cancel token | 4.36 us | 5.77 us | 6.01 us | 45, 56 | 5,376 B |
+| stop scope without locks | 4.10 us | 5.20 us | 5.39 us | 43, 52 | 4,848 B |
+
+The hop itself (`empty hop` less `Build direct`) went from 1.89 us and 10 allocations to 1.09 us and 9: 8 for the hop (`a_hop_allocates_two_contexts_and_two_boundaries`) and 1 for the boxed join. `Build direct` gains too, since the pipeline's first hop is a hop. With 200 messages the rows move by about the same amounts.
+
+A profile of the `empty hop` row (`perf record -g`) agrees. `memcpy`, mostly futures moved whole, took 30% of 6.92 us at the base and 24% of 5.13 us after. The mutex atomics of the cancel tokens took 14% and 10%: about 1.0 us, then 0.5 us.
+
+gdl's own benches on the same host, base and after, two runs each:
+
+```bash
+cargo bench -p gdl-runtime --bench hop -- --warm-up-time 1 --measurement-time 3
+cargo bench -p gdl-runtime --bench remote -- 'request/reference|reference-items' --warm-up-time 1 --measurement-time 3
+cargo test --release -p gdl-runtime --lib cost_of -- --ignored --nocapture
+```
+
+| Row | Base | After |
+|---|---|---|
+| `request/gdl` | 3.68 us, 3.66 us | 2.51 us, 2.47 us |
+| `request/gdl-streamed` | 3.59 us, 3.56 us | 2.48 us, 2.48 us |
+| `items/gdl` (10,000 items) | 330 us, 331 us | 316 us, 317 us |
+| `items/direct`, the control | 51.0 us, 52.3 us | 45.4 us, 52.0 us |
+| `request/reference-local` | 12.1 us, 11.8 us | 10.5 us, 10.3 us |
+| `request/reference-1-segment` | 13.3 us, 13.5 us | 12.2 us, 12.1 us |
+| `request/reference-2-segments` | 140 us, 139 us | 139 us, 142 us |
+| `request/reference-3-segments` | 280 us, 279 us | 271 us, 288 us |
+| `reference-items/2-segments` | 71.7 ms, 72.1 ms | 71.7 ms, 72.3 ms |
+| pick, `round_robin`, `home_first` | 127 ns, 168 ns | 124 ns, 162 ns |
+| accepted first offer over loopback, cells | 30.6 us, 29.0 us | 30.3 us, 30.9 us |
+
+No row got slower beyond its spread. `items/direct` runs no gdl code, and it moved by as much as `items/gdl` did between builds, so the items rows show no change.

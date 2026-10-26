@@ -7,6 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::sync::atomic::AtomicBool;
+
+use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -109,7 +112,7 @@ impl Cx {
     /// Ask this context and every context below it to stop gracefully:
     /// finish buffered output, then end.
     pub fn request_stop(&self) {
-        self.scope.stop.cancel();
+        self.scope.stop.stop();
     }
 
     /// Whether this context was cancelled.
@@ -125,13 +128,13 @@ impl Cx {
     /// Whether this context should stop producing: a stop was requested or it
     /// was cancelled. A cancel is a stop that also discards.
     pub fn is_stopping(&self) -> bool {
-        self.scope.stop.is_cancelled() || self.scope.cancel.is_cancelled()
+        self.scope.stop.is_stopped() || self.scope.cancel.is_cancelled()
     }
 
     /// Resolves when a stop is requested or the context is cancelled.
     pub async fn stopping(&self) {
         tokio::select! {
-            () = self.scope.stop.cancelled() => {}
+            () = self.scope.stop.stopped() => {}
             () = self.scope.cancel.cancelled() => {}
         }
     }
@@ -241,26 +244,123 @@ impl fmt::Debug for Cx {
 
 /// Stop and cancel are separate trees. Stop must not imply cancel (a stopped
 /// producer still delivers its buffered output), and a cancel must reach
-/// children whose stop token has its own parent, so each signal gets its own
-/// token tree and readers check both.
+/// children whose stop has its own parent, so each signal gets its own tree
+/// and readers check both.
 #[derive(Clone)]
 struct Scope {
-    stop: CancellationToken,
+    stop: Stop,
     cancel: CancellationToken,
 }
 
 impl Scope {
     fn root() -> Self {
         Self {
-            stop: CancellationToken::new(),
+            stop: Stop::root(),
             cancel: CancellationToken::new(),
         }
     }
 
     fn child(&self) -> Self {
         Self {
-            stop: self.stop.child_token(),
+            stop: self.stop.child(),
             cancel: self.cancel.child_token(),
+        }
+    }
+}
+
+/// One scope of the stop tree. A child points at its parent and a parent
+/// knows nothing of its children, so making, cloning, and dropping a scope
+/// takes no lock, where a cancel token takes one for each. A context checks
+/// its own flag and each of its parents'. A stop is rare, so every waiter of
+/// one request waits on one `Notify` at the root, and a stop wakes them all
+/// to check again.
+#[derive(Clone)]
+struct Stop(Arc<StopNode>);
+
+struct StopNode {
+    stopped: AtomicBool,
+    up: Up,
+}
+
+enum Up {
+    Root(Notify),
+    Parent(Arc<StopNode>),
+    /// Only while the node is dropped, which nothing reads.
+    Gone,
+}
+
+impl Drop for StopNode {
+    fn drop(&mut self) {
+        // A context replaced by its child, over and over, holds a long chain
+        // of parents that only it keeps. Dropped by recursion, the chain
+        // would overflow the stack; unlink it one node at a time instead.
+        let mut up = std::mem::replace(&mut self.up, Up::Gone);
+        while let Up::Parent(parent) = up {
+            let Ok(mut parent) = Arc::try_unwrap(parent) else {
+                return;
+            };
+            up = std::mem::replace(&mut parent.up, Up::Gone);
+        }
+    }
+}
+
+impl Stop {
+    fn root() -> Self {
+        Self(Arc::new(StopNode {
+            stopped: AtomicBool::new(false),
+            up: Up::Root(Notify::new()),
+        }))
+    }
+
+    fn child(&self) -> Self {
+        Self(Arc::new(StopNode {
+            stopped: AtomicBool::new(false),
+            up: Up::Parent(Arc::clone(&self.0)),
+        }))
+    }
+
+    fn stop(&self) {
+        // Set before the wake: a waiter that misses the wake sees the flag.
+        if !self.0.stopped.swap(true, Ordering::SeqCst) {
+            self.notify().notify_waiters();
+        }
+    }
+
+    fn is_stopped(&self) -> bool {
+        let mut node = &*self.0;
+        loop {
+            if node.stopped.load(Ordering::SeqCst) {
+                return true;
+            }
+            match &node.up {
+                Up::Parent(parent) => node = parent,
+                Up::Root(_) | Up::Gone => return false,
+            }
+        }
+    }
+
+    async fn stopped(&self) {
+        let notify = self.notify();
+        loop {
+            // Made before the check: `notify_waiters` wakes a `Notified`
+            // from the moment it exists, so a stop between the check and the
+            // await still wakes it.
+            let notified = notify.notified();
+            if self.is_stopped() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn notify(&self) -> &Notify {
+        let mut node = &*self.0;
+        loop {
+            match &node.up {
+                Up::Root(notify) => return notify,
+                Up::Parent(parent) => node = parent,
+                Up::Gone => unreachable!("a node being dropped is never read"),
+            }
         }
     }
 }
@@ -561,6 +661,79 @@ mod tests {
         assert!(sibling.is_stopping());
         parent.cancel();
         assert!(sibling.is_cancelled());
+    }
+
+    #[test]
+    fn a_stop_reaches_down_and_never_up_or_across() {
+        let root = Cx::new();
+        let parent = root.child();
+        let child = parent.child();
+        let sibling = root.child();
+        child.request_stop();
+        assert!(child.is_stopping());
+        assert!(!parent.is_stopping() && !root.is_stopping());
+
+        root.request_stop();
+        assert!(parent.is_stopping() && sibling.is_stopping());
+        let later = sibling.child().child();
+        assert!(later.is_stopping(), "a context made after the stop");
+        assert!(!later.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_stop_wakes_the_waiters_below_it_only() {
+        let root = Cx::new();
+        let parent = root.child();
+        let below = parent.child().child();
+        let sibling = root.child();
+        let waiting = tokio::spawn({
+            let below = below.clone();
+            async move { below.stopping().await }
+        });
+        let mut aside = std::pin::pin!(sibling.stopping());
+        // Both wait before any stop.
+        tokio::task::yield_now().await;
+        assert!(futures::poll!(aside.as_mut()).is_pending());
+        assert!(!waiting.is_finished());
+
+        parent.request_stop();
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("woken by the stop above it")
+            .expect("the waiter");
+        assert!(futures::poll!(aside.as_mut()).is_pending());
+        root.request_stop();
+        tokio::time::timeout(Duration::from_secs(5), aside)
+            .await
+            .expect("woken by the root's stop");
+    }
+
+    /// A waiter makes its wake before it checks the flags, and a stop sets
+    /// its flag before it wakes: whichever runs first, no stop is lost. A
+    /// barrier starts the stop and the wait together, so they overlap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_racing_a_new_waiter_is_never_lost() {
+        for _ in 0..2_000 {
+            let parent = Cx::new().child();
+            let below = parent.child().child();
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let stopper = std::thread::spawn({
+                let start = Arc::clone(&start);
+                move || {
+                    start.wait();
+                    parent.request_stop();
+                }
+            });
+            let waiter = tokio::spawn(async move {
+                start.wait();
+                below.stopping().await;
+            });
+            tokio::time::timeout(Duration::from_secs(5), waiter)
+                .await
+                .expect("the stop was lost")
+                .expect("the waiter");
+            stopper.join().expect("the stopper");
+        }
     }
 
     #[test]

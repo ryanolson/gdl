@@ -73,6 +73,12 @@ A node's context is how the runtime stops the node. A node reports failure with 
 
 Polling every node's scope on every path was rejected. It would catch a node that misuses its context, at the cost of a mutex per node per remote item on the hottest path. The request's deadline still bounds such a node.
 
+**A stop scope takes no lock.** A context has a stop scope and a cancel scope. The cancel scope is a tokio `CancellationToken`: each child takes a place in its parent's list of children, and each create, clone, check, and drop takes the token's lock. A stop scope is a flag in a node that points at its parent. Making, cloning, and dropping one takes no lock, and a check reads its own flag and its parents': one read for each level, and a hop adds two. A long chain that only its last context holds is dropped in a loop, not by recursion. All waiters of one request wait on one `Notify` at the root, and a stop wakes them all to check again. That is cheap for stop, which is rare. It would be wrong for cancel: each attempt cancels its scope when its stream ends, so a request with many attempts in flight would wake every waiter at each end. Cancel keeps its token tree. The cost is in [Feature costs](../operations/feature-costs.md#local-hop).
+
+**A nested hop's future is on the heap.** An operator's future holds the future of the hop it calls, and that one the hops below it. Held inline, the hop above carries all of them, and each request moves them whole. So an operator or a join that is a hop's inner end boxes that future. A sink's future is not boxed: nothing nests below it.
+
+**An attempt that is ready at once registers no waiter.** A hop polls its attempt before it waits on the attempt's cancel. An attempt that finishes in that poll never registers on the cancel's waiter list. Later polls check the cancel first, and no poll polls the attempt twice (`a_hop_polls_a_waiting_inner_end_once_a_pass`).
+
 Each attempt spends one unit of tokio's cooperative budget. An operator that retried attempts which failed at once used to loop without yielding, and starved the task that would cancel it. With the budget, such a storm yields about every 128 attempts. The cost per item did not change.
 
 ## Admission and egress
