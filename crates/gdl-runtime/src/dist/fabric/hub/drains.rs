@@ -13,7 +13,7 @@ use tokio::time::Instant;
 
 use super::HubSession;
 use crate::Roster;
-use crate::dist::cells::{Cells, Follows};
+use crate::dist::cells::{Cells, Damping, Follows};
 
 const DRAIN: Duration = Duration::from_millis(300);
 
@@ -99,7 +99,7 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
     .await
     .expect("registered");
     let live = Arc::clone(Roster::new().live());
-    let cells = Cells::new("r", [("model_x", "sink")]);
+    let cells = Cells::new("r", [("model_x", "sink")], Damping::default());
     let wanted = BTreeMap::from([("model_x".to_string(), BTreeSet::from(["sink".to_string()]))]);
     let mut chooser = Follows::new(
         cells.clone(),
@@ -107,6 +107,7 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
         Arc::clone(&live),
         DRAIN,
         wanted,
+        gdl::Load::FRESH_PERIODS,
     );
     let mut membership = session.follower(
         Arc::clone(&live),

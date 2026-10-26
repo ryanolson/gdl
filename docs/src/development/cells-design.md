@@ -40,7 +40,7 @@ The directory says which cells exist. The follow link carries state, load, entry
 
 The hub counts instances that are ready and not retired. It does not count `serving`. An instance announces `serving` before the routing barrier, and a retiring instance withdraws `ready` but keeps `serving` while it drains. Counting `serving` would let a cell whose instances are all retiring count as ready.
 
-`ready` needs the quorum to hold for 2 s. `degraded` and `unavailable` take effect at once. So a flapping instance cannot flap the cell into `ready`, and a loss is reported without delay.
+`ready` needs the quorum to hold for 2 s by default (`[cell] hold_ms`). `degraded` and `unavailable` take effect at once. So a flapping instance cannot flap the cell into `ready`, and a loss is reported without delay.
 
 velo-hub keeps its service directory private to the crate. So the extension reads its own hub's service watches over loopback, one watch per service.
 

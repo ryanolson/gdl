@@ -342,6 +342,7 @@ fn a_cell_table_is_read_from_a_file() {
             requires: BTreeMap::new(),
             hub: None,
             summary: CellSettings::DEFAULT_SUMMARY,
+            timing: Default::default(),
         })
     );
     let cell = config.cell().expect("a cell");
@@ -377,6 +378,7 @@ fn a_cell_table_is_read_from_the_environment() {
                 requires: BTreeMap::new(),
                 hub: None,
                 summary: std::time::Duration::from_millis(1500),
+                timing: Default::default(),
             })
         );
         Ok(())
@@ -458,6 +460,7 @@ fn a_fleet_bundles_variables_give_a_segment_its_hub_and_cell() {
                 requires: BTreeMap::new(),
                 hub: Some("model-x-02-us-east-1:1337".into()),
                 summary: CellSettings::DEFAULT_SUMMARY,
+                timing: Default::default(),
             })
         );
         Ok(())

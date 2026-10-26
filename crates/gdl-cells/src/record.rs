@@ -52,9 +52,9 @@ pub struct CellRecord {
 }
 
 impl CellRecord {
-    /// The lease of a record that does not name one: three heartbeats of
-    /// 10 s.
-    pub const DEFAULT_LEASE: Duration = Duration::from_secs(30);
+    /// The lease of a record that does not name one: a hub's default
+    /// lease, three of its default heartbeats.
+    pub const DEFAULT_LEASE: Duration = gdl_model::HubTiming::DEFAULT_LEASE;
 
     /// The record's place in its writer's order of writes.
     pub fn version(&self) -> Version {

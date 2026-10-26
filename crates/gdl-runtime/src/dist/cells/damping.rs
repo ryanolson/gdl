@@ -1,8 +1,9 @@
 //! A chooser's damping of a cell that declined its offers: for a short
 //! window after a decline, the cell is passed over, so that requests do not
 //! each pay a round trip to a cell that is full until its summary says so.
-//! The window starts at [`FIRST_WINDOW`] and doubles, up to
-//! [`MAX_WINDOW`], with each further decline with no acceptance between;
+//! The window starts at the chooser's first window (`cell_damping_first_ms`,
+//! 1 s by default) and doubles, up to its longest (`cell_damping_max_ms`,
+//! 30 s by default), with each further decline with no acceptance between;
 //! an offer the cell accepts ends its damping. As with Envoy's outlier
 //! ejection, whose ejection time grows with consecutive ejections, the
 //! window grows while the cell keeps declining, and is capped so that a
@@ -14,7 +15,7 @@
 //! declines of many requests that met one full cell at once are one
 //! decline, and the window doubles only on a decline of an offer made
 //! once the last window had passed. Extending the window on each of them
-//! would put a cell that was full for a moment out for [`MAX_WINDOW`]
+//! would put a cell that was full for a moment out for the longest window
 //! after a burst of six.
 //!
 //! A chooser keeps the cells it damps as one immutable list, swapped whole
@@ -33,12 +34,7 @@ use gdl::__runtime::Window;
 use gdl::Damped;
 use tokio::time::Instant;
 
-/// The window after a cell's first decline.
-pub(crate) const FIRST_WINDOW: Duration = Duration::from_secs(1);
-
-/// The longest window: a cell that keeps declining is tried again at least
-/// this often.
-pub(crate) const MAX_WINDOW: Duration = Duration::from_secs(30);
+use crate::RuntimeConfig;
 
 /// One chooser instance's damping of the cells it sends to, by cell
 /// [`id`](super::CellTable::id): the same in every table of a cell, so it
@@ -50,30 +46,53 @@ pub(crate) const MAX_WINDOW: Duration = Duration::from_secs(30);
 /// lone cell is still chosen), and once the window has passed it may be chosen
 /// again, which is how it is offered the request whose acceptance ends its
 /// damping, or whose decline doubles the window.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Damping {
     view: ArcSwap<Damped>,
+    /// The window after a cell's first decline.
+    first: Duration,
+    /// The longest window: a cell that keeps declining is tried again at
+    /// least this often.
+    max: Duration,
+}
+
+impl Default for Damping {
+    fn default() -> Self {
+        Self::new(
+            RuntimeConfig::DEFAULT_CELL_DAMPING_FIRST,
+            RuntimeConfig::DEFAULT_CELL_DAMPING_MAX,
+        )
+    }
 }
 
 impl Damping {
+    /// No cell damped, with windows from `first` up to `max`.
+    pub(crate) fn new(first: Duration, max: Duration) -> Self {
+        Self {
+            view: ArcSwap::default(),
+            first,
+            max,
+        }
+    }
+
     /// The damped cells now, for one choice: one load, no lock, no
     /// allocation.
     pub(crate) fn view(&self) -> Guard<Arc<Damped>> {
         self.view.load()
     }
 
-    /// The cell `cell` declined an offer at `now`: damp it for
-    /// [`FIRST_WINDOW`] if it was not damped, for twice its last window (at
-    /// most [`MAX_WINDOW`]) if that window has passed, and leave a window
-    /// that still lasts as it is. A cell with a mark as gone keeps it:
-    /// with no table of the cell to compare, the refusal cannot show that
-    /// the mark is stale, and the follower forgets a stale one.
+    /// The cell `cell` declined an offer at `now`: damp it for the first
+    /// window if it was not damped, for twice its last window (at most the
+    /// longest) if that window has passed, and leave a window that still
+    /// lasts as it is. A cell with a mark as gone keeps it: with no table
+    /// of the cell to compare, the refusal cannot show that the mark is
+    /// stale, and the follower forgets a stale one.
     pub(crate) fn decline(&self, cell: u64, now: Instant) {
         self.change(|damped| {
             if damped.holds_gone(cell) {
                 return None;
             }
-            declined(damped, cell, now)
+            self.declined(damped, cell, now)
         });
     }
 
@@ -87,7 +106,7 @@ impl Damping {
             if damped.holds_gone_since(cell) {
                 return None;
             }
-            declined(damped, cell.id(), now)
+            self.declined(damped, cell.id(), now)
         });
     }
 
@@ -134,21 +153,21 @@ impl Damping {
             current = previous;
         }
     }
-}
 
-/// The list once `cell` declined at `now`, or `None` when it does not
-/// change: the cell's window still lasts.
-fn declined(damped: &Damped, cell: u64, now: Instant) -> Option<Damped> {
-    let length = match damped.window(cell) {
-        None => FIRST_WINDOW,
-        Some(window) if window.until > now => return None,
-        Some(window) => (window.length * 2).min(MAX_WINDOW),
-    };
-    let window = Window {
-        until: now + length,
-        length,
-    };
-    Some(damped.with(cell, window))
+    /// The list once `cell` declined at `now`, or `None` when it does not
+    /// change: the cell's window still lasts.
+    fn declined(&self, damped: &Damped, cell: u64, now: Instant) -> Option<Damped> {
+        let length = match damped.window(cell) {
+            None => self.first,
+            Some(window) if window.until > now => return None,
+            Some(window) => (window.length * 2).min(self.max),
+        };
+        let window = Window {
+            until: now + length,
+            length,
+        };
+        Some(damped.with(cell, window))
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +214,20 @@ mod tests {
                 damping.view().is_damped(CELL),
                 "a passed window ended the damping"
             );
+        }
+    }
+
+    /// Windows set apart from the defaults start and stop where they say:
+    /// 2 s, then 4 s, then 5 s, the cap, from then on.
+    #[test]
+    fn the_windows_are_the_ones_the_chooser_is_given() {
+        let start = Instant::now();
+        let damping = Damping::new(SECOND * 2, SECOND * 5);
+        let mut now = start;
+        for window in [2, 4, 5, 5] {
+            damping.decline(CELL, now);
+            assert_eq!(damping.view().left(CELL, now), window * 1000);
+            now += SECOND * u32::try_from(window).expect("short");
         }
     }
 

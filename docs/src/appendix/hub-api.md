@@ -1,6 +1,6 @@
 # Cell hub routes and watch events
 
-A cell's hub serves the `gdl-cell` extension's routes under `/v1/ext/gdl-cell`. The public listener is port 1337 and the control listener is port 8337. [Classes and cells](../concepts/cells.md) and [Following and choosing cells](../concepts/cell-routing.md) describe what each route does. Field-level detail is the rustdoc of `gdl_watch` (wire types, routes, client) and `gdl_hub` (`CellReadiness`, `CellTiming`, `CellHealth`).
+A cell's hub serves the `gdl-cell` extension's routes under `/v1/ext/gdl-cell`. The public listener is port 1337 and the control listener is port 8337. [Classes and cells](../concepts/cells.md) and [Following and choosing cells](../concepts/cell-routing.md) describe what each route does. Field-level detail is the rustdoc of `gdl_watch` (wire types, routes, client) and `gdl_hub` (`CellReadiness`, `CellTiming`, `CellHealth`). A hub process reads its timing from the `[cell]` keys in the table below, as `GDL_CELL__*` variables ([Segment settings](../operations/configuration.md)).
 
 ## Routes
 
@@ -46,10 +46,10 @@ Every relay event except `synced` names its class, cell, and generation. A choos
 | Time from asking to `synced` | 30 s | `WatchLimits::SYNCED_WITHIN` |
 | Idle time before a reader ends a watch | 30 s without a byte | `CellWatcher` |
 | Keep-alive | every 10 s | the hub |
-| Events a watcher may fall behind | 1024, then its watch ends | `CellTiming::watch_buffer` |
-| Concurrent watches: cell's watch, relay, one follow | 2048, 2048, 16384; beyond that 503 with `Retry-After: 1` | `WatchCaps` |
-| Quorum hold | 2 s | `Quorum::DEFAULT_HOLD` |
-| Record heartbeat, lease | 10 s, 30 s | `CellTiming`, `CellRecord::DEFAULT_LEASE` |
+| Events a watcher may fall behind | 1024 by default, then its watch ends | `[cell] watch_buffer` |
+| Concurrent watches: cell's watch, relay, one follow | 2048, 2048, 16384 by default; beyond that 503 with `Retry-After: 1` | `[cell.watch_caps] cell`, `relay`, `follow` |
+| Quorum hold | 2 s by default | `[cell] hold_ms` |
+| Record heartbeat, lease | 10 s, 30 s by default | `[cell] heartbeat_ms`, `lease_ms` |
 | Load summary period | 10 s by default, at least 1 s | `[cell] summary_ms` |
 | Drain answer wait | up to 5 s | the hub |
 | Chooser acknowledgement poll, resend | 50 ms, 500 ms | the runtime |

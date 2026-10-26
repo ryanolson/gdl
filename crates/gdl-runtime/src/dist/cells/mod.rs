@@ -39,7 +39,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
-use damping::Damping;
+pub(crate) use damping::Damping;
 use gdl_cells::{CellState, LoadSummary};
 use gdl_model::Layout;
 use lease::Leases;
@@ -91,10 +91,11 @@ struct Shared {
 
 impl Cells {
     /// Empty tables for `entries`, each an entry segment and its class, of
-    /// a chooser in `region`.
+    /// a chooser in `region` that damps the cells by `damping`.
     pub(crate) fn new<'a>(
         region: &str,
         entries: impl IntoIterator<Item = (&'a str, &'a str)>,
+        damping: Damping,
     ) -> Self {
         let mut wanted: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for (class, segment) in entries {
@@ -121,7 +122,7 @@ impl Cells {
                 segments,
                 classes,
                 changes: watch::Sender::new(0),
-                damping: Arc::default(),
+                damping: Arc::new(damping),
                 registered: watch::Sender::new(HashSet::new()),
                 draining: Mutex::default(),
                 unknown: std::sync::atomic::AtomicU64::new(0),
@@ -488,8 +489,9 @@ pub(crate) fn check_policies(
     segment: &str,
     policies: &gdl::CellPolicies,
 ) -> gdl::Result<()> {
+    // Only whether each name resolves: the thresholds play no part.
     for class in entries(layout, segment).keys() {
-        policy::of(layout, class, policies)?;
+        policy::of(layout, class, policies, gdl::HomeFirstAt::DEFAULT)?;
     }
     Ok(())
 }

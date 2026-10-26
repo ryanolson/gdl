@@ -274,7 +274,11 @@ mod tests {
             })
             .expect("a handler");
 
-        let cells = Cells::new("home", [("model_x", "d")]);
+        let cells = Cells::new(
+            "home",
+            [("model_x", "d")],
+            super::super::damping::Damping::default(),
+        );
         let id = entry.instance_id();
         cells.store(
             "d",
@@ -298,8 +302,14 @@ mod tests {
             })])),
         );
         let crossing = |within: Within| {
-            let mut targets =
-                targets(&layout, "a", &cells, &gdl::CellPolicies::new()).expect("targets");
+            let mut targets = targets(
+                &layout,
+                "a",
+                &cells,
+                &gdl::CellPolicies::new(),
+                gdl::HomeFirstAt::DEFAULT,
+            )
+            .expect("targets");
             let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
             Router::Cells(Arc::new(Crossing::new(target, within, Default::default())))
         };
@@ -400,7 +410,11 @@ mod tests {
                 })
                 .expect("a handler");
         }
-        let cells = Cells::new("home", [("model_x", "d")]);
+        let cells = Cells::new(
+            "home",
+            [("model_x", "d")],
+            super::super::damping::Damping::default(),
+        );
         let tables = entries
             .iter()
             .zip(["m1", "m2"])
@@ -427,8 +441,14 @@ mod tests {
             })
             .collect();
         cells.store("d", EntryTable::new(tables));
-        let mut targets =
-            targets(&layout, "a", &cells, &gdl::CellPolicies::new()).expect("targets");
+        let mut targets = targets(
+            &layout,
+            "a",
+            &cells,
+            &gdl::CellPolicies::new(),
+            gdl::HomeFirstAt::DEFAULT,
+        )
+        .expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         let reading = Arc::new(Reading(AtomicUsize::new(0)));
         let router = Router::Cells(Arc::new(Crossing::new(
@@ -552,7 +572,11 @@ mod tests {
                 })
                 .expect("a handler");
         }
-        let cells = Cells::new("home", [("model_x", "d")]);
+        let cells = Cells::new(
+            "home",
+            [("model_x", "d")],
+            super::super::damping::Damping::default(),
+        );
         let tables = entries
             .iter()
             .zip(["m1", "m2"])
@@ -579,7 +603,8 @@ mod tests {
             })
             .collect();
         cells.store("d", EntryTable::new(tables));
-        let mut targets = targets(&layout, "a", &cells, &policies).expect("targets");
+        let mut targets =
+            targets(&layout, "a", &cells, &policies, gdl::HomeFirstAt::DEFAULT).expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         let router = Router::Cells(Arc::new(Crossing::new(
             target,
@@ -666,7 +691,11 @@ mod tests {
         names: &[&str],
         policies: &gdl::CellPolicies,
     ) -> (Crossing, Cells) {
-        let cells = Cells::new("home", [("model_x", "d")]);
+        let cells = Cells::new(
+            "home",
+            [("model_x", "d")],
+            super::super::damping::Damping::default(),
+        );
         let tables = names
             .iter()
             .map(|name| {
@@ -692,7 +721,8 @@ mod tests {
             })
             .collect();
         cells.store("d", EntryTable::new(tables));
-        let mut targets = targets(layout, "a", &cells, policies).expect("targets");
+        let mut targets =
+            targets(layout, "a", &cells, policies, gdl::HomeFirstAt::DEFAULT).expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         (
             Crossing::new(
@@ -787,7 +817,8 @@ mod tests {
     /// does not hold it in the choice.
     #[tokio::test(start_paused = true)]
     async fn a_cell_that_declined_as_gone_is_passed_over_until_its_follow_changes() {
-        use super::super::damping::{FIRST_WINDOW, MAX_WINDOW};
+        const FIRST_WINDOW: Duration = crate::RuntimeConfig::DEFAULT_CELL_DAMPING_FIRST;
+        const MAX_WINDOW: Duration = crate::RuntimeConfig::DEFAULT_CELL_DAMPING_MAX;
 
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
@@ -892,7 +923,7 @@ mod tests {
 
         crossing.declined(cell, Decline::Full, Some(&second));
         drop(second);
-        tokio::time::advance(super::super::damping::MAX_WINDOW * 2).await;
+        tokio::time::advance(crate::RuntimeConfig::DEFAULT_CELL_DAMPING_MAX * 2).await;
         let shown = &cells.followed("d")[0];
         assert!(
             shown.gone && pick().is_err(),
@@ -1007,7 +1038,11 @@ mod tests {
                 Box::pin(async move { accepted })
             })
             .expect("a handler");
-        let cells = Cells::new("home", [("model_x", "d")]);
+        let cells = Cells::new(
+            "home",
+            [("model_x", "d")],
+            super::super::damping::Damping::default(),
+        );
         let id = entry.instance_id();
         cells.store(
             "d",
@@ -1030,8 +1065,14 @@ mod tests {
                 leases: Arc::default(),
             })])),
         );
-        let mut targets =
-            targets(&layout, "a", &cells, &gdl::CellPolicies::new()).expect("targets");
+        let mut targets = targets(
+            &layout,
+            "a",
+            &cells,
+            &gdl::CellPolicies::new(),
+            gdl::HomeFirstAt::DEFAULT,
+        )
+        .expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         let policy = Within::Policy(Policy::RoundRobin);
         let routers = [

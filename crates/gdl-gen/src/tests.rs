@@ -876,7 +876,9 @@ fn a_segment_name_is_short_enough_for_its_hub_services() {
 /// Each default constant, as the spec reference's table names it, and its value
 /// as the table writes it.
 fn defaults() -> Vec<(&'static str, String)> {
-    use gdl_model::{CellPolicy, CellSettings, DirectoryBackend, RequestRouter};
+    use gdl_model::{
+        CellPolicy, CellSettings, DirectoryBackend, HubTiming, RequestRouter, WatchCaps,
+    };
     let millis = |d: std::time::Duration| d.as_millis().to_string();
     let directory = match DirectoryBackend::DEFAULT {
         DirectoryBackend::Relay { .. } => "relay",
@@ -916,6 +918,32 @@ fn defaults() -> Vec<(&'static str, String)> {
         (
             "CellSettings::MIN_SUMMARY",
             millis(CellSettings::MIN_SUMMARY),
+        ),
+        ("HubTiming::DEFAULT_HOLD", millis(HubTiming::DEFAULT_HOLD)),
+        (
+            "HubTiming::DEFAULT_HEARTBEAT",
+            millis(HubTiming::DEFAULT_HEARTBEAT),
+        ),
+        ("HubTiming::DEFAULT_LEASE", millis(HubTiming::DEFAULT_LEASE)),
+        (
+            "HubTiming::MIN_RELAY_LEASE",
+            millis(HubTiming::MIN_RELAY_LEASE),
+        ),
+        (
+            "HubTiming::DEFAULT_WATCH_BUFFER",
+            HubTiming::DEFAULT_WATCH_BUFFER.to_string(),
+        ),
+        (
+            "WatchCaps::DEFAULT_CELL",
+            WatchCaps::DEFAULT_CELL.to_string(),
+        ),
+        (
+            "WatchCaps::DEFAULT_RELAY",
+            WatchCaps::DEFAULT_RELAY.to_string(),
+        ),
+        (
+            "WatchCaps::DEFAULT_FOLLOW",
+            WatchCaps::DEFAULT_FOLLOW.to_string(),
         ),
     ]
 }

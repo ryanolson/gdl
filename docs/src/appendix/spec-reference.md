@@ -114,8 +114,13 @@ The fleet file fills in each cell's `[cell]` table in its segments' settings. Th
 | `summary_ms` | the load summary's period. Least 1000. | 10000 |
 | `ready.<segment>` | the quorum. A segment it does not name needs 1. | 1 |
 | `requires.<class>` | the ready cells of a class that the cell's health needs. Only the hub reads it. | 1 for each class sent to |
+| `hold_ms` | how long every quorum must hold before the cell is `ready`. Only the hub reads it. | 2000 |
+| `heartbeat_ms` | how often the hub publishes the cell's record while its state does not change. At least 1. Only the hub reads it. | 10000 |
+| `lease_ms` | how long a reader keeps the record without seeing it published again. At least 1, longer than `heartbeat_ms`, and at least 300 under the `relay` backend. Only the hub reads it. | 30000 |
+| `watch_buffer` | events a watcher may fall behind by before its watch ends. From 1 to 65536. Only the hub reads it. | 1024 |
+| `watch_caps.cell`, `watch_caps.relay`, `watch_caps.follow` | how many watches of the cell, of the relay, and of one follow the hub serves at once. At least 1. Only the hub reads them. | 2048, 2048, 16384 |
 
-An instance refuses to start when its `[cell]` does not fit its deployment: the placement has no classes, the class is not one of them, the instance's segment is not in it, a `ready` key is not a segment of it, or a `requires` key is not a class it sends to or is 0. Each problem names where the key was set, the file and key or the variable.
+An instance refuses to start when its `[cell]` does not fit its deployment: the placement has no classes, the class is not one of them, the instance's segment is not in it, a `ready` key is not a segment of it, or a `requires` key is not a class it sends to or is 0. An instance and a hub both refuse a hub timing out of its bounds, though only the hub runs with it. Each problem names where the key was set, the file and key or the variable.
 
 ## Constants
 
@@ -141,5 +146,13 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 | `[cell] directory` | `"relay"` | `DirectoryBackend::DEFAULT` |
 | `[cell] summary_ms` | `10000` | `CellSettings::DEFAULT_SUMMARY` |
 | `[cell] summary_ms`, its least | `1000` | `CellSettings::MIN_SUMMARY` |
+| `[cell] hold_ms` | `2000` | `HubTiming::DEFAULT_HOLD` |
+| `[cell] heartbeat_ms` | `10000` | `HubTiming::DEFAULT_HEARTBEAT` |
+| `[cell] lease_ms` | `30000` | `HubTiming::DEFAULT_LEASE` |
+| `[cell] lease_ms`, its least under `relay` | `300` | `HubTiming::MIN_RELAY_LEASE` |
+| `[cell] watch_buffer` | `1024` | `HubTiming::DEFAULT_WATCH_BUFFER` |
+| `[cell] watch_caps.cell` | `2048` | `WatchCaps::DEFAULT_CELL` |
+| `[cell] watch_caps.relay` | `2048` | `WatchCaps::DEFAULT_RELAY` |
+| `[cell] watch_caps.follow` | `16384` | `WatchCaps::DEFAULT_FOLLOW` |
 
 The constants are `gdl_model`'s, and the two images are the generator's (`gdl-gen`). Every other optional key has no value unless it is set.

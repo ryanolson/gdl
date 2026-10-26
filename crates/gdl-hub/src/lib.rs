@@ -23,7 +23,7 @@
 //! too), and a watch of one follow of it alone, ordered as the relay is
 //! (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`). Each of the three
 //! watch routes serves at most its cap of watches at once
-//! ([`WatchCaps`]), and refuses one beyond it with 503 before it builds
+//! ([`gdl_model::WatchCaps`], from `[cell.watch_caps]`), and refuses one beyond it with 503 before it builds
 //! anything for it. A followed cell whose
 //! watch sends an event of a kind the hub does not know is withheld: the
 //! relay shows it `unavailable`, its instances hidden, and not offered,
@@ -45,7 +45,7 @@ mod setup;
 
 pub use cell::{
     CellError, CellHealth, CellReadiness, CellTiming, CellWatch, RefusedWatches, RequiredHealth,
-    SegmentHealth, WatchCaps,
+    SegmentHealth,
 };
 pub use follow::FollowsWatch;
 pub use quorum::Quorum;

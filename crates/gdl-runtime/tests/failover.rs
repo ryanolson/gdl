@@ -15,10 +15,11 @@ mod common;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, home_first, model_of, placement, run_graph,
-    spec_of,
+    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, home_first, model_in, model_of, placement,
+    run_graph, spec_of,
 };
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::streamed::{self, Script, replies, words};
@@ -224,6 +225,101 @@ async fn a_cell_with_no_room_declines_and_another_answers() {
     assert_eq!(started(&e2), 1);
     drop(held);
     for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// The chooser damps a cell that declined for the first window its
+/// `[runtime]` settings give, 20 s here, not the default, 1 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declining_cell_is_damped_for_the_choosers_first_window() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(
+        &spec,
+        &hub,
+        "cell_damping_first_ms = 20000\n",
+        Selectors::new(),
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    let m1 = reference_cell(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        &one_at_a_time,
+        &quiet,
+    )
+    .await;
+    let m2 = reference_cell(
+        &spec,
+        &directory,
+        degraded(M2, "m2-hub:1337"),
+        &|r| r,
+        &quiet,
+    )
+    .await;
+    let cells = tables(&chooser);
+    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+    let held = hold(&chooser, "held").await;
+    ask(&chooser.segment).await.expect("another cell answered");
+    assert_eq!(offered(&[&m1, &m2]), [2, 1], "M1 declined once");
+    let left = followed(&cells, "f", M1)
+        .and_then(|m1| m1.damped)
+        .expect("M1 is damped");
+    assert!(
+        left > Duration::from_secs(10) && left <= Duration::from_secs(20),
+        "{left:?} left of M1's window"
+    );
+    drop(held);
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// `home_first`'s spill bound is the chooser's `[runtime]` setting: a
+/// lone idle cell in another region takes a request under the default
+/// bound, 80%, and none under a bound of 0%, which keeps every request
+/// in the chooser's region. Both choosers wait for the cell's summary, a
+/// period (1 s) at most.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_spill_bound_is_the_choosers_setting() {
+    let spec = spec_of(home_first());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let assemble = |deployment: &Deployment| reference_graph(deployment, &quiet);
+    let spilling = chooser(&spec, &hub, "", Selectors::new(), &assemble).await;
+    let home_only = chooser(
+        &spec,
+        &hub,
+        "home_first_spill_percent = 0\n",
+        Selectors::new(),
+        &assemble,
+    )
+    .await;
+    let m1 = model_in(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        "us-west-2",
+        &quiet,
+    )
+    .await;
+    for chooser in [&spilling, &home_only] {
+        following(&tables(chooser), &[(M1, CellState::Ready)]).await;
+    }
+    ask(&spilling.segment)
+        .await
+        .expect("the cell elsewhere answered");
+    let refused = ask(&home_only.segment)
+        .await
+        .expect_err("a cell elsewhere was chosen under a spill bound of 0");
+    assert_eq!(refused.kind(), ErrorKind::Routing, "{refused}");
+    assert_eq!(m1.forwards(), 1);
+    for hub in [hub, m1.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }

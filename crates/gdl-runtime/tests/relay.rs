@@ -82,7 +82,8 @@ async fn relay_hub(
     let readiness = Arc::new(
         CellReadiness::new(spec, cell, named.clone(), timing)
             .expect("valid test fixture")
-            .with_reports(&directory),
+            .with_reports(&directory)
+            .expect("a lease its reports cover"),
     );
     let hub = Hub::builder(hub_config())
         .extension(GraphAdmission::new(spec.clone()))

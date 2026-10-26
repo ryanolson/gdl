@@ -468,7 +468,7 @@ impl Fleet {
     /// [`CellSettings::quorum`]'s fallback. Its `requires` is its class's, and
     /// unsaid when that is, which requires one ready child of each class its
     /// class sends to ([`CellSettings::requirements`]). The directory, hub
-    /// address, and summary period are not in the fleet file and take their defaults. Meant for a fleet that
+    /// address, summary period, and hub timing are not in the fleet file and take their defaults. Meant for a fleet that
     /// [`Fleet::check`] accepted, whose `ready` keys are all segments of
     /// the cell's class.
     pub fn cell(&self, name: &str) -> Option<CellSettings> {
@@ -491,6 +491,7 @@ impl Fleet {
                 .unwrap_or_default(),
             hub: None,
             summary: CellSettings::DEFAULT_SUMMARY,
+            timing: Default::default(),
         })
     }
 

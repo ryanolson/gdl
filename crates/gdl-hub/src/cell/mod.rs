@@ -50,7 +50,7 @@ mod tests;
 
 pub use feed::CellWatch;
 pub use health::{CellHealth, RequiredHealth, SegmentHealth};
-pub use timing::{CellTiming, RefusedWatches, WatchCaps};
+pub use timing::{CellTiming, RefusedWatches};
 
 /// Whether a cell can take work, judged and published by the cell's own
 /// hub: the `gdl-cell` extension, beside [`crate::GraphAdmission`].
@@ -287,7 +287,7 @@ impl<D: CellDirectory> CellReadiness<D> {
         if timing.watch_buffer == 0 {
             return Err(CellError::new("the cell's watch buffer is zero"));
         }
-        if timing.watch_caps.has_zero() {
+        if timing::has_zero(&timing.watch_caps) {
             return Err(CellError::new("a watch route's cap is zero"));
         }
         if timing.refollow.is_zero() {
@@ -363,7 +363,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             timing,
             health,
             feed: Arc::new(feed),
-            places: timing.watch_caps.places(),
+            places: timing::RoutePlaces::new(&timing.watch_caps),
             admission: OnceLock::new(),
             sends: sends.into_iter().collect(),
             summary: (!entries.is_empty()).then_some(cell.summary),
@@ -390,14 +390,25 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// credential: the route trusts the private network, as registration
     /// and velo's traffic do, and writes only what it verifies
     /// ([`crate::VerifiedReport`]).
-    pub fn with_reports(mut self, directory: &HubDirectory) -> Self {
+    ///
+    /// Refuses a lease shorter than [`gdl_model::HubTiming::MIN_RELAY_LEASE`]:
+    /// the parent asks for a report no more often than every
+    /// [`gdl_model::HubTiming::MIN_RELAY_CADENCE`], so a shorter lease
+    /// lapses at the parent between reports.
+    pub fn with_reports(mut self, directory: &HubDirectory) -> Result<Self, CellError> {
+        gdl_model::check_relay_lease(self.timing.lease).map_err(|why| {
+            CellError::new(
+                gdl_model::Problem::at(Some("cell".into()), Some("lease_ms".into()), why)
+                    .to_string(),
+            )
+        })?;
         self.reports = Some(Arc::new(Reports::new(
             directory.children().clone(),
             &self.record,
             self.timing.heartbeat,
         )));
         self.cadence = Some(directory.cadence());
-        self
+        Ok(self)
     }
 
     /// The cell's health as it changes: its state, and each segment's
@@ -410,7 +421,7 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// events. It begins once the cell's record is stored, since its epoch
     /// is settled only then; refused if the hub stops first, and once the
     /// drained cell's record is withdrawn.
-    /// Not capped, as the route is ([`WatchCaps`]).
+    /// Not capped, as the route is ([`gdl_model::WatchCaps`]).
     pub async fn watch(&self) -> Result<CellWatch, CellWatchError> {
         self.feed.watch().await
     }
@@ -429,7 +440,7 @@ impl<D: CellDirectory> CellReadiness<D> {
 
     /// A watch of what the hub follows, in process: what `GET follows`
     /// serves, as typed events. It ends at once if the hub has stopped.
-    /// Not capped, as the route is ([`WatchCaps`]).
+    /// Not capped, as the route is ([`gdl_model::WatchCaps`]).
     pub fn follows(&self) -> FollowsWatch {
         self.relay.watch()
     }

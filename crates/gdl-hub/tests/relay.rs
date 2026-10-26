@@ -49,7 +49,8 @@ async fn relay_cell(spec: &DeploymentSpec, cell: CellSettings, timing: CellTimin
     let readiness = Arc::new(
         CellReadiness::new(spec, cell, named.clone(), timing)
             .expect("valid test fixture")
-            .with_reports(&directory),
+            .with_reports(&directory)
+            .expect("a lease its reports cover"),
     );
     let hub = Hub::builder(config())
         .extension(GraphAdmission::new(spec.clone()))
@@ -812,4 +813,68 @@ async fn a_withdrawal_after_a_visible_publish_removes_the_record() {
         "a withdrawal acknowledged after its record was visible left that record held: {:?}",
         records.keys().collect::<Vec<_>>()
     );
+}
+
+/// An accepted relay timing must allow renewal before the record expires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_accepted_relay_timing_can_renew_inside_its_lease() {
+    let parent = relay_cell(&spec(), global(), quiet_timing()).await;
+    for (name, lease) in [
+        ("model-x-01", Duration::from_millis(600)),
+        ("model-x-02", Duration::from_millis(30)),
+    ] {
+        let settings = model(name, &address(&parent.hub));
+        let directory = HubDirectory::new(Some(address(&parent.hub))).expect("a directory");
+        let named = Named::new(directory.clone());
+        let hub_name = settings.hub.clone().expect("a hub name");
+        let timing = CellTiming {
+            heartbeat: Duration::from_millis(10),
+            lease,
+            ..quiet_timing()
+        };
+        let readiness = match CellReadiness::new(&spec(), settings, named.clone(), timing)
+            .and_then(|readiness| readiness.with_reports(&directory))
+        {
+            Ok(readiness) => Arc::new(readiness),
+            Err(error) => {
+                assert!(lease < Duration::from_millis(300), "{error}");
+                assert!(error.to_string().contains("lease"), "{error}");
+                continue;
+            }
+        };
+        let mut changes = parent.directory.watch("model_x", None);
+        while !matches!(changes.next().await, Some(Ok(CellEvent::Synced { .. }))) {}
+        let child = Hub::builder(config())
+            .extension(GraphAdmission::new(spec()))
+            .extension(Arc::clone(&readiness))
+            .serve()
+            .await
+            .expect("the child serves");
+        named.resolve(&hub_name, &child);
+        tokio::time::timeout(WAIT, async {
+            while let Some(Ok(event)) = changes.next().await {
+                if matches!(event, CellEvent::Put { record, .. } if record.name == name) {
+                    return;
+                }
+            }
+            panic!("the first report");
+        })
+        .await
+        .expect("the first report arrives");
+        let accepted = tokio::time::timeout(WAIT, readiness.watch())
+            .await
+            .expect("the child receives the parent's answer")
+            .expect("the child's epoch is settled");
+        drop(accepted);
+        assert!(held(&parent.directory, "model_x").await.contains_key(name));
+        // Observe the lease after a confirmed write, with every report delivered.
+        tokio::time::sleep(lease + Duration::from_millis(10)).await;
+        let records = held(&parent.directory, "model_x").await;
+        child.shutdown().await.expect("the child stops");
+        assert!(
+            records.contains_key(name),
+            "a healthy child with an accepted {lease:?} lease expired at the 100 ms cadence floor"
+        );
+    }
+    parent.hub.shutdown().await.expect("the parent stops");
 }

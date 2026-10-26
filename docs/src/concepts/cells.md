@@ -86,8 +86,8 @@ For each segment of the cell's class, the hub counts the instances usable for fr
 | State | When |
 |---|---|
 | `unavailable` | a segment has no usable instance |
-| `degraded` | a segment is below its quorum, but every segment has a usable instance; also while every quorum is met but has not yet held for 2 s |
-| `ready` | every quorum has held for 2 s; a drop below a quorum during the 2 s starts them again |
+| `degraded` | a segment is below its quorum, but every segment has a usable instance; also while every quorum is met but has not yet held for the hold, 2 s by default (`hold_ms`) |
+| `ready` | every quorum has held for the hold; a drop below a quorum during the hold starts it again |
 | `draining` | the cell was asked to drain, whatever its quorum |
 
 ### Health
@@ -104,7 +104,7 @@ For each segment of the cell's class, the hub counts the instances usable for fr
 
 ### The record
 
-The hub publishes the cell's record to the cell directory when the state changes and every 10 s. Under the `relay` backend, it writes the record at the cadence its parent's hub answers with ([The relay backend](#the-relay-backend)). The record carries the cell's name, class, region, parent, contract and placement hashes, state, hub address, load summary, an epoch, a sequence number, and a lease of 30 s.
+The hub publishes the cell's record to the cell directory when the state changes and on each heartbeat, every 10 s by default (`heartbeat_ms`). Under the `relay` backend, it writes the record at the cadence its parent's hub answers with ([The relay backend](#the-relay-backend)). The record carries the cell's name, class, region, parent, contract and placement hashes, state, hub address, load summary, an epoch, a sequence number, and a lease, 30 s by default (`lease_ms`). A hub refuses a lease that is not longer than its heartbeat, since readers would let the record lapse between two publishes.
 
 The epoch is the hub process's incarnation. A restarted hub takes a new epoch, which orders after every write of the one before. A write that is not newer than what the directory holds for the cell is refused.
 
@@ -163,6 +163,6 @@ The parent writes a report only once it has checked it (`gdl_hub::VerifiedReport
 
 A withdrawal is written only over a record the parent holds. Any other withdrawal is answered and writes nothing, so a withdrawal cannot block a cell's records before the cell reports. The parent takes reports whether or not its own health answers 200: its health waits for a ready child, so a parent that refused them would never become healthy.
 
-Two leases stay apart. The record's own lease drops a child that stops reporting: once no newer report has come for the length of the lease, on the parent's clock, the parent's follow drops the cell, and a new watch of the parent's directory leaves it out. The parent's answer to each report gives the interval at which it expects the next one: its own heartbeat, but at most a third of the record's lease, so that a child that reports at that cadence is not dropped. The child writes its record at that cadence from the first answer on, and changes it when the answer changes.
+Two leases stay apart. The record's own lease drops a child that stops reporting: once no newer report has come for the length of the lease, on the parent's clock, the parent's follow drops the cell, and a new watch of the parent's directory leaves it out. The parent's answer to each report gives the interval at which it expects the next one: its own heartbeat, but at most a third of the record's lease, so that a child that reports at that cadence is not dropped. A child takes no cadence shorter than 100 ms, so a hub under the `relay` backend refuses a lease under 300 ms (`HubTiming::MIN_RELAY_LEASE`), from its settings or from its timing made in code. The child writes its record at that cadence from the first answer on, and changes it when the answer changes.
 
 No credential crosses cells. The report route trusts the private network, as an instance's registration and velo's traffic do. [Limitations](../operations/limitations.md#a-childs-report-to-its-parents-hub-carries-no-credential) lists what that allows, and what else the relay does not do yet.

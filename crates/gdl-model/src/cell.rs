@@ -24,6 +24,12 @@ use crate::{Layout, Problem, Problems, check_layout_name};
 /// # dir = "/var/lib/gdl/cells" # with "dir", and only with it: the shared directory
 /// hub = "model-x-01-hub:1337"  # optional: where other cells' hubs reach this cell's hub
 /// summary_ms = 10000           # optional: the load summary's period, at least 1000
+/// hold_ms = 2000               # optional, the hub's alone: how long the quorum holds before `ready`
+/// heartbeat_ms = 10000         # optional, the hub's alone: how often the record is published
+/// lease_ms = 30000             # optional, the hub's alone: how long readers keep it; longer than the heartbeat
+/// watch_buffer = 1024          # optional, the hub's alone: events a watcher may fall behind by
+/// [watch_caps]                 # optional, the hub's alone: watches each route serves at once
+/// relay = 2048
 /// [ready]                      # optional: the quorum of each segment of the class
 /// e = 4
 /// [requires]                   # optional: ready cells of each class it sends to that its health needs; 1 of each when unsaid
@@ -81,6 +87,133 @@ pub struct CellSettings {
     /// instances read the same setting, so that a report arrives once a
     /// summary.
     pub summary: Duration,
+    /// How the cell's hub paces its judgment, its record, and its watches,
+    /// and how many watches it serves at once. Only the cell's hub reads
+    /// it.
+    pub timing: HubTiming,
+}
+
+/// How a cell's hub paces its judgment, its record, and its watches, and
+/// how many of its watches it serves at once: the `[cell]` keys
+/// `hold_ms`, `heartbeat_ms`, `lease_ms`, `watch_buffer`, and
+/// `[watch_caps]`. Each key that is not set takes its default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HubTiming {
+    /// How long every segment's quorum must hold before the cell is
+    /// `ready` (`hold_ms`).
+    pub hold: Duration,
+    /// How often the cell's record is published while its state does not
+    /// change (`heartbeat_ms`).
+    pub heartbeat: Duration,
+    /// How long a reader keeps the record without seeing it published
+    /// again (`lease_ms`): longer than the heartbeat, or the record would
+    /// lapse between two publishes.
+    pub lease: Duration,
+    /// How many events a watcher of the cell, or of what its hub follows,
+    /// may fall behind by before its watch ends (`watch_buffer`): at least
+    /// this many, rounded up to a power of two.
+    pub watch_buffer: usize,
+    /// How many watches each of the hub's watch routes serves at once
+    /// (`[watch_caps]`).
+    pub watch_caps: WatchCaps,
+}
+
+impl HubTiming {
+    /// How long the quorum holds before the cell is `ready` when `hold_ms`
+    /// is not set: 2 s.
+    pub const DEFAULT_HOLD: Duration = Duration::from_secs(2);
+
+    /// How often the record is published when `heartbeat_ms` is not set:
+    /// 10 s.
+    pub const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(10);
+
+    /// How long a reader keeps the record when `lease_ms` is not set: three
+    /// default heartbeats, so that one late publish does not cost it.
+    pub const DEFAULT_LEASE: Duration = Duration::from_secs(30);
+
+    /// The watch buffer when `watch_buffer` is not set: 1024 events.
+    pub const DEFAULT_WATCH_BUFFER: usize = 1024;
+
+    /// The largest watch buffer, 65536 events: 64 times the default. The
+    /// hub keeps a buffer for the cell and one for each cell it follows,
+    /// and each takes its slots when it is made, so a buffer far past
+    /// what a slow watcher needs costs memory for nothing.
+    pub const MAX_WATCH_BUFFER: usize = 65536;
+
+    /// The shortest cadence a cell's hub takes from its parent's answer
+    /// under the `relay` backend, 100 ms, so that a parent's mistake
+    /// cannot make a child report in a loop.
+    pub const MIN_RELAY_CADENCE: Duration = Duration::from_millis(100);
+
+    /// The shortest lease under the `relay` backend, 300 ms: three reports
+    /// at [`HubTiming::MIN_RELAY_CADENCE`], as a child reports within a
+    /// third of its lease so that two lost reports do not drop it.
+    pub const MIN_RELAY_LEASE: Duration = Self::MIN_RELAY_CADENCE.saturating_mul(3);
+}
+
+impl Default for HubTiming {
+    fn default() -> Self {
+        Self {
+            hold: Self::DEFAULT_HOLD,
+            heartbeat: Self::DEFAULT_HEARTBEAT,
+            lease: Self::DEFAULT_LEASE,
+            watch_buffer: Self::DEFAULT_WATCH_BUFFER,
+            watch_caps: WatchCaps::default(),
+        }
+    }
+}
+
+/// How many watches each watch route of a cell's hub serves at once. A
+/// watch asked for beyond its route's cap is refused with 503 and a
+/// `Retry-After`, before any snapshot is built or any subscription taken
+/// for it; a watch that closes frees its place at once. The watches a hub
+/// gives in process are not capped.
+///
+/// Each default is sized for a large healthy cell, of some hundreds of
+/// instances: at least twice what a cell of 500 holds open, so that a
+/// cell whose instances all restart at once, each counted by its old
+/// connection until the hub sees it close and by its new one, is still
+/// served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchCaps {
+    /// The cell's watch (`GET watch`), opened by each of the cell's own
+    /// instances and by its parent's hub, one per follow of it.
+    pub cell: usize,
+    /// The relay (`GET follows`), opened by each chooser instance of the
+    /// cell.
+    pub relay: usize,
+    /// The watch of one follow (`GET follows/{class}/{cell}`), opened by a
+    /// chooser for each followed cell it reads again after an event of a
+    /// kind it does not know, and held until its next watch of the relay:
+    /// one per chooser and per followed cell when an event of a new kind
+    /// names every follow.
+    pub follow: usize,
+}
+
+impl WatchCaps {
+    /// The default cap of the cell's watch: one per instance of a cell of
+    /// 500, and one per follow of its parent's hub, which holds a few at
+    /// most, four times over.
+    pub const DEFAULT_CELL: usize = 2048;
+    /// The default cap of the relay: one per chooser instance of a cell of
+    /// 500, four times over.
+    pub const DEFAULT_RELAY: usize = 2048;
+    /// The default cap of the watches of one follow: one per chooser of a
+    /// cell of 500 and per followed cell, for a parent that follows 16
+    /// cells, every one read again, twice over. Each costs one cell's
+    /// snapshot, and its cell's channel is shared, so it is far cheaper
+    /// than a watch of the relay.
+    pub const DEFAULT_FOLLOW: usize = 16384;
+}
+
+impl Default for WatchCaps {
+    fn default() -> Self {
+        Self {
+            cell: Self::DEFAULT_CELL,
+            relay: Self::DEFAULT_RELAY,
+            follow: Self::DEFAULT_FOLLOW,
+        }
+    }
 }
 
 /// Where cell records are published and watched. Each backend's own
@@ -373,6 +506,23 @@ pub fn check_summary(summary: Duration) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `lease` can be the lease of a cell whose hub reports its record
+/// to its parent's hub (the `relay` backend): at least
+/// [`HubTiming::MIN_RELAY_LEASE`], or the record could lapse at the parent
+/// between two reports. Reading [`CellSettings`] applies it to the `relay`
+/// backend; a hub applies it again to timing made in code.
+pub fn check_relay_lease(lease: Duration) -> Result<(), String> {
+    if lease < HubTiming::MIN_RELAY_LEASE {
+        return Err(format!(
+            "is {}; under the `relay` backend it is at least {} ms, three reports at the shortest cadence a parent can ask for, {} ms, or the record lapses at the parent between reports",
+            lease.as_millis(),
+            HubTiming::MIN_RELAY_LEASE.as_millis(),
+            HubTiming::MIN_RELAY_CADENCE.as_millis()
+        ));
+    }
+    Ok(())
+}
+
 /// Whether `name` can name a cell: a DNS label.
 pub fn check_cell_name(name: &str) -> Result<(), String> {
     check_label("cell", name)
@@ -432,10 +582,44 @@ struct Table {
     hub: Option<String>,
     #[serde(default = "default_summary_ms")]
     summary_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hold_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heartbeat_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    watch_buffer: Option<usize>,
+    #[serde(default, skip_serializing_if = "Caps::is_empty")]
+    watch_caps: Caps,
+}
+
+/// The `[watch_caps]` table as written: each cap that is set.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Caps {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cell: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    follow: Option<usize>,
+}
+
+impl Caps {
+    fn is_empty(&self) -> bool {
+        self.cell.is_none() && self.relay.is_none() && self.follow.is_none()
+    }
 }
 
 fn default_summary_ms() -> u64 {
     millis(CellSettings::DEFAULT_SUMMARY)
+}
+
+/// `value`, unless it is `default`: a default is not written out, so that
+/// a table written before the key existed is written alike.
+fn set<T: PartialEq>(value: T, default: T) -> Option<T> {
+    (value != default).then_some(value)
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -481,6 +665,7 @@ impl TryFrom<Table> for CellSettings {
             }
             check_hub_address(parent_hub).map_err(|why| at("parent_hub", why))?;
         }
+        let timing = hub_timing(&table).map_err(|(key, why)| at(key, why))?;
         let directory = match (table.directory, table.dir) {
             (Backend::Relay, None) => DirectoryBackend::Relay {
                 parent_hub: table.parent_hub,
@@ -505,6 +690,9 @@ impl TryFrom<Table> for CellSettings {
                 ));
             }
         };
+        if matches!(directory, DirectoryBackend::Relay { .. }) {
+            check_relay_lease(timing.lease).map_err(|why| at("lease_ms", why))?;
+        }
         if let Some(layout) = &table.layout {
             check_layout_name(layout).map_err(|why| at("layout", why))?;
         }
@@ -524,8 +712,86 @@ impl TryFrom<Table> for CellSettings {
             requires: table.requires,
             hub: table.hub,
             summary,
+            timing,
         })
     }
+}
+
+/// The hub's timing that `table` sets, each key it leaves out at its
+/// default, or the key that is refused and why. The lease is checked
+/// against the heartbeat as the hub will run them, defaults included, and
+/// a refusal names the one of the two that was set, the lease when both
+/// were.
+fn hub_timing(table: &Table) -> Result<HubTiming, (&'static str, String)> {
+    let at_least_one = |key: &'static str, value: u64| {
+        if value == 0 {
+            Err((key, "is 0; it is at least 1".to_string()))
+        } else {
+            Ok(())
+        }
+    };
+    let defaults = HubTiming::default();
+    let millis_or =
+        |value: Option<u64>, default: Duration| value.map_or(default, Duration::from_millis);
+    if let Some(heartbeat) = table.heartbeat_ms {
+        at_least_one("heartbeat_ms", heartbeat)?;
+    }
+    if let Some(lease) = table.lease_ms {
+        at_least_one("lease_ms", lease)?;
+    }
+    let heartbeat = millis_or(table.heartbeat_ms, defaults.heartbeat);
+    let lease = millis_or(table.lease_ms, defaults.lease);
+    if lease <= heartbeat {
+        let (heartbeat_ms, lease_ms) = (millis(heartbeat), millis(lease));
+        return Err(if table.lease_ms.is_some() {
+            (
+                "lease_ms",
+                format!(
+                    "is {lease_ms}; it must be longer than the heartbeat, {heartbeat_ms} ms, or readers let the record lapse between two publishes"
+                ),
+            )
+        } else {
+            (
+                "heartbeat_ms",
+                format!(
+                    "is {heartbeat_ms}; it must be shorter than the lease, {lease_ms} ms by default: set `lease_ms` longer too"
+                ),
+            )
+        });
+    }
+    let watch_buffer = table.watch_buffer.unwrap_or(defaults.watch_buffer);
+    if watch_buffer == 0 {
+        return Err(("watch_buffer", "is 0; it is at least 1".into()));
+    }
+    if watch_buffer > HubTiming::MAX_WATCH_BUFFER {
+        return Err((
+            "watch_buffer",
+            format!(
+                "is {watch_buffer}; it is at most {}",
+                HubTiming::MAX_WATCH_BUFFER
+            ),
+        ));
+    }
+    let cap = |key: &'static str, value: Option<usize>, default: usize| match value {
+        Some(0) => Err((
+            key,
+            "is 0, which refuses every watch; it is at least 1".to_string(),
+        )),
+        Some(cap) => Ok(cap),
+        None => Ok(default),
+    };
+    let caps = &table.watch_caps;
+    Ok(HubTiming {
+        hold: millis_or(table.hold_ms, defaults.hold),
+        heartbeat,
+        lease,
+        watch_buffer,
+        watch_caps: WatchCaps {
+            cell: cap("watch_caps.cell", caps.cell, defaults.watch_caps.cell)?,
+            relay: cap("watch_caps.relay", caps.relay, defaults.watch_caps.relay)?,
+            follow: cap("watch_caps.follow", caps.follow, defaults.watch_caps.follow)?,
+        },
+    })
 }
 
 impl From<CellSettings> for Table {
@@ -548,6 +814,18 @@ impl From<CellSettings> for Table {
             requires: settings.requires,
             hub: settings.hub,
             summary_ms: millis(settings.summary),
+            hold_ms: set(settings.timing.hold, HubTiming::DEFAULT_HOLD).map(millis),
+            heartbeat_ms: set(settings.timing.heartbeat, HubTiming::DEFAULT_HEARTBEAT).map(millis),
+            lease_ms: set(settings.timing.lease, HubTiming::DEFAULT_LEASE).map(millis),
+            watch_buffer: set(
+                settings.timing.watch_buffer,
+                HubTiming::DEFAULT_WATCH_BUFFER,
+            ),
+            watch_caps: Caps {
+                cell: set(settings.timing.watch_caps.cell, WatchCaps::DEFAULT_CELL),
+                relay: set(settings.timing.watch_caps.relay, WatchCaps::DEFAULT_RELAY),
+                follow: set(settings.timing.watch_caps.follow, WatchCaps::DEFAULT_FOLLOW),
+            },
         }
     }
 }

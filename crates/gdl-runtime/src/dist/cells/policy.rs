@@ -6,16 +6,17 @@
 use std::sync::Arc;
 
 use gdl::__runtime::ErasedPolicy;
-use gdl::{CellPolicies, Error, ErrorKind, Result};
+use gdl::{CellPolicies, Error, ErrorKind, HomeFirstAt, Result};
 use gdl_model::{CellPolicy, Layout};
 
 /// The cell policy the placement names for `class`, with its name, from
-/// `policies` or gdl's own; refused, naming the policy and the class,
-/// when neither has it.
+/// `policies` or gdl's own, `home_first` as configured; refused, naming
+/// the policy and the class, when neither has it.
 pub(crate) fn of(
     layout: &Layout,
     class: &str,
     policies: &CellPolicies,
+    home_first: HomeFirstAt,
 ) -> Result<(Arc<str>, Arc<dyn ErasedPolicy>)> {
     let default;
     let policy = match layout.cell_policy(class) {
@@ -26,7 +27,7 @@ pub(crate) fn of(
         }
     };
     let name = policy.policy.as_str();
-    match policies.resolve(name) {
+    match policies.resolve(name, home_first) {
         Some(found) => Ok((Arc::from(name), found)),
         None => {
             let known: Vec<String> = policies.names().map(|name| format!("`{name}`")).collect();
@@ -118,11 +119,17 @@ mod tests {
             (Some("round_robin"), "round_robin"),
             (Some("home_first"), "home_first"),
         ] {
-            let (found, _) = of(&layout_under(policy), "model_x", &none).expect("gdl's own");
+            let (found, _) = of(
+                &layout_under(policy),
+                "model_x",
+                &none,
+                HomeFirstAt::DEFAULT,
+            )
+            .expect("gdl's own");
             assert_eq!(&*found, name);
         }
         let layout = layout_under(Some("last"));
-        let Err(error) = of(&layout, "model_x", &none) else {
+        let Err(error) = of(&layout, "model_x", &none, HomeFirstAt::DEFAULT) else {
             panic!("a policy nothing registers was taken");
         };
         let message = error.to_string();
@@ -134,7 +141,8 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::Placement);
         let mut policies = CellPolicies::new();
         policies.add("last", Last).expect("registered");
-        let (found, policy) = of(&layout, "model_x", &policies).expect("registered");
+        let (found, policy) =
+            of(&layout, "model_x", &policies, HomeFirstAt::DEFAULT).expect("registered");
         assert_eq!(&*found, "last");
         let cells = [
             Cell::new("model_x", "m1", "r", gdl::CellState::Ready).with_entries(1),

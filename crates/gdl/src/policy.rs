@@ -29,7 +29,7 @@ mod round_robin;
 
 pub use damped::{Damped, Window};
 pub use gdl_cells::{CellState, LoadSummary};
-pub use home_first::HomeFirst;
+pub use home_first::{HomeFirst, HomeFirstAt};
 pub use round_robin::RoundRobin;
 
 /// Chooses the cell of a class that one attempt of a hand-off goes to. A
@@ -322,19 +322,32 @@ pub struct Load {
 
 impl Load {
     /// A summary older than this many of its cell's summary periods is
-    /// stale, on the chooser's clock.
+    /// stale, on the chooser's clock, unless the chooser's
+    /// `cell_fresh_periods` says otherwise
+    /// ([`with_fresh_periods`](Load::with_fresh_periods)).
     pub const FRESH_PERIODS: u32 = 3;
 
-    /// `summary`, which arrived at `arrived`.
+    /// `summary`, which arrived at `arrived`, fresh for
+    /// [`FRESH_PERIODS`](Load::FRESH_PERIODS) of its
+    /// periods.
     pub fn new(summary: LoadSummary, arrived: Instant) -> Self {
-        let fresh =
-            std::time::Duration::from_millis(summary.period_ms).saturating_mul(Self::FRESH_PERIODS);
         Self {
             summary,
             arrived,
-            fresh_until: (summary.period_ms > 0)
-                .then(|| arrived.checked_add(fresh))
+            fresh_until: None,
+        }
+        .with_fresh_periods(Self::FRESH_PERIODS)
+    }
+
+    /// This summary, fresh for `periods` of its periods after it arrived.
+    pub fn with_fresh_periods(self, periods: u32) -> Self {
+        let fresh =
+            std::time::Duration::from_millis(self.summary.period_ms).saturating_mul(periods);
+        Self {
+            fresh_until: (self.summary.period_ms > 0)
+                .then(|| self.arrived.checked_add(fresh))
                 .flatten(),
+            ..self
         }
     }
 
@@ -352,9 +365,9 @@ impl Load {
         self.arrived
     }
 
-    /// The last instant the summary is fresh at:
-    /// [`FRESH_PERIODS`](Load::FRESH_PERIODS) of its periods after it
-    /// arrived. `None` when it is never fresh: it names no period, or one
+    /// The last instant the summary is fresh at: the chooser's fresh
+    /// periods of its periods after it arrived
+    /// ([`with_fresh_periods`](Load::with_fresh_periods)). `None` when it is never fresh: it names no period, or one
     /// so long that the instant overflows the clock.
     #[inline]
     pub fn fresh_until(&self) -> Option<Instant> {
@@ -655,14 +668,15 @@ impl CellPolicies {
     }
 
     /// The policy a class that names `name` chooses its cells by: the one
-    /// registered, or else gdl's own of that name.
+    /// registered, or else gdl's own of that name, with `home_first` at the
+    /// chooser's thresholds ([`HomeFirstAt`]).
     #[doc(hidden)]
-    pub fn resolve(&self, name: &str) -> Option<Arc<dyn ErasedPolicy>> {
+    pub fn resolve(&self, name: &str, home_first: HomeFirstAt) -> Option<Arc<dyn ErasedPolicy>> {
         if let Some(policy) = self.named.get(name) {
             return Some(Arc::clone(policy));
         }
         match name {
-            "home_first" => Some(Arc::new(TypedPolicy(Arc::new(HomeFirst)))),
+            "home_first" => Some(Arc::new(TypedPolicy(Arc::new(home_first)))),
             "round_robin" => Some(Arc::new(TypedPolicy(Arc::new(RoundRobin)))),
             _ => None,
         }
@@ -739,6 +753,26 @@ fn mix(draw: u64, nth: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use serde::{Deserialize, Serialize};
+
+    /// A summary is fresh for three of its periods after it arrived,
+    /// unless the chooser is given another count.
+    #[test]
+    fn a_summary_is_fresh_for_the_periods_it_is_given() {
+        let arrived = Instant::now();
+        let period = std::time::Duration::from_secs(2);
+        let summary = LoadSummary {
+            limit: 1,
+            period_ms: 2000,
+            ..LoadSummary::default()
+        };
+        let load = Load::new(summary, arrived);
+        assert_eq!(load.fresh_until(), Some(arrived + period * 3));
+        let longer = load.with_fresh_periods(5);
+        assert_eq!(longer.fresh_until(), Some(arrived + period * 5));
+        assert!(longer.is_fresh(arrived + period * 5));
+        assert!(!load.is_fresh(arrived + period * 4));
+        assert_eq!(longer.arrived(), arrived);
+    }
 
     use super::*;
     use crate::select::Projected;

@@ -67,8 +67,8 @@ pub fn cell_from_vars(
 }
 
 /// The hub of `spec`: [`GraphAdmission`], and with `cell`, the cell's
-/// [`CellReadiness`] publishing to the directory its settings name, with
-/// the default [`CellTiming`]: `relay`, reporting to its parent's hub
+/// [`CellReadiness`] publishing to the directory its settings name, at the
+/// pace its settings give ([`CellTiming::from_settings`]): `relay`, reporting to its parent's hub
 /// ([`HubDirectory`]), or `dir`. `memory` is one directory inside one
 /// process, which no other hub could read, so a hub process refuses it.
 pub fn hub_builder(
@@ -80,17 +80,17 @@ pub fn hub_builder(
         return Ok(Hub::builder(config).extension(GraphAdmission::new(spec)));
     };
     let builder = Hub::builder(config).extension(GraphAdmission::new(spec.clone()));
+    let timing = CellTiming::from_settings(&cell.timing);
     match &cell.directory {
         DirectoryBackend::Relay { parent_hub } => {
             let directory = HubDirectory::new(parent_hub.clone())?;
-            let readiness =
-                CellReadiness::new(&spec, cell, directory.clone(), CellTiming::default())?
-                    .with_reports(&directory);
+            let readiness = CellReadiness::new(&spec, cell, directory.clone(), timing)?
+                .with_reports(&directory)?;
             Ok(builder.extension(readiness))
         }
         DirectoryBackend::Dir { path } => {
             let directory = DirDirectory::new(path.clone());
-            let readiness = CellReadiness::new(&spec, cell, directory, CellTiming::default())?;
+            let readiness = CellReadiness::new(&spec, cell, directory, timing)?;
             Ok(builder.extension(readiness))
         }
         DirectoryBackend::Memory => Err(CellError::new(

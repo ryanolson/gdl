@@ -104,6 +104,7 @@ impl CellPolicy for ByModel {
 - The filter is called more than once for a cell within one choice. It must answer the same each time.
 - A policy that chooses as `home_first` does should also override `eligible` as above. The default does not check that a cell's summary is fresh.
 - Both take a request of any `Head`, since neither reads the head.
+- `HomeFirst` chooses at the default thresholds, not at the chooser's `[runtime] home_first_*` settings. `HomeFirstAt { saturated_percent, spill_percent }` chooses alike at thresholds of its own. Whether a summary is fresh (`Load::is_fresh`) follows the chooser's `cell_fresh_periods` either way.
 
 ### Learn which cell took the request
 

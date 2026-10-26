@@ -505,6 +505,7 @@ impl<H> ProcessConfig<H> {
                         roster.live(),
                         drain,
                         session.chooser_hub(node.instance_id()),
+                        &self.runtime,
                     )?
                     .map(|(cells, task)| (cells, Abort(task)));
                     // The nodes, built already, read the tables from now.

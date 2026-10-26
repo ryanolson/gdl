@@ -14,7 +14,8 @@ use common::{
 };
 use futures::StreamExt;
 use gdl_cells::CellState;
-use gdl_hub::{CellReadiness, CellTiming, WatchCaps};
+use gdl_hub::{CellReadiness, CellTiming};
+use gdl_model::WatchCaps;
 use gdl_watch::CellWatcher;
 
 /// Wait until `cell` has refused `n` watches of itself.

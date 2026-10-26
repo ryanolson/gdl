@@ -181,6 +181,7 @@ fn a_cells_settings_have_its_quorum_resolved() {
             requires: BTreeMap::new(),
             hub: None,
             summary: CellSettings::DEFAULT_SUMMARY,
+            timing: Default::default(),
         }
     );
     assert!(larger.requires.is_empty(), "model_x requires nothing");

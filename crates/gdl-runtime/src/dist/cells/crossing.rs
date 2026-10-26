@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use arc_swap::ArcSwap;
 use futures::future::BoxFuture;
 use gdl::__runtime::{ChoiceHeld, Erased, ErasedPolicy, Picked};
-use gdl::{CellPolicies, CellRequest, Cx, Error, ErrorKind, Instances, NoCell, Result};
+use gdl::{
+    CellPolicies, CellRequest, Cx, Error, ErrorKind, HomeFirstAt, Instances, NoCell, Result,
+};
 use gdl_model::{Encoding, Layout};
 use velo::InstanceId;
 
@@ -348,12 +350,14 @@ pub(crate) struct Target {
 /// outer end is in `segment` and whose entry segment `cells` keeps a
 /// table for. Found once, when the runtime is built, so that a request
 /// pays one branch on what was found. A cell policy that `policies` does
-/// not register and gdl does not have is refused.
+/// not register and gdl does not have is refused. A class that names
+/// `home_first` chooses by `home_first`, the chooser's configured one.
 pub(crate) fn targets(
     layout: &Layout,
     segment: &str,
     cells: &Cells,
     policies: &CellPolicies,
+    home_first: HomeFirstAt,
 ) -> Result<BTreeMap<(usize, usize), Target>> {
     let mut targets = BTreeMap::new();
     for boundary in layout.boundaries() {
@@ -370,7 +374,7 @@ pub(crate) fn targets(
         let Some(table) = cells.slot(&inner.segment) else {
             continue;
         };
-        let (name, policy) = policy::of(layout, &boundary.into, policies)?;
+        let (name, policy) = policy::of(layout, &boundary.into, policies, home_first)?;
         targets.insert(
             (boundary.hop, inner.start),
             Target {

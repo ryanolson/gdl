@@ -15,8 +15,9 @@ use gdl_watch::{CellWatcher, WatchFailure};
 use tokio::sync::watch;
 use velo_hub::{Hub, HubConfig};
 
-use super::{CellReadiness, CellTiming, WatchCaps};
+use super::{CellReadiness, CellTiming};
 use crate::GraphAdmission;
+use gdl_model::WatchCaps;
 
 /// How long any one observation may take before the test fails.
 const WAIT: Duration = Duration::from_secs(5);

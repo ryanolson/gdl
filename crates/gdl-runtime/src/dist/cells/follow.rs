@@ -79,6 +79,9 @@ pub(crate) struct Follows<R> {
     drain: Duration,
     /// For each class sent to, the entry segments kept.
     wanted: Arc<Wanted>,
+    /// How many of its periods a cell's summary stays fresh after it
+    /// arrived.
+    fresh_periods: u32,
     followed: Followed,
     /// Each entry segment's cells, as last published.
     tables: BTreeMap<String, BTreeMap<Key, Arc<CellTable>>>,
@@ -128,6 +131,7 @@ impl<R: Registry> Follows<R> {
         live: Arc<Live>,
         drain: Duration,
         wanted: Wanted,
+        fresh_periods: u32,
     ) -> Self {
         Self {
             cells,
@@ -135,7 +139,8 @@ impl<R: Registry> Follows<R> {
             live,
             drain,
             wanted: Arc::new(wanted),
-            followed: Followed::default(),
+            fresh_periods,
+            followed: Followed::new(fresh_periods),
             tables: BTreeMap::new(),
             held: HashMap::new(),
             registered: HashSet::new(),
@@ -155,7 +160,7 @@ impl<R: Registry> Follows<R> {
     pub(super) fn snapshot(&self) -> Snapshot {
         Snapshot {
             wanted: Arc::clone(&self.wanted),
-            followed: Followed::default(),
+            followed: Followed::new(self.fresh_periods),
             unread: BTreeSet::new(),
             unknown: 0,
         }
@@ -572,13 +577,14 @@ pub(crate) type Wanted = BTreeMap<String, BTreeSet<String>>;
 /// each cell, so that an older one is ignored even after its cell's follow
 /// was dropped. What the follower holds, and a snapshot being filled, are
 /// each one of these, changed by the same rules.
-#[derive(Default)]
 struct Followed {
     follows: HashMap<Key, Follow>,
     /// Earlier follows of a cell, by generation: not offered, and holding
     /// their instances until the relay drops them.
     closing: HashMap<(Key, u64), Follow>,
     generations: HashMap<Key, u64>,
+    /// How many of its periods a summary stays fresh after it arrived.
+    fresh_periods: u32,
 }
 
 /// What one event changed in a cell's follow, beyond its table.
@@ -607,6 +613,17 @@ enum Change {
 }
 
 impl Followed {
+    /// Nothing followed yet, each summary fresh for `fresh_periods` of its
+    /// periods once it arrives.
+    fn new(fresh_periods: u32) -> Self {
+        Self {
+            follows: HashMap::new(),
+            closing: HashMap::new(),
+            generations: HashMap::new(),
+            fresh_periods,
+        }
+    }
+
     /// Apply one event, which arrived at `now`: the cell it changed, and
     /// how, or `None` for an event of a class or segment not sent to, or
     /// of a generation this view does not hold, which changes nothing. Of
@@ -619,6 +636,10 @@ impl Followed {
         event: FollowEvent,
         now: Instant,
     ) -> Option<(Key, Change)> {
+        // Freshness is worked out once, as a summary arrives, so that a
+        // choice compares one instant.
+        let fresh_periods = self.fresh_periods;
+        let loaded = |summary| Load::new(summary, now).with_fresh_periods(fresh_periods);
         let wants = |class: &str, segment: &str| {
             wanted
                 .get(class)
@@ -653,7 +674,8 @@ impl Followed {
                         generation,
                         region,
                         state,
-                        load.and_then(|load| received(load, load_age_ms, now)),
+                        load.and_then(|load| received(load, load_age_ms, now))
+                            .map(|load| load.with_fresh_periods(fresh_periods)),
                         segments,
                     ),
                 );
@@ -682,7 +704,7 @@ impl Followed {
                 load,
             } => {
                 let key = (class, cell);
-                self.current(&key, generation)?.load = load.map(|load| Load::new(load, now));
+                self.current(&key, generation)?.load = load.map(loaded);
                 Some((key, Change::Table))
             }
             FollowEvent::Offering {

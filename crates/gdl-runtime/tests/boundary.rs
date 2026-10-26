@@ -21,8 +21,9 @@ use common::cells::{
 use common::{Events, WAIT};
 use futures::StreamExt;
 use gdl::{Choice, Encoded, ErrorKind, Instances, Request, Selector, Selectors};
-use gdl_hub::{CellTiming, WatchCaps};
+use gdl_hub::CellTiming;
 use gdl_model::CellPolicy;
+use gdl_model::WatchCaps;
 use gdl_runtime::{CellState, Cells, DeploymentSpec, RequestRouter, RuntimeConfig};
 use gdl_watch::CellWatcher;
 use velo_hub::Hub;

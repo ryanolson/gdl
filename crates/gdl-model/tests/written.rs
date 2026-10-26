@@ -82,6 +82,7 @@ fn a_cells_settings_read_back_what_they_write() {
         requires: BTreeMap::from([("model_y".into(), 1)]),
         hub: Some("model-x-01-hub:1337".into()),
         summary: Duration::from_millis(2500),
+        timing: Default::default(),
     };
     let text = toml::to_string(&every).expect("toml");
     let value: toml::Value = toml::from_str(&text).expect("toml");

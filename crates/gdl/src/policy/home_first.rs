@@ -11,9 +11,9 @@ use crate::select::Encoded;
 /// A cell is eligible only while it is `ready` or `degraded`, has an
 /// entry instance to route to, has not declined the request nor declined
 /// an offer as gone in the follow it is shown in
-/// ([`Damped::is_gone`](super::Damped::is_gone)), and has a summary no
-/// older than [`FRESH_PERIODS`](super::Load::FRESH_PERIODS) of
-/// its periods: a cell whose load is not known is not sent to, since a
+/// ([`Damped::is_gone`](super::Damped::is_gone)), and has a summary that
+/// is fresh ([`Load::is_fresh`](super::Load::is_fresh), three of its
+/// periods by default): a cell whose load is not known is not sent to, since a
 /// summary steers only while it is recent and a cell's refusal is the
 /// fast correction. Among the eligible, the first non-empty tier:
 ///
@@ -38,24 +38,99 @@ use crate::select::Encoded;
 /// down, are damped at once: when more are, those whose windows end
 /// soonest are chosen as if they were not. So one bad spell cannot leave a
 /// request no cell, and a lone cell is never damped.
+///
+/// `HomeFirst` chooses at the default thresholds,
+/// [`SATURATED_PERCENT`](HomeFirst::SATURATED_PERCENT) and
+/// [`SPILL_PERCENT`](HomeFirst::SPILL_PERCENT). [`HomeFirstAt`] chooses
+/// alike at thresholds of its own, as a chooser's own `home_first` does
+/// at its `[runtime]` settings.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HomeFirst;
 
 impl HomeFirst {
     /// A cell is saturated once its admitted roots reach this share of its
     /// admission limit, in percent, or its last summary period had
-    /// refusals.
+    /// refusals, unless the thresholds say otherwise ([`HomeFirstAt`]).
     pub const SATURATED_PERCENT: u64 = 100;
 
+    /// A cell in another region is a candidate only while its admitted
+    /// roots are under this share of its admission limit, in percent,
+    /// unless the thresholds say otherwise ([`HomeFirstAt`]).
+    pub const SPILL_PERCENT: u64 = 80;
+
+    /// [`HomeFirstAt::choose_where`] at the default thresholds.
+    #[inline]
+    pub fn choose_where<H>(
+        &self,
+        request: CellRequest<'_, H>,
+        cells: &[Cell],
+        keep: impl Fn(&Cell) -> bool,
+    ) -> Option<usize> {
+        HomeFirstAt::DEFAULT.choose_where(request, cells, keep)
+    }
+}
+
+impl CellPolicy for HomeFirst {
+    /// It reads no request data.
+    type Head = Encoded;
+
+    /// [`choose_where`](HomeFirst::choose_where), keeping every cell, with
+    /// no lease.
+    fn choose(
+        &self,
+        request: CellRequest<'_, Encoded>,
+        cells: &[Cell],
+    ) -> Result<CellChoice, NoCell> {
+        // Through the inlined `choose_where`, so that the thresholds stay
+        // constants in the code rather than data the choice loads.
+        self.choose_where(request, cells, |_| true)
+            .map(CellChoice::new)
+            .ok_or_else(NoCell::new)
+    }
+
+    /// Whether `cell` is in a tier at the default thresholds.
+    fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
+        HomeFirstAt::DEFAULT
+            .tier(cell, region, &[], &Damped::EMPTY, now)
+            .is_some()
+    }
+}
+
+/// `home_first` at thresholds of its own: what [`HomeFirst`] does at the
+/// defaults. A chooser's own `home_first` is one, at the chooser's
+/// `[runtime]` settings (`home_first_saturated_percent`,
+/// `home_first_spill_percent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HomeFirstAt {
+    /// A cell is saturated once its admitted roots reach this share of its
+    /// admission limit, in percent, or its last summary period had
+    /// refusals.
+    pub saturated_percent: u64,
     /// A cell in another region is a candidate only while its admitted
     /// roots are under this share of its admission limit, in percent: a
     /// cell near its limit, behind a round trip between regions, is where
     /// a request would most likely be declined.
-    pub const SPILL_PERCENT: u64 = 80;
+    pub spill_percent: u64,
+}
+
+impl Default for HomeFirstAt {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl HomeFirstAt {
+    /// The default thresholds, [`HomeFirst`]'s.
+    pub const DEFAULT: Self = Self {
+        saturated_percent: HomeFirst::SATURATED_PERCENT,
+        spill_percent: HomeFirst::SPILL_PERCENT,
+    };
 
     /// `cell`'s tier, lower first, with its summary, or `None` when it is
     /// not eligible.
+    #[inline]
     fn tier<'c>(
+        &self,
         cell: &'c Cell,
         region: &str,
         excluded: &[u64],
@@ -77,10 +152,10 @@ impl HomeFirst {
         let load = load.summary();
         let share = |percent: u64| u128::from(load.limit) * u128::from(percent);
         let admitted = u128::from(load.admitted) * 100;
-        let saturated = load.refusals > 0 || admitted >= share(Self::SATURATED_PERCENT);
+        let saturated = load.refusals > 0 || admitted >= share(self.saturated_percent);
         let tier = match (cell.region == region, saturated) {
             (true, false) => 0,
-            (false, false) if admitted < share(Self::SPILL_PERCENT) => 1,
+            (false, false) if admitted < share(self.spill_percent) => 1,
             (true, true) => 2,
             (false, _) => return None,
         };
@@ -118,7 +193,7 @@ impl HomeFirst {
         let lasts = damped.lasts(now);
         let cut = if lasts {
             let eligible = |cell: &Cell| {
-                Self::tier(cell, region, excluded, damped, now).is_some() && keep(cell)
+                self.tier(cell, region, excluded, damped, now).is_some() && keep(cell)
             };
             cut(cells, eligible, damped, now)
         } else {
@@ -129,7 +204,7 @@ impl HomeFirst {
         let mut count = 0u64;
         let mut drawn: [Option<(usize, &LoadSummary)>; 2] = [None, None];
         for (at, cell) in cells.iter().enumerate() {
-            let Some((tier, load)) = Self::tier(cell, region, excluded, damped, now) else {
+            let Some((tier, load)) = self.tier(cell, region, excluded, damped, now) else {
                 continue;
             };
             if !keep(cell) || lasts && damped.left(cell.id, now) > cut {
@@ -189,12 +264,12 @@ impl HomeFirst {
     }
 }
 
-impl CellPolicy for HomeFirst {
+impl CellPolicy for HomeFirstAt {
     /// It reads no request data.
     type Head = Encoded;
 
-    /// [`choose_where`](HomeFirst::choose_where), keeping every cell, with
-    /// no lease.
+    /// [`choose_where`](HomeFirstAt::choose_where), keeping every cell,
+    /// with no lease.
     fn choose(
         &self,
         request: CellRequest<'_, Encoded>,
@@ -209,7 +284,7 @@ impl CellPolicy for HomeFirst {
     /// eligible, since damping steers the next choices, not one already
     /// made.
     fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
-        Self::tier(cell, region, &[], &Damped::EMPTY, now).is_some()
+        self.tier(cell, region, &[], &Damped::EMPTY, now).is_some()
     }
 }
 
@@ -442,6 +517,48 @@ mod tests {
                 now,
             ));
         assert_eq!(chosen_at(&[unknown], now), names(&[]));
+    }
+
+    /// The thresholds are the policy's own: with saturation at 50% and the
+    /// spill bound at 10%, a home cell at 60% is saturated, and a cell
+    /// elsewhere at 20% is not a candidate, where the defaults, 100% and
+    /// 80%, take both.
+    #[test]
+    fn its_thresholds_are_the_ones_it_is_given() {
+        let now = origin();
+        let defaults = HomeFirstAt::default();
+        assert_eq!(
+            (defaults.saturated_percent, defaults.spill_percent),
+            (100, 80)
+        );
+        let tight = HomeFirstAt {
+            saturated_percent: 50,
+            spill_percent: 10,
+        };
+        let chosen = |policy: &HomeFirstAt, cells: &[Cell]| -> BTreeSet<String> {
+            (0..256)
+                .filter_map(|turn| {
+                    let cx = Cx::new();
+                    let request = CellRequest::new(&cx, &Encoded, HOME, now).with_turn(turn);
+                    policy.choose(request, cells).ok().map(|choice| choice.at())
+                })
+                .map(|at| cells[at].name.clone())
+                .collect()
+        };
+        // At 60%, home is not saturated by default, so it comes first; at
+        // 50%, it is, and the idle cell elsewhere comes first.
+        let cells = [
+            busy("home", HOME, CellState::Ready, LIMIT * 6 / 10, 0, now),
+            busy("away", AWAY, CellState::Ready, 0, 0, now),
+        ];
+        assert_eq!(chosen(&defaults, &cells), names(&["home"]));
+        assert_eq!(chosen(&tight, &cells), names(&["away"]));
+        // Elsewhere at 20%: under the default bound, over the tight one.
+        let away = [busy("away", AWAY, CellState::Ready, LIMIT * 2 / 10, 0, now)];
+        assert_eq!(chosen(&defaults, &away), names(&["away"]));
+        assert_eq!(chosen(&tight, &away), names(&[]));
+        assert!(defaults.eligible(&away[0], HOME, now));
+        assert!(!tight.eligible(&away[0], HOME, now));
     }
 
     /// Home cells are used until every one is saturated (its admitted

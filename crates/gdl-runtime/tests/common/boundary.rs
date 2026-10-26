@@ -290,6 +290,32 @@ pub async fn model_changed(
     .await
 }
 
+/// [`model_of`] for a cell in `region` rather than [`REGION`]: a cell in
+/// another region than its parent's choosers.
+pub async fn model_in(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    region: &str,
+    events: &Arc<Events>,
+) -> ModelCell<impl Next<Prompt, Chunk> + Register + use<>> {
+    let (hub, timing, extra) = summarized(cell, RUNTIME);
+    let hub = CellSettings {
+        region: region.into(),
+        ..hub
+    };
+    start_model(
+        spec,
+        directory,
+        cell,
+        (hub, timing),
+        &extra,
+        &|runtime| runtime,
+        &|deployment| reference_graph(deployment, events),
+    )
+    .await
+}
+
 /// [`model`], with its hub's timing changed by `change`.
 pub async fn model_timed(
     spec: &DeploymentSpec,

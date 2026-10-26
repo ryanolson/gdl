@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use gdl_model::{
-    CellSettings, DirectoryBackend, HopInfo, Layout, Manifest, NodeInfo, Placement, Role, TypeInfo,
-    layout,
+    CellSettings, DirectoryBackend, HopInfo, HubTiming, Layout, Manifest, NodeInfo, Placement,
+    Role, TypeInfo, WatchCaps, layout,
 };
 
 /// `S => F { D }`: F's own hop crosses from `global` into `model_x`.
@@ -84,6 +84,7 @@ fn a_cells_settings_are_read_whole() {
             requires: BTreeMap::new(),
             hub: Some("model-x-01-hub:1337".into()),
             summary: Duration::from_secs(10),
+            timing: Default::default(),
         }
     );
     let text = toml::to_string(&settings(MODEL)).expect("toml");
@@ -479,4 +480,179 @@ fn a_cell_names_its_layout() {
             .starts_with("layout name `Regional` must be"),
         "{problem}"
     );
+}
+
+/// The hub's own pace and watch caps are `[cell]` keys that only the
+/// cell's hub reads: each one set is read back, and is written back.
+#[test]
+fn a_cells_hub_timing_is_read_from_its_table() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    let cell = settings(&format!(
+        "{LEAST}hold_ms = 500\nheartbeat_ms = 2000\nlease_ms = 9000\nwatch_buffer = 64\n[watch_caps]\ncell = 3\nrelay = 4\nfollow = 5\n"
+    ));
+    assert_eq!(
+        cell.timing,
+        HubTiming {
+            hold: Duration::from_millis(500),
+            heartbeat: Duration::from_secs(2),
+            lease: Duration::from_secs(9),
+            watch_buffer: 64,
+            watch_caps: WatchCaps {
+                cell: 3,
+                relay: 4,
+                follow: 5,
+            },
+        }
+    );
+    let text = toml::to_string(&cell).expect("toml");
+    assert_eq!(settings(&text), cell, "{text}");
+    // One cap alone leaves the others at their defaults.
+    let one = settings(&format!("{LEAST}[watch_caps]\nrelay = 7\n"));
+    assert_eq!(
+        one.timing.watch_caps,
+        WatchCaps {
+            cell: 2048,
+            relay: 7,
+            follow: 16384,
+        }
+    );
+}
+
+/// With none of the hub's keys set, its pace is what it was when the
+/// pace was fixed in the binary; and a default is not written out, so a
+/// generated `[cell]` table stays as it was.
+#[test]
+fn with_no_timing_set_a_cells_hub_keeps_its_defaults() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    let cell = settings(LEAST);
+    assert_eq!(cell.timing.hold, Duration::from_secs(2));
+    assert_eq!(cell.timing.heartbeat, Duration::from_secs(10));
+    assert_eq!(cell.timing.lease, Duration::from_secs(30));
+    assert_eq!(cell.timing.watch_buffer, 1024);
+    assert_eq!(
+        cell.timing.watch_caps,
+        WatchCaps {
+            cell: 2048,
+            relay: 2048,
+            follow: 16384,
+        }
+    );
+    assert_eq!(cell.timing, HubTiming::default());
+    let text = toml::to_string(&cell).expect("toml");
+    for key in [
+        "hold_ms",
+        "heartbeat_ms",
+        "lease_ms",
+        "watch_buffer",
+        "watch_caps",
+    ] {
+        assert!(!text.contains(key), "{key} in {text}");
+    }
+}
+
+/// A value the hub cannot run with is refused where it is read, naming
+/// its key: a lease no longer than the heartbeat, which readers would
+/// let lapse between two publishes, also when only one of the two is
+/// set; a heartbeat or a lease of zero; a watch buffer of zero or past
+/// its ceiling; a cap of zero, which would refuse every watch.
+#[test]
+fn a_hub_timing_the_hub_cannot_run_with_is_refused_by_key() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    for (bad, key, says) in [
+        (
+            "heartbeat_ms = 5000\nlease_ms = 5000\n",
+            "lease_ms",
+            "longer than the heartbeat",
+        ),
+        (
+            "heartbeat_ms = 5000\nlease_ms = 4000\n",
+            "lease_ms",
+            "longer than the heartbeat",
+        ),
+        // The lease left at its default, 30 s.
+        (
+            "heartbeat_ms = 30000\n",
+            "heartbeat_ms",
+            "shorter than the lease",
+        ),
+        // The heartbeat left at its default, 10 s.
+        (
+            "lease_ms = 10000\n",
+            "lease_ms",
+            "longer than the heartbeat",
+        ),
+        ("heartbeat_ms = 0\n", "heartbeat_ms", "at least 1"),
+        ("lease_ms = 0\n", "lease_ms", "at least 1"),
+        ("watch_buffer = 0\n", "watch_buffer", "at least 1"),
+        ("watch_buffer = 65537\n", "watch_buffer", "at most 65536"),
+        ("[watch_caps]\ncell = 0\n", "watch_caps.cell", "at least 1"),
+        (
+            "[watch_caps]\nrelay = 0\n",
+            "watch_caps.relay",
+            "at least 1",
+        ),
+        (
+            "[watch_caps]\nfollow = 0\n",
+            "watch_caps.follow",
+            "at least 1",
+        ),
+    ] {
+        let value: toml::Value = toml::from_str(&format!("{LEAST}{bad}")).expect("toml");
+        let problems = CellSettings::read(value).expect_err(bad);
+        assert_eq!(problems.0.len(), 1, "{bad}: {problems}");
+        let problem = &problems.0[0];
+        assert_eq!(
+            (problem.table.as_deref(), problem.key.as_deref()),
+            (Some("cell"), Some(key)),
+            "{bad}: {problem}"
+        );
+        assert!(problem.message.contains(says), "{bad}: {problem}");
+    }
+    // A cap the table does not have is refused, as any other key is.
+    let value: toml::Value =
+        toml::from_str(&format!("{LEAST}[watch_caps]\nfollows = 1\n")).expect("toml");
+    let problems = CellSettings::read(value).expect_err("an unknown cap");
+    assert!(problems.to_string().contains("follows"), "{problems}");
+    // The bounds themselves are taken.
+    let edge = settings(&format!(
+        "{LEAST}directory = 'memory'\nheartbeat_ms = 1\nlease_ms = 2\nhold_ms = 0\nwatch_buffer = 65536\n"
+    ));
+    assert_eq!(edge.timing.watch_buffer, HubTiming::MAX_WATCH_BUFFER);
+    assert_eq!(edge.timing.hold, Duration::ZERO);
+}
+
+/// Under the `relay` backend, the default, a cell's hub writes its record
+/// at its parent's cadence, never less than 100 ms apart, and within a
+/// third of the lease: a lease under 300 ms could lapse at the parent
+/// between two reports, so it is refused, naming the key. The other
+/// backends write at the heartbeat, and take it.
+#[test]
+fn a_relay_cell_refuses_a_lease_its_reports_cannot_cover() {
+    const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    let value: toml::Value =
+        toml::from_str(&format!("{LEAST}heartbeat_ms = 50\nlease_ms = 299\n")).expect("toml");
+    let problems = CellSettings::read(value).expect_err("a lease under three reports");
+    assert_eq!(problems.0.len(), 1, "{problems}");
+    let problem = &problems.0[0];
+    assert_eq!(
+        (problem.table.as_deref(), problem.key.as_deref()),
+        (Some("cell"), Some("lease_ms")),
+        "{problem}"
+    );
+    assert!(problem.message.contains("300"), "{problem}");
+    let least = settings(&format!("{LEAST}heartbeat_ms = 50\nlease_ms = 300\n"));
+    assert_eq!(least.timing.lease, HubTiming::MIN_RELAY_LEASE);
+    for backend in [
+        "directory = 'memory'\n",
+        "directory = 'dir'\ndir = '/srv/cells'\n",
+    ] {
+        let cell = settings(&format!(
+            "{LEAST}{backend}heartbeat_ms = 50\nlease_ms = 200\n"
+        ));
+        assert_eq!(
+            cell.timing.lease,
+            std::time::Duration::from_millis(200),
+            "{backend}"
+        );
+    }
 }

@@ -31,10 +31,6 @@ pub struct Quorum {
 }
 
 impl Quorum {
-    /// How long the quorum must hold before a cell is `ready`, unless its
-    /// hub is given another.
-    pub const DEFAULT_HOLD: Duration = Duration::from_secs(2);
-
     /// The quorum of each segment of a class, in the order
     /// [`Quorum::segments`] reports them, with no usable instance counted
     /// yet: `unavailable`. A class has at least one segment; with none,

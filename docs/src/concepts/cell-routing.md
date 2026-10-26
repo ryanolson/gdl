@@ -158,16 +158,16 @@ gdl provides two policies, `round_robin` and `home_first`. A spec can bind other
 
 ### `home_first`
 
-`home_first` chooses by each cell's load summary. A cell is not eligible if it is `unavailable` or `draining`, has no entry instance to route to, declined this request, or has no summary younger than three of its periods. A cell is saturated when its admitted roots reach its admission limit, or its last period had refusals. Of the eligible cells, `home_first` takes the first tier that is not empty:
+`home_first` chooses by each cell's load summary. A cell is not eligible if it is `unavailable` or `draining`, has no entry instance to route to, declined this request, or has no fresh summary: one that reached the chooser's hub within three of its periods, by default (`[runtime] cell_fresh_periods`). A cell is saturated when its admitted roots reach its admission limit, by default (`[runtime] home_first_saturated_percent`, 100), or its last period had refusals. Of the eligible cells, `home_first` takes the first tier that is not empty:
 
 | Tier | Cells |
 |---|---|
 | 1 | `ready` home cells (the chooser's own `[cell] region`) that are not saturated |
-| 2 | `ready` cells in another region that report no refusals and whose admitted roots are under 80% of their limit |
+| 2 | `ready` cells in another region that are not saturated and whose admitted roots are under the spill bound, 80% of their limit by default (`[runtime] home_first_spill_percent`) |
 | 3 | saturated `ready` home cells |
 | 4 to 6 | the `degraded` cells, in the same three tiers |
 
-Within the tier it draws two cells at random and takes the one with the lower ratio of admitted roots to limit. A cell in another region that reports a refusal, or is at or over 80%, is never chosen. Admission counts roots, not engine work, so this is an admission heuristic. The thresholds are constants of the policy.
+Within the tier it draws two cells at random and takes the one with the lower ratio of admitted roots to limit. A cell in another region that is saturated, or at or over the spill bound, is never chosen. A spill bound of 0 keeps every request in the chooser's region. Admission counts roots, not engine work, so this is an admission heuristic. The chooser's `[runtime]` settings give the thresholds of its own `home_first`. A registered policy that runs `HomeFirst` chooses at the defaults; one that runs `HomeFirstAt` chooses at the thresholds it gives.
 
 ### A registered policy
 
@@ -186,7 +186,7 @@ A registered policy can run either of them over only the cells it keeps, with `c
 
 ### Damping
 
-Under every policy, the chooser damps a cell that declined a request. `round_robin` and `home_first` pass a damped cell over as this section says. A registered policy sees the damped cells and decides for itself. It is not chosen for 1 s. Each further decline after its window has passed doubles the window, up to 30 s. An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.
+Under every policy, the chooser damps a cell that declined a request. `round_robin` and `home_first` pass a damped cell over as this section says. A registered policy sees the damped cells and decides for itself. It is not chosen for the first window, 1 s by default (`[runtime] cell_damping_first_ms`). Each further decline after its window has passed doubles the window, up to the longest, 30 s by default (`cell_damping_max_ms`). An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.
 
 At most half of the otherwise eligible cells, rounded down, are damped at once. When more are, the cells whose windows end soonest are chosen as if they were not damped. So a lone cell is never damped out.
 

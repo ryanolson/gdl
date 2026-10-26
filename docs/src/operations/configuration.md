@@ -60,11 +60,16 @@ The `gdl-hub` binary serves on 1337 and 8337, unless `GDL_HUB__PUBLIC_PORT` and 
 | `drain_ms` | `default_deadline_ms` | the bound on a stopped instance's drain |
 | `instance_failovers` | 2 | how many more times a router chooses after a declined hand-off. 0 makes each refusal final |
 | `cell_failovers` | 2 | how many other cells a chooser offers a request to after the first declines |
+| `cell_damping_first_ms` | 1000 | how long a chooser passes over a cell after its first decline. At least 1 |
+| `cell_damping_max_ms` | 30000 | the longest a chooser passes over a cell that keeps declining. From `cell_damping_first_ms` to 3600000 |
+| `cell_fresh_periods` | 3 | how many of its periods a cell's load summary stays fresh after it reached the chooser's hub (a summary the hub relayed late counts from then). From 1 to 100 |
+| `home_first_saturated_percent` | 100 | the chooser's `home_first`: a cell is saturated once its admitted roots reach this share of its admission limit. From 1 to 100 |
+| `home_first_spill_percent` | 80 | the chooser's `home_first`: a cell in another region is a candidate only while its admitted roots are under this share. 0 keeps every request in the chooser's region. At most `home_first_saturated_percent` |
 | `heartbeat_interval_ms` | velo's default | how often producers send heartbeats. At least 1 |
 | `anchor_timeout_ms` | velo's default | how long an ordinary anchor waits for its producer |
 | `reservation_renew_interval_ms` | 30000 | how often held reply reservations are renewed, in batches. 0 is refused. Choose one shorter than the reservation's lifetime |
 
-The chapters that explain these settings: [Requests, attempts, and deadlines](../concepts/requests.md), [Admission and egress](../concepts/admission.md), [Crossing segments](../concepts/crossings.md) (reply renewal), [Routing, selectors, and offers](../concepts/routing.md), and [Segment lifecycle](../concepts/lifecycle.md) (the drain).
+The chapters that explain these settings: [Requests, attempts, and deadlines](../concepts/requests.md), [Admission and egress](../concepts/admission.md), [Crossing segments](../concepts/crossings.md) (reply renewal), [Routing, selectors, and offers](../concepts/routing.md), [Following and choosing cells](../concepts/cell-routing.md) (the `cell_*` and `home_first_*` keys, which only a chooser reads), and [Segment lifecycle](../concepts/lifecycle.md) (the drain).
 
 ## `[system]`
 
@@ -88,6 +93,11 @@ The system listener answers the live and health probes and serves `/metrics`. It
 | `summary_ms` | 10000 (`CellSettings::DEFAULT_SUMMARY`) | the load summary's period. At least 1000 |
 | `[cell.ready]` | 1 per segment (`DEFAULT_QUORUM`) | the quorum of each segment of the class |
 | `[cell.requires]` | 1 per class sent to (`DEFAULT_REQUIRES`) | ready cells of each class that the cell's health needs. A table that is set replaces the default whole. An instance ignores it |
+| `hold_ms` | 2000 (`HubTiming::DEFAULT_HOLD`) | how long every quorum must hold before the cell is `ready`. An instance ignores it |
+| `heartbeat_ms` | 10000 (`HubTiming::DEFAULT_HEARTBEAT`) | how often the hub publishes the cell's record while its state does not change. At least 1. Not the `[hub] heartbeat_ms` of an instance's lease. An instance ignores it |
+| `lease_ms` | 30000 (`HubTiming::DEFAULT_LEASE`) | how long a reader keeps the record without seeing it published again. At least 1, longer than `heartbeat_ms`, and under the `relay` backend at least 300 (`HubTiming::MIN_RELAY_LEASE`). An instance ignores it |
+| `watch_buffer` | 1024 (`HubTiming::DEFAULT_WATCH_BUFFER`) | events a watcher of the cell, or of what its hub follows, may fall behind by before its watch ends. From 1 to 65536 (`MAX_WATCH_BUFFER`). An instance ignores it |
+| `[cell.watch_caps]` | `cell` 2048, `relay` 2048, `follow` 16384 (`WatchCaps::DEFAULT_*`) | how many watches each of the hub's watch routes serves at once. Each at least 1. An instance ignores it |
 
 Every problem with `[cell]` names the file and key, or the variable, that set it.
 

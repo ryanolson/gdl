@@ -15,7 +15,7 @@ use crate::CellError;
 
 /// The shortest cadence a child takes from its parent's answer, so that a
 /// parent's mistake cannot make a child report in a loop.
-const MIN_CADENCE: Duration = Duration::from_millis(100);
+const MIN_CADENCE: Duration = gdl_model::HubTiming::MIN_RELAY_CADENCE;
 
 /// A cell hub's directory under the `relay` backend
 /// (`[cell] directory = "relay"`).

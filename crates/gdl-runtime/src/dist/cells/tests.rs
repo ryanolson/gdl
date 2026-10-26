@@ -18,6 +18,7 @@ use gdl_watch::FollowEvent;
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo, WorkerAddress};
 
+use super::damping::Damping;
 use super::follow::Follows;
 use super::task::run;
 use super::{Cells, FollowedCell};
@@ -85,7 +86,20 @@ fn follower() -> (
     Recorded,
     Arc<crate::dist::roster::Live>,
 ) {
-    let cells = Cells::new("r", [("model_x", "f")]);
+    follower_fresh_for(gdl::Load::FRESH_PERIODS)
+}
+
+/// [`follower`], whose cells' summaries are fresh for `fresh_periods` of
+/// their periods.
+fn follower_fresh_for(
+    fresh_periods: u32,
+) -> (
+    Follows<Recorded>,
+    Cells,
+    Recorded,
+    Arc<crate::dist::roster::Live>,
+) {
+    let cells = Cells::new("r", [("model_x", "f")], Damping::default());
     let recorded = Recorded {
         cells: cells.clone(),
         calls: Arc::default(),
@@ -98,6 +112,7 @@ fn follower() -> (
         Arc::clone(&live),
         DRAIN,
         wanted,
+        fresh_periods,
     );
     (follows, cells, recorded, live)
 }
@@ -815,6 +830,55 @@ fn summary(admitted: u64) -> LoadSummary {
         refusals: 0,
         period_ms: 1000,
     }
+}
+
+/// A summary the follower takes, from a cell's first event, a load event,
+/// or a snapshot, is fresh for as many of its periods as the chooser is
+/// given.
+#[test]
+fn a_cells_summary_is_fresh_for_the_periods_the_chooser_is_given() {
+    let (mut follows, cells, _, _) = follower_fresh_for(5);
+    let start = Instant::now();
+    let period = Duration::from_millis(summary(0).period_ms);
+    let fresh_until = |cells: &Cells, at: usize| {
+        let table = cells.table("f").expect("kept");
+        table.cells[at].load.and_then(|load| load.fresh_until())
+    };
+    let first = FollowEvent::Follow {
+        class: "model_x".into(),
+        cell: M1.into(),
+        generation: 1,
+        region: "r".into(),
+        state: CellState::Ready,
+        load: Some(summary(3)),
+        load_age_ms: None,
+    };
+    live(&mut follows, start, [first]);
+    assert_eq!(fresh_until(&cells, 0), Some(start + period * 5));
+    let later = start + Duration::from_secs(1);
+    live(&mut follows, later, [loaded(M1, 1, Some(summary(4)))]);
+    assert_eq!(fresh_until(&cells, 0), Some(later + period * 5));
+    // A summary the relay held for a while is fresh for as many periods
+    // from when it was made.
+    let held = Duration::from_millis(400);
+    let replayed = FollowEvent::Follow {
+        class: "model_x".into(),
+        cell: M1.into(),
+        generation: 1,
+        region: "r".into(),
+        state: CellState::Ready,
+        load: Some(summary(3)),
+        load_age_ms: Some(400),
+    };
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(replayed, later);
+    follows.resnapshot(snapshot, later);
+    assert_eq!(fresh_until(&cells, 0), Some(later - held + period * 5));
+    // The default: three periods.
+    let (mut follows, cells, _, _) = follower();
+    live(&mut follows, start, [follow(M1, 1, CellState::Ready)]);
+    live(&mut follows, start, [loaded(M1, 1, Some(summary(1)))]);
+    assert_eq!(fresh_until(&cells, 0), Some(start + period * 3));
 }
 
 /// A cell's load summary is kept with the time it arrived on the

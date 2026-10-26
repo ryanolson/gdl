@@ -7,10 +7,10 @@ use std::time::Duration;
 use figment::Jail;
 use futures::StreamExt;
 use gdl_cells::{CellDirectory, CellEvent, CellState, DirDirectory};
-use gdl_hub::{cell_from_env, cell_from_vars, hub_builder};
+use gdl_hub::{CellTiming, cell_from_env, cell_from_vars, hub_builder};
 use gdl_model::{
-    CellSettings, DeploymentSpec, DirectoryBackend, HopInfo, Manifest, NodeInfo, Placement, Role,
-    TypeInfo,
+    CellSettings, DeploymentSpec, DirectoryBackend, HopInfo, HubTiming, Manifest, NodeInfo,
+    Placement, Role, TypeInfo, WatchCaps,
 };
 use velo_hub::{Hub, HubConfig};
 
@@ -98,8 +98,75 @@ fn a_cells_settings_are_read_from_the_environment() {
                 requires: BTreeMap::new(),
                 hub: Some("model-x-01-hub:1337".into()),
                 summary: Duration::from_millis(2500),
+                timing: Default::default(),
             })
         );
+        Ok(())
+    });
+}
+
+/// The hub's pace and its watch caps are `GDL_CELL__*` variables too, and
+/// the timing the hub runs with is theirs, each one left out at its
+/// default.
+#[test]
+fn a_cells_hub_timing_is_read_from_the_environment() {
+    Jail::expect_with(|jail| {
+        model_cell(jail, "/srv/cells");
+        jail.set_env("GDL_CELL__HOLD_MS", "500");
+        jail.set_env("GDL_CELL__HEARTBEAT_MS", "2000");
+        jail.set_env("GDL_CELL__LEASE_MS", "9000");
+        jail.set_env("GDL_CELL__WATCH_BUFFER", "64");
+        jail.set_env("GDL_CELL__WATCH_CAPS__CELL", "3");
+        jail.set_env("GDL_CELL__WATCH_CAPS__RELAY", "4");
+        jail.set_env("GDL_CELL__WATCH_CAPS__FOLLOW", "5");
+        let cell = cell_from_env(&spec())
+            .map_err(|e| e.to_string())?
+            .ok_or("a cell")?;
+        let timing = CellTiming::from_settings(&cell.timing);
+        assert_eq!(
+            timing,
+            CellTiming {
+                hold: Duration::from_millis(500),
+                heartbeat: Duration::from_secs(2),
+                lease: Duration::from_secs(9),
+                watch_buffer: 64,
+                watch_caps: WatchCaps {
+                    cell: 3,
+                    relay: 4,
+                    follow: 5,
+                },
+                ..CellTiming::default()
+            }
+        );
+        Ok(())
+    });
+}
+
+/// With no timing variable set, the hub runs at the pace it ran at when
+/// the pace was fixed in the binary.
+#[test]
+fn with_no_timing_variable_a_cells_hub_keeps_its_pace() {
+    Jail::expect_with(|jail| {
+        model_cell(jail, "/srv/cells");
+        let cell = cell_from_env(&spec())
+            .map_err(|e| e.to_string())?
+            .ok_or("a cell")?;
+        assert_eq!(cell.timing, HubTiming::default());
+        let timing = CellTiming::from_settings(&cell.timing);
+        assert_eq!(timing.hold, Duration::from_secs(2));
+        assert_eq!(timing.heartbeat, Duration::from_secs(10));
+        assert_eq!(timing.lease, Duration::from_secs(30));
+        assert_eq!(timing.watch_buffer, 1024);
+        assert_eq!(
+            timing.watch_caps,
+            WatchCaps {
+                cell: 2048,
+                relay: 2048,
+                follow: 16384,
+            }
+        );
+        assert_eq!(timing.refollow, Duration::from_millis(250));
+        assert_eq!(timing, CellTiming::default());
         Ok(())
     });
 }
@@ -219,6 +286,32 @@ fn a_misspelled_or_malformed_cell_variable_is_refused_by_name() {
             "model_y",
             "GDL_CELL__CLASS: the placement has no class `model_y`",
         ),
+        // Against the lease's default, 30 s.
+        (
+            "GDL_CELL__HEARTBEAT_MS",
+            "30000",
+            "GDL_CELL__HEARTBEAT_MS: is 30000; it must be shorter than the lease",
+        ),
+        (
+            "GDL_CELL__LEASE_MS",
+            "10000",
+            "GDL_CELL__LEASE_MS: is 10000; it must be longer than the heartbeat",
+        ),
+        (
+            "GDL_CELL__WATCH_BUFFER",
+            "0",
+            "GDL_CELL__WATCH_BUFFER: is 0",
+        ),
+        (
+            "GDL_CELL__WATCH_CAPS__RELAY",
+            "0",
+            "GDL_CELL__WATCH_CAPS__RELAY: is 0",
+        ),
+        (
+            "GDL_CELL__WATCH_CAPS__RELAYS",
+            "1",
+            "GDL_CELL__WATCH_CAPS__RELAYS: unknown field",
+        ),
     ] {
         Jail::expect_with(|jail| {
             model_cell(jail, "/srv/cells");
@@ -311,6 +404,7 @@ fn settings(directory: DirectoryBackend) -> CellSettings {
         requires: BTreeMap::new(),
         hub: Some("model-x-01-hub:1337".into()),
         summary: CellSettings::DEFAULT_SUMMARY,
+        timing: Default::default(),
     }
 }
 
@@ -361,6 +455,41 @@ async fn a_hub_without_a_cell_runs_admission_alone() {
         .expect("the hub serves");
     assert_eq!(status(&hub, "/v1/ext/gdl-cell/health").await, 404);
     assert_eq!(status(&hub, "/v1/ext/gdl/members").await, 200);
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// The hub the binary builds runs at its settings' pace: with a cap of one
+/// watch of the cell, a second watch while the first is open is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_binary_serves_the_watch_caps_its_settings_give() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-caps-")
+        .tempdir()
+        .expect("a directory");
+    let mut cell = settings(DirectoryBackend::Dir {
+        path: dir.path().to_path_buf(),
+    });
+    cell.timing.watch_caps.cell = 1;
+    let hub = hub_builder(config(), spec(), Some(cell))
+        .expect("a dir cell")
+        .serve()
+        .await
+        .expect("the hub serves");
+    let url = format!(
+        "http://127.0.0.1:{}/v1/ext/gdl-cell/watch",
+        hub.public_addr().port()
+    );
+    let held = tokio::time::timeout(Duration::from_secs(5), reqwest::get(&url))
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub answers");
+    assert_eq!(held.status().as_u16(), 200, "the one watch is served");
+    assert_eq!(
+        status(&hub, "/v1/ext/gdl-cell/watch").await,
+        503,
+        "a second watch is refused"
+    );
+    drop(held);
     hub.shutdown().await.expect("the hub stops");
 }
 

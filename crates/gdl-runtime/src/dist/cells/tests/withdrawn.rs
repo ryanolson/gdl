@@ -316,7 +316,11 @@ fn a_gate_reads_the_availability_of_the_entry_it_sends_to() {
     }
 
     let (f, g) = (super::peer(), super::peer());
-    let cells = Cells::new("r", [("model_x", "f"), ("model_x", "g")]);
+    let cells = Cells::new(
+        "r",
+        [("model_x", "f"), ("model_x", "g")],
+        super::super::damping::Damping::default(),
+    );
     let node = handle(&cells);
     let mut follows = Follows::new(
         cells.clone(),
@@ -327,6 +331,7 @@ fn a_gate_reads_the_availability_of_the_entry_it_sends_to() {
             "model_x".to_string(),
             BTreeSet::from(["f".to_string(), "g".to_string()]),
         )]),
+        gdl::Load::FRESH_PERIODS,
     );
     let now = Instant::now();
     let mut snapshot = follows.snapshot();

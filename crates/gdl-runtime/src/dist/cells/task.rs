@@ -21,7 +21,9 @@ use tokio::time::Instant;
 use velo::Velo;
 
 use super::Cells;
+use super::damping::Damping;
 use super::follow::{Asked, Follows, Key};
+use crate::RuntimeConfig;
 use crate::dist::fabric::{ChooserHub, Registry};
 use crate::dist::roster::Live;
 
@@ -50,7 +52,8 @@ pub(crate) const REWATCH_CAP: Duration = Duration::from_secs(1);
 /// stays registered. `chooser` tells the hub, as this instance, that it
 /// runs this follower, before the relay is first watched, of each
 /// follow it holds no offer to once the hub marked it not offered, and of
-/// each retired entry instance its tables hold.
+/// each retired entry instance its tables hold. `runtime` gives the
+/// chooser's damping windows and how long a cell's summary stays fresh.
 #[expect(
     clippy::too_many_arguments,
     reason = "the chooser's settings, its hub, and its membership, as the launch holds them"
@@ -65,6 +68,7 @@ pub(crate) fn follow(
     live: &Arc<Live>,
     drain: Duration,
     chooser: ChooserHub,
+    runtime: &RuntimeConfig,
 ) -> Result<Option<(Cells, JoinHandle<()>)>> {
     let wanted = super::entries(layout, segment);
     if wanted.is_empty() {
@@ -80,8 +84,16 @@ pub(crate) fn follow(
                 .iter()
                 .map(move |segment| (class.as_str(), segment.as_str()))
         }),
+        Damping::new(runtime.cell_damping_first, runtime.cell_damping_max),
     );
-    let follows = Follows::new(cells.clone(), node.clone(), Arc::clone(live), drain, wanted);
+    let follows = Follows::new(
+        cells.clone(),
+        node.clone(),
+        Arc::clone(live),
+        drain,
+        wanted,
+        runtime.cell_fresh_periods,
+    );
     let task = tokio::spawn(run(
         Hub {
             watcher,

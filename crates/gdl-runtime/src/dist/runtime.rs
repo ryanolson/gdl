@@ -19,7 +19,7 @@ use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
 use gdl::__runtime::{Erased, Lease};
 use gdl::Cx;
-use gdl::{CellPolicies, FollowedCells, Selectors};
+use gdl::{CellPolicies, FollowedCells, HomeFirstAt, Selectors};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::{Layout, RequestRouter};
 
@@ -46,6 +46,22 @@ pub struct RuntimeConfig {
     /// this instance: only for a hand-off into another class, from an
     /// instance in a cell. 0 offers each request to one cell.
     pub cell_failovers: usize,
+    /// How long a chooser passes over a cell after its first decline. The
+    /// window doubles with each further decline after it ended, up to
+    /// `cell_damping_max`. At least 1 ms.
+    pub cell_damping_first: Duration,
+    /// The longest a chooser passes over a cell that keeps declining: it
+    /// is tried again at least this often. From `cell_damping_first` to
+    /// one hour.
+    pub cell_damping_max: Duration,
+    /// How many of its periods a cell's load summary stays fresh after it
+    /// reached the chooser's hub. A policy that chooses by load, as `home_first`
+    /// does, passes over a cell whose summary is stale. From 1 to 100.
+    pub cell_fresh_periods: u32,
+    /// The thresholds of the chooser's `home_first`: its saturation
+    /// threshold, from 1 to 100 percent of a cell's admission limit, and
+    /// its spill bound, at most the saturation threshold.
+    pub home_first: HomeFirstAt,
     /// How many more times a crossing's router chooses an instance after
     /// the one it chose declined a hand-off (no room, or retired), or the
     /// hand-off to it provably never left this instance: for every
@@ -159,6 +175,10 @@ impl Default for RuntimeConfig {
             attempt_limit: 16,
             setup_timeout: Duration::from_secs(10),
             cell_failovers: 2,
+            cell_damping_first: Self::DEFAULT_CELL_DAMPING_FIRST,
+            cell_damping_max: Self::DEFAULT_CELL_DAMPING_MAX,
+            cell_fresh_periods: gdl::Load::FRESH_PERIODS,
+            home_first: HomeFirstAt::DEFAULT,
             instance_failovers: 2,
             anchor_timeout: None,
             reservation_renew_interval: Duration::from_secs(30),
@@ -186,6 +206,11 @@ struct Settings {
     attempt_limit: usize,
     setup_timeout_ms: u64,
     cell_failovers: usize,
+    cell_damping_first_ms: u64,
+    cell_damping_max_ms: u64,
+    cell_fresh_periods: u32,
+    home_first_saturated_percent: u64,
+    home_first_spill_percent: u64,
     instance_failovers: usize,
     anchor_timeout_ms: Option<u64>,
     reservation_renew_interval_ms: u64,
@@ -206,6 +231,11 @@ impl Default for Settings {
             attempt_limit: config.attempt_limit,
             setup_timeout_ms: ms(config.setup_timeout),
             cell_failovers: config.cell_failovers,
+            cell_damping_first_ms: ms(config.cell_damping_first),
+            cell_damping_max_ms: ms(config.cell_damping_max),
+            cell_fresh_periods: config.cell_fresh_periods,
+            home_first_saturated_percent: config.home_first.saturated_percent,
+            home_first_spill_percent: config.home_first.spill_percent,
             instance_failovers: config.instance_failovers,
             anchor_timeout_ms: config.anchor_timeout.map(ms),
             reservation_renew_interval_ms: ms(config.reservation_renew_interval),
@@ -228,6 +258,13 @@ impl TryFrom<Settings> for RuntimeConfig {
             attempt_limit: s.attempt_limit,
             setup_timeout: Duration::from_millis(s.setup_timeout_ms),
             cell_failovers: s.cell_failovers,
+            cell_damping_first: Duration::from_millis(s.cell_damping_first_ms),
+            cell_damping_max: Duration::from_millis(s.cell_damping_max_ms),
+            cell_fresh_periods: s.cell_fresh_periods,
+            home_first: HomeFirstAt {
+                saturated_percent: s.home_first_saturated_percent,
+                spill_percent: s.home_first_spill_percent,
+            },
             instance_failovers: s.instance_failovers,
             anchor_timeout: s.anchor_timeout_ms.map(Duration::from_millis),
             reservation_renew_interval: Duration::from_millis(s.reservation_renew_interval_ms),
@@ -287,6 +324,7 @@ impl RuntimeConfig {
                 ));
             }
         }
+        self.validate_cells()?;
         // velo carries the interval in whole milliseconds, so anything
         // shorter becomes zero on the way.
         if self
@@ -297,6 +335,83 @@ impl RuntimeConfig {
                 ErrorKind::Placement,
                 "runtime setting `heartbeat_interval_ms` must be at least 1",
             ));
+        }
+        Ok(())
+    }
+}
+
+impl RuntimeConfig {
+    /// The damping window after a cell's first decline, unless
+    /// `cell_damping_first_ms` is set: 1 s.
+    pub(crate) const DEFAULT_CELL_DAMPING_FIRST: Duration = Duration::from_secs(1);
+
+    /// The longest damping window, unless `cell_damping_max_ms` is set:
+    /// 30 s.
+    pub(crate) const DEFAULT_CELL_DAMPING_MAX: Duration = Duration::from_secs(30);
+
+    /// The longest damping window: a cell is tried again at least once an
+    /// hour, and a window's end stays far inside what the clock holds.
+    const MAX_DAMPING: Duration = Duration::from_secs(3600);
+
+    /// The most periods a summary may stay fresh: a summary 100 periods
+    /// old says nothing of the cell's load now.
+    const MAX_FRESH_PERIODS: u32 = 100;
+
+    /// Refuse the chooser's cell settings that break what it relies on:
+    /// windows that cannot grow or end, a summary that is never fresh or
+    /// is fresh too long, and thresholds outside a cell's admission limit,
+    /// or a spill bound past the saturation threshold, which no cell
+    /// elsewhere could reach unsaturated.
+    fn validate_cells(&self) -> Result<()> {
+        let refuse = |key: &str, why: String| {
+            Err(Error::new(
+                ErrorKind::Placement,
+                format!("runtime setting `{key}` {why}"),
+            ))
+        };
+        let ms = |d: Duration| d.as_millis();
+        if self.cell_damping_first < Duration::from_millis(1) {
+            return refuse("cell_damping_first_ms", "must be at least 1".into());
+        }
+        if self.cell_damping_max < self.cell_damping_first {
+            return refuse(
+                "cell_damping_max_ms",
+                format!(
+                    "is {}; it must be at least `cell_damping_first_ms`, {}",
+                    ms(self.cell_damping_max),
+                    ms(self.cell_damping_first)
+                ),
+            );
+        }
+        if self.cell_damping_max > Self::MAX_DAMPING {
+            return refuse(
+                "cell_damping_max_ms",
+                format!("must be at most {}", ms(Self::MAX_DAMPING)),
+            );
+        }
+        if !(1..=Self::MAX_FRESH_PERIODS).contains(&self.cell_fresh_periods) {
+            return refuse(
+                "cell_fresh_periods",
+                format!("must be from 1 to {}", Self::MAX_FRESH_PERIODS),
+            );
+        }
+        let HomeFirstAt {
+            saturated_percent,
+            spill_percent,
+        } = self.home_first;
+        if !(1..=100).contains(&saturated_percent) {
+            return refuse(
+                "home_first_saturated_percent",
+                "must be from 1 to 100".into(),
+            );
+        }
+        if spill_percent > saturated_percent {
+            return refuse(
+                "home_first_spill_percent",
+                format!(
+                    "is {spill_percent}; it must be at most `home_first_saturated_percent`, {saturated_percent}"
+                ),
+            );
         }
         Ok(())
     }
@@ -428,7 +543,13 @@ impl Runtime {
         }
         #[cfg(feature = "hub")]
         let crossings = match roster.cells() {
-            Some(cells) => super::cells::targets(&layout, &segment, cells, &config.cell_policies)?,
+            Some(cells) => super::cells::targets(
+                &layout,
+                &segment,
+                cells,
+                &config.cell_policies,
+                config.home_first,
+            )?,
             None => BTreeMap::new(),
         };
         for peer in roster.peers() {
@@ -1047,6 +1168,83 @@ mod tests {
         let none: RuntimeConfig = toml::from_str("instance_failovers = 0\n").expect("none");
         assert_eq!(none.instance_failovers, 0);
         assert_eq!(none.cell_failovers, 2, "the two bounds are apart");
+    }
+
+    /// A chooser's damping windows, the periods a summary stays fresh, and
+    /// `home_first`'s thresholds are settings, each with the value it had
+    /// when it was fixed in the binary unless it is set.
+    #[test]
+    fn a_choosers_cell_settings_keep_their_defaults_unless_set() {
+        for defaults in [
+            RuntimeConfig::default(),
+            toml::from_str::<RuntimeConfig>("").expect("defaults"),
+        ] {
+            assert_eq!(defaults.cell_damping_first, Duration::from_secs(1));
+            assert_eq!(defaults.cell_damping_max, Duration::from_secs(30));
+            assert_eq!(defaults.cell_fresh_periods, 3);
+            assert_eq!(defaults.home_first.saturated_percent, 100);
+            assert_eq!(defaults.home_first.spill_percent, 80);
+        }
+        let set: RuntimeConfig = toml::from_str(
+            "cell_damping_first_ms = 2000\ncell_damping_max_ms = 5000\ncell_fresh_periods = 5\n\
+             home_first_saturated_percent = 90\nhome_first_spill_percent = 0\n",
+        )
+        .expect("set");
+        assert_eq!(set.cell_damping_first, Duration::from_secs(2));
+        assert_eq!(set.cell_damping_max, Duration::from_secs(5));
+        assert_eq!(set.cell_fresh_periods, 5);
+        assert_eq!(set.home_first.saturated_percent, 90);
+        assert_eq!(set.home_first.spill_percent, 0);
+    }
+
+    /// A chooser setting that breaks what the chooser relies on is refused,
+    /// naming its key.
+    #[test]
+    fn a_choosers_cell_setting_out_of_its_bounds_is_refused_by_key() {
+        for (bad, key) in [
+            ("cell_damping_first_ms = 0\n", "cell_damping_first_ms"),
+            (
+                "cell_damping_first_ms = 3000\ncell_damping_max_ms = 2000\n",
+                "cell_damping_max_ms",
+            ),
+            // Against the first window's default, 1 s.
+            ("cell_damping_max_ms = 999\n", "cell_damping_max_ms"),
+            ("cell_damping_max_ms = 3600001\n", "cell_damping_max_ms"),
+            ("cell_fresh_periods = 0\n", "cell_fresh_periods"),
+            ("cell_fresh_periods = 101\n", "cell_fresh_periods"),
+            (
+                "home_first_saturated_percent = 0\n",
+                "home_first_saturated_percent",
+            ),
+            (
+                "home_first_saturated_percent = 101\n",
+                "home_first_saturated_percent",
+            ),
+            // Against the saturation threshold's default, 100.
+            (
+                "home_first_spill_percent = 101\n",
+                "home_first_spill_percent",
+            ),
+            (
+                "home_first_saturated_percent = 50\nhome_first_spill_percent = 60\n",
+                "home_first_spill_percent",
+            ),
+        ] {
+            let Err(error) = toml::from_str::<RuntimeConfig>(bad) else {
+                panic!("{bad} was accepted");
+            };
+            assert!(
+                error.to_string().contains(&format!("`{key}`")),
+                "{bad}: {error}"
+            );
+        }
+        // The bounds themselves are taken.
+        let edge: RuntimeConfig = toml::from_str(
+            "cell_damping_first_ms = 3600000\ncell_damping_max_ms = 3600000\ncell_fresh_periods = 100\n\
+             home_first_saturated_percent = 1\nhome_first_spill_percent = 1\n",
+        )
+        .expect("the bounds");
+        assert_eq!(edge.cell_damping_max, Duration::from_secs(3600));
     }
 
     #[test]
