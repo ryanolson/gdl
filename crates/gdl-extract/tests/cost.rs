@@ -1,10 +1,13 @@
 //! What the reader costs grows with the source it reads, whatever the
 //! source's shape: doubling a crate at most about doubles the reader's peak
-//! memory and its allocations. Each test reads one shape at two sizes and
-//! compares; a cost that multiplies two lengths quadruples instead. The
-//! shapes are the ones that once did: a `use` that copied its attributes
-//! and its path to every name it binds, modules that copied their parent's
-//! path, and a wire check that walked every impl of the crate per message.
+//! memory, its allocations, and its reads from its lookup structures
+//! (`gdl_extract::lookup_reads`, which the `count-reads` feature builds
+//! for these tests). Each test reads one shape at two sizes and compares; a
+//! cost that multiplies two lengths quadruples instead. The shapes are the
+//! ones that once did: a `use` that copied its attributes and its path to
+//! every name it binds, modules that copied their parent's path, and a
+//! wire check that walked every impl of the crate per message. Each cost
+//! is a count of work, never a time, so a busy host cannot fail a test.
 //! Its own test binary, so that the counting allocator sees only it.
 
 // A counting global allocator needs `unsafe`; it only forwards to `System`.
@@ -64,13 +67,14 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 /// What one extraction cost: peak live bytes, the allocation count and
-/// volume, and elapsed time.
+/// volume, and its reads from its lookup structures. Each is a count of
+/// work, not a time, so a busy host cannot change it.
 #[derive(Debug, Clone, Copy)]
 struct Cost {
     peak: isize,
     allocations: u64,
     allocated: u64,
-    elapsed: Duration,
+    reads: u64,
 }
 
 /// Write a crate of these files, load it, and read it on a thread of its
@@ -135,13 +139,12 @@ fn extract_beside(
     std::thread::Builder::new()
         .stack_size(256 << 20)
         .spawn(move || {
-            let started = std::time::Instant::now();
             let extraction = workspace.extract(&package).expect("the package");
             let cost = Cost {
                 peak: PEAK.with(Cell::get),
                 allocations: COUNT.with(Cell::get),
                 allocated: ALLOCATED.with(Cell::get),
-                elapsed: started.elapsed(),
+                reads: gdl_extract::lookup_reads(),
             };
             let _ = done.send((cost, extraction));
         })
@@ -152,19 +155,24 @@ fn extract_beside(
 }
 
 /// Read a shape at size `n` and at `2n`, and assert that neither the peak
-/// memory nor the allocations grew by more than three times: linear growth
-/// doubles them, a product of two lengths quadruples them.
+/// memory, nor the allocations, nor the lookup reads grew by more
+/// than three times: linear growth doubles them, a product of two lengths
+/// quadruples them. The reads witness work that allocates nothing, such
+/// as a scan of a module per name.
 fn grows_linearly(name: &str, shape: impl Fn(usize) -> Vec<(String, String)>, n: usize) {
     let (small, problems) = read(&format!("{name}-small"), &shape(n));
     assert!(problems.is_empty(), "{problems:?}");
     let (large, problems) = read(&format!("{name}-large"), &shape(2 * n));
     assert!(problems.is_empty(), "{problems:?}");
+    // No reads means the `count-reads` feature is off, not a free reader.
+    assert!(small.reads > 0, "{name}: no lookup was read: {small:?}");
     let memory = large.peak as f64 / small.peak as f64;
     let work = large.allocations as f64 / small.allocations as f64;
+    let reads = large.reads as f64 / small.reads as f64;
     assert!(
-        memory < 3.0 && work < 3.0,
-        "{name}: doubling the source multiplied the peak memory by {memory:.1} and the \
-         allocations by {work:.1}\n  n:  {small:?}\n  2n: {large:?}"
+        memory < 3.0 && work < 3.0 && reads < 3.0,
+        "{name}: doubling the source multiplied the peak memory by {memory:.1}, the \
+         allocations by {work:.1}, and the lookup reads by {reads:.1}\n  n:  {small:?}\n  2n: {large:?}"
     );
 }
 
@@ -255,7 +263,9 @@ fn the_wire_check_finds_a_types_impls_without_walking_the_crate() {
 /// A chain of the crate's own generic message, each level an alias of the
 /// one below (`L1 = Carry<L0>`, `L2 = Carry<L1>`, ...): the wire check
 /// judged each argument once per serde direction, so each level doubled
-/// the work while the type grew by one. 24 levels took minutes. The
+/// the work while the type grew by one. 24 levels took minutes. The chain
+/// is read at 8 and 16 levels first, where work that doubles per level
+/// grows about 256 times and fails the test in seconds; then at 24. The
 /// export at the top must still read as a wire type, so that the check
 /// walks the whole chain.
 #[test]
@@ -273,8 +283,8 @@ fn a_nested_instantiation_is_judged_once_per_level() {
         source.push_str(&format!("#[gdl_message::export]\npub type Deep = L{n};\n"));
         vec![("lib.rs".to_string(), source)]
     };
-    grows_linearly("nested", chain, 12);
-    let (cost, extraction) = extract_beside("nested-deep", &chain(24), None);
+    grows_linearly("nested", chain, 8);
+    let (_, extraction) = extract_beside("nested-deep", &chain(24), None);
     assert!(extraction.problems.is_empty(), "{:?}", extraction.problems);
     let wire: Vec<(&str, bool)> = extraction
         .offer
@@ -283,11 +293,6 @@ fn a_nested_instantiation_is_judged_once_per_level() {
         .map(|e| (e.name.as_str(), e.wire))
         .collect();
     assert_eq!(wire, [("Deep", true)]);
-    assert!(
-        cost.elapsed < Duration::from_secs(5),
-        "24 levels took {:?}",
-        cost.elapsed
-    );
 }
 
 /// Many nodes whose ports carry one instantiation of a generic message of
@@ -361,34 +366,12 @@ fn indexing_an_impl_for_an_alias_does_not_read_its_arguments_crates() {
     );
 }
 
-/// Read a shape at size `n` and at `2n`, the faster of two runs each, and
-/// assert that the time grew by less than three times. For work no
-/// allocation witnesses, such as a scan; a square would quadruple it.
-fn time_grows_linearly(name: &str, shape: impl Fn(usize) -> Vec<(String, String)>, n: usize) {
-    let fastest = |label: &str, n: usize| {
-        (0..2)
-            .map(|run| {
-                let (cost, problems) = read(&format!("{name}-{label}-{run}"), &shape(n));
-                assert!(problems.is_empty(), "{problems:?}");
-                cost.elapsed
-            })
-            .min()
-            .expect("two runs")
-    };
-    let (small, large) = (fastest("small", n), fastest("large", 2 * n));
-    let ratio = large.as_secs_f64() / small.as_secs_f64();
-    assert!(
-        ratio < 3.0,
-        "{name}: doubling the source multiplied the time by {ratio:.1}: {small:?} then {large:?}"
-    );
-}
-
 /// Many names bound by `use`s carrying an attribute of a single name: the
 /// export check looked each such attribute up among every `use` of the
-/// module, so the time grew with the square of the names.
+/// module, so the work grew with the square of the names.
 #[test]
 fn the_export_check_does_not_scan_the_module_per_name() {
-    time_grows_linearly(
+    grows_linearly(
         "scan",
         |n| {
             let mut source = String::from("pub mod inner {}\n");
@@ -397,7 +380,7 @@ fn the_export_check_does_not_scan_the_module_per_name() {
             }
             vec![("lib.rs".to_string(), source)]
         },
-        8000,
+        2000,
     );
 }
 
@@ -478,12 +461,10 @@ fn an_inline_module_does_not_build_its_directory() {
 }
 
 /// Many types, each with a serde impl: each impl's type was found by
-/// scanning its module's types, so the time grew with types times impls.
-/// A guard on time, not a proof: the scan it guards against grows the
-/// time by 3.6 to 3.8 times here and is caught in most runs, not all.
+/// scanning its module's types, so the work grew with types times impls.
 #[test]
 fn a_type_is_found_by_its_name() {
-    time_grows_linearly(
+    grows_linearly(
         "types",
         |n| {
             // One message without derived serde makes the wire check
@@ -496,7 +477,7 @@ fn a_type_is_found_by_its_name() {
             }
             vec![("lib.rs".into(), source)]
         },
-        16000,
+        2000,
     );
 }
 

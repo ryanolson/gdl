@@ -12,13 +12,17 @@ use gdl_model::Role;
 use crate::canon::{DEPTH, Env, Ty, canonical, unify};
 use crate::identity::{Known, known_trait};
 use crate::markers::imported_as;
+use crate::reads::Counted;
 use crate::resolve::{Def, Resolver, segments};
 
 /// The impls of serde's traits and of the role traits in each crate read,
 /// by the type they are for: each crate's impls of one kind are resolved
 /// once, since walking them for every type costs types times impls.
 #[derive(Default)]
-pub(crate) struct Impls(HashMap<(usize, Traits), HashMap<Def, Vec<ImplOf>>>);
+pub(crate) struct Impls(HashMap<(usize, Traits), ByType>);
+
+/// One crate's impls of one kind, by the type they are for.
+type ByType = Counted<HashMap<Def, Vec<ImplOf>>>;
 
 impl Impls {
     /// The impls of the traits of `traits` for `def`, in the order of its
@@ -44,8 +48,8 @@ impl Impls {
 /// for. Only those impls' self types are resolved: resolving one can read
 /// another crate, and a crate holds many impls of traits nothing asks
 /// about (`tests/cost.rs` guards it).
-fn index(resolver: &mut Resolver<'_>, krate: usize, traits: Traits) -> HashMap<Def, Vec<ImplOf>> {
-    let mut by_type: HashMap<Def, Vec<ImplOf>> = HashMap::new();
+fn index(resolver: &mut Resolver<'_>, krate: usize, traits: Traits) -> ByType {
+    let mut by_type = ByType::default();
     for module in 0..resolver.crates[krate].modules.len() {
         let found: Vec<(usize, TraitName, syn::Path, syn::Type)> = resolver.crates[krate].modules
             [module]

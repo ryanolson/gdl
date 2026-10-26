@@ -17,7 +17,15 @@ serde_json = { workspace = true }
 syn = { version = "2", features = ["full"] }
 toml = { workspace = true }
 
+[features]
+# Counts the reader's reads from its lookup structures (`lookup_reads`),
+# for the cost tests. Off in a normal build, where they are the plain
+# standard collections.
+count-reads = []
+
 [dev-dependencies]
+# Itself, with the read count on for `tests/cost.rs`.
+gdl-extract = { path = ".", features = ["count-reads"] }
 tempfile.workspace = true
 
 [lints]

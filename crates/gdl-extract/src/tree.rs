@@ -10,6 +10,7 @@ use syn::spanned::Spanned as _;
 use syn::{Item, Meta, UseTree};
 
 use crate::cfg::Settings;
+use crate::reads::Counted;
 
 /// One crate: its modules, the root first.
 pub(crate) struct Crate {
@@ -28,24 +29,24 @@ pub(crate) struct Module {
     pub(crate) name: String,
     /// Who can see it from outside its parent.
     pub(crate) vis: Vis,
-    pub(crate) children: BTreeMap<String, usize>,
-    pub(crate) types: Vec<TypeDef>,
-    pub(crate) uses: Vec<Use>,
-    pub(crate) impls: Vec<Impl>,
+    pub(crate) children: Counted<BTreeMap<String, usize>>,
+    pub(crate) types: Counted<Vec<TypeDef>>,
+    pub(crate) uses: Counted<Vec<Use>>,
+    pub(crate) impls: Counted<Vec<Impl>>,
     /// The types of each name, and the uses that bind it, by index in
     /// order: a lookup finds a name without scanning the module, which
     /// made resolving every name of a module cost the square of its size.
-    types_named: HashMap<String, Vec<usize>>,
-    uses_named: HashMap<String, Vec<usize>>,
+    types_named: Counted<HashMap<String, Vec<usize>>>,
+    uses_named: Counted<HashMap<String, Vec<usize>>>,
     /// The uses that are globs, in order.
-    globs: Vec<usize>,
+    globs: Counted<Vec<usize>>,
     /// The names of the traits and trait aliases it declares: a local
     /// `trait Default` hides the prelude's.
-    others: HashSet<String>,
+    others: Counted<HashSet<String>>,
     /// The traits it declares, which a path can resolve to, as a cell
     /// policy's trait does.
-    pub(crate) traits: Vec<TraitDef>,
-    traits_named: HashMap<String, Vec<usize>>,
+    pub(crate) traits: Counted<Vec<TraitDef>>,
+    traits_named: Counted<HashMap<String, Vec<usize>>>,
 }
 
 /// A trait a module declares: its name and visibility, all a path to it
@@ -306,16 +307,16 @@ impl Module {
             parent,
             name,
             vis,
-            children: BTreeMap::new(),
-            types: Vec::new(),
-            uses: Vec::new(),
-            impls: Vec::new(),
-            types_named: HashMap::new(),
-            uses_named: HashMap::new(),
-            globs: Vec::new(),
-            others: HashSet::new(),
-            traits: Vec::new(),
-            traits_named: HashMap::new(),
+            children: Default::default(),
+            types: Default::default(),
+            uses: Default::default(),
+            impls: Default::default(),
+            types_named: Default::default(),
+            uses_named: Default::default(),
+            globs: Default::default(),
+            others: Default::default(),
+            traits: Default::default(),
+            traits_named: Default::default(),
         }
     }
 
@@ -344,7 +345,7 @@ impl Module {
     }
 
     /// The uses that are globs, in order.
-    pub(crate) fn globs(&self) -> &[usize] {
+    pub(crate) fn globs(&self) -> &Counted<Vec<usize>> {
         &self.globs
     }
 

@@ -43,10 +43,3 @@ retries = 2
 filter = 'binary_id(gdl-hub::snapshot) & test(=a_real_hubs_snapshot_completes_well_inside_its_bounds)'
 test-group = 'timing'
 retries = 2
-
-[[profile.default.overrides]]
-# Doubling the source multiplies the fastest of two timed runs by less than
-# 3.
-filter = 'binary_id(gdl-extract::cost) & (test(=the_export_check_does_not_scan_the_module_per_name) | test(=a_type_is_found_by_its_name))'
-test-group = 'timing'
-retries = 2

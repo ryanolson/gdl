@@ -16,6 +16,7 @@ use crate::canon::{Env, Ty, canonical};
 use crate::cfg::Settings;
 use crate::impls::{ImplOf, Impls, TraitName, Traits, matching};
 use crate::metadata::Graph;
+use crate::reads::Counted;
 use crate::resolve::{Def, Resolver, segments};
 use crate::tree::{Location, TypeDef, UsePath, Vis};
 use crate::wire::{plain_wire, ty_wire};
@@ -73,7 +74,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
         let reachable = public(&resolver, krate, module);
         // One answer per `use` item, whose names share its attributes:
         // deciding per name costs names times attributes.
-        let mut decided: HashMap<*const [Meta], bool> = HashMap::new();
+        let mut decided: Counted<HashMap<*const [Meta], bool>> = Default::default();
         let uses: Vec<ExportUse> = resolver.crates[krate].modules[module]
             .uses
             .iter()

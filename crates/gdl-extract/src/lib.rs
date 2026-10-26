@@ -39,6 +39,7 @@ mod impls;
 mod markers;
 mod metadata;
 mod policies;
+mod reads;
 mod resolve;
 mod tree;
 mod wire;
@@ -49,6 +50,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 pub use catalog::{Catalog, Entry, rfc3339};
+#[cfg(feature = "count-reads")]
+pub use reads::lookup_reads;
 
 /// The packages of a Cargo workspace and of all their dependencies, as
 /// `cargo metadata` gives them, ready to read.
