@@ -584,6 +584,8 @@ impl Outbound {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     /// The longest a test waits for an answer it expects.
@@ -599,13 +601,28 @@ mod tests {
         Fabric::new(node.clone(), None, None, Duration::from_secs(30))
     }
 
-    /// A node whose `probe` handler answers with what it was sent.
-    async fn answering() -> Velo {
+    /// A handler name no other test has, in this process or in another
+    /// copy of it: a node stopped by one test leaves its port to the OS,
+    /// and an offer that reaches whatever node binds it next must find no
+    /// handler there (see `an_address_another_test_holds_does_not_answer`).
+    fn probe() -> String {
+        static PROBES: AtomicUsize = AtomicUsize::new(0);
+        format!(
+            "probe-{}-{}",
+            std::process::id(),
+            PROBES.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    /// A node whose handler, under the name it gives back, answers with
+    /// what it was sent.
+    async fn answering() -> (Velo, String) {
         let node = node().await;
+        let probe = probe();
         fabric(&node)
-            .register("probe", |bytes| Box::pin(async move { bytes }))
+            .register(&probe, |bytes| Box::pin(async move { bytes }))
             .expect("a handler");
-        node
+        (node, probe)
     }
 
     /// velo refuses, before its transport takes it, a send to a peer it
@@ -614,15 +631,15 @@ mod tests {
     async fn what_velo_proves_never_left() {
         let sender = node().await;
         let fabric = fabric(&sender);
-        let peer = answering().await;
+        let (peer, probe) = answering().await;
         let id = peer.instance_id();
-        let offered = fabric.offer(id, "probe", vec![7], WAIT).await;
+        let offered = fabric.offer(id, &probe, vec![7], WAIT).await;
         assert!(
             matches!(offered, Offered::Unsent(_)),
             "to a peer not registered"
         );
         fabric.register_peer(peer.peer_info()).expect("registered");
-        let offered = fabric.offer(id, "probe", vec![7], WAIT).await;
+        let offered = fabric.offer(id, &probe, vec![7], WAIT).await;
         assert!(matches!(offered, Offered::Answered(ref bytes) if bytes == &[7]));
         let offered = fabric.offer(id, "absent", vec![7], WAIT).await;
         assert!(
@@ -639,15 +656,15 @@ mod tests {
     async fn a_peer_that_stopped_is_not_proven_unsent() {
         let sender = node().await;
         let fabric = fabric(&sender);
-        let peer = answering().await;
+        let (peer, probe) = answering().await;
         let id = peer.instance_id();
         fabric.register_peer(peer.peer_info()).expect("registered");
-        let offered = fabric.offer(id, "probe", vec![7], WAIT).await;
+        let offered = fabric.offer(id, &probe, vec![7], WAIT).await;
         assert!(matches!(offered, Offered::Answered(_)));
         shut_down(&peer, Duration::from_millis(100)).await;
         drop(peer);
         let offered = fabric
-            .offer(id, "probe", vec![7], Duration::from_secs(1))
+            .offer(id, &probe, vec![7], Duration::from_secs(1))
             .await;
         assert!(matches!(offered, Offered::Unknown(_)), "a stopped peer");
     }
@@ -659,16 +676,39 @@ mod tests {
     async fn a_peer_gone_before_its_first_contact_is_proven_unsent() {
         let sender = node().await;
         let fabric = fabric(&sender);
-        let peer = answering().await;
+        let (peer, probe) = answering().await;
         let id = peer.instance_id();
         fabric.register_peer(peer.peer_info()).expect("registered");
         shut_down(&peer, Duration::from_millis(100)).await;
         drop(peer);
-        let offered = fabric.offer(id, "probe", vec![7], WAIT).await;
+        let offered = fabric.offer(id, &probe, vec![7], WAIT).await;
         match offered {
             Offered::Unsent(_) => {}
             Offered::Unknown(error) => panic!("unknown: {error}"),
             Offered::Answered(_) => panic!("answered"),
+        }
+    }
+
+    /// A peer whose address another test's node now holds, as when the
+    /// peer stopped and the OS gave its port to that node, does not answer:
+    /// velo's handshake does not check who answers at an address, but that
+    /// node has no handler of this test's, so the offer is unsent. Tests
+    /// running side by side (other copies of this binary too) are such
+    /// neighbours, which is why each takes a handler name of its own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_address_another_test_holds_does_not_answer() {
+        let (neighbour, _) = answering().await;
+        let sender = node().await;
+        let fabric = fabric(&sender);
+        let id = InstanceId::new_v4();
+        let taken = neighbour.peer_info().worker_address().clone();
+        fabric
+            .register_peer(PeerInfo::new(id, taken))
+            .expect("registered");
+        match fabric.offer(id, &probe(), vec![7], WAIT).await {
+            Offered::Unsent(_) => {}
+            Offered::Unknown(error) => panic!("unknown: {error}"),
+            Offered::Answered(_) => panic!("the neighbour answered"),
         }
     }
 }
