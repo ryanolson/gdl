@@ -165,7 +165,14 @@ async fn relay(
             }
             Mode::Forward | Mode::SilentAtDelete | Mode::Undrained => {}
         }
+        // Biased, the mode first: a test changes the mode before it makes
+        // the hub send what the new mode treats, so bytes ready at the same
+        // poll as a change are relayed under the new mode.
         tokio::select! {
+            biased;
+            changed = mode.changed() => if changed.is_err() {
+                return;
+            },
             read = from_client.read(&mut up) => match read {
                 Ok(n) if n > 0 => {
                     let mut seen = tail.clone();
@@ -220,9 +227,6 @@ async fn relay(
                     }
                 }
                 _ => return,
-            },
-            changed = mode.changed() => if changed.is_err() {
-                return;
             },
         }
     }

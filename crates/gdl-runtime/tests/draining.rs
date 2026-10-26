@@ -395,6 +395,90 @@ fn id<H>(instance: &Running<H>) -> InstanceId {
     instance.node.instance_id()
 }
 
+/// The proxy that hides a cell's drain from the hub that follows it hides
+/// one its hub sends just after the test turns it on, even when the relay
+/// next runs with the change and the hub's bytes both ready, as a busy
+/// host leaves it. A current-thread runtime, stepped by hand, makes that
+/// so on any host: one turn of its I/O driver sees the hub's bytes and a
+/// signal that ends the step, so the relay is woken but does not run; the
+/// mode then changes, and the next step runs the relay. Repeated, since a
+/// relay that took either first at random would pass a round by chance.
+#[test]
+fn the_proxy_hides_a_drain_ready_as_its_mode_changes() {
+    use std::io::Write as _;
+    use tokio::io::AsyncReadExt as _;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let hub = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let proxy = runtime.block_on(common::proxy::Proxy::new(
+        hub.local_addr().expect("an address"),
+    ));
+    let mut client = runtime
+        .block_on(tokio::net::TcpStream::connect(("127.0.0.1", proxy.port)))
+        .expect("the proxy accepts");
+    let signals = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let signal = runtime
+        .block_on(tokio::net::TcpStream::connect(
+            signals.local_addr().expect("an address"),
+        ))
+        .expect("connected");
+    let (mut signalling, _) = signals.accept().expect("accepted");
+    // The relay connects to the hub once the runtime runs it.
+    hub.set_nonblocking(true).expect("nonblocking");
+    let (mut sent, _) = runtime.block_on(async {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                match hub.accept() {
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    accepted => return accepted.expect("accepted"),
+                }
+            }
+        })
+        .await
+        .expect("the relay connected in time")
+    });
+    sent.set_nonblocking(false).expect("blocking");
+
+    for round in 0..20 {
+        proxy.set(Mode::Forward);
+        // The relay, queued by the change, runs before the timer fires: it
+        // takes the change and waits on both again.
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await });
+        sent.write_all(b"\"draining\"").expect("the hub sends");
+        signalling.write_all(b"x").expect("signalled");
+        runtime.block_on(async {
+            let mut byte = [0u8; 1];
+            loop {
+                signal.readable().await.expect("readable");
+                match signal.try_read(&mut byte) {
+                    Ok(1) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    other => panic!("the signal: {other:?}"),
+                }
+            }
+            // Read to the end of what came, so that the next round's
+            // signal is a new readiness, seen only by a turn of the driver.
+            assert!(signal.try_read(&mut byte).is_err());
+        });
+        proxy.set(Mode::Undrained);
+        let mut got = [0u8; 10];
+        runtime
+            .block_on(async { tokio::time::timeout(WAIT, client.read_exact(&mut got)).await })
+            .expect("relayed in time")
+            .expect("relayed");
+        assert_eq!(
+            &got,
+            b"\"ready\"   ",
+            "round {round}: {}",
+            String::from_utf8_lossy(&got)
+        );
+    }
+}
+
 /// A chooser whose view of a cell is stale offers to it after the cell
 /// began to drain: the cell's entry takes the offer until the bound has
 /// passed since it learned of the drain, and declines it after, and the
@@ -421,6 +505,10 @@ async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
     let cells = tables(&chooser);
     following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
     proxy.set(Mode::Undrained);
+    // Held at the entry, so that the entry is still there once it stops
+    // taking work. Taken before the drain, so that the only offer that
+    // must arrive within the bound is the one asked for next.
+    let held = gated(&chooser, &e1, "held").await;
 
     let started = Instant::now();
     m1.readiness.drain().await.expect("the cell drains");
@@ -429,12 +517,9 @@ async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
         .expect("the draining cell answered");
     assert_eq!(
         (m1.forwards(), m2.forwards()),
-        (1, 0),
+        (2, 0),
         "taken within the bound"
     );
-    // Held at the entry, so that the entry is still there once it stops
-    // taking work.
-    let held = gated(&chooser, &e1, "held").await;
     declining(&m1.entries[0]).await;
     assert!(
         started.elapsed() >= BOUND,
