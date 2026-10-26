@@ -8,7 +8,8 @@ use std::sync::Arc;
 use common::selecting::{Counting, counted};
 use common::streamed::{self, Brief, Note, Script, ask, replies, words};
 use common::{
-    Cluster, Events, WAIT, collect, partitions, placement_of, settles, source_segment, velo_node,
+    Cluster, Events, WAIT, collect, ms, partitions, placement_of, settles, source_segment,
+    velo_node,
 };
 use gdl::{Cx, Streamed, items};
 use gdl_runtime::{Layout, Placement, RuntimeConfig};
@@ -101,6 +102,43 @@ async fn a_relay_streams_the_request_through_the_middle_segment() {
     assert_eq!((served.forwards, served.inputs), (1, 1), "{served:?}");
 }
 
+/// In this placement C relays the request's items to D. The relay gives
+/// back its admission share and egress permit, then its lease, the third
+/// the request takes. `settles` does not count leases, so the cluster can
+/// settle while this lease is held. The 200 ms drop delay can leave a
+/// lease held when the count is checked. A stalled test task can miss that
+/// window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relays_lease_given_back_after_the_cluster_settles_is_waited_for() {
+    let blocks: Vec<Vec<String>> = [vec!["A", "D", "G"], vec!["B"], vec!["C", "E", "F"]]
+        .iter()
+        .map(|block| block.iter().map(|n| n.to_string()).collect())
+        .collect();
+    let manifest = streamed::contract::manifest();
+    let placement = placement_of(&blocks);
+    let layout = gdl_runtime::layout(&manifest, &placement).expect("layout");
+    let placement = counted(placement, &layout);
+    let counting = Counting::slow(2, ms(200));
+    let nodes = nodes(blocks.len()).await;
+    let events = Events::new();
+    let cluster = streamed::deploy(
+        &streamed::instances(&nodes, &placement),
+        &placement,
+        &events,
+        counting.config(),
+    );
+    let input = words(&events, &["x", "y"], false);
+    let out = cluster
+        .segment(&source_segment(&placement))
+        .call(Cx::new(), ask("p", Script::default(), input))
+        .await
+        .expect("call");
+    assert_eq!(collect(out).await, replies("p", &["x", "y"]));
+    assert!(settles(&cluster).await);
+    assert_eq!(counting.taken(), 3);
+    assert!(counting.released().await, "a lease was kept");
+}
+
 /// About 15 s: one request through each of the 877 placements, on velo
 /// nodes started once. Each placement splits the hops differently, so none
 /// can stand in for another.
@@ -160,7 +198,7 @@ async fn every_placement_of_the_streamed_reference_graph_matches_the_local_run()
         assert_eq!(served_work(&cluster), expected_work(&layout), "{blocks:?}");
         if selected {
             assert_eq!(counting.taken(), expected_work(&layout).0, "{blocks:?}");
-            assert_eq!(counting.live(), 0, "{blocks:?}: a lease was kept");
+            assert!(counting.released().await, "{blocks:?}: a lease was kept");
         }
     }
 }

@@ -99,7 +99,7 @@ async fn every_placement_of_the_reference_graph_matches_the_local_run() {
                 want.0,
                 "{blocks:?}: a hand-off chose no instance"
             );
-            assert_eq!(counting.live(), 0, "{blocks:?}: a lease was kept");
+            assert!(counting.released().await, "{blocks:?}: a lease was kept");
         }
     }
 }
