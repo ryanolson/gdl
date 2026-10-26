@@ -71,43 +71,56 @@ pub trait Selector: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Choice<'a>>> + Send + 'a;
 }
 
-/// A type a selector can read a request's head as: any type that
-/// deserializes, or [`Encoded`].
+/// A type a selector or a cell policy can read a request's head as: any
+/// type that deserializes, [`Encoded`], or a [`Projected`] part of the
+/// head.
 pub trait Head: sealed::Sealed + Sized + Send + Sync + 'static {}
 
 impl<T: DeserializeOwned + Send + Sync + 'static> Head for T {}
 impl Head for Encoded {}
+impl<P: Projection> Head for Projected<P> {}
 
 /// A head read as its bytes only: no decode, and no check of its type.
 #[derive(Debug, Clone, Copy)]
 pub struct Encoded;
 
-mod sealed {
+pub(crate) mod sealed {
     use std::any::TypeId;
 
     use gdl_model::Encoding;
     use serde::de::DeserializeOwned;
 
+    use super::{Projected, Projection};
     use crate::error::{Error, ErrorKind, Result};
 
     pub trait Sealed: Sized {
         fn decode(bytes: &[u8], encoding: Encoding) -> Result<Self>;
         /// The type that the crossing's edge must carry, if any.
         fn edge() -> Option<(TypeId, &'static str)>;
+        /// Whether it reads the head's fields by their names, which a
+        /// positional encoding does not carry.
+        fn by_name() -> bool {
+            false
+        }
+    }
+
+    /// Read `bytes` as a `T`, or say why not.
+    fn read<T: DeserializeOwned>(bytes: &[u8], encoding: Encoding) -> Result<T> {
+        crate::codec::decoder::<T>(encoding)(bytes).map_err(|e| {
+            Error::new(
+                ErrorKind::Codec,
+                format!(
+                    "the request's head could not be read as `{}`: {}",
+                    std::any::type_name::<T>(),
+                    e.message()
+                ),
+            )
+        })
     }
 
     impl<T: DeserializeOwned + Send + Sync + 'static> Sealed for T {
         fn decode(bytes: &[u8], encoding: Encoding) -> Result<Self> {
-            crate::codec::decoder::<T>(encoding)(bytes).map_err(|e| {
-                Error::new(
-                    ErrorKind::Codec,
-                    format!(
-                        "a selector could not read the request's head as `{}`: {}",
-                        std::any::type_name::<T>(),
-                        e.message()
-                    ),
-                )
-            })
+            read(bytes, encoding)
         }
 
         fn edge() -> Option<(TypeId, &'static str)> {
@@ -123,6 +136,64 @@ mod sealed {
         fn edge() -> Option<(TypeId, &'static str)> {
             None
         }
+    }
+
+    impl<P: Projection> Sealed for Projected<P> {
+        fn decode(bytes: &[u8], encoding: Encoding) -> Result<Self> {
+            read(bytes, encoding).map(Projected)
+        }
+
+        fn edge() -> Option<(TypeId, &'static str)> {
+            Some((TypeId::of::<P::Of>(), std::any::type_name::<P::Of>()))
+        }
+
+        fn by_name() -> bool {
+            true
+        }
+    }
+}
+
+/// A part of a request's head, read by the names of its fields: a type
+/// that declares some fields of the edge's type [`Of`](Projection::Of),
+/// under the same names and types. A router reads only those, and the
+/// decoder skips the others, so it never builds the rest of a large
+/// request.
+///
+/// The runtime checks `Of` against the crossing's edge when the segment
+/// starts, and refuses an edge whose encoding is positional
+/// (`msgpack_array`), which has no field names to read by. A field that
+/// `Of` does not have fails each request's read with `Codec`.
+///
+/// ```
+/// #[derive(serde::Deserialize)]
+/// struct Routed { request: String, hint: Hint }
+/// #[derive(serde::Deserialize)]
+/// struct Hint { model: String }
+///
+/// /// The part of `Routed` a router reads.
+/// #[derive(serde::Deserialize)]
+/// struct Hinted { hint: Hint }
+///
+/// impl gdl::Projection for Hinted {
+///     type Of = Routed;
+/// }
+/// // A policy or selector then reads `type Head = gdl::Projected<Hinted>`.
+/// ```
+pub trait Projection: DeserializeOwned + Send + Sync + 'static {
+    /// The type of the edge it reads a part of: the request that crosses.
+    type Of: 'static;
+}
+
+/// The head read as the projection `P`: a router's `Head` that reads a
+/// part of the edge's type rather than the whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Projected<P>(pub P);
+
+impl<P> std::ops::Deref for Projected<P> {
+    type Target = P;
+
+    fn deref(&self) -> &P {
+        &self.0
     }
 }
 
@@ -350,6 +421,10 @@ pub trait Erased: Send + Sync + 'static {
 
     /// The head type it reads, if it reads one.
     fn edge(&self) -> Option<(TypeId, &'static str)>;
+
+    /// Whether it reads the head's fields by name, which a positional
+    /// encoding cannot give.
+    fn by_name(&self) -> bool;
 }
 
 /// A typed selector behind [`Erased`].
@@ -379,6 +454,10 @@ impl<S: Selector> Erased for Typed<S> {
 
     fn edge(&self) -> Option<(TypeId, &'static str)> {
         <S::Head as sealed::Sealed>::edge()
+    }
+
+    fn by_name(&self) -> bool {
+        <S::Head as sealed::Sealed>::by_name()
     }
 }
 

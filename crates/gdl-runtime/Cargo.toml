@@ -112,3 +112,7 @@ required-features = ["hub"]
 [[test]]
 name = "allocs"
 harness = false
+
+[[test]]
+name = "policies"
+required-features = ["hub"]

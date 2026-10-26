@@ -189,6 +189,13 @@ pub fn check_selector_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `name` can name a cell policy in `[cells.<class>] policy`: a
+/// name of the same shape as a selector's, so that a registered policy is
+/// named as a selector is.
+pub fn check_cell_policy_name(name: &str) -> Result<(), String> {
+    check_name_shape("policy", name)
+}
+
 /// Whether `name` can name a class. A class name is a TOML key in the files
 /// that deploy a class, and a value a setting in the environment carries,
 /// so it has a settings key's shape. It never names a routing policy, so

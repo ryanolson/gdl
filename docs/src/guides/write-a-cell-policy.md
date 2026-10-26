@@ -1,0 +1,109 @@
+# Write a cell policy
+
+A cell policy chooses the cell of a class that a hand-off goes to, when a hop crosses into that class. This guide writes one that reads a routing hint from the request, tests it without a runtime, registers it, and names it in a placement. [Following and choosing cells](../concepts/cell-routing.md#choosing-a-cell) explains when a policy runs and what gdl's own policies do. Try `round_robin` and `home_first` first: they need no code.
+
+## 1. Read only what you route by
+
+A policy's `Head` is what it reads of the request's head, as for a [selector](write-a-selector.md):
+
+- the edge's own type, decoded whole;
+- `gdl::Encoded`, the bytes only, with no decode;
+- `gdl::Projected<P>`, a part of the head: a type `P` that declares some of the edge type's fields, under the same names and types.
+
+A request that crosses into a model's class often carries a large body and a small hint. A projection reads the hint and skips the body:
+
+```rust
+use gdl::Projection;
+
+/// What crosses into the model's class.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Routed {
+    request: Internal,
+    hint: Hint,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Hint {
+    model: String,
+    fingerprint: [u8; 16],
+    first_turn: bool,
+}
+
+/// The part of `Routed` the policy reads.
+#[derive(serde::Deserialize)]
+struct Hinted {
+    hint: Hint,
+}
+
+impl Projection for Hinted {
+    type Of = Routed;
+}
+```
+
+`Of` names the edge type. The segment refuses to start when the edge carries another type, or when the edge is encoded as `msgpack_array`, which has no field names. [Runtime feature costs](../operations/feature-costs.md#cell-policies) measures what a projection saves.
+
+## 2. Implement `gdl::CellPolicy`
+
+```rust
+use gdl::{Cell, CellPolicy, CellRequest, Projected};
+
+/// The first cell that serves the request's model.
+struct ByModel;
+
+impl CellPolicy for ByModel {
+    type Head = Projected<Hinted>;
+
+    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<usize> {
+        let model = &request.head().hint.model;
+        cells.iter().position(|cell| {
+            cell.name().starts_with(model.as_str())
+                && cell.takes_work()
+                && !request.is_excluded(cell)
+        })
+    }
+}
+```
+
+- Return the index in `cells` of the cell to offer this attempt to, or `None` when no cell may take it. `None` fails the request with `Routing`.
+- Skip a cell that `request.is_excluded` names: it declined this request.
+- `request` also gives the chooser's region, the clock, the damped cells (`request.damped()`), the attempt's turn, and a random draw (`request.draw()`).
+- `choose` is not `async`, and it runs once per attempt. Take no lock and allocate nothing in it.
+- Override `eligible` when a cell can stop fitting while a selector waits, as `home_first` does for a stale summary. By default, a cell is eligible while it takes work.
+
+## 3. Test it without a runtime
+
+Every input is a plain value that a test can build:
+
+```rust
+use gdl::{CellState, Cx, Load, LoadSummary};
+use tokio::time::Instant;
+
+let now = Instant::now();
+let cells = [
+    Cell::new("model", "llama-1", "us-east-1", CellState::Ready).with_entries(1),
+    Cell::new("model", "qwen-1", "us-east-1", CellState::Ready)
+        .with_entries(1)
+        .with_load(Load::new(LoadSummary::default(), now)),
+];
+let cx = Cx::new();
+let head = Projected(Hinted { hint: Hint { model: "qwen".into(), fingerprint: [0; 16], first_turn: true } });
+let request = CellRequest::new(&cx, &head, "us-east-1", now);
+assert_eq!(ByModel.choose(request, &cells), Some(1));
+```
+
+`with_excluded`, `with_damped` (a `gdl::Damped`), and `with_turn` set the rest. `crates/gdl/tests/policies.rs` has more.
+
+## 4. Register it
+
+In an in-process deployment, add it to the `RuntimeConfig` with `config.cell_policies.add("by_model", ByModel)?`. A chooser launched through a `ProcessConfig` checks the placement's names against that config's `runtime.cell_policies`, so register it there too. In a hand-written `SegmentBinary`, call `builder.cell_policy("by_model", ByModel)?` in `build`. A generated binary chooses cells only by gdl's own policies (see [Known limitations](../operations/limitations.md)).
+
+A name is lowercase letters and digits in words joined by single `_`s, starts with a letter, and has at most 64 characters. It cannot be `home_first` or `round_robin`, and it can be registered once.
+
+## 5. Name it in the placement
+
+```toml
+[cells.model]
+policy = "by_model"
+```
+
+The placement hash covers the name. A chooser refuses to launch when nothing registers the name and gdl does not have it, and names the policy and the class.

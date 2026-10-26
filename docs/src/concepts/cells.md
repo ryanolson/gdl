@@ -57,7 +57,7 @@ A class that a boundary enters can name a cell policy: how a chooser picks a cel
 policy = "home_first"   # round_robin by default
 ```
 
-`policy` is the only key. A `[cells.<class>]` table must name a class of the spec that a boundary enters. The spec does not check the name against a list. A chooser that cannot run it refuses to start. The runtime provides `round_robin` and `home_first` ([Choosing a cell](cell-routing.md#choosing-a-cell)).
+`policy` is the only key. A `[cells.<class>]` table must name a class of the spec that a boundary enters. The spec does not check the name against a list. A chooser that cannot run it refuses to start. gdl provides `round_robin` and `home_first`, and a deployment can register others by name ([Choosing a cell](cell-routing.md#choosing-a-cell)).
 
 The placement hash covers each entered class's effective policy, the default included. A spec that spells out the default has the same hash as one that leaves it unsaid. Any other value changes the hash.
 

@@ -16,16 +16,16 @@ NOTE: gdl is experimental. Its design and tests are still in progress, and its A
 - **Live rosters.** Instances join, retire, and drain while the others serve. See [Segment lifecycle](docs/src/concepts/lifecycle.md).
 - **Selectors and offers.** Route a crossing by round robin, random, or a selector you write, and fail over when an instance declines. See [Routing, selectors, and offers](docs/src/concepts/routing.md).
 - **Dynamo-shaped health and metrics.** See [Health and metrics](docs/src/operations/observability.md).
-- **Cells.** One graph across several deployments, each with its own hub. See [Classes and cells](docs/src/concepts/cells.md).
+- **Cells.** One graph across several deployments, each with its own hub. A cell policy, gdl's or one you register, chooses the cell for each request. See [Classes and cells](docs/src/concepts/cells.md) and [Write a cell policy](docs/src/guides/write-a-cell-policy.md).
 - **A composer.** Draw a graph in a browser, place it, and deploy it with Compose. See [Compose in the browser](docs/src/guides/composer.md).
 
 ## Crates
 
-gdl is two layers. A crate that implements nodes depends on `gdl`: the node roles, the request context, selectors, the derives, and local composition, so that it can run its nodes in one process. It does not link velo. The runtime, `gdl-runtime`, runs those nodes: segments, crossings over velo, discovery, and the segment binaries. Contract crates, generated segment crates, and programs that run a graph depend on `gdl-runtime`, which re-exports the `gdl` it was built with as `gdl_runtime::gdl`. The derives expand to `::gdl::...`, so a crate that uses one depends on `gdl` itself, also when it depends on `gdl-runtime`.
+gdl is two layers. A crate that implements nodes depends on `gdl`: the node roles, the request context, selectors, cell policies, the derives, and local composition, so that it can run its nodes in one process. It does not link velo. The runtime, `gdl-runtime`, runs those nodes: segments, crossings over velo, discovery, and the segment binaries. Contract crates, generated segment crates, and programs that run a graph depend on `gdl-runtime`, which re-exports the `gdl` it was built with as `gdl_runtime::gdl`. The derives expand to `::gdl::...`, so a crate that uses one depends on `gdl` itself, also when it depends on `gdl-runtime`.
 
 | Crate | For | Contents |
 |---|---|---|
-| `gdl` | Authors of nodes | The request context, role traits, local composition, selectors, metrics, and the derives. No velo |
+| `gdl` | Authors of nodes and routers | The request context, role traits, local composition, selectors, cell policies, metrics, and the derives. No velo |
 | `gdl-runtime` | Programs that run a graph | Segments, crossings over velo, discovery, the segment binary, and `graph!`. Re-exports `gdl` and the model |
 | `gdl-model` | Tools | The manifest, placement, layout, diagrams, and the fleet file, without the runtime. Builds for wasm |
 | `gdl-syntax` | The macro and the generator | The graph parser and checked model |
@@ -34,7 +34,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-extract` | Tools | The source reader and the working catalogue |
 | `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | Users | The composer: a page and its server |
-| `gdl-cells` | Hub and runtime | The cell plane's shared types: the cell record and the `CellDirectory` backends. No velo |
+| `gdl-cells` | `gdl`, hub, and runtime | The cell plane's shared types: the cell record, a cell's state and load summary, and the `CellDirectory` backends. No velo |
 | `gdl-watch` | Hub and runtime | The watches a cell's hub serves, as typed events, and their client |
 | `gdl-hub` | Deployments | The discovery hub, and a cell's quorum, health, record, and follows |
 

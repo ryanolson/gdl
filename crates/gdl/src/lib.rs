@@ -25,6 +25,7 @@ mod items;
 #[doc(hidden)]
 mod meter;
 mod metrics;
+mod policy;
 mod role;
 mod select;
 mod service;
@@ -40,6 +41,10 @@ pub use gdl_model::{ConfigField, ConfigSchema, ConfigValue, Encoding, MetricFiel
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 pub use metrics::Metrics;
+pub use policy::{
+    Cell, CellPolicies, CellPolicy, CellRequest, CellState, Damped, HomeFirst, Load, LoadSummary,
+    RoundRobin,
+};
 /// The prometheus version node metrics are built with: a node crate names
 /// its metric types through here, so they are the types the runtime
 /// registers and serves.
@@ -47,7 +52,7 @@ pub use prometheus;
 pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
 pub use select::{
     Affinity, AffinityConfig, Choice, Encoded, Head, Instance, InstanceId, Instances, LeastLoaded,
-    Request, Selector, Selectors,
+    Projected, Projection, Request, Selector, Selectors,
 };
 pub use service::{Client, Endpoints, Service};
 pub use streamed::Streamed;
@@ -117,6 +122,7 @@ pub mod __runtime {
     pub use crate::meter::{
         END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit, ended, note,
     };
+    pub use crate::policy::{ErasedPolicy, TypedPolicy, Window, cell_id};
     pub use crate::select::{Erased, Lease, Picked, Typed};
 }
 

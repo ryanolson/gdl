@@ -257,6 +257,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "futures",
+ "gdl-cells",
  "gdl-macros",
  "gdl-message",
  "gdl-model",
@@ -268,6 +269,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "gdl-cells"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "gdl-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

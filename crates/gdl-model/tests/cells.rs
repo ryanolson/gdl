@@ -110,6 +110,23 @@ fn a_classed_placement_hashes_the_default_policy() {
     );
 }
 
+/// The hash covers a policy's name whatever registers it: two custom
+/// policies hash apart, and apart from gdl's own, so instances that
+/// choose cells by different policies are not one deployment.
+#[test]
+fn a_registered_policy_name_is_hashed() {
+    let hashes: std::collections::BTreeSet<u64> =
+        ["round_robin", "home_first", "by_model", "by_model_2"]
+            .into_iter()
+            .map(|name| built().cell_policy("model_x", policy(name)).hash())
+            .collect();
+    assert_eq!(hashes.len(), 4, "{hashes:x?}");
+    assert_eq!(
+        parsed("[cells.model_x]\npolicy = 'by_model'\n").hash(),
+        built().cell_policy("model_x", policy("by_model")).hash()
+    );
+}
+
 /// A placement without classes writes nothing for cell policies, and keeps
 /// the hash it had before they existed.
 #[test]
@@ -349,7 +366,7 @@ fn a_misplaced_cells_table_is_refused_by_layout() {
 }
 
 /// A policy is named like a selector: the same shape, and no list of known
-/// names, since a custom policy can be registered later.
+/// names, since a deployment can register its own.
 #[test]
 fn a_policy_name_has_a_selector_names_shape() {
     for bad in [

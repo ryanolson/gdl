@@ -4,7 +4,7 @@ The root workspace has twelve crates. Each example is its own workspace, outside
 
 | Crate | Depends on | Contents |
 |---|---|---|
-| `gdl` | (no velo) | What a node crate depends on: `Cx`, `Error`, the role traits, `Build`, selectors, metrics, the derives, and local composition |
+| `gdl` | `gdl-model`, `gdl-cells`, `gdl-message`, `gdl-macros` (no velo) | What a node crate depends on: `Cx`, `Error`, the role traits, `Build`, selectors, cell policies, metrics, the derives, and local composition |
 | `gdl-runtime` | `gdl`, `gdl-model`, velo | Segments, crossings over velo, discovery, the segment binary, and `graph!`. It re-exports `gdl` and the model |
 | `gdl-model` | nothing in the workspace | The manifest, placement, layout, validator, diagrams, the fleet file, a cell's settings, and the names of a segment's hub services. It builds for wasm |
 | `gdl-syntax` | `gdl-model` | The graph parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract. It builds for wasm |
@@ -13,7 +13,7 @@ The root workspace has twelve crates. Each example is its own workspace, outside
 | `gdl-extract` | `gdl-model`, `gdl-syntax` | The source reader and the working catalogue |
 | `gdl-gen` | `gdl-model`, `gdl-syntax`, `gdl-message`, `gdl-extract` | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | `gdl-gen`, `gdl-extract`, `gdl-model`, `gdl-syntax` | The composer: a page and its axum server |
-| `gdl-cells` | `gdl-model` | The cell plane's shared types: the cell record, the `CellDirectory` trait, its `memory` and `dir` backends, the reader's view, and the conformance suite (the `conformance` feature). It never links velo |
+| `gdl-cells` | `gdl-model` | The cell plane's shared types: the cell record, the `CellDirectory` trait, its `memory` and `dir` backends, the reader's view, and the conformance suite (the `conformance` feature). It never links velo, so `gdl` takes `CellState` and `LoadSummary` from it |
 | `gdl-watch` | `gdl-cells`, `gdl-model`, velo's peer types | The watches a cell's hub serves, as typed events, and the client that reads them. It never links velo-hub's server |
 | `gdl-hub` | `gdl-cells`, `gdl-watch`, velo-hub | The discovery hub: velo-hub with admission restricted to one deployment, and for a cell's hub the `gdl-cell` extension. See [Discovery](../concepts/hub.md) and [Classes and cells](../concepts/cells.md) |
 

@@ -1,6 +1,6 @@
 # Feature costs
 
-This chapter reports what runtime metrics, live rosters, and routing selectors add to a request. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
+This chapter reports what runtime metrics, live rosters, routing selectors, and registered cell policies add to a request. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
 
 ## Method
 
@@ -78,3 +78,36 @@ A named selector costs what it costs. The change build only, five rounds, two se
 | `affinity` (on the head's bytes) | 629,843 |
 
 `least_loaded` adds about 2.5k instructions: a table load, a scan of the counts, a boxed lease, and its drop. `affinity` is within the spread of `round_robin`.
+
+## Cell policies
+
+A chooser's cell policy became a `gdl` trait that a deployment can register by name. The pick reads the policy through one dynamic call, as before, and the policy reads the head through its `Head`. Measured on an aarch64 Linux host (Cortex-X925 and Cortex-A725, 20 cores), shared, load average 5 to 10, rustc 1.93.1. Base `25e0aeb`, change `1fe0f0a`:
+
+```bash
+cargo test --release -p gdl-runtime --lib cost_of -- --ignored --nocapture
+cargo test --release -p gdl-runtime --lib the_cost_of_a_boundary_pick -- --ignored --nocapture
+```
+
+| Measure | Base | Change |
+|---|---|---|
+| pick, `round_robin`, four idle cells | 98.7 ns, 98.6 ns | 98.0 ns, 96.8 ns |
+| pick, `home_first`, four idle cells | 125.3 ns, 125.2 ns | 126.3 ns, 125.1 ns |
+| boundary pick (`the_cost_of_a_boundary_pick`) | 106 ns | 105 to 107 ns |
+| boundary pick and acceptance | 122 ns | 121 to 122 ns |
+| accepted first offer over loopback, cells | 36.8 us, 37.1 us | 33.1 us, 36.8 us |
+| accepted first offer over loopback, roster | 30.3 us, 33.2 us | 37.9 us, 32.6 us |
+
+The picks are unchanged, and the offers are within their spread. Without `#[inline]` on the small accessors of `gdl::Damped`, `Cell`, `Load`, and `CellRequest`, pick and acceptance took 126 ns in every round: the runtime calls them across the crate boundary, and the workspace builds without LTO. A pick allocates nothing under either policy (`a_pick_allocates_nothing_under_either_policy`).
+
+What a policy pays to read the head of a 100 KB request (100 messages of 1,000 characters, the hint after them), by the runtime's path, from `crates/gdl/benches/projection.rs`:
+
+```bash
+cargo bench -p gdl --bench projection
+```
+
+| Head | msgpack | JSON |
+|---|---|---|
+| the whole request (`Routed`) | 10.7 us | 20.5 us |
+| the hint only (`Projected<Hinted>`) | 4.4 us | 12.0 us |
+
+A skipped field is still read. In msgpack, rmp-serde reads an ignored field through `deserialize_any`, which checks each string as UTF-8. In JSON, serde_json scans every skipped byte.

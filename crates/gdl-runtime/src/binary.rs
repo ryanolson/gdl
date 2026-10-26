@@ -21,7 +21,7 @@ use gdl::Build;
 use gdl::Cx;
 use gdl::Metrics;
 use gdl::Result;
-use gdl::{Affinity, LeastLoaded, Selector, Selectors};
+use gdl::{Affinity, CellPolicies, CellPolicy, LeastLoaded, Selector, Selectors};
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
 
 /// What one segment's binary hosts and serves: the parts that differ
@@ -112,7 +112,7 @@ pub async fn run_segment<B: SegmentBinary>(
     // First: a stop while the nodes build is taken, and the probes say the
     // process is live while it starts.
     let process = Process::start(&config).await?;
-    let (config, settings) = config.into_hosted();
+    let (mut config, settings) = config.into_hosted();
     // The deployment before the build: every metric a node registers
     // carries the deployment's identity.
     let deployment = B::deployment()?;
@@ -140,6 +140,9 @@ pub async fn run_segment<B: SegmentBinary>(
             }
         }
     }
+    // Before the launch: a chooser checks the policies its placement
+    // names against these before it registers.
+    config.runtime.cell_policies = builder.cell_policies();
     let ready = async {
         tokio::try_join!(B::ready(&hosts), builder.ready())?;
         Ok(())
@@ -203,6 +206,8 @@ pub struct Builder {
     /// The routing selectors built so far, and how to wait for each to be
     /// ready.
     selectors: Mutex<(Selectors, Vec<Readiness>)>,
+    /// The cell policies registered so far.
+    cell_policies: Mutex<CellPolicies>,
 }
 
 /// One built selector's [`Build::ready`].
@@ -220,7 +225,31 @@ impl Builder {
             defined: Mutex::new(BTreeMap::new()),
             tables,
             selectors: Mutex::new((Selectors::new(), Vec::new())),
+            cell_policies: Mutex::new(CellPolicies::new()),
         })
+    }
+
+    /// Choose the cells of each class whose `[cells.<class>] policy` is
+    /// `name` by `policy`. Refuses a name a placement cannot use, gdl's
+    /// own policies' names, and a name registered twice.
+    pub fn cell_policy<P: CellPolicy>(
+        &self,
+        name: &str,
+        policy: P,
+    ) -> std::result::Result<(), Failure> {
+        self.cell_policies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .add(name, policy)
+            .map_err(|e| format!("registering cell policy {name}: {e}").into())
+    }
+
+    /// The registered cell policies, for the launch and the runtime.
+    fn cell_policies(&self) -> CellPolicies {
+        self.cell_policies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Build `S`, the routing selector named `name` in the placement, from

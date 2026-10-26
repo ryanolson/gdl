@@ -4,20 +4,20 @@
 //! the hand-off, never on the wire and never kept per request.
 
 use std::collections::BTreeMap;
-use std::hash::{BuildHasher, RandomState};
+use std::hash::RandomState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arc_swap::ArcSwap;
 use futures::future::BoxFuture;
-use gdl::__runtime::{Erased, Picked};
-use gdl::{Cx, Error, Instances, Result};
-use gdl_model::Layout;
+use gdl::__runtime::{Erased, ErasedPolicy, Picked};
+use gdl::{CellPolicies, CellRequest, Cx, Error, ErrorKind, Instances, Result};
+use gdl_model::{Encoding, Layout};
 use velo::InstanceId;
 
 use super::damping::Damping;
 use super::lease::CellLease;
-use super::policy::{self, CellChooser};
+use super::policy;
 use super::{CellTable, Cells, EntryTable};
 use crate::dist::roster::{CHOICES, Policy, turn};
 use crate::dist::runtime::Within;
@@ -26,6 +26,9 @@ use crate::dist::runtime::Within;
 pub(crate) struct Crossing {
     target: Target,
     within: Within,
+    /// The encoding of the head that crosses, which a cell policy that
+    /// reads it reads it in.
+    encoding: Encoding,
     /// The attempts' turns for the cell policy, and the draws hashed from
     /// them for a policy that draws at random, apart from the turns of the
     /// instance within the cell: with one sequence and one hasher for
@@ -35,12 +38,13 @@ pub(crate) struct Crossing {
 }
 
 impl Crossing {
-    /// The hand-off into `target`, choosing the instance within the
-    /// chosen cell as `within` chooses.
-    pub(crate) fn new(target: Target, within: Within) -> Self {
+    /// The hand-off into `target` of a head in `encoding`, choosing the
+    /// instance within the chosen cell as `within` chooses.
+    pub(crate) fn new(target: Target, within: Within, encoding: Encoding) -> Self {
         Self {
             target,
             within,
+            encoding,
             draws: AtomicUsize::new(0),
             random: RandomState::new(),
         }
@@ -51,34 +55,40 @@ impl Crossing {
         &self.within
     }
 
-    /// Choose a cell for one attempt, then an instance of it by `policy`,
-    /// with the chosen cell's [`id`](CellTable::id) and a lease on its
-    /// follow, or `None` when no cell but those in `excluded` may take it:
-    /// one load of the table, a read of the clock, two counter increments,
-    /// the policy's passes over the followed cells, and the lease, with no
-    /// lock and no allocation. A cell whose follow became not offered
-    /// since the table was loaded refuses the lease, and the table, which
-    /// then no longer offers it, is loaded again.
+    /// Choose a cell for one attempt of the request with context `cx`
+    /// and head `head`, then an instance of it by `policy`, with the
+    /// chosen cell's [`id`](CellTable::id) and a lease on its follow, or
+    /// `None` when no cell but those in `excluded` may take it: one load
+    /// of the table, a read of the clock, two counter increments, the cell
+    /// policy's read of the head and its passes over the followed cells,
+    /// and the lease, with no lock and no allocation of the runtime's. A
+    /// cell whose follow became not offered since the table was loaded
+    /// refuses the lease, and the table, which then no longer offers it,
+    /// is loaded again. Fails when the cell policy cannot read the head.
     pub(crate) fn pick(
         &self,
+        cx: &Cx,
+        head: &[u8],
         policy: Policy,
         random: &RandomState,
         excluded: &[u64],
-    ) -> Option<(InstanceId, u64, CellLease)> {
+    ) -> Result<Option<(InstanceId, u64, CellLease)>> {
         for _ in 0..CHOICES {
             let table = self.target.table.load();
-            let cell = self.cell(&table, excluded)?;
+            let Some(cell) = self.cell(&table, cx, head, excluded)? else {
+                return Ok(None);
+            };
             let Some(lease) = CellLease::take(&cell.leases) else {
                 continue;
             };
             let sequence = cell.turn.fetch_add(1, Ordering::Relaxed);
-            return Some((
+            return Ok(Some((
                 cell.eligible[turn(policy, sequence, cell.eligible.len(), random)],
                 cell.id,
                 lease,
-            ));
+            )));
         }
-        None
+        Ok(None)
     }
 
     /// Choose a cell for one attempt, then ask `selector` to choose among
@@ -104,7 +114,7 @@ impl Crossing {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.target.table.load_full();
-                let Some(cell) = self.cell(&table, excluded).map(Arc::clone) else {
+                let Some(cell) = self.cell(&table, cx, head, excluded)?.map(Arc::clone) else {
                     return Ok(None);
                 };
                 let picked = selector
@@ -126,11 +136,8 @@ impl Crossing {
                 let chosen = cell.eligible[picked.index];
                 let target = &self.target;
                 let now = tokio::time::Instant::now();
-                let policy = |current: &CellTable| {
-                    target
-                        .policy
-                        .eligible(current, &target.region, excluded, now)
-                };
+                let policy =
+                    |current: &gdl::Cell| target.policy.eligible(current, &target.region, now);
                 let current = target.table.load();
                 let lease = still_eligible(&current, &cell, chosen, policy)
                     .and_then(|now| CellLease::take(&now.leases));
@@ -175,48 +182,92 @@ impl Crossing {
         self.target.damping.accept(cell);
     }
 
-    /// The cell the policy chooses from `table` for one attempt, of those
-    /// not in `excluded`, by the summaries' ages now: one relaxed increment
-    /// of the attempts' count, hashed only for a policy that draws at
-    /// random.
-    fn cell<'t>(&self, table: &'t EntryTable, excluded: &[u64]) -> Option<&'t Arc<CellTable>> {
+    /// The cell the policy chooses from `table` for one attempt of the
+    /// request with context `cx` and head `head`, of those not in
+    /// `excluded`, by the summaries' ages now: one relaxed increment of
+    /// the attempts' count, which a policy that draws at random hashes
+    /// when it asks. Fails when the policy cannot read the head.
+    fn cell<'t>(
+        &self,
+        table: &'t EntryTable,
+        cx: &Cx,
+        head: &[u8],
+        excluded: &[u64],
+    ) -> Result<Option<&'t Arc<CellTable>>> {
         let target = &self.target;
-        let turn = self.draws.fetch_add(1, Ordering::Relaxed);
-        let draw = if target.random {
-            self.random.hash_one(turn)
-        } else {
-            turn as u64
+        let turn = self.draws.fetch_add(1, Ordering::Relaxed) as u64;
+        let damped = target.damping.view();
+        let request = CellRequest::new(cx, &(), &target.region, tokio::time::Instant::now())
+            .with_bytes(head)
+            .with_excluded(excluded)
+            .with_damped(&damped)
+            .with_turn(turn)
+            .with_random(&self.random);
+        let at = target.policy.choose(request, self.encoding, &table.views)?;
+        // A policy names a cell by its place in the views it was given,
+        // which are the table's, index for index; a place past them is
+        // no cell.
+        Ok(at.and_then(|at| table.cells.get(at)))
+    }
+
+    /// Refuse a cell policy that reads the head as a type the crossing's
+    /// edge does not carry (`carried`, with the id `carries`), or by its
+    /// fields' names when the edge's encoding is positional: checked when
+    /// the segment starts, not per request.
+    pub(crate) fn check_head(
+        &self,
+        segment: &str,
+        carries: std::any::TypeId,
+        carried: &str,
+    ) -> Result<()> {
+        let target = &self.target;
+        let refused = |why: String| {
+            Err(Error::new(
+                ErrorKind::Placement,
+                format!(
+                    "segment `{segment}`: cell policy `{}` of class `{}` {why}",
+                    target.name, target.class
+                ),
+            ))
         };
-        target
-            .policy
-            .choose(
-                &table.cells,
-                &target.region,
-                excluded,
-                &target.damping.view(),
-                tokio::time::Instant::now(),
-                draw,
-            )
-            .map(|at| &table.cells[at])
+        if let Some((wants, wanted)) = target.policy.edge()
+            && wants != carries
+        {
+            return refused(format!(
+                "reads the head as `{wanted}`, but the request that crosses into `{}` carries `{carried}`",
+                target.segment
+            ));
+        }
+        if target.policy.by_name() && self.encoding == Encoding::MsgpackArray {
+            return refused(format!(
+                "reads the head's fields by name, but the request that crosses into `{}` is encoded as `msgpack_array`, which carries no names",
+                target.segment
+            ));
+        }
+        Ok(())
     }
 }
 
 /// The cell's current table in `table`, which may be newer, if `chosen`,
 /// an instance of `cell`, is still eligible in it: the cell's current
 /// table, of whatever generation, is `cell` itself or still offers it, and
-/// `policy` still takes it. The lease is taken from it, since it is the
-/// follow the offer is made under.
+/// `policy` still takes it, as it sees it. The lease is taken from it,
+/// since it is the follow the offer is made under.
 fn still_eligible<'t>(
     table: &'t EntryTable,
     cell: &Arc<CellTable>,
     chosen: InstanceId,
-    policy: impl Fn(&CellTable) -> bool,
+    policy: impl Fn(&gdl::Cell) -> bool,
 ) -> Option<&'t Arc<CellTable>> {
     table
         .cells
         .iter()
-        .find(|now| now.class == cell.class && now.cell == cell.cell)
-        .filter(|now| (Arc::ptr_eq(now, cell) || now.eligible.contains(&chosen)) && policy(now))
+        .zip(&table.views)
+        .find(|(now, _)| now.class == cell.class && now.cell == cell.cell)
+        .filter(|(now, view)| {
+            (Arc::ptr_eq(now, cell) || now.eligible.contains(&chosen)) && policy(view)
+        })
+        .map(|(now, _)| now)
 }
 
 /// A selector's choice within a cell: the instance, the cell's
@@ -226,16 +277,16 @@ pub(crate) type Chosen = (InstanceId, u64, Picked, CellLease);
 
 /// What a hand-off into another class chooses from: the class, its entry
 /// segment, the chooser's table of that segment's cells, the chooser's
-/// region, the class's cell policy, and the cells the chooser damps.
+/// region, the class's cell policy and its name, and the cells the
+/// chooser damps.
 #[derive(Clone)]
 pub(crate) struct Target {
     class: String,
     segment: String,
     table: Arc<ArcSwap<EntryTable>>,
     region: Arc<str>,
-    policy: &'static dyn CellChooser,
-    /// Whether `policy` draws at random, asked once rather than per pick.
-    random: bool,
+    policy: Arc<dyn ErasedPolicy>,
+    name: Arc<str>,
     /// The cells the chooser damps, shared by all its hand-offs.
     damping: Arc<Damping>,
 }
@@ -244,12 +295,13 @@ pub(crate) struct Target {
 /// forward position, each with what it chooses from: those whose hop's
 /// outer end is in `segment` and whose entry segment `cells` keeps a
 /// table for. Found once, when the runtime is built, so that a request
-/// pays one branch on what was found. A cell policy the runtime does not
-/// provide is refused.
+/// pays one branch on what was found. A cell policy that `policies` does
+/// not register and gdl does not have is refused.
 pub(crate) fn targets(
     layout: &Layout,
     segment: &str,
     cells: &Cells,
+    policies: &CellPolicies,
 ) -> Result<BTreeMap<(usize, usize), Target>> {
     let mut targets = BTreeMap::new();
     for boundary in layout.boundaries() {
@@ -266,7 +318,7 @@ pub(crate) fn targets(
         let Some(table) = cells.slot(&inner.segment) else {
             continue;
         };
-        let policy = policy::of(layout, &boundary.into)?;
+        let (name, policy) = policy::of(layout, &boundary.into, policies)?;
         targets.insert(
             (boundary.hop, inner.start),
             Target {
@@ -275,7 +327,7 @@ pub(crate) fn targets(
                 table,
                 region: cells.region(),
                 policy,
-                random: policy.random(),
+                name,
                 damping: cells.damping(),
             },
         );
@@ -329,21 +381,88 @@ mod tests {
     }
 
     fn crossing(cells: Vec<Arc<CellTable>>, within: Within) -> Crossing {
-        let table = Arc::new(ArcSwap::from_pointee(EntryTable {
-            cells: cells.into_boxed_slice(),
-        }));
+        let table = Arc::new(ArcSwap::from_pointee(EntryTable::new(
+            cells.into_boxed_slice(),
+        )));
         Crossing::new(
             Target {
                 class: "model_x".into(),
                 segment: "f".into(),
                 table,
                 region: Arc::from("home"),
-                policy: &policy::HomeFirst,
-                random: true,
+                policy: Arc::new(gdl::__runtime::TypedPolicy(Arc::new(gdl::HomeFirst))),
+                name: Arc::from("home_first"),
                 damping: Arc::default(),
             },
             within,
+            Default::default(),
         )
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Hinted {
+        #[allow(dead_code, reason = "a field to read, never read")]
+        hint: String,
+    }
+
+    impl gdl::Projection for Hinted {
+        type Of = String;
+    }
+
+    /// Reads a projection of `String`'s fields.
+    struct ByName;
+
+    impl gdl::CellPolicy for ByName {
+        type Head = gdl::Projected<Hinted>;
+
+        fn choose(
+            &self,
+            _: CellRequest<'_, gdl::Projected<Hinted>>,
+            _: &[gdl::Cell],
+        ) -> Option<usize> {
+            None
+        }
+    }
+
+    /// The edge check at the segment's start: a policy that reads a type
+    /// must be given that type, and one that reads fields by name an
+    /// encoding that names them; a policy that reads no type takes any
+    /// edge.
+    #[test]
+    fn a_policy_head_is_checked_against_the_edge() {
+        let by_name = |encoding| {
+            let mut crossing = crossing(Vec::new(), Within::Policy(Policy::RoundRobin));
+            crossing.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(ByName)));
+            crossing.target.name = Arc::from("by_name");
+            crossing.encoding = encoding;
+            crossing
+        };
+        let string = std::any::TypeId::of::<String>();
+        for encoding in [Encoding::Msgpack, Encoding::Json] {
+            by_name(encoding)
+                .check_head("a", string, "String")
+                .expect("an edge of the type, in an encoding that names fields");
+        }
+        let error = by_name(Encoding::MsgpackArray)
+            .check_head("a", string, "String")
+            .expect_err("a positional encoding");
+        let message = error.to_string();
+        assert_eq!(error.kind(), ErrorKind::Placement);
+        assert!(
+            message.contains("by_name") && message.contains("msgpack_array"),
+            "{message}"
+        );
+        let error = by_name(Encoding::Msgpack)
+            .check_head("a", std::any::TypeId::of::<u32>(), "u32")
+            .expect_err("another type");
+        let message = error.to_string();
+        assert!(
+            message.contains("String") && message.contains("u32"),
+            "{message}"
+        );
+        let own = crossing(Vec::new(), Within::Policy(Policy::RoundRobin));
+        own.check_head("a", std::any::TypeId::of::<u32>(), "u32")
+            .expect("home_first reads no head");
     }
 
     /// The longest a test waits for something it expects.
@@ -355,34 +474,39 @@ mod tests {
 
     #[test]
     fn round_robin_takes_turns_within_a_cell_across_its_tables() {
+        let cx = Cx::new();
         let ids = ids(2);
         let first = cell("m", CellState::Ready, &ids);
         let crossing = crossing(vec![Arc::clone(&first)], Within::Policy(Policy::RoundRobin));
         let random = RandomState::new();
         let pick = || {
             crossing
-                .pick(Policy::RoundRobin, &random, &[])
+                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .expect("a pick")
                 .expect("one")
                 .0
         };
         assert_eq!([pick(), pick(), pick()], [ids[0], ids[1], ids[0]]);
         // The follower makes a new table for an event, carrying the turn.
         let again = cell_turning("m", CellState::Ready, &ids, Arc::clone(&first.turn));
-        crossing.target.table.store(Arc::new(EntryTable {
-            cells: Box::new([again]),
-        }));
+        crossing
+            .target
+            .table
+            .store(Arc::new(EntryTable::new(Box::new([again]))));
         assert_eq!(pick(), ids[1], "a new table reset the turn");
     }
 
     #[test]
     fn no_cell_to_choose_is_a_routing_error_naming_the_class() {
+        let cx = Cx::new();
         let crossing = crossing(
             vec![cell("m", CellState::Unavailable, &[])],
             Within::Policy(Policy::RoundRobin),
         );
         assert!(
             crossing
-                .pick(Policy::RoundRobin, &RandomState::new(), &[])
+                .pick(&cx, &[], Policy::RoundRobin, &RandomState::new(), &[])
+                .expect("a pick")
                 .is_none()
         );
         let error = crossing.no_cell();
@@ -403,11 +527,13 @@ mod tests {
             Within::Policy(Policy::RoundRobin),
         );
         let random = RandomState::new();
+        let cx = Cx::new();
         let m1 = super::super::cell_id("model_x", "m1");
         let m2 = super::super::cell_id("model_x", "m2");
         let pick = |excluded: &[u64]| {
             crossing
-                .pick(Policy::RoundRobin, &random, excluded)
+                .pick(&cx, &[], Policy::RoundRobin, &random, excluded)
+                .expect("a pick")
                 .map(|(id, cell, _)| (id, cell))
         };
         assert_eq!(pick(&[]), Some((ids[0], m1)));
@@ -499,9 +625,14 @@ mod tests {
             .await
             .expect("the selector was asked in time");
         // While the selector waits, its choice leaves the cell's table.
-        crossing.target.table.store(Arc::new(EntryTable {
-            cells: Box::new([cell("m", CellState::Ready, &ids[1..])]),
-        }));
+        crossing
+            .target
+            .table
+            .store(Arc::new(EntryTable::new(Box::new([cell(
+                "m",
+                CellState::Ready,
+                &ids[1..],
+            )]))));
         waiting.release.notify_one();
         let (chosen, lease) = tokio::time::timeout(WAIT, choosing)
             .await
@@ -570,9 +701,10 @@ mod tests {
         let chosen = chosen_after(async |crossing: &Crossing, ids: &[InstanceId]| {
             let mut unknown = Arc::try_unwrap(cell("m", CellState::Ready, ids)).expect("one owner");
             unknown.load = None;
-            crossing.target.table.store(Arc::new(EntryTable {
-                cells: Box::new([Arc::new(unknown)]),
-            }));
+            crossing
+                .target
+                .table
+                .store(Arc::new(EntryTable::new(Box::new([Arc::new(unknown)]))));
         })
         .await;
         assert_eq!(chosen, None, "sent to a cell with no summary");
@@ -682,17 +814,11 @@ mod tests {
         let table = crossing.target.table.load_full();
         let chosen = &table.cells[0];
         // An event made the cell's table again, with the same instances.
-        let newer = EntryTable {
-            cells: Box::new([cell("m", CellState::Ready, &ids)]),
-        };
+        let newer = EntryTable::new(Box::new([cell("m", CellState::Ready, &ids)]));
         assert!(still_eligible(&newer, chosen, ids[0], |_| true).is_some());
-        let fewer = EntryTable {
-            cells: Box::new([cell("m", CellState::Ready, &ids[1..])]),
-        };
+        let fewer = EntryTable::new(Box::new([cell("m", CellState::Ready, &ids[1..])]));
         assert!(still_eligible(&fewer, chosen, ids[0], |_| true).is_none());
-        let gone = EntryTable {
-            cells: Box::new([]),
-        };
+        let gone = EntryTable::new(Box::new([]));
         assert!(still_eligible(&gone, chosen, ids[1], |_| true).is_none());
     }
 
@@ -705,6 +831,7 @@ mod tests {
     #[test]
     #[ignore = "a measurement, not a check: run it with --ignored --nocapture"]
     fn the_cost_of_a_boundary_pick() {
+        let cx = Cx::new();
         const PICKS: u32 = 2_000_000;
         let ids = ids(4);
         let roster = crate::dist::Roster::new();
@@ -734,7 +861,8 @@ mod tests {
             });
             let boundary = time(&|| {
                 crossing
-                    .pick(Policy::RoundRobin, &random, &[])
+                    .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                    .expect("a pick")
                     .expect("one")
                     .0
             });
@@ -749,7 +877,8 @@ mod tests {
             });
             let accepted = time(&|| {
                 let (id, cell, _) = crossing
-                    .pick(Policy::RoundRobin, &random, &[])
+                    .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                    .expect("a pick")
                     .expect("one");
                 crossing.accepted(cell);
                 id

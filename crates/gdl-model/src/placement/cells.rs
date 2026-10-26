@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::hash::Fnv;
 use crate::manifest::Manifest;
 
-use super::{ClassBoundary, Placement, PlacementError, check_name_shape};
+use super::{ClassBoundary, Placement, PlacementError};
 
 /// How a chooser picks a cell of a class it sends to: a placement's
 /// `[cells.<class>]` table. Its one key is optional in the table, and a
@@ -17,7 +17,7 @@ use super::{ClassBoundary, Placement, PlacementError, check_name_shape};
 pub struct CellPolicy {
     /// The policy's name, [`CellPolicy::DEFAULT_POLICY`] by default. Named
     /// like a selector, and not checked against a list, since a custom
-    /// policy can be registered later.
+    /// policy can be registered by a deployment.
     #[serde(skip_serializing_if = "is_default_policy")]
     pub policy: String,
 }
@@ -52,7 +52,7 @@ pub(super) fn recorded<'de, D: Deserializer<'de>>(
 
 /// Why `policy` cannot name a cell policy, if it cannot.
 pub(super) fn check_policy_name(policy: &CellPolicy) -> Result<(), String> {
-    check_name_shape("policy", &policy.policy)
+    super::check_cell_policy_name(&policy.policy)
 }
 
 /// Hash the cell policies after the classes: each class's effective

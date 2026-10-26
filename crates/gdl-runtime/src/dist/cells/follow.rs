@@ -36,13 +36,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
+use gdl::Load;
 use gdl_cells::CellState;
 use gdl_watch::{FollowEvent, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
 
 use super::lease::Leases;
-use super::{CellTable, Cells, EntryTable, Load};
+use super::{CellTable, Cells, EntryTable};
 use crate::dist::fabric::Registry;
 use crate::dist::roster::{Live, selector_id};
 
@@ -456,7 +457,8 @@ impl<R: Registry> Follows<R> {
     }
 
     /// Swap `segment`'s table for one of its cells as they are now: a new
-    /// list of the cells' tables, one pointer per followed cell. The follow
+    /// list of the cells' tables, one pointer per followed cell, and each
+    /// cell's view for the cell policy, which copies its names. The follow
     /// set bounds it (the children of the chooser's own cell); no other
     /// cell's instances are read or copied.
     fn store(&self, segment: &str) {
@@ -465,7 +467,7 @@ impl<R: Registry> Follows<R> {
             .get(segment)
             .map(|cells| cells.values().cloned().collect())
             .unwrap_or_default();
-        self.cells.store(segment, EntryTable { cells });
+        self.cells.store(segment, EntryTable::new(cells));
     }
 }
 

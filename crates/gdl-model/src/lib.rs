@@ -45,7 +45,7 @@ pub use metrics::{
 pub use placement::{
     CellPolicy, ClassBoundary, CrossingReport, HopLayout, Layout, Leg, Placement, PlacementError,
     PlacementErrors, Placements, RequestRouter, Run, SELECTORS, SelectorInfo, WireEdge, WireReason,
-    check_class_name, check_layout_name, check_selector_name, layout,
+    check_cell_policy_name, check_class_name, check_layout_name, check_selector_name, layout,
 };
 pub use problem::{Origin, Problem, Problems, read_toml};
 

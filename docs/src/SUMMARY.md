@@ -28,6 +28,7 @@
 - [Split, generate, and draw](guides/split-and-generate.md)
 - [Hosted frontends and service entries](guides/frontends.md)
 - [Write a selector](guides/write-a-selector.md)
+- [Write a cell policy](guides/write-a-cell-policy.md)
 - [Compose in the browser](guides/composer.md)
 - [Deploy with Docker Compose](guides/compose-deploy.md)
 - [Deploy a fleet of cells](guides/fleet.md)

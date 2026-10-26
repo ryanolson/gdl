@@ -128,10 +128,10 @@ impl Cells {
                 generation: cell.generation,
                 region: cell.region.clone(),
                 state: cell.state,
-                load: cell.load.map(|load| load.summary),
+                load: cell.load.map(|load| *load.summary()),
                 load_age: cell
                     .load
-                    .map(|load| now.saturating_duration_since(load.arrived)),
+                    .map(|load| now.saturating_duration_since(load.arrived())),
                 damped: damped
                     .is_damped(cell.id)
                     .then(|| std::time::Duration::from_millis(damped.left(cell.id, now))),
@@ -338,10 +338,21 @@ pub struct FollowedCell {
 }
 
 /// One entry segment's table: each followed cell of its class, ordered by
-/// class and cell.
+/// class and cell, and each as a cell policy sees it, index for index.
 #[derive(Debug, Default)]
 pub(crate) struct EntryTable {
     pub(crate) cells: Box<[Arc<CellTable>]>,
+    /// `cells` as a cell policy sees them, made with the table so that a
+    /// choice borrows them rather than making them per request.
+    pub(crate) views: Box<[gdl::Cell]>,
+}
+
+impl EntryTable {
+    /// The table of `cells`, with their views.
+    pub(crate) fn new(cells: Box<[Arc<CellTable>]>) -> Self {
+        let views = cells.iter().map(|cell| cell.view()).collect();
+        Self { cells, views }
+    }
 }
 
 /// One followed cell, for one entry segment, in its current generation.
@@ -356,7 +367,7 @@ pub(crate) struct CellTable {
     pub(crate) region: String,
     pub(crate) state: CellState,
     /// The cell's load summary, as it arrived.
-    pub(crate) load: Option<Load>,
+    pub(crate) load: Option<gdl::Load>,
     pub(crate) eligible: Box<[InstanceId]>,
     /// `eligible` as a selector sees it, index for index, made with the
     /// table so that a selection borrows it rather than converting each
@@ -379,54 +390,31 @@ pub(crate) struct CellTable {
     pub(crate) leases: Arc<Leases>,
 }
 
-/// A cell's load summary as its tables hold it: when it arrived, on the
-/// chooser's clock, and until when it is fresh, worked out once as it
-/// arrives so that a choice compares one instant rather than doing the
-/// arithmetic per cell and pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Load {
-    pub(crate) summary: LoadSummary,
-    pub(crate) arrived: Instant,
-    /// The last instant the summary is fresh at:
-    /// [`FRESH_PERIODS`](policy::FRESH_PERIODS) of its periods after it
-    /// arrived. `None` when it is never fresh: it names no period, or one
-    /// so long that the instant overflows the clock.
-    pub(crate) fresh_until: Option<Instant>,
-}
-
-impl Load {
-    /// `summary`, which arrived at `arrived`.
-    pub(crate) fn new(summary: LoadSummary, arrived: Instant) -> Self {
-        let fresh = std::time::Duration::from_millis(summary.period_ms)
-            .saturating_mul(policy::FRESH_PERIODS);
-        Self {
-            summary,
-            arrived,
-            fresh_until: (summary.period_ms > 0)
-                .then(|| arrived.checked_add(fresh))
-                .flatten(),
+impl CellTable {
+    /// The cell as a cell policy sees it.
+    fn view(&self) -> gdl::Cell {
+        let view = gdl::Cell::new(&*self.class, &*self.cell, &*self.region, self.state)
+            .with_entries(self.eligible.len());
+        match self.load {
+            Some(load) => view.with_load(load),
+            None => view,
         }
     }
 }
 
-/// The number that names the cell `cell` of `class` in its tables: a hash
-/// of the two, so that a request can keep the cells it excluded without
-/// cloning a name, or a table, on every choice. Two cells whose names hash
-/// alike would be excluded together, for one request: with a 64-bit hash
-/// and a fleet's few cells, that does not happen.
-pub(crate) fn cell_id(class: &str, cell: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::hash::DefaultHasher::new();
-    (class, cell).hash(&mut hasher);
-    hasher.finish()
-}
+/// The number that names a cell in its tables ([`gdl::Cell::id`]).
+pub(crate) use gdl::__runtime::cell_id;
 
 /// Refuse a chooser of `segment` whose placement names, for a class it
-/// sends to, a cell policy the runtime does not provide. Nothing for a
-/// segment that sends into no other class.
-pub(crate) fn check_policies(layout: &Layout, segment: &str) -> gdl::Result<()> {
+/// sends to, a cell policy that `policies` does not register and gdl does
+/// not have. Nothing for a segment that sends into no other class.
+pub(crate) fn check_policies(
+    layout: &Layout,
+    segment: &str,
+    policies: &gdl::CellPolicies,
+) -> gdl::Result<()> {
     for class in entries(layout, segment).keys() {
-        policy::of(layout, class)?;
+        policy::of(layout, class, policies)?;
     }
     Ok(())
 }

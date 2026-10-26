@@ -43,6 +43,7 @@ A spec of one layout has these tables at its top level. A spec with `[layout.<na
 | segment | lowercase letters, digits, `-`, `_`; at most 58 characters |
 | class, layout, selector, policy | lowercase letters and digits in words joined by single `_`; start with a letter; at most 64 characters |
 | selector | never `round_robin` or `random` |
+| registered cell policy | never `home_first` or `round_robin` |
 
 A value equal to its default is not recorded. The placement hash covers each class's effective cell policy, the default included.
 

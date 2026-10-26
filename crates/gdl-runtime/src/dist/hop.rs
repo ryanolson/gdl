@@ -319,6 +319,27 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
                     ),
                 ));
             }
+            // A projection reads fields by name, which a positional
+            // encoding does not carry: every read would fail.
+            if sends && selector.by_name() && head.encoding == gdl_model::Encoding::MsgpackArray {
+                return Err(Error::new(
+                    ErrorKind::Placement,
+                    format!(
+                        "segment `{}`: selector `{name}` reads the head's fields by name, but the request that crosses into `{}` (hop {index}) is encoded as `msgpack_array`, which carries no names",
+                        rt.segment, forward[pos].1
+                    ),
+                ));
+            }
+        }
+        // A cell policy that reads the head as a type must be given that
+        // type too, and one that reads its fields by name an encoding that
+        // names them.
+        #[cfg(feature = "hub")]
+        for pos in 1..forward.len() {
+            if let Router::Cells(crossing) = &plan.routers[pos] {
+                let head = &heads[pos - 1];
+                crossing.check_head(&rt.segment, head.id, head.name)?;
+            }
         }
         // The source is the one outer end that is no hop's inner end.
         let outer = &forward[0].1;

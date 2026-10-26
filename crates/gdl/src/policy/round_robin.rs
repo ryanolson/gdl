@@ -1,14 +1,5 @@
-//! `round_robin`: each attempt takes the next eligible cell in table
-//! order, by the crossing's count of attempts.
-
-use std::sync::Arc;
-
-use gdl_cells::CellState;
-use tokio::time::Instant;
-
-use super::super::CellTable;
-use super::super::damping::Damped;
-use super::CellChooser;
+use super::{Cell, CellPolicy, CellRequest, CellState, cut};
+use crate::select::Encoded;
 
 /// `round_robin`: the cells the chooser follows take turns, whatever their
 /// load and region.
@@ -40,13 +31,14 @@ use super::CellChooser;
 /// declines the request at turn 0, its failover's turn 1 among B and C
 /// goes to C. A cell that leaves or joins shifts which cell the next turn
 /// lands on, which a rotation does not need to avoid.
-pub(crate) struct RoundRobin;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RoundRobin;
 
 impl RoundRobin {
     /// `cell`'s rank, `ready` before `degraded`, or `None` when it may not
     /// be chosen for this request.
-    fn rank(cell: &CellTable, excluded: &[u64]) -> Option<usize> {
-        if cell.eligible.is_empty() || excluded.contains(&cell.id) {
+    fn rank(cell: &Cell, excluded: &[u64]) -> Option<usize> {
+        if cell.entries == 0 || excluded.contains(&cell.id) {
             return None;
         }
         match cell.state {
@@ -57,25 +49,21 @@ impl RoundRobin {
     }
 }
 
-impl CellChooser for RoundRobin {
+impl CellPolicy for RoundRobin {
+    /// It reads no request data.
+    type Head = Encoded;
+
     /// Two passes over the table and no allocation while no cell's damping
     /// window lasts: one counts the choosable cells of each rank, the other
     /// finds the turn's. While a window lasts, a pass first sets which
-    /// damped cells are passed over, as in `home_first`. `damped` is one
+    /// damped cells are passed over, as in `home_first`. The damping is one
     /// moment's view, so the passes agree whatever other requests decline
     /// or accept meanwhile.
-    fn choose(
-        &self,
-        cells: &[Arc<CellTable>],
-        _region: &str,
-        excluded: &[u64],
-        damped: &Damped,
-        now: Instant,
-        turn: u64,
-    ) -> Option<usize> {
+    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<usize> {
+        let (excluded, damped, now) = (request.excluded(), request.damped(), request.now());
         let lasts = damped.lasts(now);
         let cut = if lasts {
-            super::cut(
+            cut(
                 cells,
                 |cell| Self::rank(cell, excluded).is_some(),
                 damped,
@@ -84,7 +72,7 @@ impl CellChooser for RoundRobin {
         } else {
             0
         };
-        let rank = |cell: &CellTable| {
+        let rank = |cell: &Cell| {
             Self::rank(cell, excluded).filter(|_| !lasts || damped.left(cell.id, now) <= cut)
         };
         let mut counts = [0u64; 2];
@@ -94,7 +82,7 @@ impl CellChooser for RoundRobin {
             }
         }
         let best = usize::from(counts[0] == 0);
-        let mut nth = turn.checked_rem(counts[best])?;
+        let mut nth = request.turn().checked_rem(counts[best])?;
         for (at, cell) in cells.iter().enumerate() {
             if rank(cell) != Some(best) {
                 continue;
@@ -106,77 +94,48 @@ impl CellChooser for RoundRobin {
         }
         None
     }
-
-    /// Whether `cell` is `ready` or `degraded`, has an entry instance, and
-    /// has not declined the request: a damped cell, or a degraded one
-    /// beside a ready one, is still eligible, since the rank and damping
-    /// steer the next choices, not one already made.
-    fn eligible(&self, cell: &CellTable, _region: &str, excluded: &[u64], _now: Instant) -> bool {
-        Self::rank(cell, excluded).is_some()
-    }
-
-    fn random(&self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
-    use velo::InstanceId;
+    use tokio::time::Instant;
 
-    use super::super::super::cell_id;
-    use super::super::super::damping::Damping;
+    use super::super::{Damped, cell_id};
     use super::*;
+    use crate::cx::Cx;
 
     const SECOND: Duration = Duration::from_secs(1);
 
-    /// A table of the cell `name`, in `state`, with `entries` eligible
-    /// instances and no load summary: round robin reads none.
-    fn cell(name: &str, state: CellState, entries: usize) -> Arc<CellTable> {
-        let eligible: Box<[InstanceId]> = (0..entries).map(|_| InstanceId::new_v4()).collect();
-        Arc::new(CellTable {
-            class: "model_x".into(),
-            cell: name.into(),
-            id: cell_id("model_x", name),
-            generation: 1,
-            region: "anywhere".into(),
-            state,
-            load: None,
-            offered: eligible
-                .iter()
-                .copied()
-                .map(crate::dist::roster::selector_id)
-                .collect(),
-            eligible,
-            retired: Box::new([]),
-            unread: false,
-            turn: Arc::new(AtomicUsize::new(0)),
-            offering: true,
-            revision: 1,
-            leases: Arc::default(),
-        })
+    /// The cell `name`, in `state`, with `entries` entry instances and no
+    /// load summary: round robin reads none.
+    fn cell(name: &str, state: CellState, entries: usize) -> Cell {
+        Cell::new("model_x", name, "anywhere", state).with_entries(entries)
     }
 
-    fn ready(name: &str) -> Arc<CellTable> {
+    fn ready(name: &str) -> Cell {
         cell(name, CellState::Ready, 1)
     }
 
     /// The names of the cells chosen for the turns `turns`, `-` for none.
     fn turns(
-        cells: &[Arc<CellTable>],
+        cells: &[Cell],
         excluded: &[u64],
         damped: &Damped,
         now: Instant,
         turns: std::ops::Range<u64>,
     ) -> Vec<String> {
+        let cx = Cx::new();
         turns
             .map(|turn| {
+                let request = CellRequest::new(&cx, &Encoded, "here", now)
+                    .with_excluded(excluded)
+                    .with_damped(damped)
+                    .with_turn(turn);
                 RoundRobin
-                    .choose(cells, "here", excluded, damped, now, turn)
-                    .map_or_else(|| "-".to_string(), |at| cells[at].cell.clone())
+                    .choose(request, cells)
+                    .map_or_else(|| "-".to_string(), |at| cells[at].name.clone())
             })
             .collect()
     }
@@ -228,11 +187,10 @@ mod tests {
             names(&["m1", "m6", "m1", "m6"])
         );
         for at in [1, 2, 3] {
-            assert!(!RoundRobin.eligible(&cells[at], "here", &[], now), "{at}");
+            assert!(!RoundRobin.eligible(&cells[at], "here", now), "{at}");
         }
-        assert!(RoundRobin.eligible(&cells[0], "here", &[], now));
-        assert!(!RoundRobin.eligible(&cells[4], "here", &excluded, now));
-        assert!(RoundRobin.eligible(&cell("d", CellState::Degraded, 1), "here", &[], now));
+        assert!(RoundRobin.eligible(&cells[0], "here", now));
+        assert!(RoundRobin.eligible(&cell("d", CellState::Degraded, 1), "here", now));
         let excluded = [
             cell_id("model_x", "m1"),
             cell_id("model_x", "m6"),
@@ -285,36 +243,32 @@ mod tests {
     fn a_damped_cell_takes_no_turn_while_others_can() {
         let cells = [ready("m1"), ready("m2"), ready("m3")];
         let now = Instant::now();
-        let damping = Damping::default();
-        damping.decline(cells[1].id, now);
+        let damped = Damped::new([(cells[1].id(), now + SECOND)]);
         assert_eq!(
-            turns(&cells, &[], &damping.view(), now, 0..4),
+            turns(&cells, &[], &damped, now, 0..4),
             names(&["m1", "m3", "m1", "m3"])
         );
         assert_eq!(
-            turns(&cells, &[], &damping.view(), now + SECOND * 2, 0..3),
+            turns(&cells, &[], &damped, now + SECOND * 2, 0..3),
             names(&["m1", "m2", "m3"]),
             "a passed window"
         );
         // Two of three damped: one may be passed over, the one whose
         // window lasts longest.
-        damping.decline(cells[0].id, now + SECOND / 2);
+        let damped = Damped::new([
+            (cells[1].id(), now + SECOND),
+            (cells[0].id(), now + SECOND * 3 / 2),
+        ]);
         assert_eq!(
-            turns(&cells, &[], &damping.view(), now + SECOND / 2, 0..4),
+            turns(&cells, &[], &damped, now + SECOND / 2, 0..4),
             names(&["m2", "m3", "m2", "m3"])
         );
         // A lone damped cell is still chosen.
         let lone = [ready("m2")];
-        assert_eq!(
-            turns(&lone, &[], &damping.view(), now, 0..2),
-            names(&["m2", "m2"])
-        );
+        assert_eq!(turns(&lone, &[], &damped, now, 0..2), names(&["m2", "m2"]));
         // A damped ready cell passed over leaves a degraded one its turns,
         // as it does in `home_first`, which caps over every eligible cell.
         let mixed = [ready("m2"), cell("d1", CellState::Degraded, 1)];
-        assert_eq!(
-            turns(&mixed, &[], &damping.view(), now, 0..2),
-            names(&["d1", "d1"])
-        );
+        assert_eq!(turns(&mixed, &[], &damped, now, 0..2), names(&["d1", "d1"]));
     }
 }

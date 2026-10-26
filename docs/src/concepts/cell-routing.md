@@ -98,7 +98,7 @@ Each hand-off of a hop into another class goes to a cell, then to an instance of
 
 If the chosen instance leaves the cell's table while a selector waits, or the cell stops taking work, both choices are made again. With no cell to choose, the request fails at once with `Routing`, naming the class. It never waits for a cell to appear.
 
-The runtime provides two policies. A chooser whose placement names any other policy refuses to start.
+gdl provides two policies, `round_robin` and `home_first`. A deployment can register others by name ([Write a cell policy](../guides/write-a-cell-policy.md)). A chooser whose placement names a policy that nothing registers and gdl does not have refuses to launch, and names the policy and the class.
 
 ### `round_robin`
 
@@ -117,9 +117,22 @@ The runtime provides two policies. A chooser whose placement names any other pol
 
 Within the tier it draws two cells at random and takes the one with the lower ratio of admitted roots to limit. A cell in another region that reports a refusal, or is at or over 80%, is never chosen. Admission counts roots, not engine work, so this is an admission heuristic. The thresholds are constants of the policy.
 
+### A registered policy
+
+A registered policy implements `gdl::CellPolicy`. It runs in the chooser, once per attempt: for the first offer, and again after each decline. It is not `async`. It gets:
+
+- the request's context, and its head as the policy's `Head` reads it: the edge's type, `gdl::Encoded` bytes, or a `gdl::Projected` part that decodes only the fields it declares;
+- the class's followed cells: each cell's name, region, state, load summary, and number of entry instances;
+- the chooser's region, the clock, the cells that declined this request, and the cells the chooser damps;
+- the attempt's turn, and a random draw made from it when the policy asks.
+
+It returns the index of a cell, or none, which fails the request with `Routing`. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no cell is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`.
+
+The inputs are plain `gdl` types (`Cell`, `CellRequest`, `Damped`, `Load`), so a policy crate builds them in its own tests, with no hub or runtime. `home_first` and `round_robin` (`gdl::HomeFirst`, `gdl::RoundRobin`) implement the same trait, and take the same inputs.
+
 ### Damping
 
-Under either policy, a cell that declined a request is damped. It is not chosen for 1 s. Each further decline after its window has passed doubles the window, up to 30 s. An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.
+Under every policy, the chooser damps a cell that declined a request. `round_robin` and `home_first` pass a damped cell over as this section says. A registered policy sees the damped cells and decides for itself. It is not chosen for 1 s. Each further decline after its window has passed doubles the window, up to 30 s. An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.
 
 At most half of the otherwise eligible cells, rounded down, are damped at once. When more are, the cells whose windows end soonest are chosen as if they were not damped. So a lone cell is never damped out.
 

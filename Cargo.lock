@@ -687,7 +687,9 @@ name = "gdl"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "criterion",
  "futures",
+ "gdl-cells",
  "gdl-macros",
  "gdl-message",
  "gdl-model",

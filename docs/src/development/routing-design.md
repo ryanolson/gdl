@@ -56,3 +56,16 @@ Every routed forward hand-off is an offer, and a declined one is chosen again in
 - **The first offer costs what a hand-off did before.** The failover's state (the declined instances, the last miss) is a local of a call that is boxed only on the miss path.
 
 The opening of a backward run keeps its own round robin. A chooser's hand-off into another class keeps its failover between cells ([Cells design](cells-design.md)).
+
+## Cell policies
+
+A chooser's hand-off into another class first picks a cell by the class's cell policy ([Choosing a cell](../concepts/cell-routing.md#choosing-a-cell)). A deployment can register a policy by name, as it registers a selector. The constraints were these: the pick of `round_robin` and `home_first` keeps its cost and allocates nothing, and a policy crate can test its policy with no hub, no velo node, and no runtime.
+
+- **The trait and its inputs live in `gdl`.** A cell is a plain `gdl::Cell` (name, region, state, load summary, entry count), and a request a plain `gdl::CellRequest`. A policy crate builds both in its tests. `home_first` and `round_robin` live there too, and implement the same trait. **Rejected: a view over the runtime's tables behind a trait.** A policy crate could not build one, and each read of a cell would be a dynamic call.
+- **The views are made with the table.** The follower makes a `gdl::Cell` for each cell when it stores a table, index for index with the runtime's own entries. A choice borrows the slice. Nothing is made per request.
+- **`choose` is synchronous.** It runs once per attempt on every hand-off into the class, and again when a selector's choice is checked. **Rejected: an `async` trait.** It needs a boxed future for each call, so an allocation on every hand-off. A wait belongs to the selector that chooses within the cell.
+- **The head is read once per attempt.** A failover after a decline reads it again from the bytes. **Rejected: keeping the decoded head across attempts.** It needs a boxed value of the policy's type on every hand-off to save a decode on the rare failover.
+- **A projection reads part of the head.** A typed head must be the edge's type, so that the segment can check it at start. The edge into a model's class carries the whole request, so a typed head would decode all of it. A `gdl::Projected<P>` names the edge type it reads part of, so the check holds, and the decoder skips the fields `P` does not declare. A positional encoding has no names to skip by, so the check refuses `msgpack_array`. **Rejected: `gdl::Encoded` and a decode inside the policy.** It works, but the start check is lost. A skipped field is still read, so a projection of a 100 KB request costs 41% of a full decode in msgpack and 58% in JSON, not nothing ([Runtime feature costs](../operations/feature-costs.md#cell-policies)).
+- **A random draw is made when the policy asks.** `round_robin` takes turns, so it pays for no hash.
+- **A registered name cannot be `home_first` or `round_robin`.** The placement hash covers only the name, so a name must mean one policy in every instance that runs the placement.
+- **Damping stays the chooser's.** The chooser records each decline and each acceptance. A policy gets the damped cells as one moment's view, and decides what to do with them.

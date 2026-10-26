@@ -55,7 +55,7 @@ impl Runtime {
     ) -> Result<Option<(InstanceId, u64, Held)>> {
         match crossing.within() {
             Within::Policy(policy) => Ok(crossing
-                .pick(*policy, self.random(), offered)
+                .pick(cx, &envelope.payload, *policy, self.random(), offered)?
                 .map(|(instance, cell, lease)| (instance, cell, Held::cell(None, lease)))),
             Within::Selector {
                 selector, encoding, ..
@@ -270,30 +270,29 @@ mod tests {
         let id = entry.instance_id();
         cells.store(
             "d",
-            EntryTable {
-                cells: Box::new([Arc::new(CellTable {
-                    class: "model_x".into(),
-                    cell: "m1".into(),
-                    id: cell_id("model_x", "m1"),
-                    generation: 1,
-                    region: "home".into(),
-                    state: CellState::Ready,
-                    load: super::super::tests::idle(),
-                    eligible: Box::new([id]),
-                    offered: Box::new([crate::dist::roster::selector_id(id)]),
-                    retired: Box::new([]),
-                    unread: false,
-                    turn: Arc::new(AtomicUsize::new(0)),
-                    offering: true,
-                    revision: 1,
-                    leases: Arc::default(),
-                })]),
-            },
+            EntryTable::new(Box::new([Arc::new(CellTable {
+                class: "model_x".into(),
+                cell: "m1".into(),
+                id: cell_id("model_x", "m1"),
+                generation: 1,
+                region: "home".into(),
+                state: CellState::Ready,
+                load: super::super::tests::idle(),
+                eligible: Box::new([id]),
+                offered: Box::new([crate::dist::roster::selector_id(id)]),
+                retired: Box::new([]),
+                unread: false,
+                turn: Arc::new(AtomicUsize::new(0)),
+                offering: true,
+                revision: 1,
+                leases: Arc::default(),
+            })])),
         );
         let crossing = |within: Within| {
-            let mut targets = targets(&layout, "a", &cells).expect("targets");
+            let mut targets =
+                targets(&layout, "a", &cells, &gdl::CellPolicies::new()).expect("targets");
             let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
-            Router::Cells(Arc::new(Crossing::new(target, within)))
+            Router::Cells(Arc::new(Crossing::new(target, within, Default::default())))
         };
         let policy = Within::Policy(Policy::RoundRobin);
         let selector = Within::Selector {
@@ -417,8 +416,9 @@ mod tests {
                 })
             })
             .collect();
-        cells.store("d", EntryTable { cells: tables });
-        let mut targets = targets(&layout, "a", &cells).expect("targets");
+        cells.store("d", EntryTable::new(tables));
+        let mut targets =
+            targets(&layout, "a", &cells, &gdl::CellPolicies::new()).expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         let reading = Arc::new(Reading(AtomicUsize::new(0)));
         let router = Router::Cells(Arc::new(Crossing::new(
@@ -428,6 +428,7 @@ mod tests {
                 selector: Arc::new(Typed(Arc::clone(&reading))),
                 encoding: gdl_model::Encoding::Json,
             },
+            gdl_model::Encoding::Json,
         )));
         let cx = Cx::new();
         let envelope = Forward {
@@ -451,6 +452,150 @@ mod tests {
         .expect("the second cell took it");
         assert_eq!(offers.load(Ordering::SeqCst), 2, "one decline, one take");
         assert_eq!(reading.0.load(Ordering::SeqCst), 2, "a choice per cell");
+    }
+
+    /// Sends a prompt to the cell whose name is its text.
+    struct ByText;
+
+    impl gdl::CellPolicy for ByText {
+        type Head = Prompt;
+
+        fn choose(
+            &self,
+            request: gdl::CellRequest<'_, Prompt>,
+            cells: &[gdl::Cell],
+        ) -> Option<usize> {
+            let text = &request.head().text;
+            cells.iter().position(|cell| cell.name() == text)
+        }
+    }
+
+    /// A registered cell policy reads the head, in the edge's encoding,
+    /// and chooses the cell: two requests that differ only in the field
+    /// it reads are offered to different cells, each to the one it names,
+    /// over velo. A head it cannot read fails the request with `Codec`,
+    /// and offers it to no cell.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_registered_policy_chooses_the_cell_by_the_head() {
+        let layout = layout_under(gdl_model::CellPolicy {
+            policy: "by_text".into(),
+        });
+        let chooser = bind_node(([127, 0, 0, 1], 0).into())
+            .await
+            .expect("a velo node");
+        let mut entries = Vec::new();
+        let mut roster = Roster::new();
+        for _ in 0..2 {
+            let entry = bind_node(([127, 0, 0, 1], 0).into())
+                .await
+                .expect("a velo node");
+            roster.add("d", entry.peer_info());
+            entries.push(entry);
+        }
+        let mut policies = gdl::CellPolicies::new();
+        policies.add("by_text", ByText).expect("registered");
+        let fabric = Fabric::new(chooser, None, None, Duration::from_secs(30));
+        let rt = Runtime::new(
+            fabric,
+            layout.clone(),
+            "a".into(),
+            &roster,
+            RuntimeConfig {
+                cell_policies: policies.clone(),
+                ..RuntimeConfig::default()
+            },
+            None,
+        )
+        .expect("a runtime");
+        let accepted = crate::dist::envelope::encode(&Ok::<Accepted, Error>(None)).expect("encode");
+        let offers: Vec<Arc<AtomicUsize>> = entries.iter().map(|_| Arc::default()).collect();
+        for (entry, offers) in entries.iter().zip(&offers) {
+            let (offers, accepted) = (Arc::clone(offers), accepted.clone());
+            Fabric::new(entry.clone(), None, None, Duration::from_secs(30))
+                .register(&rt.names().forward, move |_| {
+                    offers.fetch_add(1, Ordering::SeqCst);
+                    let accepted = accepted.clone();
+                    Box::pin(async move { accepted })
+                })
+                .expect("a handler");
+        }
+        let cells = Cells::new("home", ["d"]);
+        let tables = entries
+            .iter()
+            .zip(["m1", "m2"])
+            .map(|(entry, name)| {
+                let id = entry.instance_id();
+                Arc::new(CellTable {
+                    class: "model_x".into(),
+                    cell: name.into(),
+                    id: cell_id("model_x", name),
+                    generation: 1,
+                    region: "home".into(),
+                    state: CellState::Ready,
+                    load: super::super::tests::idle(),
+                    eligible: Box::new([id]),
+                    offered: Box::new([crate::dist::roster::selector_id(id)]),
+                    retired: Box::new([]),
+                    unread: false,
+                    turn: Arc::new(AtomicUsize::new(0)),
+                    offering: true,
+                    revision: 1,
+                    leases: Arc::default(),
+                })
+            })
+            .collect();
+        cells.store("d", EntryTable::new(tables));
+        let mut targets = targets(&layout, "a", &cells, &policies).expect("targets");
+        let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
+        let router = Router::Cells(Arc::new(Crossing::new(
+            target,
+            Within::Policy(Policy::RoundRobin),
+            gdl_model::Encoding::Json,
+        )));
+        let send = |payload: Vec<u8>| {
+            let cx = Cx::new();
+            let envelope = Forward {
+                version: VERSION,
+                identity: rt.identity,
+                hop: 0,
+                pos: 1,
+                cx: WireCx::of(&cx),
+                reply: ReplyTo::test_value(7),
+                payload,
+            };
+            let rt = &rt;
+            let router = &router;
+            async move {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    rt.send_forward("d", router, &cx, envelope, false),
+                )
+                .await
+                .expect("answered in time")
+                .map(|_| ())
+            }
+        };
+        let prompt =
+            |text: &str| serde_json::to_vec(&Prompt { text: text.into() }).expect("encoded");
+        let offered = || {
+            offers
+                .iter()
+                .map(|n| n.load(Ordering::SeqCst))
+                .collect::<Vec<_>>()
+        };
+        send(prompt("m2")).await.expect("m2 took it");
+        assert_eq!(offered(), [0, 1]);
+        send(prompt("m1")).await.expect("m1 took it");
+        assert_eq!(offered(), [1, 1]);
+        send(prompt("m2")).await.expect("m2 took it");
+        assert_eq!(offered(), [1, 2]);
+        let error = send(prompt("m3")).await.expect_err("no cell is m3");
+        assert_eq!(error.kind(), ErrorKind::Routing, "{error}");
+        let error = send(b"not json".to_vec())
+            .await
+            .expect_err("no head to read");
+        assert_eq!(error.kind(), ErrorKind::Codec, "{error}");
+        assert_eq!(offered(), [1, 2], "a request no cell may take was offered");
     }
 
     /// The crossing into `model_x` of [`layout`], over `cells`, each with
@@ -490,11 +635,15 @@ mod tests {
                 })
             })
             .collect();
-        cells.store("d", EntryTable { cells: tables });
-        let mut targets = targets(layout, "a", &cells).expect("targets");
+        cells.store("d", EntryTable::new(tables));
+        let mut targets = targets(layout, "a", &cells, &gdl::CellPolicies::new()).expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         (
-            Crossing::new(target, Within::Policy(Policy::RoundRobin)),
+            Crossing::new(
+                target,
+                Within::Policy(Policy::RoundRobin),
+                Default::default(),
+            ),
             cells,
         )
     }
@@ -505,11 +654,13 @@ mod tests {
     /// while it was damped, only the first acceptance writes.
     #[test]
     fn an_acceptance_ends_the_damping_the_cell_has_when_it_accepts() {
+        let cx = Cx::new();
         let writes = || super::super::damping::WRITES.with(Cell::get);
         let random = std::hash::RandomState::new();
         let (lone, cells) = followed_over(&["m1"]);
         let pick = || {
-            lone.pick(Policy::RoundRobin, &random, &[])
+            lone.pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .expect("a pick")
                 .expect("a lone cell is always chosen")
                 .1
         };
@@ -538,6 +689,7 @@ mod tests {
     /// that ends a cell's damping, once.
     #[test]
     fn an_accepted_pick_allocates_nothing_and_writes_no_damping() {
+        let cx = Cx::new();
         let writes = || super::super::damping::WRITES.with(Cell::get);
         let random = std::hash::RandomState::new();
         let crossing = crossing_over(&["m1", "m2", "m3"]);
@@ -545,7 +697,8 @@ mod tests {
         counting(true);
         for _ in 0..1000 {
             let (_, chosen, _) = crossing
-                .pick(Policy::RoundRobin, &random, &[])
+                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .expect("a pick")
                 .expect("a cell");
             crossing.accepted(chosen);
         }
@@ -554,16 +707,148 @@ mod tests {
         assert_eq!(writes() - wrote, 0, "an accepted pick wrote damping state");
 
         let lone = crossing_over(&["m1"]);
-        let (_, chosen, _) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
+        let (_, chosen, _) = lone
+            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .expect("a pick")
+            .expect("a cell");
         lone.declined(chosen);
         assert_eq!(writes() - wrote, 1, "a decline wrote nothing");
         // A lone cell is never damped out of the choice.
-        let (_, chosen, _) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
+        let (_, chosen, _) = lone
+            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .expect("a pick")
+            .expect("a cell");
         lone.accepted(chosen);
         assert_eq!(writes() - wrote, 2, "the acceptance kept the damping");
-        let (_, chosen, _) = lone.pick(Policy::RoundRobin, &random, &[]).expect("a cell");
+        let (_, chosen, _) = lone
+            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .expect("a pick")
+            .expect("a cell");
         lone.accepted(chosen);
         assert_eq!(writes() - wrote, 2, "an undamped cell's acceptance wrote");
+    }
+
+    /// What a cell choice and an accepted first offer cost, in time, for
+    /// the record in the book: a pick under each policy the runtime
+    /// provides, over four idle cells, and one accepted offer over loopback
+    /// against the same hand-off routed by the roster. Ignored: it times,
+    /// and asserts nothing. Run it in release:
+    /// `cargo test --release -p gdl-runtime --lib cost_of -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "a timing, not a check"]
+    async fn cost_of_a_cell_choice_and_an_offer() {
+        const PICKS: u32 = 2_000_000;
+        let random = std::hash::RandomState::new();
+        let cx = Cx::new();
+        for name in ["round_robin", "home_first"] {
+            let layout = layout_under(gdl_model::CellPolicy {
+                policy: name.into(),
+            });
+            let (crossing, _cells) = followed_under(&layout, &["m1", "m2", "m3", "m4"]);
+            let mut best = Duration::MAX;
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                for _ in 0..PICKS {
+                    std::hint::black_box(
+                        crossing
+                            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                            .expect("a pick"),
+                    );
+                }
+                best = best.min(start.elapsed());
+            }
+            println!(
+                "pick {name}: {:.1} ns",
+                best.as_nanos() as f64 / f64::from(PICKS)
+            );
+        }
+
+        const OFFERS: u32 = 20_000;
+        let layout = layout();
+        let entry = bind_node(([127, 0, 0, 1], 0).into())
+            .await
+            .expect("a velo node");
+        let chooser = bind_node(([127, 0, 0, 1], 0).into())
+            .await
+            .expect("a velo node");
+        let mut roster = Roster::new();
+        roster.add("d", entry.peer_info());
+        let fabric = Fabric::new(chooser, None, None, Duration::from_secs(30));
+        let rt = Runtime::new(
+            fabric,
+            layout.clone(),
+            "a".into(),
+            &roster,
+            RuntimeConfig::default(),
+            None,
+        )
+        .expect("a runtime");
+        let accepted = crate::dist::envelope::encode(&Ok::<Accepted, Error>(None)).expect("encode");
+        Fabric::new(entry.clone(), None, None, Duration::from_secs(30))
+            .register(&rt.names().forward, move |_| {
+                let accepted = accepted.clone();
+                Box::pin(async move { accepted })
+            })
+            .expect("a handler");
+        let cells = Cells::new("home", ["d"]);
+        let id = entry.instance_id();
+        cells.store(
+            "d",
+            EntryTable::new(Box::new([Arc::new(CellTable {
+                class: "model_x".into(),
+                cell: "m1".into(),
+                id: cell_id("model_x", "m1"),
+                generation: 1,
+                region: "home".into(),
+                state: CellState::Ready,
+                load: super::super::tests::idle(),
+                eligible: Box::new([id]),
+                offered: Box::new([crate::dist::roster::selector_id(id)]),
+                retired: Box::new([]),
+                unread: false,
+                turn: Arc::new(AtomicUsize::new(0)),
+                offering: true,
+                revision: 1,
+                leases: Arc::default(),
+            })])),
+        );
+        let mut targets =
+            targets(&layout, "a", &cells, &gdl::CellPolicies::new()).expect("targets");
+        let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
+        let policy = Within::Policy(Policy::RoundRobin);
+        let routers = [
+            ("roster", Router::Roster(policy.clone())),
+            (
+                "cells",
+                Router::Cells(Arc::new(Crossing::new(target, policy, Default::default()))),
+            ),
+        ];
+        for (name, router) in &routers {
+            let mut best = Duration::MAX;
+            for _ in 0..3 {
+                let start = std::time::Instant::now();
+                for _ in 0..OFFERS {
+                    let cx = Cx::new();
+                    let envelope = Forward {
+                        version: VERSION,
+                        identity: rt.identity,
+                        hop: 0,
+                        pos: 1,
+                        cx: WireCx::of(&cx),
+                        reply: ReplyTo::test_value(7),
+                        payload: vec![1, 2, 3],
+                    };
+                    rt.send_forward("d", router, &cx, envelope, false)
+                        .await
+                        .expect("accepted");
+                }
+                best = best.min(start.elapsed());
+            }
+            println!(
+                "offer {name}: {:.2} us",
+                best.as_nanos() as f64 / f64::from(OFFERS) / 1000.0
+            );
+        }
     }
 
     /// A pick allocates nothing under either policy the runtime provides,
@@ -571,6 +856,7 @@ mod tests {
     /// sets which damped cells are passed over, and with a cell excluded.
     #[test]
     fn a_pick_allocates_nothing_under_either_policy() {
+        let cx = Cx::new();
         let random = std::hash::RandomState::new();
         for name in ["home_first", "round_robin"] {
             let layout = layout_under(gdl_model::CellPolicy {
@@ -589,7 +875,8 @@ mod tests {
             counting(true);
             for _ in 0..1000 {
                 let (_, cell, _) = crossing
-                    .pick(Policy::RoundRobin, &random, &excluded)
+                    .pick(&cx, &[], Policy::RoundRobin, &random, &excluded)
+                    .expect("a pick")
                     .expect("a cell");
                 chosen.push(cell);
             }

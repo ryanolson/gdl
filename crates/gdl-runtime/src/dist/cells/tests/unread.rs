@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 
+use gdl::{CellPolicy, HomeFirst};
 use gdl_cells::{CellState, LoadSummary};
 use gdl_watch::{FollowEvent, UnknownFollowEvent, WatchEnd, Watched};
 use tokio::time::Instant;
@@ -13,7 +14,6 @@ use velo::PeerInfo;
 
 use super::super::Cells;
 use super::super::follow::{Asked, Follows};
-use super::super::policy::{CellChooser, HomeFirst};
 use super::{
     Call, DRAIN, M1, M2, Recorded, Scripted, exposed, follow, follower, live, peer, retired, run,
     state, table,
@@ -62,10 +62,10 @@ fn ready(cell: &str, generation: u64, peers: &[&PeerInfo]) -> Vec<FollowEvent> {
 fn chosen(cells: &Cells, cell: &str, now: Instant) -> bool {
     let table = cells.table("f").expect("a table");
     table
-        .cells
+        .views
         .iter()
-        .find(|table| table.cell == cell)
-        .is_some_and(|table| HomeFirst.eligible(table, "r", &[], now))
+        .find(|view| view.name() == cell)
+        .is_some_and(|view| HomeFirst.eligible(view, "r", now))
 }
 
 /// The cells and watches asked for, as `(cell, watch, paused)`.

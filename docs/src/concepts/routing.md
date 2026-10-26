@@ -36,11 +36,11 @@ Each sending process keeps its own sequence for each destination segment. A pick
 A crossing can name a selector instead: `{ selector = "<name>" }`. A selector is a type that implements `gdl::Selector`. It runs in the sending segment, once for each choice. It sees:
 
 - the request's context: its id, metadata, and deadline (`request.cx()`);
-- the request's head, as its own type (`request.head()`), or only the head's bytes (`request.bytes()`) when its `Head` is `gdl::Encoded`;
+- the request's head, as its own type (`request.head()`), as a part of it that decodes only the fields it declares (`gdl::Projected`), or only the head's bytes (`request.bytes()`) when its `Head` is `gdl::Encoded`;
 - the instances that declined this request so far (`request.declined()`);
 - the destination segment's eligible instances (`Instances`), never empty.
 
-When the segment starts, the runtime checks the selector's `Head` against the head type of the edge that crosses there. For a streamed edge `Streamed<H, T>`, the head type is `H`. A mismatch fails the start and names the selector, the crossing, and both types. `gdl::Encoded` fits any edge and costs no decode.
+When the segment starts, the runtime checks the selector's `Head` against the head type of the edge that crosses there. For a streamed edge `Streamed<H, T>`, the head type is `H`. A mismatch fails the start and names the selector, the crossing, and both types. `gdl::Encoded` fits any edge and costs no decode. A `gdl::Projected<P>` must name the edge's type as `P::Of`, and its edge must not be encoded as `msgpack_array`, which carries no field names. A cell policy's `Head` is checked the same way ([Choosing a cell](cell-routing.md#a-registered-policy)).
 
 A selector returns a `Choice` made from one of the `Instance`s it was given. Neither type has a public constructor, so a selector cannot name an instance outside the table. A choice can carry two things:
 

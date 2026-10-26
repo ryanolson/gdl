@@ -19,7 +19,7 @@ use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
 use gdl::__runtime::{Erased, Lease};
 use gdl::Cx;
-use gdl::Selectors;
+use gdl::{CellPolicies, Selectors};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::{Layout, RequestRouter};
 
@@ -84,6 +84,12 @@ pub struct RuntimeConfig {
     /// with its defaults. Not a setting: a segment binary registers them
     /// through its `Builder`.
     pub selectors: Selectors,
+    /// The cell policies a placement's `[cells.<class>] policy` can name,
+    /// by name. A name that is not here is gdl's own policy of that name.
+    /// Not a setting: a segment binary registers them through its
+    /// `Builder`. A chooser launched through a `ProcessConfig` checks the
+    /// names against its `runtime`'s.
+    pub cell_policies: CellPolicies,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -154,6 +160,7 @@ impl Default for RuntimeConfig {
             drain: None,
             metrics: None,
             selectors: Selectors::new(),
+            cell_policies: CellPolicies::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -221,6 +228,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             drain: s.drain_ms.map(Duration::from_millis),
             metrics: None,
             selectors: Selectors::new(),
+            cell_policies: CellPolicies::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };
@@ -399,7 +407,7 @@ impl Runtime {
         }
         #[cfg(feature = "hub")]
         let crossings = match roster.cells() {
-            Some(cells) => super::cells::targets(&layout, &segment, cells)?,
+            Some(cells) => super::cells::targets(&layout, &segment, cells, &config.cell_policies)?,
             None => BTreeMap::new(),
         };
         for peer in roster.peers() {
@@ -559,6 +567,7 @@ impl Runtime {
             return Router::Cells(Arc::new(super::cells::Crossing::new(
                 target.clone(),
                 within,
+                encoding,
             )));
         }
         Router::Roster(within)

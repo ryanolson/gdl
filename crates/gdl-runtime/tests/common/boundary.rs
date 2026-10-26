@@ -139,9 +139,21 @@ pub async fn run_graph<H: Register + Send + Sync + 'static>(
     runtime: RuntimeConfig,
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> gdl::Result<Running<H>> {
+    run_graph_in(config, segment, SEGMENTS, spec, runtime, assemble).await
+}
+
+/// [`run_graph`] for a deployment of the segments `segments`.
+pub async fn run_graph_in<H: Register + Send + Sync + 'static>(
+    config: &ProcessConfig<Nothing>,
+    segment: &'static str,
+    segments: &'static [&'static str],
+    spec: &DeploymentSpec,
+    runtime: RuntimeConfig,
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> gdl::Result<Running<H>> {
     let process = Process::start(config).await?;
     let launch = config
-        .launch(&process, segment, SEGMENTS, spec, async { Ok(()) })
+        .launch(&process, segment, segments, spec, async { Ok(()) })
         .await?;
     let cells = launch.cells();
     let node = launch.node();
