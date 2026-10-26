@@ -615,7 +615,37 @@ fn quote(s: &str) -> String {
 /// Write a Compose bundle into `out`, which must not exist, its images
 /// built from `sources`. Returns the root of the build context of a bundle
 /// of local sources, which the bundle names only relative to itself.
+/// Refuses a directory that Docker Compose cannot load a project from.
 pub fn compose(
+    spec: &Spec,
+    fleet: Option<&Fleet>,
+    out: &Path,
+    target: &Path,
+    sources: Sources,
+) -> Result<Option<PathBuf>, Error> {
+    // Compose loads the project from the directory as the shell names it,
+    // which can be a symlink's name; a later `cd` may take the resolved one.
+    loadable(&as_given(out)?)?;
+    loadable(&crate::dump::absolute(out)?)?;
+    write(spec, fleet, out, target, sources)
+}
+
+/// `out` absolute as a shell spells it: a relative `out` from `PWD`, which
+/// keeps the symlinks the shell went through, when `PWD` names the
+/// working directory. Compose takes its working directory the same way.
+fn as_given(out: &Path) -> Result<PathBuf, Error> {
+    let here = std::env::current_dir().and_then(|d| d.canonicalize()).ok();
+    let absolute = match std::env::var_os("PWD").map(PathBuf::from) {
+        Some(pwd) if out.is_relative() && pwd.is_absolute() && pwd.canonicalize().ok() == here => {
+            pwd.join(out)
+        }
+        _ => std::path::absolute(out).map_err(io)?,
+    };
+    Ok(crate::paths::normalize(&absolute))
+}
+
+/// [`compose`], whatever the path.
+fn write(
     spec: &Spec,
     fleet: Option<&Fleet>,
     out: &Path,
@@ -627,11 +657,7 @@ pub fn compose(
             "Compose output already exists; choose a fresh directory",
         ));
     }
-    // Compose loads the project from the directory as the shell names it,
-    // which can be a symlink's name.
-    loadable(&std::path::absolute(out).map_err(io)?)?;
     let out = crate::dump::absolute(out)?;
-    loadable(&out)?;
     let (files, local) = bundle_files(spec, fleet, &out, target, sources)?;
     crate::write(&out, &files)?;
     Ok(local)
@@ -712,8 +738,9 @@ pub fn compose_bundle(spec: &Spec, target: &Path) -> Result<ComposeBundle, Error
         .prefix("gdl-compose-")
         .tempdir()
         .map_err(io)?;
+    // Not checked: the bundle runs where its archive is unpacked.
     let out = temp.path().join("deployment");
-    compose(spec, None, &out, target, Sources::Fetched)?;
+    write(spec, None, &out, target, Sources::Fetched)?;
     let mut files = Files::new();
     let mut pending = vec![out.clone()];
     while let Some(dir) = pending.pop() {

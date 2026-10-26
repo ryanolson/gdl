@@ -15,8 +15,16 @@ pub fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     for split in (1..=parts.len()).rev() {
         let existing: PathBuf = parts[..split].iter().collect();
         if let Ok(mut resolved) = existing.canonicalize() {
-            resolved.extend(&parts[split..]);
-            return Ok(normalize(&resolved));
+            let rest = &parts[split..];
+            resolved.extend(rest);
+            let resolved = normalize(&resolved);
+            // A `..` after a missing component can step back into existing
+            // ones, which may be symlinks: resolve again. The normalized
+            // path has no `..`, so the second pass is the last.
+            return match rest.contains(&Component::ParentDir) {
+                true => resolve(&resolved),
+                false => Ok(resolved),
+            };
         }
     }
     Ok(normalize(&absolute))
@@ -121,6 +129,12 @@ mod tests {
         assert_eq!(
             resolve(&root.join("project/link/../out/front")).expect("resolve"),
             root.join("vendor/out/front")
+        );
+        // A missing component that `..` cancels leaves the rest to resolve:
+        // `missing/../project/link` is `vendor/a`.
+        assert_eq!(
+            resolve(&root.join("missing/../project/link/front")).expect("resolve"),
+            root.join("vendor/a/front")
         );
     }
 

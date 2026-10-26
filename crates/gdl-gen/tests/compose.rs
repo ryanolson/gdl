@@ -544,17 +544,7 @@ fn an_archive_of_fetchable_crates_builds_images() {
 fn compose_serves_a_source_without_a_frontend_on_stdin() {
     let temp = offline_registry("compose-no-frontend");
     let dir = temp.path();
-    std::fs::write(
-        dir.join("graph.gdl"),
-        "name = \"imaged\", schema = 1;\nsource A: Words -> stream Token;\nsink   Engine: Words -> stream Token;\ntopology: A => Engine;\n",
-    )
-    .expect("graph");
-    std::fs::write(
-        dir.join("gdl.toml"),
-        "[graph]\npath = \"graph.gdl\"\n[messages]\ncrates = [\"regproto@0.1.0\"]\n[nodes]\ncrates = [\"regnodes@0.1.0\"]\n[gdl]\ngit = \"https://example.com/gdl\"\nrev = \"abc123\"\n[segment.front]\nnodes = [\"A\"]\n[segment.engine]\nnodes = [\"Engine\"]\n",
-    )
-    .expect("spec");
-    let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
+    let spec = front_and_engine(dir);
     let files = gdl_gen::compose_files(
         &spec,
         None,
@@ -575,6 +565,256 @@ fn compose_serves_a_source_without_a_frontend_on_stdin() {
         "{}",
         files[Path::new("engine/config.toml")]
     );
+}
+
+/// A spec in `dir`, which [`offline_registry`] made, of a source `front`
+/// without a frontend and a sink `engine`, both from the registry.
+fn front_and_engine(dir: &Path) -> gdl_gen::Spec {
+    std::fs::write(
+        dir.join("graph.gdl"),
+        "name = \"imaged\", schema = 1;\nsource A: Words -> stream Token;\nsink   Engine: Words -> stream Token;\ntopology: A => Engine;\n",
+    )
+    .expect("graph");
+    std::fs::write(
+        dir.join("gdl.toml"),
+        "[graph]\npath = \"graph.gdl\"\n[messages]\ncrates = [\"regproto@0.1.0\"]\n[nodes]\ncrates = [\"regnodes@0.1.0\"]\n[gdl]\ngit = \"https://example.com/gdl\"\nrev = \"abc123\"\n[segment.front]\nnodes = [\"A\"]\n[segment.engine]\nnodes = [\"Engine\"]\n",
+    )
+    .expect("spec");
+    gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec")
+}
+
+/// Bundle directories, under a fresh directory, and whether Docker Compose
+/// loads a project from each. Compose turns its working directory into a
+/// `file://` URL, and the parse fails on a `%` that two hex digits do not
+/// follow, anywhere in the path. A `%` with two hex digits, in either case,
+/// loads.
+const PERCENT: &[(&str, bool)] = &[
+    ("p%x", false),
+    ("p%", false),
+    ("p%4", false),
+    ("a%41b%", false),
+    ("up%x/bundle", false),
+    ("p%41", true),
+    ("p%25", true),
+    ("u%e9", true),
+];
+
+/// `compose` refuses to write a bundle where Docker Compose cannot load
+/// it, and writes nothing there. Each directory is a fresh one, as
+/// `compose` needs.
+#[test]
+fn compose_refuses_a_directory_compose_cannot_load() {
+    let temp = offline_registry("compose-percent");
+    let spec = front_and_engine(temp.path());
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-compose-percent-")
+        .tempdir()
+        .expect("dir");
+    for (name, loads) in PERCENT {
+        let out = holder.path().join(name);
+        let result = gdl_gen::compose(
+            &spec,
+            None,
+            &out,
+            &temp.path().join("target"),
+            gdl_gen::Sources::Fetched,
+        );
+        if *loads {
+            result.unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(out.join("compose.yaml").is_file(), "{name}");
+        } else {
+            let error = result.expect_err(name).to_string();
+            assert!(
+                error.contains("holds a `%` that two hex digits do not follow"),
+                "{name}: {error}"
+            );
+            assert!(
+                error.contains(&format!("{:?}", out.as_os_str())),
+                "{name}: {error}"
+            );
+            assert!(!out.exists(), "{name}");
+        }
+    }
+}
+
+/// Compose reads its working directory as the shell gives it, through any
+/// symlink, so a bundle is refused when either the path as given or the
+/// path the file system resolves holds such a `%`.
+#[cfg(unix)]
+#[test]
+fn compose_refuses_a_percent_on_either_side_of_a_symlink() {
+    let temp = offline_registry("compose-percent-link");
+    let spec = front_and_engine(temp.path());
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-compose-percent-link-")
+        .tempdir()
+        .expect("dir");
+    let plain = holder.path().join("plain");
+    let percent = holder.path().join("p%x");
+    std::fs::create_dir(&plain).expect("dir");
+    std::fs::create_dir(&percent).expect("dir");
+    std::os::unix::fs::symlink(&plain, holder.path().join("to%x")).expect("link");
+    std::os::unix::fs::symlink(&percent, holder.path().join("to")).expect("link");
+    for link in ["to%x", "to"] {
+        let out = holder.path().join(link).join("bundle");
+        let error = gdl_gen::compose(
+            &spec,
+            None,
+            &out,
+            &temp.path().join("target"),
+            gdl_gen::Sources::Fetched,
+        )
+        .expect_err(link)
+        .to_string();
+        assert!(
+            error.contains("holds a `%` that two hex digits do not follow"),
+            "{link}: {error}"
+        );
+        assert!(!out.exists(), "{link}");
+    }
+}
+
+/// A missing component followed by `..` can hide an existing symlink
+/// from a single resolution pass.
+#[cfg(unix)]
+#[test]
+fn compose_refuses_a_percent_symlink_after_a_cancelled_component() {
+    let temp = offline_registry("compose-percent-cancelled");
+    let spec = front_and_engine(temp.path());
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-compose-percent-cancelled-")
+        .tempdir()
+        .expect("dir");
+    for (name, link, accepted) in [("plain", "safe", true), ("p%x", "to", false)] {
+        let destination = holder.path().join(name);
+        std::fs::create_dir(&destination).expect("dir");
+        std::os::unix::fs::symlink(&destination, holder.path().join(link)).expect("link");
+        let out = holder
+            .path()
+            .join("missing")
+            .join("..")
+            .join(link)
+            .join("bundle");
+        let result = gdl_gen::compose(
+            &spec,
+            None,
+            &out,
+            &temp.path().join("target"),
+            gdl_gen::Sources::Fetched,
+        );
+        if accepted {
+            result.expect("a plain destination is accepted");
+            assert!(destination.join("bundle/compose.yaml").is_file());
+        } else {
+            assert!(
+                result.is_err(),
+                "compose accepted {out:?}; compose.yaml written under p%x={}",
+                destination.join("bundle/compose.yaml").is_file()
+            );
+            assert!(
+                result
+                    .expect_err("a percent-bearing destination is refused")
+                    .to_string()
+                    .contains("holds a `%` that two hex digits do not follow")
+            );
+            assert!(!destination.join("bundle").exists());
+        }
+    }
+}
+
+/// A shell keeps the path it took through a symlink in `PWD`, and Compose
+/// reads `PWD`, so a relative output is checked from there too.
+#[cfg(unix)]
+#[test]
+fn compose_refuses_a_relative_output_under_a_percent_pwd() {
+    let temp = offline_registry("compose-percent-pwd");
+    front_and_engine(temp.path());
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-compose-percent-pwd-")
+        .tempdir()
+        .expect("dir");
+    let plain = holder.path().join("plain");
+    let link = holder.path().join("work%x");
+    std::fs::create_dir(&plain).expect("dir");
+    std::os::unix::fs::symlink(&plain, &link).expect("link");
+    for (cwd, name, accepted) in [(&plain, "control", true), (&link, "bundle", false)] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+            .args(["gdl", "compose", "--spec"])
+            .arg(temp.path().join("gdl.toml"))
+            .arg("--target-dir")
+            .arg(temp.path().join("target"))
+            .args(["--out", name])
+            .current_dir(cwd)
+            .env("PWD", cwd)
+            .output()
+            .expect("cargo gdl compose");
+        let out = cwd.join(name);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            accepted,
+            "PWD={}: --out {name}; compose.yaml written={}; stderr={stderr}",
+            cwd.display(),
+            out.join("compose.yaml").is_file()
+        );
+        if accepted {
+            assert!(out.join("compose.yaml").is_file());
+        } else {
+            assert!(
+                stderr.contains("holds a `%` that two hex digits do not follow"),
+                "{stderr}"
+            );
+            assert!(!out.exists());
+        }
+    }
+}
+
+/// [`PERCENT`] agrees with Docker Compose: `docker compose config` loads a
+/// project from each directory that `compose` writes, and fails in each
+/// that it refuses. When a Compose release loads them all, the limit can
+/// be lifted (`docs/src/operations/limitations.md`).
+#[test]
+#[ignore = "needs docker; run with --ignored"]
+fn the_percent_rule_matches_docker_compose() {
+    let temp = offline_registry("compose-percent-docker");
+    let spec = front_and_engine(temp.path());
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-compose-percent-docker-")
+        .tempdir()
+        .expect("dir");
+    for (name, loads) in PERCENT {
+        let out = holder.path().join(name);
+        if *loads {
+            gdl_gen::compose(
+                &spec,
+                None,
+                &out,
+                &temp.path().join("target"),
+                gdl_gen::Sources::Fetched,
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        } else {
+            std::fs::create_dir_all(&out).expect("dir");
+            std::fs::write(
+                out.join("compose.yaml"),
+                "{\"services\":{\"a\":{\"image\":\"scratch\"}}}\n",
+            )
+            .expect("compose.yaml");
+        }
+        let result = std::process::Command::new("timeout")
+            .args(["30", "docker", "compose", "config", "--quiet"])
+            .current_dir(&out)
+            // Compose prefers `PWD` to the directory the process runs in.
+            .env("PWD", &out)
+            .output()
+            .expect("docker compose");
+        assert_eq!(
+            result.status.success(),
+            *loads,
+            "{name}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }
 
 /// Generation, a check, and an export each write the `[gdl]` path into
