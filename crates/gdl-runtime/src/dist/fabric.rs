@@ -5,6 +5,8 @@
 
 #[cfg(feature = "hub")]
 mod hub;
+#[cfg(test)]
+mod refusing;
 mod renewal;
 #[cfg(feature = "hub")]
 pub use hub::HubSession;
@@ -12,6 +14,8 @@ pub use hub::HubSession;
 pub(crate) use hub::bind_under_hub;
 #[cfg(feature = "hub")]
 pub(crate) use hub::{CellDrain, ChooserHub, Parent};
+#[cfg(test)]
+pub(crate) use refusing::Refusing;
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -671,17 +675,18 @@ mod tests {
 
     /// A peer that stopped before this node's first contact with it is
     /// proven unsent: velo admits a send only after the peer's handshake,
-    /// and the handshake fails when no connection opens.
+    /// and the handshake fails when no connection opens. The peer is an
+    /// address that refuses connections, not a node this test stops (see
+    /// [`Refusing`] for why).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_peer_gone_before_its_first_contact_is_proven_unsent() {
         let sender = node().await;
         let fabric = fabric(&sender);
-        let (peer, probe) = answering().await;
+        let gone = Refusing::new();
+        let peer = gone.peer();
         let id = peer.instance_id();
-        fabric.register_peer(peer.peer_info()).expect("registered");
-        shut_down(&peer, Duration::from_millis(100)).await;
-        drop(peer);
-        let offered = fabric.offer(id, &probe, vec![7], WAIT).await;
+        fabric.register_peer(peer).expect("registered");
+        let offered = fabric.offer(id, &probe(), vec![7], WAIT).await;
         match offered {
             Offered::Unsent(_) => {}
             Offered::Unknown(error) => panic!("unknown: {error}"),

@@ -16,7 +16,7 @@ node --test crates/gdl-web/tests/editor.cjs         # the composer's page, outsi
 (cd examples/api && timeout <limit> cargo nextest run)
 ```
 
-The suite runs under [cargo-nextest](https://nexte.st), which runs each test in its own process. Its settings are in `.config/nextest.toml`. `crates/gdl-runtime/tests/allocs.rs` has its own `main`, so that no other thread changes its allocation count. It answers nextest's `--list` with one test, `allocations`.
+The suite runs under [cargo-nextest](https://nexte.st), which runs each test in its own process. Its settings are in `.config/nextest.toml`. `crates/gdl-runtime/tests/allocs.rs` has its own `main`, so that no other thread changes its allocation count. It answers nextest's `--list` with one test, `allocations`. A test that counts the allocations of a velo call warms the sender first. velo's table of response slots allocates once for each of its shards, and the shard count grows with the host's cores (`warm` in `crates/gdl-runtime/src/dist/offers/failover.rs`).
 
 The tests of `gdl-gen` build the other examples in `target/examples`. The `editor.cjs` test runs the composer's `assets/app.js` in a Node `vm` context with a stub DOM. It needs a Node with the built-in test runner (`node --test`) and nothing from npm.
 
@@ -54,6 +54,8 @@ Tests that need two or more velo nodes run them in one process, over TCP on OS-a
 
 - **Placement matrices.** The reference graph has seven nodes. `crates/gdl-runtime/tests/{flows,graph,dist}.rs` send one request through each of its 877 placements (every partition of seven nodes) and compare the result with the local run. Each takes about 15 s, which the doc comment on the test says. The streamed reference graph has the same matrix.
 - **Process fixtures.** `crates/gdl-runtime/tests/common/` builds deployments of several segments, each a velo node, and a TCP proxy (`proxy.rs`) in front of a hub's port. The proxy can forward, hold connections silent, refuse them, fall silent at a `DELETE`, or hide a cell's drain from the hub that follows it.
+
+An instance that stopped is an address that refuses connections: `Refusing` in `crates/gdl-runtime/src/dist/fabric/refusing.rs`. Do not stop a node to make one. The port it frees is not reserved. Another node, in this test binary or another copy of it, can bind the port at once. On a busy host, the stopped node's own listener can still be open when its shutdown returns. Either one accepts the connection and never answers velo's handshake. The send then waits out velo's 30 s handshake timeout and does not fail as unsent.
 
 ## Fault hooks
 

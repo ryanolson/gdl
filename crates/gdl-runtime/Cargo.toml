@@ -51,6 +51,9 @@ criterion = { workspace = true }
 velo = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+# A port that refuses connections and that no listener can take: a bound
+# socket that never listens, which std cannot make.
+socket2 = { workspace = true }
 tempfile.workspace = true
 trybuild = { workspace = true }
 

@@ -13,7 +13,7 @@ use gdl::{Cx, Error, ErrorKind, Result};
 
 use crate::dist::counting::Counted;
 use crate::dist::envelope::{self, Accepted, Forward, VERSION, WireCx};
-use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
+use crate::dist::fabric::{Fabric, Refusing, ReplyTo, bind_node};
 use crate::dist::offers::Refused;
 use crate::dist::roster::{Policy, Roster};
 use crate::dist::runtime::{Entries, Router, Runtime, RuntimeConfig, Within};
@@ -102,10 +102,22 @@ fn manifest() -> gdl_model::Manifest {
 /// it says; `None` registers no handler, so that velo refuses to send to
 /// it.
 async fn fixture(answers: Vec<Option<Answering>>, config: RuntimeConfig) -> Fixture {
+    fixture_after(None, answers, config).await
+}
+
+/// [`fixture`], with `first` in the roster ahead of the entries.
+async fn fixture_after(
+    first: Option<velo::PeerInfo>,
+    answers: Vec<Option<Answering>>,
+    config: RuntimeConfig,
+) -> Fixture {
     let sender = bind_node(([127, 0, 0, 1], 0).into())
         .await
         .expect("a velo node");
     let mut roster = Roster::new();
+    if let Some(first) = first {
+        roster.add("d", first);
+    }
     let mut nodes = Vec::new();
     for _ in &answers {
         let node = bind_node(([127, 0, 0, 1], 0).into())
@@ -600,9 +612,29 @@ async fn a_refusal_here_that_is_not_a_decline_is_final() {
     }
 }
 
+/// Send enough hand-offs from `fixture`'s sender that velo's response
+/// table has its memory, so that a later send allocates only what each
+/// send does.
+///
+/// velo gives each call the next of its 65,535 response slots in turn, and
+/// marks the slot in a dashmap set. The first slot that lands in a shard of
+/// that set allocates the shard's table, and dashmap makes
+/// `(cores * 4).next_power_of_two()` shards: 128 on 20 cores, 512 on 72.
+/// So a fresh sender's sends often allocate one more, and on a big host
+/// every one of 30 sends can. After twice as many sends as shards, about
+/// one send in seven still does, and the fewest of 30 is the steady cost.
+async fn warm(fixture: &Fixture) {
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    for _ in 0..2 * (cores * 4).next_power_of_two() {
+        send(fixture, &ROUND_ROBIN, &Cx::new())
+            .await
+            .expect("accepted");
+    }
+}
+
 /// The allocations each of `routers` makes to send one hand-off that is
 /// accepted, from `fixture`'s sender to its one entry, done by `send`:
-/// the fewest over a few sends, after a first that meets the peer.
+/// the fewest over a few sends, after [`warm`] and a first send by each.
 async fn allocations<'a, F>(fixture: &'a Fixture, routers: &'a [Router], send: F) -> Vec<u64>
 where
     F: Fn(&'a Runtime, &'a Router, Cx, Forward) -> BoxFuture<'a, Result<()>>,
@@ -692,6 +724,8 @@ async fn an_accepted_first_offer_allocates_what_a_call_did() {
     let routers = [ROUND_ROBIN, selector(Arc::new(Replacing))];
     let two = fixture(vec![accepting()], config(2)).await;
     let none = fixture(vec![accepting()], config(0)).await;
+    warm(&two).await;
+    warm(&none).await;
     let calls = allocations(&two, &routers, called).await;
     let offers = allocations(&two, &routers, offered).await;
     let unbounded = allocations(&none, &routers, offered).await;
@@ -881,34 +915,32 @@ async fn a_roster_emptied_after_a_refusal_fails_with_the_refusal() {
 
 /// An instance that stopped before this sender's first contact with it is
 /// one velo proves the hand-off never reached: its handshake fails before
-/// the send is admitted. So the hand-off is offered to another instance,
-/// and with none, fails as unsent (`Transport`), not as an unknown
-/// outcome. An instance that stops after its handshake is the other case
+/// the send is admitted, because no connection opens. So the hand-off is
+/// offered to another instance, and with none, fails as unsent
+/// (`Transport`), not as an unknown outcome. An instance that stops after
+/// its handshake is the other case
 /// (`an_unknown_outcome_or_another_error_is_not_offered_again`).
+///
+/// The stopped instance is an address that refuses connections
+/// ([`Refusing`]), not a node this test stops: a stopped node's port can be
+/// listening again (another node took it, or its own listener outlived
+/// its shutdown), and a hand-off sent there waits out velo's handshake
+/// timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_instance_gone_before_first_contact_is_unsent_and_offered_again() {
     for alone in [false, true] {
-        let answers = if alone {
-            vec![accepting()]
-        } else {
-            vec![accepting(), accepting()]
-        };
-        let fixture = fixture(answers, config(2)).await;
-        // The first instance in the roster stops before any handshake.
-        let gone = &fixture.entries[0].node;
-        crate::dist::fabric::shut_down(gone, Duration::from_millis(100)).await;
+        let answers = if alone { vec![] } else { vec![accepting()] };
+        // The first instance in the roster, which round robin offers to
+        // first.
+        let gone = Refusing::new();
+        let fixture = fixture_after(Some(gone.peer()), answers, config(2)).await;
         let result = send(&fixture, &ROUND_ROBIN, &Cx::new()).await;
-        assert_eq!(
-            fixture.entries[0].offers(),
-            0,
-            "the stopped instance took it"
-        );
         if alone {
             let error = result.expect_err("nothing could take it");
             assert_eq!(error.kind(), ErrorKind::Transport, "{error}");
         } else {
             result.expect("the other instance took it");
-            assert_eq!(fixture.entries[1].offers(), 1);
+            assert_eq!(fixture.entries[0].offers(), 1);
         }
     }
 }
