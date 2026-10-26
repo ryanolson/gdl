@@ -31,6 +31,7 @@ The suite runs on every change, so its speed is part of its correctness.
 
 - A test waits only for what it observes, and bounds each wait to a few seconds. A defect makes the test fail. It never hangs.
 - Prove a precondition with an observable signal. Never sleep and hope.
+- A deadline that only has to outlast the setup starts short and doubles each time the setup runs past it. A loaded host then makes the test slower, but not red. `within_a_window` in `crates/gdl-runtime/tests/recorded.rs` does this.
 - Build expensive state once. Start velo nodes once per test and reuse them across cases, as the placement matrices do.
 - A test that runs for more than a few seconds says why in a comment.
 

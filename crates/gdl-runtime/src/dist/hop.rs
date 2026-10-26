@@ -896,6 +896,11 @@ where
         if let Some(delay) = self.rt.config.faults.delay_forward_ack {
             tokio::time::sleep(delay).await;
         }
+        #[cfg(feature = "fault-injection")]
+        if let Some(gate) = &self.rt.config.faults.forward_ack_gate {
+            gate.arrived.notify_one();
+            gate.release.notified().await;
+        }
         Ok(accepted)
     }
 

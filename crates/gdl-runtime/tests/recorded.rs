@@ -7,6 +7,8 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use common::*;
 use futures::StreamExt;
@@ -204,6 +206,25 @@ async fn next(out: &mut gdl::Items<Chunk>) -> gdl::Result<Chunk> {
         .await
         .expect("no item in time")
         .expect("an item")
+}
+
+/// Run `attempt` with a deadline window of `first`, and double the window
+/// each time the attempt returns `None`: its setup outlasted the window, so
+/// that run says nothing about the deadline. A loaded host makes the setup
+/// slow, and a fixed window that covers every load would make every run
+/// slow. A setup that never fits in `WAIT` fails the test.
+async fn within_a_window<T>(
+    first: Duration,
+    mut attempt: impl AsyncFnMut(Duration) -> Option<T>,
+) -> T {
+    let mut window = first;
+    loop {
+        if let Some(done) = attempt(window).await {
+            return done;
+        }
+        window *= 2;
+        assert!(window <= WAIT, "the setup never fit in its deadline");
+    }
 }
 
 fn one() -> Placement {
@@ -413,32 +434,69 @@ async fn the_parts_add_up_to_the_first_item_end_to_end() {
 }
 
 /// The hand-off is timed when it is sent: an acknowledgement the engine
-/// delays (after it has admitted the request, so its own request path is
+/// holds (after it has admitted the request, so its own request path is
 /// already running) is in no segment's figure, and the parts still sum to
 /// no more than the time end to end.
+///
+/// No load can blur the two outcomes. The hand-off left before the engine
+/// held its acknowledgement, so a figure that ends at the hand-off is at
+/// most the time until the test saw the hold. A figure that ended at the
+/// acknowledgement would be longer: the hold lasts longer than the front
+/// took to show its visit, which began before the hand-off.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_slow_acknowledgement_is_counted_nowhere() {
+    held_acknowledgement(None).await;
+}
+
+/// A slow arrival at the engine leaves the call room for the hold, which
+/// outlasts only the front's start, not the whole setup. Runs for about
+/// 2.7 s: the arrival takes over half of the call's guard, so a hold as
+/// long as the setup would overrun it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_arrival_leaves_room_for_the_acknowledgement_hold() {
+    held_acknowledgement(Some(WAIT / 2 + ms(100))).await;
+}
+
+/// Hold the engine's acknowledgement of one request, after an arrival
+/// delayed by `arrival`, and check that no figure counts the hold.
+async fn held_acknowledgement(arrival: Option<Duration>) {
+    let gate = Arc::new(gdl_runtime::Gate::default());
     let d = deployed(two(), &|segment| {
         let mut config = RuntimeConfig::default();
         if segment == "engine" {
-            config.faults.delay_forward_ack = Some(ms(150));
+            config.faults.delay_forward_arrival = arrival;
+            config.faults.forward_ack_gate = Some(Arc::clone(&gate));
         }
         config
     })
     .await;
-    assert_eq!(d.run(Cx::new(), plan(1)).await, expected(0..1));
+    let called = tokio::time::Instant::now();
+    let (out, (before, hold)) = tokio::join!(d.run(Cx::new(), plan(1)), async {
+        d.reaches("A", 1.0).await;
+        let started = called.elapsed();
+        tokio::time::timeout(WAIT, gate.arrived.notified())
+            .await
+            .expect("the engine never held the acknowledgement");
+        let before = called.elapsed();
+        let held = tokio::time::Instant::now();
+        tokio::time::sleep(started + ms(10)).await;
+        let hold = held.elapsed();
+        gate.release.notify_one();
+        (before.as_secs_f64(), hold.as_secs_f64())
+    });
+    assert_eq!(out, expected(0..1));
     d.idle().await;
     let front = d.sum("request_path_duration_seconds", "A");
     assert!(
-        front < 0.1,
-        "the front's request path held the ack: {front} s"
+        front <= before,
+        "the front's request path held the ack: {front} s, though the hand-off left within {before} s"
     );
     let total = front
         + d.sum("request_path_duration_seconds", "D")
         + d.sum("response_time_to_first_item_seconds", "D")
         + d.sum("response_time_to_first_item_seconds", "A");
     let end_to_end = d.sum("end_to_end_time_to_first_item_seconds", "A");
-    assert!(end_to_end >= 0.15, "{end_to_end} s");
+    assert!(end_to_end >= hold, "{end_to_end} s for a hold of {hold} s");
     assert!(total <= end_to_end, "{total} s against {end_to_end} s");
 }
 
@@ -551,24 +609,48 @@ async fn a_dropped_stream_is_a_cancellation_of_every_response() {
 /// flight in each segment until then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deadline_is_counted_where_its_clock_ended_the_stream() {
-    // A wide allowance: the front's own deadline comes 200 ms after the
-    // engine's, so the engine's error always reaches it first.
-    let d = deployed(two(), &|_| RuntimeConfig {
-        clock_skew: ms(200),
-        ..RuntimeConfig::default()
+    let mut attempts = 0;
+    let (d, out) = within_a_window(ms(200), async |window| {
+        attempts += 1;
+        // The engine's allowance is as long as any wait in these tests: the
+        // front's own deadline comes that long after the engine's, so the
+        // engine's error always reaches it first. The engine's clock also
+        // runs 250 ms ahead, past the first window: its deadline comes
+        // earlier than the test's clock shows, so only what the engine did
+        // can say whether the deadline came first.
+        let d = deployed(two(), &|segment| {
+            let mut config = RuntimeConfig::default();
+            if segment == "engine" {
+                config.clock_skew = WAIT;
+                config.faults.clock_offset_nanos = 250_000_000;
+            }
+            config
+        })
+        .await;
+        let out = match d
+            .call(Cx::new().with_timeout(window + WAIT), endless())
+            .await
+        {
+            Err(error) if error.kind() == gdl::ErrorKind::DeadlineExceeded => return None,
+            out => out.expect("call"),
+        };
+        let held = [
+            d.get("inflight_requests", "D", &[]),
+            d.get("inflight_requests", "A", &[]),
+        ];
+        if held == [Some(1.0); 2] {
+            return Some((d, out));
+        }
+        // Not held: that says nothing only if the deadline came first.
+        match collect(out).await.pop() {
+            Some(Err(error)) if error.kind() == gdl::ErrorKind::DeadlineExceeded => None,
+            end => panic!("D and A are {held:?} before the request ended with {end:?}"),
+        }
     })
     .await;
-    let endless = Plan {
-        endless: true,
-        item_delay_ms: 1,
-        ..plan(0)
-    };
-    let out = d
-        .call(Cx::new().with_timeout(ms(400)), endless)
-        .await
-        .expect("call");
-    assert_eq!(d.value("inflight_requests", "D", &[]), 1.0);
-    assert_eq!(d.value("inflight_requests", "A", &[]), 1.0);
+    // On the engine's clock and allowance, the first deadline had passed
+    // before the request arrived.
+    assert!(attempts > 1, "the engine took the first window's request");
     let items = collect(out).await;
     assert_eq!(
         items
@@ -683,11 +765,20 @@ async fn a_cancel_ends_a_crossing_sources_visit_though_its_caller_does_not_read(
     assert_eq!(d.value("end_to_end_cancellation_total", "A", &[]), 1.0);
     drop(out);
 
-    let mut out = d
-        .call(Cx::new().with_timeout(ms(200)), endless())
-        .await
-        .expect("call");
-    next(&mut out).await.expect("not an error");
+    // The caller must read the first item before the deadline; where the
+    // deadline came first, a fresh deployment tries a longer one.
+    let (d, out) = within_a_window(ms(200), async |window| {
+        let d = deployed(alone(), &|_| RuntimeConfig::default()).await;
+        let first = match d.call(Cx::new().with_timeout(window), endless()).await {
+            Ok(mut out) => next(&mut out).await.map(|_| out),
+            Err(error) => Err(error),
+        };
+        match first {
+            Err(error) if error.kind() == gdl::ErrorKind::DeadlineExceeded => None,
+            first => Some((d, first.expect("not an error"))),
+        }
+    })
+    .await;
     d.idle().await;
     let with = [("error_type", "deadline_exceeded")];
     assert_eq!(d.value("end_to_end_errors_total", "A", &with), 1.0);
@@ -798,24 +889,26 @@ async fn a_refused_request_is_counted_by_its_sender() {
 /// request path ends when the sink below it starts its stream.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_default_deadline_classifies_a_dropped_request() {
-    let d = deployed(alone(), &|_| RuntimeConfig {
-        default_deadline: ms(200),
-        ..RuntimeConfig::default()
+    // The call returns once the engine's stream exists; where the deadline
+    // came first, a fresh deployment tries a longer one.
+    let (d, out) = within_a_window(ms(200), async |window| {
+        let d = deployed(alone(), &|_| RuntimeConfig {
+            default_deadline: window,
+            ..RuntimeConfig::default()
+        })
+        .await;
+        match d.call(Cx::new(), endless()).await {
+            Err(error) if error.kind() == gdl::ErrorKind::DeadlineExceeded => None,
+            out => Some((d, out.expect("call"))),
+        }
     })
     .await;
-    let endless = Plan {
-        endless: true,
-        item_delay_ms: 1,
-        ..plan(0)
-    };
-    let called = tokio::time::Instant::now();
-    let out = d.call(Cx::new(), endless).await.expect("call");
     assert_eq!(d.value("requests_total", "B", &[]), 1.0);
     assert_eq!(d.count("request_path_duration_seconds", "B"), 1.0);
     // Held unread until the engine's stream has ended at the deadline,
     // which it sees early by the clock skew allowance, and until the
-    // front's own has passed: the attempt took it after `called`, within
-    // milliseconds.
+    // front's visit has ended at its own: the drop comes too late to be
+    // a cancellation.
     let with = [("error_type", "deadline_exceeded")];
     let deadline = tokio::time::Instant::now() + WAIT;
     while d.value("response_errors_total", "B", &with) == 0.0 {
@@ -825,7 +918,7 @@ async fn the_default_deadline_classifies_a_dropped_request() {
         );
         tokio::time::sleep(ms(5)).await;
     }
-    tokio::time::sleep_until(called + ms(300)).await;
+    d.reaches("A", 0.0).await;
     drop(out);
     d.idle().await;
     assert_eq!(d.value("end_to_end_errors_total", "A", &with), 1.0);

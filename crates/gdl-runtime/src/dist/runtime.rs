@@ -115,6 +115,9 @@ pub struct Faults {
     /// Hold the acknowledgement of an accepted forward hand-off this long, as
     /// a lost reply would.
     pub delay_forward_ack: Option<Duration>,
+    /// Hold the acknowledgement of each accepted forward hand-off at this
+    /// gate; the test observes the hold and ends it.
+    pub forward_ack_gate: Option<Arc<Gate>>,
     /// Hold the reply to an opened backward run this long, as a lost reply
     /// would.
     pub delay_open_reply: Option<Duration>,
