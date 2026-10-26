@@ -805,6 +805,11 @@ impl Drop for Project {
     }
 }
 
+/// What the http example's spec adds to publish its frontend on a port
+/// Docker chooses.
+const PUBLISHED: &str = "\n[deployment.segment.main]\nports = [\"0:8081\"]\n\
+    [deployment.segment.main.config.frontend]\nlisten = \"0.0.0.0:8081\"\n";
+
 /// The http example, from the sources in this checkout, under Docker
 /// Compose: the hub and the segment build from the repository, and the
 /// frontend answers on a port Docker chooses. The bundle's path holds
@@ -819,9 +824,7 @@ fn the_http_example_answers_from_a_local_bundle() {
         return;
     }
     let example = root().join("examples/http");
-    let text = std::fs::read_to_string(example.join("gdl.toml")).expect("the spec")
-        + "\n[deployment.segment.main]\nports = [\"0:8081\"]\n\
-           [deployment.segment.main.config.frontend]\nlisten = \"0.0.0.0:8081\"\n";
+    let text = std::fs::read_to_string(example.join("gdl.toml")).expect("the spec") + PUBLISHED;
     let graph = std::fs::read_to_string(example.join("http.gdl")).expect("the graph");
     let spec = gdl_gen::Spec::from_text(&text, &graph, &example).expect("a spec");
     let id = std::process::id();
@@ -843,6 +846,12 @@ fn the_http_example_answers_from_a_local_bundle() {
     )
     .expect("a bundle");
 
+    answers(&project);
+}
+
+/// Start `project`, whose `main` serves the http example's frontend on
+/// container port 8081, and check that it answers a request.
+fn answers(project: &Project) {
     let started = Instant::now();
     let up = project
         .compose()
@@ -971,4 +980,663 @@ fn a_local_bundle_refuses_a_secret_in_its_context() {
             "{inside:?}: {error}"
         );
     }
+}
+
+/// A Git repository of stand-ins for `gdl` and `gdl-message`, at the
+/// version of the real ones, as a node crate takes them from Git, and of
+/// each crate in `more`, by name and dependencies: the repository, its
+/// `file://` URL, and its commit. A stand-in that is built fails the
+/// build, and a container cannot fetch it, so only a bundle that patches
+/// it out, with a lock that says so, builds.
+fn stub_gdl(more: &[(&str, &str)]) -> (tempfile::TempDir, String, String) {
+    let repo = tempfile::Builder::new()
+        .prefix("gdl-stub-")
+        .tempdir()
+        .expect("a directory");
+    let crates = [
+        ("gdl", "gdl-message = { path = \"../gdl-message\" }\n"),
+        ("gdl-message", ""),
+    ];
+    for &(name, deps) in crates.iter().chain(more) {
+        let dir = repo.path().join(name);
+        std::fs::create_dir_all(dir.join("src")).expect("a crate");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{deps}"
+            ),
+        )
+        .expect("a manifest");
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "compile_error!(\"the stand-in was built\");\n",
+        )
+        .expect("a library");
+    }
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(repo.path())
+            .args(["-c", "user.name=gdl", "-c", "user.email=gdl@localhost"])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "--message", "stand-ins"]);
+    let rev = git(&["rev-parse", "HEAD"]);
+    let url = format!("file://{}", repo.path().display());
+    (repo, url, rev)
+}
+
+/// `gdl` and `gdl-message` from Git at `url` and `rev`, as a manifest
+/// names them.
+fn gdl_from_git(url: &str, rev: &str) -> String {
+    format!(
+        "gdl = {{ git = \"{url}\", rev = \"{rev}\" }}\ngdl-message = {{ git = \"{url}\", rev = \"{rev}\" }}\n"
+    )
+}
+
+/// The http example copied into `holder/http`, at the depth of
+/// `examples/http`, so that its paths to the runtime hold, with `deps` in
+/// place of its `gdl` by path, and `extra` added to its spec.
+fn http_from_git(holder: &Path, deps: &str, extra: &str) -> gdl_gen::Spec {
+    let example = root().join("examples/http");
+    let dir = holder.join("http");
+    std::fs::create_dir_all(dir.join("src")).expect("a directory");
+    for file in ["gdl.toml", "http.gdl", "src/lib.rs", "src/main.rs"] {
+        std::fs::copy(example.join(file), dir.join(file)).expect("an example file");
+    }
+    let manifest = std::fs::read_to_string(example.join("Cargo.toml")).expect("the manifest");
+    let by_path = "gdl = { path = \"../../crates/gdl\" }\n";
+    assert!(manifest.contains(by_path), "{manifest}");
+    std::fs::write(dir.join("Cargo.toml"), manifest.replace(by_path, deps)).expect("a manifest");
+    let text = std::fs::read_to_string(dir.join("gdl.toml")).expect("the spec") + extra;
+    let graph = std::fs::read_to_string(dir.join("http.gdl")).expect("the graph");
+    gdl_gen::Spec::from_text(&text, &graph, &dir).expect("a spec")
+}
+
+/// The `[[package]]` entry of `name` in the lock file `lock`.
+fn locked<'l>(lock: &'l str, name: &str) -> Vec<&'l str> {
+    lock.split("[[package]]")
+        .filter(|entry| entry.contains(&format!("\nname = \"{name}\"\n")))
+        .collect()
+}
+
+/// Node crates that take gdl from Git, as a repository outside gdl's does,
+/// while `[gdl] path` gives the segments gdl by path: the segment patches
+/// the Git source with the path crates, so it builds one gdl, and its lock,
+/// written on the host, records the patch, so that the image build fetches
+/// nothing from that source. The lock keeps the versions gdl's own lock
+/// pins. Resolving the segment takes a second or two.
+#[test]
+fn a_local_bundle_patches_the_gdl_that_its_node_crates_take_from_git() {
+    let (_repo, url, rev) = stub_gdl(&[]);
+    // In the repository, not under `target`, as a node crate in the build
+    // context is.
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-git-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let spec = http_from_git(holder.path(), &gdl_from_git(&url, &rev), "");
+    let out = holder.path().join("bundle");
+    gdl_gen::compose(
+        &spec,
+        None,
+        &out,
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect("a bundle");
+
+    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    assert!(
+        manifest.contains(&format!(
+            "[patch.\"{url}\"]\ngdl = {{ path = \"../../../crates/gdl\" }}\ngdl-message = {{ path = \"../../../crates/gdl-message\" }}\n"
+        )),
+        "{manifest}"
+    );
+    let contract = std::fs::read_to_string(out.join("contract/Cargo.toml")).expect("a manifest");
+    assert!(!contract.contains("[patch"), "{contract}");
+
+    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    for name in ["gdl", "gdl-message"] {
+        let entries = locked(&lock, name);
+        assert_eq!(entries.len(), 1, "one {name} in:\n{lock}");
+        assert!(
+            !entries[0].contains("source ="),
+            "{name} by path: {}",
+            entries[0]
+        );
+    }
+    assert!(
+        !lock.contains(&url),
+        "the lock names the Git source:\n{lock}"
+    );
+    let gdl_lock = std::fs::read_to_string(root().join("Cargo.lock")).expect("gdl's lock");
+    assert_eq!(
+        locked(&lock, "velo"),
+        locked(&gdl_lock, "velo"),
+        "velo at the commit gdl's lock pins"
+    );
+
+    let dockerfile = std::fs::read_to_string(out.join("main/Dockerfile")).expect("a Dockerfile");
+    let run = dockerfile
+        .lines()
+        .find(|line| line.starts_with("RUN "))
+        .expect("a build");
+    assert!(
+        run.starts_with("RUN cargo build --locked --release --manifest-path "),
+        "{run}"
+    );
+
+    // With the lock as written, the segment resolves to one gdl without
+    // the network.
+    let metadata = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--locked", "--offline", "--format-version", "1"])
+        .arg("--manifest-path")
+        .arg(out.join("main/Cargo.toml"))
+        .output()
+        .expect("cargo metadata");
+    assert!(
+        metadata.status.success(),
+        "{}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).expect("metadata");
+    let gdl: Vec<&serde_json::Value> = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .filter(|package| package["name"] == "gdl")
+        .collect();
+    assert_eq!(gdl.len(), 1, "{gdl:?}");
+    assert!(gdl[0]["source"].is_null(), "{:?}", gdl[0]);
+}
+
+/// A node crate that takes gdl by path, and a crate from Git that takes it
+/// from Git: no crate the segment reaches by path names that source, so no
+/// patch replaces it, and a bundle that would build two copies of gdl is
+/// refused, and nothing of it is left.
+#[test]
+fn a_local_bundle_that_reaches_gdl_from_git_only_through_git_is_refused() {
+    let (_repo, url, rev) = stub_gdl(&[("helper", "gdl = { path = \"../gdl\" }\n")]);
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-git-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let spec = http_from_git(
+        holder.path(),
+        &format!(
+            "gdl = {{ path = \"../../crates/gdl\" }}\nhelper = {{ git = \"{url}\", rev = \"{rev}\" }}\n"
+        ),
+        "",
+    );
+
+    let out = holder.path().join("bundle");
+    let error = gdl_gen::compose(
+        &spec,
+        None,
+        &out,
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect_err("two copies of gdl")
+    .to_string();
+    assert!(error.contains("`gdl` from git+file://"), "{error}");
+    assert!(!out.exists(), "a refused bundle is not left behind");
+}
+
+/// The http example, its node crate taking gdl from a Git repository that
+/// the image build cannot reach, under Docker Compose: the segment's image
+/// builds by the lock written on the host, which records the patch, so it
+/// fetches nothing from that source and builds one gdl, and the frontend
+/// answers. Building the images takes a minute or more.
+#[test]
+#[ignore = "needs docker; run with --ignored"]
+fn a_local_bundle_whose_node_crate_takes_gdl_from_git_builds_and_answers() {
+    let version = Command::new("docker").args(["compose", "version"]).output();
+    if !version.is_ok_and(|output| output.status.success()) {
+        eprintln!("skipped: `docker compose version` fails");
+        return;
+    }
+    let (_repo, url, rev) = stub_gdl(&[]);
+    // Dropped after the project, which stops it from the bundle.
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-git-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let spec = http_from_git(holder.path(), &gdl_from_git(&url, &rev), PUBLISHED);
+    let project = Project {
+        name: format!("gdl-local-git-{}", std::process::id()),
+        dir: holder.path().join("bundle"),
+    };
+    gdl_gen::compose(
+        &spec,
+        None,
+        &project.dir,
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect("a bundle");
+    answers(&project);
+}
+
+/// A crate by path that a node crate takes, whose own dev-dependency is
+/// not there: Cargo never reads a dependency's dev-dependencies, so the
+/// segment builds, and `cargo metadata --no-deps`, which cannot read that
+/// crate's workspace, does not stop the bundle.
+#[test]
+fn a_local_bundle_does_not_require_a_transitive_crates_dev_dependencies() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-dev-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let spec = http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\nhelper = { path = \"../helper\" }\n",
+        "",
+    );
+    let helper = holder.path().join("helper");
+    std::fs::create_dir_all(helper.join("src")).expect("a path dependency");
+    std::fs::write(helper.join("src/lib.rs"), "").expect("a library");
+    std::fs::write(
+        helper.join("Cargo.toml"),
+        "[package]\nname = \"helper\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dev-dependencies]\nmissing-test-helper = { path = \"../missing-test-helper\" }\n",
+    )
+    .expect("a dev dependency");
+
+    let consumer = holder.path().join("consumer");
+    std::fs::create_dir_all(consumer.join("src")).expect("a consumer");
+    std::fs::write(consumer.join("src/lib.rs"), "").expect("a library");
+    std::fs::write(
+        consumer.join("Cargo.toml"),
+        "[package]\nname = \"dev-control\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nhttp-frontend = { path = \"../http\" }\n",
+    )
+    .expect("a manifest");
+    std::fs::copy(root().join("Cargo.lock"), consumer.join("Cargo.lock"))
+        .expect("the workspace lock");
+    let control = Command::new("timeout")
+        .args([
+            "30",
+            env!("CARGO"),
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(consumer.join("Cargo.toml"))
+        .output()
+        .expect("metadata of the node as a dependency");
+    assert!(
+        control.status.success(),
+        "the consumer does not build the helper's dev dependency: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+
+    gdl_gen::compose(
+        &spec,
+        None,
+        &holder.path().join("bundle"),
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect("compose does not build the helper's tests either");
+}
+
+/// Another process makes the output directory while compose prepares the
+/// bundle, and the lock step then fails: compose refuses the directory, or
+/// removes only what it made, and never another process's files.
+#[cfg(unix)]
+#[test]
+fn a_failed_local_bundle_keeps_a_directory_created_by_another_process() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-ownership-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let out = holder.path().join("bundle");
+    let wrapper = holder.path().join("cargo-wrapper");
+    std::fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+if [ "$1" = metadata ]; then
+    case " $* " in
+        *" --no-deps "*)
+            mkdir -p "$REVIEW_OUTPUT"
+            printf '%s\n' 'another process owns this file' > "$REVIEW_OUTPUT/user-data"
+            ;;
+        *"$REVIEW_OUTPUT/main/Cargo.toml"*)
+            printf '%s\n' 'injected lock resolution failure' >&2
+            exit 1
+            ;;
+    esac
+fi
+exec "$REVIEW_CARGO" "$@"
+"#,
+    )
+    .expect("a cargo wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("an executable");
+
+    let composed = Command::new("timeout")
+        .args(["30", env!("CARGO_BIN_EXE_cargo-gdl"), "compose", "--local"])
+        .arg("--spec")
+        .arg(root().join("examples/http/gdl.toml"))
+        .arg("--out")
+        .arg(&out)
+        .arg("--target-dir")
+        .arg(target("gdl-gen-tests"))
+        .env("CARGO", &wrapper)
+        .env("REVIEW_CARGO", env!("CARGO"))
+        .env("REVIEW_OUTPUT", &out)
+        .output()
+        .expect("compose");
+    let stderr = String::from_utf8_lossy(&composed.stderr);
+    assert!(
+        composed.status.success()
+            || stderr.contains("injected lock resolution failure")
+            || stderr.contains("output already exists"),
+        "compose must refuse the conflict or reach the injected failure: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("user-data"))
+            .ok()
+            .as_deref(),
+        Some("another process owns this file\n"),
+        "compose deletes a directory it did not create: {stderr}"
+    );
+}
+
+/// A host whose Rust is newer than the image's writes a lock that the
+/// image can build: the segment says it builds with gdl's `rust-version`,
+/// so Cargo picks each new dependency for that Rust. It needs the rustup
+/// toolchains 1.93.1, the default image's, and 1.99.0.
+#[test]
+#[ignore = "needs the rustup toolchains 1.93.1 and 1.99.0; run with --ignored"]
+fn a_host_lock_can_be_built_by_the_configured_image_compiler() {
+    let tool = |toolchain: &str, name: &str| {
+        let output = Command::new("timeout")
+            .args(["10", "rustup", "which", "--toolchain", toolchain, name])
+            .output()
+            .expect("rustup");
+        assert!(
+            output.status.success(),
+            "needs Rust {toolchain}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("a tool path")
+            .trim()
+            .to_string()
+    };
+    let host_cargo = tool("1.99.0", "cargo");
+    let host_rustc = tool("1.99.0", "rustc");
+    let image_cargo = tool("1.93.1", "cargo");
+    let image_rustc = tool("1.93.1", "rustc");
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-msrv-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let spec = http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\naws-smithy-async = \
+         \">=1.2.14, <=1.3.1\"\n",
+        "",
+    );
+    let spec_dir = holder.path().join("http");
+    let out = holder.path().join("bundle");
+    let composed = Command::new("timeout")
+        .args(["30", env!("CARGO_BIN_EXE_cargo-gdl"), "compose", "--local"])
+        .arg("--spec")
+        .arg(spec_dir.join("gdl.toml"))
+        .arg("--out")
+        .arg(&out)
+        .arg("--target-dir")
+        .arg(target("gdl-gen-tests"))
+        .env("CARGO", host_cargo)
+        .env("RUSTC", host_rustc)
+        .output()
+        .expect("compose on the newer host");
+    assert!(
+        composed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let dockerfile = std::fs::read_to_string(out.join("main/Dockerfile")).expect("a Dockerfile");
+    assert!(dockerfile.contains("FROM rust:1.93.1-slim-bookworm AS build"));
+    assert!(dockerfile.contains("cargo build --locked --release"));
+    let lock = out.join("main/Cargo.lock");
+    let from_host = std::fs::read_to_string(&lock).expect("the host's lock");
+
+    // The image's previous resolve has a usable release in the same range.
+    std::fs::copy(root().join("Cargo.lock"), &lock).expect("the workspace lock");
+    let control = Command::new("timeout")
+        .args(["30", &image_cargo, "metadata", "--format-version", "1"])
+        .arg("--manifest-path")
+        .arg(out.join("main/Cargo.toml"))
+        .env("RUSTC", &image_rustc)
+        .output()
+        .expect("the image compiler's resolve");
+    assert!(
+        control.status.success(),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&control.stdout).expect("metadata");
+    let dependency = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "aws-smithy-async")
+        .expect("the new node dependency");
+    assert_eq!(dependency["version"], "1.2.14");
+    assert_eq!(dependency["rust_version"], "1.91.1");
+    std::fs::write(&lock, &from_host).expect("the host's lock restored");
+    assert!(local(&spec, &out).is_ok(), "the spec itself is valid");
+
+    let from_image = std::fs::read_to_string(&lock).expect("the restored host lock");
+    let host_version = locked(&from_image, "aws-smithy-async");
+    assert_eq!(
+        host_version.len(),
+        1,
+        "the host lock must contain the dependency"
+    );
+    if !host_version[0].contains("version = \"1.2.14\"") {
+        let build = Command::new("timeout")
+            .args(["30", &image_cargo, "check", "--locked", "--offline"])
+            .arg("--manifest-path")
+            .arg(out.join("main/Cargo.toml"))
+            .env("RUSTC", image_rustc)
+            .env("CARGO_BUILD_JOBS", "2")
+            .env("CARGO_TARGET_DIR", target("gdl-msrv"))
+            .output()
+            .expect("the image compiler with the host's lock");
+        assert!(
+            build.status.success(),
+            "the host emitted a lock the configured image cannot build:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+}
+
+/// A named registry at crates.io's sparse URL is a source of its own, not
+/// crates.io, which Cargo names by its Git index: the patch names it so.
+#[test]
+fn a_sparse_registry_alias_is_patched_as_its_own_source() {
+    const INDEX: &str = "sparse+https://index.crates.io/";
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-sparse-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { version = \"=0.1.0\", registry = \"review\" }\n",
+        "",
+    );
+    let control = holder.path().join("control");
+    std::fs::create_dir_all(control.join("src")).expect("a control crate");
+    std::fs::write(control.join("src/lib.rs"), "").expect("a library");
+    std::fs::write(
+        control.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"sparse-control\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
+             [workspace]\n[dependencies]\nhttp-frontend = {{ path = \"../http\" }}\n\
+             [patch.\"{INDEX}\"]\ngdl = {{ path = \"../../crates/gdl\" }}\n"
+        ),
+    )
+    .expect("a manifest with the sparse source's patch");
+    std::fs::copy(root().join("Cargo.lock"), control.join("Cargo.lock"))
+        .expect("the workspace lock");
+    let resolved = Command::new("timeout")
+        .args(["30", env!("CARGO"), "metadata", "--format-version", "1"])
+        .arg("--manifest-path")
+        .arg(control.join("Cargo.toml"))
+        .env("CARGO_REGISTRIES_REVIEW_INDEX", INDEX)
+        .output()
+        .expect("the sparse source's patch");
+    assert!(
+        resolved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&resolved.stdout).expect("metadata");
+    let packages = metadata["packages"].as_array().expect("packages");
+    let copies: Vec<_> = packages
+        .iter()
+        .filter(|package| package["name"] == "gdl")
+        .collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert!(copies[0]["source"].is_null(), "{copies:?}");
+    let node = packages
+        .iter()
+        .find(|package| package["name"] == "http-frontend")
+        .expect("the node crate");
+    assert!(
+        node["dependencies"]
+            .as_array()
+            .expect("dependencies")
+            .iter()
+            .any(|dependency| dependency["name"] == "gdl" && dependency["source"] == INDEX),
+        "Cargo reports the sparse source's identity"
+    );
+
+    let out = holder.path().join("bundle");
+    let composed = Command::new("timeout")
+        .args(["30", env!("CARGO_BIN_EXE_cargo-gdl"), "compose", "--local"])
+        .arg("--spec")
+        .arg(holder.path().join("http/gdl.toml"))
+        .arg("--out")
+        .arg(&out)
+        .arg("--target-dir")
+        .arg(target("gdl-gen-tests"))
+        .env("CARGO_REGISTRIES_REVIEW_INDEX", INDEX)
+        .output()
+        .expect("compose with a sparse registry alias");
+    assert!(
+        composed.status.success(),
+        "a path crate names a patchable source, but compose refuses it:\n{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+}
+
+/// Compose reads the Cargo configuration of the build context, as the image
+/// build does, wherever it runs from. It copies gdl's sources and resolves
+/// two bundles, which takes several seconds.
+#[test]
+fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-config-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    std::fs::write(holder.path().join("Cargo.toml"), "[workspace]\n")
+        .expect("the context's workspace");
+    let gdl = holder.path().join("gdl");
+    let listed = Command::new("timeout")
+        .args([
+            "10",
+            "git",
+            "ls-files",
+            "-z",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "crates",
+        ])
+        .current_dir(root())
+        .output()
+        .expect("the workspace's source files");
+    assert!(listed.status.success());
+    for file in std::str::from_utf8(&listed.stdout)
+        .expect("UTF-8 file names")
+        .split('\0')
+        .filter(|file| !file.is_empty())
+    {
+        let into = gdl.join(file);
+        std::fs::create_dir_all(into.parent().expect("a parent")).expect("a source directory");
+        std::fs::copy(root().join(file), into).expect("a source file");
+    }
+    http_from_git(
+        holder.path(),
+        "gdl = { version = \"=0.1.0\", registry = \"review-config\" }\n",
+        "",
+    );
+    for file in ["Cargo.toml", "gdl.toml"] {
+        let path = holder.path().join("http").join(file);
+        let text = std::fs::read_to_string(&path).expect("the http example");
+        std::fs::write(
+            path,
+            text.replace("../../crates/gdl-runtime", "../gdl/crates/gdl-runtime"),
+        )
+        .expect("the copied gdl workspace");
+    }
+    std::fs::create_dir(holder.path().join(".cargo")).expect("a configuration directory");
+    std::fs::write(
+        holder.path().join(".cargo/config.toml"),
+        "[registries.review-config]\nindex = \"https://github.com/rust-lang/crates.io-index\"\n\
+         [patch.crates-io]\ngdl = { path = \"gdl/crates/gdl\" }\n",
+    )
+    .expect("the context's registry configuration");
+    let compose = |cwd: &Path, out: &Path| {
+        Command::new("timeout")
+            .args(["30", env!("CARGO_BIN_EXE_cargo-gdl"), "compose", "--local"])
+            .arg("--spec")
+            .arg(holder.path().join("http/gdl.toml"))
+            .arg("--out")
+            .arg(out)
+            .arg("--target-dir")
+            .arg(target("gdl-gen-tests"))
+            .env_remove("CARGO_REGISTRIES_REVIEW_CONFIG_INDEX")
+            .current_dir(cwd)
+            .output()
+            .expect("compose")
+    };
+    let inside = holder.path().join("inside");
+    let control = compose(holder.path(), &inside);
+    assert!(
+        control.status.success(),
+        "compose works from the context: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let compose_file: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(inside.join("compose.yaml")).expect("compose.yaml"),
+    )
+    .expect("JSON");
+    assert_eq!(compose_file["services"]["main"]["build"]["context"], "..");
+
+    let outside = compose(&root(), &holder.path().join("outside"));
+    assert!(
+        outside.status.success(),
+        "the same spec fails from outside the context:\n{}",
+        String::from_utf8_lossy(&outside.stderr)
+    );
 }

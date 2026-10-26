@@ -101,6 +101,7 @@ name = "http-main"
 version = "0.0.0"
 edition = "2024"
 publish = false
+rust-version = "1.93"
 
 [lib]
 path = "src/lib.rs"
@@ -127,7 +128,7 @@ FROM rust:1.93.1-slim-bookworm AS build
 WORKDIR /app
 COPY . /app
 ENV CARGO_TARGET_DIR=/build
-RUN cp '/app/Cargo.lock' '/app/target/gdl-local-golden/main/Cargo.lock' && cargo build --release --manifest-path '/app/target/gdl-local-golden/main/Cargo.toml'
+RUN cargo build --locked --release --manifest-path '/app/target/gdl-local-golden/main/Cargo.toml'
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /build/release/http-main /usr/local/bin/segment
 COPY ["./target/gdl-local-golden/main/config.toml", "/etc/gdl/config"]

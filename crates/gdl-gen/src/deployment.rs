@@ -129,6 +129,7 @@ use crate::{
 
 mod cells;
 mod context;
+mod locks;
 mod variables;
 
 /// Where a bundle's images take the crates they build.
@@ -142,6 +143,8 @@ pub enum Sources {
     /// runtime and hub of its `[gdl] path`, as they are on this machine,
     /// from a build context that holds them and the bundle. For testing
     /// code that is not pushed: the bundle builds only on this machine.
+    /// [`compose`] writes each segment's lock on this machine, and each
+    /// image builds by it.
     Local,
 }
 
@@ -162,15 +165,14 @@ pub fn compose_files(
     Ok(bundle_files(spec, fleet, out, target, sources)?.0)
 }
 
-/// [`compose_files`], and the root of the build context of a bundle of
-/// local sources.
+/// [`compose_files`], and the build context of a bundle of local sources.
 fn bundle_files(
     spec: &Spec,
     fleet: Option<&Fleet>,
     out: &Path,
     target: &Path,
     sources: Sources,
-) -> Result<(Files, Option<PathBuf>), Error> {
+) -> Result<(Files, Option<context::Context>), Error> {
     let by_cell = cells::by_cell(spec);
     if let (None, Some(why)) = (fleet, &by_cell) {
         return Err(Error::new(format!(
@@ -179,7 +181,7 @@ fn bundle_files(
     }
     let (spec, bundle) = Bundle::prepare(spec, out, target, sources)?;
     bundle.check_secrets(out)?;
-    let local = bundle.local_root();
+    let local = bundle.context.clone();
     let mut files = match fleet {
         None => single(&spec, bundle, target)?,
         Some(fleet) => {
@@ -364,11 +366,6 @@ impl Bundle {
         }
     }
 
-    /// The root of the build context, for a bundle of local sources.
-    fn local_root(&self) -> Option<PathBuf> {
-        self.context.as_ref().map(|c| c.root().to_path_buf())
-    }
-
     /// Every image the settings name, checked.
     fn validate_images(&self) -> Result<(), Error> {
         let settings = &self.settings;
@@ -420,19 +417,37 @@ impl Bundle {
         let crate_dir = dir.join(segment);
         let path = crate_dir.join("config.toml");
         let manifest = format!("/app/{}/Cargo.toml", self.in_build(&crate_dir));
-        let mut build = format!("cargo build --release --manifest-path {}", quote(&manifest));
-        // The segment is a workspace of its own, which a fresh resolve
-        // would give the newest commit of each Git dependency, such as
-        // velo's branch: the gdl workspace's lock pins the versions its
-        // runtime was built and tested with.
-        if let Some(lock) = self.context.as_ref().and_then(|c| c.lock()) {
-            let into = format!("/app/{}/Cargo.lock", self.in_build(&crate_dir));
-            build = format!(
-                "cp {} {} && {build}",
-                quote(&format!("/app/{lock}")),
-                quote(&into)
-            );
-        }
+        // A segment of local sources builds by the lock [`locks::write`]
+        // writes on the host, which records its patch: a resolve in the
+        // image build would fetch the patched source, with no SSH agent,
+        // or move a Git dependency to its newest commit.
+        let locked = match &self.context {
+            Some(context) => {
+                let patch = context.patch(&self.files, &crate_dir);
+                if let Some(manifest) = self.files.get_mut(&crate_dir.join("Cargo.toml")) {
+                    manifest.push_str(&patch);
+                    // The host's Rust may be newer than the image's: Cargo
+                    // picks each new dependency for the oldest Rust the
+                    // segment says it builds with, which is gdl's.
+                    if let Some(version) = context.rust_version() {
+                        *manifest = manifest.replacen(
+                            "publish = false\n",
+                            &format!(
+                                "publish = false\nrust-version = {}\n",
+                                crate::dump::toml_string(version)
+                            ),
+                            1,
+                        );
+                    }
+                }
+                "--locked "
+            }
+            None => "",
+        };
+        let build = format!(
+            "cargo build {locked}--release --manifest-path {}",
+            quote(&manifest)
+        );
         let text = dockerfile(
             &build,
             &format!("/build/release/{package}"),
@@ -799,9 +814,32 @@ fn write(
         ));
     }
     let out = crate::dump::absolute(out)?;
-    let (files, local) = bundle_files(spec, fleet, &out, target, sources)?;
-    crate::write(&out, &files)?;
-    Ok(local)
+    let (files, context) = bundle_files(spec, fleet, &out, target, sources)?;
+    // Claim `out` only now, and atomically: another process may have made
+    // it while the bundle was prepared. A failure below then removes only
+    // what this run made, so compose writes all of a bundle or none.
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(io)?;
+    }
+    match std::fs::create_dir(&out) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(Error::new(
+                "Compose output already exists; choose a fresh directory",
+            ));
+        }
+        other => other.map_err(io)?,
+    }
+    let written = crate::write(&out, &files)
+        .map(drop)
+        .and_then(|()| match &context {
+            Some(context) => locks::write(&out, &files, context),
+            None => Ok(()),
+        });
+    if let Err(error) = written {
+        let _ = std::fs::remove_dir_all(&out);
+        return Err(error);
+    }
+    Ok(context.map(|context| context.root().to_path_buf()))
 }
 
 /// Refuse an output directory, absolute, from which Docker Compose cannot
