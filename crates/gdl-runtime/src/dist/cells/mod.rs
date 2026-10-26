@@ -346,10 +346,12 @@ pub struct FollowedCell {
     /// has none. `home_first` chooses by it, and not at all without it;
     /// `round_robin`, the default, does not read it.
     pub load: Option<LoadSummary>,
-    /// How long ago, on this instance's clock, the summary arrived: a
-    /// cell's hub sends its summary every period, so this is the time
-    /// since the hub last made it, or since the follow was first shown.
-    /// `None` with no summary.
+    /// How long ago, on this instance's clock, the summary reached this
+    /// instance's hub: a new watch of the hub's relay is sent each summary
+    /// with its age, so a summary the hub has held is as old on every
+    /// watch. A cell's hub sends its summary every period, so this is
+    /// about the time since the cell's hub last made it. `None` with no
+    /// summary.
     pub load_age: Option<std::time::Duration>,
     /// Whether this chooser damps the cell, and how long its window still
     /// lasts: `Some` from a decline of its offer until it accepts one,

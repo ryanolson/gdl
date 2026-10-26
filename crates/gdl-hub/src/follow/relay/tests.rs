@@ -5,7 +5,7 @@
 use super::{Installed, Relay};
 use crate::{CellHealth, Quorum};
 use futures::{FutureExt, StreamExt};
-use gdl_cells::CellState;
+use gdl_cells::{CellState, LoadSummary};
 use gdl_watch::{CellWatchEvent, FollowEvent};
 use velo_hub::velo::{InstanceId, PeerInfo, WorkerAddress};
 
@@ -77,6 +77,67 @@ fn pending(watch: &mut super::FollowsWatch) -> Vec<FollowEvent> {
         events.push(event);
     }
     events
+}
+
+/// The age of the summary the snapshot `events` begins with.
+fn load_age(events: &[FollowEvent]) -> Option<u64> {
+    match events.first() {
+        Some(FollowEvent::Follow { load_age_ms, .. }) => *load_age_ms,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A watch that begins is sent a follow's summary with its age: how long
+/// ago the relay received it, from the cell's snapshot, from a load
+/// event, or from a reading of the cell again, which sends the summary
+/// anew even when it has not changed. With no summary, no age.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_sends_the_summary_with_its_age() {
+    let second = std::time::Duration::from_secs(1);
+    let load = LoadSummary {
+        admitted: 1,
+        limit: 4,
+        instances: 1,
+        refusals: 0,
+        period_ms: 1000,
+    };
+    let of = |load| {
+        Installed::new(
+            "m".into(),
+            "model_x".into(),
+            "r".into(),
+            "hub:1".into(),
+            CellState::Ready,
+            load,
+        )
+    };
+    let mut cell = of(Some(load));
+    tokio::time::advance(second * 4).await;
+    assert_eq!(load_age(&cell.snapshot(1, None)), Some(4000));
+    assert_eq!(
+        load_age(&cell.snapshot(1, None)),
+        Some(4000),
+        "as old again"
+    );
+
+    sent(&mut cell, CellWatchEvent::Load { load: Some(load) });
+    tokio::time::advance(second).await;
+    assert_eq!(load_age(&cell.snapshot(1, None)), Some(1000));
+
+    cell.withhold(1, |_| {});
+    tokio::time::advance(second * 2).await;
+    let fresh = of(Some(load));
+    tokio::time::advance(second / 2).await;
+    cell.restore(fresh, 1, |_| {});
+    assert_eq!(
+        load_age(&cell.snapshot(1, None)),
+        Some(500),
+        "as old as the reading, the same summary"
+    );
+
+    sent(&mut cell, CellWatchEvent::Load { load: None });
+    assert_eq!(load_age(&cell.snapshot(1, None)), None);
+    assert_eq!(load_age(&of(None).snapshot(1, None)), None);
 }
 
 /// An instance retired is never exposed, even if its cell's watch named
@@ -231,6 +292,7 @@ fn only_the_current_generation_writes() {
         region: "r".into(),
         state,
         load: None,
+        load_age_ms: None,
     };
     let first_exposed = FollowEvent::Exposed {
         class: "model_x".into(),

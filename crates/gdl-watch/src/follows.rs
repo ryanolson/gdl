@@ -95,6 +95,15 @@ pub enum FollowEvent {
         state: CellState,
         /// The load of the cell's entry segments, as its hub last sent it.
         load: Option<LoadSummary>,
+        /// How long before this event the relay received `load`, in
+        /// milliseconds: a consumer dates the summary back by it, so that
+        /// a summary the relay has held for a while does not read as new
+        /// on every watch that begins. An age, not an instant, since the
+        /// relay's clock and the consumer's are not the same. Absent from
+        /// a hub that does not send it: the summary then dates from when
+        /// the event arrives.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        load_age_ms: Option<u64>,
     },
     /// The snapshot is complete: the events before this one are every
     /// follow as the watch began.

@@ -317,6 +317,7 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
                 region: like.region.clone(),
                 state: CellState::Unavailable,
                 load: None,
+                load_age_ms: None,
             },
             FollowEvent::Offering {
                 class: "model_x".into(),

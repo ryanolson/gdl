@@ -226,6 +226,7 @@ fn an_event_passes_over_no_follow_to_acknowledge() {
                     region: "r".into(),
                     state: CellState::Draining,
                     load: None,
+                    load_age_ms: None,
                 },
                 FollowEvent::Offering {
                     class: "model_x".into(),

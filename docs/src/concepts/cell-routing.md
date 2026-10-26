@@ -82,12 +82,14 @@ A chooser is an instance in a cell, under a hub, whose segment holds the outer e
 For each entry segment its hops enter, and each followed cell, the chooser keeps a table of the cell's current generation:
 
 - the cell's state and region;
-- its load summary, with the time it arrived on the chooser's clock (`FollowedCell::load`, `load_age`);
+- its load summary, with the time it reached the chooser's hub, on the chooser's clock (`FollowedCell::load`, `load_age`);
 - whether it is offered, and at which revision (`FollowedCell::offered`, `revision`);
 - its exposed entry instances;
 - its retired entry instances, which are never routed to again.
 
 A newer generation replaces a cell's table at once. The older generation keeps its instances until the hub drops it. `Launch::cells` reads the tables (`gdl_runtime::Cells`).
+
+A summary keeps its age when the chooser watches the relay again. The snapshot of a new watch sends each summary with `load_age_ms`, the time since the hub received it, and the chooser dates the summary back by that age. So a summary that the hub has held for a while, for example while its link to the cell is silent, is just as old on the next watch, and a stale summary stays stale. The hub sends an age, not an instant, since the hub and the chooser can run on different hosts with different clocks. A summary from a hub that sends no age dates from when the chooser read it.
 
 Beside the cells, each table keeps the class's withdrawn cells: those the relay sent `withdrawn` for. A withdrawal is kept when the chooser watches the relay again, since a snapshot holds none. It ends when a later generation of the cell is shown. A hub follows a withdrawn cell again only from a newer record, so that follow is the cell started again. The same generation shown again by a new watch does not end it. Generations only grow while a chooser runs, since a chooser stops when its hub restarts.
 

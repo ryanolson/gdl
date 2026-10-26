@@ -130,6 +130,7 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
             region: "r".into(),
             state: CellState::Ready,
             load: None,
+            load_age_ms: None,
         },
         FollowEvent::Exposed {
             class: "model_x".into(),

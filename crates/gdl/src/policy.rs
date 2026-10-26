@@ -327,7 +327,9 @@ impl Load {
         &self.summary
     }
 
-    /// When it arrived, on the chooser's clock.
+    /// When it arrived, on the chooser's clock. The chooser's runtime
+    /// dates a summary back by the age its hub sends with it, so this is
+    /// when the summary reached the chooser's hub.
     #[inline]
     pub fn arrived(&self) -> Instant {
         self.arrived

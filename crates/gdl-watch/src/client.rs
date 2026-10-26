@@ -691,6 +691,29 @@ mod tests {
         assert_eq!(unknown, 0);
     }
 
+    /// A follow's summary age is optional: a hub that does not send it is
+    /// read with none, and a follow with none is sent as that hub sends
+    /// it. A reader that does not know the field ignores it, as any field
+    /// a later build adds.
+    #[test]
+    fn a_follows_load_age_is_optional() {
+        let follow = |load_age_ms| FollowEvent::Follow {
+            class: "model_x".into(),
+            cell: "m".into(),
+            generation: 2,
+            region: "r".into(),
+            state: CellState::Ready,
+            load: None,
+            load_age_ms,
+        };
+        let earlier = "data: {\"event\":\"follow\",\"class\":\"model_x\",\"cell\":\"m\",\"generation\":2,\"region\":\"r\",\"state\":\"ready\",\"load\":null}\n\n";
+        let (got, unknown) = read::<FollowEvent>(&[earlier]);
+        assert_eq!((got, unknown), (vec![Watched::Event(follow(None))], 0));
+        let sent = |age| serde_json::to_value(follow(age)).expect("an event serializes");
+        assert_eq!(sent(None).get("load_age_ms"), None);
+        assert_eq!(sent(Some(4000))["load_age_ms"], 4000);
+    }
+
     /// An event of a kind this build does not know, between two known
     /// ones, is read as unknown and counted, and the watch goes on: on a
     /// cell's watch it concerns the watched cell, whatever it names.

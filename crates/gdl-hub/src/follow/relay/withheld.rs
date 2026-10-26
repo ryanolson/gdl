@@ -90,6 +90,7 @@ fn follow(cell: &str, generation: u64, state: CellState) -> FollowEvent {
         region: "r".into(),
         state,
         load: None,
+        load_age_ms: None,
     }
 }
 

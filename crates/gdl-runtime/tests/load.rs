@@ -10,12 +10,14 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::boundary::{
-    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, model_summarized, placement, run_graph,
-    spec_of,
+    Model, ModelCell, RUNTIME, Running, SUMMARY, ask, model_proxied, model_summarized, placement,
+    run_graph, spec_of,
 };
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
+use common::proxy::{Mode, Proxy};
 use common::{Chunk, Events, Plan, Prompt, WAIT, prompt, reference_graph};
 use futures::StreamExt;
 use gdl::{Cx, ErrorKind, Next};
@@ -57,20 +59,43 @@ async fn chooser(
     Running<impl Next<Prompt, Chunk> + Register + use<>>,
 ) {
     let (hub, readiness) = cell_hub_of(spec, global_hub(), directory).await;
+    let public = hub.public_addr().port();
+    let chooser = chooser_of(spec, &hub, public).await;
+    (hub, readiness, chooser)
+}
+
+/// [`chooser`], which reaches its hub's public listener through a proxy,
+/// also returned.
+async fn chooser_proxied(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+) -> (
+    Hub,
+    Arc<gdl_hub::CellReadiness<Resolving>>,
+    Running<impl Next<Prompt, Chunk> + Register + use<>>,
+    Proxy,
+) {
+    let (hub, readiness) = cell_hub_of(spec, global_hub(), directory).await;
+    let public = Proxy::new(hub.public_addr()).await;
+    let chooser = chooser_of(spec, &hub, public.port).await;
+    (hub, readiness, chooser, public)
+}
+
+/// A chooser in the global cell of `hub`, which it reaches at the port
+/// `public` for the hub's public listener.
+async fn chooser_of(
+    spec: &DeploymentSpec,
+    hub: &Hub,
+    public: u16,
+) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
     let extra = format!("{}{RUNTIME}", global_cell());
-    let config = settings(
-        hub.public_addr().port(),
-        hub.control_addr().port(),
-        5_000,
-        &extra,
-    );
+    let config = settings(public, hub.control_addr().port(), 5_000, &extra);
     let quiet = Events::quiet();
-    let chooser = run_graph(&config, "a", spec, config.runtime.clone(), &|deployment| {
+    run_graph(&config, "a", spec, config.runtime.clone(), &|deployment| {
         reference_graph(deployment, &quiet)
     })
     .await
-    .expect("the chooser serves");
-    (hub, readiness, chooser)
+    .expect("the chooser serves")
 }
 
 /// The model cell `M1`, ready with `entries` entry instances, each
@@ -299,6 +324,80 @@ async fn an_entry_instances_refusals_are_in_the_summary() {
     load(&mut watch, summary(LIMIT as u64, 1, 1)).await;
     load(&mut watch, summary(LIMIT as u64, 1, 0)).await;
     drop(held);
+    drop(chooser);
+    shut([global_hub, m1.hub]).await;
+}
+
+/// A summary keeps its age when the chooser watches the relay again. The
+/// global hub's link to M1 falls silent without closing, so the relay
+/// holds M1's last summary, in the same generation, and no new one comes.
+/// Four seconds later the summary, of a 1 s period, is stale in the
+/// chooser's table; the chooser's relay watch is cut, and the snapshot of
+/// its next watch shows the same summary of the same generation, which is
+/// still as old, and stale. The four seconds are the claim: a summary is
+/// stale after three of its periods.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_summary_keeps_its_age_when_the_chooser_watches_the_relay_again() {
+    const SILENT: Duration = Duration::from_secs(4);
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let (global_hub, global, chooser, public) = chooser_proxied(&spec, &directory).await;
+    let cell = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 1,
+        entries: 1,
+    };
+    let quiet = Events::quiet();
+    let (m1, link) = model_proxied(&spec, &directory, cell, RUNTIME, &|deployment| {
+        reference_graph(deployment, &quiet)
+    })
+    .await;
+    let cells = tables(&chooser);
+    until(&cells, "M1 followed, with a summary", |cells| {
+        followed(cells, "f", M1).is_some_and(|m| m.eligible.len() == 1 && m.load.is_some())
+    })
+    .await;
+    let mut relay_watchers = global.follows_watchers();
+    assert_eq!(*relay_watchers.borrow_and_update(), 1);
+
+    link.set(Mode::Silent);
+    let generation = followed(&cells, "f", M1).expect("followed").generation;
+    tokio::time::sleep(SILENT).await;
+    let before = followed(&cells, "f", M1).expect("followed");
+    assert_eq!(before.generation, generation, "the follow goes on");
+    let stale = |age: Option<Duration>| age.is_some_and(|age| age >= SILENT);
+    assert!(
+        stale(before.load_age),
+        "stale before the watch is cut: {:?}",
+        before.load_age
+    );
+
+    let mut changes = cells.changes();
+    changes.borrow_and_update();
+    public.set(Mode::Refuse);
+    tokio::time::timeout(WAIT, relay_watchers.wait_for(|watchers| *watchers == 0))
+        .await
+        .expect("the chooser's relay watch is cut in time")
+        .expect("the hub lives");
+    public.set(Mode::Forward);
+    tokio::time::timeout(WAIT, relay_watchers.wait_for(|watchers| *watchers == 1))
+        .await
+        .expect("the chooser watches the relay again in time")
+        .expect("the hub lives");
+    tokio::time::timeout(WAIT, changes.changed())
+        .await
+        .expect("the new watch's snapshot replaces the tables in time")
+        .expect("the tables live");
+    let after = followed(&cells, "f", M1).expect("followed");
+    assert_eq!(after.generation, generation, "the same follow, shown again");
+    assert_eq!(after.load, before.load, "no new summary");
+    assert!(
+        stale(after.load_age),
+        "stale after the chooser watched the relay again: {:?}",
+        after.load_age
+    );
+    link.set(Mode::Forward);
     drop(chooser);
     shut([global_hub, m1.hub]).await;
 }

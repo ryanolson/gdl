@@ -116,6 +116,7 @@ fn follow(cell: &str, generation: u64, state: CellState) -> FollowEvent {
         region: "r".into(),
         state,
         load: None,
+        load_age_ms: None,
     }
 }
 
@@ -507,6 +508,7 @@ fn only_the_entry_segments_sent_to_are_kept() {
                 region: "r".into(),
                 state: CellState::Ready,
                 load: None,
+                load_age_ms: None,
             },
             FollowEvent::Exposed {
                 class: "model_y".into(),
@@ -832,6 +834,7 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
         region: "r".into(),
         state: CellState::Ready,
         load: Some(summary(3)),
+        load_age_ms: None,
     };
     live(
         &mut follows,
@@ -882,6 +885,7 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
             region: "r".into(),
             state: CellState::Ready,
             load: Some(summary(7)),
+            load_age_ms: None,
         },
         start + second * 4,
     );
@@ -891,6 +895,46 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
         (held.load, held.load_age),
         (Some(summary(7)), Some(Duration::ZERO))
     );
+}
+
+/// A summary the relay sends with its age is dated back by it, in a
+/// snapshot as in a follow's first event: one of a 1 s period that the
+/// relay has held for 4 s is 4 s old, so stale, the moment it arrives, and
+/// stays so when a new watch shows the same follow with it again. One
+/// sent with no age, as a hub sends it that does not know of ages, dates
+/// from when it arrived.
+#[tokio::test(start_paused = true)]
+async fn a_relayed_summary_is_dated_back_by_its_age() {
+    let (mut follows, cells, _, _) = follower();
+    let second = Duration::from_secs(1);
+    let aged = |age: Option<Duration>| FollowEvent::Follow {
+        class: "model_x".into(),
+        cell: M1.into(),
+        generation: 1,
+        region: "r".into(),
+        state: CellState::Ready,
+        load: Some(summary(3)),
+        load_age_ms: age.map(|age| u64::try_from(age.as_millis()).expect("short")),
+    };
+    live(&mut follows, Instant::now(), [aged(Some(second * 4))]);
+    let held = table(&cells, M1).expect("held");
+    assert_eq!(
+        (held.load, held.load_age),
+        (Some(summary(3)), Some(second * 4))
+    );
+
+    tokio::time::advance(second).await;
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(aged(Some(second * 5)), Instant::now());
+    follows.resnapshot(snapshot, Instant::now());
+    let held = table(&cells, M1).expect("held");
+    assert_eq!(held.load_age, Some(second * 5), "as old on a new watch");
+
+    let mut snapshot = follows.snapshot();
+    snapshot.apply(aged(None), Instant::now());
+    follows.resnapshot(snapshot, Instant::now());
+    let held = table(&cells, M1).expect("held");
+    assert_eq!(held.load_age, Some(Duration::ZERO), "no age: new");
 }
 
 /// A cell's damping is the chooser's, not its follow's, and is found by

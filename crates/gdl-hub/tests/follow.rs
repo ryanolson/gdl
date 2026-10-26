@@ -444,6 +444,7 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
                 region: "us-east-1".into(),
                 state: CellState::Ready,
                 load: None,
+                load_age_ms: None,
             },
             FollowEvent::Retired {
                 class: "model_x".into(),

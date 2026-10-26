@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use gdl_cells::{CellState, LoadSummary};
 use gdl_watch::{CellWatchEvent, FollowEvent};
+use tokio::time::Instant;
 use velo_hub::velo::{InstanceId, PeerInfo};
 
 /// A followed cell as its cell watch has shown it.
@@ -17,6 +18,8 @@ pub(crate) struct Installed {
     pub(super) hub: String,
     state: CellState,
     load: Option<LoadSummary>,
+    /// When `load` was received, which a snapshot sends as its age.
+    received: Instant,
     /// Retired entry instances, with their segments: never exposed.
     retired: HashMap<InstanceId, String>,
     /// Ready entry instances that have not retired, with their segments:
@@ -48,6 +51,7 @@ impl Installed {
             hub,
             state,
             load,
+            received: Instant::now(),
             retired: HashMap::new(),
             ready: HashMap::new(),
             sent: HashSet::new(),
@@ -157,6 +161,9 @@ impl Installed {
                 &mut send,
             );
         }
+        // The cell's hub sent the summary again in the reading, so it is
+        // as new as the reading even when it has not changed.
+        self.received = fresh.received;
         self.withheld = false;
         self.state = fresh.state;
         send(FollowEvent::State {
@@ -212,6 +219,7 @@ impl Installed {
             }
             CellWatchEvent::Load { load } => {
                 self.load = load;
+                self.received = Instant::now();
                 send(FollowEvent::Load {
                     class,
                     cell,
@@ -275,8 +283,9 @@ impl Installed {
         }
     }
 
-    /// The follow as a watch of the relay begins with it: the cell, then
-    /// `offering`, then its retired instances, then those it exposes.
+    /// The follow as a watch of the relay begins with it: the cell, with
+    /// its summary's age, then `offering`, then its retired instances, then
+    /// those it exposes.
     pub(super) fn snapshot(
         &self,
         generation: u64,
@@ -292,6 +301,10 @@ impl Installed {
             region: self.region.clone(),
             state: self.shown(),
             load: self.load,
+            load_age_ms: self.load.map(|_| {
+                let age = Instant::now().saturating_duration_since(self.received);
+                u64::try_from(age.as_millis()).unwrap_or(u64::MAX)
+            }),
         });
         events.extend(offering);
         events.extend(

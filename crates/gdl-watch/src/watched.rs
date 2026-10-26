@@ -215,6 +215,7 @@ mod tests {
                 region: "r".into(),
                 state: CellState::Ready,
                 load: None,
+                load_age_ms: None,
             },
             FollowEvent::Synced,
             FollowEvent::State {

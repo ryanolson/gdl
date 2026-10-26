@@ -37,7 +37,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use gdl::Load;
-use gdl_cells::CellState;
+use gdl_cells::{CellState, LoadSummary};
 use gdl_watch::{FollowEvent, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
@@ -611,6 +611,7 @@ impl Followed {
                 region,
                 state,
                 load,
+                load_age_ms,
             } => {
                 let segments = wanted.get(&class)?;
                 let key = (class, cell);
@@ -631,7 +632,7 @@ impl Followed {
                         generation,
                         region,
                         state,
-                        load.map(|load| Load::new(load, now)),
+                        load.and_then(|load| received(load, load_age_ms, now)),
                         segments,
                     ),
                 );
@@ -830,6 +831,18 @@ impl Followed {
         }
         self.closing.get_mut(&(key.clone(), generation))
     }
+}
+
+/// `load`, which arrived at `now`, dated back by the age the relay sent
+/// with it, if it sent one: a summary the relay has held for a while is as
+/// old on every watch of it. `None` for an age this clock cannot go back
+/// by, so that such a summary never reads as fresh.
+fn received(load: LoadSummary, age_ms: Option<u64>, now: Instant) -> Option<Load> {
+    let arrived = match age_ms {
+        Some(age) => now.checked_sub(Duration::from_millis(age))?,
+        None => now,
+    };
+    Some(Load::new(load, arrived))
 }
 
 /// One cell's follow, current or earlier.

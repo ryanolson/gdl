@@ -463,6 +463,7 @@ async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::Followe
                 region,
                 state,
                 load,
+                ..
             } => {
                 // No instance here reports within the 10 s summary period,
                 // so there is no summary, and no age to compare.
