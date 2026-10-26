@@ -589,7 +589,9 @@ async fn a_deadline_is_counted_where_its_clock_ended_the_stream() {
 /// The engine, whose stream stays open after its items, holds its request
 /// until its stream ends, and so does the front, which relays the stream to
 /// the caller. A segment that only hands the request on lets it go at the
-/// hand-off, while the stream still flows elsewhere.
+/// hand-off, while the stream still flows elsewhere. It lets go when the
+/// next segment's acknowledgement comes back, which can be after the items
+/// reach the caller, so the test waits for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_request_is_in_flight_until_its_segment_is_done_with_it() {
     let d = deployed(handing_on(), &|_| RuntimeConfig::default()).await;
@@ -602,11 +604,11 @@ async fn a_request_is_in_flight_until_its_segment_is_done_with_it() {
     for _ in 0..2 {
         next(&mut out).await.expect("not an error");
     }
+    d.reaches("C", 0.0).await;
+    assert_eq!(d.value("requests_total", "C", &[]), 1.0);
     // D holds its stream open until a stop: the engine is still streaming.
     assert_eq!(d.value("inflight_requests", "D", &[]), 1.0, "the engine");
     assert_eq!(d.value("inflight_requests", "A", &[]), 1.0, "the front");
-    assert_eq!(d.value("requests_total", "C", &[]), 1.0);
-    assert_eq!(d.value("inflight_requests", "C", &[]), 0.0, "handed on");
     assert_eq!(d.get("responses_total", "C", &[]), None, "no response");
     cx.request_stop();
     let rest = collect(out).await;
