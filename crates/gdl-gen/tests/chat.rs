@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use common::{Running, cargo, example, root, target};
+use common::{Running, cargo, example, generated, root, target};
 
 /// The spec's placement draws as a diagram: one cluster per segment, and
 /// the three crossings (Truncate to Engine, Engine to Detokenize, Format to
@@ -129,7 +129,7 @@ fn three_segment_binaries_answer_requests() {
     let front = config("front", "[runtime]\ndefault_deadline_ms = 20000\n");
 
     let spawn = |name: &str, config: &Path, piped: bool| {
-        let mut command = Command::new(bin.join(name));
+        let mut command = generated(bin.join(name));
         command.arg(config).stderr(Stdio::piped());
         if piped {
             command.stdin(Stdio::piped()).stdout(Stdio::piped());

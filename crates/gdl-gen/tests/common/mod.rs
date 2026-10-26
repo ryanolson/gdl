@@ -20,6 +20,15 @@ pub fn root() -> PathBuf {
         .to_path_buf()
 }
 
+/// A command that runs generated binary `path`, without the caller's
+/// `RUST_LOG`: under a verbose filter a binary can fill a stderr pipe that
+/// its test no longer reads, and stop until it is read.
+pub fn generated(path: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(path);
+    command.env_remove("RUST_LOG");
+    command
+}
+
 pub fn example() -> PathBuf {
     root().join("examples/chat")
 }
@@ -196,7 +205,7 @@ impl Chat {
     /// stdout piped when `piped`, else closed and dropped. Its stderr is
     /// piped.
     pub fn spawn(&self, segment: &str, config: &Path, piped: bool) -> Running {
-        let mut command = Command::new(built().join(format!("chat-{segment}")));
+        let mut command = generated(built().join(format!("chat-{segment}")));
         command.arg(config).stderr(Stdio::piped());
         if piped {
             command.stdin(Stdio::piped()).stdout(Stdio::piped());

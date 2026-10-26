@@ -8,3 +8,4 @@ publish = false
 gdl = { path = "../../../../../gdl" }
 policy-messages = { path = "../messages" }
 serde = { version = "1", features = ["derive"] }
+tracing = "0.1"

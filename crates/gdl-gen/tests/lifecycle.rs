@@ -212,7 +212,7 @@ fn the_probes_follow_an_engine_through_its_life() {
         &format!("[system]\nhost = \"0.0.0.0\"\nport = {}\n", address.port()),
     );
     let healthy = || {
-        std::process::Command::new(common::built().join("chat-engine"))
+        common::generated(common::built().join("chat-engine"))
             .arg("--healthcheck")
             .arg(&check)
             .output()

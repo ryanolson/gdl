@@ -562,6 +562,12 @@ impl Unit<'_> {
             "tokio = {{ version = \"1\", features = [\"io-std\", \"io-util\", \"macros\"] }}"
         );
         let _ = writeln!(text, "toml = \"0.9\"");
+        // The binary's log, without the `ansi` and `log` bridge features:
+        // the log has no colour, and nothing in the runtime uses `log`.
+        let _ = writeln!(
+            text,
+            "tracing-subscriber = {{ version = \"0.3\", default-features = false, features = [\"env-filter\", \"fmt\"] }}"
+        );
         text.push_str(self.deps.workspace());
         text
     }

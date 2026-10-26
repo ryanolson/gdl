@@ -272,7 +272,13 @@ pub(crate) fn validate(
                 &mut problems,
             );
             see(&contract.lib, "the contract".into(), &mut problems);
-            for fixed in ["gdl_runtime", "serde", "tokio", "toml"] {
+            for fixed in [
+                "gdl_runtime",
+                "serde",
+                "tokio",
+                "toml",
+                "tracing_subscriber",
+            ] {
                 see(fixed, format!("the `{fixed}` dependency"), &mut problems);
             }
             // Every crate sees these; a dependency of the same name would
@@ -311,7 +317,13 @@ pub(crate) fn validate(
                     keys.insert(name.to_string(), what);
                 }
             };
-            for fixed in ["gdl-runtime", "serde", "tokio", "toml"] {
+            for fixed in [
+                "gdl-runtime",
+                "serde",
+                "tokio",
+                "toml",
+                "tracing-subscriber",
+            ] {
                 key(fixed, format!("the `{fixed}` dependency"), &mut problems);
             }
             key(&contract.package, "the contract".into(), &mut problems);

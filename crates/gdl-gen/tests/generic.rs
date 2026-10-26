@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use common::{Running, cargo, root, target};
+use common::{Running, cargo, generated, root, target};
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generic")
@@ -632,7 +632,7 @@ fn the_carrier_crosses_between_two_generated_segments() {
     let back = config("back");
     let front = config("front");
     let _back = Running(
-        Command::new(bin.join("generic-back"))
+        generated(bin.join("generic-back"))
             .arg(&back)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -641,7 +641,7 @@ fn the_carrier_crosses_between_two_generated_segments() {
             .expect("back"),
     );
     let mut front = Running(
-        Command::new(bin.join("generic-front"))
+        generated(bin.join("generic-front"))
             .arg(&front)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

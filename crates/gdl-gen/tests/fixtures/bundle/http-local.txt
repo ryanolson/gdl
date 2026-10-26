@@ -116,6 +116,7 @@ http-frontend = { path = "../../../examples/http" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros"] }
 toml = "0.9"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 
 # Its own workspace, though a workspace may hold the bundle.
 [workspace]

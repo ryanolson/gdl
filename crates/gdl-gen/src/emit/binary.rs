@@ -28,6 +28,21 @@ impl Unit<'_> {
         text.push_str(&self.settings_doc(&hosted, frontend, service, self.serves()));
         let _ = writeln!(text);
         let _ = writeln!(text, "fn main() -> std::process::ExitCode {{");
+        // The binary, not the runtime, installs the subscriber: a program
+        // that deploys the segment through the library keeps its own. On
+        // stderr, since a segment that serves JSON lines answers on stdout.
+        // Colour off, though another crate may turn on the `ansi` feature:
+        // escape codes are noise in a container's log.
+        text.push_str(concat!(
+            "    let filter = tracing_subscriber::EnvFilter::builder()\n",
+            "        .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())\n",
+            "        .from_env_lossy();\n",
+            "    tracing_subscriber::fmt()\n",
+            "        .with_env_filter(filter)\n",
+            "        .with_writer(std::io::stderr)\n",
+            "        .with_ansi(false)\n",
+            "        .init();\n",
+        ));
         let _ = writeln!(
             text,
             "    gdl_runtime::segment_main::<{}::Binary>()",
@@ -72,7 +87,11 @@ impl Unit<'_> {
             text,
             "//! asks a running instance's health probe instead, as a container health check"
         );
-        let _ = writeln!(text, "//! does. The settings are:");
+        let _ = writeln!(
+            text,
+            "//! does. Log events go to stderr, at the level `RUST_LOG` sets (`warn` by default)."
+        );
+        let _ = writeln!(text, "//! The settings are:");
         let _ = writeln!(text, "//!");
         let mut rows = vec![
             (

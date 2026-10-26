@@ -418,6 +418,29 @@ fn a_dependency_may_not_take_a_reserved_key() {
 }
 
 #[test]
+fn a_subscriber_dependency_key_cannot_duplicate_a_node_package() {
+    let mut spec = spec(split(), &[("D", "engine_impl::D")]);
+    spec.bind.get_mut("D").expect("D").lib = "engine_impl".into();
+    let out = Path::new("/work/segments");
+    let files = rendered(&spec, &manifest(), out).expect("control renders");
+    toml::from_str::<toml::Table>(&files[&PathBuf::from("engine/Cargo.toml")])
+        .expect("the control manifest parses");
+
+    spec.bind.get_mut("D").expect("D").package = "tracing-subscriber".into();
+    match rendered(&spec, &manifest(), out) {
+        Err(error) => assert!(error.to_string().contains("tracing-subscriber"), "{error}"),
+        Ok(files) => {
+            let manifest = &files[&PathBuf::from("engine/Cargo.toml")];
+            let parsed = toml::from_str::<toml::Table>(manifest);
+            assert!(
+                parsed.is_ok(),
+                "an accepted spec generated invalid Cargo.toml: {parsed:?}\n{manifest}"
+            );
+        }
+    }
+}
+
+#[test]
 fn generated_code_names_implementations_from_the_crate_root() {
     let spec = spec(split(), &[("D", "tiny_nodes::D")]);
     let files = rendered(&spec, &manifest(), Path::new("/work/segments")).expect("render");
@@ -637,6 +660,31 @@ fn a_streaming_source_is_not_served_as_json_lines() {
     let usage = &files[&PathBuf::from("front/src/main.rs")];
     assert!(usage.contains("streamed request"), "{usage}");
     assert!(!files[&PathBuf::from("front/Cargo.toml")].contains("json-lines"));
+}
+
+/// Each segment's binary sends log events to stderr at `warn` unless
+/// `RUST_LOG` says otherwise; its library installs nothing, so a program
+/// that deploys the segment keeps its own subscriber.
+#[test]
+fn only_the_binary_installs_a_log_subscriber() {
+    let out = std::path::Path::new("/work/segments");
+    let spec = spec(split(), &[("D", "tiny_nodes::D")]);
+    let files = rendered(&spec, &manifest(), out).expect("render");
+    for segment in ["front", "engine"] {
+        let main = &files[&PathBuf::from(format!("{segment}/src/main.rs"))];
+        assert!(main.contains("LevelFilter::WARN.into()"), "{main}");
+        assert!(main.contains(".from_env_lossy()"), "{main}");
+        assert!(main.contains(".with_writer(std::io::stderr)"), "{main}");
+        // Cargo unifies features: a hosted crate can turn on `ansi`.
+        assert!(main.contains(".with_ansi(false)"), "{main}");
+        let lib = &files[&PathBuf::from(format!("{segment}/src/lib.rs"))];
+        assert!(!lib.contains("tracing_subscriber"), "{lib}");
+        let manifest = &files[&PathBuf::from(format!("{segment}/Cargo.toml"))];
+        assert!(
+            manifest.contains(r#"tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }"#),
+            "{manifest}"
+        );
+    }
 }
 
 #[test]

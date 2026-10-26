@@ -36,10 +36,18 @@ impl CellPolicy for ByModel {
     type Head = Ask;
 
     fn choose(&self, request: CellRequest<'_, Ask>, cells: &[Cell]) -> Option<CellChoice> {
-        let cell = self.models.get(&request.head().model)?;
-        cells
-            .iter()
-            .position(|c| c.name() == cell.as_str() && c.takes_work() && !request.is_excluded(c))
-            .map(CellChoice::new)
+        let model = &request.head().model;
+        let chosen = self.models.get(model).and_then(|cell| {
+            cells.iter().position(|c| {
+                c.name() == cell.as_str() && c.takes_work() && !request.is_excluded(c)
+            })
+        });
+        // The reason reaches only the log, as a set router's does: the
+        // binary's tests read it there.
+        match chosen {
+            Some(index) => tracing::info!(model, cell = cells[index].name(), "chose a cell"),
+            None => tracing::warn!(model, "no cell serves the model"),
+        }
+        chosen.map(CellChoice::new)
     }
 }

@@ -7,7 +7,8 @@
 //! order, then `GDL_` environment variables, with `__` between nested keys
 //! (`GDL_RUNTIME__ADMISSION_LIMIT=64`). `asr-front --healthcheck <config.toml> ...`
 //! asks a running instance's health probe instead, as a container health check
-//! does. The settings are:
+//! does. Log events go to stderr, at the level `RUST_LOG` sets (`warn` by default).
+//! The settings are:
 //!
 //! ```toml
 //! listen = "127.0.0.1:0"  # this instance's address; under a hub, an unspecified one advertises what HOSTNAME resolves to
@@ -27,5 +28,13 @@
 //! line cannot carry it, so the binary only serves; call it through the library.
 
 fn main() -> std::process::ExitCode {
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
+        .from_env_lossy();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
     gdl_runtime::segment_main::<asr_front::Binary>()
 }

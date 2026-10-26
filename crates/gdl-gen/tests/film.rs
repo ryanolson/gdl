@@ -6,12 +6,12 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::{Running, cargo, get, listener, root, target};
+use common::{Running, cargo, generated, get, listener, root, target};
 use gdl_extract::{Offer, Origin, Workspace};
 
 fn example() -> PathBuf {
@@ -261,7 +261,7 @@ fn generated_placements_serve_the_same_response_and_move_the_node_metrics() {
             }
             std::fs::write(&config, settings).expect("runtime config");
             let mut process = Running(
-                Command::new(target("examples").join(format!("debug/film-{segment}")))
+                generated(target("examples").join(format!("debug/film-{segment}")))
                     .arg(config)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())

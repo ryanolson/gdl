@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{Lines, Running, cargo, root, target};
+use common::{Lines, Running, cargo, generated, root, target};
 
 const REGION: &str = "us-east-1";
 const GLOBAL: &str = "global-01-us-east-1";
@@ -136,17 +136,22 @@ impl Cell {
     }
 
     /// Start an instance of `segment` in this cell, with `extra` in its
-    /// settings file: the instance, with its stdin piped, and its stdout
-    /// and stderr, each read as it writes them.
+    /// settings file and `RUST_LOG` set to `log` when it names a filter:
+    /// the instance, with its stdin piped, and its stdout and stderr, each
+    /// read as it writes them. `name` tells apart the instances of one
+    /// segment in one cell.
+    #[allow(clippy::too_many_arguments)]
     fn instance(
         &self,
         bin: &Path,
         dir: &Path,
         cells: &Path,
         segment: &str,
+        name: &str,
         extra: &str,
+        log: Option<&str>,
     ) -> Instance {
-        let config = dir.join(format!("{}-{segment}.toml", self.name));
+        let config = dir.join(format!("{}-{name}.toml", self.name));
         std::fs::write(
             &config,
             format!(
@@ -154,8 +159,10 @@ impl Cell {
             ),
         )
         .expect("settings");
+        let mut command = generated(bin.join(format!("policy-{segment}")));
+        command.envs(log.map(|filter| ("RUST_LOG", filter)));
         let mut running = Running(
-            Command::new(bin.join(format!("policy-{segment}")))
+            command
                 .arg(&config)
                 .envs(self.variables(cells))
                 .stdin(Stdio::piped())
@@ -263,14 +270,14 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
         .iter()
         .map(|cell| {
             let settings = format!("[node.Model]\ncell = \"{}\"\n", cell.name);
-            cell.instance(&bin, temp.path(), &cells, "model", &settings)
+            cell.instance(&bin, temp.path(), &cells, "model", "model", &settings, None)
         })
         .collect();
     // The policy's settings: `mistral` names no cell, so no cell may take it.
     let settings = format!(
         "[cell_policy.by_model.models]\nllama = \"{LLAMA}\"\nqwen = \"{QWEN}\"\nmistral = \"none\"\n"
     );
-    let mut front = global.instance(&bin, temp.path(), &cells, "front", &settings);
+    let mut front = global.instance(&bin, temp.path(), &cells, "front", "front", &settings, None);
 
     // Until the global hub follows both model cells, a request may find no
     // cell: ask until each model's cell answers.
@@ -293,6 +300,62 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
     }
     let refused = ask(&mut front, "mistral").expect_err("no cell serves mistral");
     assert!(refused.contains("error"), "{refused}");
+
+    // The policy says why on stderr, at `warn`, the binary's default
+    // level. Its `info` for each choice is below that level: the six
+    // choices came before the refusal on the same stream, so they would
+    // be read first.
+    let mut before = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let warned = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match front.stderr.try_next(left) {
+            // While the hubs followed each other, other models found no
+            // cell too.
+            Some(line)
+                if line.contains("no cell serves the model")
+                    && line.contains(r#"model="mistral""#) =>
+            {
+                break line;
+            }
+            Some(line) => before.push(line),
+            None => panic!("no warning on stderr within 10 s: {before:?}"),
+        }
+    };
+    assert!(
+        warned.contains("WARN") && warned.contains("mistral"),
+        "{warned}"
+    );
+    assert!(
+        !before.iter().any(|line| line.contains("chose a cell")),
+        "info under the default level: {before:?}"
+    );
+
+    // `RUST_LOG` sets the level: a second source instance with `info`
+    // logs each choice.
+    let mut verbose = global.instance(
+        &bin,
+        temp.path(),
+        &cells,
+        "front",
+        "front-verbose",
+        &settings,
+        Some("info"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut errors = Vec::new();
+    while let Err(error) = ask(&mut verbose, "llama") {
+        errors.push(error);
+        assert!(
+            Instant::now() < deadline,
+            "llama found no cell within 30 s: {:?}",
+            errors.first()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let chose = verbose.stderr.find("chose a cell", Duration::from_secs(10));
+    assert!(chose.contains(" INFO policy_router: "), "{chose}");
+    assert!(chose.contains(&format!(r#"cell="{LLAMA}""#)), "{chose}");
 }
 
 /// `cargo gdl check` reads each policy's crate as it reads a node crate,

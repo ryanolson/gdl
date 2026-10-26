@@ -183,6 +183,14 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** add `gdl` as a dependency from the same path or revision as `gdl-runtime`, so both resolve to one crate.
 - **Lifts:** reading the caller's manifest at expansion time (`proc-macro-crate`), which adds a TOML parser to every node crate's build.
 
+## Logs
+
+### A segment binary does not show records of the `log` crate
+- **What:** a node or a dependency that logs through the `log` crate, not `tracing`, writes nothing to a segment binary's stderr, unless a crate in the segment turns on `tracing-subscriber`'s `tracing-log` feature. See [Health and metrics](observability.md#logs).
+- **Why:** nothing in the runtime uses `log`, so the generated crate leaves out `tracing-subscriber`'s bridge from it.
+- **Workaround:** log through `tracing`, or deploy the segment from your own program, with a subscriber that takes `log` records.
+- **Lifts:** the bridge (`tracing-subscriber`'s `tracing-log` feature) in the generated crate's dependencies.
+
 ## Metrics
 
 ### Metric names follow dynamo's rules, and are stricter about durations
