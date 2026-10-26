@@ -740,12 +740,7 @@ impl Runtime {
 
     /// Whether an arriving message belongs to this deployment.
     pub(crate) fn check_identity(&self, version: u8, identity: Identity) -> Result<()> {
-        if version != super::envelope::VERSION {
-            return Err(Error::new(
-                ErrorKind::Placement,
-                format!("envelope version {version} is not supported"),
-            ));
-        }
+        super::envelope::check_version(version)?;
         if identity != self.identity {
             return Err(Error::new(
                 ErrorKind::Placement,

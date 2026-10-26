@@ -10,6 +10,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::StreamExt;
 
 use crate::wire::{Codec, RequestCodec};
@@ -82,7 +83,7 @@ pub trait DForward: sealed::Sealed + Send + Sync + 'static {
         end: usize,
         cx: &Cx,
         head: &[u8],
-        input: Option<Items<Vec<u8>>>,
+        input: Option<Items<Bytes>>,
     ) -> impl Future<Output = Result<FwdExit<Self::Out>>> + Send;
 }
 
@@ -181,7 +182,7 @@ where
         end: usize,
         cx: &Cx,
         head: &[u8],
-        input: Option<Items<Vec<u8>>>,
+        input: Option<Items<Bytes>>,
     ) -> Result<FwdExit<R::Out>> {
         if pos == target {
             let value = join(self.codec, head, input)?;
@@ -225,7 +226,7 @@ impl<C: RequestCodec> DForward for FwdEnd<C> {
         _end: usize,
         _cx: &Cx,
         head: &[u8],
-        input: Option<Items<Vec<u8>>>,
+        input: Option<Items<Bytes>>,
     ) -> Result<FwdExit<C::Value>> {
         if pos != target {
             return Err(position_error(target));
@@ -263,7 +264,7 @@ pub trait DBackward: sealed::Sealed + Send + Sync + 'static {
         target: usize,
         end: usize,
         attempt: &Cx,
-        bytes: Items<Vec<u8>>,
+        bytes: Items<Bytes>,
     ) -> Result<BwdExit<Self::Out>>;
 }
 
@@ -335,7 +336,7 @@ where
         target: usize,
         end: usize,
         attempt: &Cx,
-        bytes: Items<Vec<u8>>,
+        bytes: Items<Bytes>,
     ) -> Result<BwdExit<R::Out>> {
         if pos == target {
             let items = decode_stream(self.codec, bytes);
@@ -367,7 +368,7 @@ impl<T: Send + 'static> DBackward for BwdEnd<T> {
         target: usize,
         _end: usize,
         _attempt: &Cx,
-        bytes: Items<Vec<u8>>,
+        bytes: Items<Bytes>,
     ) -> Result<BwdExit<T>> {
         if pos != target {
             return Err(position_error(target));
@@ -487,7 +488,7 @@ fn leave<C: RequestCodec, T>(codec: Option<C>, at: usize, value: C::Value) -> Re
 fn join<C: RequestCodec>(
     codec: Option<C>,
     head: &[u8],
-    input: Option<Items<Vec<u8>>>,
+    input: Option<Items<Bytes>>,
 ) -> Result<C::Value> {
     codec.ok_or_else(not_wire)?.join(head, input)
 }
@@ -499,7 +500,7 @@ fn encode_stream<T: Send + 'static>(codec: Option<Codec<T>>, input: Items<T>) ->
     }
 }
 
-fn decode_stream<T: Send + 'static>(codec: Option<Codec<T>>, input: Items<Vec<u8>>) -> Items<T> {
+fn decode_stream<T: Send + 'static>(codec: Option<Codec<T>>, input: Items<Bytes>) -> Items<T> {
     match codec {
         // A crossing is a boundary like any other: nothing follows an error.
         Some(codec) => until_error(items(input.map(move |bytes| codec.decode(&bytes?)))),
@@ -557,10 +558,12 @@ mod tests {
         let guard = Dropped(Arc::clone(&released));
         let input = items(
             // 0xc1 is the one byte msgpack never uses.
-            futures::stream::iter([Ok(vec![0xc1]), Ok(good)]).map(move |item| {
-                let _guard = &guard;
-                item
-            }),
+            futures::stream::iter([Ok(Bytes::from_static(&[0xc1])), Ok(Bytes::from(good))]).map(
+                move |item| {
+                    let _guard = &guard;
+                    item
+                },
+            ),
         );
         let mut decoded = decode_stream(Some(codec), input);
         let first = decoded.next().await;

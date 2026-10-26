@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::Stream;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,6 @@ use velo::{
     StreamFrame, StreamOpenTicket, StreamSender, Velo,
 };
 
-use super::envelope::WireItem;
 use gdl::{Error, ErrorKind, Result};
 
 /// A velo node whose TCP transport binds `listen`, carrying requests and
@@ -196,7 +196,7 @@ impl Fabric {
         self.velo.register_peer(peer).map_err(transport)
     }
 
-    /// Mint an anchor for one stream of `WireItem`s, and the reply-to that
+    /// Mint an anchor for one stream of byte items, and the reply-to that
     /// names it. Inherit Velo's reservation lifetime unless the runtime overrides it.
     /// A ticket is minted whenever velo can; a producer on this same worker
     /// ignores it and attaches, which also releases the prebind.
@@ -204,7 +204,7 @@ impl Fabric {
         let anchor = self
             .velo
             .anchor_manager()
-            .create_anchor_with_config::<WireItem>(AnchorConfig {
+            .create_anchor_with_config::<Bytes>(AnchorConfig {
                 unattached_timeout: self.anchor_timeout,
                 heartbeat_interval: self.heartbeat_interval,
             });
@@ -233,10 +233,10 @@ impl Fabric {
         let sender = match (&reply.ticket, local) {
             (Some(ticket), false) => {
                 self.velo
-                    .open_anchor_stream::<WireItem>(handle, ticket.clone())
+                    .open_anchor_stream::<Bytes>(handle, ticket.clone())
                     .await
             }
-            _ => self.velo.attach_anchor::<WireItem>(handle).await,
+            _ => self.velo.attach_anchor::<Bytes>(handle).await,
         }
         .map_err(|e| Error::new(ErrorKind::Transport, format!("attach failed: {e}")))?;
         Ok(Outbound { sender })
@@ -361,7 +361,7 @@ fn transport(error: impl std::fmt::Display) -> Error {
 ///
 /// Dropping it drops the velo anchor, which cancels the producer.
 pub(crate) struct Inbound {
-    anchor: StreamAnchor<WireItem>,
+    anchor: StreamAnchor<Bytes>,
     controller: StreamController,
     ended: bool,
 }
@@ -484,12 +484,17 @@ impl Canceller {
 }
 
 /// One event on an inbound stream, in gdl's terms.
+///
+/// Each crosses as one velo frame on velo's byte path: an item is the edge
+/// codec's bytes, Open is an empty item, and Fail is a velo sender error
+/// that carries the `gdl::Error` as JSON (docs/src/concepts/crossings.md).
 #[derive(Debug, PartialEq)]
 pub(crate) enum Frame {
     /// The producer's stream is established.
     Open,
-    /// One encoded item.
-    Item(Vec<u8>),
+    /// One encoded item: a view into the frame buffer velo received, so the
+    /// edge decode reads it where it arrived.
+    Item(Bytes),
     /// The producer reported a terminal failure.
     Fail(Error),
     /// The producer finished normally.
@@ -505,31 +510,11 @@ impl Stream for Inbound {
         if self.ended {
             return Poll::Ready(None);
         }
-        let frame = match Pin::new(&mut self.anchor).poll_next(cx) {
+        let frame = match self.anchor.poll_next_bytes(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(frame) => frame,
         };
-        let frame = match frame {
-            Some(Ok(StreamFrame::Item(WireItem::Open))) => Frame::Open,
-            Some(Ok(StreamFrame::Item(WireItem::Item(bytes)))) => Frame::Item(bytes),
-            Some(Ok(StreamFrame::Item(WireItem::Fail(error)))) => Frame::Fail(error),
-            Some(Ok(StreamFrame::Finalized)) => Frame::End,
-            Some(Ok(StreamFrame::Detached)) => Frame::Broken(truncated("the producer detached")),
-            Some(Ok(_)) => Frame::Broken(truncated("the producer ended abnormally")),
-            Some(Err(StreamError::SenderDropped)) => {
-                Frame::Broken(truncated("the producer was dropped or stopped responding"))
-            }
-            Some(Err(StreamError::TransportError(why))) => {
-                Frame::Broken(Error::new(ErrorKind::Transport, why))
-            }
-            Some(Err(StreamError::DeserializationError(why))) => {
-                Frame::Broken(Error::new(ErrorKind::Codec, why))
-            }
-            Some(Err(error)) => Frame::Broken(truncated(&error.to_string())),
-            None => Frame::Broken(truncated(
-                "the stream ended without the producer finishing it",
-            )),
-        };
+        let frame = frame_of(frame);
         if matches!(frame, Frame::Fail(_) | Frame::End | Frame::Broken(_)) {
             self.ended = true;
         }
@@ -537,22 +522,77 @@ impl Stream for Inbound {
     }
 }
 
+/// What velo delivered, as a [`Frame`]. An item's bytes pass through as
+/// velo's view: converting them to a `Vec` would move the payload to the
+/// start of its buffer.
+pub(crate) fn frame_of(
+    polled: Option<std::result::Result<StreamFrame<Bytes>, StreamError>>,
+) -> Frame {
+    match polled {
+        // No encoding writes zero bytes for a value, and the pump refuses
+        // one that does, so an empty item is only ever Open.
+        Some(Ok(StreamFrame::Item(bytes))) if bytes.is_empty() => Frame::Open,
+        Some(Ok(StreamFrame::Item(bytes))) => Frame::Item(bytes),
+        Some(Err(StreamError::SenderError(json))) => match serde_json::from_str(&json) {
+            Ok(error) => Frame::Fail(error),
+            Err(why) => Frame::Broken(Error::new(
+                ErrorKind::Codec,
+                format!("a failure that does not decode: {why}"),
+            )),
+        },
+        Some(Ok(StreamFrame::Finalized)) => Frame::End,
+        Some(Ok(StreamFrame::Detached)) => Frame::Broken(truncated("the producer detached")),
+        Some(Ok(_)) => Frame::Broken(truncated("the producer ended abnormally")),
+        Some(Err(StreamError::SenderDropped)) => {
+            Frame::Broken(truncated("the producer was dropped or stopped responding"))
+        }
+        Some(Err(StreamError::TransportError(why))) => {
+            Frame::Broken(Error::new(ErrorKind::Transport, why))
+        }
+        Some(Err(StreamError::DeserializationError(why))) => {
+            Frame::Broken(Error::new(ErrorKind::Codec, why))
+        }
+        Some(Err(error)) => Frame::Broken(truncated(&error.to_string())),
+        None => Frame::Broken(truncated(
+            "the stream ended without the producer finishing it",
+        )),
+    }
+}
+
 fn truncated(why: &str) -> Error {
     Error::new(ErrorKind::Truncated, why)
 }
 
+/// What a producer sends before it finishes: the open signal, or an item.
+pub(crate) enum Outgoing {
+    /// The producer's stream is established. Sent first, before any item,
+    /// so a prepared run can activate without waiting for application data.
+    Open,
+    /// One item's encoded bytes, never empty: an empty item is Open.
+    Item(Vec<u8>),
+}
+
 /// The producer end of an anchor.
 pub(crate) struct Outbound {
-    sender: StreamSender<WireItem>,
+    sender: StreamSender<Bytes>,
 }
 
 impl Outbound {
-    /// Send one item. Fails once the consumer has cancelled.
-    pub(crate) async fn send(&self, item: WireItem) -> Result<()> {
-        self.sender
-            .send(item)
-            .await
-            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))
+    /// Send the open signal or one item. Fails once the consumer has
+    /// cancelled.
+    pub(crate) async fn send(&self, item: Outgoing) -> Result<()> {
+        let payload: &[u8] = match &item {
+            Outgoing::Open => &[],
+            Outgoing::Item(bytes) => bytes,
+        };
+        self.sender.send_bytes(payload).await.map_err(transport)
+    }
+
+    /// Send a terminal failure. velo's sender error does not end the
+    /// stream, so the producer finishes right after it.
+    pub(crate) async fn fail(&self, error: &Error) -> Result<()> {
+        let json = serde_json::to_string(error).map_err(transport)?;
+        self.sender.send_err(json).await.map_err(transport)
     }
 
     /// Fires when the consumer asks for a graceful stop (or cancels).
@@ -589,6 +629,8 @@ impl Outbound {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::StreamExt;
 
     use super::*;
 
@@ -627,6 +669,46 @@ mod tests {
             .register(&probe, |bytes| Box::pin(async move { bytes }))
             .expect("a handler");
         (node, probe)
+    }
+
+    /// Open, an item, and a failure cross between two nodes in order, as
+    /// velo's byte items and its sender error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_items_and_a_failure_cross() {
+        let (consumer, producer) = (node().await, node().await);
+        let (consumer, producer) = (fabric(&consumer), fabric(&producer));
+        producer
+            .register_peer(consumer.peer_info())
+            .expect("registered");
+        let (mut inbound, reply) = consumer.mint();
+        let out = producer.attach(&reply).await.expect("attach");
+        out.send(Outgoing::Open).await.expect("open");
+        out.send(Outgoing::Item(vec![1, 2, 3])).await.expect("item");
+        let error = Error::new(ErrorKind::Overloaded, "full");
+        out.fail(&error).await.expect("fail");
+        out.finish().await;
+        let mut frames = Vec::new();
+        while let Ok(Some(frame)) = tokio::time::timeout(WAIT, inbound.next()).await {
+            frames.push(frame);
+        }
+        assert_eq!(
+            frames,
+            [
+                Frame::Open,
+                Frame::Item(Bytes::from_static(&[1, 2, 3])),
+                Frame::Fail(error)
+            ]
+        );
+    }
+
+    /// A failure that does not decode breaks the stream as a codec error.
+    #[test]
+    fn a_failure_that_does_not_decode_breaks_the_stream() {
+        let frame = frame_of(Some(Err(StreamError::SenderError("not json".into()))));
+        let Frame::Broken(error) = frame else {
+            panic!("{frame:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::Codec);
     }
 
     /// velo refuses, before its transport takes it, a send to a peer it

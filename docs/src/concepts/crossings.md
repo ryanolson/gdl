@@ -84,13 +84,13 @@ Request envelopes and their replies are MessagePack, sent through velo's raw-byt
 
 A receiver refuses an envelope of another version, and one whose identity differs from its own, with `Placement`. So an instance built from another contract or placement cannot misread a request. [Specs, segments, and layouts](placement.md) describes the identity hashes.
 
-Stream items cross as one concrete velo type, `WireItem`:
+Stream items cross on velo's byte path: each is one velo frame whose payload is a byte string. The producer sends with `StreamSender::send_bytes`, and the consumer reads with `StreamAnchor::poll_next_bytes`, which hands on the payload as a view of the frame it arrived in.
 
-- `Open`: the producer's stream exists. It is sent before any item.
-- `Item(bytes)`: one item, encoded by the edge's codec.
-- `Fail(error)`: a terminal failure. The producer finalizes right after it.
+- **Open:** an empty item. The producer's stream exists. It is sent before any item.
+- **Item:** the item's bytes from the edge's codec. The edge decode reads them in the buffer velo received them in, with no copy.
+- **Fail:** velo's sender error, carrying the `gdl::Error` as JSON. It is a terminal failure for gdl. velo does not end the stream on it, so the producer finalizes right after it, and the consumer stops reading.
 
-velo's own sender-error frame is not terminal and carries only a string, so gdl does not use it. Each message type chooses its own encoding. [Messages and encodings](messages.md) describes the codecs.
+No encoding writes zero bytes for a value, so an empty item is only Open. A hand-written `Serialize` could write nothing. The sending stage fails such an item with `Codec` instead of sending it. Envelope version 4 carries items this way. A segment of version 3 framed each item a second time, and the two refuse each other's envelopes. Each message type chooses its own encoding. [Messages and encodings](messages.md) describes the codecs.
 
 ## The codec rule
 

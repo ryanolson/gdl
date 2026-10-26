@@ -5,11 +5,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use bytes::Bytes;
 use futures::{Future, Stream, StreamExt};
 
 use super::admission::{EgressPermit, Share};
-use super::envelope::{Accepted, Forward, Open, VERSION, WireCx, WireItem};
-use super::fabric::{Canceller, Frame, Inbound, Outbound, ReplyTo, Retirer};
+use super::envelope::{Accepted, Forward, Open, VERSION, WireCx};
+use super::fabric::{Canceller, Frame, Inbound, Outbound, Outgoing, ReplyTo, Retirer};
 use super::offers::Refused;
 use super::runtime::{Entries, Handed, Held, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
@@ -1050,7 +1051,7 @@ where
                     stopped: &mut stopped,
                     done: done_open.as_mut(),
                 };
-                match deliver(&out, WireItem::Open, watch, &upstream).await {
+                match deliver(&out, Outgoing::Open, watch, &upstream).await {
                     Delivery::Sent => {}
                     Delivery::Gone => {
                         meter::ended(held, Ending::Gone);
@@ -1165,7 +1166,7 @@ where
             stopped: &mut stopped,
             done: done_open.as_mut(),
         };
-        match deliver(&out, WireItem::Open, watch, &upstream).await {
+        match deliver(&out, Outgoing::Open, watch, &upstream).await {
             Delivery::Sent => {}
             Delivery::Gone => {
                 meter::ended(owner.as_ref(), Ending::Gone);
@@ -1370,13 +1371,19 @@ async fn pump_watching(
             }
         };
         match item {
+            // An empty item would cross as the open signal, and the
+            // consumer would skip it. No encoding writes zero bytes for a
+            // value, but a hand-written `Serialize` could.
+            Some(Ok(item)) if item.is_empty() => {
+                return failed(out, empty_encode(), response).await;
+            }
             Some(Ok(item)) => {
                 let watch = Watch {
                     stop: stop.as_mut(),
                     stopped: &mut stopped,
                     done: done.as_mut(),
                 };
-                match deliver(&out, WireItem::Item(item), watch, &upstream).await {
+                match deliver(&out, Outgoing::Item(item), watch, &upstream).await {
                     Delivery::Sent => {
                         if first_pending {
                             first_pending = false;
@@ -1465,7 +1472,7 @@ enum Delivery {
 /// common path builds no timer.
 async fn deliver<S, D>(
     out: &Outbound,
-    item: WireItem,
+    item: Outgoing,
     watch: Watch<'_, S, D>,
     upstream: &Upstream<'_>,
 ) -> Delivery
@@ -1522,7 +1529,7 @@ async fn finish_failed(out: Outbound, error: Error) {
     // One bound for the frame and its hand-off: a consumer that is not
     // reading holds neither longer than this.
     let _ = tokio::time::timeout(FAIL_DELIVERY, async {
-        if out.send(WireItem::Fail(error)).await.is_ok() {
+        if out.fail(&error).await.is_ok() {
             out.finish().await;
         }
     })
@@ -1537,7 +1544,7 @@ async fn failed(out: Outbound, error: Error, owner: Option<&Owner>) {
 
 /// A streamed request's input anchor as a stream of encoded items. A stop
 /// does not pass through here: the pump that holds the anchor forwards it.
-fn input_items<S>(inbound: S) -> Items<Vec<u8>>
+fn input_items<S>(inbound: S) -> Items<Bytes>
 where
     S: Stream<Item = Frame> + Unpin + Send + 'static,
 {
@@ -1551,7 +1558,7 @@ where
 /// A response anchor as a stream of encoded items: its first item is the
 /// first to reach `visit` from another segment, and a failure on it was
 /// raised in the segment that sent it, so it is relayed here.
-fn response_items<S>(inbound: S, visit: Option<Arc<Visit>>) -> Items<Vec<u8>>
+fn response_items<S>(inbound: S, visit: Option<Arc<Visit>>) -> Items<Bytes>
 where
     S: Stream<Item = Frame> + Unpin + Send + 'static,
 {
@@ -1570,7 +1577,7 @@ struct InboundItems<S> {
 }
 
 impl<S: Stream<Item = Frame> + Unpin> Stream for InboundItems<S> {
-    type Item = Result<Vec<u8>>;
+    type Item = Result<Bytes>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -1603,6 +1610,13 @@ fn items_holding<T: Send + 'static>(inner: Items<T>, held: impl Send + 'static) 
         let _held = &held;
         item
     }))
+}
+
+fn empty_encode() -> Error {
+    Error::new(
+        ErrorKind::Codec,
+        "an item encoded to no bytes, which cannot cross",
+    )
 }
 
 fn disagree() -> Error {
@@ -1653,8 +1667,124 @@ fn setup_timeout(step: &str) -> Error {
 mod tests {
     use std::time::Duration;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use bytes::Buf;
+
     use super::*;
-    use crate::dist::fabric::{Fabric, bind_node};
+    use crate::dist::fabric::{Fabric, bind_node, frame_of};
+    use crate::dist::stages::{BwdEnd, FwdEnd};
+    use crate::wire::{Codec, StreamCodec};
+
+    /// An item as velo's byte path delivers it: a view past the frame's
+    /// header into the buffer the frame arrived in, which is exactly as
+    /// long as the frame.
+    fn delivered(payload: &[u8]) -> Bytes {
+        // `StreamFrame::Item` and a msgpack `bin8` header, as velo writes
+        // an item of under 256 bytes.
+        let header = [
+            0x81,
+            0xa4,
+            b'I',
+            b't',
+            b'e',
+            b'm',
+            0xc4,
+            payload.len() as u8,
+        ];
+        let mut frame = Vec::with_capacity(header.len() + payload.len());
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(payload);
+        let mut item = Bytes::from(frame);
+        item.advance(header.len());
+        item
+    }
+
+    /// Where the last item a test codec decoded began, one per test.
+    static RESPONSE_READ: AtomicUsize = AtomicUsize::new(0);
+    static INPUT_READ: AtomicUsize = AtomicUsize::new(0);
+
+    fn read_at(at: &AtomicUsize, bytes: &[u8]) -> Result<u32> {
+        at.store(bytes.as_ptr() as usize, Ordering::SeqCst);
+        crate::wire_codec!(u32).expect("wire").decode(bytes)
+    }
+
+    fn encode(value: &u32) -> Result<Vec<u8>> {
+        crate::wire_codec!(u32).expect("wire").encode(value)
+    }
+
+    /// The edge decode reads an item where velo delivered it, on a
+    /// response and on a streamed request's input: no copy, and no move to
+    /// the start of its buffer, which turning the view into a `Vec` makes.
+    #[tokio::test]
+    async fn the_edge_decode_reads_an_item_in_the_buffer_velo_delivered() {
+        let payload = encode(&7).expect("encode");
+
+        let item = delivered(&payload);
+        let at = item.as_ptr() as usize;
+        let frames = futures::stream::iter([frame_of(Some(Ok(velo::StreamFrame::Item(item))))]);
+        let codec = Codec::from_fns(encode, |bytes| read_at(&RESPONSE_READ, bytes));
+        let Ok(BwdExit::Here(mut decoded)) = BwdEnd::new(Some(codec)).enter(
+            1,
+            1,
+            usize::MAX,
+            &Cx::new(),
+            response_items(frames, None),
+        ) else {
+            panic!("the response did not enter its outer end");
+        };
+        assert_eq!(decoded.next().await.expect("an item").expect("decoded"), 7);
+        assert_eq!(
+            RESPONSE_READ.load(Ordering::SeqCst),
+            at,
+            "a response item moved"
+        );
+
+        let item = delivered(&payload);
+        let at = item.as_ptr() as usize;
+        let frames = futures::stream::iter([frame_of(Some(Ok(velo::StreamFrame::Item(item))))]);
+        let head = crate::wire_codec!(u32).expect("wire");
+        let codec = StreamCodec::pair(
+            Some(head),
+            Some(Codec::from_fns(encode, |bytes| read_at(&INPUT_READ, bytes))),
+        );
+        let entered = FwdEnd::new(codec)
+            .enter(
+                1,
+                1,
+                usize::MAX,
+                &Cx::new(),
+                &payload,
+                Some(input_items(frames)),
+            )
+            .await;
+        let Ok(FwdExit::Here(request)) = entered else {
+            panic!("the request did not enter its inner end");
+        };
+        let (_, mut input) = request.into_parts();
+        assert_eq!(input.next().await.expect("an item").expect("decoded"), 7);
+        assert_eq!(INPUT_READ.load(Ordering::SeqCst), at, "an input item moved");
+    }
+
+    /// An item that encodes to no bytes would cross as the open signal and
+    /// vanish; the pump fails the stream with a codec error instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_empty_encode_fails_the_stream_as_a_codec_error() {
+        let node = bind_node(([127, 0, 0, 1], 0).into()).await.expect("node");
+        let fabric = Fabric::new(node, None, None, Duration::from_secs(30));
+        let (mut inbound, reply) = fabric.mint();
+        let out = fabric.attach(&reply).await.expect("attach");
+        let cx = Cx::new();
+        let input = items(futures::stream::iter([Ok(Vec::new()), Ok(vec![7])]));
+        let wait = Duration::from_secs(5);
+        tokio::time::timeout(wait, pump(input, out, &cx, None, None, None))
+            .await
+            .expect("the pump ended");
+        match tokio::time::timeout(wait, inbound.next()).await {
+            Ok(Some(Frame::Fail(error))) => assert_eq!(error.kind(), ErrorKind::Codec, "{error}"),
+            other => panic!("the consumer did not see a codec failure: {other:?}"),
+        }
+    }
 
     /// A consumer whose cancel the pump has not seen yet, and whose stop has
     /// fired.

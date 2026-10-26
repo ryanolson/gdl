@@ -12,8 +12,22 @@ use super::fabric::ReplyTo;
 use gdl::{Cx, Deadline, RequestId};
 use gdl::{Error, ErrorKind, Result};
 
-/// The envelope format. A receiver rejects any other version.
-pub(crate) const VERSION: u8 = 3;
+/// The envelope format. A receiver rejects any other version. Version 4
+/// carries each stream item as velo's own byte item, which version 3
+/// segments cannot read, so the two refuse each other at the envelope that
+/// starts the stream.
+pub(crate) const VERSION: u8 = 4;
+
+/// Refuse an envelope of a version other than [`VERSION`].
+pub(crate) fn check_version(version: u8) -> Result<()> {
+    if version == VERSION {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorKind::Placement,
+        format!("envelope version {version} is not supported"),
+    ))
+}
 
 /// Which deployment a message belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,19 +118,6 @@ pub(crate) struct Open {
     pub(crate) reply: ReplyTo,
 }
 
-/// One stream item as it crosses: the item's bytes from its edge codec, a
-/// terminal failure, or the open signal a producer sends before any item.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) enum WireItem {
-    /// The producer's stream is established. Sent first, before any item,
-    /// so a prepared run can activate without waiting for application data.
-    Open,
-    /// One item.
-    Item(#[serde(with = "serde_bytes")] Vec<u8>),
-    /// A terminal failure; the producer finalizes right after it.
-    Fail(Error),
-}
-
 pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     rmp_serde::to_vec(value).map_err(|e| Error::new(ErrorKind::Codec, e.to_string()))
 }
@@ -172,16 +173,22 @@ mod tests {
     }
 
     #[test]
-    fn wire_items_round_trip() {
-        for item in [
-            WireItem::Open,
-            WireItem::Item(vec![9; 3]),
-            WireItem::Fail(Error::node("x")),
-        ] {
-            assert_eq!(
-                decode::<WireItem>(&encode(&item).expect("encode")).expect("decode"),
-                item
-            );
-        }
+    fn an_envelope_of_version_3_is_refused() {
+        let envelope = Open {
+            version: 3,
+            identity: Identity {
+                contract: 1,
+                placement: 2,
+            },
+            hop: 0,
+            pos: 1,
+            cx: WireCx::default(),
+            reply: ReplyTo::test_value(7),
+        };
+        let back: Open = decode(&encode(&envelope).expect("encode")).expect("decode");
+        let refused = check_version(back.version).expect_err("version 3 was accepted");
+        assert_eq!(refused.kind(), ErrorKind::Placement);
+        assert!(refused.to_string().contains("version 3"), "{refused}");
+        assert!(check_version(VERSION).is_ok());
     }
 }

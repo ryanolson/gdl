@@ -24,9 +24,11 @@ The graph is a typed structure, and the placement is runtime data.
 
 ## Byte-based crossings
 
-Every gdl anchor and envelope carries one concrete velo type, `WireItem`, and each edge's codec turns `T` into bytes and back. A runtime that is generic over `T` cannot call velo's `attach_anchor::<T>` without `T: Serialize`, and a runtime check cannot supply that bound. A codec is a pair of function pointers, monomorphized where `T` is concrete (in the graph macro's expansion), so the runtime carries the bound without naming it. An edge whose type cannot be serialized has no codec, and a placement that would cross it is refused before anything runs.
+Every gdl anchor carries velo's byte items, and each edge's codec turns `T` into bytes and back. A runtime that is generic over `T` cannot call velo's `attach_anchor::<T>` without `T: Serialize`, and a runtime check cannot supply that bound. A codec is a pair of function pointers, monomorphized where `T` is concrete (in the graph macro's expansion), so the runtime carries the bound without naming it. An edge whose type cannot be serialized has no codec, and a placement that would cross it is refused before anything runs.
 
-The cost is one extra copy per item at a crossing, into and out of the `WireItem` frame. On velo 0.19, the codec added 80 ns per item at 16 B and 402 ns at 16 KiB, per crossing, over velo's own encoding. [Crossing performance](../operations/crossing-performance.md) has the full table and the command.
+The cost is one extra copy per item at a crossing: the edge codec's bytes are copied into velo's frame. The receiver decodes them where they arrived. [Crossing performance](../operations/crossing-performance.md#codec-cost) has the measured cost and the command.
+
+The first form wrapped the bytes in a `WireItem` enum that velo serialized inside its own frame: two encodes and four copies of the payload per item, against velo's one encode and two copies. It cost 97 ns more than velo per item at 16 B and 477 ns more at 16 KiB, and 3 more allocations per item end to end. A tag byte before each payload, instead of an empty item for Open and velo's sender error for Fail, was not taken: it costs a byte per item and a copy unless the codec writes it.
 
 The graph macro picks a streamed edge's codec from the syntax (`stream_codec!` for `Head + stream Item`, `wire_codec!` otherwise). The wire probe is autoref specialization with two levels. A third autoref level that recognized `Streamed` by type was not built, because the syntax already marks each streamed edge (`Head + stream Item`).
 
@@ -42,7 +44,7 @@ A receiver acknowledges a hand-off only after it has checked the deployment and 
 
 ## Activation on `Open`, never on data
 
-A provisioned backward run activates on a `WireItem::Open` frame that its producer sends as soon as its stream exists. Two other triggers fail:
+A provisioned backward run activates on the open signal (an empty item) that its producer sends as soon as its stream exists. Two other triggers fail:
 
 - **Activate at once.** A backward node may legally ignore its input and end at once. It would finish and remove its anchor while the outer end was still provisioning, and the next attach would fail, where a local run would have produced an empty stream.
 - **Activate on the first item.** An upstream stream may stay pending forever while a backward node that ignores it ends at once. Waiting for data would hang that run.

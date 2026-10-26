@@ -149,8 +149,9 @@ async fn a_stream_codec_uses_each_parts_declared_encoding() {
     assert_eq!(head.text, "head");
     let encoded: Vec<_> = split.input.expect("input").collect().await;
     assert_eq!(encoded, [Ok(vec![0x91, 7])]);
+    let arrived = encoded.into_iter().map(|item| item.map(bytes::Bytes::from));
     let joined = codec
-        .join(&split.head, Some(items(futures::stream::iter(encoded))))
+        .join(&split.head, Some(items(futures::stream::iter(arrived))))
         .expect("join");
     let (_, input) = joined.into_parts();
     assert_eq!(input.collect::<Vec<_>>().await, [Ok(Array { n: 7 })]);
@@ -417,7 +418,10 @@ async fn a_stream_codec_splits_and_joins_a_streamed_request() {
     };
     let request = Streamed::new(head, items(futures::stream::iter([Ok(4), Ok(5)])));
     let split = codec.split(request).expect("split");
-    let joined = codec.join(&split.head, split.input).expect("join");
+    let arrived = split
+        .input
+        .map(|input| items(input.map(|item| item.map(bytes::Bytes::from))));
+    let joined = codec.join(&split.head, arrived).expect("join");
     let (head, input) = joined.into_parts();
     assert_eq!(
         head,
@@ -446,7 +450,10 @@ async fn joining_a_stream_ends_at_its_first_bad_item() {
         .expect("encode");
     let good = wire_codec!(u32).expect("wire").encode(&9).expect("encode");
     // 0xc1 is the one byte msgpack never uses.
-    let input = items(futures::stream::iter([Ok(vec![0xc1]), Ok(good)]));
+    let input = items(futures::stream::iter([
+        Ok(bytes::Bytes::from_static(&[0xc1])),
+        Ok(bytes::Bytes::from(good)),
+    ]));
     let (_, mut input) = codec.join(&head, Some(input)).expect("join").into_parts();
     assert!(matches!(input.next().await, Some(Err(_))));
     assert!(input.next().await.is_none(), "an item followed the bad one");

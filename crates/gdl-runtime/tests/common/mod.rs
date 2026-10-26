@@ -792,6 +792,10 @@ use gdl_runtime::{
     RuntimeConfig, Segment, wire_codec,
 };
 
+/// The bytes a tight node's stream slot holds before its producer waits
+/// for credit.
+pub const TIGHT_SLOT_BYTES: u32 = 1024;
+
 /// A velo node whose streams buffer very little: a stalled consumer blocks
 /// its producer after a few small items instead of after a megabyte.
 pub async fn tight_velo_node() -> velo::Velo {
@@ -803,7 +807,7 @@ pub async fn tight_velo_node() -> velo::Velo {
         .expect("transport");
     let mux = velo::streaming::MuxConfig {
         initial_credit: 4,
-        slot_byte_budget: 1024,
+        slot_byte_budget: TIGHT_SLOT_BYTES,
         ..velo::streaming::MuxConfig::default()
     };
     velo::Velo::builder()
@@ -829,7 +833,7 @@ pub async fn metered_tight_velo_node() -> (velo::Velo, prometheus::Registry) {
         .expect("transport");
     let mux = velo::streaming::MuxConfig {
         initial_credit: 4,
-        slot_byte_budget: 1024,
+        slot_byte_budget: TIGHT_SLOT_BYTES,
         ..velo::streaming::MuxConfig::default()
     };
     let node = velo::Velo::builder()

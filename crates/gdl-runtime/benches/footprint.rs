@@ -1,5 +1,5 @@
 //! What crossing segments costs, in memory and work: allocations and tasks
-//! per request, and what a held, unread request keeps. A counting
+//! per request, allocations per item, and what a held, unread request keeps. A counting
 //! allocator measures it, so this is kept apart from the timed benches in
 //! `benches/remote.rs`, which it would slow.
 //!
@@ -111,6 +111,28 @@ fn per_request<'a>(
     );
 }
 
+/// Allocations and bytes allocated per item, over requests of 1,000 items
+/// after a warm-up. `tests/item_allocs.rs` guards the count.
+fn per_item<'a>(
+    rt: &tokio::runtime::Runtime,
+    label: &str,
+    request: &'a dyn Fn() -> BoxFuture<'a, ()>,
+) {
+    const N: u64 = 20;
+    for _ in 0..5 {
+        rt.block_on(request());
+    }
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let bytes_before = ALLOCATED.load(Ordering::Relaxed);
+    for _ in 0..N {
+        rt.block_on(request());
+    }
+    let items = (N * 1_000) as f64;
+    let allocations = (ALLOCATIONS.load(Ordering::Relaxed) - before) as f64 / items;
+    let bytes = (ALLOCATED.load(Ordering::Relaxed) - bytes_before) as f64 / items;
+    println!("{label:<28} {allocations:>6.2} allocations/item  {bytes:>9.0} bytes allocated/item");
+}
+
 /// Items produced, tasks, and heap held per in-flight request: open `IN_FLIGHT`
 /// requests that each ask for more than the credit window holds, read one
 /// item from each, and hold them; then drop them all and see what remains.
@@ -158,6 +180,17 @@ fn report(rt: &tokio::runtime::Runtime, setups: &Setups) {
     per_request(rt, "velo direct, attach", &|| {
         Box::pin(setups.direct_attach(one))
     });
+
+    println!("per item (requests of 1,000 items):");
+    for size in SIZES {
+        let ask = Ask { items: 1_000, size };
+        per_item(rt, &format!("lean 2 segments, {size} B"), &|| {
+            Box::pin(setups.lean(ask))
+        });
+        per_item(rt, &format!("velo direct, {size} B"), &|| {
+            Box::pin(setups.direct(ask))
+        });
+    }
 
     println!("held while in flight ({IN_FLIGHT} requests of 1,000 items, one read):");
     for size in SIZES {

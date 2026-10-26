@@ -72,7 +72,7 @@ An earlier Compose design copied non-ignored files of a Git worktree into the bu
 
 ## Encodings
 
-Each application message selects named MessagePack (the default), positional MessagePack, or JSON. The envelope version is 3, which separates this wire contract from earlier builds.
+Each application message selects named MessagePack (the default), positional MessagePack, or JSON. The envelope version is 4, which separates this wire contract from earlier builds.
 
 - **Named maps are the default** because they keep an omitted optional field, including in nested structs. Positional arrays stay opt-in because they need a fixed layout, and the wire probe checks serde traits, not that each value round-trips.
 - **One parser** reads the annotation for the derive and for the source reader, so the catalogue, resolution, exports, and manifests carry the same encoding.

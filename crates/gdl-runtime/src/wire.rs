@@ -1,5 +1,6 @@
 use std::fmt;
 
+use bytes::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -37,6 +38,22 @@ impl<T> Codec<T> {
     /// Decode one value.
     pub fn decode(&self, bytes: &[u8]) -> Result<T> {
         (self.decode)(bytes)
+    }
+}
+
+impl<T> Codec<T> {
+    /// A codec from its two functions, so that a test can see what the
+    /// runtime hands them.
+    #[cfg(test)]
+    pub(crate) fn from_fns(
+        encode: fn(&T) -> Result<Vec<u8>>,
+        decode: fn(&[u8]) -> Result<T>,
+    ) -> Self {
+        Self {
+            encode,
+            decode,
+            encoding: Encoding::default(),
+        }
     }
 }
 
@@ -89,8 +106,8 @@ pub trait RequestCodec: sealed::Sealed + Copy + Send + Sync + 'static {
     fn split(&self, value: Self::Value) -> Result<Split>;
 
     /// Rebuild a request from its head's bytes and, for a streamed request,
-    /// its encoded items.
-    fn join(&self, head: &[u8], input: Option<Items<Vec<u8>>>) -> Result<Self::Value>;
+    /// its encoded items as they arrived.
+    fn join(&self, head: &[u8], input: Option<Items<Bytes>>) -> Result<Self::Value>;
 }
 
 /// A request as it crosses: its head's bytes, and for a streamed request its
@@ -120,7 +137,7 @@ impl<T: Send + 'static> RequestCodec for Codec<T> {
         })
     }
 
-    fn join(&self, head: &[u8], input: Option<Items<Vec<u8>>>) -> Result<T> {
+    fn join(&self, head: &[u8], input: Option<Items<Bytes>>) -> Result<T> {
         match input {
             None => self.decode(head),
             Some(_) => Err(mismatch()),
@@ -184,7 +201,7 @@ impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
         })
     }
 
-    fn join(&self, head: &[u8], input: Option<Items<Vec<u8>>>) -> Result<Streamed<H, T>> {
+    fn join(&self, head: &[u8], input: Option<Items<Bytes>>) -> Result<Streamed<H, T>> {
         let input = input.ok_or_else(mismatch)?;
         let item = self.item;
         // `Streamed::new` fuses the decoded items: nothing follows a bad one.

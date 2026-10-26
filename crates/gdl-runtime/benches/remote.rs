@@ -11,7 +11,8 @@
 //!   Measured at 16 B, 1 KiB, and 16 KiB, one stream at a time and 32 at
 //!   once. velo's plain attach is reported alongside.
 //! - **Codec:** one item's encode and decode as each side frames it, in
-//!   process, for the copy a crossing adds per item.
+//!   process, for the copy a crossing adds per item; and the crossing's
+//!   four steps on their own (`gdl-crossing/1-edge-encode` and so on).
 //! - **Reference graph:** the test suites' graph (with its event log off)
 //!   local, in one segment (the distributed stages without a crossing),
 //!   over two segments, and over three.
@@ -39,26 +40,19 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use serde::{Deserialize, Serialize};
 use setup::*;
 
 /// Nothing is counted while timing.
 #[inline(always)]
 fn produced() {}
 
-/// The shape of gdl's crossing frame (`dist::envelope::WireItem`, which is
-/// crate-private), for the in-process codec comparison.
-#[derive(Serialize, Deserialize)]
-enum Crossing {
-    Open,
-    Item(#[serde(with = "serde_bytes")] Vec<u8>),
-    Fail(String),
-}
+/// How `rmp_serde` encodes every `velo::StreamFrame::Item`: a one-entry map
+/// keyed by the fixstr `"Item"`. velo's own copy is crate-private.
+const ITEM_PREFIX: &[u8] = &[0x81, 0xa4, b'I', b't', b'e', b'm'];
 
-/// One item's encode and decode as velo carries it: directly as the frame's
-/// payload, or as gdl does, encoded by the edge codec and carried as bytes
-/// in a `Crossing` frame. Isolates the copy a crossing adds per item, which
-/// the end-to-end rate (bounded by velo's single-stream rate) cannot show.
+/// One item's encode and decode as velo carries it directly, as the frame's
+/// payload. For the copy a crossing adds per item, which the end-to-end rate
+/// (bounded by velo's single-stream rate) cannot show.
 fn codec_direct(blob: &Blob) -> usize {
     let frame = rmp_serde::to_vec(&velo::StreamFrame::Item(blob)).expect("encode");
     match rmp_serde::from_slice::<velo::StreamFrame<Blob>>(&frame).expect("decode") {
@@ -67,16 +61,68 @@ fn codec_direct(blob: &Blob) -> usize {
     }
 }
 
+/// The same item as gdl carries it, in the four steps each row below times
+/// on its own: the edge codec encodes it, velo's byte path frames the bytes
+/// (`StreamSender::send_bytes`), the receiver takes the payload as a view of
+/// the frame (`StreamAnchor::next_bytes`), and the edge codec decodes it.
 fn codec_crossing(blob: &Blob) -> usize {
-    let codec = gdl_runtime::wire_codec!(Blob).expect("wire");
-    let bytes = codec.encode(blob).expect("edge encode");
-    let frame = rmp_serde::to_vec(&velo::StreamFrame::Item(Crossing::Item(bytes))).expect("encode");
-    match rmp_serde::from_slice::<velo::StreamFrame<Crossing>>(&frame).expect("decode") {
-        velo::StreamFrame::Item(Crossing::Item(bytes)) => {
-            codec.decode(&bytes).expect("edge decode").0.len()
-        }
-        _ => unreachable!(),
-    }
+    let bytes = edge_encode(blob);
+    let frame = frame_encode(&bytes);
+    let item = frame_decode(frame);
+    edge_decode(&item).0.len()
+}
+
+fn edge_encode(blob: &Blob) -> Vec<u8> {
+    gdl_runtime::wire_codec!(Blob)
+        .expect("wire")
+        .encode(blob)
+        .expect("edge encode")
+}
+
+fn edge_decode(bytes: &[u8]) -> Blob {
+    gdl_runtime::wire_codec!(Blob)
+        .expect("wire")
+        .decode(bytes)
+        .expect("edge decode")
+}
+
+/// The frame `send_bytes` writes: the item prefix and the shortest msgpack
+/// `bin` header, in one buffer of the exact size.
+fn frame_encode(payload: &[u8]) -> Vec<u8> {
+    let len = payload.len();
+    let header: &[u8] = if let Ok(len) = u8::try_from(len) {
+        &[0xc4, len]
+    } else if let Ok(len) = u16::try_from(len) {
+        &[0xc5, (len >> 8) as u8, len as u8]
+    } else {
+        let len = u32::try_from(len).expect("under 4 GiB");
+        &[
+            0xc6,
+            (len >> 24) as u8,
+            (len >> 16) as u8,
+            (len >> 8) as u8,
+            len as u8,
+        ]
+    };
+    let mut frame = Vec::with_capacity(ITEM_PREFIX.len() + header.len() + len);
+    frame.extend_from_slice(ITEM_PREFIX);
+    frame.extend_from_slice(header);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// What `next_bytes` hands on: the payload as a view of the frame's buffer,
+/// found by its header, with no copy.
+fn frame_decode(frame: Vec<u8>) -> bytes::Bytes {
+    use bytes::Buf;
+    let header = match frame[ITEM_PREFIX.len()] {
+        0xc4 => 2,
+        0xc5 => 3,
+        _ => 5,
+    };
+    let mut item = bytes::Bytes::from(frame);
+    item.advance(ITEM_PREFIX.len() + header);
+    item
 }
 
 /// Process CPU time (user plus system), from `/proc/self/stat`, in
@@ -212,6 +258,28 @@ fn bench(c: &mut Criterion) {
         codec.bench_function("velo-direct", |b| b.iter(|| codec_direct(black_box(&item))));
         codec.bench_function("gdl-crossing", |b| {
             b.iter(|| codec_crossing(black_box(&item)))
+        });
+        // The crossing's steps, so a change that regrows one shows where.
+        let edge = edge_encode(&item);
+        let frame = frame_encode(&edge);
+        // velo's byte frame is what serde writes for the bytes as an item.
+        let serde = rmp_serde::to_vec(&velo::StreamFrame::Item(serde_bytes::Bytes::new(&edge)));
+        assert_eq!(frame, serde.expect("encode"), "the frame is not velo's");
+        codec.bench_function("gdl-crossing/1-edge-encode", |b| {
+            b.iter(|| edge_encode(black_box(&item)))
+        });
+        codec.bench_function("gdl-crossing/2-frame-encode", |b| {
+            b.iter(|| frame_encode(black_box(&edge)))
+        });
+        codec.bench_function("gdl-crossing/3-frame-decode", |b| {
+            b.iter_batched(
+                || frame.clone(),
+                |frame| frame_decode(black_box(frame)),
+                criterion::BatchSize::SmallInput,
+            )
+        });
+        codec.bench_function("gdl-crossing/4-edge-decode", |b| {
+            b.iter(|| edge_decode(black_box(&edge)))
         });
         codec.finish();
     }

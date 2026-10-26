@@ -31,6 +31,7 @@ gdl-model = { path = "../gdl-model" }
 # relay, under `hub`.
 gdl-cells = { path = "../gdl-cells", optional = true }
 gdl-watch = { path = "../gdl-watch", optional = true }
+bytes = { workspace = true }
 futures = { workspace = true }
 prometheus = { workspace = true }
 rmp-serde = { workspace = true }
@@ -114,6 +115,10 @@ required-features = ["hub"]
 
 [[test]]
 name = "allocs"
+harness = false
+
+[[test]]
+name = "item_allocs"
 harness = false
 
 [[test]]

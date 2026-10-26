@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::streamed::{self, Brief, Note, Script, ask, replies, reply, words};
-use common::{Events, WAIT, collect, ms, settles, tight_velo_node, velo_node};
+use common::{Events, TIGHT_SLOT_BYTES, WAIT, collect, ms, settles, tight_velo_node, velo_node};
 use futures::StreamExt;
 use gdl::{Cx, Error, ErrorKind, Streamed, items};
 use gdl_runtime::{Faults, Placement, RuntimeConfig};
@@ -63,6 +63,19 @@ fn deploy(
 
 fn defaults(_: &str) -> RuntimeConfig {
     RuntimeConfig::default()
+}
+
+/// More words than a tight node's stream slot holds, whatever a word's
+/// frame costs: every frame is at least a byte, so these fill the slot's
+/// byte budget twice over.
+fn past_credit() -> Vec<String> {
+    many(2 * TIGHT_SLOT_BYTES as usize)
+}
+
+/// Whether the last of `words` was sent.
+fn last_sent(events: &Events, words: &[String]) -> bool {
+    let last = words.last().expect("words");
+    events.has(&format!("input:sent:{last}"))
 }
 
 /// `count` words named `w0`, `w1`, ...
@@ -378,7 +391,7 @@ async fn stop_reaches_a_relay_that_waits_for_it_before_reading_under_exhausted_c
     };
     // Far more ready words than the input's credit admits while C reads
     // none of them.
-    let words_sent = many(64);
+    let words_sent = past_credit();
     let input = words(&events, &refs(&words_sent), false);
     let cx = Cx::new();
     let out = cluster
@@ -388,7 +401,7 @@ async fn stop_reaches_a_relay_that_waits_for_it_before_reading_under_exhausted_c
         .expect("call");
     events.wait_for("input:sent:w3", WAIT).await;
     assert!(
-        !events.has("input:sent:w63"),
+        !last_sent(&events, &words_sent),
         "the input was not held back by credit"
     );
     cx.request_stop();
@@ -414,7 +427,7 @@ async fn stop_reaches_a_waiting_relay_when_the_response_returns_to_its_own_worke
         wait_for_stop: true,
         ..Script::default()
     };
-    let words_sent = many(64);
+    let words_sent = past_credit();
     let input = words(&events, &refs(&words_sent), false);
     let cx = Cx::new();
     let out = cluster
@@ -424,7 +437,7 @@ async fn stop_reaches_a_waiting_relay_when_the_response_returns_to_its_own_worke
         .expect("call");
     events.wait_for("input:sent:w3", WAIT).await;
     assert!(
-        !events.has("input:sent:w63"),
+        !last_sent(&events, &words_sent),
         "the input was not held back by credit"
     );
     cx.request_stop();
@@ -523,7 +536,7 @@ async fn a_held_input_and_its_blocked_sender_are_released_at_the_deadline() {
         stall: true,
         ..Script::default()
     };
-    let words_sent = many(64);
+    let words_sent = past_credit();
     let input = words(&events, &refs(&words_sent), false);
     let started = tokio::time::Instant::now();
     let out = cluster
@@ -559,7 +572,7 @@ async fn a_stalled_input_does_not_block_another_requests_input() {
         stall: true,
         ..Script::default()
     };
-    let words_sent = many(64);
+    let words_sent = past_credit();
     let input = words(&events, &refs(&words_sent), false);
     let held = front
         .call(Cx::new(), ask("st", stalled, input))

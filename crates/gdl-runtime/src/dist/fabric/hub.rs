@@ -1034,8 +1034,7 @@ mod tests {
     /// that absence takes a bounded wait of two seconds to show.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_node_under_a_hub_reaches_a_peer_it_was_never_told_of() {
-        use super::super::{Fabric, Frame, bind_node, bind_under_hub};
-        use crate::dist::envelope::WireItem;
+        use super::super::{Fabric, Frame, Outgoing, bind_node, bind_under_hub};
         use futures::StreamExt;
         use std::time::Duration;
 
@@ -1076,7 +1075,7 @@ mod tests {
             async move {
                 let sent = async {
                     let out = attacher.attach(&reply).await.ok()?;
-                    out.send(WireItem::Item(vec![7])).await.ok()?;
+                    out.send(Outgoing::Item(vec![7])).await.ok()?;
                     out.finish().await;
                     Some(())
                 };
@@ -1084,7 +1083,7 @@ mod tests {
                 let _ = tokio::time::timeout(wait, sent).await;
                 matches!(
                     tokio::time::timeout(wait, inbound.next()).await,
-                    Ok(Some(Frame::Item(item))) if item == [7]
+                    Ok(Some(Frame::Item(item))) if item[..] == [7]
                 )
             }
         };

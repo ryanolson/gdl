@@ -500,6 +500,7 @@ name = "gdl-runtime"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "bytes",
  "dashmap",
  "figment",
  "futures",

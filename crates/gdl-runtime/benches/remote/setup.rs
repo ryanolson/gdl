@@ -59,6 +59,14 @@ impl gdl::Sink for Emit {
 }
 
 pub async fn lean_front() -> LeanCaller {
+    lean_front_with(Emit).await
+}
+
+/// The lean graph with `sink` as its `D`.
+pub async fn lean_front_with<D>(sink: D) -> LeanCaller
+where
+    D: gdl::Sink<Req = Ask, Item = Blob>,
+{
     let nodes = [velo_node().await, velo_node().await];
     let placement = Placement::new()
         .segment("front", ["S"])
@@ -80,7 +88,7 @@ pub async fn lean_front() -> LeanCaller {
         .expect("deployment")
     };
     let engine = deployment(1, "engine");
-    let root = lean::assemble(&engine, lean::Bindings::new().d(Emit)).expect("engine");
+    let root = lean::assemble(&engine, lean::Bindings::new().d(sink)).expect("engine");
     let engine = engine.start(root).expect("engine");
     let front = deployment(0, "front");
     let root = lean::assemble(&front, lean::Bindings::new()).expect("front");
@@ -109,6 +117,12 @@ pub struct DirectAsk {
 }
 
 pub async fn direct_pair() -> (velo::Velo, velo::InstanceId) {
+    direct_pair_with(false).await
+}
+
+/// [`direct_pair`], whose server sends each blob only on a [`PERMIT`] when
+/// `paced`.
+pub async fn direct_pair_with(paced: bool) -> (velo::Velo, velo::InstanceId) {
     let client = velo_node().await;
     let server = velo_node().await;
     client.register_peer(server.peer_info()).expect("peer");
@@ -134,6 +148,9 @@ pub async fn direct_pair() -> (velo::Velo, velo::InstanceId) {
                         };
                         let size = request.ask.size as usize;
                         for _ in 0..request.ask.items {
+                            if paced {
+                                PERMIT.notified().await;
+                            }
                             if sender.send(blob(size)).await.is_err() {
                                 return;
                             }
@@ -149,6 +166,49 @@ pub async fn direct_pair() -> (velo::Velo, velo::InstanceId) {
     let target = server.instance_id();
     std::mem::forget(server);
     (client, target)
+}
+
+// ----- the paced workload: one item per wait -----
+
+/// Lets a paced producer send its next blob. A paced consumer grants one
+/// each time it waits for an item, so items arrive one at a time, as
+/// tokens do, and a cost paid on each wait is paid per item.
+pub static PERMIT: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// [`Emit`], sending each blob only on a [`PERMIT`].
+pub struct PacedEmit;
+
+impl gdl::Sink for PacedEmit {
+    type Req = Ask;
+    type Item = Blob;
+
+    async fn generate(&self, _cx: Cx, ask: Ask) -> gdl::Result<Items<Blob>> {
+        let size = ask.size as usize;
+        Ok(gdl::items(futures::stream::unfold(
+            ask.items,
+            move |left| async move {
+                if left == 0 {
+                    return None;
+                }
+                PERMIT.notified().await;
+                Some((Ok(blob(size)), left - 1))
+            },
+        )))
+    }
+}
+
+/// The next item of `items`, granting a [`PERMIT`] once if it has to wait.
+pub async fn next_paced<S: futures::Stream + Unpin>(items: &mut S) -> Option<S::Item> {
+    let mut granted = false;
+    futures::future::poll_fn(|cx| {
+        let next = std::pin::Pin::new(&mut *items).poll_next(cx);
+        if next.is_pending() && !granted {
+            PERMIT.notify_one();
+            granted = true;
+        }
+        next
+    })
+    .await
 }
 
 /// Open a direct request and return its anchor, unread.
