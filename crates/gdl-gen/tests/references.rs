@@ -62,6 +62,8 @@ fn the_check_sees_each_kind_of_reference() {
         "/// The graph of cells.md section 3.1",
         "// ----- milestone 3 review, pass 1 -----",
         "// found in review m19-r12",
+        "/// Counterexample 1 of review `cells-r2`: Route provisions Post first",
+        "#[ignore = \"B-2 (review round 2): the hook names no services\"]",
     ] {
         assert!(cites(line).is_some(), "missed: {line}");
     }
@@ -72,6 +74,8 @@ fn the_check_sees_each_kind_of_reference() {
         "See [Classes and cells](../concepts/cells.md).",
         "[Classes and cells](cells.md) covers them.",
         "let rem3 = 1;",
+        "// a review of the drain, round two",
+        "/// the cell-r2 table",
     ] {
         assert!(cites(line).is_none(), "false positive: {line}");
     }
@@ -102,7 +106,7 @@ fn cites(line: &str) -> Option<&'static str> {
     }) {
         return Some("milestone label");
     }
-    if review_id(&lower) {
+    if review_id(&lower) || named_review(&lower) {
         return Some("review id");
     }
     None
@@ -114,6 +118,22 @@ fn after(haystack: &str, needle: &str, then: impl Fn(&str) -> bool) -> bool {
     haystack
         .match_indices(needle)
         .any(|(at, _)| then(&haystack[at + needle.len()..]))
+}
+
+/// A review named after "review": a round number (`review round 2`) or
+/// a name ending in a round (`review cells-r2`).
+fn named_review(line: &str) -> bool {
+    let digit = |rest: &str| rest.starts_with(|c: char| c.is_ascii_digit());
+    after(line, "review round ", digit)
+        || after(line, "review ", |rest| {
+            let name: String = rest
+                .trim_start_matches('`')
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            name.rsplit_once("-r")
+                .is_some_and(|(_, round)| !round.is_empty() && digit(round))
+        })
 }
 
 /// A review id such as `m19-r12` or `m10-18-r6`, standing alone as a word.

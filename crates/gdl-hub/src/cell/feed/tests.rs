@@ -228,7 +228,7 @@ async fn a_departure_waits_for_what_the_loopback_holds_before_it() {
 /// its earlier retirement arrives. Nothing it holds says a retirement
 /// is still on its way, so `left` goes without `retired`.
 #[tokio::test]
-#[ignore = "B-2 (review round 2): velo-hub's removal hook names no services and its ready and retired watches are not ordered with each other; lifting it needs V4, a read of the service directory in process"]
+#[ignore = "velo-hub's removal hook names no services and its ready and retired watches are not ordered with each other; lifting it needs a read of velo-hub's service directory in process"]
 async fn a_retirement_delivered_after_the_withdrawal_and_the_departure_comes_before_left() {
     let feed = feed();
     let mut watch = watch(&feed);

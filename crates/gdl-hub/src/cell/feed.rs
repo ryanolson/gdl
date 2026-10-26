@@ -31,7 +31,7 @@
 //! instance's withdrawal from `ready`, the hub removes the instance, and
 //! only then does the retirement it announced first arrive. The instance
 //! is sent `left` without `retired`; it is gone either way. Reading
-//! velo-hub's service directory in process (its V4) would close it.
+//! velo-hub's service directory in process would close it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::pin::Pin;

@@ -207,7 +207,7 @@ fn the_recommended_shape_crosses_once_at_the_choosers_hop() {
     }
 }
 
-/// Counterexample 1 of review `cells-r2`: Route provisions Post first, so
+/// A counterexample: Route provisions Post first, so
 /// Model's output would go to Post's instance, which never sent to Model.
 #[test]
 fn a_backward_stage_in_another_segment_of_the_outer_class_is_refused() {
@@ -220,7 +220,7 @@ fn a_backward_stage_in_another_segment_of_the_outer_class_is_refused() {
     }
 }
 
-/// Counterexample 2 of review `cells-r2`: the forward path leaves C and
+/// A counterexample: the forward path leaves C and
 /// returns to it, possibly on another instance than the one that chose.
 #[test]
 fn a_forward_path_that_leaves_and_returns_to_the_outer_segment_is_refused() {
