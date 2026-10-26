@@ -1,0 +1,52 @@
+# cargo-nextest settings. See docs/src/development/testing.md, "Tests with
+# a time bound".
+
+[test-groups]
+# Tests whose claim is a wall-clock bound that a busy host can break with a
+# correct runtime. They run one at a time, and a failure gets two retries. A
+# pass on a retry shows as FLAKY, and each bound stays as it is. Each test
+# below failed at its bound on a host far over its core count, unless its
+# note says otherwise.
+timing = { max-threads = 1 }
+
+[[profile.default.overrides]]
+# Each latency figure holds its own delay plus at most 60 ms, and the parts
+# sum to the time to the first item within 60 ms.
+filter = 'binary_id(gdl-runtime::recorded) & test(=the_parts_add_up_to_the_first_item_end_to_end)'
+test-group = 'timing'
+retries = 2
+
+[[profile.default.overrides]]
+# With clocks off by 40 ms and a 50 ms allowance, the remote sink stops
+# before the source's 400 ms deadline: about 10 ms to spare.
+filter = 'binary_id(gdl-runtime::faults) & test(=remote_deadlines_never_run_late_with_clocks_off_either_way)'
+test-group = 'timing'
+retries = 2
+
+[[profile.default.overrides]]
+# The engine lets the request go after its own 900 ms deadline and before
+# the front's at 1500 ms.
+filter = 'binary_id(gdl-runtime::faults) & test(=a_producer_blocked_on_a_stalled_consumer_ends_at_the_deadline)'
+test-group = 'timing'
+retries = 2
+
+[[profile.default.overrides]]
+# The retiree stops taking offers within the drain's bound plus 400 ms. The
+# second test has the same bound; it did not fail under load, but the first
+# did.
+filter = 'binary_id(gdl-runtime::retirement) & (test(=a_drain_while_the_retiree_waits_keeps_it_to_the_drains_bound) | test(=a_stalled_question_to_the_hub_does_not_hold_off_the_drains_cutoff))'
+test-group = 'timing'
+retries = 2
+
+[[profile.default.overrides]]
+# A real hub's 64-entry snapshot completes in under 1 s.
+filter = 'binary_id(gdl-hub::snapshot) & test(=a_real_hubs_snapshot_completes_well_inside_its_bounds)'
+test-group = 'timing'
+retries = 2
+
+[[profile.default.overrides]]
+# Doubling the source multiplies the fastest of two timed runs by less than
+# 3.
+filter = 'binary_id(gdl-extract::cost) & (test(=the_export_check_does_not_scan_the_module_per_name) | test(=a_type_is_found_by_its_name))'
+test-group = 'timing'
+retries = 2

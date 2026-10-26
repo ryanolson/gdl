@@ -6,13 +6,17 @@
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 rustup target add wasm32-unknown-unknown            # once: gdl-model's tests check the wasm build
-cargo test --workspace --no-run                     # build first: the limit is for the tests
-timeout <limit> cargo test --workspace              # full suite
-timeout <limit> cargo test -p <crate> --test <t>    # one target
+cargo install cargo-nextest --locked                 # once: the test runner
+cargo nextest run --workspace --no-run              # build first: the limit is for the tests
+timeout <limit> cargo nextest run --workspace       # full suite
+timeout <limit> cargo nextest run -p <crate> --test <t>   # one target
+timeout <limit> cargo test --workspace --doc        # doctests: nextest does not run them
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page, outside cargo
-(cd examples/http && timeout <limit> cargo test)    # the example workspaces are outside the root workspace
-(cd examples/api && timeout <limit> cargo test)
+(cd examples/http && timeout <limit> cargo nextest run)   # the example workspaces are outside the root workspace
+(cd examples/api && timeout <limit> cargo nextest run)
 ```
+
+The suite runs under [cargo-nextest](https://nexte.st), which runs each test in its own process. Its settings are in `.config/nextest.toml`. `crates/gdl-runtime/tests/allocs.rs` has its own `main`, so that no other thread changes its allocation count. It answers nextest's `--list` with one test, `allocations`.
 
 The tests of `gdl-gen` build the other examples in `target/examples`. The `editor.cjs` test runs the composer's `assets/app.js` in a Node `vm` context with a stub DOM. It needs a Node with the built-in test runner (`node --test`) and nothing from npm.
 
@@ -20,9 +24,9 @@ The tests of `gdl-gen` build the other examples in `target/examples`. The `edito
 
 Run every suite under `timeout`. A test that hangs stops the whole runner without failing it. The tests most likely to hang are those that change timeout and deadline code on purpose.
 
-- Size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once. A large fixed one hides it. Cargo prints each target's time (`finished in`).
+- Size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once. A large fixed one hides it. nextest prints each test's time and the run's (`Summary`).
 - Build first with `--no-run`, so the limit does not have to cover compilation.
-- On exit 124, suspect the newest test or change. Run that test binary again with `--test-threads=1 --nocapture` and a short timeout to find the hang.
+- On exit 124, suspect the newest test or change. Run that target again with `cargo nextest run -p <crate> --test <t> --no-capture`, which runs its tests one at a time, and a short timeout to find the hang.
 - When a target gets slower, find the cause before you raise its limit.
 
 ## Keep the suite fast
@@ -34,6 +38,15 @@ The suite runs on every change, so its speed is part of its correctness.
 - A deadline that only has to outlast the setup starts short and doubles each time the setup runs past it. A loaded host then makes the test slower, but not red. `within_a_window` in `crates/gdl-runtime/tests/recorded.rs` does this.
 - Build expensive state once. Start velo nodes once per test and reuse them across cases, as the placement matrices do.
 - A test that runs for more than a few seconds says why in a comment.
+
+## Tests with a time bound
+
+Most tests wait for events, so a busy host makes them slower but does not fail them. A few tests prove a wall-clock bound, such as a latency figure that holds its own delay plus at most 60 ms. A loaded host can break that bound even when the runtime is correct, and a wider bound would prove less. Such tests are in the `timing` group of `.config/nextest.toml`. They run one at a time, apart from each other, and a failure gets two retries. The file lists each test with the bound it proves.
+
+- A test that passes on a retry shows as `FLAKY` in nextest's output and summary. Report it: the host was busy, or the bound is close.
+- A test that fails all three tries fails the run.
+- nextest cannot stop load from other processes. On a host far over its core count, a timing test can still fail.
+- Add a test to the group only when its bound is what it proves and a busy host breaks it. Many tests prove a bound with seconds to spare, and load does not break those. A bound that only stands in for an event becomes a wait on that event.
 
 ## Velo in one process
 

@@ -123,7 +123,7 @@ Application messages cross as named-field MessagePack (`msgpack`) by default. A 
 CARGO_TARGET_DIR=/path/to/base-target cargo bench --locked --manifest-path /path/to/base/Cargo.toml -p gdl-runtime --bench codecs --no-run
 CARGO_TARGET_DIR=/path/to/change-target cargo bench --locked -p gdl-runtime --bench codecs --no-run
 python3 scripts/bench/codecs.py --base /path/to/base-binary --change /path/to/change-binary --out /path/to/new-results --cpu 5 --rounds 10
-timeout 60 cargo test -p gdl-runtime --test allocs --test wire
+timeout 60 cargo nextest run -p gdl-runtime --test allocs --test wire
 ```
 
 The runner alternates the order, records binary hashes and load, and keeps each criterion result.

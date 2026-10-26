@@ -97,8 +97,10 @@ A graph that is not cut costs no encoding. A cut costs one encode and one decode
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 rustup target add wasm32-unknown-unknown            # once: gdl-model's tests check the wasm build
-cargo test --workspace --no-run                     # build first: the timeout then counts only the tests
-timeout 300 cargo test --workspace
+cargo install cargo-nextest --locked                 # once: the test runner
+cargo nextest run --workspace --no-run              # build first: the timeout then counts only the tests
+timeout 300 cargo nextest run --workspace
+timeout 60 cargo test --workspace --doc             # doctests: nextest does not run them
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page
 bash scripts/build-book.sh                          # needs mdbook, mdbook-mermaid, mdbook-linkcheck
 ```

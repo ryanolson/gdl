@@ -25,17 +25,20 @@ Plans: Linear. Plans, remaining work, and follow-ups live in the work tracker, n
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 rustup target add wasm32-unknown-unknown            # once: gdl-model's tests check the wasm build
-cargo test --workspace --no-run                   # build first: the limit is for the tests
-timeout <limit> cargo test --workspace            # full suite
-timeout <limit> cargo test -p <crate> --test <t>   # one target
+cargo install cargo-nextest --locked               # once: the test runner
+cargo nextest run --workspace --no-run            # build first: the limit is for the tests
+timeout <limit> cargo nextest run --workspace     # full suite
+timeout <limit> cargo nextest run -p <crate> --test <t>   # one target
+timeout <limit> cargo test --workspace --doc      # doctests: nextest does not run them
 node --test crates/gdl-web/tests/editor.cjs       # the composer's page, outside cargo
-(cd examples/http && timeout <limit> cargo test)  # the example workspaces are outside the root workspace
-(cd examples/api && timeout <limit> cargo test)
+(cd examples/http && timeout <limit> cargo nextest run)  # the example workspaces are outside the root workspace
+(cd examples/api && timeout <limit> cargo nextest run)
 bash scripts/build-book.sh                         # the book, with its link check (INSTALL_TOOLS=1 fetches or builds the tools)
 ```
 
-- Always run tests under `timeout`, and size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once; a large fixed one hides it. Build first with `--no-run`, so that the limit does not have to cover compilation. Keep the measured times in agent memory, not here: they change as the suite does. Cargo prints each target's time (`finished in`).
-- On exit 124, rerun the newest test binary with `--test-threads=1 --nocapture` under a short timeout to name the hang.
+- Always run tests under `timeout`, and size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once; a large fixed one hides it. Build first with `--no-run`, so that the limit does not have to cover compilation. Keep the measured times in agent memory, not here: they change as the suite does. nextest prints each test's time and the run's (`Summary`).
+- On exit 124, rerun the newest test target with `cargo nextest run -p <crate> --test <t> --no-capture`, which runs its tests one at a time, under a short timeout to name the hang.
+- Tests whose claim is a wall-clock bound are in the `timing` group of `.config/nextest.toml`. They run one at a time, and a failure gets two retries. A test that passes on a retry shows as `FLAKY`: report it, since the host was busy or the bound is close. Add a test to the group only when its bound is what it proves and a busy host breaks it. A bound that only stands in for an event becomes a wait on that event instead.
 - Tests that need two or more velo nodes run them in one process over TCP on OS-assigned ports. They must not depend on NATS, etcd, or fixed ports.
 - Prove a precondition with an observable signal; never sleep and hope.
 - Tests and tools take temporary directories from `tempfile::TempDir` (`tempfile::Builder::new().prefix("gdl-<what>-").tempdir()`), so that they are removed on drop even when a test fails or panics. Hold the `TempDir` for as long as anything uses the directory, and never build a path under the system temp directory by hand.

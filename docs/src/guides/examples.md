@@ -35,7 +35,7 @@ cargo run -p gdl-gen -- generate --spec examples/asr/gdl.toml --out examples/asr
 The generated binary of the source's segment has no JSON-lines server, because one line cannot carry a streamed request. Call the source through the segment library instead. The `asr-demo` crate starts the three segments in one process, sends audio, and receives transcripts while the audio streams in:
 
 ```bash
-(cd examples/asr && timeout 300 cargo test -p asr-demo)
+(cd examples/asr && timeout 300 cargo nextest run -p asr-demo)
 ```
 
 See [Streamed requests](../concepts/streamed-requests.md).

@@ -43,6 +43,16 @@ struct Token {
 }
 
 fn main() {
+    // cargo-nextest first lists each binary's tests the way libtest does,
+    // then runs each one by name. Answer the listing with one test, or
+    // nextest would run the checks as a listing and find no test.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--list") {
+        if !args.iter().any(|arg| arg == "--ignored") {
+            println!("allocations: test");
+        }
+        return;
+    }
     let token = Token {
         index: 42,
         text: "hello".into(),
