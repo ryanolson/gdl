@@ -4,10 +4,11 @@
 //! the graph, diagrams of both, and the cells that deploy a placement's
 //! classes: the [`Fleet`] file and a cell's own [`CellSettings`].
 //!
-//! The generator and the runtime check placements with these rules, and
-//! the composer runs the same rules in a browser while a user draws, so
-//! this crate builds for `wasm32-unknown-unknown`. `gdl` re-exports
-//! everything here under the same names.
+//! The generator and the runtime check placements with these rules. The
+//! crate builds for `wasm32-unknown-unknown` so that the same rules can
+//! run in a browser; today the composer checks a draft on its server.
+//! `gdl` re-exports the configuration and metric metadata, and
+//! `gdl-runtime` the placement types it reads; the rest is here.
 
 mod cell;
 mod config;

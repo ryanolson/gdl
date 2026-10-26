@@ -1,7 +1,7 @@
-//! A segment that hosts a pinned frontend or service builds. The chat and
-//! asr examples serve JSON lines, so their generated segments do not reach
-//! the code that hands a frontend its `next` or a service its clients;
-//! these two examples do.
+//! A segment that hosts a pinned frontend or service builds. The chat
+//! example serves JSON lines and asr is driven through its library, so
+//! their generated segments do not reach the code that hands a frontend
+//! its `next` or a service its clients; these two examples do.
 
 mod common;
 

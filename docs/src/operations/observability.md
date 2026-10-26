@@ -78,8 +78,8 @@ sequenceDiagram
     F->>C: first item (end-to-end time to first item)
 ```
 
-- **The parts add up.** The front's request path, the engine's request path, the engine's time to its first item, and the time each later segment adds to it sum to the end-to-end time to the first item, less the wire.
-- **The request path** runs from arrival until the segment hands the request on (and it is accepted), or until a sink here starts its stream. A request refused at admission records nothing in the refusing segment. The sender counts the refusal, as `overloaded`.
+- **The parts add up.** The front's request path, the engine's request path, the engine's time to its first item, and the time each later segment adds to it sum to the end-to-end time to the first item, less the wire and the waits for acknowledgements.
+- **The request path** runs from arrival until the segment sends the request on, or until a sink here starts its stream. A sent request's span is recorded once it is accepted, and the wait for the acceptance is not part of it. A request refused at admission records nothing in the refusing segment. The sender counts the refusal, as `overloaded`.
 - **A response's clock** starts at its first item from another segment. Without one, it starts where a sink here started its stream, or where its backward run activated.
 - **`inflight_requests`** counts each visit until the segment has nothing left to do for it. A visit that waits counts too: queued at a held roster, waiting for activation, or held by a consumer that does not read. At the source's endpoint, it is the number of requests in flight in the graph.
 - **An error is counted once**, in the segment that raised it. A segment that relays the error from another segment does not count it. The end-to-end counter counts each request's outcome once.

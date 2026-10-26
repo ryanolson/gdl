@@ -67,7 +67,7 @@ A cell has a name, a class, a region, and a layout. A cell or region name is a D
 
 - **Parent (`home`).** A cell's parent is the cell of the class that sends to it. Only the parent's hub follows it, and only the parent's choosers offer it work. `home` is required for every cell of a class that another class sends to. It is refused for a cell of a class that nothing sends to, such as a global cell.
 - **Complete per parent.** Every cell whose class sends to another class needs at least one child of each class its class sends to, in its own layout. With three classes in a chain, this holds at every level: a middle cell is a child of a top cell and a parent of a bottom cell.
-- **Layouts.** A spec can hold several layouts of one graph, each with its own placement hash. Each layout must be a complete graph on its own. A cell runs one layout. Cells of different layouts never follow or offer to each other, because a hub follows only cells whose hashes equal its own.
+- **Layouts.** A spec can hold several layouts of one graph, each with its own placement hash. Each layout must be a complete graph on its own. A cell runs one layout. Cells of layouts that place nodes differently never follow or offer to each other, because a hub follows only cells whose hashes equal its own. The hash does not include the layout's name.
 - **Quorum (`ready`).** The usable instances each segment of the class needs for the cell to be `ready`: 1 by default, a class default in the fleet file, or the cell's own override.
 - **Requires.** How many `ready` children of each class it sends to the cell's health needs: 1 of each by default.
 

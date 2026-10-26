@@ -39,7 +39,9 @@ pub use watch::DirWatch;
 /// writes of one cell between two polls are one change, the later; a
 /// reader keeps a cell's newest record, so it misses no state. A file that
 /// does not parse is skipped; a cell's file that cannot be read ends every
-/// watch of its class with [`DirectoryError::Unavailable`]. Every file
+/// watch of its class with [`DirectoryError::Unavailable`], except a
+/// watch whose buffer is full, which is lagged and reads
+/// [`CellEvent::Resnapshot`] instead. Every file
 /// operation runs on a blocking thread.
 ///
 /// A resume token is a place in what this process watched, shared by its
@@ -418,7 +420,8 @@ impl Class {
         }
     }
 
-    /// End every watch of the class with `error`.
+    /// End every watch of the class with `error`; a watch whose buffer is
+    /// full is marked lagged instead, and reads a resnapshot.
     fn fail(&mut self, error: DirectoryError) {
         for (_, watcher) in self.watchers.drain() {
             match watcher.start {

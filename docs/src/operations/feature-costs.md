@@ -13,7 +13,7 @@ remote-<base|change> --bench --warm-up-time 2 --measurement-time 5 --output-form
   '^(request/reference-[123]-segments?|concurrent-32x1-reference/1-segment|concurrent-32x1000-16B/lean-2-segments|reference-items/2-segments)$'
 ```
 
-The setups are one segment (no crossing, the control), two segments (one crossing), and three segments (two crossings). The wall-time row `concurrent-32x1-reference` runs 32 requests at once on four workers. One request at a time leaves every atomic uncontended, so only this row can show contention.
+The setups are one segment (no crossing, the control), two segments (two crossings, out and back, through one anchor), and three segments (three crossings, two anchors). The wall-time row `concurrent-32x1-reference` runs 32 requests at once on four workers. One request at a time leaves every atomic uncontended, so only this row can show contention.
 
 ## Runtime metrics
 

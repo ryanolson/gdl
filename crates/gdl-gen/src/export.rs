@@ -27,7 +27,7 @@ use crate::{Error, Offers, Spec, emit};
 const EXPORT: &str = "`export`";
 
 /// The spec's crates as a `.tar.gz`, under a directory named for the graph.
-/// The contract's manifest is built in `target`, as for [`crate::render`].
+/// The contract's manifest is got as for [`crate::render`].
 pub fn export(spec: &Spec, target: &Path, from: Offers<'_>) -> Result<Vec<u8>, Error> {
     let laid = spec.only_layout(EXPORT)?;
     // The output's place only decides which paths are inside it; nothing

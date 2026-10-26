@@ -4,15 +4,15 @@
 
 | Term | Meaning |
 |---|---|
-| Graph | A source plus one nested chain of hops. See [The graph model](../concepts/model.md) |
+| Graph | One or more sources, each with one nested chain of hops. See [The graph model](../concepts/model.md) |
 | Node | A named, typed step with a role: source, operator, forward, sink, or backward |
-| Source | The entry point of a graph. It has no implementation and needs no binding |
+| Source | An entry point of a graph. A source with no binding is called from a program; a source bound to a `Frontend` or a `Service` is hosted by that implementation |
 | Operator | A node with a request half and a response half that share per-request state. It calls the hop below it through `next` |
 | Forward, backward | A node that transforms the request on its way in (forward), or the response stream on its way out (backward) |
 | Sink | The inner end of the last hop. It turns a request into a response stream |
 | Hop | The span between an outer end (source or operator) and an inner end (operator or sink), with a forward chain and a backward chain |
 | Stage | One position in a hop: a forward node, the inner end, or a backward node |
-| Root | A source's entry. A graph can have several roots, and a root is what admission counts |
+| Root | A source's entry. A graph can have several roots. Admission counts root requests: one request identity, shared by all its attempts |
 | Message | A type on an edge. `derive(Message)` makes it known to the catalogue. See [Messages and encodings](../concepts/messages.md) |
 | Wire type | A message that can cross segments: it implements serde's `Serialize` and `DeserializeOwned` |
 | Contract | The generated crate that holds a graph's types and `manifest()`. Its hash is part of a deployment's identity |

@@ -4,7 +4,7 @@
 //! difference by the difference in counts: the setup cancels out.
 //!
 //! ```text
-//! cargo bench -p gdl --bench requests --no-run
+//! cargo bench -p gdl-runtime --bench requests --no-run
 //! /usr/bin/time -l target/release/deps/requests-<hash> one 20000   # macOS
 //! perf stat -e instructions target/release/deps/requests-<hash> one 20000   # Linux
 //! ```

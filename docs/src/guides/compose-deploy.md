@@ -60,7 +60,7 @@ Each segment's health check runs `segment --healthcheck /etc/gdl/config` every 5
 
 ## 4. Scale and stop
 
-- **Add instances** with `docker compose up --scale <segment>=N`. Each new instance joins once it is ready. A segment that publishes a host port cannot scale: two containers cannot bind one port.
+- **Add instances** with `docker compose up --scale <segment>=N`. Each new instance joins once it is ready. A segment that publishes a fixed, nonzero host port cannot scale: two containers cannot bind one port. A port Docker chooses (`CONTAINER`, `0:CONTAINER`, or `IP::CONTAINER`) scales.
 - **Stop one instance** with `docker stop <container>`. It retires: its peers stop routing to it, and it leaves once it has drained.
 - **Stop everything** with `docker compose down`. Every segment drains, within its drain bound.
 

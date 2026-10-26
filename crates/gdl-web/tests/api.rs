@@ -540,7 +540,8 @@ async fn an_export_holds_its_spec_and_graph_file() {
     gdl_gen::Spec::load(&root.join("gdl.toml")).expect("the archived spec loads");
 }
 
-/// When every crate can be fetched anywhere, an export builds images, and
+/// When every crate can be fetched anywhere, an export includes the files
+/// that build its images, and
 /// a check refuses what that export would: a segment whose image name
 /// Docker would refuse.
 #[tokio::test]

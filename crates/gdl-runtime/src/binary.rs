@@ -35,7 +35,8 @@ pub trait SegmentBinary {
     const PACKAGE: &'static str;
     /// This segment's name in the placement.
     const SEGMENT: &'static str;
-    /// Every segment of the placement: an instance waits for all of them.
+    /// Every segment of the placement. An instance waits for all of them,
+    /// or, in a cell, only for those of its class.
     const SEGMENTS: &'static [&'static str];
     /// The graph's own config values, as TOML: a table per node, by the
     /// node's name. A node's settings table may restate them but not

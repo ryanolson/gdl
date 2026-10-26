@@ -14,7 +14,7 @@ use velo_hub::client::HubClient;
 use velo_hub::velo::InstanceId;
 use velo_hub::velo::discovery::{ServiceDiscovery, ServiceEvent};
 
-/// The counts not yet taken by the publisher before counting waits for it.
+/// The counts not yet taken by the judgment before counting waits for it.
 pub(super) const BUFFER: usize = 256;
 
 /// How long to wait before watching again after a watch failed or ended,
@@ -50,7 +50,7 @@ pub(super) fn loopback(public: SocketAddr) -> SocketAddr {
 }
 
 /// Count the usable instances of each of `segments` at the hub at
-/// `public`, sending each change to the publisher, until `cancel`. Each
+/// `public`, sending each change to the judgment, until `cancel`. Each
 /// event is shown to `observe` before it is counted, with its segment's
 /// index, so that what the counting has sent is never ahead of it.
 pub(super) async fn run(

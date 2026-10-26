@@ -545,7 +545,8 @@ pub struct NodeEntry {
     pub metrics: Vec<gdl_model::MetricField>,
     /// The node's name: its type's name.
     pub name: String,
-    /// Its role: a sink, a forward or backward node, or an operator.
+    /// Its role: a sink, a forward or backward node, an operator, or a
+    /// source (a hosted frontend or service).
     pub role: gdl_model::Role,
     /// The implementing type, at the crate root.
     #[serde(rename = "type")]

@@ -11,7 +11,8 @@ pub use ::chat_contract as contract;
 /// This segment's name in the placement.
 pub const SEGMENT: &str = "post";
 
-/// Every segment of the placement: an instance waits for all of them.
+/// Every segment of the placement. An instance waits for all of them,
+/// or, in a cell, only for those of its class.
 pub const SEGMENTS: &[&str] = &["engine", "front", "post"];
 
 /// The placement this crate was generated for.

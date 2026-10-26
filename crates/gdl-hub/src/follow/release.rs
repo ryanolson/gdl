@@ -44,9 +44,10 @@ pub(crate) enum Told {
 
 /// Send what `releases` gives, as `me` with the follow's generation, until
 /// `cancel`. What the cell's hub does not take is sent again every
-/// [`RETRY`] for up to `patience`: by then the cell's hub no longer counts
-/// the watch, whose lease is as long, and a hub that cannot be reached is
-/// no longer waited for.
+/// [`RETRY`] for up to `patience`, this hub's watch lease, checked between
+/// attempts, so an attempt in flight can outlast it. When both hubs share
+/// one `CellTiming`, the cell's hub no longer counts the watch by then; a
+/// hub that cannot be reached is no longer waited for.
 pub(crate) async fn run(
     mut releases: mpsc::UnboundedReceiver<Release>,
     watcher: CellWatcher,

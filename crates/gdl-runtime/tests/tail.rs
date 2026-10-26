@@ -1,8 +1,9 @@
 //! A finished stream's output may still sit in velo, waiting for a consumer
 //! that has not read it. The instance that produced it keeps the stream's
 //! admission share and egress permit until velo has handed that output on,
-//! so that an instance that drains to an empty ledger never cuts output its
-//! consumer still wants.
+//! so that an instance that drains to an empty ledger never cuts eager
+//! output its consumer still wants. An item larger than velo's eager budget
+//! is staged and can still be cut at shutdown; this test does not cover it.
 mod common;
 
 use common::{Events, Plan, WAIT, collect, deploy, expected, ms, prompt, settles, velo_node};

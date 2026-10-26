@@ -690,7 +690,9 @@ fn the_environment_overrides_the_files_as_a_whole() {
 
 /// Launch `config` as an instance of `segment` in `deployment`, recording
 /// whether it went on to await its nodes' readiness, which comes after the
-/// cell check and before every registration and rendezvous.
+/// cell check. With a roster directory it comes before the rendezvous;
+/// with a hub, after the registration, whose lease is kept while the nodes
+/// load.
 async fn launch_cell(
     config: &Config,
     segment: &'static str,

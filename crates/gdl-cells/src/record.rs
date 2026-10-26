@@ -95,7 +95,8 @@ impl CellRecord {
 pub enum CellState {
     /// Every segment of the class has its quorum of usable instances.
     Ready,
-    /// A segment is below its quorum, but every segment has a usable
+    /// A segment is below its quorum, or every quorum is met but has not
+    /// yet held for the readiness hold, and every segment has a usable
     /// instance: chosen only when no ready cell fits.
     Degraded,
     /// A segment has no usable instance: never chosen.

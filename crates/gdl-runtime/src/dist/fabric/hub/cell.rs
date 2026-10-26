@@ -74,9 +74,11 @@ enum Role {
 /// cell is stale lands: the runtime's setup timeout, the longest a hand-off
 /// sent before its chooser stopped offering to the cell takes to arrive,
 /// and twice the cell's load summary period, the follow link's lag bound.
-/// A chooser whose view lags further than three periods has a stale
-/// summary of the cell, and its cell policy does not choose the cell at
-/// all. The bound is a fallback: the instance stops earlier once its hub
+/// Under `home_first`, a chooser whose view lags further than three
+/// periods has a stale summary of the cell and does not choose it. Under
+/// `round_robin`, which reads no summary, such a chooser may still offer
+/// to the cell, and the entry declines the offer, so the chooser offers
+/// another cell. The bound is a fallback: the instance stops earlier once its hub
 /// says that no other cell follows the cell, since a cell lets go of
 /// another only once none of its choosers holds an offer to it. The same
 /// bound caps how long a retired entry instance waits for the cells that

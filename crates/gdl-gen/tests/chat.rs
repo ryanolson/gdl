@@ -452,7 +452,7 @@ fn the_spec_path_may_be_given_any_way() {
 }
 
 /// Rendering a graph spec, as `--check` does, and drawing it build the
-/// generated contract under the target directory, never in the output.
+/// manifest in memory and write nothing in the output.
 #[test]
 fn rendering_a_graph_spec_writes_nothing_in_the_output() {
     let temp = scratch("render-only");

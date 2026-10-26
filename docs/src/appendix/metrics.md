@@ -54,7 +54,7 @@ An entry is a node where a visit begins. The parts a visit has decide which fami
 
 ## Buckets
 
-All five histograms use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. A histogram's `_count` is the sum of the buckets read in the same scrape.
+All five histograms use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. Buckets are cumulative. A histogram's `_count` equals its `+Inf` bucket, both computed from the same read of the internal bins.
 
 ## `error_type` values
 

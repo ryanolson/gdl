@@ -231,8 +231,8 @@ pub struct Model<'a> {
 
 /// [`model`] for any graph of `spec`, whose root `assemble` builds, with
 /// each entry instance's runtime settings changed by `entry`. Its load
-/// summary period is the shortest, [`SUMMARY`]: a chooser sends only to a
-/// cell whose summary it has.
+/// summary period is the shortest, [`SUMMARY`]: a `home_first` chooser
+/// sends only to a cell whose summary it has.
 pub async fn model_of<H: Register + Send + Sync + 'static>(
     spec: &DeploymentSpec,
     directory: &Resolving,

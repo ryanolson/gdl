@@ -25,7 +25,7 @@
 //! ```
 //! Graph-affecting values must match the built graph.
 //!
-//! This segment hosts the source. Once every segment is ready, it reads
+//! This segment hosts the source. Once its segments are ready, it reads
 //! one JSON request per line on stdin and answers each with one line per
 //! item, `{"item": ...}`, then `{"done": null}` or `{"error": "..."}`.
 

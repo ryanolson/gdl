@@ -3,7 +3,7 @@
 //! allocator measures it, so this is kept apart from the timed benches in
 //! `benches/remote.rs`, which it would slow.
 //!
-//! Run with `cargo bench -p gdl --bench footprint`; for tasks spawned per
+//! Run with `cargo bench -p gdl-runtime --bench footprint`; for tasks spawned per
 //! request, build with `RUSTFLAGS="--cfg tokio_unstable"`.
 
 #![allow(missing_docs)]

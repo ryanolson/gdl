@@ -68,4 +68,3 @@ cargo test --manifest-path examples/api/Cargo.toml --no-run
 timeout 60 cargo test --manifest-path examples/api/Cargo.toml
 ```
 
-The pinned velo 0.19.0 dependency currently fails to compile on macOS because it calls a Linux-only socket API. Validation on that host requires fixing the upstream dependency or using an isolated validation patch; this example does not alter the pin.

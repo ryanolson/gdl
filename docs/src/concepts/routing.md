@@ -86,7 +86,7 @@ flowchart TD
     E -->|no| H[fails with the last refusal]
 ```
 
-- An instance declines with `Overloaded` (it has no room, or it is retiring) or `Placement` (the hand-off is not of its deployment). It gives either answer only before it has admitted anything for the request.
+- An instance declines with `Overloaded` (it has no room, or it is retiring) or `Placement` (the hand-off is not of its deployment). It gives either answer only before the request's work starts. An admission share it took is released before the refusal returns.
 - A hand-off velo refused to send never left, so it is offered again too.
 - The router chooses again at most `[runtime] instance_failovers` more times, 2 by default. `0` makes a refusal final. The request's deadline and cancel are checked before each choice.
 - Nothing is excluded. The router may choose an instance that declined, since a decline can come from a state that its view did not show yet.

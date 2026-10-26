@@ -87,7 +87,7 @@ With classes, the crossing report also counts the WAN round trips that each boun
 
 A class that a boundary enters can set how the hop's outer end picks a cell, in `[cells.<class>] policy` (`home_first`, for example).
 
-The spec does not check the name against a list, because a custom policy can be registered later. A chooser that cannot run the policy refuses to start. The runtime provides `home_first` and `round_robin`.
+The spec checks only the name's shape. The runtime runs `home_first` and `round_robin`, and a chooser given any other name refuses to start.
 
 ## Layouts
 
@@ -128,4 +128,4 @@ segments = ["engine"]
 - A layout name has a class name's shape.
 - With several layouts, each layout's crates go in `<out>/<layout>/<segment>` and are named `<graph>-<layout>-<segment>`. `[deployment.segment.<name>]` names a segment of any layout and serves it in each layout that has it.
 
-A cell runs one layout. A hub follows only cells whose contract and placement hashes equal its own, so cells of different layouts never follow or offer to each other, and the runtime needs no layout name to keep them apart. `export` and `diagram` take a spec of one layout. `compose` deploys several layouts only by cell. See [Known limitations](../operations/limitations.md).
+A cell runs one layout. A hub follows only cells whose contract and placement hashes equal its own. The placement hash covers the placement's contents and not the layout's name, so cells of layouts that place nodes differently never follow or offer to each other. Two layouts that place every node alike have one hash and are one layout to the runtime. The fleet file still checks each cell's layout against its parent's. `export` and `diagram` take a spec of one layout. `compose` deploys several layouts only by cell. See [Known limitations](../operations/limitations.md).

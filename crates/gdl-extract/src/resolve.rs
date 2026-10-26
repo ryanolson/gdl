@@ -67,9 +67,10 @@ impl<'a> Resolver<'a> {
             .clone()
             .map(|(name, root)| {
                 // A crate of the workspace may share files across its
-                // packages; one elsewhere, fetched from a registry or a Git
-                // checkout or a path dependency outside the workspace, has
-                // its own directory and nothing beyond it.
+                // packages, and one from a Git checkout across the
+                // checkout's packages. One from a registry, or a path
+                // dependency outside the workspace, has its own directory
+                // and nothing beyond it.
                 let info = &self.graph.packages[package];
                 let within = if info.source.starts_with("path+")
                     && info.dir.starts_with(&self.graph.workspace_root)

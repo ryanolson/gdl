@@ -1,6 +1,6 @@
 //! Local composition: the typed building blocks a graph is assembled from
 //! when its stages share a segment. Everything here is a plain nested call;
-//! there is no anchor, no map, and no lock on this path.
+//! there is no anchor and no map on this path.
 
 use std::future::Future;
 use std::sync::Arc;

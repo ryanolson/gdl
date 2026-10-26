@@ -81,7 +81,7 @@ Velo moved anchors' unattached deadlines and senders' heartbeats from one timer 
 | two segments, `round_robin` | 629,125 | 612,719 | -16,406 (-2.6%) |
 | three segments, `round_robin` | 1,212,451 | 1,181,941 | -30,510 (-2.5%) |
 
-The saving is about 16k instructions per crossing and nothing without one. Wall time per request is within the spread. `reference-items/2-segments` is bimodal on both builds, with overlapping ranges, and the change median is 2.4% higher. That is below the 5% block, and unsettled: a dedicated machine decides whether a per-item cost exists.
+The saving is about 16k instructions per anchor (per stream) and nothing without one. Wall time per request is within the spread. `reference-items/2-segments` is bimodal on both builds, with overlapping ranges, and the change median is 2.4% higher. That is below the 5% block, and unsettled: a dedicated machine decides whether a per-item cost exists.
 
 ## The single-stream limit
 

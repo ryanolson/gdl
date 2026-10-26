@@ -1,5 +1,5 @@
 //! A chooser's damping of a cell that declined its offers: for a short
-//! window after a decline, the cell is not chosen, so that requests do not
+//! window after a decline, the cell is passed over, so that requests do not
 //! each pay a round trip to a cell that is full until its summary says so.
 //! The window starts at [`FIRST_WINDOW`] and doubles, up to
 //! [`MAX_WINDOW`], with each further decline with no acceptance between;
@@ -44,7 +44,8 @@ pub(crate) const MAX_WINDOW: Duration = Duration::from_secs(30);
 /// tables, which the follower makes.
 ///
 /// A cell is damped from a decline until an acceptance: while its window
-/// lasts it is not chosen, and once the window has passed it may be chosen
+/// lasts it is passed over (at most half of the eligible cells are, so a
+/// lone cell is still chosen), and once the window has passed it may be chosen
 /// again, which is how it is offered the request whose acceptance ends its
 /// damping, or whose decline doubles the window.
 #[derive(Debug, Default)]

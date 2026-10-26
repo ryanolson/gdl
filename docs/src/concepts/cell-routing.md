@@ -6,7 +6,7 @@ A parent cell sends work to its child cells. This chapter covers how the parent'
 
 A hub follows only its children. A child is a cell whose record names the hub's own cell as its `home`, has the same contract and placement hashes, and is `ready` or `degraded`. Region plays no part in following. A child in another region is followed. A cell in the hub's region whose parent is another cell is not followed.
 
-Cells of different layouts have different placement hashes, so they never follow or offer to each other. A cell with other hashes is ignored, not an error. A hub follows children only for the classes its own class sends to. A cell of a class that sends to no class follows nothing.
+Cells of layouts that place nodes differently have different placement hashes, so they never follow or offer to each other. A cell with other hashes is ignored, not an error. A hub follows children only for the classes its own class sends to. A cell of a class that sends to no class follows nothing.
 
 ## Two links
 
@@ -111,11 +111,11 @@ The runtime provides two policies. A chooser whose placement names any other pol
 | Tier | Cells |
 |---|---|
 | 1 | `ready` home cells (the chooser's own `[cell] region`) that are not saturated |
-| 2 | `ready` cells in another region whose admitted roots are under 80% of their limit |
+| 2 | `ready` cells in another region that report no refusals and whose admitted roots are under 80% of their limit |
 | 3 | saturated `ready` home cells |
 | 4 to 6 | the `degraded` cells, in the same three tiers |
 
-Within the tier it draws two cells at random and takes the one with the lower ratio of admitted roots to limit. A cell in another region at or over 80% is never chosen. Admission counts roots, not engine work, so this is an admission heuristic. The thresholds are constants of the policy.
+Within the tier it draws two cells at random and takes the one with the lower ratio of admitted roots to limit. A cell in another region that reports a refusal, or is at or over 80%, is never chosen. Admission counts roots, not engine work, so this is an admission heuristic. The thresholds are constants of the policy.
 
 ### Damping
 
@@ -125,7 +125,7 @@ At most half of the otherwise eligible cells, rounded down, are damped at once. 
 
 ## A hand-off is an offer
 
-A child cell may decline the hand-off. The chooser then offers the request to another cell in the same call. Nothing of a declined offer is sent again: the entry took nothing, and a streamed request's input goes only to the cell that accepts it. A selector's lease and metadata from a declined choice are released before the next choice.
+A child cell may decline the hand-off. The chooser then offers the request to another cell in the same call. Nothing of a declined offer is sent again: the entry started no work and holds nothing, and a streamed request's input goes only to the cell that accepts it. A selector's lease and metadata from a declined choice are released before the next choice.
 
 | What happens | Outcome |
 |---|---|

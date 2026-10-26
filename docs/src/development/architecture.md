@@ -29,7 +29,7 @@ The derives expand to `::gdl::...`. Rust gives a proc macro no way to see the na
 
 The runtime calls velo in one place: `crates/gdl-runtime/src/dist/fabric.rs` and its submodules, including the hub client. The rest of the runtime speaks in terms of `Fabric`, `Inbound`, `Outbound`, and `ReplyTo`, and only names velo's plain types (`InstanceId`, `PeerInfo`). A velo upgrade then stays in one module. There is no transport trait, because the runtime has no second messaging implementation. Generated code and node implementations never call velo.
 
-`gdl-model` and `gdl-syntax` stay portable. `crates/gdl-model/tests/portable.rs` checks that they and the generator do not depend on the runtime, and that they build for `wasm32-unknown-unknown`, where the composer runs the same rules in a browser.
+`gdl-model` and `gdl-syntax` stay portable. `crates/gdl-model/tests/portable.rs` checks that they and the generator do not depend on the runtime, and that they build for `wasm32-unknown-unknown`, so the same rules can run in a browser. Today the composer's page checks a draft on its server (`/api/check`), which runs those rules natively.
 
 ## Features of `gdl-runtime`
 

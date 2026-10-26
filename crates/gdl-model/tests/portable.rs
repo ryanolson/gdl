@@ -1,6 +1,6 @@
 //! The model and the graph syntax stay portable: they build for
-//! `wasm32-unknown-unknown`, where the composer runs them, and neither they
-//! nor the generator depend on the runtime.
+//! `wasm32-unknown-unknown`, so that they can run in a browser, and
+//! neither they nor the generator depend on the runtime.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,7 +70,7 @@ fn the_model_and_the_generator_do_not_depend_on_the_runtime() {
     }
 }
 
-/// The composer's copy of the rules is this crate, built for wasm. The
+/// The rules build for wasm, so that a browser can run them. The
 /// check needs the target's standard library; without it the test says how
 /// to add it and passes, so a machine without wasm can run the suite. The
 /// dependency test above runs everywhere.

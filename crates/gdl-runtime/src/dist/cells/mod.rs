@@ -310,8 +310,8 @@ pub struct FollowedCell {
     pub load_age: Option<std::time::Duration>,
     /// Whether this chooser damps the cell, and how long its window still
     /// lasts: `Some` from a decline of its offer until it accepts one,
-    /// and while the window lasts the cell is not chosen; `None` when it
-    /// is not damped.
+    /// and while the window lasts the cell is passed over, unless more than
+    /// half of the eligible cells are damped; `None` when it is not damped.
     pub damped: Option<std::time::Duration>,
     /// The entry instances of the segment that may be routed to, by id:
     /// none while the state is `draining` or `unavailable`, or the cell is

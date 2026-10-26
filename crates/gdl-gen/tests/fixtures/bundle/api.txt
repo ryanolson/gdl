@@ -236,7 +236,8 @@ pub use ::api_contract as contract;
 /// This segment's name in the placement.
 pub const SEGMENT: &str = "engine";
 
-/// Every segment of the placement: an instance waits for all of them.
+/// Every segment of the placement. An instance waits for all of them,
+/// or, in a cell, only for those of its class.
 pub const SEGMENTS: &[&str] = &["engine", "front"];
 
 /// The placement this crate was generated for.
@@ -457,7 +458,8 @@ pub use ::api_contract as contract;
 /// This segment's name in the placement.
 pub const SEGMENT: &str = "front";
 
-/// Every segment of the placement: an instance waits for all of them.
+/// Every segment of the placement. An instance waits for all of them,
+/// or, in a cell, only for those of its class.
 pub const SEGMENTS: &[&str] = &["engine", "front"];
 
 /// The placement this crate was generated for.
@@ -719,7 +721,7 @@ impl gdl_runtime::SegmentBinary for Binary {
 //! ```
 //! Graph-affecting values must match the built graph.
 //!
-//! The source frontend serves once every segment is ready, and drains on
+//! The source frontend serves once its segments are ready, and drains on
 //! SIGINT or SIGTERM.
 
 fn main() -> std::process::ExitCode {

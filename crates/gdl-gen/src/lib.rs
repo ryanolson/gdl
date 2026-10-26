@@ -115,10 +115,11 @@ impl std::error::Error for Error {}
 /// Generated files, keyed by path relative to the output directory.
 pub type Files = BTreeMap<PathBuf, String>;
 
-/// Build the contract's manifest in `target` (a cargo target directory),
-/// validate `spec` against it, and render every file for output directory
-/// `out`. For a graph file, the files include the contract crate, in
-/// `contract/` under `out`.
+/// Get the contract's manifest, validate `spec` against it, and render
+/// every file for output directory `out`. A graph file's manifest is built
+/// in memory, and the files include the contract crate, in `contract/`
+/// under `out`. A Rust contract's manifest is built by a program compiled
+/// in `target` (a cargo target directory).
 pub fn render(spec: &Spec, out: &Path, target: &Path) -> Result<Files, Error> {
     Ok(render_with(spec, out, target, emit::Deps::Relative, Offers::Read)?.0)
 }
@@ -318,8 +319,8 @@ pub enum Format {
 }
 
 /// The spec's placed graph as a diagram: each segment a cluster, and each
-/// edge that crosses segments marked. The contract's manifest is built in
-/// `target` (a cargo target directory), as for [`render`]. A spec of
+/// edge that crosses segments marked. The contract's manifest is got as
+/// for [`render`]. A spec of
 /// several layouts is refused: a diagram draws one.
 pub fn diagram(spec: &Spec, target: &Path, format: Format) -> Result<String, Error> {
     let laid = spec.only_layout("`diagram`")?;

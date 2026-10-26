@@ -55,4 +55,4 @@ cargo test --manifest-path examples/http/Cargo.toml --no-run
 timeout 60 cargo test --manifest-path examples/http/Cargo.toml
 ```
 
-The HTTP test uses an OS-assigned port and checks streamed output, collected output, bind errors, source registration, and shutdown. The pinned `velo` 0.19.0 currently fails to compile on macOS because it calls the Linux-only `set_tcp_user_timeout`. Normal build commands require a supported host until that dependency issue is fixed.
+The HTTP test uses an OS-assigned port and checks streamed output, collected output, bind errors, source registration, and shutdown.

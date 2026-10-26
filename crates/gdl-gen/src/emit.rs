@@ -594,8 +594,9 @@ impl Unit<'_> {
         let _ = writeln!(text);
         let _ = writeln!(
             text,
-            "/// Every segment of the placement: an instance waits for all of them."
+            "/// Every segment of the placement. An instance waits for all of them,"
         );
+        let _ = writeln!(text, "/// or, in a cell, only for those of its class.");
         let quoted: Vec<String> = self.segments.iter().map(|s| format!("\"{s}\"")).collect();
         let _ = writeln!(
             text,

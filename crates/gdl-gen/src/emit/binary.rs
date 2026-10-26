@@ -44,7 +44,7 @@ impl Unit<'_> {
     }
 
     /// The module doc: usage, the settings table, and what the binary does
-    /// once every segment is ready.
+    /// once the segments it waits for are ready.
     fn settings_doc(
         &self,
         hosted: &[Hosted<'_>],
@@ -150,7 +150,7 @@ impl Unit<'_> {
             let _ = writeln!(text, "//!");
             let _ = writeln!(
                 text,
-                "//! This segment hosts the source. Once every segment is ready, it reads"
+                "//! This segment hosts the source. Once its segments are ready, it reads"
             );
             let _ = writeln!(
                 text,
@@ -164,7 +164,7 @@ impl Unit<'_> {
             let _ = writeln!(text, "//!");
             let _ = writeln!(
                 text,
-                "//! The source frontend serves once every segment is ready, and drains on"
+                "//! The source frontend serves once its segments are ready, and drains on"
             );
             let _ = writeln!(text, "//! SIGINT or SIGTERM.");
         } else if self.hosts_source() && self.streamed_source() {
@@ -343,7 +343,7 @@ impl Unit<'_> {
     }
 
     /// `start`: the segment's graph, and the body that serves it once
-    /// every segment is ready.
+    /// the segments it waits for are ready.
     fn start_fn(
         &self,
         frontend: Option<&Bind>,
@@ -390,8 +390,8 @@ impl Unit<'_> {
         text
     }
 
-    /// What the body does once every segment is ready: serve the frontend
-    /// or the service, answer JSON lines, or wait to be stopped.
+    /// What the body does once the segments it waits for are ready: serve
+    /// the frontend or the service, answer JSON lines, or wait to be stopped.
     fn serve_body(
         &self,
         frontend: Option<&Bind>,

@@ -60,7 +60,7 @@ A hub follows only the cells that name its own cell as their parent. Region play
 
 ## Failover only before acceptance
 
-The chooser tries another cell only when it knows the chosen cell did not take the request: an explicit refusal before admission, or a send that velo refused before it left. Nothing was admitted there, and no input was sent, because a streamed request's input starts only after acceptance. So nothing needs replay.
+The chooser tries another cell only when it knows the chosen cell did not take the request: an explicit refusal before the request's work starts, or a send that velo refused before it left. Nothing stays admitted there, and no input was sent, because a streamed request's input starts only after acceptance. So nothing needs replay.
 
 **A missing acknowledgement is not a refusal.** An entry admits the request and spawns its work before it answers. After the spawn, only the acknowledgement can fail. So when the answer is late or lost, the entry may already have run user code. Failing over then would run the request twice. A dropped anchor stops a second response, but not a second execution. So a setup timeout, or a transport error after the send, fails the request with `OutcomeUnknown`, and the operator decides. `crates/gdl-runtime/tests/failover.rs` holds this: an unanswered hand-off yields `OutcomeUnknown` and is not retried.
 

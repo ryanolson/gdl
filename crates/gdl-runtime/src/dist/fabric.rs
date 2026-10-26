@@ -566,7 +566,9 @@ impl Outbound {
     /// because its consumer left: `finalize` only queues the end, and a
     /// consumer that does not read keeps the rest here. What the stream
     /// holds (its admission share, its egress permit) is held until then,
-    /// so that an instance whose ledger is empty has no output left to cut.
+    /// so that an instance whose ledger is empty has no eager output left
+    /// to cut. An item larger than velo's eager budget is the exception: see
+    /// [`shut_down`].
     pub(crate) fn finish(self) -> impl Future<Output = ()> + Send + 'static {
         // Asked for before `finalize`, which consumes the sender.
         let retired = self.sender.retired();

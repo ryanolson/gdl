@@ -477,8 +477,8 @@ fn a_module_path_cycle_is_a_problem_not_an_overflow() {
     assert_eq!(extraction.offer.messages.len(), 1);
 }
 
-/// A crate is read from under its own directory, once per file, each file
-/// a regular file of bounded size, within one budget: a `#[path]` to a
+/// A crate is read from under its own directory, each file a regular
+/// file of bounded size, within one budget: a `#[path]` to a
 /// device or to a file elsewhere, a pipe, a file too large, or a chain of
 /// files each naming the next twice (bounded by the budget, since each
 /// read costs at least a few kilobytes) is a problem rather than a process
