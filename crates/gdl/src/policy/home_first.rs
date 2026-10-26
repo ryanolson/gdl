@@ -82,24 +82,18 @@ impl HomeFirst {
         Some((state + tier, load))
     }
 
-    /// Whether `a` has a lower ratio of admitted roots to limit than `b`;
-    /// a limit of zero is the highest.
-    fn lighter(a: &LoadSummary, b: &LoadSummary) -> bool {
-        match (a.limit, b.limit) {
-            (0, _) => false,
-            (_, 0) => true,
-            _ => {
-                u128::from(a.admitted) * u128::from(b.limit)
-                    < u128::from(b.admitted) * u128::from(a.limit)
-            }
-        }
-    }
-}
-
-impl CellPolicy for HomeFirst {
-    /// It reads no request data.
-    type Head = Encoded;
-
+    /// `home_first`'s choice among only the cells `keep` keeps, as if
+    /// the others were not there: the index of the chosen cell in
+    /// `cells`, or `None` when no kept cell is eligible. The tiers, the
+    /// two cells drawn, and the damping cap count only the kept cells. A
+    /// policy that filters the cells, by model for instance, runs
+    /// `home_first` over the rest with this, and allocates nothing. It
+    /// reads no head, so it takes a request of any head.
+    ///
+    /// `keep` is called again for a cell within one choice, and must
+    /// answer alike each time. A policy that chooses by it should also
+    /// check a cell as [`eligible`](CellPolicy::eligible) does here.
+    ///
     /// One pass and no allocation while no cell's damping window lasts:
     /// the best tier of the eligible cells, with two of them drawn as it
     /// goes, by reservoir sampling. While a window lasts, a pass first
@@ -108,12 +102,18 @@ impl CellPolicy for HomeFirst {
     /// cells. The damping is one moment's view, so the cap and the cells
     /// drawn from agree whatever other requests decline or accept
     /// meanwhile, and a choice finds a cell whenever one is eligible.
-    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<usize> {
+    pub fn choose_where<H>(
+        &self,
+        request: CellRequest<'_, H>,
+        cells: &[Cell],
+        keep: impl Fn(&Cell) -> bool,
+    ) -> Option<usize> {
         let (region, excluded) = (request.region(), request.excluded());
         let (damped, now) = (request.damped(), request.now());
         let lasts = damped.lasts(now);
         let cut = if lasts {
-            let eligible = |cell: &Cell| Self::tier(cell, region, excluded, now).is_some();
+            let eligible =
+                |cell: &Cell| Self::tier(cell, region, excluded, now).is_some() && keep(cell);
             cut(cells, eligible, damped, now)
         } else {
             0
@@ -126,7 +126,7 @@ impl CellPolicy for HomeFirst {
             let Some((tier, load)) = Self::tier(cell, region, excluded, now) else {
                 continue;
             };
-            if lasts && damped.left(cell.id, now) > cut {
+            if !keep(cell) || lasts && damped.left(cell.id, now) > cut {
                 continue;
             }
             match best {
@@ -167,6 +167,29 @@ impl CellPolicy for HomeFirst {
             [Some((one, _)), None] | [None, Some((one, _))] => Some(one),
             [None, None] => None,
         }
+    }
+
+    /// Whether `a` has a lower ratio of admitted roots to limit than `b`;
+    /// a limit of zero is the highest.
+    fn lighter(a: &LoadSummary, b: &LoadSummary) -> bool {
+        match (a.limit, b.limit) {
+            (0, _) => false,
+            (_, 0) => true,
+            _ => {
+                u128::from(a.admitted) * u128::from(b.limit)
+                    < u128::from(b.admitted) * u128::from(a.limit)
+            }
+        }
+    }
+}
+
+impl CellPolicy for HomeFirst {
+    /// It reads no request data.
+    type Head = Encoded;
+
+    /// [`choose_where`](HomeFirst::choose_where), keeping every cell.
+    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<usize> {
+        self.choose_where(request, cells, |_| true)
     }
 
     /// Whether `cell` is in a tier: a damped cell is still eligible, since
@@ -633,6 +656,68 @@ mod tests {
         for at in [0, 2, 3] {
             assert!(counts[at].abs_diff(1000) < 150, "{counts:?}");
         }
+    }
+
+    /// `choose_where` is `choose` over a copy of the cells it keeps, turn
+    /// for turn, with its index into all of them: for every subset of
+    /// cells of mixed state, region, and load, with one damped and one
+    /// excluded.
+    #[test]
+    fn choose_where_is_choose_over_the_kept_cells() {
+        let now = origin();
+        let cells = [
+            cell("home-1", HOME, CellState::Ready, 1, now),
+            busy("full", HOME, CellState::Ready, LIMIT, 0, now),
+            busy("away", AWAY, CellState::Ready, 10, 0, now),
+            busy("home-2", HOME, CellState::Ready, 40, 0, now),
+            cell("degraded", HOME, CellState::Degraded, 1, now),
+            busy("home-3", HOME, CellState::Ready, 70, 0, now),
+        ];
+        let damped = Damped::new([(id("home-2"), now + SECOND)]);
+        let cx = Cx::new();
+        for excluded in [&[][..], &[id("home-1")][..]] {
+            for mask in 0u32..1 << cells.len() {
+                let kept = |cell: &Cell| {
+                    let at = cells.iter().position(|of| of.name == cell.name);
+                    at.is_some_and(|at| mask & 1 << at != 0)
+                };
+                let copy: Vec<Cell> = cells.iter().filter(|cell| kept(cell)).cloned().collect();
+                for turn in 0..32 {
+                    let request = CellRequest::new(&cx, &Encoded, HOME, now)
+                        .with_excluded(excluded)
+                        .with_damped(&damped)
+                        .with_turn(turn);
+                    let whole = HomeFirst
+                        .choose_where(request, &cells, kept)
+                        .map(|at| cells[at].name.clone());
+                    let alone = HomeFirst
+                        .choose(request, &copy)
+                        .map(|at| copy[at].name.clone());
+                    assert_eq!(whole, alone, "mask {mask:06b}, turn {turn}");
+                }
+            }
+        }
+    }
+
+    /// The damping cap counts only the kept cells: a lone kept cell is
+    /// not damped out by cells the filter drops, and its index is into
+    /// all the cells.
+    #[test]
+    fn choose_where_damps_among_the_kept_cells_only() {
+        let now = origin();
+        let cells = [
+            cell("b", HOME, CellState::Ready, 1, now),
+            cell("c", HOME, CellState::Ready, 1, now),
+            cell("a", HOME, CellState::Ready, 1, now),
+        ];
+        let damped = Damped::new([(id("a"), now + SECOND)]);
+        let cx = Cx::new();
+        let request = CellRequest::new(&cx, &(), HOME, now).with_damped(&damped);
+        assert_eq!(
+            HomeFirst.choose_where(request, &cells, |cell| cell.name == "a"),
+            Some(2)
+        );
+        assert_eq!(HomeFirst.choose_where(request, &cells, |_| false), None);
     }
 
     /// A cell is eligible while it is in a tier, damped or not.

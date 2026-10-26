@@ -611,6 +611,15 @@ mod tests {
 
     /// [`followed_over`], for the crossing of `layout`.
     fn followed_under(layout: &gdl_model::Layout, names: &[&str]) -> (Crossing, Cells) {
+        followed_with(layout, names, &gdl::CellPolicies::new())
+    }
+
+    /// [`followed_under`], with `policies` registered.
+    fn followed_with(
+        layout: &gdl_model::Layout,
+        names: &[&str],
+        policies: &gdl::CellPolicies,
+    ) -> (Crossing, Cells) {
         let cells = Cells::new("home", [("model_x", "d")]);
         let tables = names
             .iter()
@@ -636,7 +645,7 @@ mod tests {
             })
             .collect();
         cells.store("d", EntryTable::new(tables));
-        let mut targets = targets(layout, "a", &cells, &gdl::CellPolicies::new()).expect("targets");
+        let mut targets = targets(layout, "a", &cells, policies).expect("targets");
         let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
         (
             Crossing::new(
@@ -851,18 +860,52 @@ mod tests {
         }
     }
 
+    /// Chooses as `home_first` or `round_robin` among every cell but `m2`.
+    struct KeptBut(bool);
+
+    impl gdl::CellPolicy for KeptBut {
+        type Head = gdl::Encoded;
+
+        fn choose(
+            &self,
+            request: gdl::CellRequest<'_, gdl::Encoded>,
+            cells: &[gdl::Cell],
+        ) -> Option<usize> {
+            let keep = |cell: &gdl::Cell| cell.name() != "m2";
+            if self.0 {
+                gdl::HomeFirst.choose_where(request, cells, keep)
+            } else {
+                gdl::RoundRobin.choose_where(request, cells, keep)
+            }
+        }
+    }
+
     /// A pick allocates nothing under either policy the runtime provides,
-    /// also while a cell's damping window lasts, which takes the pass that
-    /// sets which damped cells are passed over, and with a cell excluded.
+    /// nor under a registered one that runs either over the cells it
+    /// keeps, also while a cell's damping window lasts, which takes the
+    /// pass that sets which damped cells are passed over, and with a cell
+    /// excluded.
     #[test]
     fn a_pick_allocates_nothing_under_either_policy() {
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
-        for name in ["home_first", "round_robin"] {
+        let mut policies = gdl::CellPolicies::new();
+        policies
+            .add("kept_home_first", KeptBut(true))
+            .expect("registered");
+        policies
+            .add("kept_round_robin", KeptBut(false))
+            .expect("registered");
+        for name in [
+            "home_first",
+            "round_robin",
+            "kept_home_first",
+            "kept_round_robin",
+        ] {
             let layout = layout_under(gdl_model::CellPolicy {
                 policy: name.into(),
             });
-            let (crossing, cells) = followed_under(&layout, &["m1", "m2", "m3", "m4"]);
+            let (crossing, cells) = followed_with(&layout, &["m1", "m2", "m3", "m4"], &policies);
             let excluded = [cell_id("model_x", "m4")];
             crossing.declined(cell_id("model_x", "m1"));
             crossing.declined(cell_id("model_x", "m2"));
@@ -886,6 +929,9 @@ mod tests {
             // The undamped cell is chosen, and the excluded one never.
             assert!(chosen.contains(&cell_id("model_x", "m3")), "{name}");
             assert!(!chosen.contains(&excluded[0]), "{name}");
+            if name.starts_with("kept") {
+                assert!(!chosen.contains(&cell_id("model_x", "m2")), "{name}");
+            }
         }
     }
 }

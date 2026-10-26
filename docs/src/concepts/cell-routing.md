@@ -180,6 +180,8 @@ It returns the index of a cell, or none, which fails the request with `Routing`.
 
 The inputs are plain `gdl` types (`Cell`, `CellRequest`, `Damped`, `Load`), so a policy crate builds them in its own tests, with no hub or runtime. `home_first` and `round_robin` (`gdl::HomeFirst`, `gdl::RoundRobin`) implement the same trait, and take the same inputs.
 
+A registered policy can run either of them over only the cells it keeps, with `choose_where`: for example, the cells that serve the request's model. The choice is the one the policy would make over a copy of those cells, and its index is into all of them. Nothing is allocated. Their tiers, turns, and damping cap count only the kept cells. A policy that chooses as `home_first` does should also check a cell with `HomeFirst::eligible`.
+
 ### Damping
 
 Under every policy, the chooser damps a cell that declined a request. `round_robin` and `home_first` pass a damped cell over as this section says. A registered policy sees the damped cells and decides for itself. It is not chosen for 1 s. Each further decline after its window has passed doubles the window, up to 30 s. An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.

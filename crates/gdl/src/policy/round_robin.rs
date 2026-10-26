@@ -35,45 +35,40 @@ use crate::select::Encoded;
 pub struct RoundRobin;
 
 impl RoundRobin {
-    /// `cell`'s rank, `ready` before `degraded`, or `None` when it may not
-    /// be chosen for this request.
-    fn rank(cell: &Cell, excluded: &[u64]) -> Option<usize> {
-        if cell.entries == 0 || excluded.contains(&cell.id) {
-            return None;
-        }
-        match cell.state {
-            CellState::Ready => Some(0),
-            CellState::Degraded => Some(1),
-            CellState::Draining | CellState::Unavailable => None,
-        }
-    }
-}
-
-impl CellPolicy for RoundRobin {
-    /// It reads no request data.
-    type Head = Encoded;
-
+    /// `round_robin`'s choice among only the cells `keep` keeps, as if
+    /// the others were not there: the index of the chosen cell in
+    /// `cells`, or `None` when no kept cell is eligible. The turn goes
+    /// round the kept cells, and the damping cap counts only them. A
+    /// policy that filters the cells, by model for instance, takes turns
+    /// over the rest with this, and allocates nothing. It reads no head,
+    /// so it takes a request of any head.
+    ///
+    /// `keep` is called again for a cell within one choice, and must
+    /// answer alike each time.
+    ///
     /// Two passes over the table and no allocation while no cell's damping
     /// window lasts: one counts the choosable cells of each rank, the other
     /// finds the turn's. While a window lasts, a pass first sets which
     /// damped cells are passed over, as in `home_first`. The damping is one
     /// moment's view, so the passes agree whatever other requests decline
     /// or accept meanwhile.
-    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<usize> {
+    pub fn choose_where<H>(
+        &self,
+        request: CellRequest<'_, H>,
+        cells: &[Cell],
+        keep: impl Fn(&Cell) -> bool,
+    ) -> Option<usize> {
         let (excluded, damped, now) = (request.excluded(), request.damped(), request.now());
         let lasts = damped.lasts(now);
         let cut = if lasts {
-            cut(
-                cells,
-                |cell| Self::rank(cell, excluded).is_some(),
-                damped,
-                now,
-            )
+            let eligible = |cell: &Cell| Self::rank(cell, excluded).is_some() && keep(cell);
+            cut(cells, eligible, damped, now)
         } else {
             0
         };
         let rank = |cell: &Cell| {
-            Self::rank(cell, excluded).filter(|_| !lasts || damped.left(cell.id, now) <= cut)
+            Self::rank(cell, excluded)
+                .filter(|_| keep(cell) && (!lasts || damped.left(cell.id, now) <= cut))
         };
         let mut counts = [0u64; 2];
         for cell in cells {
@@ -93,6 +88,29 @@ impl CellPolicy for RoundRobin {
             nth -= 1;
         }
         None
+    }
+
+    /// `cell`'s rank, `ready` before `degraded`, or `None` when it may not
+    /// be chosen for this request.
+    fn rank(cell: &Cell, excluded: &[u64]) -> Option<usize> {
+        if cell.entries == 0 || excluded.contains(&cell.id) {
+            return None;
+        }
+        match cell.state {
+            CellState::Ready => Some(0),
+            CellState::Degraded => Some(1),
+            CellState::Draining | CellState::Unavailable => None,
+        }
+    }
+}
+
+impl CellPolicy for RoundRobin {
+    /// It reads no request data.
+    type Head = Encoded;
+
+    /// [`choose_where`](RoundRobin::choose_where), keeping every cell.
+    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<usize> {
+        self.choose_where(request, cells, |_| true)
     }
 }
 
@@ -232,6 +250,74 @@ mod tests {
             turns(&degraded, &[], &none, now, 0..2),
             names(&["d1", "d1"])
         );
+    }
+
+    /// `choose_where` is `choose` over a copy of the cells it keeps, turn
+    /// for turn, with its index into all of them: for every subset of
+    /// cells of mixed state, with one damped and one excluded.
+    #[test]
+    fn choose_where_is_choose_over_the_kept_cells() {
+        let cells = [
+            ready("m1"),
+            cell("d1", CellState::Degraded, 1),
+            ready("m2"),
+            cell("u1", CellState::Unavailable, 1),
+            ready("m3"),
+            cell("d2", CellState::Degraded, 1),
+        ];
+        let now = Instant::now();
+        let damped = Damped::new([(cell_id("model_x", "m2"), now + SECOND)]);
+        let cx = Cx::new();
+        for excluded in [&[][..], &[cell_id("model_x", "m1")][..]] {
+            for mask in 0u32..1 << cells.len() {
+                let kept = |cell: &Cell| {
+                    let at = cells.iter().position(|of| of.name == cell.name);
+                    at.is_some_and(|at| mask & 1 << at != 0)
+                };
+                let copy: Vec<Cell> = cells.iter().filter(|cell| kept(cell)).cloned().collect();
+                for turn in 0..16 {
+                    let request = CellRequest::new(&cx, &Encoded, "here", now)
+                        .with_excluded(excluded)
+                        .with_damped(&damped)
+                        .with_turn(turn);
+                    let whole = RoundRobin
+                        .choose_where(request, &cells, kept)
+                        .map(|at| cells[at].name.clone());
+                    let alone = RoundRobin
+                        .choose(request, &copy)
+                        .map(|at| copy[at].name.clone());
+                    assert_eq!(whole, alone, "mask {mask:06b}, turn {turn}");
+                }
+            }
+        }
+    }
+
+    /// The turns go round the kept cells only, and the damping cap counts
+    /// only them: a lone kept cell is not damped out by cells the filter
+    /// drops, and its index is into all the cells.
+    #[test]
+    fn choose_where_takes_turns_among_the_kept_cells_only() {
+        let cells = [ready("b"), ready("c"), ready("a"), ready("e")];
+        let now = Instant::now();
+        let damped = Damped::new([(cell_id("model_x", "a"), now + SECOND)]);
+        let cx = Cx::new();
+        let chosen = |keep: &dyn Fn(&Cell) -> bool, turns: std::ops::Range<u64>| -> Vec<usize> {
+            turns
+                .filter_map(|turn| {
+                    let request = CellRequest::new(&cx, &(), "here", now)
+                        .with_damped(&damped)
+                        .with_turn(turn);
+                    RoundRobin.choose_where(request, &cells, keep)
+                })
+                .collect()
+        };
+        assert_eq!(chosen(&|cell| cell.name == "a", 0..3), [2, 2, 2]);
+        assert_eq!(
+            chosen(&|cell| cell.name != "c", 0..4),
+            [0, 3, 0, 3],
+            "the damped cell is passed over among three"
+        );
+        assert!(chosen(&|_| false, 0..2).is_empty());
     }
 
     /// A damped cell takes no turn while its window lasts, but at most half

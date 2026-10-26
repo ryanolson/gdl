@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gdl::{
     Cell, CellPolicies, CellPolicy, CellRequest, CellState, Cx, Damped, HomeFirst, Load,
-    LoadSummary, Projected, Projection,
+    LoadSummary, Projected, Projection, RoundRobin,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -48,13 +48,13 @@ impl CellPolicy for ByModel {
     type Head = Projected<Hinted>;
 
     fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<usize> {
-        let model = &request.head().hint.model;
-        let mut serving = cells
-            .iter()
-            .enumerate()
-            .filter(|(_, cell)| cell.name().starts_with(model.as_str()))
-            .filter(|(_, cell)| !request.is_excluded(cell) && cell.takes_work());
-        serving.next().map(|(at, _)| at)
+        let model = request.head().hint.model.as_str();
+        HomeFirst.choose_where(request, cells, |cell| cell.name().starts_with(model))
+    }
+
+    /// As `home_first` checks it, since it chooses as `home_first` does.
+    fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
+        HomeFirst.eligible(cell, region, now)
     }
 }
 
@@ -136,6 +136,89 @@ fn a_policy_sees_what_the_runtime_gives_it() {
         cells[0].id(),
         Cell::new("other", "llama-1", HOME, CellState::Ready).id()
     );
+}
+
+/// A policy that filters the cells chooses among the ones it keeps as
+/// `home_first` or `round_robin` would, and gets an index into all of
+/// them: the model's cell elsewhere while its home cell is saturated,
+/// never another model's cell, and the model's cells in turn.
+#[test]
+fn a_policy_chooses_as_gdls_own_among_the_cells_it_keeps() {
+    let now = Instant::now();
+    let full = Load::new(
+        LoadSummary {
+            admitted: 10,
+            ..*idle(now).summary()
+        },
+        now,
+    );
+    let cells = [
+        cell("llama-1", HOME, now),
+        Cell::new("model", "qwen-1", HOME, CellState::Ready)
+            .with_entries(1)
+            .with_load(full),
+        cell("llama-2", AWAY, now),
+        cell("qwen-2", AWAY, now),
+    ];
+    let cx = Cx::new();
+    let chosen = |model: &str| -> BTreeSet<usize> {
+        let head = hinted(model);
+        (0..64)
+            .filter_map(|turn| {
+                let request = CellRequest::new(&cx, &head, HOME, now).with_turn(turn);
+                ByModel.choose(request, &cells)
+            })
+            .collect()
+    };
+    assert_eq!(chosen("qwen"), BTreeSet::from([3]));
+    assert_eq!(chosen("llama"), BTreeSet::from([0]));
+    assert!(chosen("mistral").is_empty());
+    let head = hinted("qwen");
+    let turns: Vec<Option<usize>> = (0..4)
+        .map(|turn| {
+            let request = CellRequest::new(&cx, &head, HOME, now).with_turn(turn);
+            RoundRobin.choose_where(request, &cells, |cell| cell.name().starts_with("qwen"))
+        })
+        .collect();
+    assert_eq!(turns, [Some(1), Some(3), Some(1), Some(3)]);
+}
+
+/// The guide's fixture (`docs/src/guides/write-a-cell-policy.md`, step 3)
+/// works with both versions of its policy: the first match, and the one
+/// that chooses as `home_first` does, which needs a fresh summary.
+#[test]
+fn the_guide_fixture_works_with_home_first() {
+    let now = Instant::now();
+    let idle = Load::new(
+        LoadSummary {
+            limit: 10,
+            period_ms: 10_000,
+            ..LoadSummary::default()
+        },
+        now,
+    );
+    let cells = [
+        Cell::new("model", "llama-1", "us-east-1", CellState::Ready)
+            .with_entries(1)
+            .with_load(idle),
+        Cell::new("model", "qwen-1", "us-east-1", CellState::Ready)
+            .with_entries(1)
+            .with_load(idle),
+    ];
+    let cx = Cx::new();
+    let head = hinted("qwen");
+    let request = CellRequest::new(&cx, &head, "us-east-1", now);
+
+    assert_eq!(
+        cells.iter().position(|cell| {
+            cell.name().starts_with(request.head().hint.model.as_str())
+                && cell.takes_work()
+                && !request.is_excluded(cell)
+        }),
+        Some(1),
+        "the guide's first policy works with this fixture"
+    );
+    assert_eq!(ByModel.choose(request, &cells), Some(1));
 }
 
 /// gdl's own policies take the same inputs that a policy crate builds:

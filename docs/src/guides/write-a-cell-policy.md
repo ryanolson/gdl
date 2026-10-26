@@ -69,6 +69,33 @@ impl CellPolicy for ByModel {
 - `choose` is not `async`, and it runs once per attempt. Take no lock and allocate nothing in it.
 - Override `eligible` when a cell can stop fitting while a selector waits, as `home_first` does for a stale summary. By default, a cell is eligible while it takes work.
 
+### Choose as gdl's own policies do, among the cells you keep
+
+A policy often filters the cells first, then wants to choose among the rest by load and region. `HomeFirst::choose_where` and `RoundRobin::choose_where` run gdl's own policies over only the cells a filter keeps. They return an index into all of `cells`, and allocate nothing. `ByModel` written this way chooses as `home_first` does among its model's cells:
+
+```rust
+use gdl::HomeFirst;
+use tokio::time::Instant;
+
+impl CellPolicy for ByModel {
+    type Head = Projected<Hinted>;
+
+    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<usize> {
+        let model = request.head().hint.model.as_str();
+        HomeFirst.choose_where(request, cells, |cell| cell.name().starts_with(model))
+    }
+
+    fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
+        HomeFirst.eligible(cell, region, now)
+    }
+}
+```
+
+- The choice is the one the policy would make over a copy of the kept cells. The tiers, the turns, and the damping cap count only the kept cells, so a lone kept cell is never damped out.
+- The filter is called more than once for a cell within one choice. It must answer the same each time.
+- A policy that chooses as `home_first` does should also override `eligible` as above. The default does not check that a cell's summary is fresh.
+- Both take a request of any `Head`, since neither reads the head.
+
 ## 3. Test it without a runtime
 
 Every input is a plain value that a test can build:
@@ -78,11 +105,11 @@ use gdl::{CellState, Cx, Load, LoadSummary};
 use tokio::time::Instant;
 
 let now = Instant::now();
+// A summary with a period, so that `home_first` takes it as fresh.
+let idle = Load::new(LoadSummary { limit: 10, period_ms: 10_000, ..LoadSummary::default() }, now);
 let cells = [
-    Cell::new("model", "llama-1", "us-east-1", CellState::Ready).with_entries(1),
-    Cell::new("model", "qwen-1", "us-east-1", CellState::Ready)
-        .with_entries(1)
-        .with_load(Load::new(LoadSummary::default(), now)),
+    Cell::new("model", "llama-1", "us-east-1", CellState::Ready).with_entries(1).with_load(idle),
+    Cell::new("model", "qwen-1", "us-east-1", CellState::Ready).with_entries(1).with_load(idle),
 ];
 let cx = Cx::new();
 let head = Projected(Hinted { hint: Hint { model: "qwen".into(), fingerprint: [0; 16], first_turn: true } });
@@ -90,7 +117,7 @@ let request = CellRequest::new(&cx, &head, "us-east-1", now);
 assert_eq!(ByModel.choose(request, &cells), Some(1));
 ```
 
-`with_excluded`, `with_damped` (a `gdl::Damped`), and `with_turn` set the rest. `crates/gdl/tests/policies.rs` has more.
+Both versions of `ByModel` choose `qwen-1` here. The `home_first` version takes no cell whose summary is missing, or has no period (`LoadSummary::default()` has none). `with_excluded`, `with_damped` (a `gdl::Damped`), and `with_turn` set the rest. `crates/gdl/tests/policies.rs` has more.
 
 ## 4. Register it
 

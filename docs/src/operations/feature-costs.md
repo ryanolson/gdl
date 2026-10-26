@@ -112,6 +112,27 @@ cargo bench -p gdl --bench projection
 
 A skipped field is still read. In msgpack, rmp-serde reads an ignored field through `deserialize_any`, which checks each string as UTF-8. In JSON, serde_json scans every skipped byte.
 
+### Choosing among the cells a policy keeps
+
+`HomeFirst::choose_where` and `RoundRobin::choose_where` run gdl's own policies over the cells a filter keeps. Each policy's `choose` is its `choose_where` with a filter that keeps every cell. Measured on the same host, with each test binary pinned to one Cortex-X925 core, load average 10 to 19. Base `03be278`. The control is the change with each `choose` keeping its old body, so that it differs from the base only by the new code and tests in the binary.
+
+```bash
+cargo test --release -p gdl-runtime --lib --no-run
+taskset -c 17 target/release/deps/gdl_runtime-<hash> cost_of_a_cell --ignored --nocapture --test-threads=1
+taskset -c 17 target/release/deps/gdl_runtime-<hash> the_cost_of_a_boundary_pick --ignored --nocapture --test-threads=1
+```
+
+| Measure | Base | Change | Control |
+|---|---|---|---|
+| pick, `round_robin`, four idle cells | 98.6 to 98.9 ns | 102.4 to 102.5 ns | 102.4 ns |
+| pick, `home_first`, four idle cells | 126.8 to 127.1 ns | 129.0 to 129.2 ns | 129.1 to 129.2 ns |
+| boundary pick | 107 ns | 109 to 110 ns | 109 ns |
+| boundary pick and acceptance | 123 ns | 125 to 126 ns | 125 to 126 ns |
+| accepted first offer over loopback, cells | 19.6 to 19.7 us | 19.5 to 19.6 us | |
+| accepted first offer over loopback, roster | 19.4 to 19.6 us | 19.5 to 19.6 us | |
+
+The change and the control agree in every row, so the 2 to 4 ns over the base comes from where the test binary places the code, not from the pick. A first version built the filter as a closure that two other closures called. It kept `RoundRobin::rank` out of line, and its `round_robin` pick took 106 ns. A pick through a registered policy that calls `choose_where` allocates nothing either (`a_pick_allocates_nothing_under_either_policy`).
+
 ## Reading the followed cells
 
 A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by, then, in the bench, one cell found by name among four and one withdrawal looked up. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`). Measured on the aarch64 Linux host above, shared, rustc 1.93.1, at `03be278` with the change, in four runs at load averages from 10 to 24:
