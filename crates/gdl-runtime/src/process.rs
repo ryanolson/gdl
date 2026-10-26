@@ -507,6 +507,10 @@ impl<H> ProcessConfig<H> {
                         session.chooser_hub(node.instance_id()),
                     )?
                     .map(|(cells, task)| (cells, Abort(task)));
+                    // The nodes, built already, read the tables from now.
+                    if let Some((cells, _)) = &chooser {
+                        self.runtime.followed.bind(Arc::new(cells.clone()));
+                    }
                     cell_drain = crate::dist::CellDrain::watch(
                         &layout,
                         cell,

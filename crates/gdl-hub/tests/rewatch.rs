@@ -11,13 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{GLOBAL, WAIT, global_default, hub_of, spec, timing};
-use futures::StreamExt;
 use futures::stream::BoxStream;
+use futures::{FutureExt, StreamExt};
 use gdl_cells::{
     CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryDirectory, ResumeToken,
     Withdrawal,
 };
 use gdl_hub::CellTiming;
+use gdl_watch::FollowEvent;
 use tokio::sync::watch;
 
 type Script = Vec<Result<CellEvent, DirectoryError>>;
@@ -115,6 +116,7 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
         },
     )
     .await;
+    let mut relay = global.follows();
     let key = ("model_x".to_string(), cell.name.clone());
     let mut following = global.following();
     tokio::time::timeout(WAIT, following.wait_for(|cells| cells.contains_key(&key)))
@@ -137,7 +139,85 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
         "{GLOBAL} still follows the cell: {:?}",
         *following.borrow()
     );
+    // A snapshot that does not hold the cell is no withdrawal: the
+    // directory may have lost the record for any reason, an expiry
+    // included, and silence is never a decommission.
+    let withdrawn: Vec<FollowEvent> = std::iter::from_fn(|| relay.next().now_or_never().flatten())
+        .filter(|event| matches!(event, FollowEvent::Withdrawn { .. }))
+        .collect();
+    assert!(withdrawn.is_empty(), "{withdrawn:?}");
     hub.shutdown().await.expect("the hub stops");
+}
+
+/// A withdrawal the directory's watch shows is relayed, naming the
+/// cell's latest follow: the control for the test above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawal_the_watch_shows_is_relayed() {
+    let directory = MemoryDirectory::new();
+    let cell = record();
+    let (hub, global) = hub_of(global_default(), directory.clone(), timing()).await;
+    let mut relay = global.follows();
+    let key = ("model_x".to_string(), cell.name.clone());
+    let mut following = global.following();
+    directory.publish(cell.clone()).await.expect("stored");
+    tokio::time::timeout(WAIT, following.wait_for(|cells| cells.contains_key(&key)))
+        .await
+        .expect("the global follows the cell")
+        .expect("the extension lives");
+    directory
+        .withdraw(Withdrawal {
+            class: cell.class.clone(),
+            cell: cell.name.clone(),
+            epoch: cell.epoch,
+            seq: cell.seq + 1,
+        })
+        .await
+        .expect("withdrawn");
+    let withdrawn = tokio::time::timeout(WAIT, async {
+        loop {
+            if let FollowEvent::Withdrawn {
+                class,
+                cell,
+                generation,
+            } = relay.next().await.expect("the relay lives")
+            {
+                return (class, cell, generation);
+            }
+        }
+    })
+    .await
+    .expect("the withdrawal relayed in time");
+    // The follow begun from the record; its link to no hub fails, and a
+    // later follow may have begun by then.
+    assert_eq!(
+        (withdrawn.0.as_str(), withdrawn.1.as_str()),
+        ("model_x", &*cell.name)
+    );
+    assert!(withdrawn.2 >= 1, "{withdrawn:?}");
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// A ready child of the global whose hub nobody serves.
+fn record() -> CellRecord {
+    let spec = spec();
+    let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
+    let refused = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let nowhere = refused.local_addr().expect("an address").to_string();
+    drop(refused);
+    CellRecord {
+        name: "model-x-07-us-east-1".into(),
+        class: "model_x".into(),
+        region: "us-east-1".into(),
+        home: Some(GLOBAL.into()),
+        contract: layout.contract_hash(),
+        placement: layout.placement_hash(),
+        state: CellState::Ready,
+        epoch: 1,
+        seq: 1,
+        hub: nowhere,
+        lease: Duration::from_secs(30),
+        load: None,
+    }
 }
 
 /// The most watches a follower asks for in `window` while every one

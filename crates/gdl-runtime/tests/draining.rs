@@ -24,7 +24,7 @@ use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, s
 use common::proxy::Mode;
 use common::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
 use futures::StreamExt;
-use gdl::{Cx, ErrorKind, Next, Selectors};
+use gdl::{Cx, ErrorKind, FollowedCells, Next, Selectors};
 use gdl_cells::{CellDirectory, CellEvent, CellRecord};
 use gdl_hub::CellReadiness;
 use gdl_model::{SegmentPhase, segment_service};
@@ -72,13 +72,23 @@ async fn chooser(
     spec: &DeploymentSpec,
     hub: &Hub,
 ) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
+    reading_chooser(spec, hub, &FollowedCells::new()).await
+}
+
+/// A chooser whose nodes read the cells it follows through `followed`.
+async fn reading_chooser(
+    spec: &DeploymentSpec,
+    hub: &Hub,
+    followed: &FollowedCells,
+) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
     let extra = format!("{}{RUNTIME}", global_cell());
-    let config = settings(
+    let mut config = settings(
         hub.public_addr().port(),
         hub.control_addr().port(),
         5_000,
         &extra,
     );
+    config.runtime.followed = followed.clone();
     let runtime = RuntimeConfig {
         selectors: Selectors::new(),
         ..config.runtime.clone()
@@ -839,6 +849,92 @@ async fn a_drained_cell_is_withdrawn_once_its_instances_have_left() {
     })
     .await;
     for hub in [hub, model_hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// What a node in the global cell reads of the model cell `cell`: its
+/// state, if its chooser follows it, and whether it is withdrawn.
+fn read(followed: &FollowedCells, cell: &str) -> (Option<CellState>, bool) {
+    followed
+        .read("model_x", |cells| {
+            (
+                cells.cell(cell).map(gdl::Cell::state),
+                cells.is_withdrawn(cell),
+            )
+        })
+        .expect("the chooser sends to model_x")
+}
+
+/// A node in the global cell reads each model cell as its chooser holds
+/// it. A cell that drains reads `ready`, then `draining` while a request
+/// the chooser sent it holds its follow, then withdrawn once its
+/// instances have left and its hub has withdrawn its record. A cell whose
+/// hub stops without a drain reads as neither followed nor withdrawn: its
+/// lease runs out, and silence is never a decommission. A chooser that
+/// starts after the withdrawal never saw the cell, and reads it so too:
+/// a gate answers it as not available (503), not as removed (404). The
+/// drain waits out the entry's bound, so this test takes several seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_reads_a_drained_cell_as_withdrawn_and_a_stopped_one_as_not() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, _global): (Hub, Arc<CellReadiness<Resolving>>) =
+        cell_hub_of(&spec, global_hub(), &directory).await;
+    let node = FollowedCells::new();
+    let chooser = reading_chooser(&spec, &hub, &node).await;
+    assert!(node.is_bound(), "the launch binds the handle");
+    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &events).await;
+    let cells = tables(&chooser);
+    following(&cells, &[(M1, CellState::Ready)]).await;
+    assert_eq!(read(&node, M1), (Some(CellState::Ready), false));
+
+    let held = gated(&chooser, &events, "held").await;
+    m1.readiness.drain().await.expect("the cell drains");
+    until(&cells, "the node reads the cell draining", |_| {
+        read(&node, M1) == (Some(CellState::Draining), false)
+    })
+    .await;
+    release(&events, "held");
+    held.await
+        .expect("the request ran")
+        .expect("the request was answered");
+    let ModelCell {
+        hub: m1_hub,
+        entries,
+        sink,
+        ..
+    } = m1;
+    for entry in entries {
+        entry.ended(PAST_BOUND).await.expect("the entry drained");
+    }
+    sink.ended(WAIT)
+        .await
+        .expect("the interior instance drained");
+    until(&cells, "the node reads the cell withdrawn", |_| {
+        read(&node, M1) == (None, true)
+    })
+    .await;
+
+    let m2 = cell(&spec, &directory, ready(M2, "m2-hub:1337"), &events).await;
+    following(&cells, &[(M2, CellState::Ready)]).await;
+    assert_eq!(read(&node, M2), (Some(CellState::Ready), false));
+    // Once it follows the cell that came after, the late chooser has read
+    // its hub's relay, and the withdrawal is not in it.
+    let late = FollowedCells::new();
+    let later = reading_chooser(&spec, &hub, &late).await;
+    following(&tables(&later), &[(M2, CellState::Ready)]).await;
+    assert_eq!(read(&late, M1), (None, false), "never seen");
+
+    m2.hub.shutdown().await.expect("valid test fixture");
+    until(&cells, "the stopped cell dropped", |cells| {
+        followed(cells, "f", M2).is_none()
+    })
+    .await;
+    assert_eq!(read(&node, M2), (None, false), "a stop is not a withdrawal");
+    assert_eq!(read(&node, M1), (None, true));
+    for hub in [hub, m1_hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }

@@ -180,15 +180,30 @@ impl<D: CellDirectory> Follows<'_, D> {
     /// Apply one event of the directory's watch, and decide on the cell it
     /// names, if any: a record is considered when it arrives, never on a
     /// pass over the others.
+    ///
+    /// A withdrawal the view takes is relayed: the cell drained on
+    /// purpose. A cell a completed snapshot no longer holds is not, since
+    /// the directory may have lost its record for any reason, and silence
+    /// is never a decommission.
     fn directory(&mut self, event: CellEvent) {
-        let cell = match &event {
-            CellEvent::Current(record) | CellEvent::Put { record, .. } => Some(record.name.clone()),
-            _ => None,
+        let (cell, withdrawal) = match &event {
+            CellEvent::Current(record) | CellEvent::Put { record, .. } => {
+                (Some(record.name.clone()), None)
+            }
+            CellEvent::Withdrawn { withdrawal, .. } => (None, Some(withdrawal.clone())),
+            _ => (None, None),
         };
         let now = Instant::now();
         self.view.apply(event, now);
         if let Some(cell) = cell {
             self.decide(&cell, now, None);
+        }
+        if let Some(withdrawal) = withdrawal
+            && self.view.withdrawn(&withdrawal.cell) == Some(withdrawal.version())
+        {
+            self.follower
+                .relay
+                .withdrawn(&self.follower.class, &withdrawal.cell);
         }
     }
 

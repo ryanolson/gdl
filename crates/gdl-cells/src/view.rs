@@ -88,6 +88,13 @@ impl CellView {
             .map(|seen| &seen.record)
     }
 
+    /// The version of `cell`'s withdrawal, if the view holds it withdrawn:
+    /// by a withdrawal it was shown, or by a completed snapshot that did
+    /// not hold the cell.
+    pub fn withdrawn(&self, cell: &str) -> Option<Version> {
+        self.withdrawn.get(cell).copied()
+    }
+
     /// The records that are not expired at `now`, by cell name.
     pub fn records(&self, now: Instant) -> impl Iterator<Item = &CellRecord> {
         self.cells

@@ -152,6 +152,9 @@ fn nowhere() -> String {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Relay {
     follows: BTreeMap<String, Followed>,
+    /// The cells the relay said were withdrawn, with the generation each
+    /// withdrawal named.
+    withdrawn: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -284,6 +287,16 @@ impl Relay {
             } => {
                 self.current(cell, *generation);
                 self.follows.remove(cell);
+            }
+            // It names the cell's latest follow, which may have been
+            // dropped already.
+            FollowEvent::Withdrawn {
+                cell, generation, ..
+            } => {
+                if let Some(followed) = self.follows.get(cell) {
+                    assert_eq!(followed.generation, *generation, "not the latest follow");
+                }
+                self.withdrawn.insert(cell.clone(), *generation);
             }
         }
     }
@@ -577,6 +590,10 @@ async fn a_cell_whose_hub_stops_is_dropped_and_its_successor_followed_anew() {
     .await;
     let second = relay.follows[CELL].generation;
     assert!(second > first, "{second} after {first}");
+    assert!(
+        relay.withdrawn.is_empty(),
+        "a stopped hub is not a withdrawal"
+    );
     let cells = following(&global_cell, "the new generation", |cells| {
         cells.get(CELL) == Some(&second)
     })
@@ -719,6 +736,7 @@ async fn a_withdrawn_record_does_not_end_a_live_follow() {
     }
     assert_eq!(relay.follows[CELL].generation, generation);
     assert!(relay.exposed(CELL).contains(&instances[0].id()));
+    assert_eq!(relay.withdrawn.get(CELL), Some(&generation));
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
 }
@@ -767,9 +785,11 @@ async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
         |cells| !cells.contains_key(CELL),
     )
     .await;
-    for event in pending(&mut watch) {
-        relay.apply(&event);
-    }
+    until(&mut watch, &mut relay, "the withdrawal", |relay| {
+        relay.withdrawn.contains_key(CELL)
+    })
+    .await;
+    assert_eq!(relay.withdrawn[CELL], generation);
     assert!(relay.follows.contains_key(CELL), "dropped unacknowledged");
     chooser
         .acknowledge(&gdl_watch::Unoffered {
@@ -797,6 +817,71 @@ async fn a_drained_cell_is_dropped_once_its_hub_withdraws_it() {
             .get(CELL)
             .is_none_or(|followed| followed.generation == generation),
         "followed again"
+    );
+    global_hub.shutdown().await.expect("the hub stops");
+    model_hub.shutdown().await.expect("the hub stops");
+}
+
+/// A drained cell whose follow every chooser acknowledged is dropped
+/// before its last instance leaves; the withdrawal of its record that
+/// follows is relayed after the drop, naming the follow that was dropped,
+/// so that a chooser that held the cell learns it was drained on purpose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawal_after_the_drop_is_relayed() {
+    let directory = Resolving::new();
+    let mut records = Records::new(&directory.inner);
+    let (model_hub, model_cell) = serve_cell(
+        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (instances, _) = meet_the_quorum(&model_hub).await;
+    records.until(CellState::Ready).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
+    let chooser = Instance::chooser(&global_hub).await;
+    let mut watch = global_cell.follows();
+    let mut relay = Relay::of(&snapshot(&mut watch).await);
+    until(&mut watch, &mut relay, "the follow", |relay| {
+        relay.exposed(CELL).contains(&instances[0].id())
+    })
+    .await;
+    let generation = relay.follows[CELL].generation;
+
+    model_cell.drain().await.expect("the cell drains");
+    until(&mut watch, &mut relay, "the cell draining", |relay| {
+        relay.follows[CELL].state == CellState::Draining
+    })
+    .await;
+    assert_eq!(next(&mut watch).await, unoffered(generation));
+    chooser
+        .acknowledge(&gdl_watch::Unoffered {
+            class: "model_x".into(),
+            cell: CELL.into(),
+            generation,
+            revision: 2,
+        })
+        .await
+        .expect("the hub takes the acknowledgement");
+    until(&mut watch, &mut relay, "the follow dropped", |relay| {
+        !relay.follows.contains_key(CELL)
+    })
+    .await;
+    assert!(
+        relay.withdrawn.is_empty(),
+        "withdrawn before the instances left"
+    );
+    for instance in instances {
+        instance.leave().await;
+    }
+    let event = next(&mut watch).await;
+    assert_eq!(
+        event,
+        FollowEvent::Withdrawn {
+            class: "model_x".into(),
+            cell: CELL.into(),
+            generation,
+        }
     );
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
@@ -836,6 +921,7 @@ async fn an_expired_record_does_not_end_a_live_follow() {
     for event in pending(&mut watch) {
         relay.apply(&event);
     }
+    assert!(relay.withdrawn.is_empty(), "an expiry is not a withdrawal");
     assert_eq!(relay.follows[CELL].generation, generation);
     assert!(relay.exposed(CELL).contains(&instances[0].id()));
     global_hub.shutdown().await.expect("the hub stops");

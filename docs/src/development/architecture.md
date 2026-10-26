@@ -4,7 +4,7 @@ The root workspace has twelve crates. Each example is its own workspace, outside
 
 | Crate | Depends on | Contents |
 |---|---|---|
-| `gdl` | `gdl-model`, `gdl-cells`, `gdl-message`, `gdl-macros` (no velo) | What a node crate depends on: `Cx`, `Error`, the role traits, `Build`, selectors, cell policies, metrics, the derives, and local composition |
+| `gdl` | `gdl-model`, `gdl-cells`, `gdl-message`, `gdl-macros` (no velo) | What a node crate depends on: `Cx`, `Error`, the role traits, `Build`, selectors, cell policies, the followed cells' view (`FollowedCells`), metrics, the derives, and local composition |
 | `gdl-runtime` | `gdl`, `gdl-model`, velo | Segments, crossings over velo, discovery, the segment binary, and `graph!`. It re-exports `gdl` and the model |
 | `gdl-model` | nothing in the workspace | The manifest, placement, layout, validator, diagrams, the fleet file, a cell's settings, and the names of a segment's hub services. It builds for wasm |
 | `gdl-syntax` | `gdl-model` | The graph parser and checked model that `graph!` and the generator share, and a graph file's manifest built without compiling its contract. It builds for wasm |

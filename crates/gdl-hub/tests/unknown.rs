@@ -202,7 +202,8 @@ fn concerns(event: &FollowEvent, of: &str) -> bool {
         | FollowEvent::Exposed { cell, .. }
         | FollowEvent::Retired { cell, .. }
         | FollowEvent::Left { cell, .. }
-        | FollowEvent::Dropped { cell, .. } => cell == of,
+        | FollowEvent::Dropped { cell, .. }
+        | FollowEvent::Withdrawn { cell, .. } => cell == of,
         FollowEvent::Offering { .. } | FollowEvent::Synced => false,
     }
 }

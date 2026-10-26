@@ -111,3 +111,21 @@ cargo bench -p gdl --bench projection
 | the hint only (`Projected<Hinted>`) | 4.4 us | 12.0 us |
 
 A skipped field is still read. In msgpack, rmp-serde reads an ignored field through `deserialize_any`, which checks each string as UTF-8. In JSON, serde_json scans every skipped byte.
+
+## Reading the followed cells
+
+A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by, then, in the bench, one cell found by name among four and one withdrawal looked up. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`). Measured on the aarch64 Linux host above, shared, rustc 1.93.1, at `03be278` with the change, in four runs at load averages from 10 to 24:
+
+```bash
+cargo bench -p gdl --bench followed
+```
+
+| Read | Time |
+|---|---|
+| bound, a cell and a withdrawal looked up | 40.8 ns, 41.9 ns, 42.3 ns, 55.9 ns |
+| not bound | 0.5 to 0.6 ns |
+
+A run by another agent on the same host, at load 12.5, measured 83 ns for the bound read. The spread is the shared host's: the bench has no lock or allocation to contend on.
+
+Nothing reads the handle unless a node does, so a request that no such node handles pays nothing.
+

@@ -106,7 +106,16 @@ impl Classify for FollowEvent {
     type Unknown = UnknownFollowEvent;
 
     const KINDS: &'static [&'static str] = &[
-        "follow", "synced", "state", "load", "exposed", "retired", "left", "offering", "dropped",
+        "follow",
+        "synced",
+        "state",
+        "load",
+        "exposed",
+        "retired",
+        "left",
+        "offering",
+        "dropped",
+        "withdrawn",
     ];
 
     fn unknown(data: &str) -> Option<UnknownFollowEvent> {
@@ -249,6 +258,11 @@ mod tests {
                 offered: false,
             },
             FollowEvent::Dropped {
+                class: class.clone(),
+                cell: name.clone(),
+                generation: 1,
+            },
+            FollowEvent::Withdrawn {
                 class,
                 cell: name,
                 generation: 1,
@@ -264,7 +278,8 @@ mod tests {
                 | FollowEvent::Retired { .. }
                 | FollowEvent::Left { .. }
                 | FollowEvent::Offering { .. }
-                | FollowEvent::Dropped { .. } => {}
+                | FollowEvent::Dropped { .. }
+                | FollowEvent::Withdrawn { .. } => {}
             }
         }
         let tags: Vec<String> = relay.iter().map(tag).collect();

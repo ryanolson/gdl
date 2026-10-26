@@ -73,7 +73,14 @@ pub(crate) fn follow(
     let watcher =
         CellWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
     let address = hub_address(host, public_port);
-    let cells = Cells::new(region, wanted.values().flatten().map(String::as_str));
+    let cells = Cells::new(
+        region,
+        wanted.iter().flat_map(|(class, segments)| {
+            segments
+                .iter()
+                .map(move |segment| (class.as_str(), segment.as_str()))
+        }),
+    );
     let follows = Follows::new(cells.clone(), node.clone(), Arc::clone(live), drain, wanted);
     let task = tokio::spawn(run(
         Hub {

@@ -170,6 +170,24 @@ impl Relay {
         });
     }
 
+    /// The cell `cell` of `class` withdrew its record: if it was ever
+    /// followed, say so, naming its latest follow, which may have closed.
+    pub(crate) fn withdrawn(&self, class: &str, cell: &str) {
+        let mut shared = self.lock();
+        let Some(&generation) = shared
+            .generations
+            .get(class)
+            .and_then(|cells| cells.get(cell))
+        else {
+            return;
+        };
+        shared.changes.send(FollowEvent::Withdrawn {
+            class: class.to_string(),
+            cell: cell.to_string(),
+            generation,
+        });
+    }
+
     /// The snapshot of the follow `generation` of `installed`'s cell is
     /// complete: expose it, its state first, then whether it is offered if
     /// it is not, then its retired instances, then the ready ones its state

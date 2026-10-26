@@ -266,7 +266,7 @@ mod tests {
             })
             .expect("a handler");
 
-        let cells = Cells::new("home", ["d"]);
+        let cells = Cells::new("home", [("model_x", "d")]);
         let id = entry.instance_id();
         cells.store(
             "d",
@@ -391,7 +391,7 @@ mod tests {
                 })
                 .expect("a handler");
         }
-        let cells = Cells::new("home", ["d"]);
+        let cells = Cells::new("home", [("model_x", "d")]);
         let tables = entries
             .iter()
             .zip(["m1", "m2"])
@@ -519,7 +519,7 @@ mod tests {
                 })
                 .expect("a handler");
         }
-        let cells = Cells::new("home", ["d"]);
+        let cells = Cells::new("home", [("model_x", "d")]);
         let tables = entries
             .iter()
             .zip(["m1", "m2"])
@@ -611,7 +611,7 @@ mod tests {
 
     /// [`followed_over`], for the crossing of `layout`.
     fn followed_under(layout: &gdl_model::Layout, names: &[&str]) -> (Crossing, Cells) {
-        let cells = Cells::new("home", ["d"]);
+        let cells = Cells::new("home", [("model_x", "d")]);
         let tables = names
             .iter()
             .map(|name| {
@@ -790,7 +790,7 @@ mod tests {
                 Box::pin(async move { accepted })
             })
             .expect("a handler");
-        let cells = Cells::new("home", ["d"]);
+        let cells = Cells::new("home", [("model_x", "d")]);
         let id = entry.instance_id();
         cells.store(
             "d",

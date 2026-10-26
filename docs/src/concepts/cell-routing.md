@@ -50,6 +50,8 @@ The parent's hub relays what it follows to its own instances on `GET /v1/ext/gdl
 
 A cell's instances are exposed only while the state it last sent is `ready` or `degraded`. A state that exposes nothing hides them all. A state that exposes them again sends each one again.
 
+When the hub's watch of the cell directory shows that a cell it followed withdrew its record, the relay sends `withdrawn`, naming the cell's latest follow. It may come after that follow's `dropped`. Only an explicit withdrawal sends it: a record that expires, a link that fails, and a directory snapshot that no longer holds the record send nothing. A snapshot of the relay holds no `withdrawn`.
+
 `GET /v1/ext/gdl-cell/follows/{class}/{cell}` watches one cell's follows alone. A chooser uses it to read one cell again after an event it does not know (see [unknown events](#an-event-of-an-unknown-kind)).
 
 ## Offered and not offered
@@ -86,6 +88,54 @@ For each entry segment its hops enter, and each followed cell, the chooser keeps
 - its retired entry instances, which are never routed to again.
 
 A newer generation replaces a cell's table at once. The older generation keeps its instances until the hub drops it. `Launch::cells` reads the tables (`gdl_runtime::Cells`).
+
+Beside the cells, each table keeps the class's withdrawn cells: those the relay sent `withdrawn` for. A withdrawal is kept when the chooser watches the relay again, since a snapshot holds none. It ends when a later generation of the cell is shown. A hub follows a withdrawn cell again only from a newer record, so that follow is the cell started again. The same generation shown again by a new watch does not end it. Generations only grow while a chooser runs, since a chooser stops when its hub restarts.
+
+## What a node reads
+
+A node in a chooser's segment reads the same tables, through a `gdl::FollowedCells` handle. A model gate in front of a set router is the case it serves: the gate answers 404 for a model whose sets were all drained on purpose, and the router answers 503 when no set takes work. If they read different sources, they can disagree. A node that reads the chooser's tables cannot.
+
+```rust,ignore
+impl gdl::Build for Gate {
+    type Config = GateConfig;
+    type Metrics = ();
+
+    async fn build(config: GateConfig, (): ()) -> gdl::Result<Self> {
+        Ok(Self { sets: config.sets, followed: gdl::FollowedCells::current() })
+    }
+}
+
+// Per request: one load of the class's table.
+let answer = self.followed.read("model_x", |cells| {
+    if sets.iter().any(|set| cells.cell(set).is_some_and(gdl::Cell::takes_work)) {
+        Pass
+    } else if sets.iter().all(|set| cells.is_withdrawn(set)) {
+        NotFound // 404: every set drained on purpose
+    } else {
+        Unavailable // 503
+    }
+});
+```
+
+- `FollowedCells::current()` gives the handle of the segment being built. Call it in `build`. Outside a build it gives a handle that is never bound.
+- The launch binds the handle once the chooser's follower starts, after the nodes are built. Until then, and in a segment that sends into no other class or runs without a hub, `read` gives `None`. `is_bound` tells the cases apart.
+- `read(class, ..)` loads the class's table once and passes a `ClassCells`. `cells()` are the `gdl::Cell`s the class's cell policy chooses from, in the same order, so the node and the policy see one value. `cell(name)` finds one. `is_withdrawn(name)` says whether the relay said that the cell withdrew its record. A cell can be both followed and withdrawn until its follow is dropped.
+- The read takes no lock and allocates nothing. It costs 40 to 85 ns on a shared host (see [Feature costs](../operations/feature-costs.md#reading-the-followed-cells)). Keep the closure short: the table is held while it runs.
+- A class has one table per entry segment that the chooser's hops enter. They list the same cells, but each counts its own entry instances, so whether a cell takes work can differ between them. When the chooser enters the class at one entry segment, `read(class, ..)` reads its table. When it enters at several, `read` gives `None`, and the node names the entry segment of the hop it guards with `read_entry(class, entry, ..)`.
+- A test of a node builds a handle with `FollowedCells::fixed(cells, withdrawn)`, with no hub or runtime.
+
+How a drained cell reads, from the chooser's view:
+
+| Moment | `cell(name)` | `is_withdrawn(name)` |
+|---|---|---|
+| followed, `ready` | `Some`, `ready` | `false` |
+| the cell drains | `Some`, `draining`, until every chooser has acknowledged and the follow is dropped | `false` |
+| the follow is dropped | `None` | `false` |
+| its instances have left, and its hub withdrew its record | `None` | `true` |
+| the cell's hub stops without a drain, or its link fails, or its lease expires | `None` once dropped | `false` |
+| this chooser never saw the cell, or started after the withdrawal | `None` | `false` |
+
+Silence is never a decommission. Only the cell's own hub withdraws its record, and only after a drain. A cell that this chooser cannot see reads as not available, so a gate answers 503 for it, not 404. Two choosers can then answer differently for a while: one that saw the withdrawal reads it, and one that started after it does not. [Limitations](../operations/limitations.md) lists this.
 
 Each entry instance is registered with the chooser's velo node before a table holds it. It is unregistered `drain_ms` after no follow holds it, unless the chooser's own membership still routes to it or is still draining it. The membership, in turn, does not unregister a peer that a table holds. So a velo peer in both is unregistered by whichever lets go of it last.
 
@@ -173,6 +223,7 @@ Avoiding a retiree promises nothing about hand-offs sent to it before. The insta
 4. Then the entry instance declines offers from other cells, which choosers take as a decline. It finishes the requests it holds and announces that it has drained. It still takes hand-offs inside the cell until every entry instance has drained or left. Then it closes and leaves. It does not retire: the cell's state already keeps choosers away.
 5. An interior instance serves until every entry instance of the cell has drained or left, then drains as after a stop. While its cell drains, the entry instances are its drain sources, whatever stopped it. The sources outside the cell are not members of its hub, so it cannot see them.
 6. Once no instance of the cell's class is a member, the hub writes a last draining record, withdraws it, and ends the cell's watches. From then it refuses every registration with 409. To serve the cell again, start its hub again.
+7. Each parent hub that sees the withdrawal in the directory sends `withdrawn` on its relay, and its choosers keep the cell as withdrawn ([What a node reads](#what-a-node-reads)).
 
 A drain cannot be cancelled.
 
@@ -189,7 +240,7 @@ A drain cannot be cancelled.
 A reader ignores a field it does not know in a known event. An event of a kind it does not know makes it fail closed for the cell that the event names, until it has read that cell again.
 
 - **A parent's hub** withholds the cell. The relay shows it `unavailable` at once, which hides its instances and keeps it out of the `requires` count, and not offered at the follow's next revision. The follow does not close while the cell is withheld. The hub reads the cell again from a new watch of the child's hub. If the new watch's snapshot also has an unknown event, the cell stays withheld, and the hub tries again after the refollow wait.
-- **A chooser** leaves the cell unread (`FollowedCell::unread`). The cell is not offered, its tables show none of its instances, and its follow refuses new leases. The chooser opens `GET /v1/ext/gdl-cell/follows/{class}/{cell}` at once and reads the cell from it until its next relay watch. The relay watch and every other cell go on. Being unread is not acknowledged to the hub: it has no revision.
+- **A chooser** leaves the cell unread (`FollowedCell::unread`). The cell is not offered, its tables show none of its instances, and its follow refuses new leases. The chooser opens `GET /v1/ext/gdl-cell/follows/{class}/{cell}` at once and reads the cell from it until its next relay watch. Meanwhile it still applies a `withdrawn` for the cell from the relay watch, since no snapshot carries one. The relay watch and every other cell go on. Being unread is not acknowledged to the hub: it has no revision.
 - An unknown relay event that names no cell, an event that is not JSON, or a known event whose fields do not parse, ends the watch.
 
 `gdl_hub::CellReadiness::unknown_events`, `gdl_watch::CellWatcher::unknown_events`, and `Cells::unknown_events` count such events.

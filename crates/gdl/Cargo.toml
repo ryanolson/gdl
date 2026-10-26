@@ -36,5 +36,9 @@ trybuild = { workspace = true }
 name = "projection"
 harness = false
 
+[[bench]]
+name = "followed"
+harness = false
+
 [lints]
 workspace = true

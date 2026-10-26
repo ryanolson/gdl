@@ -19,7 +19,7 @@ use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
 use gdl::__runtime::{Erased, Lease};
 use gdl::Cx;
-use gdl::{CellPolicies, Selectors};
+use gdl::{CellPolicies, FollowedCells, Selectors};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::{Layout, RequestRouter};
 
@@ -90,6 +90,12 @@ pub struct RuntimeConfig {
     /// `Builder`. A chooser launched through a `ProcessConfig` checks the
     /// names against its `runtime`'s.
     pub cell_policies: CellPolicies,
+    /// The handle through which the segment's nodes read the cells its
+    /// chooser follows. Not a setting: a segment binary's `Builder` gives
+    /// it to the nodes it builds, and the launch binds it to the chooser's
+    /// tables. A segment that sends into no other class, or runs without a
+    /// hub, leaves it unbound.
+    pub followed: FollowedCells,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -161,6 +167,7 @@ impl Default for RuntimeConfig {
             metrics: None,
             selectors: Selectors::new(),
             cell_policies: CellPolicies::new(),
+            followed: FollowedCells::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -229,6 +236,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             metrics: None,
             selectors: Selectors::new(),
             cell_policies: CellPolicies::new(),
+            followed: FollowedCells::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };

@@ -21,7 +21,7 @@ use gdl::Build;
 use gdl::Cx;
 use gdl::Metrics;
 use gdl::Result;
-use gdl::{Affinity, CellPolicies, CellPolicy, LeastLoaded, Selector, Selectors};
+use gdl::{Affinity, CellPolicies, CellPolicy, FollowedCells, LeastLoaded, Selector, Selectors};
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
 
 /// What one segment's binary hosts and serves: the parts that differ
@@ -143,6 +143,7 @@ pub async fn run_segment<B: SegmentBinary>(
     // Before the launch: a chooser checks the policies its placement
     // names against these before it registers.
     config.runtime.cell_policies = builder.cell_policies();
+    config.runtime.followed = builder.followed.clone();
     let ready = async {
         tokio::try_join!(B::ready(&hosts), builder.ready())?;
         Ok(())
@@ -208,6 +209,9 @@ pub struct Builder {
     selectors: Mutex<(Selectors, Vec<Readiness>)>,
     /// The cell policies registered so far.
     cell_policies: Mutex<CellPolicies>,
+    /// What every node and selector it builds reads the chooser's cells
+    /// through ([`FollowedCells::current`]), bound at the launch.
+    followed: FollowedCells,
 }
 
 /// One built selector's [`Build::ready`].
@@ -226,6 +230,7 @@ impl Builder {
             tables,
             selectors: Mutex::new((Selectors::new(), Vec::new())),
             cell_policies: Mutex::new(CellPolicies::new()),
+            followed: FollowedCells::new(),
         })
     }
 
@@ -268,7 +273,9 @@ impl Builder {
             .map_err(|e| format!("building selector {name}: registering its metrics: {e}"))?;
         let table = self.tables.get(name).cloned().unwrap_or_default();
         let providers = Figment::from(Serialized::defaults(table));
-        let built = build_node::<S>(&providers, &GraphConfig::new(), metrics)
+        let built = self
+            .followed
+            .scope(build_node::<S>(&providers, &GraphConfig::new(), metrics))
             .await
             .map_err(|e| format!("building selector {name}: {e}"))?;
         let built = Arc::new(built);
@@ -322,7 +329,8 @@ impl Builder {
         let none = GraphConfig::new();
         let graph = self.graph.get(node).unwrap_or(&none);
         let providers = Figment::from(Serialized::defaults(table.unwrap_or_default()));
-        build_node::<T>(&providers, graph, metrics)
+        self.followed
+            .scope(build_node::<T>(&providers, graph, metrics))
             .await
             .map_err(|e| format!("building {node}: {e}").into())
     }

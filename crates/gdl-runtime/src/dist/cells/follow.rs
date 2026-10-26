@@ -107,6 +107,18 @@ pub(crate) struct Follows<R> {
     asked: Vec<Asked>,
     /// The number of the last watch of its own asked for.
     watches: u64,
+    /// The cells the hub said withdrew their records after a drain, each
+    /// with the generation its withdrawal named: kept when the relay is
+    /// watched again, since a snapshot holds no withdrawal, until a later
+    /// generation of the cell is shown, which only a newer record of the
+    /// cell starts. Generations are the hub's, and a chooser does not
+    /// outlive its hub, so they only grow while it runs.
+    withdrawn: BTreeMap<Key, u64>,
+    /// The newest generation of each cell this follower was shown, over
+    /// every watch: what fences a withdrawal of an earlier one, which may
+    /// arrive late on another watch, also after a snapshot that no longer
+    /// shows the cell.
+    newest: BTreeMap<Key, u64>,
 }
 
 impl<R: Registry> Follows<R> {
@@ -134,6 +146,8 @@ impl<R: Registry> Follows<R> {
             own: HashMap::new(),
             asked: Vec::new(),
             watches: 0,
+            withdrawn: BTreeMap::new(),
+            newest: BTreeMap::new(),
         }
     }
 
@@ -148,10 +162,13 @@ impl<R: Registry> Follows<R> {
     }
 
     /// Take one event of the relay's watch after its snapshot, at `now`:
-    /// applied, unless its cell is read from a watch of its own.
+    /// applied, unless its cell is read from a watch of its own. A
+    /// withdrawal is applied either way: no snapshot carries it, and it
+    /// needs no order, since only a later generation ends it.
     pub(super) fn take(&mut self, event: FollowEvent, now: Instant) {
         // Looked up only while a cell has a watch of its own, which is rare.
         if !self.own.is_empty()
+            && !matches!(event, FollowEvent::Withdrawn { .. })
             && let Some((class, cell)) = event.cell()
             && self
                 .own
@@ -178,12 +195,30 @@ impl<R: Registry> Follows<R> {
             } => Some((*generation, *instance)),
             _ => None,
         };
+        let shown = match &event {
+            FollowEvent::Follow { generation, .. } => Some(*generation),
+            _ => None,
+        };
         let (key, change) = match self.followed.apply(&self.wanted, event, now) {
             Some(changed) => changed,
             None => return,
         };
+        if let Some(generation) = shown {
+            self.shown(&key, generation);
+        }
         match change {
             Change::Table => {}
+            Change::Withdrawn(generation) => {
+                if self
+                    .newest
+                    .get(&key)
+                    .is_some_and(|newest| *newest > generation)
+                {
+                    return;
+                }
+                let named = self.withdrawn.entry(key.clone()).or_insert(generation);
+                *named = (*named).max(generation);
+            }
             Change::Ended(follow) => self.release(&follow, now),
             Change::Replaced(earlier) => {
                 self.publish(&key);
@@ -303,6 +338,15 @@ impl<R: Registry> Follows<R> {
             self.schedule(id, now);
         }
         self.followed = followed;
+        let shown: Vec<(Key, u64)> = self
+            .followed
+            .follows
+            .iter()
+            .map(|(key, follow)| (key.clone(), follow.generation))
+            .collect();
+        for (key, generation) in shown {
+            self.shown(&key, generation);
+        }
         let follows = || {
             self.followed
                 .follows
@@ -467,7 +511,35 @@ impl<R: Registry> Follows<R> {
             .get(segment)
             .map(|cells| cells.values().cloned().collect())
             .unwrap_or_default();
-        self.cells.store(segment, EntryTable::new(cells));
+        let withdrawn = self
+            .wanted
+            .iter()
+            .find(|(_, segments)| segments.contains(segment))
+            .map(|(class, _)| {
+                self.withdrawn
+                    .keys()
+                    .filter(|(of, _)| of == class)
+                    .map(|(_, cell)| Box::from(cell.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.cells
+            .store(segment, EntryTable::new(cells).with_withdrawn(withdrawn));
+    }
+
+    /// The follow `generation` of `key` is shown: a later one than its
+    /// withdrawal named ends the withdrawal, since the cell was started
+    /// again. The same one, shown again by a new watch, does not.
+    fn shown(&mut self, key: &Key, generation: u64) {
+        let newest = self.newest.entry(key.clone()).or_insert(generation);
+        *newest = (*newest).max(generation);
+        if self
+            .withdrawn
+            .get(key)
+            .is_some_and(|named| *named < generation)
+        {
+            self.withdrawn.remove(key);
+        }
     }
 }
 
@@ -509,6 +581,8 @@ enum Change {
     Held(InstanceId),
     /// The follow no longer holds this instance.
     Released(InstanceId),
+    /// The hub said the cell withdrew its record, naming this generation.
+    Withdrawn(u64),
 }
 
 impl Followed {
@@ -684,6 +758,26 @@ impl Followed {
                 }
                 let follow = self.closing.remove(&(key.clone(), generation))?;
                 Some((key, Change::Ended(Box::new(follow))))
+            }
+            // Of the cell's latest follow, which may have been dropped:
+            // ignored once a later one is shown.
+            FollowEvent::Withdrawn {
+                class,
+                cell,
+                generation,
+            } => {
+                if !wanted.contains_key(&class) {
+                    return None;
+                }
+                let key = (class, cell);
+                if self
+                    .generations
+                    .get(&key)
+                    .is_some_and(|newest| *newest > generation)
+                {
+                    return None;
+                }
+                Some((key, Change::Withdrawn(generation)))
             }
             // The snapshot's marker, which the task reads.
             FollowEvent::Synced => None,

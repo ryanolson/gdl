@@ -293,6 +293,12 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **Cell drain:** `POST /v1/ext/gdl-cell/drain` on a hub's control listener cannot be cancelled. A cell whose class no hop enters, such as a global cell, cannot be drained. Once the last instance leaves, the hub withdraws the cell's record, ends its watches, and refuses every instance that asks to join until it starts again.
 - **Lifts:** retiring interior instances across cells, cancelling a drain, and draining a global cell.
 
+### A cell's withdrawal reaches only the choosers that saw it
+- **What:** a chooser reads a cell as withdrawn ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)) only if its hub's watch of the cell directory showed the withdrawal while the chooser watched the relay. The relay's snapshot holds no withdrawal, and a directory snapshot holds only current records. So a chooser that starts after the withdrawal, a chooser whose hub restarted since, and a hub whose directory watch was down at that moment, read the cell as neither followed nor withdrawn. A model gate then answers 503 for a model whose sets were all drained, not 404, and two gate instances can answer differently until the one that saw the withdrawal restarts.
+- **Why:** silence is never a decommission. A record missing from a snapshot may have expired or been lost, so only an explicit withdrawal counts. Keeping withdrawals in the relay's snapshot would only move the gap to a hub restart.
+- **Workaround:** take a decommissioned model out of the gate's own model-to-set map.
+- **Lifts:** model availability in the cell record and in events.
+
 ### The names a watch, a release, and an acknowledgement carry are not authenticated
 - **What:** nothing checks the class, cell, run, and generation a caller names. Anyone who can reach a cell's hub can hold a draining cell's early end off until the bound, or bring it forward by releasing a watch it did not open. It can also tell the hub that the cells following it avoid a retired entry instance when they do not. `POST /drain` on the control listener and `POST /release` and `POST /avoided` on the public listener need no credential. A chooser that still picks the instance after it stopped taking work is refused and offers the request to another cell.
 - **Lifts:** a credential across cells, which waits for the private CA. Hub listeners have no TLS. See [Cell hub routes and watch events](../appendix/hub-api.md).

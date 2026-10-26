@@ -31,9 +31,9 @@ Each server-sent event's data is one JSON value tagged by `event`.
 | Watch | Snapshot, in order | Changes |
 |---|---|---|
 | Cell's watch (`CellWatchEvent`) | `cell` (name, class, epoch, state, load); `state` with `unfollowed: true` if already sent; `retired`; `ready` (segment, `PeerInfo`); `synced` | `state`; `load` once a period while there is a summary, and once when there is none; `ready`; `retired`; `retired` again with `acknowledged: true`; `left`; `state` again with `unfollowed: true` |
-| Relay (`FollowEvent`) | for each follow: `follow` (class, cell, generation, region, state, load), `offering` if not offered, `retired`, `exposed`; then one `synced` | `state`, `load`, `offering` (revision, offered), `exposed`, `retired`, `left`, `dropped` |
+| Relay (`FollowEvent`) | for each follow: `follow` (class, cell, generation, region, state, load), `offering` if not offered, `retired`, `exposed`; then one `synced` | `state`, `load`, `offering` (revision, offered), `exposed`, `retired`, `left`, `dropped`, `withdrawn` (after the hub's directory watch shows the cell's withdrawal; it names the cell's latest follow and may come after its `dropped`) |
 
-Every relay event except `synced` names its class, cell, and generation. `unfollowed` and `acknowledged` are fields of known events, not kinds of their own, so an earlier reader ignores them. A later build adds to an event only as an optional field.
+Every relay event except `synced` names its class, cell, and generation. A chooser of an earlier build does not know `withdrawn`: it leaves the cell unread until it reads it again, if it still follows the cell, which by then is draining and not offered. `unfollowed` and `acknowledged` are fields of known events, not kinds of their own, so an earlier reader ignores them. A later build adds to an event only as an optional field.
 
 ## Limits and timing
 

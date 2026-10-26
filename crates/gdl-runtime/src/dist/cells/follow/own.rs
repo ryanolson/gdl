@@ -229,6 +229,7 @@ impl<R: Registry> Follows<R> {
                 self.followed
                     .generations
                     .insert(key.clone(), follow.generation);
+                self.shown(key, follow.generation);
                 self.followed.follows.insert(key.clone(), follow)
             }
             None => {

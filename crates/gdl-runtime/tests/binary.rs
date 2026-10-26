@@ -36,6 +36,9 @@ const GRAPH_CONFIG: &str = "[Add]\noffset = 10\n";
 struct Add {
     by: u32,
     metrics: AddMetrics,
+    /// The handle on the cells its segment's chooser follows, taken as it
+    /// is built.
+    followed: gdl::FollowedCells,
 }
 
 /// What `Add` reports.
@@ -80,6 +83,7 @@ impl gdl::Build for Add {
         Ok(Self {
             by: config.amount + config.offset,
             metrics,
+            followed: gdl::FollowedCells::current(),
         })
     }
 }
@@ -134,6 +138,14 @@ fn start_adder(
     deployment.start(root)
 }
 
+/// Tables with no class in them.
+struct NoCells;
+
+impl gdl::__runtime::CellSource for NoCells {
+    fn read(&self, _class: &str, _entry: Option<&str>, _read: &mut dyn FnMut(gdl::ClassCells<'_>)) {
+    }
+}
+
 /// Set by `Adder::ready`; the serving body checks that it ran first.
 static READY: AtomicBool = AtomicBool::new(false);
 
@@ -168,6 +180,12 @@ impl gdl_runtime::SegmentBinary for Adder {
         roster: &Roster,
         runtime: RuntimeConfig,
     ) -> gdl::Result<Serving> {
+        // The node holds the handle the runtime has: a segment without a
+        // hub follows no cells and leaves it unbound, and a bind of the
+        // runtime's reaches the node.
+        assert!(!add.followed.is_bound(), "bound without a chooser");
+        assert!(runtime.followed.bind(std::sync::Arc::new(NoCells)));
+        assert!(add.followed.is_bound(), "the node holds another handle");
         let segment = start_adder(add, node, roster, runtime)?;
         Ok(Serving::new(segment, |segment, _shutdown| async move {
             assert!(READY.load(Ordering::SeqCst), "served before ready");

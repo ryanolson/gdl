@@ -99,7 +99,7 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
     .await
     .expect("registered");
     let live = Arc::clone(Roster::new().live());
-    let cells = Cells::new("r", ["sink"]);
+    let cells = Cells::new("r", [("model_x", "sink")]);
     let wanted = BTreeMap::from([("model_x".to_string(), BTreeSet::from(["sink".to_string()]))]);
     let mut chooser = Follows::new(
         cells.clone(),

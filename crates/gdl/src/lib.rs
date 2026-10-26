@@ -23,6 +23,7 @@ mod codec;
 mod compose;
 mod cx;
 mod error;
+mod followed;
 mod identity;
 #[doc(hidden)]
 mod items;
@@ -40,6 +41,7 @@ pub use compose::{
 };
 pub use cx::{Cx, Deadline, RequestId};
 pub use error::{Error, ErrorKind, Result};
+pub use followed::{ClassCells, FollowedCells};
 pub use gdl_macros::{Config, Endpoints, Metrics};
 pub use gdl_model::{ConfigField, ConfigSchema, ConfigValue, Encoding, MetricField, MetricKind};
 pub use identity::{IdentityNode, IdentityOperator};
@@ -128,6 +130,7 @@ pub use gdl_macros::Projection;
 pub mod __runtime {
     pub use crate::codec::{decoder, encoder};
     pub use crate::cx::wall_now_nanos;
+    pub use crate::followed::CellSource;
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};
     pub use crate::meter::{
         END_TO_END, Ending, Figures, Meters, Owner, REQUEST, RESPONSE, Visit, ended, note,

@@ -21,9 +21,10 @@ use velo::{InstanceId, PeerInfo};
 /// later one replaced, closes only once every chooser has acknowledged
 /// that it no longer holds an offer to it, and until then it is still
 /// relayed, not offered, beside the current one. The relay never sends an
-/// event of a generation after its [`FollowEvent::Dropped`], and after a
-/// later generation of the same cell, only the earlier one's
-/// [`FollowEvent::Offering`] and [`FollowEvent::Dropped`].
+/// event of a generation after its [`FollowEvent::Dropped`] but
+/// [`FollowEvent::Withdrawn`], and after a later generation of the same
+/// cell, only the earlier one's [`FollowEvent::Offering`] and
+/// [`FollowEvent::Dropped`].
 ///
 /// A watch begins with a snapshot: for each follow, the earlier
 /// generations that have yet to close first, [`FollowEvent::Follow`], its
@@ -61,6 +62,15 @@ use velo::{InstanceId, PeerInfo};
 /// applied once it holds no offer to the follow
 /// ([`crate::Unoffered`]); the follow closes once every chooser of its
 /// class has acknowledged its current revision, and the relay drops it.
+///
+/// A cell that drains withdraws its record from the cell directory once
+/// its instances have left. When the hub's watch of the directory shows
+/// that withdrawal, the relay sends [`FollowEvent::Withdrawn`], naming the
+/// cell's latest follow, whether or not that follow has been dropped:
+/// the cell was drained on purpose. Nothing else is a withdrawal: a
+/// record that expires, a link that fails, and a directory snapshot that
+/// no longer holds the record send none. A watch's snapshot holds no
+/// withdrawal, so a consumer that begins after one never learns of it.
 ///
 /// Every event but [`FollowEvent::Synced`] names its follow by its class,
 /// cell, and generation, and an event a later build adds must too: a
@@ -187,6 +197,18 @@ pub enum FollowEvent {
         /// The follow's generation.
         generation: u64,
     },
+    /// The cell withdrew its record from the cell directory after its
+    /// drain: it was drained on purpose. It may come after the follow's
+    /// [`FollowEvent::Dropped`]. A later follow of the cell, which a hub
+    /// begins only from a newer record, ends it.
+    Withdrawn {
+        /// The cell's class.
+        class: String,
+        /// The cell, named within its class.
+        cell: String,
+        /// The generation of the cell's latest follow.
+        generation: u64,
+    },
 }
 
 impl FollowEvent {
@@ -201,7 +223,8 @@ impl FollowEvent {
             | Self::Retired { class, cell, .. }
             | Self::Left { class, cell, .. }
             | Self::Offering { class, cell, .. }
-            | Self::Dropped { class, cell, .. } => Some((class, cell)),
+            | Self::Dropped { class, cell, .. }
+            | Self::Withdrawn { class, cell, .. } => Some((class, cell)),
             Self::Synced => None,
         }
     }

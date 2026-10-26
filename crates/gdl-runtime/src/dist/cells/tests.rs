@@ -6,6 +6,7 @@ mod bounded;
 mod offered;
 mod reread;
 mod rewatch;
+mod withdrawn;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -83,7 +84,7 @@ fn follower() -> (
     Recorded,
     Arc<crate::dist::roster::Live>,
 ) {
-    let cells = Cells::new("r", ["f"]);
+    let cells = Cells::new("r", [("model_x", "f")]);
     let recorded = Recorded {
         cells: cells.clone(),
         calls: Arc::default(),

@@ -67,7 +67,10 @@ struct Shared {
     region: Arc<str>,
     /// Fixed at the launch: one per entry segment the instance sends to,
     /// each shared with the hand-offs that choose from it.
-    segments: BTreeMap<String, Arc<ArcSwap<EntryTable>>>,
+    segments: BTreeMap<String, Slot>,
+    /// For each class sent to, its entry segments' tables by segment, which
+    /// a node reads ([`gdl::FollowedCells`]).
+    classes: BTreeMap<String, Box<[(String, Slot)]>>,
     /// Counts each change of a table, or of what is registered with velo.
     changes: watch::Sender<u64>,
     /// The cells this chooser damps, shared by every hand-off that
@@ -87,16 +90,36 @@ struct Shared {
 }
 
 impl Cells {
-    /// Empty tables for the entry segments `segments`, of a chooser in
-    /// `region`.
-    pub(crate) fn new<'a>(region: &str, segments: impl IntoIterator<Item = &'a str>) -> Self {
+    /// Empty tables for `entries`, each an entry segment and its class, of
+    /// a chooser in `region`.
+    pub(crate) fn new<'a>(
+        region: &str,
+        entries: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Self {
+        let mut wanted: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (class, segment) in entries {
+            wanted.entry(class).or_default().insert(segment);
+        }
+        let segments: BTreeMap<String, Slot> = wanted
+            .values()
+            .flatten()
+            .map(|segment| (segment.to_string(), Arc::default()))
+            .collect();
+        let classes = wanted
+            .iter()
+            .map(|(class, entries)| {
+                let tables = entries
+                    .iter()
+                    .map(|entry| (entry.to_string(), Arc::clone(&segments[*entry])))
+                    .collect();
+                (class.to_string(), tables)
+            })
+            .collect();
         Self {
             shared: Arc::new(Shared {
                 region: Arc::from(region),
-                segments: segments
-                    .into_iter()
-                    .map(|segment| (segment.to_string(), Arc::default()))
-                    .collect(),
+                segments,
+                classes,
                 changes: watch::Sender::new(0),
                 damping: Arc::default(),
                 registered: watch::Sender::new(HashSet::new()),
@@ -173,7 +196,7 @@ impl Cells {
 
     /// Where `segment`'s table is kept, for a hand-off that chooses from
     /// it on every request without looking it up.
-    pub(crate) fn slot(&self, segment: &str) -> Option<Arc<ArcSwap<EntryTable>>> {
+    pub(crate) fn slot(&self, segment: &str) -> Option<Slot> {
         self.shared.segments.get(segment).map(Arc::clone)
     }
 
@@ -277,6 +300,26 @@ impl Cells {
     }
 }
 
+/// What a node reads of the tables: the table an entry segment's cell
+/// policy chooses from, with the class's withdrawn cells, in one load.
+impl gdl::__runtime::CellSource for Cells {
+    fn read(&self, class: &str, entry: Option<&str>, read: &mut dyn FnMut(gdl::ClassCells<'_>)) {
+        let Some(tables) = self.shared.classes.get(class) else {
+            return;
+        };
+        let slot = match (entry, &**tables) {
+            (None, [(_, slot)]) => slot,
+            (None, _) => return,
+            (Some(entry), tables) => match tables.iter().find(|(of, _)| of == entry) {
+                Some((_, slot)) => slot,
+                None => return,
+            },
+        };
+        let table = slot.load();
+        read(gdl::ClassCells::new(&table.views, &table.withdrawn));
+    }
+}
+
 impl std::fmt::Debug for Cells {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cells")
@@ -337,21 +380,40 @@ pub struct FollowedCell {
     pub unread: bool,
 }
 
+/// Where one entry segment's table is kept, swapped whole.
+pub(crate) type Slot = Arc<ArcSwap<EntryTable>>;
+
 /// One entry segment's table: each followed cell of its class, ordered by
-/// class and cell, and each as a cell policy sees it, index for index.
+/// class and cell, and each as a cell policy sees it, index for index;
+/// and the cells of the class whose records were withdrawn.
 #[derive(Debug, Default)]
 pub(crate) struct EntryTable {
     pub(crate) cells: Box<[Arc<CellTable>]>,
     /// `cells` as a cell policy sees them, made with the table so that a
     /// choice borrows them rather than making them per request.
     pub(crate) views: Box<[gdl::Cell]>,
+    /// The cells of the class the hub said withdrew their records after
+    /// a drain, by name, sorted: kept beside the cells, in the same table,
+    /// so that a node reads both from one snapshot. A withdrawn cell may
+    /// still be in `cells` until its follow is dropped.
+    pub(crate) withdrawn: Box<[Box<str>]>,
 }
 
 impl EntryTable {
-    /// The table of `cells`, with their views.
+    /// The table of `cells`, with their views, and no withdrawn cell.
     pub(crate) fn new(cells: Box<[Arc<CellTable>]>) -> Self {
         let views = cells.iter().map(|cell| cell.view()).collect();
-        Self { cells, views }
+        Self {
+            cells,
+            views,
+            withdrawn: Box::default(),
+        }
+    }
+
+    /// The table with the class's `withdrawn` cells, sorted.
+    pub(crate) fn with_withdrawn(mut self, withdrawn: Box<[Box<str>]>) -> Self {
+        self.withdrawn = withdrawn;
+        self
     }
 }
 
