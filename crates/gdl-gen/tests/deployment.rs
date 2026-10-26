@@ -99,6 +99,40 @@ fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
     assert_eq!(compose["services"]["front"]["stop_grace_period"], "630s");
 }
 
+/// Without image settings, a segment and the hub run in a distroless image
+/// as a user that is not root, and are built in the toolchain that
+/// `rust-toolchain.toml` pins, on the Debian release the distroless image
+/// is built from, so that the binary finds the glibc it was linked against.
+#[test]
+fn the_default_images_are_distroless_and_the_pinned_toolchain() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let toolchain: toml::Table = toml::from_str(
+        &std::fs::read_to_string(root.join("rust-toolchain.toml")).expect("the toolchain"),
+    )
+    .expect("the toolchain");
+    let channel = toolchain["toolchain"]["channel"]
+        .as_str()
+        .expect("a channel");
+    let spec = portable_spec(&root).expect("valid test fixture");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-defaults-")
+        .tempdir()
+        .expect("a directory");
+    let files =
+        gdl_gen::compose_files(&spec, None, temp.path(), &root.join("target")).expect("a bundle");
+    for dockerfile in ["front/Dockerfile", "engine/Dockerfile", "hub/Dockerfile"] {
+        let text = &files[Path::new(dockerfile)];
+        assert!(
+            text.contains(&format!("FROM rust:{channel}-slim-bookworm AS build\n")),
+            "{dockerfile}:\n{text}"
+        );
+        assert!(
+            text.contains("FROM gcr.io/distroless/cc-debian12:nonroot\n"),
+            "{dockerfile}:\n{text}"
+        );
+    }
+}
+
 #[test]
 fn preview_files_are_the_exact_downloaded_snapshot() {
     use std::io::Read;
@@ -442,6 +476,22 @@ fn running<'a>(compose: &'a serde_json::Value, image: &str) -> (Vec<&'a str>, Ve
 /// The directory every hub of a fleet's bundle publishes to.
 const CELLS: &str = "/var/lib/gdl/cells";
 
+/// The cell directory's volume is writable whatever user a hub runs as. A
+/// new named volume takes the owner of the directory it is mounted on, and
+/// a distroless image has no `/var/lib/gdl/cells`, so the volume was
+/// root's, and a hub that is not root could not publish its cell's record.
+/// On tmpfs it is also empty again once no container uses it, so that each
+/// deployment starts with a fresh directory.
+#[test]
+fn the_cell_directory_is_writable_by_a_hub_that_is_not_root() {
+    let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
+    let (_, compose) = fleet_bundle(&placed(SPLIT), &fleet);
+    assert_eq!(
+        compose["volumes"],
+        serde_json::json!({"cells": {"driver_opts": {"type": "tmpfs", "device": "tmpfs", "o": "mode=1777"}}})
+    );
+}
+
 /// A fleet of one layout: a hub per cell, and each cell's segments of its
 /// class, configured as that cell and waiting only for its hub; one
 /// directory, shared by every hub; one image per segment, which both
@@ -502,7 +552,12 @@ fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
     assert_eq!(env("model-x-02", "GDL_CELL__HOME"), "global-us");
     assert_eq!(env("global-us", "GDL_CELL__HOME"), serde_json::Value::Null);
     // One directory, on one volume.
-    assert_eq!(compose["volumes"], serde_json::json!({ "cells": {} }));
+    assert_eq!(
+        compose["volumes"]
+            .as_object()
+            .map(|v| v.keys().map(String::as_str).collect::<Vec<_>>()),
+        Some(vec!["cells"])
+    );
     // One image per segment, built once, which both model cells run.
     assert_eq!(
         dockerfiles(&files),
@@ -656,7 +711,7 @@ fn no_hub_can_be_scaled() {
             "stops the old container before it starts the new one",
             "for one host",
             "`relay`",
-            "docker compose down -v",
+            "fresh directory after `docker compose down`",
         ] {
             assert!(readme.contains(needle), "{needle}\nin:\n{readme}");
         }

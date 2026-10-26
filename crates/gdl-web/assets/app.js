@@ -2027,7 +2027,7 @@ $('canvas').addEventListener('pointerout',event=>{
 $('canvas').addEventListener('pointerdown',hideActionTooltip);
 $('graph-viewport').addEventListener('scroll',hideActionTooltip);
 
-let deploymentSettings={base_image:'debian:bookworm-slim',build_image:'rust:1.93-slim-bookworm',segment:Object.create(null)};
+let deploymentSettings={base_image:'gcr.io/distroless/cc-debian12:nonroot',build_image:'rust:1.93.1-slim-bookworm',segment:Object.create(null)};
 function deploymentDraft(groups) {
   const {segment,...defaults}=deploymentSettings;
   return {...defaults,segment:Object.fromEntries(Object.keys(groups).filter(name=>segment[name]).map(name=>[name,segment[name]]))};

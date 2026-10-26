@@ -16,9 +16,9 @@ Image settings go in the spec's `[deployment]` table. [Spec and fleet reference]
 
 ```toml
 [deployment]
-base_image = "debian:bookworm-slim"        # the default
-build_image = "rust:1.93-slim-bookworm"    # the default
-hub_image = "debian:bookworm-slim"         # defaults to base_image
+base_image = "gcr.io/distroless/cc-debian12:nonroot"   # the default
+build_image = "rust:1.93.1-slim-bookworm"               # the default
+hub_image = "gcr.io/distroless/cc-debian12:nonroot"    # defaults to base_image
 
 [deployment.segment.front]
 ports = ["8082:8082"]
@@ -30,7 +30,7 @@ listen = "0.0.0.0:8082"
 base_image = "nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04"
 ```
 
-A runtime image must run the binary built in `build_image` and supply its libraries. The generator installs no packages into it. A `config` table adds to the segment's settings ([Segment settings](../operations/configuration.md)).
+A runtime image must run the binary built in `build_image` and supply its libraries. The generator installs no packages into it. The default runtime image holds glibc and the C runtime, and no shell, and runs as a user that is not root (uid 65532). The default build image is the toolchain that `rust-toolchain.toml` pins, on Debian 12, the release that the runtime image is built from, so a binary finds the glibc that it was linked against. A runtime image that runs as root, such as a CUDA image, works too: nothing in the image or the bundle depends on the user. A `config` table adds to the segment's settings ([Segment settings](../operations/configuration.md)).
 
 ## 2. Write the bundle
 

@@ -13,12 +13,16 @@ pub(crate) struct Settings {
     segment: std::collections::BTreeMap<String, Image>,
 }
 /// `[deployment] base_image` when the spec does not set it: the image a
-/// segment, and the hub unless `hub_image` says otherwise, runs in.
-pub(crate) const DEFAULT_BASE_IMAGE: &str = "debian:bookworm-slim";
+/// segment, and the hub unless `hub_image` says otherwise, runs in. It
+/// holds glibc and the C runtime and no shell, and runs as a user that is
+/// not root.
+pub(crate) const DEFAULT_BASE_IMAGE: &str = "gcr.io/distroless/cc-debian12:nonroot";
 
 /// `[deployment] build_image` when the spec does not set it: the image
-/// every binary is built in.
-pub(crate) const DEFAULT_BUILD_IMAGE: &str = "rust:1.93-slim-bookworm";
+/// every binary is built in. It is the toolchain `rust-toolchain.toml`
+/// pins, on Debian 12, the release the default base image is built from,
+/// so that a binary finds the glibc it was linked against.
+pub(crate) const DEFAULT_BUILD_IMAGE: &str = "rust:1.93.1-slim-bookworm";
 
 impl Settings {
     /// The segments that `[deployment.segment.<name>]` tables name.

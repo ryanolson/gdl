@@ -43,7 +43,7 @@
   <section id="deploy-panel" role="tabpanel" aria-labelledby="deploy-tab" hidden>
     <h2>Deploy your graph</h2><p class="muted">One process per segment. The hub checks graph contracts and supplies discovery.</p>
     <div class="deploy-targets"><button aria-pressed="true">Docker Compose</button><button id="deploy-kubernetes" disabled title="Not available yet">Kubernetes</button><button disabled title="Not available yet">srt-slurm</button></div>
-    <div class="deploy-defaults"><label>Default runtime image<input id="deploy-base" value="debian:bookworm-slim" spellcheck="false"></label><label>Rust build image<input id="deploy-build" value="rust:1.93-slim-bookworm" spellcheck="false"></label><label>Hub runtime image<input id="deploy-hub" placeholder="Use default runtime image" spellcheck="false"></label></div>
+    <div class="deploy-defaults"><label>Default runtime image<input id="deploy-base" value="gcr.io/distroless/cc-debian12:nonroot" spellcheck="false"></label><label>Rust build image<input id="deploy-build" value="rust:1.93.1-slim-bookworm" spellcheck="false"></label><label>Hub runtime image<input id="deploy-hub" placeholder="Use default runtime image" spellcheck="false"></label></div>
     <div id="deploy-segments"></div>
     <h3>Generated files</h3>
     <p class="muted">Change the settings above to regenerate. The download contains exactly this preview. Only Git and crates.io packages can be deployed.</p>

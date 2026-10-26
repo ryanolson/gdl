@@ -51,8 +51,8 @@ A value equal to its default is not recorded. The placement hash covers each cla
 | Key | Meaning | Default |
 |---|---|---|
 | `[config.<Node>] <field>` | a value for a graph-affecting field of the node's `Build::Config`: a bool, an integer, or a string. The field must exist and have that type. | the field's declared default |
-| `[deployment] base_image` | the image a segment runs in | `debian:bookworm-slim` |
-| `[deployment] build_image` | the image every binary is built in | `rust:1.93-slim-bookworm` |
+| `[deployment] base_image` | the image a segment runs in | `gcr.io/distroless/cc-debian12:nonroot` |
+| `[deployment] build_image` | the image every binary is built in | `rust:1.93.1-slim-bookworm` |
 | `[deployment] hub_image` | the image the hub runs in | `base_image` |
 | `[deployment.segment.<name>] base_image` | one segment's run image | `base_image` |
 | `[deployment.segment.<name>] ports` | the ports the segment publishes, as Compose writes them | none |
@@ -122,8 +122,8 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 |---|---|---|
 | spec `[routing] <node>` | `"round_robin"` | `RequestRouter::DEFAULT` |
 | spec `[cells.<class>] policy` | `"round_robin"` | `CellPolicy::DEFAULT_POLICY` |
-| spec `[deployment] base_image` | `"debian:bookworm-slim"` | `DEFAULT_BASE_IMAGE` |
-| spec `[deployment] build_image` | `"rust:1.93-slim-bookworm"` | `DEFAULT_BUILD_IMAGE` |
+| spec `[deployment] base_image` | `"gcr.io/distroless/cc-debian12:nonroot"` | `DEFAULT_BASE_IMAGE` |
+| spec `[deployment] build_image` | `"rust:1.93.1-slim-bookworm"` | `DEFAULT_BUILD_IMAGE` |
 | fleet `ready.<segment>`, `[cell] ready.<segment>` | `1` | `CellSettings::DEFAULT_QUORUM` |
 | fleet `requires.<class>`, `[cell] requires.<class>`, for each class the cell's class sends to, when `requires` is unsaid | `1` | `CellSettings::DEFAULT_REQUIRES` |
 | `[cell] directory` | `"relay"` | `DirectoryBackend::DEFAULT` |

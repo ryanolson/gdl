@@ -85,7 +85,7 @@ The bundle publishes no hub port. To read a cell's health, ask from a container 
 docker run --rm --network fleet_default curlimages/curl:8.10.1 -s http://global-us:1337/v1/ext/gdl-cell/health
 ```
 
-The global cell answers 200 once its own quorum holds and a model cell is `ready` and followed. `docker compose down -v` stops the fleet and removes the cell directory's volume. Use a fresh directory for each deployment.
+The global cell answers 200 once its own quorum holds and a model cell is `ready` and followed. `docker compose down` stops the fleet. The cell directory's volume is on tmpfs, open to every user: it is empty again once no container uses it, so the next deployment starts with a fresh directory.
 
 ## How the bundle starts
 
