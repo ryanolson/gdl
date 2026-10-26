@@ -105,11 +105,19 @@ pub enum CellState {
     Draining,
 }
 
-/// The load of a cell's entry segments, summed over their usable
-/// instances, as the cell's hub makes it once a summary period from the
-/// instances' reports, and sends it on the cell's watch each period,
-/// changed or not. Admission counts roots, not engine work, so a policy
-/// built on it is an admission heuristic.
+/// The load of a cell's entry segments, as the cell's hub makes it once a
+/// summary period from the instances' reports, and sends it on the cell's
+/// watch each period, changed or not.
+///
+/// `admitted`, `limit`, and `refusals` are sums over the reports the hub
+/// counts: the latest report of each usable entry instance, from its
+/// current registration, and at most three periods old. `instances`
+/// counts every usable entry instance, whether it reported or not, so
+/// the sums can cover fewer instances than `instances` says. The hub
+/// makes no summary while it counts no report.
+///
+/// Admission counts roots, not engine work, so a policy built on it is
+/// an admission heuristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoadSummary {
     /// The roots the instances that reported hold admitted.
