@@ -147,6 +147,10 @@ pub struct Faults {
     /// attaches, as a slow consumer would; the test observes the hold and
     /// ends it.
     pub failure_gate: Option<Arc<Gate>>,
+    /// Hold the stop that a streamed run passes up its input until the run
+    /// has retired that input, as a host too busy to run the stop watcher
+    /// before the run ends would.
+    pub stop_after_input_retired: bool,
 }
 
 /// A point a runtime step stops at until a test lets it go. Available only

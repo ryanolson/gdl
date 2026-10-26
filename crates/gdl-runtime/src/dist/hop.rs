@@ -753,6 +753,13 @@ where
                 });
             }
         };
+        #[cfg(feature = "fault-injection")]
+        let (signal, retired) = if rt.config.faults.stop_after_input_retired {
+            let (signal, retired) = tokio::sync::oneshot::channel();
+            (Some(signal), Some(retired))
+        } else {
+            (None, None)
+        };
         // Minted last, after everything that can refuse: a refusal leaves
         // no anchor behind.
         let (input, guard, accepted) = if self.plan.streamed_into(pos) {
@@ -763,7 +770,11 @@ where
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             (
                 Some(input_items(shared)),
-                Some(InputGuard(retirer)),
+                Some(InputGuard {
+                    retirer,
+                    #[cfg(feature = "fault-injection")]
+                    retired: signal,
+                }),
                 Some(reply),
             )
         } else {
@@ -798,6 +809,10 @@ where
                         biased;
                         () = watched.cancelled() => {}
                         () = watched.stopping() => {
+                            #[cfg(feature = "fault-injection")]
+                            if let Some(retired) = retired {
+                                let _ = retired.await;
+                            }
                             if !watched.is_cancelled() {
                                 input.request_stop();
                             }
@@ -1250,17 +1265,25 @@ async fn send_input(
 /// else bounds that anchor: a ticket pauses its unattached timeout, a
 /// sender whose acknowledgement was lost never attaches, and a node may hold
 /// its input unread.
-struct InputGuard(Retirer);
+struct InputGuard {
+    retirer: Retirer,
+    /// Dropped once the input is retired, for a test whose stop watcher
+    /// waits for that.
+    #[cfg(feature = "fault-injection")]
+    retired: Option<tokio::sync::oneshot::Sender<()>>,
+}
 
 impl InputGuard {
     fn canceller(&self) -> Canceller {
-        self.0.canceller()
+        self.retirer.canceller()
     }
 }
 
 impl Drop for InputGuard {
     fn drop(&mut self) {
-        self.0.retire(Error::cancelled());
+        self.retirer.retire(Error::cancelled());
+        #[cfg(feature = "fault-injection")]
+        drop(self.retired.take());
     }
 }
 

@@ -1386,13 +1386,16 @@ impl gdl::Forward for StopAndFinish {
     }
 }
 
-async fn stop_as_a_relay_finishes(placement: Placement) -> Vec<gdl::Result<u32>> {
+async fn stop_as_a_relay_finishes(
+    placement: Placement,
+    config: &dyn Fn(&str) -> RuntimeConfig,
+) -> Vec<gdl::Result<u32>> {
     let nodes = nodes(placement.segments().count()).await;
     let cluster = streamed::deploy_graph(
         &streamed::instances(&nodes, &placement),
         &stopping::manifest(),
         &placement,
-        &defaults,
+        config,
         |deployment| {
             let bindings = stopping::Bindings::new()
                 .x(UntilStop)
@@ -1418,7 +1421,8 @@ async fn stop_as_a_relay_finishes(placement: Placement) -> Vec<gdl::Result<u32>>
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_a_relay_asks_for_as_it_finishes_reaches_the_sink_locally() {
-    let got = stop_as_a_relay_finishes(Placement::new().segment("a", ["A", "X", "C", "D"])).await;
+    let placement = Placement::new().segment("a", ["A", "X", "C", "D"]);
+    let got = stop_as_a_relay_finishes(placement, &defaults).await;
     assert_eq!(got, vec![Ok(1)]);
 }
 
@@ -1428,13 +1432,26 @@ async fn a_stop_a_relay_asks_for_as_it_finishes_reaches_the_sink_locally() {
 /// the sender's stop token with that cancel, so the sender takes both for
 /// the receiver leaving. The stop does not reach the sink; the deadline
 /// ends the request.
+///
+/// C's stop watcher is a task of its own, so on a busy host it can pass
+/// the stop up before C's run ends, and the stop then reaches the sink. A
+/// fault holds C's stop until its run has retired its input. By then the
+/// run's context is cancelled too, so the watcher takes the run as gone and
+/// passes no stop: the test pins the gap every time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_a_relay_asks_for_as_it_finishes_waits_for_the_deadline() {
     let placement = Placement::new()
         .segment("a", ["A", "X"])
         .segment("c", ["C"])
         .segment("d", ["D"]);
-    let got = stop_as_a_relay_finishes(placement).await;
+    let config = |segment: &str| RuntimeConfig {
+        faults: Faults {
+            stop_after_input_retired: segment == "c",
+            ..Faults::default()
+        },
+        ..RuntimeConfig::default()
+    };
+    let got = stop_as_a_relay_finishes(placement, &config).await;
     let kinds: Vec<_> = got
         .iter()
         .map(|r| r.as_ref().map_err(Error::kind))

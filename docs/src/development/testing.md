@@ -62,7 +62,7 @@ For the same reason, a port that a test picks and frees before another process b
 
 ## Fault hooks
 
-With the `fault-injection` feature, `RuntimeConfig::faults` (`Faults`) delays or skips runtime steps: a forward arrival, a forward acknowledgement, an open reply, the inner end's attach, and a failure's delivery. It can also shift one instance's wall clock. A `Gate` stops a step until the test lets it go, so a test observes the state it needs instead of sleeping. The dev-dependency of `gdl-runtime` turns the feature on. A deployment must never enable it.
+With the `fault-injection` feature, `RuntimeConfig::faults` (`Faults`) delays or skips runtime steps: a forward arrival, a forward acknowledgement, an open reply, the inner end's attach, a failure's delivery, and a streamed run's stop, which it can hold until the run has retired its input. It can also shift one instance's wall clock. A `Gate` stops a step until the test lets it go, so a test observes the state it needs instead of sleeping. The dev-dependency of `gdl-runtime` turns the feature on. A deployment must never enable it.
 
 ## Multi-hub tests
 
