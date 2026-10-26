@@ -324,6 +324,7 @@ async fn a_choices_metadata_reaches_the_receiving_context() {
     });
     let mut cx = Cx::new();
     cx.insert_meta("caller", "kept");
+    let id = cx.id();
     let out = cluster
         .segment("front")
         .call(cx, prompt("m", Plan::default()))
@@ -333,6 +334,8 @@ async fn a_choices_metadata_reaches_the_receiving_context() {
     let seen = events.cx_of("D:c(m)#0");
     assert_eq!(seen.meta().get("rank").map(String::as_str), Some("3"));
     assert_eq!(seen.meta().get("caller").map(String::as_str), Some("kept"));
+    // The receiving segment keeps the request's id: one id end to end.
+    assert_eq!(seen.id(), id);
 }
 
 /// The outer end holds its lease while the response it returns is open,

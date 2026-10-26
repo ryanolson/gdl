@@ -6,7 +6,7 @@ Every node receives a request context, `gdl::Cx`. The context carries the reques
 
 | Part | Crosses segments | Purpose |
 |---|---|---|
-| `id()`, a random `u128` | yes | Logs and traces only. The runtime never uses it to route a response. |
+| `id()`, a UUID v7 | yes | Logs and traces. Admission counts root requests by it. The runtime never uses it to route a response. |
 | `meta()`, a string map | yes | User metadata and trace context. `insert_meta` changes only this context and contexts derived from it later. |
 | `deadline()` | yes, as wall-clock time | Bounds all work for the request, including work that no cancel reaches. |
 | stop (`request_stop`, `stopping`) | through anchors | A graceful stop: finish buffered output, then end. |
@@ -14,6 +14,26 @@ Every node receives a request context, `gdl::Cx`. The context carries the reques
 | extensions (`ext`, `insert_ext`) | no | Values stored by type, local to one segment. |
 
 Stop and cancel are separate signals. A stop does not imply a cancel, because a stopped producer still delivers its buffered output. A cancel is also a stop: `is_stopping` is true after either. `check` returns the reason a request must end, and reports a passed deadline ahead of a cancel. `done` resolves with that reason.
+
+## The request id
+
+`Cx::new` mints the request id: an RFC 9562 UUID, version 7, written in the hyphenated form (`0199f5a2-7c3e-7a01-9f2b-4c1d8e6a3b70`). Every segment the request crosses gets the same id, because the envelope carries it as a `u128` and the receiver restores it.
+
+| Bits | Holds |
+|---|---|
+| 48 | Unix time in milliseconds, from the kernel's coarse clock on Linux and the precise clock elsewhere |
+| 4 | the version, 7 |
+| 12 | a counter |
+| 2 | the RFC variant |
+| 62 | random bits from a per-thread generator |
+
+- Ids sort by time, as integers and as text.
+- The ids that one process mints sort in the order it minted them, across threads too. A mint that happens after another gets the higher id.
+- When more than 4,096 ids are minted in one millisecond, the counter carries into the time, and the time runs ahead of the clock until the clock catches up. When the clock steps back, the time does not follow it.
+- The time can lag the precise clock by one kernel tick, 1 to 10 ms. On the shared aarch64 host of [Feature costs](../operations/feature-costs.md#request-ids), the precise clock costs 23 to 30 ns a read, and the coarse one 6 ns.
+- The random bits keep ids from different processes apart, except in a process that forks without exec ([Known limitations](../operations/limitations.md#a-process-that-forks-without-exec-repeats-request-ids)). The id is not a secret.
+
+Minting takes no lock and allocates nothing. [Feature costs](../operations/feature-costs.md#request-ids) gives its cost.
 
 ## Attempts
 

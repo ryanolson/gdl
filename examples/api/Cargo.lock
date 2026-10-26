@@ -350,6 +350,7 @@ dependencies = [
  "pin-project-lite",
  "prometheus",
  "rmp-serde",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",

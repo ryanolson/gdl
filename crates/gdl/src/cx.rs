@@ -1,4 +1,5 @@
 use std::any::{Any, TypeId};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::hash::{BuildHasher, RandomState};
@@ -264,18 +265,34 @@ impl Scope {
     }
 }
 
-/// A request identifier for logs and traces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// A request identifier for logs and traces: an RFC 9562 UUID, version 7.
+///
+/// Its first 48 bits are the Unix time in milliseconds when it was minted,
+/// so ids sort by time, as integers and as text. The 12 bits after the
+/// version are a counter, so the ids one process mints sort in the order
+/// they were minted, even within one millisecond (the RFC's method 1). The
+/// last 62 bits are random, so ids from different processes rarely collide
+/// (see [`RequestId::mint`] for a fork).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RequestId(u128);
 
 impl RequestId {
-    /// A new identifier: unique within the process and, with high
-    /// probability, across processes. It is not a secret.
+    /// A new identifier: unique within the process, later than every id the
+    /// process minted before it, and, with high probability, unique across
+    /// processes. A child forked without exec can repeat its parent's ids.
+    /// It is not a secret.
+    ///
+    /// Minting takes no lock and allocates nothing: one read of the wall
+    /// clock, one or two atomic operations on the process's stamp, and a
+    /// step of a per-thread random generator.
     pub fn mint() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
-        let salt = RandomState::new().hash_one(seq);
-        Self(u128::from(salt) << 64 | u128::from(seq))
+        static STAMPS: Stamps = Stamps::new();
+        let stamp = STAMPS.next(unix_millis());
+        let millis = (stamp >> COUNTER_BITS) & ((1 << 48) - 1);
+        let counter = stamp & ((1 << COUNTER_BITS) - 1);
+        let high = millis << 16 | 0x7 << 12 | counter;
+        let low = 0b10 << 62 | random() >> 2;
+        Self(u128::from(high) << 64 | u128::from(low))
     }
 
     /// Rebuild an identifier from its integer form.
@@ -289,10 +306,128 @@ impl RequestId {
     }
 }
 
+/// The hyphenated UUID form, `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, in
+/// lowercase.
 impl fmt::Display for RequestId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:032x}", self.0)
+        let id = self.0;
+        write!(
+            f,
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            id >> 96,
+            (id >> 80) & 0xffff,
+            (id >> 64) & 0xffff,
+            (id >> 48) & 0xffff,
+            id & 0xffff_ffff_ffff,
+        )
     }
+}
+
+/// The same form as [`Display`](fmt::Display), so logs show one form.
+impl fmt::Debug for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("RequestId")
+            .field(&format_args!("{self}"))
+            .finish()
+    }
+}
+
+/// Bits of a stamp below the milliseconds: the counter in the UUID's
+/// `rand_a` field.
+const COUNTER_BITS: u32 = 12;
+
+/// The time and counter of the last id a process minted, as
+/// `millis << COUNTER_BITS | counter`. Each mint takes a stamp above every
+/// earlier one: the clock's when it has moved on, else the last plus one.
+/// A counter that fills its 12 bits carries into the milliseconds, and a
+/// clock that steps back is ignored until it passes the last stamp, so the
+/// order never breaks; the stamp runs ahead of the clock meanwhile, which
+/// the RFC allows.
+///
+/// The common case is one `fetch_add` on the shared stamp, as the counter
+/// it replaced was. Only when the clock has moved past the stamp, about
+/// once a millisecond, does a mint also raise it. A read before the add
+/// would cost a second transfer of the contended line, and a
+/// compare-and-swap loop would retry under contention.
+///
+/// The stamp is alone on its cache line. The linker can place the pointer
+/// that the clock read loads next to it, and each mint's add then takes
+/// that line from the threads about to read the clock: eight threads
+/// minting at once pay 46 ns per id instead of 27 (`benches/mint.rs`).
+#[repr(align(128))]
+struct Stamps(AtomicU64);
+
+impl Stamps {
+    const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    /// The next stamp, at `now_millis` or later. Relaxed is enough: the
+    /// stamps form one modification order, so a mint that happens before
+    /// another gets the lower stamp.
+    ///
+    /// A taken value is always below the stamp. When the clock has moved
+    /// past it, the mint that raises the stamp from at most `floor` to
+    /// `floor + 1` takes `floor`, which nobody can have taken; a mint that
+    /// finds it already raised takes the next value as usual. The value the
+    /// first add returned is then skipped, which costs nothing.
+    fn next(&self, now_millis: u64) -> u64 {
+        let floor = now_millis << COUNTER_BITS;
+        let taken = self.0.fetch_add(1, Ordering::Relaxed);
+        if taken >= floor {
+            return taken;
+        }
+        if self.0.fetch_max(floor + 1, Ordering::Relaxed) <= floor {
+            return floor;
+        }
+        self.0.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// Milliseconds since the Unix epoch on the kernel's coarse wall clock.
+/// It is read without the hardware counter, in about 6 ns against 23 to
+/// 30 ns for the precise clock on a Cortex-X925, and lags the precise
+/// clock by at most one kernel tick (1 to 10 ms), which an id that orders
+/// requests in logs can spare. Elsewhere, the precise clock.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn unix_millis() -> u64 {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::RealtimeCoarse);
+    let secs = u64::try_from(now.tv_sec).unwrap_or(0);
+    let millis = u64::try_from(now.tv_nsec).unwrap_or(0) / 1_000_000;
+    secs.saturating_mul(1_000).saturating_add(millis)
+}
+
+/// Milliseconds since the Unix epoch on the wall clock.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// 64 random bits from a per-thread SplitMix64 generator, seeded from the
+/// thread's random hash keys on first use. A thread-local cell needs no
+/// lock, and a `const` one no allocation or destructor. The bits need not
+/// be secret, only distinct across processes; the admission ledger also
+/// shards roots by them.
+fn random() -> u64 {
+    thread_local! {
+        static STATE: Cell<u64> = const { Cell::new(0) };
+    }
+    STATE.with(|state| {
+        let mut seed = state.get();
+        if seed == 0 {
+            seed = RandomState::new().hash_one(0_u8);
+        }
+        let seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        state.set(seed);
+        let mut z = seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    })
 }
 
 /// When a request must end, on both the local monotonic clock and the wall
@@ -448,6 +583,143 @@ mod tests {
     fn request_ids_are_distinct() {
         let ids: std::collections::HashSet<_> = (0..1000).map(|_| RequestId::mint()).collect();
         assert_eq!(ids.len(), 1000);
+    }
+
+    /// The precise wall clock, independent of the clock ids are minted by.
+    fn unix_millis() -> u64 {
+        wall_now_nanos() / 1_000_000
+    }
+
+    /// How far the mint's coarse clock can lag the precise one: one kernel
+    /// tick, plus a millisecond for rounding each down.
+    fn coarse_lag_millis() -> u64 {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let tick = {
+            let res = rustix::time::clock_getres(rustix::time::ClockId::RealtimeCoarse);
+            u64::try_from(res.tv_sec).expect("seconds") * 1_000
+                + u64::try_from(res.tv_nsec)
+                    .expect("nanos")
+                    .div_ceil(1_000_000)
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let tick = 0;
+        tick + 1
+    }
+
+    /// The text form parses as an RFC 9562 UUID, version 7, whose time is
+    /// the time it was minted. The parser is the `uuid` crate's, not ours.
+    #[test]
+    fn a_request_id_is_a_uuid_v7_stamped_with_its_mint_time() {
+        let before = unix_millis();
+        let id = RequestId::mint();
+        let after = unix_millis();
+
+        let text = id.to_string();
+        let uuid = uuid::Uuid::parse_str(&text).expect("a UUID");
+        assert_eq!(uuid.as_u128(), id.as_u128());
+        assert_eq!(uuid.hyphenated().to_string(), text, "the canonical form");
+        assert_eq!(uuid.get_version(), Some(uuid::Version::SortRand));
+        assert_eq!(uuid.get_variant(), uuid::Variant::RFC4122);
+
+        let (secs, nanos) = uuid.get_timestamp().expect("a v7 time").to_unix();
+        let stamped = secs * 1_000 + u64::from(nanos) / 1_000_000;
+        let lag = coarse_lag_millis();
+        assert!(
+            stamped + lag >= before,
+            "{stamped} is more than {lag} ms before the mint at {before}"
+        );
+        // Another test minting many ids at once may carry the shared counter
+        // a few milliseconds ahead of the clock; a second is far more.
+        assert!(stamped <= after + 1_000, "{stamped} is after {after}");
+    }
+
+    /// Ids minted one after another sort in that order, as integers and as
+    /// text. 10,000 ids are more than one millisecond's counter can hold,
+    /// so the counter carries into the time at least once here.
+    #[test]
+    fn ids_minted_in_order_sort_in_that_order() {
+        let mut last = RequestId::mint();
+        for _ in 0..10_000 {
+            let next = RequestId::mint();
+            assert!(next > last, "{next} after {last}");
+            assert!(next.to_string() > last.to_string());
+            last = next;
+        }
+    }
+
+    /// The order holds across threads: an id minted after another thread's
+    /// mint is seen sorts after it.
+    #[test]
+    fn ids_minted_in_order_on_other_threads_sort_in_that_order() {
+        let first = RequestId::mint();
+        let second = std::thread::spawn(RequestId::mint).join().expect("minted");
+        let third = RequestId::mint();
+        assert!(first < second && second < third, "{first} {second} {third}");
+    }
+
+    #[test]
+    fn the_counter_carries_into_the_next_millisecond() {
+        let stamps = Stamps::new();
+        let ms = 1_000;
+        let first = stamps.next(ms);
+        assert_eq!(first, ms << COUNTER_BITS);
+        let mut last = first;
+        for _ in 0..(1 << COUNTER_BITS) {
+            let next = stamps.next(ms);
+            assert_eq!(next, last + 1);
+            last = next;
+        }
+        assert_eq!(last >> COUNTER_BITS, ms + 1, "carried into the next ms");
+        // When the clock catches up, the stamp follows it.
+        assert_eq!(stamps.next(ms + 5), (ms + 5) << COUNTER_BITS);
+    }
+
+    /// Threads that take stamps at once, from a clock that keeps moving,
+    /// each get stamps that rise, no two alike, and none below the clock.
+    /// This reaches the path where a thread moves the stamp up to the clock
+    /// while others take stamps.
+    #[test]
+    fn stamps_taken_at_once_are_distinct_and_rise_on_each_thread() {
+        const THREADS: usize = 8;
+        const EACH: u64 = 20_000;
+        let stamps = Stamps::new();
+        let clock = AtomicU64::new(1_000);
+        let taken: Vec<Vec<u64>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..EACH)
+                            .map(|i| {
+                                if i % 7 == 0 {
+                                    clock.fetch_add(1, Ordering::Relaxed);
+                                }
+                                let now = clock.load(Ordering::Relaxed);
+                                let stamp = stamps.next(now);
+                                assert!(stamp >= now << COUNTER_BITS, "below the clock");
+                                stamp
+                            })
+                            .collect()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|w| w.join().expect("took stamps"))
+                .collect()
+        });
+        for stamps in &taken {
+            assert!(stamps.windows(2).all(|w| w[0] < w[1]), "fell on a thread");
+        }
+        let all: std::collections::HashSet<u64> = taken.iter().flatten().copied().collect();
+        assert_eq!(all.len(), THREADS * usize::try_from(EACH).expect("fits"));
+    }
+
+    #[test]
+    fn a_clock_that_steps_back_does_not_reorder_ids() {
+        let stamps = Stamps::new();
+        let late = stamps.next(2_000);
+        let early = stamps.next(1_000);
+        assert_eq!(early, late + 1);
     }
 
     #[test]

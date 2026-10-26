@@ -181,3 +181,26 @@ A run by another agent on the shared host, at load 12.5, measured 83 ns for the 
 
 Nothing reads the handle unless a node does, so a request that no such node handles pays nothing.
 
+## Request ids
+
+`RequestId::mint` makes a UUID v7: one read of the coarse wall clock, one `fetch_add` on the process's stamp (a `fetch_max` too, about once a millisecond), and a step of a per-thread random generator. It takes no lock and allocates nothing. The id it replaced was a `fetch_add` on a counter and a SipHash of it. `mint` times one thread. `mint_contended` is the wall time per id while eight threads mint at once, all from the one stamp:
+
+```bash
+cargo bench -p gdl --bench mint -- 'request_id/' --warm-up-time 1 --measurement-time 3
+```
+
+On the quiet host gb300 (Neoverse-V2), pinned to core 9, load average 2 to 3.4, rustc 1.93.1, base `8ba0a29`, change `e01f0d5`, three runs each:
+
+| Measure | Base | Change |
+|---|---|---|
+| `request_id/mint` | 17.6 ns, 17.7 ns, 17.7 ns | 15.4 ns, 15.7 ns, 15.5 ns |
+| `request_id/mint_contended` | 14.1 ns, 14.1 ns, 14.1 ns | 13.1 ns, 13.1 ns, 13.1 ns |
+
+On the shared aarch64 host above (Cortex-X925 and Cortex-A725), load average 13 to 18, two runs each:
+
+| Measure | Base | Change |
+|---|---|---|
+| `request_id/mint` | 14.9 ns, 14.6 ns | 14.2 ns, 14.1 ns |
+| `request_id/mint_contended` | 28.1 ns, 26.8 ns | 26.4 ns, 28.4 ns |
+
+On the same host, the precise wall clock (`SystemTime::now`) costs 23 to 30 ns a read, and the coarse one (`CLOCK_REALTIME_COARSE`) 6 ns. With the precise clock, `mint` took 37.6 ns. The stamp must have its own cache line: when it shared one with the pointer the clock read loads, `mint_contended` took 46 ns.

@@ -4,6 +4,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 
 ## Requests
 
+### A process that forks without exec repeats request ids
+- **What:** after a fork, the parent and the child can mint the same request ids.
+- **When:** a process forks without `exec`, and both processes mint on the thread that forked. gdl itself forks only through `std::process::Command`, which runs `exec`.
+- **Why:** the child copies the process's stamp and the thread's random state, or the random hash keys that seed it. Finding out that a fork happened costs a `getpid` system call on each mint, or an `unsafe` fork handler. See [Requests, attempts, and deadlines](../concepts/requests.md#the-request-id).
+- **Workaround:** `exec` after the fork. Forking before the first mint is not enough: the child can still copy the thread's random hash keys that seed the generator.
+
 ### A cancel does not reach a remote forward node mid-transform
 - **What:** a forward node in another segment keeps working on a cancelled request until it finishes or the request deadline passes. Its onward send then finds the reply gone, and the next stage stops.
 - **When:** the cancel arrives while the node is inside `forward`, before it hands its output on.

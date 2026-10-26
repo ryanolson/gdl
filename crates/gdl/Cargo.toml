@@ -25,12 +25,18 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 
+# The request id's clock: the kernel's coarse wall clock, read safely.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+rustix = { workspace = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 trybuild = { workspace = true }
+# Parses the request id as a UUID in tests, independently of how it is minted.
+uuid = { workspace = true }
 
 [[bench]]
 name = "projection"
@@ -38,6 +44,10 @@ harness = false
 
 [[bench]]
 name = "followed"
+harness = false
+
+[[bench]]
+name = "mint"
 harness = false
 
 [lints]
