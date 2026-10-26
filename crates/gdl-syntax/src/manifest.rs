@@ -8,6 +8,13 @@ use syn::Type;
 use crate::model::{Graph, identifier, message_name};
 use crate::parse::Request;
 
+/// A message's path (`crate::module::Name`, without `r#`) as a graph
+/// file's manifest spells it: `:: crate :: module :: Name`.
+pub fn spelled(path: &str) -> String {
+    let parts: Vec<String> = path.split("::").map(identifier).collect();
+    format!(":: {}", parts.join(" :: "))
+}
+
 impl Graph {
     /// The manifest of a graph file's contract. `resolve` gives each message
     /// name's path (`crate::module::Name`, without `r#`), wire capability,
@@ -26,8 +33,7 @@ impl Graph {
                 Ok(Some(name)) => {
                     let mut info = resolve(&name)
                         .ok_or_else(|| format!("message `{name}` is not resolved"))?;
-                    let spelled: Vec<String> = info.name.split("::").map(identifier).collect();
-                    info.name = format!(":: {}", spelled.join(" :: "));
+                    info.name = spelled(&info.name);
                     Ok(info)
                 }
                 Err(()) => Err("a graph file names a message, or `()`, at each position".into()),

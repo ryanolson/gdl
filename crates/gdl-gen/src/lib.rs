@@ -154,7 +154,8 @@ fn bound<'s>(
 ) -> Result<std::borrow::Cow<'s, Spec>, Error> {
     let mut spec = bound_nodes(spec, prepared, target, from)?;
     if !spec.cell_policies.is_empty() {
-        let problems = policies::resolve(&spec, target, from);
+        let resolution = prepared.graph.as_ref().map(|(_, resolution)| resolution);
+        let problems = policies::resolve(&spec, target, from, &prepared.manifest, resolution);
         spec.to_mut().problems.extend(problems);
     }
     Ok(spec)

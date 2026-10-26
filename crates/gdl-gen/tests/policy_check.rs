@@ -987,3 +987,403 @@ impl ::gdl::Build for ByModel {
         "check ignores the gdl module imported by an unrelated dependency's glob and accepts the unrelated CellPolicy trait"
     );
 }
+
+/// The fixture's policy reads the message that crosses into its class.
+#[test]
+fn check_accepts_the_policy_fixture() {
+    let spec = spec(&fixture().join("router"));
+    gdl_gen::check(&spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read)
+        .expect("the fixture's policy reads `Ask`, which crosses into `model`");
+}
+
+/// What check says of the fixture with its policy's source replaced by
+/// `policy`: `None` when it accepts the spec.
+fn head_check(policy: &str) -> Option<String> {
+    let source = format!(
+        r#"
+pub struct ByModel;
+
+impl gdl::Build for ByModel {{
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {{
+        Ok(Self)
+    }}
+}}
+
+{policy}
+"#
+    );
+    let router = router(&source);
+    let spec = spec(router.path());
+    gdl_gen::check(&spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read)
+        .err()
+        .map(|error| error.to_string())
+}
+
+/// A policy whose `Head` is another message than the one that crosses into
+/// its class fails the chooser's start, so check refuses it, and names the
+/// policy, the class, and both messages.
+#[test]
+fn check_refuses_a_policy_that_reads_another_message() {
+    let refused = head_check(
+        r#"
+impl gdl::CellPolicy for ByModel {
+    type Head = policy_messages::Answer;
+
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    }
+}
+"#,
+    )
+    .expect("check accepts a policy that reads `Answer` where `Ask` crosses");
+    for named in [
+        "by_model",
+        "`model`",
+        "policy_messages::Ask",
+        "policy_messages::Answer",
+    ] {
+        assert!(refused.contains(named), "{named}: {refused}");
+    }
+}
+
+/// A message of the same name in another crate is another message.
+#[test]
+fn check_refuses_a_policy_that_reads_a_message_of_the_same_name() {
+    let refused = head_check(
+        r#"
+#[derive(serde::Deserialize, gdl::Message)]
+pub struct Ask {
+    pub model: String,
+}
+
+impl gdl::CellPolicy for ByModel {
+    type Head = Ask;
+
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    }
+}
+"#,
+    )
+    .expect("check accepts a policy that reads another crate's `Ask`");
+    for named in ["by_model", "policy_router::Ask", "policy_messages::Ask"] {
+        assert!(refused.contains(named), "{named}: {refused}");
+    }
+}
+
+/// A policy that reads no head (`()`) needs a request of `()`.
+#[test]
+fn check_refuses_a_policy_that_reads_unit_where_a_message_crosses() {
+    let refused = head_check(
+        r#"
+impl gdl::CellPolicy for ByModel {
+    type Head = ();
+
+    fn choose(&self, _: gdl::CellRequest<'_, ()>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    }
+}
+"#,
+    )
+    .expect("check accepts a policy that reads `()` where `Ask` crosses");
+    for named in ["by_model", "`()`", "policy_messages::Ask"] {
+        assert!(refused.contains(named), "{named}: {refused}");
+    }
+}
+
+/// A projection fits the edge whose message is its `Of`, and no other.
+#[test]
+fn check_matches_a_projection_by_the_message_it_is_part_of() {
+    let projected = |of: &str| {
+        head_check(&format!(
+            r#"
+#[derive(serde::Deserialize, gdl::Projection)]
+#[gdl(of = policy_messages::{of})]
+pub struct Part {{
+    pub text: String,
+}}
+
+impl gdl::CellPolicy for ByModel {{
+    type Head = gdl::Projected<Part>;
+
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {{
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    }}
+}}
+"#
+        ))
+    };
+    if let Some(refused) = projected("Ask") {
+        panic!("check refuses a projection of the crossing's message: {refused}");
+    }
+    let refused =
+        projected("Answer").expect("check accepts a projection of `Answer` where `Ask` crosses");
+    for named in [
+        "by_model",
+        "policy_router::Part",
+        "policy_messages::Ask",
+        "policy_messages::Answer",
+    ] {
+        assert!(refused.contains(named), "{named}: {refused}");
+    }
+}
+
+/// `Encoded` reads the bytes of any head.
+#[test]
+fn check_accepts_an_encoded_head_on_any_edge() {
+    if let Some(refused) = head_check(
+        r#"
+impl gdl::CellPolicy for ByModel {
+    type Head = gdl::Encoded;
+
+    fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    }
+}
+"#,
+    ) {
+        panic!("check refuses an `Encoded` head: {refused}");
+    }
+}
+
+/// A projection reads fields by name, which `msgpack_array` does not
+/// carry, so check refuses it on such an edge, as the chooser's start does.
+#[test]
+fn check_refuses_a_projection_on_a_positional_edge() {
+    let router = router(
+        r#"
+#[derive(serde::Serialize, serde::Deserialize, gdl::Message)]
+#[gdl(codec = "msgpack_array")]
+pub struct Packed {
+    pub model: String,
+}
+
+#[derive(serde::Deserialize, gdl::Projection)]
+#[gdl(of = Packed)]
+pub struct Part {
+    pub model: String,
+}
+
+pub struct ByModel;
+
+impl gdl::Build for ByModel {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
+        Ok(Self)
+    }
+}
+
+impl gdl::CellPolicy for ByModel {
+    type Head = gdl::Projected<Part>;
+
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    }
+}
+
+#[derive(gdl::Node)]
+pub struct Model;
+
+impl gdl::Build for Model {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> {
+        Ok(Self)
+    }
+}
+
+impl gdl::Sink for Model {
+    type Req = Packed;
+    type Item = policy_messages::Answer;
+
+    async fn generate(&self, _: gdl::Cx, _: Packed) -> gdl::Result<gdl::Items<Self::Item>> {
+        Err(gdl::Error::node("fixture"))
+    }
+}
+"#,
+    );
+    let mut text: toml::Table = std::fs::read_to_string(fixture().join("gdl.toml"))
+        .expect("spec")
+        .parse()
+        .expect("spec table");
+    let path = toml::Value::String(router.path().display().to_string());
+    text["messages"]["crates"] = vec![toml::Value::String("messages".into()), path.clone()].into();
+    text["nodes"]["crates"] = vec![path.clone()].into();
+    text["cell_policy"]["by_model"]["path"] = path;
+    let graph = std::fs::read_to_string(fixture().join("policy.gdl"))
+        .expect("graph")
+        .replace("Ask", "Packed");
+    let spec = gdl_gen::Spec::from_text(
+        &toml::to_string(&text).expect("spec text"),
+        &graph,
+        &fixture(),
+    )
+    .expect("spec");
+    let refused = gdl_gen::check(&spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read)
+        .expect_err("check accepts a projection on an edge encoded as `msgpack_array`")
+        .to_string();
+    for named in ["by_model", "`model`", "msgpack_array"] {
+        assert!(refused.contains(named), "{named}: {refused}");
+    }
+}
+
+/// A node crate of the chooser enables a feature of the policy's crate
+/// that changes its `Head`. The reader reads the policy's crate with its
+/// own workspace's features, so check compares the other `Head`: a
+/// documented limitation, kept here as its failing case. The proof builds
+/// a node binary to observe the chooser's unified features.
+#[test]
+#[ignore = "known limitation: the policy's crate is read without the chooser's unified features (\"The reader takes each crate's features from its own workspace\" in docs/src/operations/limitations.md)"]
+fn check_accepts_the_head_enabled_by_the_choosers_node_dependency() {
+    let router = router(
+        r#"
+pub struct ByModel;
+
+impl gdl::Build for ByModel {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> { Ok(Self) }
+}
+
+#[cfg(feature = "matching")]
+impl gdl::CellPolicy for ByModel {
+    type Head = policy_messages::Ask;
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Option<gdl::CellChoice> { None }
+}
+
+#[cfg(not(feature = "matching"))]
+impl gdl::CellPolicy for ByModel {
+    type Head = policy_messages::Answer;
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Option<gdl::CellChoice> { None }
+}
+"#,
+    );
+    let router_manifest = router.path().join("Cargo.toml");
+    let mut manifest = std::fs::read_to_string(&router_manifest).expect("manifest");
+    manifest.push_str("\n[features]\nmatching = []\n");
+    std::fs::write(&router_manifest, manifest).expect("features");
+
+    let nodes = tempfile::Builder::new()
+        .prefix("gdl-policy-features-")
+        .tempdir()
+        .expect("scratch");
+    std::fs::create_dir(nodes.path().join("src")).expect("source directory");
+    let mut manifest: toml::Table = std::fs::read_to_string(fixture().join("nodes/Cargo.toml"))
+        .expect("nodes manifest")
+        .parse()
+        .expect("manifest table");
+    let path = |path: PathBuf| toml::Value::String(path.display().to_string());
+    manifest.insert("workspace".into(), toml::Table::new().into());
+    manifest["dependencies"]["gdl"]["path"] = path(root().join("crates/gdl"));
+    manifest["dependencies"]["policy-messages"]["path"] = path(fixture().join("messages"));
+    manifest["dependencies"]
+        .as_table_mut()
+        .expect("dependencies")
+        .insert(
+            "policy-router".into(),
+            toml::Table::from_iter([
+                ("path".into(), path(router.path().to_path_buf())),
+                (
+                    "features".into(),
+                    vec![toml::Value::String("matching".into())].into(),
+                ),
+            ])
+            .into(),
+        );
+    std::fs::write(
+        nodes.path().join("Cargo.toml"),
+        toml::to_string(&manifest).expect("manifest text"),
+    )
+    .expect("manifest");
+    let mut source =
+        std::fs::read_to_string(fixture().join("nodes/src/lib.rs")).expect("node source");
+    source.push_str(
+        r#"
+#[derive(gdl::Node)]
+pub struct Stamp;
+impl gdl::Build for Stamp {
+    type Config = std::collections::BTreeMap<String, String>;
+    type Metrics = ();
+    async fn build(_: Self::Config, (): ()) -> gdl::Result<Self> { Ok(Self) }
+}
+impl gdl::Forward for Stamp {
+    type In = Ask;
+    type Out = Ask;
+    async fn forward(&self, _: &gdl::Cx, request: Ask) -> gdl::Result<Ask> { Ok(request) }
+}
+"#,
+    );
+    std::fs::write(nodes.path().join("src/lib.rs"), source).expect("node source");
+    std::fs::write(
+        nodes.path().join("src/main.rs"),
+        r#"
+use gdl::__runtime::{ErasedPolicy, TypedPolicy};
+fn main() {
+    let policy = TypedPolicy(std::sync::Arc::new(policy_router::ByModel));
+    let (wanted, _) = policy.edge().expect("typed policy");
+    assert_eq!(wanted, std::any::TypeId::of::<policy_messages::Ask>());
+    assert!(!policy.by_name());
+    println!("the compiled policy reads Ask, which the crossing carries");
+}
+"#,
+    )
+    .expect("runtime type proof");
+    std::fs::copy(root().join("Cargo.lock"), nodes.path().join("Cargo.lock")).expect("lockfile");
+    let proof = Command::new("timeout")
+        .args(["120", "cargo", "run", "--offline", "--manifest-path"])
+        .arg(nodes.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", target("policy-proof"))
+        .output()
+        .expect("compiled type proof");
+    assert!(
+        proof.status.success(),
+        "{}",
+        String::from_utf8_lossy(&proof.stderr)
+    );
+    eprintln!("{}", String::from_utf8_lossy(&proof.stdout));
+
+    let mut text: toml::Table = std::fs::read_to_string(fixture().join("gdl.toml"))
+        .expect("spec")
+        .parse()
+        .expect("spec table");
+    text["nodes"]["crates"] = vec![path(nodes.path().to_path_buf())].into();
+    text["cell_policy"]["by_model"]["path"] = path(router.path().to_path_buf());
+    text["segment"]["front"]["nodes"] = vec![
+        toml::Value::String("Front".into()),
+        toml::Value::String("Stamp".into()),
+    ]
+    .into();
+    let graph = r#"
+name = "policy", schema = 1;
+source Front: Ask -> stream Answer;
+forward Stamp: Ask -> Ask;
+sink Model: Ask -> stream Answer;
+topology: Front => Stamp => Model;
+"#;
+    let spec = gdl_gen::Spec::from_text(
+        &toml::to_string(&text).expect("spec text"),
+        graph,
+        &fixture(),
+    )
+    .expect("spec");
+    let checked = gdl_gen::check(&spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read)
+        .err()
+        .map(|error| error.to_string());
+    let generated = gdl_gen::render(
+        &spec,
+        &nodes.path().join("generated"),
+        &target("gdl-gen-tests"),
+    )
+    .err()
+    .map(|error| error.to_string());
+    assert!(
+        checked.is_none() && generated.is_none(),
+        "the compiled policy fits the crossing, but check and generate refuse it:\ncheck: {checked:?}\ngenerate: {generated:?}"
+    );
+}

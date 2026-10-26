@@ -40,6 +40,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** a spec's `[cell_policy.<name>]` table names its crate by `path`, not by a version or a Git revision. `cargo gdl compose` refuses the spec without `--local`, and `cargo gdl export` writes an archive that builds only on the machine that wrote it. See [Write a cell policy](../guides/write-a-cell-policy.md).
 - **Lifts:** the forms that `[nodes] crates` takes, in the table.
 
+### A contract spec's bound cell policy is checked against its crossing only at start
+- **What:** `cargo gdl check` compares a bound cell policy's `Head` with the request that crosses into its class only for a spec with a `[graph]` file. For a spec with a `[contract]` crate, a `Head` that does not fit passes check, and the chooser refuses to start. See [Write a cell policy](../guides/write-a-cell-policy.md#4-bind-it-in-the-spec).
+- **Why:** check knows a contract's messages only by how the contract spells them, not by the package that defines them, so it cannot tell two messages of the same name apart.
+- **Workaround:** start the chooser once in a test, or describe the graph in a graph file.
+
 ### The reader finds a cell policy only where it can follow the trait's path
 - **What:** `cargo gdl check` takes a type as a cell policy only when the source reader follows the path of its impl's trait, through `use`s, renames, and globs, to gdl's `CellPolicy`. It does not see an impl that a macro writes, and it enters only packages that depend on gdl. A policy it cannot find is refused with "implements no cell policy", although the crate builds. A name `gdl` that a module or a glob of a crate without gdl binds (`use helper::routing as gdl`, or `use helper::*` where `helper` has a module `gdl`) hides the gdl crate, but the reader does not see that binding: check accepts the trait it finds through it, and the chooser's build fails with `E0277`.
 - **Workaround:** write the impl by hand, name the trait through `gdl` or a crate that depends on it, and give no other item the name `gdl`.
@@ -220,6 +225,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Features:** the reader takes `cargo metadata`, which unifies a package's features across dependency kinds, so a feature that only a build dependency enables counts as enabled for the library. Separating them would copy Cargo's feature resolver. `--verify` reports any difference.
 - **`gdl-message` from git:** `--verify` takes `gdl-message` by version from crates.io unless the crate takes it by path, so a crate that takes it from git fails with "no matching package named `gdl-message` found".
 - **Earlier `gdl-message` pin:** for a crate that exports a message and pins a `gdl-message` whose export entries lack `wire` and `encoding`, `--verify` stops at "reading the crate's registrations" with a missing field `wire`. The program `--verify` builds links the crate's own `gdl-message`, and a default for either field would show as a difference, not a match. Run `--verify` with a `cargo-gdl` of the same revision as the crate's `gdl-message`, or move the pin.
+
+### The reader takes each crate's features from its own workspace
+- **What:** `cargo gdl check` and `generate` read each node crate, and each bound cell policy's crate, with the features that its own workspace enables. A segment's build unifies the features of all its crates. When another crate of the segment enables a feature that changes a node's port type or a policy's `Head`, check compares the type the crate has alone. It can then refuse a spec that builds and runs, or accept one whose segment fails to build (a node) or whose chooser refuses to start (a policy).
+- **Why:** a graph spec compiles nothing, and the segment's feature set exists only once its crates are resolved together. Resolving it would copy Cargo's feature resolver.
+- **Workaround:** do not make a port type or a `Head` depend on a feature, or enable the feature in the crate's own `default` features.
+- **Test:** `check_accepts_the_head_enabled_by_the_choosers_node_dependency` in `crates/gdl-gen/tests/policy_check.rs`.
 
 ### Some source shapes cost the reader more than linear time, and macOS lacks the memory limit
 - **What:** resolution repeats, for each query, the chain of `use` path segments or globs it follows. N resolutions through a K-segment path, or past K globs, cost N times K.

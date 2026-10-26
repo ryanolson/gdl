@@ -39,7 +39,7 @@ struct Hinted {
 
 `#[gdl(of = ...)]` names the edge type. A projection is always derived, and the derive checks that the edge type has each field, under its name and of its exact type. A field that the edge type lacks does not build, and the error names it. The derive reads each field through the edge type, so the edge type's fields must be visible where the projection is: `pub` when the edge type is in another crate.
 
-The derive refuses `#[serde(deny_unknown_fields)]` on a projection, which skips the edge type's other fields, and `#[serde(alias)]` on its fields. The policy's registration compares the field names that each type's `Deserialize` reads, which serde's `rename` and `rename_all` change. It refuses a projection field whose name the edge type does not read, and names the field. [Known limitations](../operations/limitations.md#a-projection-is-not-checked-against-what-its-edge-type-writes) lists what passes this check. The segment refuses to start when the edge carries another type than `Of`, or when the edge is encoded as `msgpack_array`, which has no field names. [Runtime feature costs](../operations/feature-costs.md#cell-policies) measures what a projection saves.
+The derive refuses `#[serde(deny_unknown_fields)]` on a projection, which skips the edge type's other fields, and `#[serde(alias)]` on its fields. The policy's registration compares the field names that each type's `Deserialize` reads, which serde's `rename` and `rename_all` change. It refuses a projection field whose name the edge type does not read, and names the field. [Known limitations](../operations/limitations.md#a-projection-is-not-checked-against-what-its-edge-type-writes) lists what passes this check. The segment refuses to start when the edge carries another type than `Of`, or when the edge is encoded as `msgpack_array`, which has no field names. `cargo gdl check` refuses a [bound](#4-bind-it-in-the-spec) policy in both cases. [Runtime feature costs](../operations/feature-costs.md#cell-policies) measures what a projection saves.
 
 ## 2. Implement `gdl::CellPolicy`
 
@@ -180,6 +180,7 @@ type = "router::ByModel"
 ```
 
 - `cargo gdl check` reads the crate and refuses a type that the crate does not offer as a cell policy. Write the type from the crate's root, as `router::ByModel`, and make it reachable there.
+- `cargo gdl check` compares the policy's `Head` with the request that crosses into each class that names it, as the chooser does when it starts. A message must be the edge's message, and a projection's `Of` must be too: the same type from the same package, not one of the same name. `()` fits only a request of `()`, and `Encoded` fits any. A projection on an edge encoded as `msgpack_array` is refused. A spec with a `[contract]` crate is not checked this way.
 - Each segment that chooses cells of a class named `by_model` in `[cells.<class>] policy` depends on the crate. No other segment does.
 - That segment builds the policy from the `[cell_policy.by_model]` table of its settings file, or `GDL_CELL_POLICY__BY_MODEL__<KEY>` variables. A table for a policy that the segment does not register stops it at start.
 - The segment waits for the policy's `ready` before it registers it, so before the instance announces itself to its peers.

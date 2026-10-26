@@ -4,7 +4,7 @@
 //! whose `[cells.<class>] policy` a table binds builds that policy from its
 //! settings and registers it; no other segment depends on the crate.
 
-use gdl_extract::Offer;
+use gdl_extract::{Offer, Origin, PolicyEntry, PolicyHead};
 
 use crate::Offers;
 use crate::spec::{Bind, ListedCrate, Spec};
@@ -92,9 +92,18 @@ pub(crate) fn problems(
 }
 
 /// What is wrong with each `[cell_policy.<name>]` table whose crate the
-/// reader can reach: a crate it cannot read, and a type that is not a cell
-/// policy the crate offers. Offers come from `from`, as a node crate's do.
-pub(crate) fn resolve(spec: &Spec, target: &std::path::Path, from: Offers<'_>) -> Vec<String> {
+/// reader can reach: a crate it cannot read, a type that is not a cell
+/// policy the crate offers, and a policy whose `Head` does not fit a
+/// request that crosses into a class that names it. Offers come from
+/// `from`, as a node crate's do. The heads are checked only where
+/// `resolution` gives the graph's messages their identity: a graph file's.
+pub(crate) fn resolve(
+    spec: &Spec,
+    target: &std::path::Path,
+    from: Offers<'_>,
+    manifest: &gdl_model::Manifest,
+    resolution: Option<&crate::Resolution>,
+) -> Vec<String> {
     let mut problems = Vec::new();
     for (name, bind) in &spec.cell_policies {
         let at = format!("[cell_policy.{name}]");
@@ -114,8 +123,19 @@ pub(crate) fn resolve(spec: &Spec, target: &std::path::Path, from: Offers<'_>) -
         };
         match crate::offers(std::slice::from_ref(&listed), target, from) {
             Ok(offers) => {
-                if let Some(problem) = offers.first().and_then(|offer| missing(offer, bind)) {
-                    problems.push(format!("{at}: {problem}"));
+                let Some(offer) = offers.first() else {
+                    continue;
+                };
+                match offered(offer, bind) {
+                    Err(problem) => problems.push(format!("{at}: {problem}")),
+                    Ok(policy) => problems.extend(
+                        resolution
+                            .into_iter()
+                            .flat_map(|resolution| {
+                                misfits(spec, manifest, resolution, name, &policy.head)
+                            })
+                            .map(|problem| format!("{at}: {problem}")),
+                    ),
                 }
             }
             Err(error) => problems.extend(
@@ -129,31 +149,31 @@ pub(crate) fn resolve(spec: &Spec, target: &std::path::Path, from: Offers<'_>) -
     problems
 }
 
-/// Why `offer` holds no cell policy for `bind`'s type, if it does not. The
-/// reader offers a policy only where the crate root reaches it by its
+/// The cell policy `offer` holds for `bind`'s type, or why it holds none.
+/// The reader offers a policy only where the crate root reaches it by its
 /// name, so the type must be written as that path: the crate, then the
 /// name.
-fn missing(offer: &Offer, bind: &Bind) -> Option<String> {
+fn offered<'o>(offer: &'o Offer, bind: &Bind) -> Result<&'o PolicyEntry, String> {
     let unraw = |path: &str| path.trim().trim_start_matches("::").replace("r#", "");
     let written = unraw(&bind.ty);
     let at_root = |name: &str| format!("{}::{name}", unraw(&bind.lib));
     let name = written.rsplit("::").next().unwrap_or_default().to_string();
-    if offer
+    if let Some(policy) = offer
         .policies
         .iter()
-        .any(|policy| at_root(&policy.name) == written)
+        .find(|policy| at_root(&policy.name) == written)
     {
-        return None;
+        return Ok(policy);
     }
     if offer.policies.iter().any(|policy| policy.name == name) {
-        return Some(format!(
+        return Err(format!(
             "crate `{}` offers cell policy `{name}` at `{}`; write that path",
             offer.package,
             at_root(&name)
         ));
     }
     if let Some(skipped) = offer.skipped_policies.iter().find(|s| s.name == name) {
-        return Some(format!(
+        return Err(format!(
             "crate `{}` leaves `{name}` out: {}",
             offer.package, skipped.problem
         ));
@@ -163,7 +183,7 @@ fn missing(offer: &Offer, bind: &Bind) -> Option<String> {
         .iter()
         .map(|policy| format!("`{}`", policy.name))
         .collect();
-    Some(format!(
+    Err(format!(
         "crate `{}` implements no cell policy `{name}`; {}",
         offer.package,
         match offered.as_slice() {
@@ -171,4 +191,108 @@ fn missing(offer: &Offer, bind: &Bind) -> Option<String> {
             _ => format!("it implements {}", offered.join(", ")),
         }
     ))
+}
+
+/// Why policy `name`, which reads `head`, does not fit a request that
+/// crosses into a class that names it, in any layout of `spec`: the
+/// checks a chooser makes when it starts. The crossing's request is the
+/// last forward edge of its hop, since a hop crosses classes only at its
+/// inner end. Each problem is given once, however many layouts find it.
+fn misfits(
+    spec: &Spec,
+    manifest: &gdl_model::Manifest,
+    resolution: &crate::Resolution,
+    name: &str,
+    head: &PolicyHead,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    // A layout that does not fit its graph is refused for what it is.
+    for layout in spec
+        .layouts()
+        .filter_map(|laid| gdl_model::layout(manifest, laid.placement).ok())
+    {
+        for boundary in layout.boundaries() {
+            if layout
+                .cell_policy(&boundary.into)
+                .is_none_or(|policy| policy.policy != name)
+            {
+                continue;
+            }
+            let Some(edge) = manifest.hops[boundary.hop].forward_types.last() else {
+                continue;
+            };
+            let Some(problem) = misfit(resolution, edge, head) else {
+                continue;
+            };
+            let problem = format!(
+                "cell policy `{name}` of class `{}` {problem}",
+                boundary.into
+            );
+            if !problems.contains(&problem) {
+                problems.push(problem);
+            }
+        }
+    }
+    problems
+}
+
+/// Why `head` cannot be read from a request of `edge`, if it cannot: a
+/// message or a projection's `Of` that is not the edge's message, by
+/// identity, `()` where a message crosses or the reverse, and a
+/// projection, which reads fields by name, on an edge encoded as
+/// `msgpack_array`. `Encoded` reads any head.
+fn misfit(
+    resolution: &crate::Resolution,
+    edge: &gdl_model::TypeInfo,
+    head: &PolicyHead,
+) -> Option<String> {
+    // `None` for `()`; an edge whose message the resolution does not hold
+    // is not judged.
+    let carried: Option<&Origin> = match edge.name.as_str() {
+        "()" => None,
+        path => Some(
+            &resolution
+                .messages
+                .values()
+                .find(|message| gdl_syntax::spelled(&message.path) == path)?
+                .origin,
+        ),
+    };
+    let (read, by_name): (Option<&Origin>, bool) = match head {
+        PolicyHead::Encoded => return None,
+        PolicyHead::Unit => (None, false),
+        PolicyHead::Message(origin) => (Some(origin), false),
+        PolicyHead::Projected { of, .. } => (Some(of), true),
+    };
+    let reads = |shown: &str| match head {
+        PolicyHead::Projected { projection, .. } => {
+            format!("reads `{projection}`, a part of {shown}")
+        }
+        _ => format!("reads the head as {shown}"),
+    };
+    if read != carried {
+        let (reads_shown, carried_shown) = match (read, carried) {
+            (Some(read), Some(carried)) => {
+                let [a, b]: [String; 2] = Origin::shown_apart(&[read, carried])
+                    .try_into()
+                    .expect("one name for each origin");
+                (a, b)
+            }
+            (read, carried) => (
+                read.map_or("`()`".into(), Origin::shown),
+                carried.map_or("`()`".into(), Origin::shown),
+            ),
+        };
+        return Some(format!(
+            "{}, but the request that crosses into it carries {carried_shown}",
+            reads(&reads_shown)
+        ));
+    }
+    if by_name && edge.encoding == gdl_model::Encoding::MsgpackArray {
+        return Some(format!(
+            "{}, by the names of its fields, but the request that crosses into it is encoded as `msgpack_array`, which carries no names",
+            reads(&read.map_or("`()`".into(), Origin::shown))
+        ));
+    }
+    None
 }
