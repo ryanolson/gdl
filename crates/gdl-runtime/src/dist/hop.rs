@@ -11,7 +11,7 @@ use futures::{Future, Stream, StreamExt};
 use super::admission::{EgressPermit, Share};
 use super::envelope::{Accepted, Forward, Open, VERSION, WireCx};
 use super::fabric::{Canceller, Frame, Inbound, Outbound, Outgoing, ReplyTo, Retirer};
-use super::offers::Refused;
+use super::offers::{Refusal, Refused};
 use super::runtime::{Entries, Handed, Held, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use gdl::__runtime as meter;
@@ -745,9 +745,10 @@ where
         }
         let (cx, share, egress) = match self.admit(&mut envelope).await {
             Ok(admitted) => admitted,
-            Err(error) => {
+            Err(Refusal { error, decline }) => {
                 return Err(Refused {
                     error,
+                    decline,
                     envelope: Box::new(envelope),
                 });
             }
@@ -910,7 +911,10 @@ where
     /// a draining cell's entry, and egress. Takes `envelope`'s context,
     /// and leaves the rest of it, so that a refused envelope goes back
     /// whole but for that.
-    async fn admit(&self, envelope: &mut Forward) -> Result<(Cx, Share, Option<EgressPermit>)> {
+    async fn admit(
+        &self,
+        envelope: &mut Forward,
+    ) -> std::result::Result<(Cx, Share, Option<EgressPermit>), Refusal> {
         let rt = &self.rt;
         let pos = usize::from(envelope.pos);
         rt.check_identity(envelope.version, envelope.identity)?;
@@ -919,13 +923,24 @@ where
         let wire = std::mem::take(&mut envelope.cx);
         let root = wire.root();
         let cx = wire.arrive(rt.config.clock_skew, || rt.wall_now())?;
-        let share = setup(
+        let share = match setup(
             &cx,
             rt.config.setup_timeout,
             "admission",
             rt.admission.admit(root),
         )
-        .await?;
+        .await
+        {
+            Ok(share) => share,
+            // An offer that admission refuses still says that a cell that
+            // declines offers is gone, not full.
+            Err(error) => {
+                if self.offer {
+                    rt.check_offer()?;
+                }
+                return Err(error.into());
+            }
+        };
         // A retiring instance that has closed refuses, releasing the share
         // it just took; so does a draining cell's entry, for an offer.
         rt.check_open()?;

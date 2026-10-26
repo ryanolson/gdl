@@ -369,6 +369,7 @@ impl<R: Registry> Follows<R> {
         for segment in self.wanted.values().flatten() {
             self.store(segment);
         }
+        self.forget_gone(None);
         for follow in follows().filter(|follow| !follow.offers()) {
             follow.leases.unoffer();
             self.poll = Some(now);
@@ -497,7 +498,27 @@ impl<R: Registry> Follows<R> {
         for segment in segments {
             self.store(segment);
         }
+        self.forget_gone(Some(key));
         self.cells.changed();
+    }
+
+    /// Forget the marks as gone of `only`'s cell, or of every cell, whose
+    /// follow changed or is no longer held: one load of the marks, and a
+    /// write only when one is stale.
+    fn forget_gone(&self, only: Option<&Key>) {
+        let follows = &self.followed.follows;
+        let current = |cell: u64| {
+            follows
+                .iter()
+                .find(|(key, _)| super::cell_id(&key.0, &key.1) == cell)
+                .map(|(_, follow)| (follow.generation, follow.changes))
+        };
+        let only = only.map(|key| super::cell_id(&key.0, &key.1));
+        self.cells
+            .damping()
+            .forget_gone(|cell, generation, changes| {
+                only.is_some_and(|id| id != cell) || current(cell) == Some((generation, changes))
+            });
     }
 
     /// Swap `segment`'s table for one of its cells as they are now: a new
@@ -688,6 +709,7 @@ impl Followed {
                 }
                 follow.revision = revision;
                 follow.offered = offered;
+                follow.changes += 1;
                 follow.ack = Ack::None;
                 let leases = Arc::clone(&follow.leases);
                 Some((
@@ -869,6 +891,11 @@ struct Follow {
     /// The revision of the follow's offered state, and the state.
     revision: u64,
     offered: bool,
+    /// How many times the relay changed the follow's state or offered
+    /// state: a cell that declined an offer as gone is passed over until
+    /// this changes. A count, not the state itself, so that a cell that
+    /// left a state and came back to it is not taken as gone again.
+    changes: u64,
     ack: Ack,
     /// Whether the relay sent an event of a kind this build does not know
     /// for the follow, which the follower has not read again since: the
@@ -900,6 +927,7 @@ impl Follow {
             leases: Arc::default(),
             revision: 1,
             offered: true,
+            changes: 0,
             ack: Ack::None,
             unread: false,
         }
@@ -916,6 +944,9 @@ impl Follow {
     /// for an instance hidden when it leaves, and an `exposed` for each
     /// ready one when a state exposes them again.
     fn set_state(&mut self, state: CellState) {
+        if state != self.state {
+            self.changes += 1;
+        }
         self.state = state;
         if !self.exposes() {
             self.hidden.extend(self.exposed.drain());
@@ -962,13 +993,16 @@ impl Follow {
     }
 
     /// Take over what this instance holds of the same follow from `held`,
-    /// as an earlier watch showed it: the turns, the leases, an
+    /// as an earlier watch showed it: the turns, the leases, the count of
+    /// changes, one more, since a snapshot cannot show what changed while
+    /// no watch was open (it shows an offered follow at revision 1), an
     /// acknowledgement of the same revision, and, while the state hides
     /// them, the instances it held that this view neither exposes nor
     /// retires.
     fn carry(&mut self, held: &Follow) {
         self.turns.clone_from(&held.turns);
         self.leases = Arc::clone(&held.leases);
+        self.changes = held.changes + 1;
         if held.revision == self.revision {
             self.ack = held.ack;
         }
@@ -1022,6 +1056,7 @@ impl Follow {
             turn: self.turns.get(segment).map(Arc::clone).unwrap_or_default(),
             offering: self.offers(),
             revision: self.revision,
+            changes: self.changes,
             leases: Arc::clone(&self.leases),
         }
     }

@@ -175,7 +175,7 @@ A registered policy implements `gdl::CellPolicy`. It runs in the chooser, once p
 
 - the request's context, and its head as the policy's `Head` reads it: the edge's type, `gdl::Encoded` bytes, or a `gdl::Projected` part that decodes only the fields it declares;
 - the class's followed cells: each cell's name, region, state, load summary, and number of entry instances;
-- the chooser's region, the clock, the cells that declined this request, and the cells the chooser damps;
+- the chooser's region, the clock, the cells that declined this request, and the cells the chooser damps or holds gone;
 - the attempt's turn, and a random draw made from it when the policy asks.
 
 It returns a choice of one cell, by its index, or a `gdl::NoCell`, which fails the request with `Routing`. A `NoCell` may carry a short reason, such as the model that no cell serves, and the error then gives it after the policy's name, the class, and the entry segment. Only the first attempt's reason reaches the error: a request that a cell declined fails with the last refusal, which names that cell. A choice may carry a lease (`gdl::ChoiceLease`), which learns whether that cell took the request. The runtime calls the lease's `accepted` when the cell accepts the offer, and holds the lease while it holds the request. It drops the lease without telling it when the cell declines, when the offer never left, and when the outcome is unknown. A choice without a lease allocates nothing. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no cell is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`. Its fields are checked against the edge type before the segment starts: their Rust names and types when it builds, and the names each type's `Deserialize` reads when the policy is registered ([Write a cell policy](../guides/write-a-cell-policy.md#1-read-only-what-you-route-by)).
@@ -190,13 +190,26 @@ Under every policy, the chooser damps a cell that declined a request. `round_rob
 
 At most half of the otherwise eligible cells, rounded down, are damped at once. When more are, the cells whose windows end soonest are chosen as if they were not damped. So a lone cell is never damped out.
 
+### A cell that is gone
+
+An entry's refusal says why: its cell is full, or its cell is gone. A full cell is damped, as above. A gone cell is passed over until the relay changes its follow: a new generation, a new state, or a new offered state. Time alone does not end it, and neither does a new load summary. An offer the cell accepts ends it too. A draining cell's entry says gone ([Draining a cell](#draining-a-cell)). So does a segment that declines as gone by its own policy ([A cell's own refusal](#a-cells-own-refusal)). Every other refusal says full: admission or egress full, a retired instance, or a hand-off of another deployment.
+
+- `round_robin` and `home_first` never choose a gone cell, and a gone cell does not count in the cap on damping. So a lone gone cell is not chosen, and a request with no other cell fails with `Routing`, not `Overloaded`.
+- A registered policy sees gone cells through `request.is_excluded(cell)`, which is true for them, and `request.damped().is_gone(cell)`. `choose_where` skips them.
+- The mark holds the follow as the chooser's table shows it when the refusal lands, and only while that table is of the follow the offer was made under. A refusal of an offer made under an earlier generation damps the cell instead. A full refusal that lands after the mark, from an offer made before it, leaves the cell gone. A refusal that read an earlier table never replaces a gone mark of a later one.
+- An entry that declines offers says gone also when admission refuses the offer first.
+- The follower counts the relay's changes to a follow's state and offered state. A cell that leaves a state and comes back to it has changed, so it is not gone again. A new watch of the relay also ends every mark: its snapshot cannot show what changed while no watch was open. Such a cell is offered one more request, and is marked again if it still refuses.
+- `FollowedCell::gone` shows the mark. A node that reads `gdl::FollowedCells` sees a gone cell as it sees a damped one: by its state and entries alone.
+
+The reason crosses in the entry's reply, after the refusal. A build without it reads the refusal and stops there, so it takes every refusal as a full cell's, and so does this build for a reply that carries no reason.
+
 ## A hand-off is an offer
 
 A child cell may decline the hand-off. The chooser then offers the request to another cell in the same call. Nothing of a declined offer is sent again: the entry started no work and holds nothing, and a streamed request's input goes only to the cell that accepts it. A selector's lease and metadata from a declined choice are released before the next choice.
 
 | What happens | Outcome |
 |---|---|
-| The entry answers `Overloaded` before it takes the request: admission or egress refused, or the instance retired | another cell is offered the request |
+| The entry answers `Overloaded` before it takes the request: admission or egress refused, the instance retired, or the cell declines offers (a drain, or its own policy) | another cell is offered the request |
 | The entry answers `Placement`: the hand-off is not of its deployment | another cell is offered the request |
 | velo refuses the send before it leaves: the instance is not registered, or its handshake fails | another cell is offered the request |
 | No answer within the setup timeout, or the send fails after velo took it | the request fails at once with `OutcomeUnknown`; no other cell is offered it |
@@ -224,12 +237,20 @@ Avoiding a retiree promises nothing about hand-offs sent to it before. The insta
 1. The cell is `draining` on its health endpoint, record, and watch. Each parent hub marks its follow not offered at the next revision.
 2. Each entry instance learns of the drain from its own cell's watch. It keeps taking new work, stays ready, and keeps reporting its load for a bound: the setup timeout plus twice `summary_ms`. This lets an offer from a chooser with a stale view land.
 3. The bound ends early when the cell's hub says that no other cell follows it: the cell's watch sends `state` again with `unfollowed: true`. A parent's hub releases the cell only once its follow has closed, so no offer from another cell is still on its way.
-4. Then the entry instance declines offers from other cells, which choosers take as a decline. It finishes the requests it holds and announces that it has drained. It still takes hand-offs inside the cell until every entry instance has drained or left. Then it closes and leaves. It does not retire: the cell's state already keeps choosers away.
+4. Then the entry instance declines offers from other cells as gone. A chooser whose view is stale offers the request to another cell, and offers this cell no more work until the relay changes its follow ([A cell that is gone](#a-cell-that-is-gone)). It finishes the requests it holds and announces that it has drained. It still takes hand-offs inside the cell until every entry instance has drained or left. Then it closes and leaves. It does not retire: the cell's state already keeps choosers away.
 5. An interior instance serves until every entry instance of the cell has drained or left, then drains as after a stop. While its cell drains, the entry instances are its drain sources, whatever stopped it. The sources outside the cell are not members of its hub, so it cannot see them.
 6. Once no instance of the cell's class is a member, the hub writes a last draining record, withdraws it, and ends the cell's watches. From then it refuses every registration with 409. To serve the cell again, start its hub again.
 7. Each parent hub that sees the withdrawal in the directory sends `withdrawn` on its relay, and its choosers keep the cell as withdrawn ([What a node reads](#what-a-node-reads)).
 
 A drain cannot be cancelled.
+
+## A cell's own refusal
+
+A segment can decline offers from other cells by its own policy, before it admits them. The program that runs the segment calls `Segment::decline_offers_as(Decline::Gone)` or `Segment::decline_offers_as(Decline::Full)` on its running segment, and `Segment::take_offers()` to take offers again. It works on an entry segment: the hand-offs inside the cell are still taken. Each offer reads the refusal in the one atomic load it already makes, so the request path gains no allocation and no lock.
+
+- `Decline::Gone` says that this cell takes no work from other cells until its state changes: for example, when it cannot serve the model its class serves. Each chooser that hears it passes the whole cell over, every entry instance of it, until the relay changes its follow. `take_offers` does not bring them back. Call it on every entry instance, for a reason that holds for the cell.
+- `Decline::Full` says that the cell has no room now. Choosers damp the cell, and offer it work again after the window.
+- A drain's refusal (`Segment::decline_offers`) outlasts the segment's own. `decline_offers_as` does not replace it, and `take_offers` does not end it.
 
 ## When a cell fails
 

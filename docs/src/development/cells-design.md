@@ -68,6 +68,15 @@ The chooser tries another cell only when it knows the chosen cell did not take t
 
 The set of cells excluded for a request is a local of one `generate` call in the chooser's process. Failover happens before the call returns. So the set is never on the wire and never in a map keyed by request.
 
+## Full or gone
+
+A chooser damps a full cell for a short window, because room comes back on its own. A draining cell does not take work again. If its refusal only damped it, a chooser with a stale view would offer it a request each time a window ended, until the relay reported the drain. So an entry's refusal says which it is: full or gone.
+
+- **The reason follows the refusal in the reply.** An entry answers with one msgpack value, `Result<Accepted, Error>`, and `rmp_serde` reads one value and leaves the bytes after it. A build without the reason reads the refusal alone, as a full cell's. **Rejected: a third field in `Error`.** `rmp_serde` refuses an array longer than the struct, so a build without the field would read every such answer as a `Codec` error. **Rejected: a new `ErrorKind`.** A build that does not know a kind reads it as `Transport`, which is not a decline, so the request would fail instead of going to another cell.
+- **Gone lasts until the follow changes, not for a time.** The relay is how a chooser learns that a cell's state changed. Until it says so, a chooser that heard "gone" knows nothing newer. **Rejected: a long damping window.** A fixed window either sends a draining cell more refusals, or keeps a cell that came back out of the choice for too long.
+- **The mark counts changes, not states.** A mark that held the state would match again after a cell left the state and came back to it, and keep out a cell whose follow had changed. The follower counts each change of state and of offered state instead, and counts a new watch's snapshot as a change. A snapshot shows an offered follow at revision 1, so it cannot show a state that came and went while no watch was open. **Rejected: keeping the mark when the snapshot matches.** A cell that recovered while the chooser had no watch would stay out until its next change.
+- **Gone is not capped.** Damping keeps a lone cell in the choice, because a full cell can have room a moment later. A gone cell said that it will not take work, so an offer to it costs a round trip and fails.
+
 ## State order and policies
 
 New work goes to `ready` cells first, to `degraded` cells only when no `ready` cell is eligible, and never to `unavailable` cells. `degraded` promises that every segment has a usable instance, but not its quorum.

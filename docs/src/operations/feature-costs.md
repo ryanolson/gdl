@@ -187,6 +187,25 @@ cargo test --release -p gdl-runtime --lib cost_of_no_cell -- --ignored --nocaptu
 
 The error message is built in every case. A reason adds its bytes to the message, and a built reason adds the policy's own allocation, only when no cell is chosen.
 
+### A cell that is gone
+
+A cell that refuses as gone is marked in the chooser's damped list ([A cell that is gone](../concepts/cell-routing.md#a-cell-that-is-gone)). Each policy's pass checks each cell for the mark, which is one branch while no cell is gone, and each `gdl::Cell` view holds its follow's generation and count of changes. An offer still reads one atomic at the entry. A pick allocates nothing with a gone cell in the table (`a_pick_allocates_nothing_under_either_policy`).
+
+On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average about 3.9, three runs each. Base `c06ba698`, change `2ec9d213`:
+
+```bash
+cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
+```
+
+| Measure | Base | Change |
+|---|---|---|
+| pick, `round_robin`, four idle cells | 121.4 to 121.5 ns | 123.1 ns |
+| pick, `home_first`, four idle cells | 159.3 ns | 160.3 ns |
+| accepted first offer over loopback, cells | 27.9 to 31.7 us | 27.6 to 31.0 us |
+| accepted first offer over loopback, roster | 27.3 to 31.7 us | 27.2 to 31.1 us |
+
+A pick costs 1.6 ns more under `round_robin` and 1.0 ns more under `home_first`, the same in every run. Code placement alone moved these picks by up to 1 ns before ([A reason for no cell](#a-reason-for-no-cell)), and this measurement does not split the rest. The offers vary from run to run as before, so they show no change.
+
 ## Reading the followed cells
 
 A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by, then, in the bench, one cell found by name among four and one withdrawal looked up. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`).

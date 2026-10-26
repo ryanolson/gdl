@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::hash::RandomState;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -14,7 +14,7 @@ use super::envelope::{Accepted, Forward, Identity, Open};
 use super::fabric::{Fabric, ReplyTo};
 #[cfg(feature = "hub")]
 use super::offers::Answer;
-use super::offers::{Offer, Refused};
+use super::offers::{Decline, Offer, Refusal, Refused};
 use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
 use gdl::__runtime::{Erased, Lease};
@@ -369,9 +369,12 @@ pub(crate) struct Runtime {
     random: RandomState,
     /// Set once a retiring instance stops taking hand-offs and openings.
     closed: AtomicBool,
-    /// Set once an entry instance of a draining cell stops taking offers,
-    /// the hand-offs from another class.
-    offers_declined: AtomicBool,
+    /// Why the instance declines offers, the hand-offs from another
+    /// class, if it does: [`DRAINED`] once an entry instance of a
+    /// draining cell stops taking them, which nothing undoes, and the
+    /// segment's own refusal ([`Runtime::decline_offers_as`]) in the bits
+    /// below it. One byte, so that an offer reads both in one load.
+    declining: AtomicU8,
     /// Whether each hop's hand-offs to this segment are offers, worked out
     /// once.
     offers: Vec<bool>,
@@ -385,6 +388,13 @@ pub(crate) struct Runtime {
     /// records them.
     pub(crate) meters: Option<Meters>,
 }
+
+/// [`Runtime::declining`]: a drain declines offers, as gone.
+const DRAINED: u8 = 0b100;
+/// The segment's own refusal, as gone.
+const GONE: u8 = 0b010;
+/// The segment's own refusal, as full.
+const FULL: u8 = 0b001;
 
 /// Velo handler names for one deployment.
 pub(crate) struct Names {
@@ -450,7 +460,7 @@ impl Runtime {
             crossings,
             random: RandomState::new(),
             closed: AtomicBool::new(false),
-            offers_declined: AtomicBool::new(false),
+            declining: AtomicU8::new(0),
             offers,
             names: Names {
                 forward: format!("gdl-fwd-{tag}"),
@@ -491,30 +501,77 @@ impl Runtime {
         Ok(())
     }
 
-    /// Refuse every offer admitted from now on: a forward hand-off on a
-    /// hop that crosses into this segment's class, which only another
-    /// class's instances send. The hand-offs inside the class, which carry
-    /// the requests already taken, are still taken. Ordered with the
-    /// ledger as [`Runtime::close`] is.
+    /// Refuse every offer admitted from now on, for good, saying that the
+    /// cell is gone: a forward hand-off on a hop that crosses into this
+    /// segment's class, which only another class's instances send. The
+    /// hand-offs inside the class, which carry the requests already taken,
+    /// are still taken. Ordered with the ledger as [`Runtime::close`] is.
     pub(crate) fn decline_offers(&self) {
-        self.offers_declined.store(true, Ordering::SeqCst);
+        self.declining.fetch_or(DRAINED, Ordering::SeqCst);
     }
 
-    /// Whether the instance declines offers.
+    /// Refuse every offer admitted from now on, by the segment's own
+    /// policy, for `decline`, until [`Runtime::take_offers`]; a drain's
+    /// refusal outlasts both.
+    pub(crate) fn decline_offers_as(&self, decline: Decline) {
+        let policy = match decline {
+            Decline::Full => FULL,
+            Decline::Gone => GONE,
+        };
+        self.set_policy(policy);
+    }
+
+    /// Take offers again after [`Runtime::decline_offers_as`], unless a
+    /// drain declines them.
+    pub(crate) fn take_offers(&self) {
+        self.set_policy(0);
+    }
+
+    /// Replace the segment's own refusal with `policy`, keeping a drain's.
+    fn set_policy(&self, policy: u8) {
+        let _ = self
+            .declining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |declining| {
+                Some(declining & DRAINED | policy)
+            });
+    }
+
+    /// Whether the instance declines offers, for a drain or by its own
+    /// policy.
     pub(crate) fn declines_offers(&self) -> bool {
-        self.offers_declined.load(Ordering::SeqCst)
+        self.declining.load(Ordering::SeqCst) != 0
     }
 
-    /// Refuse an offer the instance has admitted once it declines offers.
-    /// One atomic load per offer, and none for any other hand-off.
-    pub(crate) fn check_offer(&self) -> Result<()> {
-        if self.declines_offers() {
-            return Err(Error::new(
-                ErrorKind::Overloaded,
-                "the instance's cell is draining and takes no new work from another cell",
-            ));
+    /// Refuse an offer the instance has admitted once it declines offers,
+    /// with the reason a chooser reads: gone for a drain, since a draining
+    /// cell takes no new work from another cell again, and the segment's
+    /// own reason otherwise. One atomic load per offer, and none for any
+    /// other hand-off.
+    pub(crate) fn check_offer(&self) -> std::result::Result<(), Refusal> {
+        let declining = self.declining.load(Ordering::SeqCst);
+        if declining == 0 {
+            return Ok(());
         }
-        Ok(())
+        let (why, decline) = if declining & DRAINED != 0 {
+            (
+                "the instance's cell is draining and takes no new work from another cell",
+                Decline::Gone,
+            )
+        } else if declining & GONE != 0 {
+            (
+                "the instance's segment takes no work from another cell by its own policy",
+                Decline::Gone,
+            )
+        } else {
+            (
+                "the instance's segment has no room for work from another cell by its own policy",
+                Decline::Full,
+            )
+        };
+        Err(Refusal {
+            error: Error::new(ErrorKind::Overloaded, why),
+            decline,
+        })
     }
 
     /// Whether the forward hand-offs of hop `hop` that reach this segment
@@ -848,6 +905,13 @@ impl Held {
             selector,
             cell: Some(cell),
         }
+    }
+
+    /// The lease on the follow of the cell this offer went to, if it went
+    /// to a cell.
+    #[cfg(feature = "hub")]
+    pub(crate) fn cell_lease(&self) -> Option<&super::cells::CellLease> {
+        self.cell.as_ref()
     }
 
     /// The cell this offer went to accepted it: tell the cell policy's

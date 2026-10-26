@@ -21,8 +21,9 @@ pub use binary::{Builder, Failure, SegmentBinary, Serving, run_segment, segment_
 pub use config::build_node;
 pub use decl::{Absent, BackwardDecl, ForwardDecl, NodeDecl, OperatorDecl, SinkDecl, SourceDecl};
 pub use dist::{
-    BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Deployment, Entries,
-    FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, SegmentLoad, Served, bind_node,
+    BwdEnd, BwdStep, DBackward, DForward, DHop, DInner, DOperator, DSink, Decline, Deployment,
+    Entries, FwdEnd, FwdStep, Register, Roster, RuntimeConfig, Segment, SegmentLoad, Served,
+    bind_node,
 };
 #[cfg(feature = "hub")]
 pub use dist::{Cells, FollowedCell, HubSession};

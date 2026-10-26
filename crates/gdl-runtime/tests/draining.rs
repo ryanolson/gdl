@@ -3,7 +3,8 @@
 //! offers that reach them for a bound, then decline new ones, finish what
 //! they took, and announce that they have drained; its interior instances
 //! serve until every entry instance has drained or left, then drain; and
-//! once every instance has left, the hub withdraws the cell's record.
+//! once every instance has left, the hub withdraws the cell's record. An
+//! entry instance can also decline offers by its own policy, with no drain.
 //!
 //! Every hub and instance runs in this process on OS-assigned ports,
 //! sharing one directory; every wait is bounded and for something
@@ -29,7 +30,7 @@ use gdl_cells::{CellDirectory, CellEvent, CellRecord};
 use gdl_hub::CellReadiness;
 use gdl_model::{SegmentPhase, segment_service};
 use gdl_runtime::{
-    CellState, Cells, Deployment, DeploymentSpec, Register, RequestRouter, RuntimeConfig,
+    CellState, Cells, Decline, Deployment, DeploymentSpec, Register, RequestRouter, RuntimeConfig,
 };
 use gdl_watch::CellWatchEvent;
 use tokio::task::JoinHandle;
@@ -552,6 +553,131 @@ async fn an_offer_within_the_bound_is_taken_and_one_after_it_is_declined() {
         .expect("the held request answered in time")
         .expect("the request's task")
         .expect("the held request answered");
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// A draining cell's decline tells a stale chooser that the cell is gone,
+/// not full: the chooser offers it none of the requests after it, also
+/// once a damping window has passed, while its view of the cell is still
+/// the stale one. The proxy hides the drain from the chooser's hub, as a
+/// follow link that lags would. Besides the bound, it waits out the first
+/// damping window (1 s), which is what it proves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_draining_cells_decline_keeps_a_stale_chooser_away() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let (e1, quiet) = (Events::new(), Events::quiet());
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let (m1, proxy) = model_proxied(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        RUNTIME,
+        &|deployment| reference_graph(deployment, &e1),
+    )
+    .await;
+    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let cells = tables(&chooser);
+    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+    proxy.set(Mode::Undrained);
+
+    m1.readiness.drain().await.expect("the cell drains");
+    // Held at the entry, so that the entry is still there once it stops
+    // taking work.
+    let held = gated(&chooser, &e1, "held").await;
+    declining(&m1.entries[0]).await;
+    let before = (offers(&m1), offers(&m2));
+    ask(&chooser.segment)
+        .await
+        .expect("the other cell answered");
+    assert_eq!(
+        (offers(&m1), offers(&m2)),
+        (before.0 + 1, before.1 + 1),
+        "declined by the draining cell, then taken by the other"
+    );
+
+    // Past the first damping window, which a full cell's decline opens.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let stale =
+        |m: &gdl_runtime::FollowedCell| m.state == CellState::Ready && m.eligible.len() == 1;
+    let m = followed(&cells, "f", M1).expect("followed");
+    assert!(stale(&m), "the chooser's view of the cell is not stale");
+    assert!(m.gone && m.damped.is_none(), "{m:?}");
+    for _ in 0..4 {
+        ask(&chooser.segment)
+            .await
+            .expect("the other cell answered");
+    }
+    assert_eq!(
+        (offers(&m1), offers(&m2)),
+        (before.0 + 1, before.1 + 5),
+        "the draining cell was offered requests again"
+    );
+    release(&e1, "held");
+    tokio::time::timeout(WAIT, held)
+        .await
+        .expect("the held request answered in time")
+        .expect("the request's task")
+        .expect("the held request answered");
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// An entry instance declines offers by its segment's own policy, as gone
+/// or as full, with no drain. A chooser passes a gone cell over, also once
+/// the entry takes offers again, since its follow has not changed. It
+/// damps a full cell, and a lone full cell takes the request again once
+/// the entry takes offers again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_declines_by_its_own_policy_as_gone_or_full() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let cells = tables(&chooser);
+    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+
+    m1.entries[0].segment.decline_offers_as(Decline::Gone);
+    ask(&chooser.segment)
+        .await
+        .expect("the other cell answered");
+    assert_eq!((offers(&m1), offers(&m2)), (1, 1));
+    assert_eq!((m1.forwards(), m2.forwards()), (0, 1));
+    let m = followed(&cells, "f", M1).expect("followed");
+    assert!(m.gone && m.state == CellState::Ready, "{m:?}");
+    m1.entries[0].segment.take_offers();
+    for _ in 0..3 {
+        ask(&chooser.segment)
+            .await
+            .expect("the other cell answered");
+    }
+    assert_eq!(
+        (offers(&m1), offers(&m2)),
+        (1, 4),
+        "a gone cell was offered work with its follow unchanged"
+    );
+
+    m2.entries[0].segment.decline_offers_as(Decline::Full);
+    let error = ask(&chooser.segment)
+        .await
+        .expect_err("no cell took the request");
+    assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
+    assert_eq!(offers(&m2), 5);
+    let m = followed(&cells, "f", M2).expect("followed");
+    assert!(!m.gone && m.damped.is_some(), "{m:?}");
+    m2.entries[0].segment.take_offers();
+    ask(&chooser.segment)
+        .await
+        .expect("the lone full cell answered");
+    assert_eq!((m1.forwards(), m2.forwards()), (0, 5));
+    assert_eq!(followed(&cells, "f", M2).expect("followed").damped, None);
     for hub in [hub, m1.hub, m2.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }

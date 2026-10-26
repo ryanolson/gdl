@@ -7,6 +7,7 @@ use velo::Velo;
 use super::envelope::{Forward, Open, decode, encode};
 use super::fabric::Fabric;
 use super::hop::{DHop, Register};
+use super::offers::{Decline, Refusal, refusal};
 use super::roster::Roster;
 use super::runtime::{Entries, Runtime, RuntimeConfig};
 use super::stages::{DBackward, DForward, DInner};
@@ -102,7 +103,7 @@ impl Deployment {
             let weak = Weak::clone(&weak);
             move |bytes| {
                 let weak = Weak::clone(&weak);
-                Box::pin(async move { encode_reply(forward(&weak, &bytes).await) })
+                Box::pin(async move { forward_reply(forward(&weak, &bytes).await) })
             }
         })?;
         self.rt.fabric.register(&names.open, move |bytes| {
@@ -117,10 +118,16 @@ impl Deployment {
     }
 }
 
-async fn forward(entries: &Weak<Entries>, bytes: &[u8]) -> Result<super::envelope::Accepted> {
+async fn forward(
+    entries: &Weak<Entries>,
+    bytes: &[u8],
+) -> std::result::Result<super::envelope::Accepted, Refusal> {
     let envelope: Forward = decode(bytes)?;
     let entry = Arc::clone(upgrade(entries)?.forward(envelope.hop, envelope.pos)?);
-    entry(envelope).await.map_err(|refused| refused.error)
+    entry(envelope).await.map_err(|refused| Refusal {
+        error: refused.error,
+        decline: refused.decline,
+    })
 }
 
 async fn open(entries: &Weak<Entries>, bytes: &[u8]) -> Result<super::fabric::ReplyTo> {
@@ -133,6 +140,17 @@ fn upgrade(entries: &Weak<Entries>) -> Result<Arc<Entries>> {
     entries
         .upgrade()
         .ok_or_else(|| Error::new(ErrorKind::Transport, "the segment has shut down"))
+}
+
+/// A forward entry's answer: the acceptance, or the refusal with its
+/// reason after it ([`refusal`]).
+fn forward_reply(reply: std::result::Result<super::envelope::Accepted, Refusal>) -> Vec<u8> {
+    match reply {
+        Ok(accepted) => encode_reply(Ok(accepted)),
+        // As for any reply: an empty one makes the caller report a codec
+        // error.
+        Err(Refusal { error, decline }) => refusal(&error, decline).unwrap_or_default(),
+    }
 }
 
 fn encode_reply<T: serde::Serialize>(reply: Result<T>) -> Vec<u8> {
@@ -240,12 +258,36 @@ impl<H> Segment<H> {
     /// Refuse every offer that arrives from now on, the forward hand-offs
     /// from another class, and take the rest: an entry instance of a
     /// draining cell stops taking new work, and still takes the hand-offs
-    /// inside its cell that carry the requests it took.
+    /// inside its cell that carry the requests it took. The refusal says
+    /// that the cell is gone, and nothing undoes it.
     pub fn decline_offers(&self) {
         self.rt.decline_offers();
     }
 
-    /// Whether the instance declines offers.
+    /// Refuse every offer that arrives from now on by this segment's own
+    /// policy, saying `decline` to the chooser that sent it, and take the
+    /// rest, until [`Segment::take_offers`]. [`Decline::Gone`] keeps each
+    /// chooser that hears it from offering this cell more work until the
+    /// cell's follow changes (a new generation, state, or offered state);
+    /// [`Decline::Full`] damps the cell for a short window. Either is
+    /// about the whole cell, since a chooser chooses cells: a chooser that
+    /// hears gone from one entry instance offers no entry instance of the
+    /// cell more work. So decline as gone on every entry instance, for a
+    /// reason that holds for the cell. A call replaces the reason an
+    /// earlier one gave. Costs nothing per request beyond the one load an
+    /// offer already makes.
+    pub fn decline_offers_as(&self, decline: Decline) {
+        self.rt.decline_offers_as(decline);
+    }
+
+    /// Take offers again after [`Segment::decline_offers_as`]. A drain's
+    /// refusal ([`Segment::decline_offers`]) stays.
+    pub fn take_offers(&self) {
+        self.rt.take_offers();
+    }
+
+    /// Whether the instance declines offers, for a drain or by its own
+    /// policy.
     pub fn declines_offers(&self) -> bool {
         self.rt.declines_offers()
     }

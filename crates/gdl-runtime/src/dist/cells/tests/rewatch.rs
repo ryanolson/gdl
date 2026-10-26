@@ -25,6 +25,77 @@ use super::{DRAIN, M1, exposed, follow, follower, left, peer, retired, run};
 /// open after them before it ends; or a refusal.
 type Answer = Result<(Vec<FollowEvent>, Duration), ()>;
 
+#[test]
+fn a_rewatch_after_a_missed_state_round_trip_releases_a_gone_cell() {
+    let (mut follows, cells, _, _) = follower();
+    let (mut uninterrupted, control, _, _) = follower();
+    let now = Instant::now();
+    let x = peer();
+    for follower in [&mut follows, &mut uninterrupted] {
+        super::live(
+            follower,
+            now,
+            [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+        );
+    }
+    for cells in [&cells, &control] {
+        let table = cells.table("f").expect("the table");
+        cells.damping().gone(&table.views[0]);
+        assert!(super::table(cells, M1).expect("followed").gone);
+    }
+
+    // A snapshot cannot show what changed while no watch was open, so a
+    // rewatch ends the mark even of a cell that did not change; it is
+    // offered one more request, and marked again if it still refuses.
+    let mut unchanged = follows.snapshot();
+    for event in [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)] {
+        unchanged.apply(event, now);
+    }
+    follows.resnapshot(unchanged, now);
+    assert!(!super::table(&cells, M1).expect("followed").gone);
+    let table = cells.table("f").expect("the table");
+    cells.damping().gone(&table.views[0]);
+
+    // The relay changes state while one chooser's watch is disconnected.
+    // An uninterrupted chooser sees the changes and releases the mark.
+    super::live(
+        &mut uninterrupted,
+        now,
+        [
+            super::state(M1, 1, CellState::Unavailable),
+            FollowEvent::Offering {
+                class: "model_x".into(),
+                cell: M1.into(),
+                generation: 1,
+                revision: 2,
+                offered: false,
+            },
+            super::state(M1, 1, CellState::Ready),
+            exposed(M1, 1, &x),
+            FollowEvent::Offering {
+                class: "model_x".into(),
+                cell: M1.into(),
+                generation: 1,
+                revision: 3,
+                offered: true,
+            },
+        ],
+    );
+    assert!(!super::table(&control, M1).expect("followed").gone);
+
+    // An offered follow's snapshot omits its offering revision.
+    let mut recovered = follows.snapshot();
+    for event in [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)] {
+        recovered.apply(event, now);
+    }
+    follows.resnapshot(recovered, now);
+    let shown = super::table(&cells, M1).expect("followed");
+    assert!(
+        !shown.gone,
+        "a missed state round trip left a recovered cell permanently gone: {shown:?}"
+    );
+}
+
 /// A relay that answers its watches from a script, then refuses every
 /// watch, or, if `hangs`, holds every watch open with nothing in it; it
 /// records when each watch was asked for, and when each acknowledgement

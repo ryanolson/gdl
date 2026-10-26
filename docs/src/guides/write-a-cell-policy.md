@@ -70,7 +70,7 @@ impl CellPolicy for ByModel {
 - Return a `CellChoice` of the index in `cells` of the cell to offer this attempt to, or a `NoCell` when no cell may take it. A `NoCell` fails the request with `Routing`.
 - Give a `NoCell` a short reason with `NoCell::because` when the error should say why, such as the model that no cell serves. The error then reads ``cell policy `by_model` of class `model` chose no cell for segment `d`: no cell serves model `mistral` ``. `NoCell::new()` gives no reason, and the error says that no ready cell has an instance of the segment.
 - A reason is a `Cow<'static, str>`. A fixed `&'static str` allocates nothing. A reason that you `format!` allocates only when no cell is chosen. The reason reaches the error only on the first attempt. After a decline, the request fails with the last cell's refusal.
-- Skip a cell that `request.is_excluded` names: it declined this request.
+- Skip a cell that `request.is_excluded` names: it declined this request, or it declined an offer as gone and its follow has not changed since (`request.damped().is_gone(cell)`).
 - `request` also gives the chooser's region, the clock, the damped cells (`request.damped()`), the attempt's turn, and a random draw (`request.draw()`).
 - `choose` is not `async`, and it runs once per attempt. Take no lock in it, and allocate nothing when it chooses a cell.
 - Override `eligible` when a cell can stop fitting while a selector waits, as `home_first` does for a stale summary. By default, a cell is eligible while it takes work.

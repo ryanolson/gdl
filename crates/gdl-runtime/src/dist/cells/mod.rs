@@ -145,7 +145,8 @@ impl Cells {
         table
             .cells
             .iter()
-            .map(|cell| FollowedCell {
+            .zip(&table.views)
+            .map(|(cell, view)| FollowedCell {
                 class: cell.class.clone(),
                 cell: cell.cell.clone(),
                 generation: cell.generation,
@@ -158,6 +159,7 @@ impl Cells {
                 damped: damped
                     .is_damped(cell.id)
                     .then(|| std::time::Duration::from_millis(damped.left(cell.id, now))),
+                gone: damped.is_gone(view),
                 eligible: cell.eligible.to_vec(),
                 retired: cell.retired.to_vec(),
                 offered: cell.offering,
@@ -358,6 +360,11 @@ pub struct FollowedCell {
     /// and while the window lasts the cell is passed over, unless more than
     /// half of the eligible cells are damped; `None` when it is not damped.
     pub damped: Option<std::time::Duration>,
+    /// Whether the cell declined this chooser's offer as gone, as a
+    /// draining cell does, in the follow shown here: it is passed over
+    /// until the relay shows a new generation, state, or offered state, or
+    /// it accepts an offer.
+    pub gone: bool,
     /// The entry instances of the segment that may be routed to, by id:
     /// none while the state is `draining` or `unavailable`, or the cell is
     /// unread.
@@ -448,6 +455,9 @@ pub(crate) struct CellTable {
     pub(crate) offering: bool,
     /// The revision of the follow's offered state.
     pub(crate) revision: u64,
+    /// How many times the relay changed the follow's state or offered
+    /// state ([`gdl::Damped::is_gone`]).
+    pub(crate) changes: u64,
     /// The offers this chooser holds to the follow, shared by every table
     /// of the follow: an offer takes a lease from the table it was chosen
     /// from, and is refused one once the follow is not offered.
@@ -458,7 +468,8 @@ impl CellTable {
     /// The cell as a cell policy sees it.
     fn view(&self) -> gdl::Cell {
         let view = gdl::Cell::new(&*self.class, &*self.cell, &*self.region, self.state)
-            .with_entries(self.eligible.len());
+            .with_entries(self.eligible.len())
+            .with_follow(self.generation, self.changes);
         match self.load {
             Some(load) => view.with_load(load),
             None => view,

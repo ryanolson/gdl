@@ -65,14 +65,54 @@ impl Damping {
     /// The cell `cell` declined an offer at `now`: damp it for
     /// [`FIRST_WINDOW`] if it was not damped, for twice its last window (at
     /// most [`MAX_WINDOW`]) if that window has passed, and leave a window
-    /// that still lasts as it is.
+    /// that still lasts as it is. A cell with a mark as gone keeps it:
+    /// with no table of the cell to compare, the refusal cannot show that
+    /// the mark is stale, and the follower forgets a stale one.
     pub(crate) fn decline(&self, cell: u64, now: Instant) {
-        self.change(|damped| declined(damped, cell, now));
+        self.change(|damped| {
+            if damped.holds_gone(cell) {
+                return None;
+            }
+            declined(damped, cell, now)
+        });
     }
 
-    /// The cell `cell` accepted an offer: its damping ends. A cell that is
-    /// not damped writes nothing, and costs one load and a search of an
-    /// empty or short list.
+    /// The cell `cell`, as the chooser's table shows it, declined an
+    /// offer as full: as [`Damping::decline`], unless the cell is gone in
+    /// that follow or a later one. A full refusal of an offer made before
+    /// the cell said it is gone says nothing newer, and must not end the
+    /// mark, even when it read an earlier table.
+    pub(crate) fn decline_shown(&self, cell: &gdl::Cell, now: Instant) {
+        self.change(|damped| {
+            if damped.holds_gone_since(cell) {
+                return None;
+            }
+            declined(damped, cell.id(), now)
+        });
+    }
+
+    /// The cell `cell`, as a choice sees it now, declined an offer as
+    /// gone: pass it over until its follow changes, in place of any
+    /// window it had. A cell already gone in that follow, or a later one,
+    /// writes nothing: a decline that read an earlier table must not put
+    /// back an earlier stamp.
+    pub(crate) fn gone(&self, cell: &gdl::Cell) {
+        self.change(|damped| (!damped.holds_gone_since(cell)).then(|| damped.with_gone(cell)));
+    }
+
+    /// Forget each mark as gone that `keep` refuses, given the cell and
+    /// the generation and count of changes it declined in: the follower
+    /// refuses those whose follow changed or is no longer held. Such a
+    /// mark already matches no cell; forgetting it keeps a choice on the
+    /// path that reads nothing for gone cells. Nothing is written while
+    /// no mark is refused.
+    pub(crate) fn forget_gone(&self, keep: impl Fn(u64, u64, u64) -> bool) {
+        self.change(|damped| damped.retain_gone(&keep));
+    }
+
+    /// The cell `cell` accepted an offer: its damping, or its mark as
+    /// gone, ends. A cell that is neither writes nothing, and costs one
+    /// load and a search of an empty or short list.
     pub(crate) fn accept(&self, cell: u64) {
         self.change(|damped| damped.without(cell));
     }

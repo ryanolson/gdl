@@ -78,6 +78,13 @@ impl CellLease {
         self
     }
 
+    /// Whether this lease is on the follow `table` shows: the leases of a
+    /// follow are shared by every table of it, and a newer generation has
+    /// its own.
+    pub(crate) fn is_of(&self, table: &super::CellTable) -> bool {
+        Arc::ptr_eq(&self.follow, &table.leases)
+    }
+
     /// The cell accepted the offer: tell the cell policy's lease, if it
     /// gave one.
     #[inline]

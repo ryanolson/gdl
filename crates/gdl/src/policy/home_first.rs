@@ -1,14 +1,18 @@
 use tokio::time::Instant;
 
-use super::{Cell, CellChoice, CellPolicy, CellRequest, CellState, LoadSummary, NoCell, cut, mix};
+use super::{
+    Cell, CellChoice, CellPolicy, CellRequest, CellState, Damped, LoadSummary, NoCell, cut, mix,
+};
 use crate::select::Encoded;
 
 /// `home_first`: by state, region, and admission, from each cell's load
 /// summary.
 ///
 /// A cell is eligible only while it is `ready` or `degraded`, has an
-/// entry instance to route to, has not declined the request, and has a
-/// summary no older than [`FRESH_PERIODS`](super::Load::FRESH_PERIODS) of
+/// entry instance to route to, has not declined the request nor declined
+/// an offer as gone in the follow it is shown in
+/// ([`Damped::is_gone`](super::Damped::is_gone)), and has a summary no
+/// older than [`FRESH_PERIODS`](super::Load::FRESH_PERIODS) of
 /// its periods: a cell whose load is not known is not sent to, since a
 /// summary steers only while it is recent and a cell's refusal is the
 /// fast correction. Among the eligible, the first non-empty tier:
@@ -55,9 +59,10 @@ impl HomeFirst {
         cell: &'c Cell,
         region: &str,
         excluded: &[u64],
+        damped: &Damped,
         now: Instant,
     ) -> Option<(u8, &'c LoadSummary)> {
-        if cell.entries == 0 || excluded.contains(&cell.id) {
+        if cell.entries == 0 || excluded.contains(&cell.id) || damped.is_gone(cell) {
             return None;
         }
         let state = match cell.state {
@@ -112,8 +117,9 @@ impl HomeFirst {
         let (damped, now) = (request.damped(), request.now());
         let lasts = damped.lasts(now);
         let cut = if lasts {
-            let eligible =
-                |cell: &Cell| Self::tier(cell, region, excluded, now).is_some() && keep(cell);
+            let eligible = |cell: &Cell| {
+                Self::tier(cell, region, excluded, damped, now).is_some() && keep(cell)
+            };
             cut(cells, eligible, damped, now)
         } else {
             0
@@ -123,7 +129,7 @@ impl HomeFirst {
         let mut count = 0u64;
         let mut drawn: [Option<(usize, &LoadSummary)>; 2] = [None, None];
         for (at, cell) in cells.iter().enumerate() {
-            let Some((tier, load)) = Self::tier(cell, region, excluded, now) else {
+            let Some((tier, load)) = Self::tier(cell, region, excluded, damped, now) else {
                 continue;
             };
             if !keep(cell) || lasts && damped.left(cell.id, now) > cut {
@@ -199,10 +205,11 @@ impl CellPolicy for HomeFirst {
             .ok_or_else(NoCell::new)
     }
 
-    /// Whether `cell` is in a tier: a damped cell is still eligible, since
-    /// damping steers the next choices, not one already made.
+    /// Whether `cell` is in a tier: a damped or gone cell is still
+    /// eligible, since damping steers the next choices, not one already
+    /// made.
     fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
-        Self::tier(cell, region, &[], now).is_some()
+        Self::tier(cell, region, &[], &Damped::EMPTY, now).is_some()
     }
 }
 
@@ -747,5 +754,23 @@ mod tests {
             HOME,
             now + PERIOD * 4
         ));
+    }
+
+    /// A home cell gone in its follow is not chosen, and the request goes
+    /// to another region's cell with room, as for a home cell that cannot
+    /// take it; a lone gone cell is not chosen at all. Once its follow
+    /// changes, it is chosen again.
+    #[test]
+    fn a_gone_cell_is_not_chosen_until_its_follow_changes() {
+        let now = Instant::now();
+        let cells = [
+            busy("home", HOME, CellState::Ready, 0, 0, now),
+            busy("away", AWAY, CellState::Ready, 0, 0, now),
+        ];
+        let gone = Damped::EMPTY.with_gone(&cells[0]);
+        assert_eq!(chosen_damped(&cells, &gone, now), names(&["away"]));
+        assert_eq!(chosen_damped(&cells[..1], &gone, now), names(&[]));
+        let changed = [cells[0].clone().with_follow(0, 1)];
+        assert_eq!(chosen_damped(&changed, &gone, now), names(&["home"]));
     }
 }

@@ -477,6 +477,7 @@ async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::Followe
                     load: None,
                     load_age: None,
                     damped: None,
+                    gone: false,
                     eligible: Vec::new(),
                     retired: Vec::new(),
                     offered: true,

@@ -24,7 +24,8 @@ use crate::dist::offers::{Answer, Missed, delivered};
 use crate::dist::runtime::{Handed, Held, Runtime, Within};
 
 /// What became of an offer, as `crossing` sent it to the cell `cell`
-/// with `held`. A cell that declined it is damped, and a damped cell that
+/// with `held`. A cell that declined it is damped, or passed over until
+/// its follow changes when it said it is gone, and a damped cell that
 /// accepted it is no longer; an acceptance is told to the cell policy's
 /// lease in `held`, if it gave one. A hand-off that never left says
 /// nothing of the cell, and changes nothing. An unknown outcome names the
@@ -36,7 +37,9 @@ pub(crate) fn answer(offered: Offered, crossing: &Crossing, cell: u64, held: &mu
             crossing.accepted(cell);
             held.accepted();
         }
-        Answer::Missed(Missed::Declined(_)) => crossing.declined(cell),
+        Answer::Missed(Missed::Declined(_, decline)) => {
+            crossing.declined(cell, *decline, held.cell_lease());
+        }
         Answer::Missed(Missed::Unsent(_)) | Answer::Failed(_) => {}
     }
     answer
@@ -146,6 +149,7 @@ mod tests {
     use crate::dist::counting::{Counted, counted, counting};
     use crate::dist::envelope::{Accepted, VERSION, WireCx};
     use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
+    use crate::dist::offers::Decline;
     use crate::dist::roster::{Policy, Roster};
     use crate::dist::runtime::{Router, RuntimeConfig};
 
@@ -289,6 +293,7 @@ mod tests {
                 turn: Arc::new(AtomicUsize::new(0)),
                 offering: true,
                 revision: 1,
+                changes: 0,
                 leases: Arc::default(),
             })])),
         );
@@ -416,6 +421,7 @@ mod tests {
                     turn: Arc::new(AtomicUsize::new(0)),
                     offering: true,
                     revision: 1,
+                    changes: 0,
                     leases: Arc::default(),
                 })
             })
@@ -567,6 +573,7 @@ mod tests {
                     turn: Arc::new(AtomicUsize::new(0)),
                     offering: true,
                     revision: 1,
+                    changes: 0,
                     leases: Arc::default(),
                 })
             })
@@ -679,6 +686,7 @@ mod tests {
                     turn: Arc::new(AtomicUsize::new(0)),
                     offering: true,
                     revision: 1,
+                    changes: 0,
                     leases: Arc::default(),
                 })
             })
@@ -714,7 +722,7 @@ mod tests {
         };
         let damped = || cells.followed("d")[0].damped.is_some();
         let (first, second) = (pick(), pick());
-        lone.declined(second);
+        lone.declined(second, Decline::Full, None);
         assert!(damped());
         lone.accepted(first);
         assert!(
@@ -722,13 +730,174 @@ mod tests {
             "an offer chosen before the decline left it damped"
         );
 
-        lone.declined(pick());
+        lone.declined(pick(), Decline::Full, None);
         let (first, second) = (pick(), pick());
         let wrote = writes();
         lone.accepted(first);
         lone.accepted(second);
         assert!(!damped());
         assert_eq!(writes() - wrote, 1, "an undamped cell's acceptance wrote");
+    }
+
+    /// `cells`' table of `name` replaced by the one `change` makes of it,
+    /// as the follower makes a new table for each change the relay sends;
+    /// the other cells' tables stay as they are.
+    fn changed(cells: &Cells, name: &str, change: impl FnOnce(&mut CellTable)) {
+        let table = cells.table("d").expect("a table");
+        let mut change = Some(change);
+        let tables = table
+            .cells
+            .iter()
+            .map(|cell| {
+                if cell.cell != name {
+                    return Arc::clone(cell);
+                }
+                let mut next = CellTable {
+                    class: cell.class.clone(),
+                    cell: cell.cell.clone(),
+                    id: cell.id,
+                    generation: cell.generation,
+                    region: cell.region.clone(),
+                    state: cell.state,
+                    load: cell.load,
+                    eligible: cell.eligible.clone(),
+                    offered: cell.offered.clone(),
+                    retired: cell.retired.clone(),
+                    unread: cell.unread,
+                    turn: Arc::clone(&cell.turn),
+                    offering: cell.offering,
+                    revision: cell.revision,
+                    changes: cell.changes,
+                    leases: Arc::clone(&cell.leases),
+                };
+                change.take().expect("one cell of the name")(&mut next);
+                Arc::new(next)
+            })
+            .collect();
+        cells.store("d", EntryTable::new(tables));
+    }
+
+    /// A cell that declines an offer as gone, as a draining cell's entry
+    /// does, is passed over until the relay changes its follow, however
+    /// long that takes; a new load summary is no change. A full cell's
+    /// decline, the control, damps the cell, which is chosen again once
+    /// its window has passed. An acceptance ends a mark as gone. A gone
+    /// decline of an offer made under an earlier generation damps the newer
+    /// one instead. A lone gone cell is not chosen: the cap on damping
+    /// does not hold it in the choice.
+    #[tokio::test(start_paused = true)]
+    async fn a_cell_that_declined_as_gone_is_passed_over_until_its_follow_changes() {
+        use super::super::damping::{FIRST_WINDOW, MAX_WINDOW};
+
+        let cx = Cx::new();
+        let random = std::hash::RandomState::new();
+        let (crossing, cells) = followed_over(&["m1", "m2", "m3"]);
+        let m1 = cell_id("model_x", "m1");
+        let pick = || {
+            crossing
+                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .expect("a pick")
+                .expect("a cell")
+        };
+        // An offer to `m1`, with its lease.
+        let offer = || loop {
+            let (_, cell, lease) = pick();
+            if cell == m1 {
+                return lease;
+            }
+        };
+        let chosen = || (0..12).any(|_| pick().1 == m1);
+        let shown = || {
+            cells
+                .followed("d")
+                .into_iter()
+                .find(|cell| cell.cell == "m1")
+                .expect("followed")
+        };
+
+        let lease = offer();
+        crossing.declined(m1, Decline::Full, Some(&lease));
+        drop(lease);
+        assert!(!chosen(), "chosen while its window lasts");
+        tokio::time::advance(FIRST_WINDOW).await;
+        assert!(
+            chosen(),
+            "a full cell was not chosen once its window passed"
+        );
+
+        let lease = offer();
+        crossing.declined(m1, Decline::Gone, Some(&lease));
+        drop(lease);
+        let m = shown();
+        assert!(m.gone && m.damped.is_none(), "{m:?}");
+        tokio::time::advance(MAX_WINDOW * 2).await;
+        assert!(!chosen(), "chosen again while its follow is unchanged");
+        changed(&cells, "m1", |cell| cell.load = super::super::tests::idle());
+        assert!(!chosen(), "a new load summary ended it");
+        changed(&cells, "m1", |cell| cell.changes += 1);
+        assert!(chosen(), "not chosen once the relay changed its state");
+        assert!(!shown().gone);
+
+        let lease = offer();
+        crossing.declined(m1, Decline::Gone, Some(&lease));
+        drop(lease);
+        assert!(!chosen());
+        crossing.accepted(m1);
+        assert!(chosen(), "not chosen once it accepted an offer");
+
+        let lease = offer();
+        changed(&cells, "m1", |cell| {
+            cell.generation += 1;
+            cell.leases = Arc::default();
+        });
+        crossing.declined(m1, Decline::Gone, Some(&lease));
+        drop(lease);
+        let m = shown();
+        assert!(!m.gone && m.damped.is_some(), "{m:?}");
+        crossing.accepted(m1);
+
+        let (lone, _cells) = followed_over(&["m1"]);
+        let (_, cell, lease) = lone
+            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .expect("a pick")
+            .expect("a lone cell");
+        lone.declined(cell, Decline::Gone, Some(&lease));
+        drop(lease);
+        let no = lone
+            .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+            .expect("a pick")
+            .expect_err("a lone gone cell was chosen");
+        assert_eq!(no, NoCell::new());
+    }
+
+    /// Replies to offers already in flight can arrive in either order.
+    /// A full reply gives no evidence that a gone cell takes work again.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_full_reply_preserves_a_gone_cell() {
+        let cx = Cx::new();
+        let random = std::hash::RandomState::new();
+        let (crossing, cells) = followed_over(&["m1"]);
+        let pick = || {
+            crossing
+                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .expect("a pick")
+        };
+        let (_, cell, first) = pick().expect("the first offer");
+        let (_, same, second) = pick().expect("the second offer");
+        assert_eq!(cell, same);
+        crossing.declined(cell, Decline::Gone, Some(&first));
+        drop(first);
+        assert!(cells.followed("d")[0].gone);
+        assert!(pick().is_err(), "the gone cell was chosen");
+
+        crossing.declined(cell, Decline::Full, Some(&second));
+        drop(second);
+        tokio::time::advance(super::super::damping::MAX_WINDOW * 2).await;
+        let shown = &cells.followed("d")[0];
+        assert!(
+            shown.gone && pick().is_err(),
+            "a full reply revived a gone cell without a follow change: {shown:?}"
+        );
     }
 
     /// A pick whose cell accepts allocates nothing and, while the cell is
@@ -759,7 +928,7 @@ mod tests {
             .pick(&cx, &[], Policy::RoundRobin, &random, &[])
             .expect("a pick")
             .expect("a cell");
-        lone.declined(chosen);
+        lone.declined(chosen, Decline::Full, None);
         assert_eq!(writes() - wrote, 1, "a decline wrote nothing");
         // A lone cell is never damped out of the choice.
         let (_, chosen, _) = lone
@@ -857,6 +1026,7 @@ mod tests {
                 turn: Arc::new(AtomicUsize::new(0)),
                 offering: true,
                 revision: 1,
+                changes: 0,
                 leases: Arc::default(),
             })])),
         );
@@ -925,9 +1095,10 @@ mod tests {
     /// A pick allocates nothing under either policy the runtime provides,
     /// nor under a registered one that runs either over the cells it
     /// keeps, also while a cell's damping window lasts, which takes the
-    /// pass that sets which damped cells are passed over, and with a cell
-    /// excluded. The registered ones build a reason when they choose no
-    /// cell, which allocates then and only then.
+    /// pass that sets which damped cells are passed over, with a cell
+    /// excluded, and with a cell gone, which is never chosen. The
+    /// registered ones build a reason when they choose no cell, which
+    /// allocates then and only then.
     #[test]
     fn a_pick_allocates_nothing_under_either_policy() {
         let cx = Cx::new();
@@ -948,12 +1119,17 @@ mod tests {
             let layout = layout_under(gdl_model::CellPolicy {
                 policy: name.into(),
             });
-            let (crossing, cells) = followed_with(&layout, &["m1", "m2", "m3", "m4"], &policies);
+            let (crossing, cells) =
+                followed_with(&layout, &["m1", "m2", "m3", "m4", "m5"], &policies);
             let excluded = [cell_id("model_x", "m4")];
-            crossing.declined(cell_id("model_x", "m1"));
-            crossing.declined(cell_id("model_x", "m2"));
+            crossing.declined(cell_id("model_x", "m1"), Decline::Full, None);
+            crossing.declined(cell_id("model_x", "m2"), Decline::Full, None);
+            cells
+                .damping()
+                .gone(&cells.table("d").expect("a table").views[4]);
             let damped = cells.followed("d");
             assert!(damped[0].damped.is_some() && damped[1].damped.is_some());
+            assert!(damped[4].gone);
             let before = counted();
             // Made before counting, so that the record of the choices
             // allocates nothing while it counts.
@@ -972,6 +1148,7 @@ mod tests {
             // The undamped cell is chosen, and the excluded one never.
             assert!(chosen.contains(&cell_id("model_x", "m3")), "{name}");
             assert!(!chosen.contains(&excluded[0]), "{name}");
+            assert!(!chosen.contains(&cell_id("model_x", "m5")), "{name}");
             if name.starts_with("kept") {
                 assert!(!chosen.contains(&cell_id("model_x", "m2")), "{name}");
             }
@@ -985,7 +1162,7 @@ mod tests {
             counting(false);
             let built = counted() - before;
             if name.starts_with("kept") {
-                assert_eq!(no.reason(), Some("none of 4 cells is kept"));
+                assert_eq!(no.reason(), Some("none of 5 cells is kept"));
                 assert!(built > 0, "a {name} reason was built");
             } else {
                 assert_eq!((no, built), (NoCell::new(), 0), "{name}");

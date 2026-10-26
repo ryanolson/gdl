@@ -13,6 +13,11 @@
 //! fails over between cells instead (`cells::offer`), with the same
 //! reading of an answer.
 //!
+//! An entry that declines says why, as a chooser in another class reads
+//! it ([`Decline`]): its cell is full, or its cell is gone. The reason
+//! follows the refusal in the reply, where a build that does not know it
+//! never reads it ([`refusal`]).
+//!
 //! This module also says which of a segment's hops bring it offers from
 //! another class, which a draining cell's entry instance declines.
 
@@ -38,8 +43,15 @@ pub(crate) enum Answer {
 
 /// Why an entry did not take a request, with its error.
 pub(crate) enum Missed {
-    /// The entry declined it.
-    Declined(Error),
+    /// The entry declined it, saying why.
+    Declined(
+        Error,
+        #[cfg_attr(
+            not(feature = "hub"),
+            allow(dead_code, reason = "only a chooser, under `hub`, reads why")
+        )]
+        Decline,
+    ),
     /// The hand-off never left this instance: no entry said anything.
     Unsent(Error),
 }
@@ -51,14 +63,14 @@ impl Missed {
     /// entry's answer, so it never replaces one.
     pub(crate) fn then(self, then: Missed) -> Missed {
         match (self, then) {
-            (Missed::Declined(refusal), Missed::Unsent(_)) => Missed::Declined(refusal),
+            (declined @ Missed::Declined(..), Missed::Unsent(_)) => declined,
             (_, then) => then,
         }
     }
 
     pub(crate) fn into_error(self) -> Error {
         match self {
-            Missed::Declined(error) | Missed::Unsent(error) => error,
+            Missed::Declined(error, _) | Missed::Unsent(error) => error,
         }
     }
 }
@@ -74,12 +86,50 @@ pub(crate) fn declines(error: &Error) -> bool {
     matches!(error.kind(), ErrorKind::Overloaded | ErrorKind::Placement)
 }
 
-/// What an entry's answer means.
-pub(crate) fn answered(answer: Result<Accepted>) -> Answer {
-    match answer {
-        Ok(accepted) => Answer::Accepted(accepted),
-        Err(error) if declines(&error) => Answer::Missed(Missed::Declined(error)),
-        Err(error) => Answer::Failed(error),
+/// Why an entry declined an offer, for a chooser that sent it from
+/// another class: whether to damp only this cell, or to pass it over
+/// until its follow changes. A segment declines offers by its own policy
+/// with [`Segment::decline_offers_as`](super::Segment::decline_offers_as).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Decline {
+    /// The cell has no room now, or this instance retired: the chooser
+    /// damps the cell, and offers it requests again after the window.
+    #[default]
+    Full,
+    /// The cell takes no work from other cells until its state changes,
+    /// as a draining cell does: the chooser passes it over until its
+    /// follow changes.
+    Gone,
+}
+
+/// The reason as it follows a refusal in the reply.
+const GONE: &str = "gone";
+
+/// What an entry that declined a forward hand-off answers: the refusal,
+/// encoded as every build reads it, then, for [`Decline::Gone`], the
+/// reason. A build that does not know the reason reads the refusal and
+/// stops there, as `rmp_serde` reads one value and leaves the bytes after
+/// it, so it takes the refusal as a full cell's.
+pub(crate) fn refusal(error: &Error, decline: Decline) -> Result<Vec<u8>> {
+    let mut reply = envelope::encode(&Err::<Accepted, &Error>(error))?;
+    if decline == Decline::Gone {
+        reply.extend(envelope::encode(&GONE)?);
+    }
+    Ok(reply)
+}
+
+/// The reason that follows the refusal in `reply`: [`Decline::Full`]
+/// when none does, as from a build before the reason, or one this build
+/// does not know. Read only once an entry declined, so that an accepted
+/// hand-off's answer is decoded once, as before.
+fn decline(reply: &[u8]) -> Decline {
+    let mut after = reply;
+    if rmp_serde::decode::from_read::<_, serde::de::IgnoredAny>(&mut after).is_err() {
+        return Decline::Full;
+    }
+    match rmp_serde::from_slice::<&str>(after) {
+        Ok(GONE) => Decline::Gone,
+        _ => Decline::Full,
     }
 }
 
@@ -90,7 +140,11 @@ pub(crate) fn answered(answer: Result<Accepted>) -> Answer {
 pub(crate) fn delivered(offered: Offered, class: Option<&str>) -> Answer {
     match offered {
         Offered::Answered(reply) => match envelope::decode::<Result<Accepted, Error>>(&reply) {
-            Ok(answer) => answered(answer),
+            Ok(Ok(accepted)) => Answer::Accepted(accepted),
+            Ok(Err(error)) if declines(&error) => {
+                Answer::Missed(Missed::Declined(error, decline(&reply)))
+            }
+            Ok(Err(error)) => Answer::Failed(error),
             Err(error) => Answer::Failed(error),
         },
         Offered::Unsent(error) => Answer::Missed(Missed::Unsent(error)),
@@ -115,7 +169,26 @@ pub(crate) fn delivered(offered: Offered, class: Option<&str>) -> Answer {
 /// answer stays as small as it was.
 pub(crate) struct Refused {
     pub(crate) error: Error,
+    /// Why, for a chooser in another class, when `error` declines.
+    pub(crate) decline: Decline,
     pub(crate) envelope: Box<Forward>,
+}
+
+/// Why an entry refused a forward hand-off before it admitted anything,
+/// with the reason a chooser in another class reads: [`Decline::Full`]
+/// for every refusal but a gone cell's.
+pub(crate) struct Refusal {
+    pub(crate) error: Error,
+    pub(crate) decline: Decline,
+}
+
+impl From<Error> for Refusal {
+    fn from(error: Error) -> Self {
+        Self {
+            error,
+            decline: Decline::Full,
+        }
+    }
 }
 
 /// What came of one offer to an instance that did not fail the request:
@@ -136,9 +209,11 @@ impl Offer {
     ) -> Result<Offer> {
         match answer {
             Ok(accepted) => Ok(Offer::Accepted(accepted, sent)),
-            Err(Refused { error, envelope }) if declines(&error) => {
-                Ok(Offer::Missed(Missed::Declined(error), envelope))
-            }
+            Err(Refused {
+                error,
+                decline,
+                envelope,
+            }) if declines(&error) => Ok(Offer::Missed(Missed::Declined(error, decline), envelope)),
             Err(refused) => Err(refused.error),
         }
     }
@@ -286,7 +361,7 @@ impl Runtime {
     ) -> Result<Handed> {
         let mut envelope = envelope;
         let mut declined = Vec::new();
-        if let Missed::Declined(_) = missed {
+        if let Missed::Declined(..) = missed {
             declined.push(selector_id(first));
         }
         let mut missed = missed;
@@ -315,7 +390,7 @@ impl Runtime {
                 }
                 Offer::Missed(then, back) => {
                     drop(held);
-                    if let Missed::Declined(_) = then {
+                    if let Missed::Declined(..) = then {
                         declined.push(selector_id(instance));
                     }
                     missed = missed.then(then);
@@ -368,14 +443,16 @@ mod failover;
 mod tests {
     use std::cell::Cell;
 
-    use super::{Boundary, Missed, offered_hops};
+    use super::{Answer, Boundary, Decline, Missed, delivered, offered_hops, refusal};
+    use crate::dist::envelope::{Accepted, decode, encode};
+    use crate::dist::fabric::Offered;
     use gdl::{Error, ErrorKind};
 
     /// A request fails with its last refusal; a hand-off that never left
     /// is the error only while no entry has refused it.
     #[test]
     fn the_last_refusal_outlasts_a_hand_off_that_never_left() {
-        let full = || Missed::Declined(Error::new(ErrorKind::Overloaded, "full"));
+        let full = || Missed::Declined(Error::new(ErrorKind::Overloaded, "full"), Decline::Full);
         let unsent = || Missed::Unsent(Error::new(ErrorKind::Transport, "unsent"));
         let kind = |missed: Missed| missed.into_error().kind();
         assert_eq!(kind(full().then(unsent())), ErrorKind::Overloaded);
@@ -385,8 +462,69 @@ mod tests {
         );
         assert_eq!(kind(unsent().then(full())), ErrorKind::Overloaded);
         assert_eq!(kind(unsent().then(unsent())), ErrorKind::Transport);
-        let retired = Missed::Declined(Error::new(ErrorKind::Placement, "other deployment"));
+        let retired = Missed::Declined(
+            Error::new(ErrorKind::Placement, "other deployment"),
+            Decline::Full,
+        );
         assert_eq!(kind(full().then(retired)), ErrorKind::Placement);
+    }
+
+    /// What a chooser makes of an entry's `reply`.
+    fn read(reply: Vec<u8>) -> Answer {
+        delivered(Offered::Answered(reply), Some("model_x"))
+    }
+
+    /// The kind and the reason of a decline.
+    fn declined(answer: Answer) -> (ErrorKind, Decline) {
+        match answer {
+            Answer::Missed(Missed::Declined(error, decline)) => (error.kind(), decline),
+            _ => panic!("not a decline"),
+        }
+    }
+
+    /// A refusal as gone carries its reason after the refusal. A build
+    /// before the reason reads the refusal alone, as the full cell's it
+    /// always read, and so does this build when no reason follows, or one
+    /// it does not know, or bytes it cannot read. A full cell's refusal is
+    /// sent byte for byte as before the reason.
+    #[test]
+    fn a_reason_after_a_refusal_is_read_here_and_skipped_by_an_older_build() {
+        let error = Error::new(ErrorKind::Overloaded, "draining");
+        let before = encode(&Err::<Accepted, Error>(error.clone())).expect("encode");
+        let full = refusal(&error, Decline::Full).expect("encode");
+        let gone = refusal(&error, Decline::Gone).expect("encode");
+        assert_eq!(full, before, "a full cell's refusal changed on the wire");
+        assert!(gone.starts_with(&before) && gone.len() > before.len());
+        // How every build before the reason reads a reply.
+        for reply in [&full, &gone] {
+            let older: Result<Accepted, Error> = decode(reply).expect("an older build reads it");
+            assert_eq!(older.expect_err("a refusal"), error);
+        }
+        assert_eq!(declined(read(gone)), (ErrorKind::Overloaded, Decline::Gone));
+        assert_eq!(declined(read(full)), (ErrorKind::Overloaded, Decline::Full));
+        let mut later = before.clone();
+        later.extend(encode(&"throttled").expect("encode"));
+        assert_eq!(
+            declined(read(later)),
+            (ErrorKind::Overloaded, Decline::Full)
+        );
+        let mut unreadable = before;
+        // A marker msgpack never uses.
+        unreadable.push(0xc1);
+        assert_eq!(
+            declined(read(unreadable)),
+            (ErrorKind::Overloaded, Decline::Full)
+        );
+        let placement = Error::new(ErrorKind::Placement, "other deployment");
+        let gone = refusal(&placement, Decline::Gone).expect("encode");
+        assert_eq!(declined(read(gone)), (ErrorKind::Placement, Decline::Gone));
+        // Only a decline has a reason: after an acceptance or the
+        // request's own error, the bytes are not read.
+        let mut accepted = encode(&Ok::<Accepted, Error>(None)).expect("encode");
+        accepted.extend(encode(&"gone").expect("encode"));
+        assert!(matches!(read(accepted), Answer::Accepted(None)));
+        let deadline = refusal(&Error::deadline_exceeded(), Decline::Gone).expect("encode");
+        assert!(matches!(read(deadline), Answer::Failed(_)));
     }
 
     /// A boundary that counts each time its hop is read.

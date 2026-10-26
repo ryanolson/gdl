@@ -80,6 +80,7 @@ Request envelopes and their replies are MessagePack, sent through velo's raw-byt
 |---|---|
 | `Forward` | envelope version, deployment identity (contract hash and placement hash), hop, the position of the first stage to run, the context's wire part (id, metadata, wall-clock deadline), reply-to, and the payload |
 | its acknowledgement | nothing, or for a streamed request the reply-to of the input anchor that the receiver minted |
+| its refusal | the error, then, when an entry declines an offer from another cell as gone, the string `gone` as a second value, which a build without it does not read ([A cell that is gone](cell-routing.md#a-cell-that-is-gone)) |
 | `Open` | envelope version, deployment identity, hop, the position of the run's first stage, the context's wire part, and reply-to |
 
 A receiver refuses an envelope of another version, and one whose identity differs from its own, with `Placement`. So an instance built from another contract or placement cannot misread a request. [Specs, segments, and layouts](placement.md) describes the identity hashes.

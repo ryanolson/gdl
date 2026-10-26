@@ -529,6 +529,7 @@ async fn refusing_here(kind: ErrorKind) -> RefusingHere {
             Box::pin(async move {
                 Err(Refused {
                     error: Error::new(kind, "refused here"),
+                    decline: Default::default(),
                     envelope: Box::new(envelope),
                 })
             })
@@ -980,4 +981,103 @@ async fn an_address_another_deployment_holds_is_not_offered_to() {
     assert_eq!(neighbour.entries[0].offers(), 0, "the neighbour took it");
     let error = result.expect_err("nothing could take it");
     assert_eq!(error.kind(), ErrorKind::Transport, "{error}");
+}
+
+/// A segment declines offers by its own policy as full or gone, and takes
+/// them again; a drain's refusal says gone, and outlasts the segment's
+/// own, which neither replaces nor undoes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drains_refusal_outlasts_the_segments_own() {
+    use crate::dist::offers::Decline;
+
+    let fixture = fixture(vec![accepting()], config(0)).await;
+    let rt = &fixture.rt;
+    let declined = || rt.check_offer().err().map(|refusal| refusal.decline);
+    assert_eq!(declined(), None);
+    rt.decline_offers_as(Decline::Full);
+    assert_eq!(declined(), Some(Decline::Full));
+    rt.decline_offers_as(Decline::Gone);
+    assert_eq!(declined(), Some(Decline::Gone));
+    rt.take_offers();
+    assert_eq!((declined(), rt.declines_offers()), (None, false));
+
+    rt.decline_offers_as(Decline::Full);
+    rt.decline_offers();
+    let refusal = rt.check_offer().expect_err("declined");
+    assert_eq!(refusal.decline, Decline::Gone);
+    assert_eq!(refusal.error.kind(), ErrorKind::Overloaded);
+    assert!(
+        refusal.error.message().contains("draining"),
+        "{}",
+        refusal.error
+    );
+    rt.take_offers();
+    assert_eq!(declined(), Some(Decline::Gone));
+    rt.decline_offers_as(Decline::Full);
+    assert_eq!(declined(), Some(Decline::Gone));
+}
+
+/// A draining entry must tell a stale chooser it is gone even while
+/// admitted requests hold every permit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_draining_entry_still_declines_as_gone() {
+    use crate::dist::hop::Register;
+    use crate::dist::offers::Decline;
+    use crate::dist::segment::Deployment;
+    use crate::dist::stages::{BwdEnd, DSink, FwdEnd};
+    use crate::wire::Codec;
+
+    let node = bind_node(([127, 0, 0, 1], 0).into())
+        .await
+        .expect("a velo node");
+    let placement = placement().class("global", ["a"]).class("model_x", ["d"]);
+    let deployment = Deployment::new(
+        node,
+        &manifest(),
+        &placement,
+        "d",
+        &Roster::new(),
+        RuntimeConfig {
+            admission_limit: 1,
+            admission_wait: Duration::from_millis(20),
+            ..config(0)
+        },
+    )
+    .expect("a deployment");
+    let codec = || Some(Codec::<String>::new(Default::default()));
+    let hop = deployment
+        .hop(
+            0,
+            FwdEnd::new(codec()),
+            DSink::new(Arc::new(Echo)),
+            BwdEnd::new(codec()),
+        )
+        .expect("the hop");
+    let mut entries = Entries::default();
+    hop.register(&mut entries);
+    let segment = deployment.start(hop).expect("started");
+    let rt = segment.runtime();
+    assert!(rt.offered(0), "the hand-off crosses into this class");
+    let entry = entries.forward(0, 1).expect("the entry");
+    segment.decline_offers();
+    let refusal = tokio::time::timeout(WAIT, entry(hand_off(rt, &Cx::new())))
+        .await
+        .expect("answered in time")
+        .expect_err("the drain refuses with spare capacity");
+    assert_eq!(refusal.decline, Decline::Gone, "the control");
+
+    let held = rt.admission.admit(7).await.expect("the only permit");
+    assert_eq!(segment.admitted(), 1);
+    let refusal = tokio::time::timeout(WAIT, entry(hand_off(rt, &Cx::new())))
+        .await
+        .expect("answered in time")
+        .expect_err("the drain refuses at capacity");
+    drop(held);
+    assert_eq!(refusal.error.kind(), ErrorKind::Overloaded);
+    assert_eq!(
+        refusal.decline,
+        Decline::Gone,
+        "admission hid the drain: {}",
+        refusal.error
+    );
 }

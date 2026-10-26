@@ -201,6 +201,11 @@ pub struct Cell {
     state: CellState,
     load: Option<Load>,
     entries: usize,
+    /// The follow the chooser's table holds the cell in, and how many
+    /// times the relay changed it: a cell that declined an offer as gone
+    /// is passed over until either changes ([`Damped::is_gone`]).
+    generation: u64,
+    changes: u64,
 }
 
 impl Cell {
@@ -221,7 +226,19 @@ impl Cell {
             state,
             load: None,
             entries: 0,
+            generation: 0,
+            changes: 0,
         }
+    }
+
+    /// The cell as the follow `generation` of the chooser's hub shows it,
+    /// after the relay changed its state or offered state `changes` times.
+    #[doc(hidden)]
+    #[inline]
+    pub fn with_follow(mut self, generation: u64, changes: u64) -> Self {
+        self.generation = generation;
+        self.changes = changes;
+        self
     }
 
     /// The cell with `entries` entry instances to route to.
@@ -497,10 +514,12 @@ impl<'a, H> CellRequest<'a, H> {
         self.excluded
     }
 
-    /// Whether `cell` declined this request.
+    /// Whether `cell` may not be chosen for this request: it declined
+    /// it, or it declined an offer as gone and its follow has not changed
+    /// since ([`Damped::is_gone`]).
     #[inline]
     pub fn is_excluded(&self, cell: &Cell) -> bool {
-        self.excluded.contains(&cell.id)
+        self.excluded.contains(&cell.id) || self.damped.is_gone(cell)
     }
 
     /// The cells the chooser damps, as one moment's view.

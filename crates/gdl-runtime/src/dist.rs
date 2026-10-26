@@ -29,6 +29,7 @@ pub(crate) use fabric::shut_down;
 pub(crate) use fabric::{CellDrain, Parent};
 pub use hop::{DHop, Register};
 pub(crate) use launch::{announce, announced, follow as follow_directory};
+pub use offers::Decline;
 pub use roster::Roster;
 pub use runtime::{Entries, RuntimeConfig};
 #[cfg(feature = "fault-injection")]

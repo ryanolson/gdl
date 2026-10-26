@@ -3,6 +3,7 @@
 
 mod avoided;
 mod bounded;
+mod declines;
 mod offered;
 mod reread;
 mod rewatch;
@@ -978,4 +979,156 @@ async fn a_cells_damping_outlives_its_follows_and_snapshots() {
     );
     cells.damping().accept(super::cell_id("model_x", M1));
     assert_eq!(table(&cells, M1).expect("held").damped, None);
+}
+
+/// A cell that declined as gone stays gone through what does not change
+/// its follow: a load summary, and the same state again. It is no longer
+/// gone once the relay changes its state, even back to the state it
+/// declined in, or its offered state, or a newer generation is shown, or
+/// a new watch's snapshot shows it, since a snapshot cannot show what
+/// changed while no watch was open. The follower then forgets the mark, as it does once the follow is
+/// dropped, or a snapshot no longer shows the cell, so that a choice reads
+/// no stale mark.
+#[test]
+fn a_cell_stays_gone_until_the_relay_changes_its_follow() {
+    let (mut follows, cells, _, _) = follower();
+    let now = Instant::now();
+    let x = peer();
+    let shown = |state: CellState| [follow(M1, 1, state), exposed(M1, 1, &x)];
+    live(&mut follows, now, shown(CellState::Ready));
+    let gone = |cells: &Cells| {
+        let table = cells.table("f").expect("kept");
+        cells.damping().gone(&table.views[0]);
+        assert!(self::table(cells, M1).expect("held").gone);
+    };
+    // Whether the cell is gone, and whether the follower forgot the
+    // marks of a follow that changed.
+    let is_gone = |cells: &Cells| {
+        let gone = table(cells, M1).expect("held").gone;
+        assert_eq!(cells.damping().view().gone_marks(), usize::from(gone));
+        gone
+    };
+    let resnapshot = |follows: &mut Follows<Recorded>, state: CellState| {
+        let mut snapshot = follows.snapshot();
+        for event in shown(state) {
+            snapshot.apply(event, now);
+        }
+        follows.resnapshot(snapshot, now);
+    };
+
+    gone(&cells);
+    live(
+        &mut follows,
+        now,
+        [
+            loaded(M1, 1, Some(summary(10))),
+            state(M1, 1, CellState::Ready),
+        ],
+    );
+    assert!(is_gone(&cells), "a summary, or the same state again");
+    resnapshot(&mut follows, CellState::Ready);
+    assert!(
+        !is_gone(&cells),
+        "a snapshot, which cannot show what it missed"
+    );
+
+    live(&mut follows, now, [state(M1, 1, CellState::Degraded)]);
+    assert!(!is_gone(&cells), "a new state");
+    gone(&cells);
+    live(&mut follows, now, [state(M1, 1, CellState::Ready)]);
+    assert!(!is_gone(&cells), "back to the state it declined in");
+
+    let offering = |revision, offered| FollowEvent::Offering {
+        class: "model_x".into(),
+        cell: M1.into(),
+        generation: 1,
+        revision,
+        offered,
+    };
+    gone(&cells);
+    live(&mut follows, now, [offering(2, false)]);
+    assert!(!is_gone(&cells), "a new offered state");
+
+    live(&mut follows, now, [offering(3, true)]);
+    gone(&cells);
+    resnapshot(&mut follows, CellState::Degraded);
+    assert!(!is_gone(&cells), "a snapshot of another state");
+
+    gone(&cells);
+    live(&mut follows, now, [follow(M1, 2, CellState::Ready)]);
+    assert!(!is_gone(&cells), "a newer generation");
+
+    gone(&cells);
+    live(&mut follows, now, [dropped(M1, 2)]);
+    assert!(table(&cells, M1).is_none());
+    assert_eq!(cells.damping().view().gone_marks(), 0, "a dropped follow");
+    live(&mut follows, now, [follow(M1, 3, CellState::Ready)]);
+    gone(&cells);
+    follows.resnapshot(follows.snapshot(), now);
+    assert_eq!(
+        cells.damping().view().gone_marks(),
+        0,
+        "a snapshot without the cell"
+    );
+}
+
+/// A decline can hold its table while the follower publishes a change.
+/// Finishing it must not erase a later decline's mark on the current view.
+#[test]
+fn a_delayed_gone_write_preserves_a_newer_gone_mark() {
+    let (mut follows, cells, _, _) = follower();
+    let now = Instant::now();
+    let x = peer();
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+    );
+    let before = cells.table("f").expect("the table");
+    let lease = super::lease::CellLease::take(&before.cells[0].leases).expect("offered");
+
+    // The first decline pauses after Crossing::declined loads its table.
+    live(&mut follows, now, [state(M1, 1, CellState::Degraded)]);
+    let current = cells.table("f").expect("the changed table");
+    assert!(lease.is_of(&before.cells[0]) && lease.is_of(&current.cells[0]));
+    cells.damping().gone(&current.views[0]);
+    assert!(table(&cells, M1).expect("held").gone);
+
+    // The first decline resumes with its captured view after the second.
+    cells.damping().gone(&before.views[0]);
+    let shown = table(&cells, M1).expect("held");
+    assert!(
+        shown.gone,
+        "a delayed gone write erased a current gone mark: {shown:?}"
+    );
+}
+
+#[test]
+fn a_full_reply_with_an_earlier_view_preserves_a_newer_gone_mark() {
+    let (mut follows, cells, _, _) = follower();
+    let now = Instant::now();
+    let x = peer();
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &x)],
+    );
+    let before = cells.table("f").expect("the table");
+    let lease = super::lease::CellLease::take(&before.cells[0].leases).expect("offered");
+
+    // A full reply pauses after Crossing::declined loads its table.
+    live(&mut follows, now, [state(M1, 1, CellState::Degraded)]);
+    let current = cells.table("f").expect("the changed table");
+    assert!(lease.is_of(&before.cells[0]) && lease.is_of(&current.cells[0]));
+    cells.damping().gone(&current.views[0]);
+    cells.damping().decline_shown(&current.views[0], now);
+    assert!(table(&cells, M1).expect("held").gone, "the control");
+
+    // The full reply resumes after a newer gone reply marked the cell.
+    cells.damping().decline_shown(&before.views[0], now);
+    let shown = table(&cells, M1).expect("held");
+    assert!(
+        shown.gone,
+        "a full reply using an earlier view erased the current gone mark: {shown:?}"
+    );
 }

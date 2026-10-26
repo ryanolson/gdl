@@ -19,6 +19,7 @@ use super::damping::Damping;
 use super::lease::CellLease;
 use super::policy;
 use super::{CellTable, Cells, EntryTable};
+use crate::dist::offers::Decline;
 use crate::dist::roster::{CHOICES, Policy, turn};
 use crate::dist::runtime::Within;
 
@@ -183,11 +184,32 @@ impl Crossing {
         &self.target.class
     }
 
-    /// The cell `cell` declined an offer: the chooser damps it.
-    pub(crate) fn declined(&self, cell: u64) {
-        self.target
-            .damping
-            .decline(cell, tokio::time::Instant::now());
+    /// The cell `cell` declined an offer, made under `lease`, for
+    /// `decline`: the chooser damps it, or, when it said it is gone,
+    /// passes it over until its follow changes. Gone holds the follow as
+    /// the cell's current table shows it, and only while that table is of
+    /// the follow the offer was made under: a decline that lands after a
+    /// newer generation replaced it says nothing of the newer one, which
+    /// is damped instead, as for a full cell. A full decline leaves a cell
+    /// that is gone in its current follow gone. Read only on a decline.
+    pub(crate) fn declined(&self, cell: u64, decline: Decline, lease: Option<&CellLease>) {
+        let damping = &self.target.damping;
+        let now = tokio::time::Instant::now();
+        let table = self.target.table.load();
+        let current = table
+            .cells
+            .iter()
+            .zip(&table.views)
+            .find(|(shown, _)| shown.id == cell);
+        match current {
+            Some((shown, view))
+                if decline == Decline::Gone && lease.is_some_and(|lease| lease.is_of(shown)) =>
+            {
+                damping.gone(view);
+            }
+            Some((_, view)) => damping.decline_shown(view, now),
+            None => damping.decline(cell, now),
+        }
     }
 
     /// The cell `cell` accepted an offer: its damping, as the chooser has
@@ -406,6 +428,7 @@ mod tests {
             turn,
             offering: true,
             revision: 1,
+            changes: 0,
             leases: Arc::default(),
         })
     }

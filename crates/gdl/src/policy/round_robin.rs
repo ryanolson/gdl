@@ -1,4 +1,4 @@
-use super::{Cell, CellChoice, CellPolicy, CellRequest, CellState, NoCell, cut};
+use super::{Cell, CellChoice, CellPolicy, CellRequest, CellState, Damped, NoCell, cut};
 use crate::select::Encoded;
 
 /// `round_robin`: the cells the chooser follows take turns, whatever their
@@ -6,7 +6,9 @@ use crate::select::Encoded;
 ///
 /// A cell is eligible only while it is `ready` or `degraded`, has an entry
 /// instance to route to (a cell that is not offered, or unread, has none),
-/// and has not declined the request. Damping comes first, then the rank:
+/// has not declined the request, and has not declined an offer as gone in
+/// the follow it is shown in ([`Damped::is_gone`]). Damping comes first,
+/// then the rank:
 ///
 /// 1. A cell the chooser damps is passed over as `home_first` passes it
 ///    over: at most half of the eligible cells, `ready` and `degraded`
@@ -61,13 +63,13 @@ impl RoundRobin {
         let (excluded, damped, now) = (request.excluded(), request.damped(), request.now());
         let lasts = damped.lasts(now);
         let cut = if lasts {
-            let eligible = |cell: &Cell| Self::rank(cell, excluded).is_some() && keep(cell);
+            let eligible = |cell: &Cell| Self::rank(cell, excluded, damped).is_some() && keep(cell);
             cut(cells, eligible, damped, now)
         } else {
             0
         };
         let rank = |cell: &Cell| {
-            Self::rank(cell, excluded)
+            Self::rank(cell, excluded, damped)
                 .filter(|_| keep(cell) && (!lasts || damped.left(cell.id, now) <= cut))
         };
         let mut counts = [0u64; 2];
@@ -92,8 +94,8 @@ impl RoundRobin {
 
     /// `cell`'s rank, `ready` before `degraded`, or `None` when it may not
     /// be chosen for this request.
-    fn rank(cell: &Cell, excluded: &[u64]) -> Option<usize> {
-        if cell.entries == 0 || excluded.contains(&cell.id) {
+    fn rank(cell: &Cell, excluded: &[u64], damped: &Damped) -> Option<usize> {
+        if cell.entries == 0 || excluded.contains(&cell.id) || damped.is_gone(cell) {
             return None;
         }
         match cell.state {
@@ -367,5 +369,42 @@ mod tests {
         // as it does in `home_first`, which caps over every eligible cell.
         let mixed = [ready("m2"), cell("d1", CellState::Degraded, 1)];
         assert_eq!(turns(&mixed, &[], &damped, now, 0..2), names(&["d1", "d1"]));
+    }
+
+    /// A cell gone in its follow takes no turn, however many cells are,
+    /// so a lone one is not chosen, and it does not count in the damping
+    /// cap: a damped cell beside a gone one is the lone eligible cell, and
+    /// is chosen. Once its follow changes, it is not gone, and takes its
+    /// turns again, as it does once its chooser no longer holds it gone.
+    #[test]
+    fn a_gone_cell_takes_no_turn_until_its_follow_changes() {
+        let cells = [ready("m1"), ready("m2"), ready("m3")];
+        let now = Instant::now();
+        let gone = Damped::EMPTY.with_gone(&cells[1]);
+        assert!(gone.is_gone(&cells[1]) && !gone.is_damped(cells[1].id()));
+        assert_eq!(
+            turns(&cells, &[], &gone, now, 0..4),
+            names(&["m1", "m3", "m1", "m3"])
+        );
+        let lone = [ready("m2")];
+        assert_eq!(turns(&lone, &[], &gone, now, 0..2), names(&["-", "-"]));
+        let both = Damped::new([(cells[0].id(), now + SECOND)]).with_gone(&cells[1]);
+        assert_eq!(
+            turns(&cells[..2], &[], &both, now, 0..2),
+            names(&["m1", "m1"]),
+            "the cap counted the gone cell"
+        );
+        let changed = [ready("m1"), ready("m2").with_follow(0, 1), ready("m3")];
+        assert!(!gone.is_gone(&changed[1]));
+        assert_eq!(
+            turns(&changed, &[], &gone, now, 0..3),
+            names(&["m1", "m2", "m3"])
+        );
+        let generation = [ready("m1"), ready("m2").with_follow(1, 0), ready("m3")];
+        assert!(!gone.is_gone(&generation[1]));
+        assert_eq!(
+            turns(&generation, &[], &Damped::default(), now, 0..3),
+            names(&["m1", "m2", "m3"])
+        );
     }
 }
