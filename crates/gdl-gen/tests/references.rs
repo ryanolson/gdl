@@ -64,6 +64,12 @@ fn the_check_sees_each_kind_of_reference() {
         "// found in review m19-r12",
         "/// Counterexample 1 of review `cells-r2`: Route provisions Post first",
         "#[ignore = \"B-2 (review round 2): the hook names no services\"]",
+        "// fixed in PR #312",
+        "/// see PR 45 for the reason",
+        "// moved here by pull request #7",
+        "// https://github.com/NVIDIA-dev/dynamo-gdl/pull/12",
+        "/// See PR `#312` for why the drain waits.",
+        "The drain moved in PR **#312**.",
     ] {
         assert!(cites(line).is_some(), "missed: {line}");
     }
@@ -76,6 +82,9 @@ fn the_check_sees_each_kind_of_reference() {
         "let rem3 = 1;",
         "// a review of the drain, round two",
         "/// the cell-r2 table",
+        "// the expr 2 form",
+        "/// a pull request runs the book job",
+        "// pull/push both work",
     ] {
         assert!(cites(line).is_none(), "false positive: {line}");
     }
@@ -109,7 +118,26 @@ fn cites(line: &str) -> Option<&'static str> {
     if review_id(&lower) || named_review(&lower) {
         return Some("review id");
     }
+    if pr_number(&lower) {
+        return Some("PR number");
+    }
     None
+}
+
+/// A pull request cited by number: `PR 42`, `PR #42`, `pull request #42`,
+/// or a `/pull/42` link, with or without Markdown code or emphasis.
+fn pr_number(line: &str) -> bool {
+    let number = |rest: &str| {
+        rest.trim_start_matches(['`', '*', '_', '#'])
+            .starts_with(|c: char| c.is_ascii_digit())
+    };
+    let word = |needle: &str| {
+        line.match_indices(needle).any(|(at, _)| {
+            !line[..at].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                && number(&line[at + needle.len()..])
+        })
+    };
+    word("pr ") || word("pr#") || word("pull request ") || after(line, "/pull/", number)
 }
 
 /// Whether some occurrence of `needle` in `haystack` is followed by text

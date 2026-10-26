@@ -6,7 +6,7 @@ You define the graph once, with its message types. A placement puts each node in
 
 NOTE: gdl is experimental. Its design and tests are still in progress, and its APIs are not stable.
 
-**Documentation: the gdl book.** The source is in [`docs/src/`](docs/src/SUMMARY.md). The book has no published site yet. Build it with `scripts/build-book.sh`, then open `docs/book/html/index.html`.
+**Documentation: the gdl book.** The source is in [`docs/src/`](docs/src/SUMMARY.md). Each push to `main` publishes it to a private GitHub Pages site, <https://crispy-adventure-qq4pemj.pages.github.io/>, which anyone who can read this repository can open. To build it locally, run `scripts/build-book.sh`, then open `docs/book/html/index.html`.
 
 ## Highlights
 

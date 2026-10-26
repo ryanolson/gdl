@@ -1,0 +1,47 @@
+# Checks that run on each pull request and on each push to main. The test
+# suite does not run here yet.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+    - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  book:
+    name: Book
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 #v6.0.1
+      with:
+        persist-credentials: false
+    - name: Build book and check links
+      env:
+        INSTALL_TOOLS: "1"
+      run: bash scripts/build-book.sh
+
+  references:
+    name: References
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 #v6.0.1
+      with:
+        persist-credentials: false
+    # The test uses only std, so rustc builds it in about a second.
+    # `cargo test -p gdl-gen` would first build gdl-gen's dependencies and velo.
+    - name: Check that no comment or chapter cites a plan
+      env:
+        CARGO_MANIFEST_DIR: ${{ github.workspace }}/crates/gdl-gen
+      run: |
+        rustc --edition 2024 --test crates/gdl-gen/tests/references.rs -o "$RUNNER_TEMP/references"
+        timeout 120 "$RUNNER_TEMP/references"
