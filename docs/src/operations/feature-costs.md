@@ -158,18 +158,26 @@ With the lease as a `Box<dyn ChoiceLease>`, a choice and the offer's lease were 
 
 ## Reading the followed cells
 
-A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by, then, in the bench, one cell found by name among four and one withdrawal looked up. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`). Measured on the aarch64 Linux host above, shared, rustc 1.93.1, at `03be278` with the change, in four runs at load averages from 10 to 24:
+A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by, then, in the bench, one cell found by name among four and one withdrawal looked up. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`).
 
 ```bash
-cargo bench -p gdl --bench followed
+cargo bench -p gdl --bench followed -- 'followed/read' --warm-up-time 1 --measurement-time 3
 ```
+
+On a quiet host, gb300 (Neoverse-V2, 72 cores), pinned to core 9, load average 3.7, rustc 1.93.1, at `d133902`:
+
+| Read | Time |
+|---|---|
+| bound, a cell and a withdrawal looked up | 48.4 ns, 47.7 ns |
+
+On the shared aarch64 host above (Cortex-X925 and Cortex-A725), at load averages from 10 to 24, without the filter, at `03be278` with the change:
 
 | Read | Time |
 |---|---|
 | bound, a cell and a withdrawal looked up | 40.8 ns, 41.9 ns, 42.3 ns, 55.9 ns |
 | not bound | 0.5 to 0.6 ns |
 
-A run by another agent on the same host, at load 12.5, measured 83 ns for the bound read. The spread is the shared host's: the bench has no lock or allocation to contend on.
+A run by another agent on the shared host, at load 12.5, measured 83 ns for the bound read.
 
 Nothing reads the handle unless a node does, so a request that no such node handles pays nothing.
 
