@@ -85,11 +85,13 @@ Request envelopes and their replies are MessagePack, sent through velo's raw-byt
 
 A receiver refuses an envelope of another version, and one whose identity differs from its own, with `Placement`. So an instance built from another contract or placement cannot misread a request. [Specs, segments, and layouts](placement.md) describes the identity hashes.
 
-Stream items cross on velo's byte path: each is one velo frame whose payload is a byte string. The producer sends with `StreamSender::send_bytes`, and the consumer reads with `StreamAnchor::poll_next_bytes`, which hands on the payload as a view of the frame it arrived in.
+Stream items cross on velo's byte path: each is one velo frame whose payload is a byte string. The edge codec writes each item straight into the frame (`ByteItemBuilder`), and the producer sends that frame with `StreamSender::send_frame`, so the item is not copied after it is encoded. The consumer reads with `StreamAnchor::poll_next_bytes`, which hands on the payload as a view of the frame it arrived in.
 
-- **Open:** an empty item. The producer's stream exists. It is sent before any item.
+- **Open:** an empty item, sent with `StreamSender::send_bytes`. The producer's stream exists. It is sent before any item.
 - **Item:** the item's bytes from the edge's codec. The edge decode reads them in the buffer velo received them in, with no copy.
 - **Fail:** velo's sender error, carrying the `gdl::Error` as JSON. It is a terminal failure for gdl. velo does not end the stream on it, so the producer finalizes right after it, and the consumer stops reading.
+
+Each stream reserves room in an item's frame for the smaller of its last two items' sizes. A stream of like items then reserves each one exactly, and one large item raises the reservation for no more than one item after it.
 
 No encoding writes zero bytes for a value, so an empty item is only Open. A hand-written `Serialize` could write nothing. The sending stage fails such an item with `Codec` instead of sending it. Envelope version 4 carries items this way. A segment of version 3 framed each item a second time, and the two refuse each other's envelopes. Each message type chooses its own encoding. [Messages and encodings](messages.md) describes the codecs.
 

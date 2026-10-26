@@ -38,8 +38,11 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7"
 trybuild = "1"
 uuid = "1"
-velo = { git = "https://github.com/ai-dynamo/velo", branch = "main", default-features = false }
-velo-hub = { git = "https://github.com/ai-dynamo/velo", branch = "main", default-features = false }
+# Pinned to the commit of an open velo pull request that adds
+# `ByteItemBuilder` and `StreamSender::send_frame`, which is not on velo's
+# main. Move both lines back to velo's main or a release once it merges.
+velo = { git = "https://github.com/ai-dynamo/velo", rev = "e892f87e398b017e3027e1ab0f56d9136099283b", default-features = false }
+velo-hub = { git = "https://github.com/ai-dynamo/velo", rev = "e892f87e398b017e3027e1ab0f56d9136099283b", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

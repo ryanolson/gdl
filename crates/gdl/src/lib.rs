@@ -128,7 +128,7 @@ pub use gdl_macros::Projection;
 /// request's visit records. Not a stable interface.
 #[doc(hidden)]
 pub mod __runtime {
-    pub use crate::codec::{decoder, encoder};
+    pub use crate::codec::{decoder, encoder, encoder_into};
     pub use crate::cx::wall_now_nanos;
     pub use crate::followed::CellSource;
     pub use crate::items::{CHECK_INTERVAL, bound_measured, failed, fuse, until_error};

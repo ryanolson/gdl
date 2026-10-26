@@ -148,8 +148,14 @@ async fn a_stream_codec_uses_each_parts_declared_encoding() {
     let head: Json = serde_json::from_slice(&split.head).expect("JSON head");
     assert_eq!(head.text, "head");
     let encoded: Vec<_> = split.input.expect("input").collect().await;
-    assert_eq!(encoded, [Ok(vec![0x91, 7])]);
-    let arrived = encoded.into_iter().map(|item| item.map(bytes::Bytes::from));
+    let payloads: Vec<Vec<u8>> = encoded
+        .into_iter()
+        .map(|item| item.expect("encoded").payload().to_vec())
+        .collect();
+    assert_eq!(payloads, [vec![0x91, 7]]);
+    let arrived = payloads
+        .into_iter()
+        .map(|item| Ok(bytes::Bytes::from(item)));
     let joined = codec
         .join(&split.head, Some(items(futures::stream::iter(arrived))))
         .expect("join");
@@ -418,9 +424,9 @@ async fn a_stream_codec_splits_and_joins_a_streamed_request() {
     };
     let request = Streamed::new(head, items(futures::stream::iter([Ok(4), Ok(5)])));
     let split = codec.split(request).expect("split");
-    let arrived = split
-        .input
-        .map(|input| items(input.map(|item| item.map(bytes::Bytes::from))));
+    let arrived = split.input.map(|input| {
+        items(input.map(|item| item.map(|item| bytes::Bytes::copy_from_slice(item.payload()))))
+    });
     let joined = codec.join(&split.head, arrived).expect("join");
     let (head, input) = joined.into_parts();
     assert_eq!(

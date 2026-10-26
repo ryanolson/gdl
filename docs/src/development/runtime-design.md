@@ -26,7 +26,7 @@ The graph is a typed structure, and the placement is runtime data.
 
 Every gdl anchor carries velo's byte items, and each edge's codec turns `T` into bytes and back. A runtime that is generic over `T` cannot call velo's `attach_anchor::<T>` without `T: Serialize`, and a runtime check cannot supply that bound. A codec is a pair of function pointers, monomorphized where `T` is concrete (in the graph macro's expansion), so the runtime carries the bound without naming it. An edge whose type cannot be serialized has no codec, and a placement that would cross it is refused before anything runs.
 
-The cost is one extra copy per item at a crossing: the edge codec's bytes are copied into velo's frame. The receiver decodes them where they arrived. [Crossing performance](../operations/crossing-performance.md#codec-cost) has the measured cost and the command.
+The edge codec writes each item straight into velo's frame, so a crossing adds no copy of the item. The receiver decodes it where it arrived. [Crossing performance](../operations/crossing-performance.md#codec-cost) has the measured cost and the command.
 
 The first form wrapped the bytes in a `WireItem` enum that velo serialized inside its own frame: two encodes and four copies of the payload per item, against velo's one encode and two copies. It cost 97 ns more than velo per item at 16 B and 477 ns more at 16 KiB, and 3 more allocations per item end to end. A tag byte before each payload, instead of an empty item for Open and velo's sender error for Fail, was not taken: it costs a byte per item and a copy unless the codec writes it.
 

@@ -91,28 +91,31 @@ Two velo 0.19 nodes in one process over loopback TCP, default settings, move one
 
 Application messages cross as named-field MessagePack (`msgpack`) by default. A fixed layout can choose positional MessagePack (`msgpack_array`), and a message can choose JSON. Named MessagePack keeps omitted fields, including nested ones. JSON has [value restrictions](limitations.md#json-cannot-preserve-every-serde-value).
 
-**Crossing overhead, in process.** Encode and decode of one item as velo carries it directly, against gdl's crossing. The crossing sends the edge codec's bytes as one velo byte item, and the receiver decodes them in the buffer they arrived in ([Crossings](../concepts/crossings.md#what-crosses-the-wire)). The item is a 16 B, 1 KiB, or 16 KiB blob. The earlier frame wrapped the bytes in a `WireItem` enum inside velo's frame.
+**Crossing overhead, in process.** Encode and decode of one item as velo carries it directly, against gdl's crossing. The crossing's edge codec writes the item straight into velo's frame, as one velo byte item, and the receiver decodes it in the buffer it arrived in ([Crossings](../concepts/crossings.md#what-crosses-the-wire)). The item is a 16 B, 1 KiB, or 16 KiB blob. Two earlier frames are shown for comparison: the `WireItem` frame wrapped the bytes in an enum inside velo's frame, and the byte path with a copy encoded the item into its own buffer, which `send_bytes` copied into the frame.
 
-| Item size | velo direct | `WireItem` frame | Byte path | Byte path minus velo |
-|---|---|---|---|---|
-| 16 B | 68.6 ns | 164.1 ns | 59.6 ns | -9.0 ns |
-| 1 KiB | 139.1 ns | 284.5 ns | 175.0 ns | +35.8 ns |
-| 16 KiB | 469.8 ns | 939.7 ns | 672.8 ns | +203.0 ns |
+| Item size | velo direct | `WireItem` frame | Byte path with a copy | In place | In place minus velo |
+|---|---|---|---|---|---|
+| 16 B | 68.4 ns | 164.1 ns | 60.3 ns | 47.6 ns | -20.8 ns |
+| 1 KiB | 144.1 ns | 284.5 ns | 207.4 ns | 105.9 ns | -38.2 ns |
+| 16 KiB | 484.6 ns | 939.7 ns | 691.7 ns | 456.6 ns | -28.0 ns |
 
-The byte path in four steps, timed one by one:
+The in-place crossing in three steps, timed one by one:
 
-| Item size | Edge encode | Frame encode | Frame decode | Edge decode |
-|---|---|---|---|---|
-| 16 B | 16.2 ns | 13.4 ns | 8.3 ns | 21.7 ns |
-| 1 KiB | 72.7 ns | 52.7 ns | 9.2 ns | 33.3 ns |
-| 16 KiB | 232.1 ns | 215.3 ns | 10.3 ns | 219.4 ns |
+| Item size | Encode in place | Frame decode | Edge decode |
+|---|---|---|---|
+| 16 B | 18.6 ns | 7.7 ns | 21.6 ns |
+| 1 KiB | 65.7 ns | 8.3 ns | 33.6 ns |
+| 16 KiB | 229.9 ns | 9.5 ns | 226.8 ns |
 
-- **The rest of the gap is one copy.** The edge codec writes the item into its own buffer, and velo copies it into the frame (the frame encode). At 1 KiB the edge encode also grows its 128-byte buffer once. Velo direct writes the item into the frame in one pass. Removing the copy needs a velo API that lets the edge codec write into velo's frame.
+The byte path with a copy spent 13.5, 67.1, and 228.2 ns copying the item into the frame, and its edge encode took 15.9, 85.4, and 235.2 ns.
+
+- **The item is written in place.** The edge codec writes each item into velo's frame (velo's `ByteItemBuilder`, sent with `send_frame`), so the copy into the frame is gone. A frame reserves the size of the stream's recent items (below), so a stream of like items needs no buffer growth either.
 - **Velo direct writes structs as positional arrays.** gdl's default codec writes named maps, so for a struct message part of the gap is the codec choice, not the frame. The blob here is one byte string, the same in both.
-- **Allocations per item, end to end.** `crates/gdl-runtime/tests/item_allocs.rs` runs the lean graph and velo direct over two in-process nodes, 1,000-item requests, and takes each path's fewest allocations per item over 15 alternating rounds. The `WireItem` frame made 10.27, 11.36, and 16.35 at 16 B, 1 KiB, and 16 KiB, against velo's 7.23, 8.32, and 13.34. The byte path makes 7.27, 8.36, and 13.35, against 7.22, 8.32, and 13.33. A second, paced workload sends each item only once the consumer waits for it, as a token stream does, so that a cost paid on each wait counts on every item: the byte path makes 25.28, 26.28, and 29.38 against velo's 25.17, 26.20, and 29.22. The test fails if the crossing makes more than velo's count plus 0.5 in either workload. Some rounds cost about one allocation per item more on either path, depending on how the two ends are scheduled, so the test compares the fewest, not the median.
+- **Allocations per item, end to end.** `crates/gdl-runtime/tests/item_allocs.rs` runs the lean graph and velo direct over two in-process nodes, 1,000-item requests, and takes each path's fewest allocations and fewest bytes per item over 15 alternating rounds. With the item written in place, the crossing makes 6.27, 6.36, and 11.39 allocations per item at 16 B, 1 KiB, and 16 KiB, against velo's 7.23, 8.32, and 13.44. It allocates 457 B, 5,806 B, and 116,284 B per item, against velo's 439 B, 5,799 B, and 117,146 B. The byte path with a copy made 7.27, 7.36, and 12.38 allocations and 480 B, 6,837 B, and 134,283 B in the same test. A second, paced workload sends each item only once the consumer waits for it, as a token stream does, so that a cost paid on each wait counts on every item: 24.29, 24.28, and 27.40 allocations against velo's 25.19, 26.18, and 29.22. The test fails if the crossing makes more allocations than velo (plus 0.02), allocates more than 128 B over velo at 16 B, or more than 2% over velo at 1 KiB and 16 KiB. Some rounds cost about one allocation per item more on either path, depending on how the two ends are scheduled, so the test compares the fewest, not the median.
+- **The frame size hint.** Each stream reserves the smaller of its last two items' sizes for the next frame. A third workload in the same test sends 16 KiB and 16 B items in turn, and fails if the crossing allocates more than velo plus 2% plus 128 B per small item. The crossing allocates 61,163 B per item there, against velo's 61,127 B. A hint of the last item's size fails it at 69,348 B, because each small item reserves 16 KiB. A hint of the last size capped at 1 KiB fails the 1 KiB rows at 7,870 B against 5,799 B, because a 1 KiB blob encodes to 1,027 bytes and its frame grows once.
 - **CPU per item, end to end**, 32 streams of 1,000 16 B items at once (the bench's first lines): 1.45 µs for the lean graph against 1.19 µs for velo direct with the `WireItem` frame, and 1.36 µs against 1.23 µs with the byte path. One run each, so this is not a claim.
 
-**Setup.** gb300 bench host (Neoverse-V2, pinned to CPU 9, load average 3.7 to 3.9), rustc 1.93.1, velo `cee2834`. The `WireItem` frame at `523afc0`, the byte path at `cadd2f3`. Each row is criterion's median with 1 s warm-up and 3 s measurement. Velo direct is the same function in both runs, at 66.8 and 68.6 ns at 16 B. The table gives the byte path's run.
+**Setup.** gb300 bench host (Neoverse-V2, pinned to CPU 9, load average 3.6 to 3.9), rustc 1.93.1. The `WireItem` frame at `523afc0` (velo `cee2834`). The byte path with a copy at `ddc0d4a` (velo `cee2834`), and in place at `d8ac735` (velo `e892f87`). Each row is criterion's median with 1 s warm-up and 3 s measurement. Velo direct is the same function in every run: 68.4 and 69.1 ns at 16 B, 144.1 and 133.2 ns at 1 KiB, 484.6 and 486.7 ns at 16 KiB. The table gives the in-place run's.
 
 ```bash
 cargo bench -p gdl-runtime --bench remote -- 'codec-' --warm-up-time 1 --measurement-time 3

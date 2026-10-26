@@ -11,6 +11,8 @@ use gdl::{Error, ErrorKind, Result};
 use gdl::{Items, items};
 use gdl_model::Encoding;
 
+use crate::dist::EncodedItem;
+
 /// How one edge's message type crosses a segment boundary.
 ///
 /// A codec is a pair of function pointers monomorphized for `T` where `T` is
@@ -24,7 +26,7 @@ use gdl_model::Encoding;
 /// (`msgpack`, the default), positional MessagePack (`msgpack_array`), or
 /// JSON (`json`). Arrays must not conditionally omit fields.
 pub struct Codec<T> {
-    encode: fn(&T) -> Result<Vec<u8>>,
+    encode: fn(&T, &mut Vec<u8>) -> Result<()>,
     decode: fn(&[u8]) -> Result<T>,
     encoding: Encoding,
 }
@@ -32,7 +34,18 @@ pub struct Codec<T> {
 impl<T> Codec<T> {
     /// Encode one value.
     pub fn encode(&self, value: &T) -> Result<Vec<u8>> {
-        (self.encode)(value)
+        // Reserved as serde_json does: token-sized values need no growth.
+        let mut bytes = Vec::with_capacity(128);
+        (self.encode)(value, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Encode one value of a stream into the frame that carries it, sized
+    /// by the stream's `hint`.
+    pub(crate) fn encode_item(&self, value: &T, hint: &mut SizeHint) -> Result<EncodedItem> {
+        let item = EncodedItem::encode(value, self.encode, hint.next())?;
+        hint.record(item.payload().len());
+        Ok(item)
     }
 
     /// Decode one value.
@@ -46,7 +59,7 @@ impl<T> Codec<T> {
     /// runtime hands them.
     #[cfg(test)]
     pub(crate) fn from_fns(
-        encode: fn(&T) -> Result<Vec<u8>>,
+        encode: fn(&T, &mut Vec<u8>) -> Result<()>,
         decode: fn(&[u8]) -> Result<T>,
     ) -> Self {
         Self {
@@ -61,7 +74,7 @@ impl<T: Serialize + DeserializeOwned> Codec<T> {
     /// A serde codec for `T` using the selected encoding.
     pub fn new(encoding: Encoding) -> Self {
         Self {
-            encode: gdl::__runtime::encoder::<T>(encoding),
+            encode: gdl::__runtime::encoder_into::<T>(encoding),
             decode: gdl::__runtime::decoder::<T>(encoding),
             encoding,
         }
@@ -115,7 +128,7 @@ pub trait RequestCodec: sealed::Sealed + Copy + Send + Sync + 'static {
 #[doc(hidden)]
 pub struct Split {
     pub head: Vec<u8>,
-    pub input: Option<Items<Vec<u8>>>,
+    pub input: Option<Items<EncodedItem>>,
 }
 
 impl<T: Send + 'static> RequestCodec for Codec<T> {
@@ -194,7 +207,8 @@ impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
     fn split(&self, value: Streamed<H, T>) -> Result<Split> {
         let (head, input) = value.into_parts();
         let item = self.item;
-        let encoded = items(input.map(move |value| item.encode(&value?)));
+        let mut hint = SizeHint::default();
+        let encoded = items(input.map(move |value| item.encode_item(&value?, &mut hint)));
         Ok(Split {
             head: self.head.encode(&head)?,
             input: Some(encoded),
@@ -207,6 +221,40 @@ impl<H: Send + 'static, T: Send + 'static> RequestCodec for StreamCodec<H, T> {
         // `Streamed::new` fuses the decoded items: nothing follows a bad one.
         let decoded = items(input.map(move |bytes| item.decode(&bytes?)));
         Ok(Streamed::new(self.head.decode(head)?, decoded))
+    }
+}
+
+/// The payload room to reserve for a stream's next item: the smaller of its
+/// last two items' sizes. A stream of like items reserves each one's size
+/// exactly, so its frame needs no growth and has no spare room. A large item
+/// raises the hint for no more than one item after it, so a small item that
+/// follows reserves a small frame.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SizeHint {
+    last: usize,
+    before: usize,
+}
+
+impl SizeHint {
+    /// The room a stream's first item reserves: a token-sized value fits.
+    const FIRST: usize = 128;
+
+    fn next(&self) -> usize {
+        self.last.min(self.before)
+    }
+
+    fn record(&mut self, len: usize) {
+        self.before = self.last;
+        self.last = len;
+    }
+}
+
+impl Default for SizeHint {
+    fn default() -> Self {
+        Self {
+            last: Self::FIRST,
+            before: Self::FIRST,
+        }
     }
 }
 

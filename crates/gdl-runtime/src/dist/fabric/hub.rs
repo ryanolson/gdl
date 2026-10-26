@@ -1075,7 +1075,9 @@ mod tests {
             async move {
                 let sent = async {
                     let out = attacher.attach(&reply).await.ok()?;
-                    out.send(Outgoing::Item(vec![7])).await.ok()?;
+                    out.send(Outgoing::Item(super::super::EncodedItem::of(&[7])))
+                        .await
+                        .ok()?;
                     out.finish().await;
                     Some(())
                 };

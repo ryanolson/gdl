@@ -27,7 +27,7 @@ use futures::Stream;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use velo::streaming::AnchorConfig;
+use velo::streaming::{AnchorConfig, ByteItemBuilder, ByteItemFrame};
 use velo::{
     Handler, InstanceId, PeerInfo, StreamAnchor, StreamAnchorHandle, StreamController, StreamError,
     StreamFrame, StreamOpenTicket, StreamSender, Velo,
@@ -486,7 +486,7 @@ impl Canceller {
 /// One event on an inbound stream, in gdl's terms.
 ///
 /// Each crosses as one velo frame on velo's byte path: an item is the edge
-/// codec's bytes, Open is an empty item, and Fail is a velo sender error
+/// codec's bytes, written into the frame in place, Open is an empty item, and Fail is a velo sender error
 /// that carries the `gdl::Error` as JSON (docs/src/concepts/crossings.md).
 #[derive(Debug, PartialEq)]
 pub(crate) enum Frame {
@@ -568,8 +568,54 @@ pub(crate) enum Outgoing {
     /// The producer's stream is established. Sent first, before any item,
     /// so a prepared run can activate without waiting for application data.
     Open,
-    /// One item's encoded bytes, never empty: an empty item is Open.
-    Item(Vec<u8>),
+    /// One encoded item, never empty: an empty item is Open.
+    Item(EncodedItem),
+}
+
+/// One item, encoded by its edge codec straight into the frame velo sends,
+/// so its bytes are not copied between the encode and the transport.
+#[doc(hidden)]
+pub struct EncodedItem(ByteItemFrame);
+
+impl EncodedItem {
+    /// Encode `value` with `encode` into a new frame with room for
+    /// `capacity` bytes of payload.
+    pub(crate) fn encode<T: ?Sized>(
+        value: &T,
+        encode: fn(&T, &mut Vec<u8>) -> Result<()>,
+        capacity: usize,
+    ) -> Result<Self> {
+        let mut item = ByteItemBuilder::with_capacity(capacity);
+        encode(value, item.buffer())?;
+        item.finish()
+            .map(Self)
+            .map_err(|error| Error::new(ErrorKind::Codec, error.to_string()))
+    }
+
+    /// The item's encoded bytes.
+    pub fn payload(&self) -> &[u8] {
+        self.0.payload()
+    }
+
+    /// An item whose encoded bytes are `payload`.
+    #[cfg(test)]
+    pub(crate) fn of(payload: &[u8]) -> Self {
+        Self::encode(
+            payload,
+            |payload, buffer| {
+                buffer.extend_from_slice(payload);
+                Ok(())
+            },
+            payload.len(),
+        )
+        .expect("a payload under 4 GiB")
+    }
+}
+
+impl std::fmt::Debug for EncodedItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EncodedItem").field(&self.payload()).finish()
+    }
 }
 
 /// The producer end of an anchor.
@@ -581,11 +627,11 @@ impl Outbound {
     /// Send the open signal or one item. Fails once the consumer has
     /// cancelled.
     pub(crate) async fn send(&self, item: Outgoing) -> Result<()> {
-        let payload: &[u8] = match &item {
-            Outgoing::Open => &[],
-            Outgoing::Item(bytes) => bytes,
-        };
-        self.sender.send_bytes(payload).await.map_err(transport)
+        match item {
+            Outgoing::Open => self.sender.send_bytes([]).await,
+            Outgoing::Item(item) => self.sender.send_frame(item.0).await,
+        }
+        .map_err(transport)
     }
 
     /// Send a terminal failure. velo's sender error does not end the
@@ -683,7 +729,9 @@ mod tests {
         let (mut inbound, reply) = consumer.mint();
         let out = producer.attach(&reply).await.expect("attach");
         out.send(Outgoing::Open).await.expect("open");
-        out.send(Outgoing::Item(vec![1, 2, 3])).await.expect("item");
+        out.send(Outgoing::Item(EncodedItem::of(&[1, 2, 3])))
+            .await
+            .expect("item");
         let error = Error::new(ErrorKind::Overloaded, "full");
         out.fail(&error).await.expect("fail");
         out.finish().await;

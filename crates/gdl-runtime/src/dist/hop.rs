@@ -10,7 +10,7 @@ use futures::{Future, Stream, StreamExt};
 
 use super::admission::{EgressPermit, Share};
 use super::envelope::{Accepted, Forward, Open, VERSION, WireCx};
-use super::fabric::{Canceller, Frame, Inbound, Outbound, Outgoing, ReplyTo, Retirer};
+use super::fabric::{Canceller, EncodedItem, Frame, Inbound, Outbound, Outgoing, ReplyTo, Retirer};
 use super::offers::{Refusal, Refused};
 use super::runtime::{Entries, Handed, Held, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
@@ -1232,7 +1232,7 @@ async fn send_input(
     rt: &Runtime,
     cx: &Cx,
     to: ReplyTo,
-    input: Items<Vec<u8>>,
+    input: Items<EncodedItem>,
     upstream: Option<Canceller>,
     stops: Option<&Cx>,
 ) {
@@ -1277,7 +1277,7 @@ impl Drop for InputGuard {
 /// Not an `async fn` itself: a second frame around `pump_watching` would
 /// enlarge the future of every stream that crosses a segment.
 fn pump<'a>(
-    bytes: Items<Vec<u8>>,
+    bytes: Items<EncodedItem>,
     out: Outbound,
     cx: &'a Cx,
     upstream: Option<Canceller>,
@@ -1320,7 +1320,7 @@ impl Consumer for Tokens {
 
 /// [`pump`], given where its consumer's signals come from.
 async fn pump_watching(
-    mut bytes: Items<Vec<u8>>,
+    mut bytes: Items<EncodedItem>,
     out: Outbound,
     cx: &Cx,
     upstream: Option<Canceller>,
@@ -1389,7 +1389,7 @@ async fn pump_watching(
             // An empty item would cross as the open signal, and the
             // consumer would skip it. No encoding writes zero bytes for a
             // value, but a hand-written `Serialize` could.
-            Some(Ok(item)) if item.is_empty() => {
+            Some(Ok(item)) if item.payload().is_empty() => {
                 return failed(out, empty_encode(), response).await;
             }
             Some(Ok(item)) => {
@@ -1728,6 +1728,49 @@ mod tests {
         crate::wire_codec!(u32).expect("wire").encode(value)
     }
 
+    fn write(value: &u32, buffer: &mut Vec<u8>) -> Result<()> {
+        gdl::__runtime::encoder_into::<u32>(Default::default())(value, buffer)
+    }
+
+    /// Where the last item a test codec encoded began.
+    static WRITTEN_AT: AtomicUsize = AtomicUsize::new(0);
+
+    fn write_at(value: &u32, buffer: &mut Vec<u8>) -> Result<()> {
+        let start = buffer.len();
+        write(value, buffer)?;
+        WRITTEN_AT.store(buffer[start..].as_ptr() as usize, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// The edge codec writes a crossing item straight into the frame that
+    /// velo sends. On one worker velo hands that frame to the consumer
+    /// unchanged, so the consumer reads the item where the encoder wrote
+    /// it: nothing copied it in between.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_item_is_encoded_into_the_frame_velo_sends() {
+        let node = bind_node(([127, 0, 0, 1], 0).into()).await.expect("node");
+        let fabric = Fabric::new(node, None, None, Duration::from_secs(30));
+        let (mut inbound, reply) = fabric.mint();
+        let out = fabric.attach(&reply).await.expect("attach");
+        let codec = Codec::from_fns(write_at, |bytes| read_at(&RESPONSE_READ, bytes));
+        let BwdExit::Leave { mut bytes, .. } =
+            BwdEnd::new(Some(codec)).walk(1, 0, &Cx::new(), items(futures::stream::iter([Ok(7)])))
+        else {
+            panic!("the stream did not leave the run");
+        };
+        let item = bytes.next().await.expect("an item").expect("encoded");
+        let written = WRITTEN_AT.load(Ordering::SeqCst);
+        assert_eq!(item.payload().as_ptr() as usize, written);
+        out.send(Outgoing::Item(item)).await.expect("send");
+        match tokio::time::timeout(Duration::from_secs(5), inbound.next()).await {
+            Ok(Some(Frame::Item(arrived))) => {
+                assert_eq!(arrived.as_ptr() as usize, written, "the item was copied");
+                assert_eq!(&arrived[..], encode(&7).expect("encode"));
+            }
+            other => panic!("expected the item: {other:?}"),
+        }
+    }
+
     /// The edge decode reads an item where velo delivered it, on a
     /// response and on a streamed request's input: no copy, and no move to
     /// the start of its buffer, which turning the view into a `Vec` makes.
@@ -1738,7 +1781,7 @@ mod tests {
         let item = delivered(&payload);
         let at = item.as_ptr() as usize;
         let frames = futures::stream::iter([frame_of(Some(Ok(velo::StreamFrame::Item(item))))]);
-        let codec = Codec::from_fns(encode, |bytes| read_at(&RESPONSE_READ, bytes));
+        let codec = Codec::from_fns(write, |bytes| read_at(&RESPONSE_READ, bytes));
         let Ok(BwdExit::Here(mut decoded)) = BwdEnd::new(Some(codec)).enter(
             1,
             1,
@@ -1761,7 +1804,7 @@ mod tests {
         let head = crate::wire_codec!(u32).expect("wire");
         let codec = StreamCodec::pair(
             Some(head),
-            Some(Codec::from_fns(encode, |bytes| read_at(&INPUT_READ, bytes))),
+            Some(Codec::from_fns(write, |bytes| read_at(&INPUT_READ, bytes))),
         );
         let entered = FwdEnd::new(codec)
             .enter(
@@ -1790,7 +1833,10 @@ mod tests {
         let (mut inbound, reply) = fabric.mint();
         let out = fabric.attach(&reply).await.expect("attach");
         let cx = Cx::new();
-        let input = items(futures::stream::iter([Ok(Vec::new()), Ok(vec![7])]));
+        let input = items(futures::stream::iter([
+            Ok(EncodedItem::of(&[])),
+            Ok(EncodedItem::of(&[7])),
+        ]));
         let wait = Duration::from_secs(5);
         tokio::time::timeout(wait, pump(input, out, &cx, None, None, None))
             .await
@@ -1835,7 +1881,7 @@ mod tests {
         cancel.cancel();
         let attempt = Cx::new();
         let scope = attempt.child();
-        let input = items(futures::stream::pending::<Result<Vec<u8>>>());
+        let input = items(futures::stream::pending::<Result<EncodedItem>>());
         // Bounded: a pump that took the cancel for a stop goes on waiting
         // for its input.
         let pumped = pump_watching(input, out, &scope, None, Some(&attempt), Racy, None);
@@ -1866,7 +1912,7 @@ mod tests {
         let attempt = Cx::new();
         let scope = attempt.child();
         // A stop does not end the input: the pump goes on waiting for it.
-        let input = items(futures::stream::pending::<Result<Vec<u8>>>());
+        let input = items(futures::stream::pending::<Result<EncodedItem>>());
         let pumped = pump_watching(input, out, &scope, None, Some(&attempt), Racy, None);
         let ended = tokio::time::timeout(Duration::from_millis(200), pumped).await;
         assert!(ended.is_err(), "a stop ended the pump");

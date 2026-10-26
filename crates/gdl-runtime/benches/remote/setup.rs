@@ -20,6 +20,19 @@ pub fn blob(size: usize) -> Blob {
     Blob(vec![7; size])
 }
 
+/// An [`Ask`] size that asks for items of mixed sizes: 16 KiB and 16 B in
+/// turn, so a large item is followed by a small one.
+pub const MIXED: u32 = 0;
+
+/// The length of item `index` of a stream that asked for `size`.
+pub fn item_len(size: u32, index: u32) -> usize {
+    match (size, index % 2) {
+        (MIXED, 0) => 16 * 1024,
+        (MIXED, _) => 16,
+        (size, _) => size as usize,
+    }
+}
+
 // ----- the matched workload -----
 
 /// Ask for `items` blobs of `size` bytes.
@@ -51,9 +64,9 @@ impl gdl::Sink for Emit {
     type Item = Blob;
 
     async fn generate(&self, _cx: Cx, ask: Ask) -> gdl::Result<Items<Blob>> {
-        let size = ask.size as usize;
+        let size = ask.size;
         Ok(gdl::items(futures::stream::iter(
-            (0..ask.items).map(move |_| Ok(blob(size))),
+            (0..ask.items).map(move |index| Ok(blob(item_len(size, index)))),
         )))
     }
 }
@@ -137,26 +150,13 @@ pub async fn direct_pair_with(paced: bool) -> (velo::Velo, velo::InstanceId) {
                     let server = weak
                         .upgrade()
                         .ok_or_else(|| std::io::Error::other("server gone"))?;
-                    tokio::spawn(async move {
-                        let handle = velo::StreamAnchorHandle::from_u128(request.handle);
-                        let sender = match request.ticket {
-                            Some(ticket) => server.open_anchor_stream::<Blob>(handle, ticket).await,
-                            None => server.attach_anchor::<Blob>(handle).await,
-                        };
-                        let Ok(sender) = sender else {
-                            return;
-                        };
-                        let size = request.ask.size as usize;
-                        for _ in 0..request.ask.items {
-                            if paced {
-                                PERMIT.notified().await;
-                            }
-                            if sender.send(blob(size)).await.is_err() {
-                                return;
-                            }
-                        }
-                        let _ = sender.finalize();
-                    });
+                    // Two tasks, not one with a branch: the paced wait would
+                    // add its state to every unpaced task too.
+                    if paced {
+                        tokio::spawn(serve_paced(server, request));
+                    } else {
+                        tokio::spawn(serve(server, request));
+                    }
                     Ok(Some(Default::default()))
                 }
             })
@@ -166,6 +166,44 @@ pub async fn direct_pair_with(paced: bool) -> (velo::Velo, velo::InstanceId) {
     let target = server.instance_id();
     std::mem::forget(server);
     (client, target)
+}
+
+/// The direct server's sender for `request`, opened as the client asked.
+async fn open_direct(server: &velo::Velo, request: &DirectAsk) -> Option<velo::StreamSender<Blob>> {
+    let handle = velo::StreamAnchorHandle::from_u128(request.handle);
+    match request.ticket.clone() {
+        Some(ticket) => server.open_anchor_stream::<Blob>(handle, ticket).await,
+        None => server.attach_anchor::<Blob>(handle).await,
+    }
+    .ok()
+}
+
+async fn serve(server: velo::Velo, request: DirectAsk) {
+    let Some(sender) = open_direct(&server, &request).await else {
+        return;
+    };
+    let size = request.ask.size;
+    for index in 0..request.ask.items {
+        if sender.send(blob(item_len(size, index))).await.is_err() {
+            return;
+        }
+    }
+    let _ = sender.finalize();
+}
+
+/// [`serve`], sending each blob only on a [`PERMIT`].
+async fn serve_paced(server: velo::Velo, request: DirectAsk) {
+    let Some(sender) = open_direct(&server, &request).await else {
+        return;
+    };
+    let size = request.ask.size as usize;
+    for _ in 0..request.ask.items {
+        PERMIT.notified().await;
+        if sender.send(blob(size)).await.is_err() {
+            return;
+        }
+    }
+    let _ = sender.finalize();
 }
 
 // ----- the paced workload: one item per wait -----
@@ -245,7 +283,7 @@ pub async fn direct_drain(mut anchor: velo::StreamAnchor<Blob>, want: u32, size:
     loop {
         match anchor.next().await {
             Some(Ok(velo::StreamFrame::Item(blob))) => {
-                assert_eq!(blob.0.len(), size as usize, "direct: item size");
+                assert_eq!(blob.0.len(), item_len(size, count), "direct: item size");
                 count += 1;
             }
             Some(Ok(velo::StreamFrame::Heartbeat)) => {}

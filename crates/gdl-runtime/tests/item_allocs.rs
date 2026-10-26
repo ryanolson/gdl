@@ -1,9 +1,16 @@
-//! Allocations per crossed item, end to end: the lean graph (`S => D`,
-//! split over two segments) against the same stream written directly on
-//! velo, over two in-process velo nodes. The guard on the crossing's frame
-//! (docs/src/operations/crossing-performance.md, "Codec cost"): an item
-//! that crosses a segment allocates at most half an allocation more than
-//! velo carrying it, at 16 B, 1 KiB, and 16 KiB.
+//! Allocations and bytes allocated per crossed item, end to end: the lean
+//! graph (`S => D`, split over two segments) against the same stream
+//! written directly on velo, over two in-process velo nodes. The guard on
+//! the crossing's frame (docs/src/operations/crossing-performance.md, "Codec
+//! cost"): an item that crosses a segment makes no more allocations than
+//! velo carrying it, at 16 B, 1 KiB, and 16 KiB. It allocates at most 128 B
+//! more than velo at 16 B, and at most 2% more at 1 KiB and 16 KiB.
+//!
+//! A third workload sends 16 KiB and 16 B items in turn. The edge codec
+//! encodes each item into a frame sized by a hint from the items before it,
+//! and a hint that a large item raises would make the small items after it
+//! reserve large frames. There the crossing may allocate at most 2% more
+//! bytes than velo, plus 128 B per small item.
 //!
 //! Each size runs two workloads. In the ready one, the producer sends as
 //! fast as velo takes the items, so the consumer seldom waits. In the paced
@@ -32,16 +39,22 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::future::BoxFuture;
-use setup::{Ask, Blob, PacedEmit, SIZES, direct, direct_open, direct_pair, direct_pair_with};
+use setup::item_len;
+use setup::{
+    Ask, Blob, MIXED, PacedEmit, SIZES, direct, direct_open, direct_pair, direct_pair_with,
+};
 use setup::{drain, lean_front, lean_front_with, next_paced};
 
 struct Counting;
 
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+/// Bytes asked for, by `alloc` and by `realloc` (its new size).
+static ALLOCATED: AtomicU64 = AtomicU64::new(0);
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED.fetch_add(layout.size() as u64, Ordering::Relaxed);
         // SAFETY: forward the caller's layout to the system allocator.
         unsafe { System.alloc(layout) }
     }
@@ -53,6 +66,7 @@ unsafe impl GlobalAlloc for Counting {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED.fetch_add(size as u64, Ordering::Relaxed);
         // SAFETY: forward the pointer, original layout, and requested size unchanged.
         unsafe { System.realloc(ptr, layout, size) }
     }
@@ -71,8 +85,14 @@ const ITEMS: u32 = 1_000;
 /// several seconds, because velo carries one stream at about 10 K items a
 /// second on loopback, and enough rounds that each path shows its floor.
 const ROUNDS: usize = 15;
-/// How many more allocations per item the crossing may make than velo.
-const ALLOWANCE: f64 = 0.5;
+/// How many more allocations per item the crossing may make than velo:
+/// none, beyond the hundredths that a request's own setup adds.
+const ALLOWANCE: f64 = 0.02;
+/// How many more bytes per 16 B item the crossing may allocate than velo.
+const SMALL_BYTES: f64 = 128.0;
+/// How much more, as a share of velo's, the crossing may allocate per item
+/// at 1 KiB and 16 KiB, and per item of the mixed workload.
+const LARGE_SHARE: f64 = 0.02;
 
 fn main() {
     // cargo-nextest first lists each binary's tests the way libtest does,
@@ -97,9 +117,15 @@ fn main() {
     let (paced_client, paced_target) = rt.block_on(direct_pair_with(true));
     let (lean, paced_lean, client, paced_client) = (&lean, &paced_lean, &client, &paced_client);
     let mut failed = Vec::new();
-    for size in SIZES {
+    for size in SIZES.into_iter().chain([MIXED]) {
         let ask = Ask { items: ITEMS, size };
-        let check = move |blob: &Blob| assert_eq!(blob.0.len(), size as usize);
+        let check = move |blob: &Blob| {
+            let len = blob.0.len();
+            assert!(
+                len == item_len(size, 0) || len == item_len(size, 1),
+                "{len}"
+            );
+        };
         let ready = Workload {
             name: "ready",
             crossing: &|| {
@@ -142,23 +168,42 @@ fn main() {
                 })
             },
         };
-        for workload in [ready, paced] {
+        // The mixed workload guards bytes only, and needs no pacing.
+        let workloads = if size == MIXED {
+            vec![ready]
+        } else {
+            vec![ready, paced]
+        };
+        for workload in workloads {
             let (crossing, velo) = workload.floors(&rt);
+            let name = workload.name;
             println!(
-                "{size:>6} B, {}: crossing {crossing:.2}, velo direct {velo:.2} allocations per item",
-                workload.name
+                "{size:>6} B, {name}: crossing {:.2} ({:.0} B), velo direct {:.2} ({:.0} B) per item",
+                crossing.allocations, crossing.bytes, velo.allocations, velo.bytes
             );
-            if crossing > velo + ALLOWANCE {
+            if size != MIXED && crossing.allocations > velo.allocations + ALLOWANCE {
                 failed.push(format!(
-                    "{size} B, {}: the crossing allocates {crossing:.2} per item, velo {velo:.2}",
-                    workload.name
+                    "{size} B, {name}: the crossing makes {:.2} allocations per item, velo {:.2}",
+                    crossing.allocations, velo.allocations
+                ));
+            }
+            let bytes_allowed = match size {
+                16 => velo.bytes + SMALL_BYTES,
+                // Half the items are small, each allowed 128 B.
+                MIXED => velo.bytes * (1.0 + LARGE_SHARE) + SMALL_BYTES / 2.0,
+                _ => velo.bytes * (1.0 + LARGE_SHARE),
+            };
+            if crossing.bytes > bytes_allowed {
+                failed.push(format!(
+                    "{size} B, {name}: the crossing allocates {:.0} B per item, velo {:.0} B, allowed {bytes_allowed:.0} B",
+                    crossing.bytes, velo.bytes
                 ));
             }
         }
     }
     assert!(
         failed.is_empty(),
-        "a crossed item allocates more than velo's count plus {ALLOWANCE}: {failed:?}"
+        "a crossed item allocates more than velo carrying it: {failed:?}"
     );
 }
 
@@ -170,15 +215,15 @@ struct Workload<'a> {
 }
 
 impl Workload<'_> {
-    /// Each path's fewest allocations per item over `ROUNDS` alternating
-    /// rounds, after a warm-up: velo's pools and the runtime's
-    /// first-request state are not per-item costs.
-    fn floors(&self, rt: &tokio::runtime::Runtime) -> (f64, f64) {
+    /// Each path's fewest allocations and fewest bytes per item over
+    /// `ROUNDS` alternating rounds, after a warm-up: velo's pools and the
+    /// runtime's first-request state are not per-item costs.
+    fn floors(&self, rt: &tokio::runtime::Runtime) -> (PerItem, PerItem) {
         for _ in 0..2 {
             rt.block_on((self.crossing)());
             rt.block_on((self.velo)());
         }
-        let (mut crossing, mut velo) = (f64::INFINITY, f64::INFINITY);
+        let (mut crossing, mut velo) = (PerItem::MAX, PerItem::MAX);
         for _ in 0..ROUNDS {
             crossing = crossing.min(per_item(|| rt.block_on((self.crossing)())));
             velo = velo.min(per_item(|| rt.block_on((self.velo)())));
@@ -187,9 +232,38 @@ impl Workload<'_> {
     }
 }
 
-/// Allocations per item of one request of `ITEMS` items.
-fn per_item(request: impl FnOnce()) -> f64 {
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+/// What one item cost.
+#[derive(Clone, Copy)]
+struct PerItem {
+    allocations: f64,
+    bytes: f64,
+}
+
+impl PerItem {
+    const MAX: Self = Self {
+        allocations: f64::INFINITY,
+        bytes: f64::INFINITY,
+    };
+
+    /// The smaller of each, which may come from different rounds.
+    fn min(self, other: Self) -> Self {
+        Self {
+            allocations: self.allocations.min(other.allocations),
+            bytes: self.bytes.min(other.bytes),
+        }
+    }
+}
+
+/// Allocations and bytes per item of one request of `ITEMS` items.
+fn per_item(request: impl FnOnce()) -> PerItem {
+    let (allocations, bytes) = (
+        ALLOCATIONS.load(Ordering::Relaxed),
+        ALLOCATED.load(Ordering::Relaxed),
+    );
     request();
-    (ALLOCATIONS.load(Ordering::Relaxed) - before) as f64 / f64::from(ITEMS)
+    let items = f64::from(ITEMS);
+    PerItem {
+        allocations: (ALLOCATIONS.load(Ordering::Relaxed) - allocations) as f64 / items,
+        bytes: (ALLOCATED.load(Ordering::Relaxed) - bytes) as f64 / items,
+    }
 }

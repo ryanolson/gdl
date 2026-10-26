@@ -13,7 +13,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::StreamExt;
 
-use crate::wire::{Codec, RequestCodec};
+use super::EncodedItem;
+use crate::wire::{Codec, RequestCodec, SizeHint};
 use gdl::__runtime::{fuse, until_error};
 use gdl::Cx;
 use gdl::{Backward, Forward, Next, Operator, Sink};
@@ -30,7 +31,7 @@ pub enum FwdExit<T> {
     Leave {
         at: usize,
         head: Vec<u8>,
-        input: Option<Items<Vec<u8>>>,
+        input: Option<Items<EncodedItem>>,
     },
 }
 
@@ -40,7 +41,10 @@ pub enum BwdExit<T> {
     /// The stream reached the outer end in this run.
     Here(Items<T>),
     /// The walk left the run before position `at`, carrying encoded items.
-    Leave { at: usize, bytes: Items<Vec<u8>> },
+    Leave {
+        at: usize,
+        bytes: Items<EncodedItem>,
+    },
 }
 
 /// A hop's forward nodes in this segment's view, as a cons list ending in
@@ -493,9 +497,15 @@ fn join<C: RequestCodec>(
     codec.ok_or_else(not_wire)?.join(head, input)
 }
 
-fn encode_stream<T: Send + 'static>(codec: Option<Codec<T>>, input: Items<T>) -> Items<Vec<u8>> {
+fn encode_stream<T: Send + 'static>(
+    codec: Option<Codec<T>>,
+    input: Items<T>,
+) -> Items<EncodedItem> {
     match codec {
-        Some(codec) => items(input.map(move |item| codec.encode(&item?))),
+        Some(codec) => {
+            let mut hint = SizeHint::default();
+            items(input.map(move |item| codec.encode_item(&item?, &mut hint)))
+        }
         None => items(futures::stream::once(async { Err(not_wire()) })),
     }
 }

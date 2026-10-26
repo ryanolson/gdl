@@ -61,16 +61,36 @@ fn codec_direct(blob: &Blob) -> usize {
     }
 }
 
-/// The same item as gdl carries it, in the four steps each row below times
-/// on its own: the edge codec encodes it, velo's byte path frames the bytes
-/// (`StreamSender::send_bytes`), the receiver takes the payload as a view of
-/// the frame (`StreamAnchor::next_bytes`), and the edge codec decodes it.
-fn codec_crossing(blob: &Blob) -> usize {
-    let bytes = edge_encode(blob);
-    let frame = frame_encode(&bytes);
+/// The same item as gdl carries it, in the three steps each row below times
+/// on its own: the edge codec encodes it straight into velo's frame
+/// (`ByteItemBuilder`, sent with `StreamSender::send_frame`), the receiver
+/// takes the payload as a view of the frame (`StreamAnchor::next_bytes`),
+/// and the edge codec decodes it. The frame reserves the size of the item
+/// before it, as a stream of like items does.
+fn codec_crossing(blob: &Blob, hint: usize) -> usize {
+    let frame = encode_in_place(blob, hint);
     let item = frame_decode(frame);
     edge_decode(&item).0.len()
 }
+
+/// What the runtime's encode does for each crossing item, as
+/// `velo::streaming::ByteItemBuilder` does it: the item prefix and a `bin32`
+/// header in a buffer with room for `hint` bytes of payload, the edge codec
+/// writing after them, then the length. velo keeps the built frame's buffer
+/// private, so the bench builds the same bytes itself.
+fn encode_in_place(blob: &Blob, hint: usize) -> Vec<u8> {
+    let encode = gdl::__runtime::encoder_into::<Blob>(Default::default());
+    let mut frame = Vec::with_capacity(HEADER + hint);
+    frame.extend_from_slice(ITEM_PREFIX);
+    frame.extend_from_slice(&[0xc6, 0, 0, 0, 0]);
+    encode(blob, &mut frame).expect("edge encode");
+    let len = u32::try_from(frame.len() - HEADER).expect("under 4 GiB");
+    frame[HEADER - 4..HEADER].copy_from_slice(&len.to_be_bytes());
+    frame
+}
+
+/// The bytes before a built item's payload.
+const HEADER: usize = ITEM_PREFIX.len() + 5;
 
 fn edge_encode(blob: &Blob) -> Vec<u8> {
     gdl_runtime::wire_codec!(Blob)
@@ -84,31 +104,6 @@ fn edge_decode(bytes: &[u8]) -> Blob {
         .expect("wire")
         .decode(bytes)
         .expect("edge decode")
-}
-
-/// The frame `send_bytes` writes: the item prefix and the shortest msgpack
-/// `bin` header, in one buffer of the exact size.
-fn frame_encode(payload: &[u8]) -> Vec<u8> {
-    let len = payload.len();
-    let header: &[u8] = if let Ok(len) = u8::try_from(len) {
-        &[0xc4, len]
-    } else if let Ok(len) = u16::try_from(len) {
-        &[0xc5, (len >> 8) as u8, len as u8]
-    } else {
-        let len = u32::try_from(len).expect("under 4 GiB");
-        &[
-            0xc6,
-            (len >> 24) as u8,
-            (len >> 16) as u8,
-            (len >> 8) as u8,
-            len as u8,
-        ]
-    };
-    let mut frame = Vec::with_capacity(ITEM_PREFIX.len() + header.len() + len);
-    frame.extend_from_slice(ITEM_PREFIX);
-    frame.extend_from_slice(header);
-    frame.extend_from_slice(payload);
-    frame
 }
 
 /// What `next_bytes` hands on: the payload as a view of the frame's buffer,
@@ -256,29 +251,35 @@ fn bench(c: &mut Criterion) {
         let mut codec = c.benchmark_group(format!("codec-{size}B"));
         codec.throughput(Throughput::Bytes(u64::from(size)));
         codec.bench_function("velo-direct", |b| b.iter(|| codec_direct(black_box(&item))));
+        // A stream of like items reserves each one's encoded size.
+        let hint = edge_encode(&item).len();
         codec.bench_function("gdl-crossing", |b| {
-            b.iter(|| codec_crossing(black_box(&item)))
+            b.iter(|| codec_crossing(black_box(&item), hint))
         });
         // The crossing's steps, so a change that regrows one shows where.
-        let edge = edge_encode(&item);
-        let frame = frame_encode(&edge);
-        // velo's byte frame is what serde writes for the bytes as an item.
-        let serde = rmp_serde::to_vec(&velo::StreamFrame::Item(serde_bytes::Bytes::new(&edge)));
-        assert_eq!(frame, serde.expect("encode"), "the frame is not velo's");
-        codec.bench_function("gdl-crossing/1-edge-encode", |b| {
-            b.iter(|| edge_encode(black_box(&item)))
+        let frame = encode_in_place(&item, hint);
+        // The bench's frame is the one velo builds: the same payload, read
+        // by serde as velo's consumers read it.
+        let mut built = velo::streaming::ByteItemBuilder::with_capacity(hint);
+        gdl::__runtime::encoder_into::<Blob>(Default::default())(&item, built.buffer())
+            .expect("encode");
+        assert_eq!(&frame[HEADER..], built.finish().expect("finish").payload());
+        let serde: velo::StreamFrame<serde_bytes::ByteBuf> =
+            rmp_serde::from_slice(&frame).expect("decode");
+        assert!(matches!(&serde, velo::StreamFrame::Item(bytes) if bytes[..] == frame[HEADER..]));
+        assert_eq!(frame.len(), frame.capacity(), "the hint is not the size");
+        codec.bench_function("gdl-crossing/1-encode-in-place", |b| {
+            b.iter(|| encode_in_place(black_box(&item), hint))
         });
-        codec.bench_function("gdl-crossing/2-frame-encode", |b| {
-            b.iter(|| frame_encode(black_box(&edge)))
-        });
-        codec.bench_function("gdl-crossing/3-frame-decode", |b| {
+        codec.bench_function("gdl-crossing/2-frame-decode", |b| {
             b.iter_batched(
                 || frame.clone(),
                 |frame| frame_decode(black_box(frame)),
                 criterion::BatchSize::SmallInput,
             )
         });
-        codec.bench_function("gdl-crossing/4-edge-decode", |b| {
+        let edge = frame[HEADER..].to_vec();
+        codec.bench_function("gdl-crossing/3-edge-decode", |b| {
             b.iter(|| edge_decode(black_box(&edge)))
         });
         codec.finish();
