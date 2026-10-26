@@ -50,12 +50,14 @@ pub(crate) fn expand(input: &syn::DeriveInput) -> syn::Result<TokenStream> {
     // of another type as a mismatch. `field::<_, T>` takes the field's
     // type by inference, which never coerces: a `Box<T>` field is not a
     // `T` field. The reads are in the impl, where a field's type may name
-    // `Self`.
+    // `Self`. Each read takes a raw pointer, not a reference: a reference
+    // to a field of a `#[repr(packed)]` edge type is refused (E0793), and
+    // `__fields` is never called, so nothing reads through the pointer.
     let checks = fields.named.iter().map(|field| {
         let name = field.ident.as_ref().expect("named fields");
         let ty = &field.ty;
         quote_spanned! {field.span()=>
-            ::gdl::__private::field::<_, #ty>(&of.#name);
+            ::gdl::__private::field::<_, #ty>(&raw const of.#name);
         }
     });
     let ident = &input.ident;

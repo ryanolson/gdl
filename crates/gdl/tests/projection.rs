@@ -188,3 +188,13 @@ mod recursive {
         );
     }
 }
+
+#[test]
+fn a_packed_edge_can_be_read_as_a_subset() {
+    trybuild::TestCases::new().pass("tests/projection/packed-control.rs");
+}
+
+#[test]
+fn a_projection_of_a_packed_edge_builds() {
+    trybuild::TestCases::new().pass("tests/projection/packed.rs");
+}

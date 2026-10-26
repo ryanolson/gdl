@@ -220,9 +220,10 @@ pub trait ProjectionDerived {}
 
 /// Read a projection's field of type `T` from the edge type's field,
 /// which must be a `T` itself: `F` is inferred from the field, so nothing
-/// coerces.
+/// coerces. It takes a raw pointer because a packed edge type's fields
+/// cannot be referenced.
 #[doc(hidden)]
-pub fn field<F: SameType<T>, T>(_: &F) {}
+pub fn field<F: SameType<T>, T>(_: *const F) {}
 
 /// `T` itself, and nothing else.
 #[doc(hidden)]

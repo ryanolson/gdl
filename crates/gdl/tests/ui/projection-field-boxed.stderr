@@ -8,5 +8,5 @@ error[E0277]: the projection reads this field as `u64`, but the edge type has it
 note: required by a bound in `field`
   --> src/select.rs
    |
-   | pub fn field<F: SameType<T>, T>(_: &F) {}
+   | pub fn field<F: SameType<T>, T>(_: *const F) {}
    |                 ^^^^^^^^^^^ required by this bound in `field`

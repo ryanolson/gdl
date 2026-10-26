@@ -1,0 +1,12 @@
+error[E0277]: the projection reads this field as `u32`, but the edge type has it as `u64`
+  --> tests/ui/projection-packed-type.rs:13:5
+   |
+13 |     hint: u32,
+   |     ^^^^ the trait `SameType<u32>` is not implemented for `u64`
+   |
+   = note: a projection's field has the type of the edge type's field of that name
+note: required by a bound in `field`
+  --> src/select.rs
+   |
+   | pub fn field<F: SameType<T>, T>(_: *const F) {}
+   |                 ^^^^^^^^^^^ required by this bound in `field`
