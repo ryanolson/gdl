@@ -49,7 +49,8 @@ struct Fixture {
     entries: Vec<Entry>,
 }
 
-/// `S => D`, with `S` in `a` and `D` in `d`: one class.
+/// `S => D`, with `S` in `a` and `D` in `d`: one class. Each call is a
+/// deployment of its own, so a fixture makes one.
 fn layout() -> gdl_model::Layout {
     gdl_model::layout(&manifest(), &placement()).expect("valid test fixture")
 }
@@ -60,9 +61,19 @@ fn placement() -> gdl_model::Placement {
         .segment("d", ["D"])
 }
 
+/// A graph with a name no other fixture has, in this process or in
+/// another copy of it: an entry stopped by one test leaves its port to the
+/// OS, and a sender that reaches whatever node binds it next must find no
+/// handler of its deployment there (see
+/// `an_address_another_deployment_holds_is_not_offered_to`).
 fn manifest() -> gdl_model::Manifest {
+    static GRAPHS: AtomicUsize = AtomicUsize::new(0);
     gdl_model::Manifest {
-        name: "offers".into(),
+        name: format!(
+            "offers-{}-{}",
+            std::process::id(),
+            GRAPHS.fetch_add(1, Ordering::Relaxed)
+        ),
         schema: 1,
         nodes: vec![
             gdl_model::NodeInfo {
@@ -887,6 +898,11 @@ async fn an_instance_gone_before_first_contact_is_unsent_and_offered_again() {
         let gone = &fixture.entries[0].node;
         crate::dist::fabric::shut_down(gone, Duration::from_millis(100)).await;
         let result = send(&fixture, &ROUND_ROBIN, &Cx::new()).await;
+        assert_eq!(
+            fixture.entries[0].offers(),
+            0,
+            "the stopped instance took it"
+        );
         if alone {
             let error = result.expect_err("nothing could take it");
             assert_eq!(error.kind(), ErrorKind::Transport, "{error}");
@@ -894,6 +910,42 @@ async fn an_instance_gone_before_first_contact_is_unsent_and_offered_again() {
             result.expect("the other instance took it");
             assert_eq!(fixture.entries[1].offers(), 1);
         }
-        assert_eq!(fixture.entries[0].offers(), 0);
     }
+}
+
+/// An instance whose address another deployment's node now holds, as
+/// when it stopped and the OS gave its port to that node, is not offered
+/// to: velo's handshake does not check who answers at an address, but that
+/// node has no handler of this deployment, so the hand-off is unsent. Tests
+/// running side by side (other copies of this binary too) are such
+/// neighbours, which is why each fixture is a deployment of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_address_another_deployment_holds_is_not_offered_to() {
+    let neighbour = fixture(vec![accepting()], config(2)).await;
+    let taken = neighbour.entries[0].node.peer_info();
+    let sender = bind_node(([127, 0, 0, 1], 0).into())
+        .await
+        .expect("a velo node");
+    let mut roster = Roster::new();
+    roster.add(
+        "d",
+        velo::PeerInfo::new(velo::InstanceId::new_v4(), taken.worker_address().clone()),
+    );
+    let rt = Runtime::new(
+        Fabric::new(sender, None, None, Duration::from_secs(30)),
+        layout(),
+        "a".into(),
+        &roster,
+        config(2),
+        None,
+    )
+    .expect("a runtime");
+    let stale = Fixture {
+        rt,
+        entries: Vec::new(),
+    };
+    let result = send(&stale, &ROUND_ROBIN, &Cx::new()).await;
+    assert_eq!(neighbour.entries[0].offers(), 0, "the neighbour took it");
+    let error = result.expect_err("nothing could take it");
+    assert_eq!(error.kind(), ErrorKind::Transport, "{error}");
 }
