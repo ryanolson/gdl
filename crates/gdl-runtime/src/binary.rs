@@ -204,17 +204,18 @@ pub struct Builder {
     defined: Mutex<BTreeMap<String, (String, MetricField)>>,
     /// `[selector.<name>]` tables, by name.
     tables: BTreeMap<String, toml::Table>,
-    /// The routing selectors built so far, and how to wait for each to be
-    /// ready.
-    selectors: Mutex<(Selectors, Vec<Readiness>)>,
+    /// The routing selectors built so far.
+    selectors: Mutex<Selectors>,
     /// The cell policies registered so far.
     cell_policies: Mutex<CellPolicies>,
+    /// How to wait for each selector and cell policy it built to be ready.
+    readiness: Mutex<Vec<Readiness>>,
     /// What every node and selector it builds reads the chooser's cells
     /// through ([`FollowedCells::current`]), bound at the launch.
     followed: FollowedCells,
 }
 
-/// One built selector's [`Build::ready`].
+/// One built selector's or cell policy's [`Build::ready`].
 type Readiness = Box<dyn Fn() -> BoxFuture<'static, Result<()>> + Send>;
 
 impl Builder {
@@ -228,8 +229,9 @@ impl Builder {
             registry,
             defined: Mutex::new(BTreeMap::new()),
             tables,
-            selectors: Mutex::new((Selectors::new(), Vec::new())),
+            selectors: Mutex::new(Selectors::new()),
             cell_policies: Mutex::new(CellPolicies::new()),
+            readiness: Mutex::new(Vec::new()),
             followed: FollowedCells::new(),
         })
     }
@@ -247,6 +249,37 @@ impl Builder {
             .unwrap_or_else(|e| e.into_inner())
             .add(name, policy)
             .map_err(|e| format!("registering cell policy {name}: {e}").into())
+    }
+
+    /// Build `P`, the cell policy named `name` in the placement, from its
+    /// settings table `table`, with its metrics registered under `name`,
+    /// and choose the cells of each class whose `[cells.<class>] policy` is
+    /// `name` by it. The instance announces itself as loaded only once `P`
+    /// is ready, as for a selector; it registers with its hub before.
+    pub async fn build_cell_policy<P: Build + CellPolicy>(
+        &self,
+        name: &str,
+        table: Option<toml::Table>,
+    ) -> std::result::Result<(), Failure> {
+        let built = Arc::new(self.build::<P>(name, table).await?);
+        self.cell_policies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .add_shared(name, Arc::clone(&built))
+            .map_err(|e| format!("registering cell policy {name}: {e}"))?;
+        self.waits_for(built);
+        Ok(())
+    }
+
+    /// Keep `built`'s readiness, which [`Builder::ready`] waits for.
+    fn waits_for<T: Build>(&self, built: Arc<T>) {
+        self.readiness
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Box::new(move || {
+                let built = Arc::clone(&built);
+                Box::pin(async move { built.ready().await })
+            }));
     }
 
     /// The registered cell policies, for the launch and the runtime.
@@ -279,29 +312,26 @@ impl Builder {
             .await
             .map_err(|e| format!("building selector {name}: {e}"))?;
         let built = Arc::new(built);
-        let mut selectors = self.selectors.lock().unwrap_or_else(|e| e.into_inner());
-        selectors
-            .0
+        self.selectors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .add_shared(name, Arc::clone(&built))
             .map_err(|e| format!("building selector {name}: {e}"))?;
-        selectors.1.push(Box::new(move || {
-            let built = Arc::clone(&built);
-            Box::pin(async move { built.ready().await })
-        }));
+        self.waits_for(built);
         Ok(())
     }
 
     /// Whether a selector named `name` is registered.
     fn registered(&self, name: &str) -> bool {
         let selectors = self.selectors.lock().unwrap_or_else(|e| e.into_inner());
-        selectors.0.contains(name)
+        selectors.contains(name)
     }
 
-    /// Resolve once every registered selector is ready.
+    /// Resolve once every selector and cell policy it built is ready.
     async fn ready(&self) -> Result<()> {
         let waits: Vec<_> = {
-            let selectors = self.selectors.lock().unwrap_or_else(|e| e.into_inner());
-            selectors.1.iter().map(|ready| ready()).collect()
+            let readiness = self.readiness.lock().unwrap_or_else(|e| e.into_inner());
+            readiness.iter().map(|ready| ready()).collect()
         };
         futures::future::try_join_all(waits).await?;
         Ok(())
@@ -309,11 +339,9 @@ impl Builder {
 
     /// The registered selectors, for the runtime.
     fn into_selectors(self) -> Selectors {
-        let selectors = self
-            .selectors
+        self.selectors
             .into_inner()
-            .unwrap_or_else(|e| e.into_inner());
-        selectors.0
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Build `T`, the implementation of node `node` (as the graph spells

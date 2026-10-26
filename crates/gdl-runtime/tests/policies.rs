@@ -450,3 +450,125 @@ async fn a_segment_binary_registers_a_policy_before_its_launch() {
     );
     global.shutdown().await.expect("valid test fixture");
 }
+
+/// Set when `Gated`'s readiness wait starts; `GATE` ends it.
+static ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static GATE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// `ByModel`, whose `ready` waits for `GATE`.
+struct Gated;
+
+impl gdl::Build for Gated {
+    type Config = toml::Table;
+    type Metrics = ();
+
+    async fn build(_: toml::Table, (): ()) -> gdl::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn ready(&self) -> gdl::Result<()> {
+        ENTERED.store(true, std::sync::atomic::Ordering::SeqCst);
+        GATE.notified().await;
+        Ok(())
+    }
+}
+
+impl CellPolicy for Gated {
+    type Head = Projected<Hinted>;
+
+    fn choose(&self, request: CellRequest<'_, Self::Head>, cells: &[Cell]) -> Option<CellChoice> {
+        ByModel.choose(request, cells)
+    }
+}
+
+/// The frontend as a generated segment binary builds a bound policy: from
+/// its settings table, registered as `by_model`, with its readiness kept.
+struct GatedFrontend;
+
+impl gdl_runtime::SegmentBinary for GatedFrontend {
+    const PACKAGE: &'static str = "routed-a";
+    const SEGMENT: &'static str = "a";
+    const SEGMENTS: &'static [&'static str] = SEGMENTS;
+    const GRAPH_CONFIG: &'static str = "";
+    type Settings = common::cells::Nothing;
+    type Hosts = ();
+
+    async fn build(
+        _: common::cells::Nothing,
+        builder: &gdl_runtime::Builder,
+    ) -> Result<(), gdl_runtime::Failure> {
+        builder.build_cell_policy::<Gated>("by_model", None).await
+    }
+
+    fn deployment() -> gdl::Result<DeploymentSpec> {
+        Ok(spec("by_model"))
+    }
+
+    fn start(
+        (): (),
+        node: gdl_runtime::velo::Velo,
+        roster: &gdl_runtime::Roster,
+        runtime: gdl_runtime::RuntimeConfig,
+    ) -> gdl::Result<gdl_runtime::Serving> {
+        Frontend::<false>::start((), node, roster, runtime)
+    }
+}
+
+/// A chooser whose bound policy is not ready yet has registered with its
+/// hub, so its deployment sees it live, but does not announce `loaded`
+/// until the policy is ready, as for a selector or a node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bound_policy_is_waited_for_after_the_chooser_registers() {
+    use velo::discovery::ServiceDiscovery as _;
+    let spec = spec("by_model");
+    let directory = Resolving::new();
+    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-policies-")
+        .tempdir()
+        .expect("settings directory");
+    let file = dir.path().join("settings.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n{}{RUNTIME}",
+            global.public_addr().port(),
+            global.control_addr().port(),
+            global_cell(),
+        ),
+    )
+    .expect("settings");
+    let registered = || global.store().peers().iter().any(|stored| !stored.pinned);
+    let client = velo_hub::client::HubClient::builder()
+        .host("127.0.0.1")
+        .public_port(global.public_addr().port())
+        .control_port(global.control_addr().port())
+        .build()
+        .expect("valid test fixture");
+    let loaded = gdl_model::segment_service("a", gdl_model::SegmentPhase::Loaded);
+    let observed = async {
+        tokio::time::timeout(WAIT, async {
+            while !(ENTERED.load(std::sync::atomic::Ordering::SeqCst) && registered()) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the chooser registers while its policy is not ready");
+        let announced = client
+            .services()
+            .get_instances(&loaded)
+            .await
+            .expect("the hub answers");
+        assert!(
+            announced.is_empty(),
+            "loaded before its policy: {announced:?}"
+        );
+        GATE.notify_one();
+    };
+    let run = gdl_runtime::run_segment::<GatedFrontend>(vec![file.into_os_string()]);
+    let (ran, ()) = tokio::time::timeout(WAIT * 2, async { tokio::join!(run, observed) })
+        .await
+        .expect("the binary ended in time");
+    ran.expect("the chooser serves once its policy is ready");
+    global.shutdown().await.expect("valid test fixture");
+}

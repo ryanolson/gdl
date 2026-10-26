@@ -183,12 +183,12 @@ type = "router::ByModel"
 - `cargo gdl check` compares the policy's `Head` with the request that crosses into each class that names it, as the chooser does when it starts. A message must be the edge's message, and a projection's `Of` must be too: the same type from the same package, not one of the same name. `()` fits only a request of `()`, and `Encoded` fits any. A projection on an edge encoded as `msgpack_array` is refused. A spec with a `[contract]` crate is not checked this way.
 - Each segment that chooses cells of a class named `by_model` in `[cells.<class>] policy` depends on the crate. No other segment does.
 - That segment builds the policy from the `[cell_policy.by_model]` table of its settings file, or `GDL_CELL_POLICY__BY_MODEL__<KEY>` variables. A table for a policy that the segment does not register stops it at start.
-- The segment waits for the policy's `ready` before it registers it, so before the instance announces itself to its peers.
+- Under a hub, the instance registers first, then waits for the policy's `ready`, with its nodes' and selectors', before it announces itself as loaded.
 - The spec names the crate by its directory. `cargo gdl compose` needs `--local` for it.
 
 ## 5. Or register it in code
 
-In an in-process deployment, add it to the `RuntimeConfig` with `config.cell_policies.add("by_model", ByModel)?`. A chooser launched through a `ProcessConfig` checks the placement's names against that config's `runtime.cell_policies`, so register it there too. In a hand-written `SegmentBinary`, call `builder.cell_policy("by_model", ByModel)?` in `build`.
+In an in-process deployment, add it to the `RuntimeConfig` with `config.cell_policies.add("by_model", ByModel)?`. A chooser launched through a `ProcessConfig` checks the placement's names against that config's `runtime.cell_policies`, so register it there too. In a hand-written `SegmentBinary`, call `builder.cell_policy("by_model", ByModel)?` in `build`, or `builder.build_cell_policy::<ByModel>("by_model", table).await?` to build it from a settings table as a generated segment does, with its `ready` waited for after the instance registers.
 
 A name is lowercase letters and digits in words joined by single `_`s, starts with a letter, and has at most 64 characters. It cannot be `home_first` or `round_robin`, and it can be registered once.
 

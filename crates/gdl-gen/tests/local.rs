@@ -923,7 +923,7 @@ fn a_local_bundle_builds_a_bound_policy_into_its_chooser() {
     );
     assert!(
         files[Path::new("front/src/lib.rs")]
-            .contains("builder.cell_policy(\"by_model\", policy)?;")
+            .contains("build_cell_policy::<::policy_router::ByModel>(")
     );
     assert!(!files[Path::new("model/Cargo.toml")].contains("policy-router"));
     let refused = compose(gdl_gen::Sources::Fetched)

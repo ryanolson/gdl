@@ -356,9 +356,9 @@ impl Unit<'_> {
     }
 
     /// Each cell policy this segment chooses cells by, built from its
-    /// settings table and registered under its name. The policy is moved
-    /// into the registration, so it is ready before it is registered, and
-    /// the instance announces itself only after `build`.
+    /// settings table and registered under its name. The builder keeps its
+    /// readiness, so the instance registers with its hub first and
+    /// announces itself as loaded once the policy is ready.
     fn policies_built(&self) -> String {
         let mut text = String::new();
         if self.policies.is_empty() {
@@ -371,18 +371,11 @@ impl Unit<'_> {
             "        if let Some(unknown) = cell_policy.keys().find(|key| !policies.contains(&key.as_str())) {{ return Err(format!(\"[cell_policy.{{unknown}}]: this segment chooses cells by no policy of that name\").into()); }}"
         );
         for (name, bind) in &self.policies {
-            let _ = writeln!(text, "        {{");
             let _ = writeln!(
                 text,
-                "            let policy = builder.build::<::{}>({name:?}, cell_policy.remove({name:?})).await?;",
+                "        builder.build_cell_policy::<::{}>({name:?}, cell_policy.remove({name:?})).await?;",
                 rooted(&bind.ty)
             );
-            let _ = writeln!(
-                text,
-                "            gdl_runtime::gdl::Build::ready(&policy).await?;"
-            );
-            let _ = writeln!(text, "            builder.cell_policy({name:?}, policy)?;");
-            let _ = writeln!(text, "        }}");
         }
         text
     }

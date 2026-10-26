@@ -49,10 +49,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** `cargo gdl check` takes a type as a cell policy only when the source reader follows the path of its impl's trait, through `use`s, renames, and globs, to gdl's `CellPolicy`. It does not see an impl that a macro writes, and it enters only packages that depend on gdl. A policy it cannot find is refused with "implements no cell policy", although the crate builds. A name `gdl` that a module or a glob of a crate without gdl binds (`use helper::routing as gdl`, or `use helper::*` where `helper` has a module `gdl`) hides the gdl crate, but the reader does not see that binding: check accepts the trait it finds through it, and the chooser's build fails with `E0277`.
 - **Workaround:** write the impl by hand, name the trait through `gdl` or a crate that depends on it, and give no other item the name `gdl`.
 
-### A generated chooser waits for its cell policy before it registers
-- **What:** a generated segment builds each bound cell policy and waits for its `ready` inside `build`, since the builder takes the policy by value. Until it is ready, the instance has not registered with its hub, so its deployment does not see it as live. A selector's and a node's `ready` are waited for after the instance registers.
-- **Lifts:** a builder that keeps a registered policy's readiness, as it keeps a selector's.
-
 ### An instance that does not know `OutcomeUnknown` refuses it
 - **What:** `OutcomeUnknown` is a hand-off whose answer did not come, so the receiver may have run it. It travels as its own error kind. An instance built before the kind existed refuses it and the stream item that carries it. Move every cell of a deployment to a build with the kind at once.
 - **Why:** earlier builds refuse an error kind they do not know. Later builds read an unknown kind as `Transport` and keep its name (`Error::unknown_kind`, in `crates/gdl/src/error.rs`).

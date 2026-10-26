@@ -996,12 +996,12 @@ fn only_the_chooser_registers_a_bound_policy() {
     let front = file("front/src/lib.rs");
     for line in [
         "const KEYS: &'static [&'static str] = &[\"node\", \"cell_policy\"];",
-        ".build::<::tiny_router::ByModel>(\"by_model\", cell_policy.remove(\"by_model\"))",
-        "gdl_runtime::gdl::Build::ready(&policy).await?;",
-        "builder.cell_policy(\"by_model\", policy)?;",
+        ".build_cell_policy::<::tiny_router::ByModel>(\"by_model\", cell_policy.remove(\"by_model\"))",
     ] {
         assert!(front.contains(line), "{line} in:\n{front}");
     }
+    // The builder keeps the policy's readiness: `build` does not wait for it.
+    assert!(!front.contains("Build::ready(&policy)"), "{front}");
     assert!(file("front/src/main.rs").contains("[cell_policy.by_model]"));
     for path in [
         "engine/Cargo.toml",
@@ -1068,7 +1068,7 @@ fn a_policy_two_classes_share_is_registered_once() {
     let front = &files[Path::new("front/src/lib.rs")];
     assert_eq!(
         front
-            .matches("builder.cell_policy(\"by_model\", policy)?;")
+            .matches(".build_cell_policy::<::tiny_router::ByModel>(\"by_model\",")
             .count(),
         1,
         "{front}"
