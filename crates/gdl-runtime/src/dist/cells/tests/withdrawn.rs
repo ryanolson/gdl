@@ -191,9 +191,6 @@ fn reading_allocates_nothing() {
     let allocations = counted() - before;
     counting(false);
     assert_eq!(seen, (100, 100));
-    // The counter is one for the whole binary, so this test allocates
-    // nothing while it counts: an allocation here would show in another
-    // test's count.
     assert_eq!(allocations, 0, "a read allocated");
 }
 

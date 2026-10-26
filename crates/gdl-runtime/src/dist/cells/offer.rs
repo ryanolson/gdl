@@ -141,7 +141,7 @@ mod tests {
 
     use super::super::{CellTable, Cells, EntryTable, cell_id, targets};
     use super::*;
-    use crate::dist::counting::{Counted, counted, counting, exclusive};
+    use crate::dist::counting::{Counted, counted, counting};
     use crate::dist::envelope::{Accepted, VERSION, WireCx};
     use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
     use crate::dist::roster::{Policy, Roster};
@@ -207,12 +207,7 @@ mod tests {
     /// is accepted, from the instance of `a` that `rt` is to the one
     /// entry instance of `d`: the fewest over a few sends, after a first
     /// that meets the peer.
-    #[allow(
-        clippy::await_holding_lock,
-        reason = "the lock keeps other tests from counting meanwhile"
-    )]
     async fn allocations(rt: &Runtime, routers: &[Router]) -> Vec<u64> {
-        let _counting = exclusive();
         let mut fewest = vec![u64::MAX; routers.len()];
         for round in 0..31 {
             for (at, router) in routers.iter().enumerate() {
@@ -227,13 +222,11 @@ mod tests {
                     reply: ReplyTo::test_value(7),
                     payload: vec![1, 2, 3],
                 };
-                let send = Counted(Box::pin(rt.send_forward("d", router, &cx, envelope, false)));
-                let before = counted();
-                tokio::time::timeout(Duration::from_secs(5), send)
+                let send = Counted::new(rt.send_forward("d", router, &cx, envelope, false));
+                let (sent, made) = tokio::time::timeout(Duration::from_secs(5), send)
                     .await
-                    .expect("answered in time")
-                    .expect("accepted");
-                let made = counted() - before;
+                    .expect("answered in time");
+                sent.expect("accepted");
                 if round > 0 {
                     fewest[at] = fewest[at].min(made);
                 }
@@ -710,7 +703,6 @@ mod tests {
     /// that ends a cell's damping, once.
     #[test]
     fn an_accepted_pick_allocates_nothing_and_writes_no_damping() {
-        let _counting = exclusive();
         let cx = Cx::new();
         let writes = || super::super::damping::WRITES.with(Cell::get);
         let random = std::hash::RandomState::new();
@@ -901,7 +893,6 @@ mod tests {
     /// excluded.
     #[test]
     fn a_pick_allocates_nothing_under_either_policy() {
-        let _counting = exclusive();
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
         let mut policies = gdl::CellPolicies::new();
@@ -977,7 +968,6 @@ mod tests {
     /// thin box it is held in, and the pick nothing more.
     #[test]
     fn a_choice_with_a_lease_allocates_twice() {
-        let _counting = exclusive();
         let cx = Cx::new();
         let random = std::hash::RandomState::new();
         let mut policies = gdl::CellPolicies::new();

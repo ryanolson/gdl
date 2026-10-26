@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use gdl::__runtime::Typed;
 use gdl::{Cx, Error, ErrorKind, Result};
 
-use crate::dist::counting::{Counted, counted, exclusive};
+use crate::dist::counting::Counted;
 use crate::dist::envelope::{self, Accepted, Forward, VERSION, WireCx};
 use crate::dist::fabric::{Fabric, ReplyTo, bind_node};
 use crate::dist::offers::Refused;
@@ -592,28 +592,21 @@ async fn a_refusal_here_that_is_not_a_decline_is_final() {
 /// The allocations each of `routers` makes to send one hand-off that is
 /// accepted, from `fixture`'s sender to its one entry, done by `send`:
 /// the fewest over a few sends, after a first that meets the peer.
-#[allow(
-    clippy::await_holding_lock,
-    reason = "the lock keeps other tests from counting meanwhile"
-)]
 async fn allocations<'a, F>(fixture: &'a Fixture, routers: &'a [Router], send: F) -> Vec<u64>
 where
     F: Fn(&'a Runtime, &'a Router, Cx, Forward) -> BoxFuture<'a, Result<()>>,
 {
-    let _counting = exclusive();
     let mut fewest = vec![u64::MAX; routers.len()];
     for round in 0..31 {
         for (at, router) in routers.iter().enumerate() {
             let mut cx = Cx::new();
             cx.insert_meta("session", "s1");
             let envelope = hand_off(&fixture.rt, &cx);
-            let sending = Counted(Box::pin(send(&fixture.rt, router, cx, envelope)));
-            let before = counted();
-            tokio::time::timeout(WAIT, sending)
+            let sending = Counted::new(send(&fixture.rt, router, cx, envelope));
+            let (sent, made) = tokio::time::timeout(WAIT, sending)
                 .await
-                .expect("answered in time")
-                .expect("accepted");
-            let made = counted() - before;
+                .expect("answered in time");
+            sent.expect("accepted");
             if round > 0 {
                 fewest[at] = fewest[at].min(made);
             }

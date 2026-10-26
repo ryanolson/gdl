@@ -307,8 +307,18 @@ async fn one_of_two_engines_retires_while_requests_flow() {
     let stopped = Instant::now();
     first_process.stop();
     let address = first_process.system_address().expect("a system listener");
-    let (code, body) = common::system::get(address, "/health").await;
-    assert_eq!(code, 503, "{body}");
+    // A stop is a signal: the instance turns unhealthy once its serving
+    // task sees it, not inside `stop`. Health never turns back to ready,
+    // so the first 503 is the drain's.
+    let deadline = Instant::now() + WAIT;
+    let body = loop {
+        let (code, body) = common::system::get(address, "/health").await;
+        if code == 503 {
+            break body;
+        }
+        assert!(Instant::now() < deadline, "still healthy: {code} {body}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
     assert!(body.contains("\"phase\":\"draining\""), "{body}");
     let promised = avoided(&hub, first_id, &[front_id]).await;
     let exited = left(first_served).await;
@@ -508,12 +518,15 @@ async fn two_of_three_engines_retire_one_after_the_other() {
     b_process.stop();
     let promised = avoided(&hub, b_id, &[front_id]).await;
     assert!(left(b_served).await >= promised);
+    // The third counts a hand-off when it takes it, so a request it took
+    // before `before` can finish after it: finished requests are not new
+    // hand-offs. With the other two gone, every new hand-off is the third's.
     let before = c_segment.served().forwards;
-    traffic.more(20).await;
-    assert!(
-        c_segment.served().forwards >= before + 20,
-        "the third did not take over"
-    );
+    let deadline = Instant::now() + WAIT;
+    while c_segment.served().forwards < before + 20 {
+        assert!(Instant::now() < deadline, "the third did not take over");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(traffic.stop().await, 0, "a request failed");
 
     front_process.stop();

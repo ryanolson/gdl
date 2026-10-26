@@ -752,7 +752,9 @@ mod slow_request {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// On tokio's paused clock, time moves only when every task waits, so a
+// host stall cannot expire the 150 ms reservation between 30 ms renewals.
+#[tokio::test(start_paused = true)]
 async fn slow_request_only_segment_renews_reply_until_handoff_or_error() {
     use gdl_runtime::{Deployment, Placement, Roster, RuntimeConfig};
     use std::time::Duration;

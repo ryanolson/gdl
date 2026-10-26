@@ -1,12 +1,12 @@
-//! The unit tests' allocation counter: a binary has one global allocator,
-//! so every test that counts what a hand-off allocates shares this one.
+//! The unit tests' allocation counter. A binary has one global allocator,
+//! and its tests run at the same time on their own threads, so each count
+//! is a thread's own: one test's count never holds another's allocations.
 
 #![allow(unsafe_code)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 /// Counts the allocations a thread makes while it polls a [`Counted`]
@@ -14,15 +14,14 @@ use std::task::{Context, Poll};
 /// other tasks, allocate uncounted.
 struct Counting;
 
-static COUNTED: AtomicU64 = AtomicU64::new(0);
-
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
+    static COUNTED: Cell<u64> = const { Cell::new(0) };
 }
 
 fn count() {
     if COUNTING.with(Cell::get) {
-        COUNTED.fetch_add(1, Ordering::Relaxed);
+        COUNTED.with(|counted| counted.set(counted.get() + 1));
     }
 }
 
@@ -48,18 +47,9 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// The allocations counted so far.
+/// The allocations this thread has counted so far.
 pub(crate) fn counted() -> u64 {
-    COUNTED.load(Ordering::Relaxed)
-}
-
-/// Held by each test that counts, while it counts: [`counted`] is one
-/// number for the whole binary, so a test that counts while another does
-/// sees the other's allocations as its own.
-pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    ONE.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    COUNTED.with(Cell::get)
 }
 
 /// Count this thread's allocations from now on, or stop.
@@ -67,16 +57,84 @@ pub(crate) fn counting(on: bool) {
     COUNTING.with(|counting| counting.set(on));
 }
 
-/// Polls the future it wraps with counting on.
-pub(crate) struct Counted<F>(pub(crate) Pin<Box<F>>);
+/// Polls the future it wraps with counting on, and gives back, with the
+/// future's output, the allocations its polls made. The total is the
+/// future's own, not a thread's: a runtime may poll it on a different
+/// thread each time.
+pub(crate) struct Counted<F> {
+    future: Pin<Box<F>>,
+    made: u64,
+}
+
+impl<F: Future> Counted<F> {
+    pub(crate) fn new(future: F) -> Self {
+        Self {
+            future: Box::pin(future),
+            made: 0,
+        }
+    }
+}
 
 impl<F: Future> Future for Counted<F> {
-    type Output = F::Output;
+    type Output = (F::Output, u64);
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let before = counted();
         counting(true);
-        let polled = self.0.as_mut().poll(cx);
+        let polled = self.future.as_mut().poll(cx);
         counting(false);
-        polled
+        self.made += counted() - before;
+        let made = self.made;
+        polled.map(|output| (output, made))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A count is the counting thread's own: a test that counts sees
+    /// nothing that another test, counting on its own thread at the same
+    /// time, allocates.
+    #[test]
+    fn another_threads_allocations_are_not_counted_here() {
+        let before = counted();
+        let theirs = std::thread::spawn(|| {
+            let before = counted();
+            counting(true);
+            std::hint::black_box(Box::new(7u64));
+            counting(false);
+            counted() - before
+        })
+        .join()
+        .expect("the counting thread");
+        assert_eq!(theirs, 1, "the other thread counted its allocation");
+        assert_eq!(counted() - before, 0, "this thread counted another's");
+    }
+
+    /// A future polled on two threads, allocating once on each, counts
+    /// both: its total does not depend on the thread that reads it.
+    #[test]
+    fn a_future_counts_its_polls_on_every_thread() {
+        let mut polls = 0;
+        let mut counted = Counted::new(std::future::poll_fn(move |_| {
+            std::hint::black_box(Box::new(polls));
+            polls += 1;
+            if polls < 2 {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }));
+        let mut poll = || {
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            Pin::new(&mut counted).poll(&mut cx)
+        };
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| poll().is_pending()).join();
+            assert!(first.expect("the first thread"), "done after one poll");
+        });
+        let second = std::thread::scope(|scope| scope.spawn(poll).join());
+        assert_eq!(second.expect("the second thread"), Poll::Ready(((), 2)));
     }
 }
