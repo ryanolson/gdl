@@ -2,7 +2,7 @@
 
 This chapter reports what a crossing costs: a request, an item, a streamed request, and the codec. A crossing is one request or stream that leaves a segment for another over velo. [Concepts: Crossings](../concepts/crossings.md) says what one is. [Benchmarking](benchmarking.md) says what these shared-machine numbers may claim, and the measurement traps that apply to all of them.
 
-The result: a two-segment request costs about what the same exchange costs on velo alone, within the run-to-run spread. A crossing's codec work per item is 9 ns under velo's at 16 B and 36 to 203 ns over it at 1 KiB to 16 KiB. Both are bounded by velo's single-stream rate of about 11 K items/s.
+The result: a two-segment request costs about what the same exchange costs on velo alone, within the run-to-run spread. A crossing's codec work per item is 21 to 38 ns under velo's at 16 B to 16 KiB. Both are bounded by velo's single-stream rate of about 11 K items/s. At `0ff3a6b`, a crossed item costs 7% more user instructions than velo carrying it at 16 B, 4% more at 1 KiB, and no measurable amount more at 16 KiB. Most of an item's cycles go to velo's transport and tokio's scheduler.
 
 A graph that is not cut costs no encoding. Nodes of one segment pass values directly. `crates/gdl-runtime/tests/crossings.rs` counts the encodes of one message type: none in a local graph, and one encode and one decode per message per crossing.
 
@@ -86,6 +86,108 @@ The saving is about 16k instructions per anchor (per stream) and nothing without
 ## The single-stream limit
 
 Two velo 0.19 nodes in one process over loopback TCP, default settings, move one stream of small items at about 12 K items/s, or 83 us per item. This is `velo-direct` in `crates/gdl-runtime/benches/remote.rs`, 4 tokio workers. Thirty-two streams at once move 234 K items/s, so the limit is per stream. The ask to velo is in [Development: Velo](../development/velo.md#open-asks-of-velo).
+
+## Instructions per item
+
+What one item costs to cross, in instructions, with the request's cost taken out. This is the per-item claim that wall time and items per second cannot settle, because velo's single-stream limit hides it.
+
+**Setup.** The gb300 bench host: 72 Neoverse-V2 cores, quiet, Linux 6.17.0 (64 KiB pages), rustc 1.93.1, perf 6.17.13. Each run is pinned to cores 16 to 23. Load average 5.3, falling to 1.4 over the run. One process runs both ends, with 4 tokio workers and two velo nodes over loopback TCP. `requests lean-<size> <count>` sends one stream of `<count>` items through the lean graph `S => D` over two segments. `requests direct-<size> <count>` sends the same stream on velo alone, opened by ticket as gdl opens it. Each run is counted at 10,000 and at 20,000 items, and the difference divided by 10,000 is the cost of one item. `perf stat` counts user and kernel instructions apart, across all threads and both ends. Seven rounds alternate the builds, the shapes, and the order of the two counts. The table gives the median and the range across rounds.
+
+The two builds are the `WireItem` frame at `523afc0` and the byte path at `cadd2f3`, whose runtime merged unchanged as `d1fa15a`. Each has the item shapes of `requests` added and nothing else. Both were built in turn in one checkout and one target directory.
+
+| User instructions per item | 16 B | 1 KiB | 16 KiB |
+|---|---|---|---|
+| Lean, `WireItem` frame (`523afc0`) | 10,420 (9,974 to 10,807) | 12,770 (12,673 to 12,889) | 35,544 (35,283 to 35,918) |
+| Lean, byte path (`cadd2f3`) | 9,172 (8,703 to 9,560) | 11,186 (11,027 to 11,352) | 32,010 (31,756 to 32,108) |
+| velo direct, at `523afc0` | 8,579 (8,107 to 8,812) | 10,022 (9,909 to 10,105) | 28,809 (28,336 to 29,112) |
+| velo direct, at `cadd2f3` | 8,174 (7,552 to 8,791) | 10,048 (9,836 to 10,110) | 28,551 (28,128 to 29,047) |
+
+| Kernel instructions per item | 16 B | 1 KiB | 16 KiB |
+|---|---|---|---|
+| Lean, `WireItem` frame (`523afc0`) | 6,846 (6,170 to 7,297) | 8,847 (8,372 to 9,326) | 27,607 (26,817 to 28,897) |
+| Lean, byte path (`cadd2f3`) | 7,430 (6,377 to 7,857) | 9,178 (8,068 to 9,374) | 28,895 (27,563 to 34,592) |
+| velo direct, at `523afc0` | 7,280 (5,806 to 9,652) | 8,644 (8,404 to 9,412) | 30,284 (28,630 to 31,831) |
+| velo direct, at `cadd2f3` | 6,261 (5,507 to 7,251) | 8,629 (8,137 to 11,421) | 29,345 (27,940 to 30,868) |
+
+**Reading.**
+- **With the `WireItem` frame, a crossing adds 1,841, 2,748, and 6,735 user instructions per item** to what velo spends on the same stream: 21%, 27%, and 23% more.
+- **The byte path removes 1,248, 1,584, and 3,534 of them** (12%, 12%, and 10% of gdl's count). The ranges of the two builds do not overlap at any size. What is left over velo direct is 998, 1,138, and 3,459.
+- **velo direct is the control.** Its code is the same in both builds. Its medians differ by 405 instructions at 16 B and under 260 at the other sizes, inside the ranges.
+- **Kernel instructions settle nothing.** They are as large as the user count at 16 KiB, their ranges overlap for every pair, and they include parking and waking the workers, which grows with wall time rather than with items.
+- **A count per item includes idle work.** One stream keeps the workers busy for only part of each item's time, so each item also pays for the park and wake of the threads that wait for it. The two paths pay it alike.
+
+**Main.** A second run of seven rounds, set up the same way (load average 5.9, falling to 1.6), compared the byte path with main at `d1fa15a`. Main also has a change to local hops (`gdl/src/items.rs`, `cx.rs`, and `compose.rs`).
+
+| User instructions per item | 16 B | 1 KiB | 16 KiB |
+|---|---|---|---|
+| Lean, byte path (`cadd2f3`) | 9,187 (9,006 to 9,560) | 11,145 (11,032 to 11,302) | 31,995 (31,437 to 32,242) |
+| Lean, main (`d1fa15a`) | 8,895 (8,842 to 9,526) | 11,158 (11,062 to 11,260) | 31,824 (31,564 to 32,085) |
+| velo direct, at `cadd2f3` | 8,462 (8,100 to 9,060) | 9,993 (9,765 to 10,123) | 28,734 (28,396 to 28,915) |
+| velo direct, at `d1fa15a` | 8,245 (7,891 to 8,653) | 9,903 (9,798 to 9,987) | 28,421 (28,023 to 28,771) |
+
+- **The local-hop change shows no cost or saving per crossed item.** Main's ranges overlap the byte path's at every size.
+- **The byte path's counts repeat.** Its medians are within 0.4% of the first run's.
+- **At main, a crossed item costs 650, 1,255, and 3,403 user instructions more than velo carrying it**: 8%, 13%, and 12% more.
+
+**Main after in-place encode.** A third run of seven rounds, set up the same way (load average 7.2, falling to 1.6), compared main at `d1fa15a` with main at `0ff3a6b`, where the edge codec encodes each item in place into velo's frame. `0ff3a6b` also pins a newer velo (`e892f87`).
+
+| User instructions per item | 16 B | 1 KiB | 16 KiB |
+|---|---|---|---|
+| Lean, main (`d1fa15a`) | 9,004 (8,192 to 9,289) | 11,134 (11,041 to 11,213) | 31,860 (31,567 to 32,240) |
+| Lean, in place (`0ff3a6b`) | 8,856 (8,522 to 9,190) | 10,336 (10,250 to 10,435) | 28,942 (28,786 to 29,334) |
+| velo direct, at `d1fa15a` | 8,613 (7,278 to 8,889) | 9,908 (9,697 to 10,172) | 28,478 (27,977 to 28,818) |
+| velo direct, at `0ff3a6b` | 8,256 (8,083 to 8,561) | 9,983 (9,921 to 10,176) | 28,691 (28,526 to 28,927) |
+
+- **The in-place encode removes 798 user instructions per item at 1 KiB and 2,918 at 16 KiB** (7% and 9%). The ranges do not overlap. At 16 B the ranges overlap, so this run shows no change there.
+- **After it, a crossed item costs 600, 353, and 251 user instructions more than velo carrying it**: 7%, 4%, and 1%. At 16 KiB the ranges of the lean graph and velo direct overlap, so the crossing costs no measurable amount more there.
+- **The controls hold.** velo direct's ranges overlap between the two builds at every size, although `0ff3a6b` pins a newer velo. Main's lean medians repeat the second run within 1.2%.
+
+**Reproduce.** On Linux with `perf` allowed (`perf_event_paranoid` 1 or lower):
+
+```bash
+python3 scripts/bench/items.py count --ref main=<base commit> --ref bytepath=<change commit> --out <new directory> --cpus 16-23 --rounds 7
+```
+
+Each ref must contain the item shapes of `crates/gdl-runtime/benches/requests.rs`. The script builds each ref in a temporary worktree under `target/`, prints the table above, and writes each round to `rounds.json`.
+
+## Where an item's cycles go
+
+A sampling profile of the same streams shows where the cycles of an item go, at both ends. One process runs both ends, so one profile covers the producer's send and the consumer's receive.
+
+**Setup.** The gb300 bench host as above, load average 2.0. `scripts/bench/items.py profile` builds `requests` with line tables and runs one stream of 100,000 items of 16 B. `perf record -e cycles -c 250000 --call-graph dwarf,8192 --no-buildid` samples every 250,000 cycles on any thread, in user space or in the kernel. The script expands each frame's inlined functions with `addr2line`, because async functions are inlined into tokio's task poll. Then it names each sample by the first step that a frame matches, from the sampled frame out to the thread's root. A step's callees count as the step's, so an allocation or a copy that a step makes is that step's cost. Every sampled address was expanded. All three profiles ran with the same `items.py`.
+
+| Share of all cycles | Lean, `WireItem` frame | Lean, byte path | Lean, main | Lean, in place | velo direct |
+|---|---|---|---|---|---|
+| velo transport (mux, batcher, TCP, sockets) | 60.0% | 60.9% | 60.2% | 60.4% | 62.1% |
+| tokio scheduler (park, wake, task polls) | 24.7% | 25.8% | 27.3% | 25.2% | 25.4% |
+| velo send (frame encode, enqueue) | 4.4% | 4.3% | 4.0% | 5.4% | 6.7% |
+| velo receive (frame decode) | 2.2% | 2.1% | 1.9% | 1.8% | 1.9% |
+| `WireItem` frame (`dist/envelope.rs`) | 5.1% | 0.0% | 0.0% | 0.0% | 0.6% |
+| gdl `dist/hop.rs` (the pump, `InboundItems`) | 1.0% | 0.8% | 1.0% | 0.7% | 0.0% |
+| gdl `dist/fabric.rs`, `dist/stages.rs` (`Outbound`, `Inbound`, the codec streams) | 0.7% | 2.7% | 2.7% | 3.1% | 0.0% |
+| edge codec (`gdl::codec`) | 0.3% | 0.4% | 0.4% | 0.1% | 0.0% |
+| other gdl and velo | 1.1% | 2.2% | 2.1% | 2.4% | 0.7% |
+| bench (build and check blobs) | 0.5% | 0.5% | 0.2% | 0.7% | 2.5% |
+| other | 0.1% | 0.3% | 0.2% | 0.1% | 0.2% |
+| Samples | 7,926 | 7,366 | 7,184 | 7,356 | 7,106 |
+| Cycles per item | 19,800 | 18,400 | 18,000 | 18,400 | 17,800 |
+
+The builds are the ones the instruction counts used: main is `d1fa15a`, and in place is `0ff3a6b`. In place, the edge encode runs as `gdl::codec::write_msgpack`, which the script's edge codec step does not match. Its samples count under other gdl and velo, which is 2.4% in all. Each profile is one run, so its shares and cycles carry a run-to-run spread that these runs did not measure. In the transport, 34% to 36% of the cycles are in the kernel (socket calls). In the scheduler, 40% to 43% are (futex waits and wakes). Setup takes about 80 samples, which is about 1% of each profile.
+
+**Reading.**
+- **The transport and the scheduler take 85% to 88% of every profile.** They take it on velo direct as well. One stream of small items spends its cycles moving bytes over loopback and waking threads, not on the item.
+- **gdl's own steps were 7.8% of the cycles with the `WireItem` frame, 4.4% on the byte path, 4.6% at main, and 4.7% in place.** The `WireItem` frame alone was 5.1%. On the byte path, `dist/fabric.rs` and `dist/stages.rs` take more than before (2.7% against 0.7%). The profile does not show why.
+- **The two views rank the builds alike.** Cycles per item and user instructions per item both put the `WireItem` frame first, then the byte path, then main, and velo direct last. At 16 B the instruction ranges of main and in place overlap, so neither view orders those two. Over velo direct, the lean graph is 11% in cycles and 21% in user instructions with the `WireItem` frame, and 4% and 12% on the byte path. The sizes differ: cycles include the kernel's work, whose counts overlap for every pair, and user instructions do not.
+- **About one point of a step's share is attribution error.** velo direct never calls gdl's envelope code, yet 0.6% of its samples name `dist/envelope.rs`. The cause is not known. One possible cause is that the compiler merged identical functions, so that a merged function names only one of its sources. A share under about one point does not show a cost.
+- **Inclusive shares.** In place (`0ff3a6b`), `pump_watching` (the producer end, `dist/hop.rs`) holds 8.4% of the cycles with its callees, velo's send included. At `d1fa15a` it held 7.0%. `InboundItems::poll_next` (the consumer end) holds 3.9%, against 4.1%. Each is one run. The [hot-paths register](hot-paths.md) lists both.
+
+**Reproduce.**
+
+```bash
+python3 scripts/bench/items.py profile --ref main=<commit> --out <new directory> --shape lean-16 --count 100000 --period 250000 --stack 8192 --cpus 16-23
+```
+
+The script prints the step table, the leaf functions, and the project functions by inclusive share, and writes them to `steps.txt`.
 
 ## Codec cost
 

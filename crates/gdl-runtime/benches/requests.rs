@@ -17,6 +17,13 @@
 //! is built. `requests sizes 0` prints the size of the front's call future
 //! over one, two, and three segments: a larger future is moved whole on
 //! every request. See docs/src/operations/benchmarking.md for the method.
+//!
+//! `lean-<size>` and `direct-<size>` count items rather than requests: one
+//! stream of `<count>` items of `<size>` bytes, through `remote`'s lean
+//! two-segment graph or the same stream on velo alone. The stream is opened
+//! once, so the difference between two counts is the cost of the items
+//! alone, with no share of a request's. `perf record` on one of these
+//! profiles the item path, both ends, in one process.
 
 #![allow(missing_docs)]
 
@@ -36,7 +43,7 @@ fn produced() {}
 
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
-    let usage = "usage: requests <local | one | two | three>[-metrics] <count> | two-<random | least_loaded | affinity> <count> | sizes 0";
+    let usage = "usage: requests <local | one | two | three>[-metrics] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct>-<size> <count> | sizes 0";
     let which = args.next().expect(usage);
     let count: u32 = args.next().and_then(|n| n.parse().ok()).expect(usage);
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -48,6 +55,14 @@ fn main() {
         // Only the setup measured: every velo node running in the process
         // does work of its own while the requests run, which a count per
         // request would take for theirs.
+        if let Some((kind, size)) = which
+            .split_once('-')
+            .filter(|(kind, _)| matches!(*kind, "lean" | "direct"))
+        {
+            let size: u32 = size.parse().expect(usage);
+            items(kind, Ask { items: count, size }).await;
+            std::process::exit(0);
+        }
         let events = Events::quiet();
         let (shape, metrics) = match which.strip_suffix("-metrics") {
             Some(shape) => (shape, true),
@@ -109,4 +124,19 @@ fn main() {
     // The setup's velo nodes are leaked on purpose; leave without waiting
     // for their tasks.
     std::process::exit(0);
+}
+
+/// One stream of `ask.items` items, read to its end and checked.
+async fn items(kind: &str, ask: Ask) {
+    if kind == "lean" {
+        let lean = lean_front().await;
+        let out = lean(Cx::new(), ask).await.expect("call");
+        drain(out, ask.items, |blob| {
+            assert_eq!(blob.0.len(), ask.size as usize, "gdl: item size");
+        })
+        .await;
+    } else {
+        let (client, target) = direct_pair().await;
+        direct(&client, target, ask, true).await;
+    }
 }

@@ -2,7 +2,7 @@
 
 This chapter says what a performance number in this book may claim, how to take one, and which claims still wait for a dedicated machine. The numbers themselves are in [Crossing performance](crossing-performance.md), [Feature costs](feature-costs.md), and [Reader cost](reader-cost.md). Velo's rig and rules are in [velo's Benchmarking](https://ai-dynamo.github.io/velo/operations/benchmarking.html).
 
-Every figure in this book was taken on a shared machine: an Apple laptop under macOS, or one shared Arm host under Linux. Each table names its machine, command, and base commit. All of them are provisional.
+Most figures in this book were taken on a shared machine: an Apple laptop under macOS, or one shared Arm host under Linux. Each table names its machine, command, and base commit. All of them are provisional. The newer tables come from the gb300 bench host: a quiet 72-core Neoverse-V2 server that runs one bench job at a time, where `perf` can count and sample. Nobody has checked it against the setup that the dedicated machines below need, so its numbers are provisional too.
 
 ## What a shared machine may claim
 
@@ -16,7 +16,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 
 ## Method
 
-- **Count instructions, not time.** `crates/gdl-runtime/benches/requests.rs` runs a fixed number of requests through the reference graph. Run it with 10,000 and with 20,000 requests under a counter. The difference divided by 10,000 is the cost of one request, and the setup cancels. The counter is `/usr/bin/time -l` on macOS and `perf stat -e instructions` on Linux.
+- **Count instructions, not time.** `crates/gdl-runtime/benches/requests.rs` runs a fixed number of requests through the reference graph. Run it with 10,000 and with 20,000 requests under a counter. The difference divided by 10,000 is the cost of one request, and the setup cancels. The counter is `/usr/bin/time -l` on macOS and `perf stat -e instructions` on Linux. For the cost of one item, the same bench's `lean-<size>` and `direct-<size>` shapes carry `<count>` items on one stream, so the difference between two item counts holds no share of a request.
 - **Interleave.** Build base and change in the same checkout and the same target directory, one after the other, and copy each binary aside. Run them alternately for at least seven rounds. Two builds of identical sources in different directories differed by 7% in instructions, so a comparison across directories means nothing.
 - **Report the median and the range across rounds.** Call a difference real only when it exceeds the range of the base alone. Record the load average with each round.
 - **Wall time** comes from the criterion rows of `crates/gdl-runtime/benches/remote.rs`, base and change in turn, with `--warm-up-time 2 --measurement-time 5`.
@@ -67,4 +67,4 @@ Still to measure there: time to first item and inter-item p50 and p99 for a thre
 
 ## Runner
 
-`scripts/bench/codecs.py` compares two prebuilt codec benchmarks on one CPU, alternating their order, and writes the medians, quartiles, binary hashes, and load for each round. See [Codec cost](crossing-performance.md#codec-cost) for its use. The other benches have no runner. Run them by hand as the commands in each table show.
+`scripts/bench/codecs.py` compares two prebuilt codec benchmarks on one CPU, alternating their order, and writes the medians, quartiles, binary hashes, and load for each round. See [Codec cost](crossing-performance.md#codec-cost) for its use. `scripts/bench/items.py` builds the `requests` bench at each ref in one checkout and one target directory, counts the instructions per item under `perf stat` in alternating rounds (`count`), and samples the item path under `perf record` (`profile`). It needs Linux with `perf` allowed. Its tests run without `perf`: `python3 -m unittest discover -s scripts/bench/tests` (they need `gcc`). See [Instructions per item](crossing-performance.md#instructions-per-item) for its use. The other benches have no runner. Run them by hand as the commands in each table show.

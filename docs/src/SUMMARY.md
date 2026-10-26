@@ -41,6 +41,7 @@
 - [Known limitations](operations/limitations.md)
 - [Benchmarking](operations/benchmarking.md)
 - [Crossing performance](operations/crossing-performance.md)
+- [Hot paths](operations/hot-paths.md)
 - [Runtime feature costs](operations/feature-costs.md)
 - [Source reader cost](operations/reader-cost.md)
 

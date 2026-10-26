@@ -1342,6 +1342,7 @@ impl Consumer for Tokens {
 }
 
 /// [`pump`], given where its consumer's signals come from.
+// hot path: crossing-item-send
 async fn pump_watching(
     mut bytes: Items<EncodedItem>,
     out: Outbound,
@@ -1617,6 +1618,7 @@ struct InboundItems<S> {
 impl<S: Stream<Item = Frame> + Unpin> Stream for InboundItems<S> {
     type Item = Result<Bytes>;
 
+    // hot path: crossing-item-receive
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
