@@ -10,8 +10,8 @@ use serde_json::{Map, Value, json};
 
 use super::variables::{cell_variables, string};
 use super::{
-    Bundle, check_segment_name, hosts, hub_healthcheck, io, keep_stdin_open, segment_healthcheck,
-    stdin_readme,
+    Bundle, Secrets, check_segment_name, hosts, hub_healthcheck, io, keep_stdin_open,
+    segment_healthcheck, stdin_readme,
 };
 use crate::{Error, Files, Spec, emit, export::image_problem, validate::Layouts};
 
@@ -69,6 +69,7 @@ pub(super) fn bundle(
     let mut runs: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     // The services whose source reads requests on stdin.
     let mut sources = BTreeSet::new();
+    let mut secrets = Secrets::new();
     for laid in spec.layouts() {
         let ours: Vec<&CellSettings> = cells
             .iter()
@@ -163,6 +164,7 @@ pub(super) fn bundle(
                     keep_stdin_open(&mut service);
                     sources.insert(format!("{}_{segment}", cell.name));
                 }
+                bundle.mount_secrets(segment, &mut service, &mut secrets);
                 image.build(&mut service, &mut built);
                 services.insert(format!("{}_{segment}", cell.name), service);
             }
@@ -181,16 +183,21 @@ pub(super) fn bundle(
             )));
         }
     }
+    let mut compose = json!({"services": services, "volumes": {VOLUME: volume()}});
+    if !secrets.is_empty() {
+        compose["secrets"] = bundle.declare_secrets(&secrets);
+    }
+    let secrets_readme = bundle.secrets_readme(&secrets);
     let mut files = bundle.files;
     files.insert(
         "compose.yaml".into(),
-        serde_json::to_string_pretty(&json!({"services": services, "volumes": {VOLUME: volume()}}))
-            .map_err(io)?,
+        serde_json::to_string_pretty(&compose).map_err(io)?,
     );
     let mut readme = String::from(README);
     for source in &sources {
         readme.push_str(&stdin_readme(source));
     }
+    readme.push_str(&secrets_readme);
     files.insert("README.md".into(), readme);
     Ok(files)
 }

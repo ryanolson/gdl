@@ -30,6 +30,33 @@ listen = "0.0.0.0:8082"
 base_image = "nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04"
 ```
 
+### Secrets
+
+A segment can mount a secret: a file on the Docker host that Compose mounts read-only at `/run/secrets/<name>` in each of the segment's containers. Declare it once, name it in each segment that reads it, and point the node's setting at the mount:
+
+```toml
+[deployment.secrets.fingerprint]
+file = "/etc/gdl/secrets/fingerprint"   # on the Docker host
+
+[deployment.segment.front]
+secrets = ["fingerprint"]
+
+[deployment.segment.front.config.node.Fingerprint]
+secret_file = "/run/secrets/fingerprint"
+```
+
+The bundle names the file and never holds it: the generator does not open the file, so it need not exist when the bundle is written, and its contents appear in no generated file and no output. `compose.yaml` gets a top-level `secrets` entry for each secret a service mounts, and each service of the segment a `secrets` list. The bundle's README lists them.
+
+- **Names.** A secret's name is letters, digits, `_`, `.`, and `-`, and not `.` or `..`, so that it names one file in `/run/secrets`. A segment may name only a declared secret, and each once.
+- **Paths.** `file` must be an absolute path. Compose reads a relative one from the bundle's directory, which is the build context of a bundle's images: every `docker compose build` would copy the file into a build stage. For the same reason a file in the build context is refused: in the bundle, or with `--local`, anywhere in the wider context. A `$` in the path is written `$$`, which Compose reads as `$`.
+- **Who can read it.** Compose mounts the file as it is on the host, with its owner and mode. It ignores a service's `uid`, `gid`, and `mode` for a secret outside Swarm. The default runtime image runs as uid 65532, so that user must be able to read the file. For a file only you can read:
+
+  ```bash
+  setfacl -m u:65532:r /etc/gdl/secrets/fingerprint
+  ```
+
+  The file must exist before `docker compose up`, or Compose refuses to start the service.
+
 A runtime image must run the binary built in `build_image` and supply its libraries. The generator installs no packages into it. The default runtime image holds glibc and the C runtime, and no shell, and runs as a user that is not root (uid 65532). The default build image is the toolchain that `rust-toolchain.toml` pins, on Debian 12, the release that the runtime image is built from, so a binary finds the glibc that it was linked against. A runtime image that runs as root, such as a CUDA image, works too: nothing in the image or the bundle depends on the user. A `config` table adds to the segment's settings ([Segment settings](../operations/configuration.md)).
 
 ## 2. Write the bundle

@@ -63,6 +63,8 @@ A value equal to its default is not recorded. The placement hash covers each cla
 | `[deployment.segment.<name>] base_image` | one segment's run image | `base_image` |
 | `[deployment.segment.<name>] ports` | the ports the segment publishes, as Compose writes them | none |
 | `[deployment.segment.<name>] config` | top-level keys of the segment's settings file, which replace the generated ones | none |
+| `[deployment.segment.<name>] secrets` | the declared secrets the segment mounts, each at `/run/secrets/<secret>` | none |
+| `[deployment.secrets.<secret>] file` | the secret's file on the Docker host, by absolute path. The generator never opens it. | required |
 | `[entry.<name>] forward` | the forward nodes of a service entry arm, by type path | none |
 | `[entry.<name>] operator` | the entry arm's operator, by type path | none |
 | `[entry.<name>] target` | the named pipeline the arm ends at. An operator owns a nested arm, not a target. | none |
@@ -70,7 +72,7 @@ A value equal to its default is not recorded. The placement hash covers each cla
 | `[entry.<name>] backward` | the backward nodes of the arm, by type path | none |
 | `[pipeline_names] <Source>` | a label for a pipeline root. Nonempty and unique, and the graph must have that source. | none |
 
-A `[deployment]` table, or the `compose` command, makes the generated crates ask for hub discovery. A `[deployment.segment.<name>]` table must name a segment that some layout has. Image names are validated: letters, digits, and `/ _ . : @ -`. [Deploy with Docker Compose](../guides/compose-deploy.md) covers the deployment, and [Hosted frontends](../guides/frontends.md) covers entries.
+A `[deployment]` table, or the `compose` command, makes the generated crates ask for hub discovery. A `[deployment.segment.<name>]` table must name a segment that some layout has. Image names are validated: letters, digits, and `/ _ . : @ -`. A secret's name is letters, digits, `_`, `.`, and `-`, and not `.` or `..`. Its file must be absolute and outside the bundle's build context ([Secrets](../guides/compose-deploy.md#secrets)). [Deploy with Docker Compose](../guides/compose-deploy.md) covers the deployment, and [Hosted frontends](../guides/frontends.md) covers entries.
 
 ## fleet.toml
 

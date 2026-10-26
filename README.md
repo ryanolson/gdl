@@ -17,6 +17,7 @@ NOTE: gdl is experimental. Its design and tests are still in progress, and its A
 - **Selectors and offers.** Route a crossing by round robin, random, or a selector you write, and fail over when an instance declines. See [Routing, selectors, and offers](docs/src/concepts/routing.md).
 - **Dynamo-shaped health and metrics.** See [Health and metrics](docs/src/operations/observability.md).
 - **Cells.** One graph across several deployments, each with its own hub. A cell policy chooses the cell for each request: gdl's, or one from your crate that the spec binds or your code registers. A node beside the chooser can read the same cells, and which were drained on purpose. See [Classes and cells](docs/src/concepts/cells.md), [Write a cell policy](docs/src/guides/write-a-cell-policy.md), and [What a node reads](docs/src/concepts/cell-routing.md#what-a-node-reads).
+- **Docker Compose bundles.** `cargo gdl compose` writes a hub and a service per segment, and mounts the file secrets a spec names without reading them. See [Deploy with Docker Compose](docs/src/guides/compose-deploy.md).
 - **A composer.** Draw a graph in a browser, place it, and deploy it with Compose. See [Compose in the browser](docs/src/guides/composer.md).
 
 ## Crates

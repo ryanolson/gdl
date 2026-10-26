@@ -11,6 +11,8 @@ pub(crate) struct Settings {
     hub_image: Option<String>,
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     segment: std::collections::BTreeMap<String, Image>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    secrets: std::collections::BTreeMap<String, Secret>,
 }
 /// `[deployment] base_image` when the spec does not set it: the image a
 /// segment, and the hub unless `hub_image` says otherwise, runs in. It
@@ -29,6 +31,50 @@ impl Settings {
     pub(crate) fn segments(&self) -> impl Iterator<Item = &str> {
         self.segment.keys().map(String::as_str)
     }
+
+    /// What is wrong with the secrets the settings declare and the
+    /// segments name, each with its table.
+    pub(crate) fn secret_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (name, secret) in &self.secrets {
+            if !secret_name(name) {
+                problems.push(format!(
+                    "[deployment.secrets.{name}]: a secret's name is letters, digits, `_`, `.`, and `-`, and not `.` or `..`, so that it names one file in `/run/secrets`"
+                ));
+            }
+            if !Path::new(&secret.file).is_absolute() {
+                problems.push(format!(
+                    "[deployment.secrets.{name}]: file `{}` is not an absolute path: Compose reads a relative one from the bundle, which every image build copies",
+                    secret.file
+                ));
+            }
+        }
+        for (segment, image) in &self.segment {
+            let mut named = std::collections::BTreeSet::new();
+            for name in &image.secrets {
+                if !self.secrets.contains_key(name) {
+                    problems.push(format!(
+                        "[deployment.segment.{segment}]: secret `{name}` is not declared in a `[deployment.secrets.{name}]` table"
+                    ));
+                }
+                if !named.insert(name) {
+                    problems.push(format!(
+                        "[deployment.segment.{segment}]: secret `{name}` is named twice"
+                    ));
+                }
+            }
+        }
+        problems
+    }
+}
+
+/// Whether `name` can name a secret: Compose mounts it at
+/// `/run/secrets/<name>`, which must be one file there.
+fn secret_name(name: &str) -> bool {
+    !matches!(name, "" | "." | "..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
 
 impl Default for Settings {
@@ -38,6 +84,7 @@ impl Default for Settings {
             build_image: DEFAULT_BUILD_IMAGE.into(),
             hub_image: None,
             segment: Default::default(),
+            secrets: Default::default(),
         }
     }
 }
@@ -50,6 +97,16 @@ struct Image {
     ports: Vec<String>,
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     config: toml::Table,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    secrets: Vec<String>,
+}
+
+/// A secret a segment can mount: a file on the Docker host, which the
+/// generator names and never opens.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Secret {
+    file: String,
 }
 fn validate_image(image: &str) -> Result<(), Error> {
     if image.is_empty()
@@ -121,6 +178,7 @@ fn bundle_files(
         )));
     }
     let (spec, bundle) = Bundle::prepare(spec, out, target, sources)?;
+    bundle.check_secrets(out)?;
     let local = bundle.local_root();
     let mut files = match fleet {
         None => single(&spec, bundle, target)?,
@@ -423,6 +481,77 @@ impl Bundle {
         Ok(drain_bound(&config).as_secs() + 30)
     }
 
+    /// Refuse a secret whose file lies in the build context, the bundle or
+    /// the context of its local sources: every image build would copy it
+    /// into an image.
+    fn check_secrets(&self, out: &Path) -> Result<(), Error> {
+        let context = match &self.context {
+            Some(context) => context.root().to_path_buf(),
+            None => crate::dump::absolute(out)?,
+        };
+        for (name, secret) in &self.settings.secrets {
+            let file = crate::paths::resolve(Path::new(&secret.file)).map_err(io)?;
+            if file.starts_with(&context) {
+                return Err(Error::new(format!(
+                    "[deployment.secrets.{name}]: file `{}` lies in the build context {}, which every image build copies: keep the file outside it",
+                    secret.file,
+                    display(&context)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Mount the secrets segment `segment` names in `service`, and note in
+    /// `used` that the segment mounts them.
+    fn mount_secrets(&self, segment: &str, service: &mut serde_json::Value, used: &mut Secrets) {
+        let names = self
+            .settings
+            .segment
+            .get(segment)
+            .map_or(&[][..], |s| s.secrets.as_slice());
+        if names.is_empty() {
+            return;
+        }
+        service["secrets"] = json!(names);
+        for name in names {
+            used.entry(name.clone())
+                .or_default()
+                .insert(segment.to_string());
+        }
+    }
+
+    /// The top-level `secrets` of a `compose.yaml` whose services mount
+    /// those in `used`: each from its file, with `$`, which Compose reads
+    /// as a variable, written `$$`.
+    fn declare_secrets(&self, used: &Secrets) -> serde_json::Value {
+        used.keys()
+            .map(|name| {
+                let file = self.settings.secrets[name].file.replace('$', "$$");
+                (name.clone(), json!({"file": file}))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    }
+
+    /// What a bundle's README says about the secrets in `used`.
+    fn secrets_readme(&self, used: &Secrets) -> String {
+        if used.is_empty() {
+            return String::new();
+        }
+        let mut text = String::from("\n## Secrets\n\n");
+        for (name, segments) in used {
+            let segments: Vec<String> = segments.iter().map(|s| format!("`{s}`")).collect();
+            text.push_str(&format!(
+                "- `{name}`, from `{}` on the Docker host, at `/run/secrets/{name}` in segment {}.\n",
+                self.settings.secrets[name].file,
+                segments.join(", ")
+            ));
+        }
+        text.push_str("\nThe bundle names each file and holds none of them. Each file must exist on the Docker host before `docker compose up`. Compose mounts it with its owner and mode on the host, and ignores `uid` and `mode` outside Swarm, so the user a container runs as must be able to read it. The default image runs as uid 65532: let that user read a file only you can read with `setfacl -m u:65532:r <file>`.\n");
+        text
+    }
+
     /// The ports segment `segment` publishes.
     fn ports(&self, segment: &str) -> &[String] {
         self.settings
@@ -431,6 +560,10 @@ impl Bundle {
             .map_or(&[], |s| s.ports.as_slice())
     }
 }
+
+/// The secrets a bundle's services mount: by name, the segments that mount
+/// each.
+type Secrets = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
 
 /// The bundle of a spec's one placement: one hub, and each segment.
 fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error> {
@@ -459,6 +592,7 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
         .find(|(_, nodes)| hosts(nodes, stdin.as_ref()))
         .map(|(segment, _)| segment);
     let mut reads_stdin = None;
+    let mut secrets = Secrets::new();
     for (segment, nodes) in placement.segments() {
         check_segment_name(segment)?;
         let package = emit::package_name(&bundle.graph, segment);
@@ -472,13 +606,18 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
             keep_stdin_open(&mut service);
             reads_stdin = Some(segment);
         }
+        bundle.mount_secrets(segment, &mut service, &mut secrets);
         services.insert(segment.into(), service);
     }
+    let mut compose = json!({"services":services});
+    if !secrets.is_empty() {
+        compose["secrets"] = bundle.declare_secrets(&secrets);
+    }
+    let secrets_readme = bundle.secrets_readme(&secrets);
     let mut files = bundle.files;
     files.insert(
         "compose.yaml".into(),
-        serde_json::to_string_pretty(&json!({"services":services}))
-            .map_err(|e| Error::new(e.to_string()))?,
+        serde_json::to_string_pretty(&compose).map_err(|e| Error::new(e.to_string()))?,
     );
     let mut readme = String::from(
         "# Docker Compose deployment\n\nRun `docker compose up --build` from this directory. The hub starts first; every segment registers its compiled contract and waits for all handlers to be ready.\n\nConfigure images, runtime settings, and published ports in the web composer Deploy tab. Review the generated files, then download a new bundle after changes. Runtime images must provide the libraries needed by their executables.\n\nEach segment takes its roster from the hub when it starts: the loaded instances of every segment, at least `min_replicas` of each (one by default). An instance that starts later joins: once it is ready, the segments already running route to it, so `docker compose up --scale <segment>=N` adds instances. Scaling works only for a segment that publishes no host port: two containers cannot bind one port. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.\n",
@@ -486,6 +625,7 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
     if let Some(source) = reads_stdin {
         readme.push_str(&stdin_readme(source));
     }
+    readme.push_str(&secrets_readme);
     files.insert("README.md".into(), readme);
     Ok(files)
 }

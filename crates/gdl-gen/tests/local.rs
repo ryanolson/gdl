@@ -931,3 +931,44 @@ fn a_local_bundle_builds_a_bound_policy_into_its_chooser() {
         .to_string();
     assert!(refused.contains("policy-router"), "{refused}");
 }
+
+/// A local bundle mounts its secrets as any bundle does, and refuses a
+/// secret whose file lies in its build context, which is wider than the
+/// bundle: every image build would copy the file into an image.
+#[test]
+fn a_local_bundle_refuses_a_secret_in_its_context() {
+    let dir = root().join("examples/http");
+    let text = std::fs::read_to_string(dir.join("gdl.toml")).expect("the spec");
+    let graph = std::fs::read_to_string(dir.join("http.gdl")).expect("the graph");
+    let outside = tempfile::Builder::new()
+        .prefix("gdl-secrets-")
+        .tempdir()
+        .expect("a directory");
+    let bundle = tempfile::Builder::new()
+        .prefix("gdl-local-secrets-")
+        .tempdir_in(root().join("target"))
+        .expect("a directory in the context");
+    let with = |file: &Path| {
+        let file = serde_json::to_string(file.to_str().expect("UTF-8")).expect("a string");
+        let secrets = format!(
+            "[deployment.secrets.key]\nfile = {file}\n[deployment.segment.main]\nsecrets = [\"key\"]\n"
+        );
+        gdl_gen::Spec::from_text(&format!("{text}{secrets}"), &graph, &dir).expect("a spec")
+    };
+    let out = bundle.path().join("bundle");
+    let files = local(&with(&outside.path().join("key")), &out).expect("a bundle");
+    let compose: serde_json::Value =
+        serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
+    assert_eq!(
+        compose["services"]["main"]["secrets"],
+        serde_json::json!(["key"])
+    );
+    assert!(compose["x-gdl-local-sources"].is_string(), "{compose}");
+    for inside in [root().join("examples/key"), root().join("target/x/../key")] {
+        let error = local(&with(&inside), &out).expect_err("a secret in the context");
+        assert!(
+            error.to_string().contains("lies in the build context"),
+            "{inside:?}: {error}"
+        );
+    }
+}

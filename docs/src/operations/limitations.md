@@ -260,6 +260,11 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** write the bundle into a directory whose path has none of these. A bare `%` that does not start `%{` breaks only Compose's working directory: to run a bundle that is already in such a directory, run Compose from another directory with `docker compose -f <dir>/compose.yaml up --build`.
 - **Lifts:** for the `%`, a Compose release that loads such a directory. `the_percent_rule_matches_docker_compose` in `crates/gdl-gen/tests/compose.rs` (run with `--ignored`) then fails.
 
+### A Compose secret is a file on the host, readable by the container's user
+- **What:** a segment's secret ([Secrets](../guides/compose-deploy.md#secrets)) is a file on the Docker host, mounted with its host owner and mode. A file that only its owner can read is unreadable in a container that runs as another user, such as the default image's uid 65532, and the node fails when it reads it. The file's path is checked against the build context on the machine that writes the bundle, with symlinks resolved there. A bundle copied to another host is not checked again. Secrets from an environment variable or an external store are not generated.
+- **Why:** outside Swarm, Docker Compose mounts a file secret as a bind mount, and ignores `uid`, `gid`, and `mode`.
+- **Workaround:** let the container's user read the file, for example `setfacl -m u:65532:r <file>`. Keep the file outside the bundle's directory on every host that runs it.
+
 ### A spec of several layouts is composed only by cell
 - **What:** `cargo gdl generate` writes every layout's segments, `check` checks every layout, and `compose --fleet` deploys them by cell. `compose` without a fleet refuses a spec with more than one layout. `export` and `diagram` refuse it too. The composer's page places a graph in one layout only, and its server refuses a draft with a key it does not read (``unknown field `layout` ``).
 - **Why:** a hub admits one placement hash, so a bundle without cells deploys one layout. An archive's `build-all.sh` and images, and a diagram, each name one layout's segments. The composer edits one placement.

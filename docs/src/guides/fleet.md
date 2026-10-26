@@ -104,6 +104,7 @@ The bundle has the same services, hubs, and variables as above. Each image build
 - **One hub per cell.** A cell's record has one writer. Each hub's service names its container (`<graph>-<cell>`), so Compose refuses to scale it, and a host runs one copy of a bundle at a time. Compose's default recreate stops the old hub before it starts the new one.
 - **Waits are on liveness.** A segment waits only for its own cell's hub to be healthy, by the hub's own liveness check (`--healthcheck`). Nothing waits for cell health: a parent's cell health answers 503 until its children are ready, so a wait on it would deadlock a fleet that starts together.
 - **Ports.** A segment that publishes a fixed, nonzero host port (`HOST:CONTAINER`) may run in one cell only. One whose host port Docker chooses (`CONTAINER`, `0:CONTAINER`, or `IP::CONTAINER`) runs in any number. `[deployment.segment.<name>] config` cannot set `[cell]`.
+- **Secrets.** Each cell's service of a segment mounts the segment's secrets, from the one file the spec names ([Secrets](compose-deploy.md#secrets)).
 
 ## Add a cell
 

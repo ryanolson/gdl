@@ -1122,3 +1122,352 @@ fn the_cli_composes_a_fleet() {
         assert!(compose["services"][cell].is_object(), "{compose}");
     }
 }
+
+/// What a secret's file holds in these tests: no generated file, and no
+/// output of the generator, may hold it.
+const SENTINEL: &str = "gdl-secret-sentinel-5c0d";
+
+/// `path` as a TOML string.
+fn quoted(path: &Path) -> String {
+    serde_json::to_string(path.to_str().expect("a UTF-8 path")).expect("a string")
+}
+
+/// Secrets `fingerprint`, from `fingerprint`, and `other`, from `other`,
+/// both mounted in segment `segment`.
+fn secrets(segment: &str, fingerprint: &Path, other: &Path) -> String {
+    format!(
+        "[deployment.secrets.fingerprint]\nfile = {}\n[deployment.secrets.other]\nfile = {}\n\
+         [deployment.segment.{segment}]\nsecrets = [\"fingerprint\", \"other\"]\n",
+        quoted(fingerprint),
+        quoted(other)
+    )
+}
+
+/// Every generated file that holds `text`.
+fn holding(files: &gdl_gen::Files, text: &str) -> Vec<String> {
+    files
+        .iter()
+        .filter(|(_, body)| body.contains(text))
+        .map(|(path, _)| path.display().to_string())
+        .collect()
+}
+
+/// A segment mounts each secret it names at `/run/secrets/<name>`, from
+/// the file on the Docker host that the spec names. The generator never
+/// opens the file: one that does not exist is written all the same, and
+/// no generated file holds what one does hold. Compose reads `$` in a path
+/// as a variable, so the path writes it `$$`.
+#[test]
+fn a_segment_mounts_the_secrets_it_names() {
+    let keys = tempfile::Builder::new()
+        .prefix("gdl-secrets-")
+        .tempdir()
+        .expect("a directory");
+    let fingerprint = keys.path().join("fingerprint");
+    std::fs::write(&fingerprint, SENTINEL).expect("the secret");
+    let other = keys.path().join("absent$HOME");
+    // The guide's recipe: the node reads the file where the secret is
+    // mounted.
+    let setting = "[deployment.segment.front.config.node.Fingerprint]\nsecret_file = \"/run/secrets/fingerprint\"\n";
+    let spec = placed(&format!(
+        "{SEGMENTS}{}{setting}",
+        secrets("front", &fingerprint, &other)
+    ));
+    let out = tempfile::Builder::new()
+        .prefix("gdl-secrets-out-")
+        .tempdir()
+        .expect("a directory");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let files = gdl_gen::compose_files(
+        &spec,
+        None,
+        &out.path().join("bundle"),
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
+    let compose: serde_json::Value =
+        serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
+    let other = other.to_str().expect("UTF-8").replace('$', "$$");
+    assert_eq!(
+        compose["secrets"],
+        serde_json::json!({
+            "fingerprint": {"file": fingerprint},
+            "other": {"file": other},
+        })
+    );
+    assert_eq!(
+        compose["services"]["front"]["secrets"],
+        serde_json::json!(["fingerprint", "other"])
+    );
+    assert!(
+        compose["services"]["engine"].get("secrets").is_none(),
+        "{compose}"
+    );
+    let config: toml::Table =
+        toml::from_str(&files[Path::new("front/config.toml")]).expect("the settings");
+    assert_eq!(
+        config["node"]["Fingerprint"]["secret_file"].as_str(),
+        Some("/run/secrets/fingerprint")
+    );
+    assert_eq!(holding(&files, SENTINEL), Vec::<String>::new());
+    let readme = &files[Path::new("README.md")];
+    assert!(readme.contains("/run/secrets/fingerprint"), "{readme}");
+}
+
+/// In a fleet's bundle, each cell's service of a segment mounts the
+/// segment's secrets, and the bundle declares them beside its volume.
+#[test]
+fn each_cells_segment_mounts_its_secrets() {
+    let keys = tempfile::Builder::new()
+        .prefix("gdl-secrets-")
+        .tempdir()
+        .expect("a directory");
+    let spec = placed(&format!(
+        "{SPLIT}{}",
+        secrets(
+            "engine",
+            &keys.path().join("fingerprint"),
+            &keys.path().join("other")
+        )
+    ));
+    let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
+    let (_, compose) = fleet_bundle(&spec, &fleet);
+    for service in ["model-x-01_engine", "model-x-02_engine"] {
+        assert_eq!(
+            compose["services"][service]["secrets"],
+            serde_json::json!(["fingerprint", "other"]),
+            "{service}"
+        );
+    }
+    for service in ["global-us", "global-us_front", "model-x-01"] {
+        assert!(
+            compose["services"][service].get("secrets").is_none(),
+            "{service}"
+        );
+    }
+    assert_eq!(
+        compose["secrets"]["fingerprint"]["file"],
+        keys.path().join("fingerprint").to_str().expect("UTF-8")
+    );
+    assert!(compose["volumes"]["cells"].is_object(), "{compose}");
+}
+
+/// A secret is refused, before anything is written, when Compose cannot
+/// mount it as one file at `/run/secrets/<name>`, when its segment names
+/// one the spec does not declare, or when its file is relative or lies
+/// in the bundle: the bundle is the build context of its images, so every
+/// build would copy the file into an image. Each case but the names
+/// checks the whole spec, as the other bundle tests do, so the test takes
+/// as long as several of them.
+#[test]
+fn a_secret_that_cannot_be_mounted_safely_is_refused() {
+    let keys = tempfile::Builder::new()
+        .prefix("gdl-secrets-")
+        .tempdir()
+        .expect("a directory");
+    let out = tempfile::Builder::new()
+        .prefix("gdl-secrets-out-")
+        .tempdir()
+        .expect("a directory");
+    let bundle = out.path().join("bundle");
+    let file = quoted(&keys.path().join("key"));
+    let cases = [
+        (
+            format!("[deployment.secrets.\"..\"]\nfile = {file}\n"),
+            "[deployment.secrets...]",
+        ),
+        (
+            format!("[deployment.secrets.\"a/b\"]\nfile = {file}\n"),
+            "[deployment.secrets.a/b]",
+        ),
+        (
+            "[deployment.secrets.key]\nfile = \"keys/key\"\n".to_string(),
+            "[deployment.secrets.key]: file `keys/key` is not an absolute path",
+        ),
+        (
+            format!(
+                "[deployment.secrets.key]\nfile = {file}\n[deployment.segment.front]\nsecrets = [\"missing\"]\n"
+            ),
+            "[deployment.segment.front]: secret `missing` is not declared",
+        ),
+        (
+            format!(
+                "[deployment.secrets.key]\nfile = {}\n[deployment.segment.front]\nsecrets = [\"key\"]\n",
+                quoted(&bundle.join("secrets/key"))
+            ),
+            "[deployment.secrets.key]: file",
+        ),
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (secrets, expected) in cases {
+        let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
+        let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
+        let spec = gdl_gen::Spec::from_text(
+            &format!("{}{secrets}", portable_text(&text)),
+            &graph,
+            &root.join("examples/api"),
+        );
+        let error = match spec {
+            Err(error) => error,
+            Ok(spec) => gdl_gen::compose(
+                &spec,
+                None,
+                &bundle,
+                &root.join("target"),
+                gdl_gen::Sources::Fetched,
+            )
+            .expect_err(&format!("refused: {secrets}")),
+        };
+        assert!(error.to_string().contains(expected), "{secrets}: {error}");
+        assert!(!bundle.exists(), "refusal must precede writing");
+    }
+}
+
+/// `cargo gdl compose` neither prints a secret nor writes it: it never
+/// opens the file.
+#[test]
+fn the_cli_never_prints_or_writes_a_secret() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-compose-cli-")
+        .tempdir()
+        .expect("a directory");
+    let fingerprint = temp.path().join("fingerprint");
+    std::fs::write(&fingerprint, SENTINEL).expect("the secret");
+    let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
+    let text = format!(
+        "{}{}",
+        portable_text(&text),
+        secrets("front", &fingerprint, &temp.path().join("other"))
+    );
+    std::fs::write(temp.path().join("gdl.toml"), text).expect("the spec");
+    std::fs::copy(
+        root.join("examples/api/api.gdl"),
+        temp.path().join("api.gdl"),
+    )
+    .expect("graph");
+    let out = temp.path().join("bundle");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-gdl"))
+        .args(["gdl", "compose", "--spec"])
+        .arg(temp.path().join("gdl.toml"))
+        .arg("--out")
+        .arg(&out)
+        .arg("--target-dir")
+        .arg(root.join("target"))
+        .output()
+        .expect("cargo gdl");
+    assert!(output.status.success(), "{output:?}");
+    for stream in [&output.stdout, &output.stderr] {
+        assert!(!String::from_utf8_lossy(stream).contains(SENTINEL));
+    }
+    let mut pending = vec![out.clone()];
+    let mut read = 0;
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(dir).expect("the bundle") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("a file");
+                assert!(
+                    !String::from_utf8_lossy(&bytes).contains(SENTINEL),
+                    "{}",
+                    path.display()
+                );
+                read += 1;
+            }
+        }
+    }
+    assert!(read > 0);
+    let compose = std::fs::read_to_string(out.join("compose.yaml")).expect("compose.yaml");
+    assert!(compose.contains("\"secrets\""), "{compose}");
+}
+
+/// With Docker: a segment's container reads its secret at
+/// `/run/secrets/<name>`, from a path that holds `$`. Compose mounts the
+/// file as it is on the host, with its owner and mode, and ignores `uid`
+/// and `mode` outside Swarm: so a file only its owner can read is
+/// unreadable to the default image's user, 65532, until an ACL lets that
+/// user read it. The override swaps only the image, user, and command:
+/// the secrets are the bundle's as generated.
+#[cfg(unix)]
+#[test]
+#[ignore = "needs docker; run with --ignored"]
+fn a_container_reads_its_secret() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    struct Project(String, std::path::PathBuf);
+    impl Drop for Project {
+        fn drop(&mut self) {
+            let _ = Command::new("timeout")
+                .args(["30", "docker", "compose", "--project-name", &self.0])
+                .args(["down", "--remove-orphans"])
+                .current_dir(&self.1)
+                .output();
+        }
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let keys = tempfile::Builder::new()
+        .prefix("gdl-secrets-")
+        .tempdir()
+        .expect("a directory");
+    let fingerprint = keys.path().join("finger$print");
+    std::fs::write(&fingerprint, SENTINEL).expect("the secret");
+    std::fs::set_permissions(&fingerprint, std::fs::Permissions::from_mode(0o600))
+        .expect("owner only");
+    let spec = placed(&format!(
+        "{SEGMENTS}{}",
+        secrets("front", &fingerprint, &keys.path().join("other"))
+    ));
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-secrets-out-")
+        .tempdir()
+        .expect("a directory");
+    let out = temp.path().join("bundle");
+    gdl_gen::compose(
+        &spec,
+        None,
+        &out,
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
+    // `other` is not read here; Compose wants each mounted file to exist.
+    std::fs::write(keys.path().join("other"), "").expect("the other secret");
+    std::fs::write(
+        out.join("compose.override.yaml"),
+        "services:\n  front:\n    build: !reset null\n    depends_on: !reset {}\n    image: busybox:1.36\n    user: \"65532\"\n    entrypoint: [\"sh\", \"-c\", \"test \\\"$$(cat /run/secrets/fingerprint)\\\" = \\\"$$EXPECTED\\\"\"]\n",
+    )
+    .expect("the override");
+    let project = Project(format!("gdl-secrets-{}", std::process::id()), out.clone());
+    let run = || {
+        Command::new("timeout")
+            .args(["60", "docker", "compose", "--project-name", &project.0])
+            .args(["run", "--rm", "--no-deps", "-e"])
+            .arg(format!("EXPECTED={SENTINEL}"))
+            .arg("front")
+            .current_dir(&out)
+            .output()
+            .expect("docker compose run")
+    };
+    let denied = run();
+    assert!(
+        !denied.status.success(),
+        "a file only its owner reads is unreadable to uid 65532"
+    );
+    let acl = Command::new("setfacl")
+        .args(["-m", "u:65532:r"])
+        .arg(&fingerprint)
+        .output()
+        .expect("setfacl");
+    assert!(acl.status.success(), "{acl:?}");
+    let read = run();
+    assert!(
+        read.status.success(),
+        "the container reads its secret:\n{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+}
