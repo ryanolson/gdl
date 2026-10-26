@@ -379,6 +379,69 @@ fn a_spec_binds_a_cell_policy_to_its_crate() {
     );
 }
 
+/// A `[cell_policy.<name>]` table names its crate as `[nodes] crates`
+/// can: by a directory, an exact version, or a Git revision with an
+/// optional library name. A version names the library for the package.
+#[test]
+fn a_cell_policy_crate_comes_from_a_path_a_version_or_a_git_revision() {
+    let temp = contract_dir("policy-sources");
+    let dir = temp.path();
+    let head = "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"p@1.0.0\"]\n[gdl]\nversion = \"0.1\"\n";
+    let policy = |source: &str| {
+        let text = format!(
+            "{head}[cell_policy.by_model]\ncrate = \"policy-router\"\n{source}type = \"policy_router::ByModel\"\n"
+        );
+        Spec::parse(&text, &dir.join("gdl.toml"), dir)
+            .map(|spec| spec.cell_policies["by_model"].clone())
+    };
+    let versioned = policy("version = \"0.3.1\"\n").expect("a version");
+    assert_eq!(versioned.source, CrateSource::Version("0.3.1".into()));
+    assert_eq!(versioned.lib, "policy_router");
+    let fetched =
+        policy("git = \"https://example.com/router\"\nrev = \"abc123\"\nlib = \"router\"\n")
+            .expect("a Git revision");
+    assert_eq!(
+        fetched.source,
+        CrateSource::Git {
+            url: "https://example.com/router".into(),
+            rev: "abc123".into()
+        }
+    );
+    assert_eq!(fetched.lib, "router");
+    let unnamed =
+        policy("git = \"https://example.com/router\"\nrev = \"abc123\"\n").expect("a Git revision");
+    assert_eq!(unnamed.lib, "policy_router");
+    for source in [
+        "",
+        "path = \"router\"\nversion = \"0.3.1\"\n",
+        "version = \"0.3.1\"\ngit = \"https://example.com/router\"\nrev = \"abc123\"\n",
+        "git = \"https://example.com/router\"\n",
+        "rev = \"abc123\"\n",
+        "path = \"router\"\nlib = \"router\"\n",
+        "version = \"0.3.1\"\nlib = \"router\"\n",
+        "git = \"\"\nrev = \"abc123\"\n",
+        "version = \"\"\n",
+    ] {
+        let Err(error) = policy(source) else {
+            panic!("taken: {source:?}");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("[cell_policy.by_model]"),
+            "{source:?}: {error}"
+        );
+    }
+}
+
+/// A table that names its crate by a directory is written back as it was
+/// read.
+#[test]
+fn a_cell_policy_table_by_path_is_written_back_as_read() {
+    let text = "[graph]\npath = \"chat.gdl\"\n\n[messages]\ncrates = [\"p@1.0.0\"]\n\n[gdl]\nversion = \"0.1\"\n\n[cell_policy.by_model]\ncrate = \"policy-router\"\npath = \"router\"\ntype = \"policy_router::ByModel\"\n";
+    let raw: Raw = toml::from_str(text).expect("a spec");
+    assert_eq!(toml::to_string(&raw).expect("written"), text);
+}
+
 #[test]
 fn gdl_needs_one_source() {
     let temp = contract_dir("gdl");

@@ -184,7 +184,7 @@ type = "router::ByModel"
 - Each segment that chooses cells of a class named `by_model` in `[cells.<class>] policy` depends on the crate. No other segment does.
 - That segment builds the policy from the `[cell_policy.by_model]` table of its settings file, or `GDL_CELL_POLICY__BY_MODEL__<KEY>` variables. A table for a policy that the segment does not register stops it at start.
 - Under a hub, the instance registers first, then waits for the policy's `ready`, with its nodes' and selectors', before it announces itself as loaded.
-- The spec names the crate by its directory. `cargo gdl compose` needs `--local` for it.
+- The spec can name the crate by `version`, or by `git` with `rev` (and `lib` when the library has another name), in place of `path`. `cargo gdl compose` needs `--local` only for a crate named by `path`, and `cargo gdl export` writes an archive that builds anywhere only when no crate is named by `path`.
 
 ## 5. Or register it in code
 

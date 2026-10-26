@@ -21,7 +21,10 @@ A spec names the graph with `[contract]` or with `[graph]`, never both. `[messag
 | `[bind.<Node>] path` | the crate's directory | required |
 | `[bind.<Node>] type` | the implementing type's path, which starts in the crate's library | required |
 | `[cell_policy.<name>] crate` | the package of a cell policy that a `[cells.<class>] policy` names | required |
-| `[cell_policy.<name>] path` | the crate's directory | required |
+| `[cell_policy.<name>] path` | the crate's directory | one source is required |
+| `[cell_policy.<name>] version` | an exact version on crates.io, as `name@version` in `[nodes] crates` | one source is required |
+| `[cell_policy.<name>] git`, `rev` | a repository and a revision. Both are required together. | one source is required |
+| `[cell_policy.<name>] lib` | the crate's library name, with `git` only, when it differs from the package's | optional |
 | `[cell_policy.<name>] type` | the type that implements `gdl::CellPolicy` and `gdl::Build`, at the root of the crate's library | required |
 | `[gdl] path` | a `gdl-runtime` directory | |
 | `[gdl] version` | a registry version | |
@@ -29,7 +32,7 @@ A spec names the graph with `[contract]` or with `[graph]`, never both. `[messag
 
 `[gdl]` takes exactly one of `path`, `version`, and `git` with `rev`. A listed package appears once, and two listed message libraries cannot share a name. A `name@version` entry is fetched, and its library must be named for its package.
 
-A `[cell_policy.<name>]` table binds a policy name to its crate and type. The name follows the rule for a registered cell policy below. It must not be the name of a node or an entry adapter, or a `[config]` key, since the segment builds the policy under it. Some layout's `[cells.<class>] policy` must name it. `check` reads the crate and refuses a type that the crate does not offer as a cell policy. In a spec with a `[graph]` file, it also refuses a policy whose `Head` does not fit the request that crosses into a class that names it. Each segment that chooses cells of a class whose policy the table binds depends on the crate, builds the policy from its `[cell_policy.<name>]` settings table, and registers it. No other segment depends on the crate. [Write a cell policy](../guides/write-a-cell-policy.md) shows one.
+A `[cell_policy.<name>]` table binds a policy name to its crate and type. It names the crate by exactly one of `path`, `version`, and `git` with `rev`, as `[nodes] crates` can. A crate named by `version` must name its library for its package. The name follows the rule for a registered cell policy below. It must not be the name of a node or an entry adapter, or a `[config]` key, since the segment builds the policy under it. Some layout's `[cells.<class>] policy` must name it. `check` reads the crate and refuses a type that the crate does not offer as a cell policy. In a spec with a `[graph]` file, it also refuses a policy whose `Head` does not fit the request that crosses into a class that names it. Each segment that chooses cells of a class whose policy the table binds depends on the crate, builds the policy from its `[cell_policy.<name>]` settings table, and registers it. No other segment depends on the crate. [Write a cell policy](../guides/write-a-cell-policy.md) shows one.
 
 ### Placement
 

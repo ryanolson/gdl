@@ -42,10 +42,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** serde's list is flat and holds only the names a type reads. It does not say which field has a name, nor which names or codecs the type writes with, and gdl has no value of the edge type to write.
 - **Workaround:** in the policy crate's tests, encode a value of the edge type and decode the projection from those bytes. `crates/gdl/tests/projection.rs` shows the first two cases.
 
-### A bound cell policy's crate is named only by its directory
-- **What:** a spec's `[cell_policy.<name>]` table names its crate by `path`, not by a version or a Git revision. `cargo gdl compose` refuses the spec without `--local`, and `cargo gdl export` writes an archive that builds only on the machine that wrote it. See [Write a cell policy](../guides/write-a-cell-policy.md).
-- **Lifts:** the forms that `[nodes] crates` takes, in the table.
-
 ### A contract spec's bound cell policy is checked against its crossing only at start
 - **What:** `cargo gdl check` compares a bound cell policy's `Head` with the request that crosses into its class only for a spec with a `[graph]` file. For a spec with a `[contract]` crate, a `Head` that does not fit passes check, and the chooser refuses to start. See [Write a cell policy](../guides/write-a-cell-policy.md#4-bind-it-in-the-spec).
 - **Why:** check knows a contract's messages only by how the contract spells them, not by the package that defines them, so it cannot tell two messages of the same name apart.

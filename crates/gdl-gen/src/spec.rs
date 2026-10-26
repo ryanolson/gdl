@@ -40,7 +40,9 @@
 //! [cell_policy.by_model]         # optional: a cell policy that a
 //! crate = "router"               # `[cells.<class>] policy` names, and the
 //! path = "router"                # segments that choose cells of that
-//! type = "router::ByModel"       # class build and register
+//! type = "router::ByModel"       # class build and register; or, for
+//!                                # `path`, `version = "0.3.1"`, or `git`
+//!                                # and `rev` (with `lib` if it differs)
 //! ```
 
 use std::collections::BTreeMap;
@@ -296,7 +298,7 @@ struct Raw {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     bind: BTreeMap<String, RawBind>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    cell_policy: BTreeMap<String, RawBind>,
+    cell_policy: BTreeMap<String, RawPolicy>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -419,6 +421,65 @@ struct RawBind {
     path: PathBuf,
     #[serde(rename = "type")]
     ty: String,
+}
+
+/// A `[cell_policy.<name>]` table: its crate, by one of the sources a
+/// `[nodes] crates` entry takes, and its type.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPolicy {
+    #[serde(rename = "crate")]
+    package: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rev: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lib: Option<String>,
+    #[serde(rename = "type")]
+    ty: String,
+}
+
+impl RawPolicy {
+    /// The policy's binding, its directory relative to `dir`, or why the
+    /// table names no one source. A directory's library is read from its
+    /// manifest when the spec is loaded; a version names the library for
+    /// the package, as `name@version` does.
+    fn bind(self, name: &str, dir: &Path) -> Result<Bind, Error> {
+        let Self {
+            package,
+            path,
+            version,
+            git,
+            rev,
+            lib,
+            ty,
+        } = self;
+        let source = match (path, version, git, rev, &lib) {
+            (Some(path), None, None, None, None) => CrateSource::Path(dir.join(path)),
+            (None, Some(version), None, None, None) if !version.is_empty() => {
+                CrateSource::Version(version)
+            }
+            (None, None, Some(url), Some(rev), _) if !url.is_empty() && !rev.is_empty() => {
+                CrateSource::Git { url, rev }
+            }
+            _ => {
+                return Err(Error::new(format!(
+                    "[cell_policy.{name}] needs exactly one of `path`, `version`, and `git` with `rev`; `lib` goes only with `git`"
+                )));
+            }
+        };
+        Ok(Bind {
+            lib: lib.unwrap_or_else(|| package.replace('-', "_")),
+            package,
+            source,
+            ty,
+        })
+    }
 }
 
 impl Spec {
@@ -592,7 +653,11 @@ impl Spec {
                 .collect()
         };
         let bind = bound(raw.bind);
-        let cell_policies = bound(raw.cell_policy);
+        let cell_policies = raw
+            .cell_policy
+            .into_iter()
+            .map(|(name, table)| Ok((name.clone(), table.bind(&name, dir)?)))
+            .collect::<Result<_, Error>>()?;
         Ok(Self {
             deployment: raw.deployment,
             pipeline_names: raw.pipeline_names,

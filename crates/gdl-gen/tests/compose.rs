@@ -848,3 +848,144 @@ fn every_step_that_writes_a_manifest_refuses_a_gdl_path_to_the_definitions() {
     gdl_gen::resolve(&spec, &target).expect("resolve");
     gdl_gen::diagram(&spec, &target, gdl_gen::Format::Dot).expect("diagram");
 }
+
+/// A Git repository in `dir`, committed: a cell policy crate `regpolicy`
+/// whose `ByWords` reads `regproto::Words`, beside a stand-in `gdl` that
+/// declares the trait, so that it resolves from the offline registry. The
+/// repository's `file://` URL and its commit.
+fn policy_repository(dir: &Path) -> (String, String) {
+    let repo = dir.join("policy-repo");
+    let write = |path: &str, text: &str| {
+        let path = repo.join(path);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("dir");
+        std::fs::write(path, text).expect("fixture");
+    };
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"gdl\", \"regpolicy\"]\nresolver = \"3\"\n",
+    );
+    write(
+        "gdl/Cargo.toml",
+        "[package]\nname = \"gdl\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(
+        "gdl/src/lib.rs",
+        "pub trait CellPolicy {\n    type Head;\n}\n",
+    );
+    write(
+        "regpolicy/Cargo.toml",
+        "[package]\nname = \"regpolicy\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\ngdl = { path = \"../gdl\" }\nregproto = \"0.1.0\"\n",
+    );
+    write(
+        "regpolicy/src/lib.rs",
+        "pub struct ByWords;\n\nimpl gdl::CellPolicy for ByWords {\n    type Head = regproto::Words;\n}\n",
+    );
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("text")
+            .trim()
+            .to_string()
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "fixture"]);
+    let rev = git(&["rev-parse", "HEAD"]);
+    let url = format!("file://{}", repo.canonicalize().expect("repo").display());
+    (url, rev)
+}
+
+/// A spec whose cell policy crate is a Git package is fetched, so Compose
+/// builds it without `--local`: only the chooser depends on the package,
+/// at its commit, and registers the policy.
+#[test]
+fn compose_fetches_a_cell_policy_crate_from_git() {
+    let temp = offline_registry("policy-git");
+    let dir = temp.path();
+    // Offline, cargo checks out no Git repository, not even a `file://`
+    // one; the registry stays replaced, so nothing reaches the network.
+    let config = dir.join(".cargo/config.toml");
+    let text = std::fs::read_to_string(&config).expect("config");
+    std::fs::write(&config, text.replace("[net]\noffline = true\n", "")).expect("config");
+    let (url, rev) = policy_repository(dir);
+    std::fs::write(
+        dir.join("graph.gdl"),
+        "name = \"routed\", schema = 1;\nsource A: Words -> stream Token;\nsink   Engine: Words -> stream Token;\ntopology: A => Engine;\n",
+    )
+    .expect("graph");
+    std::fs::write(
+        dir.join("gdl.toml"),
+        format!(
+            "[graph]\npath = \"graph.gdl\"\n[messages]\ncrates = [\"regproto@0.1.0\"]\n[nodes]\ncrates = [\"regnodes@0.1.0\"]\n[gdl]\ngit = \"https://example.com/gdl\"\nrev = \"abc123\"\n\
+             [segment.front]\nnodes = [\"A\"]\n[segment.engine]\nnodes = [\"Engine\"]\n\
+             [class.global]\nsegments = [\"front\"]\n[class.model]\nsegments = [\"engine\"]\n[cells.model]\npolicy = \"by_words\"\n\
+             [cell_policy.by_words]\ncrate = \"regpolicy\"\ngit = {url:?}\nrev = {rev:?}\ntype = \"regpolicy::ByWords\"\n"
+        ),
+    )
+    .expect("spec");
+    let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("a policy crate from Git");
+    let fleet = gdl_model::Fleet::from_toml(
+        "[class.global]\nready = { front = 1 }\n[class.model]\nready = { engine = 1 }\n\
+         [cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n\
+         [cell.model-01]\nclass = \"model\"\nregion = \"us-east-1\"\nhome = \"global-us\"\n",
+    )
+    .expect("a fleet");
+    let files = gdl_gen::compose_files(
+        &spec,
+        Some(&fleet),
+        &dir.join("out"),
+        &dir.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle without --local");
+    let chooser = &files[Path::new("front/Cargo.toml")];
+    assert!(
+        chooser.contains(&format!("regpolicy = {{ git = {url:?}, rev = {rev:?} }}")),
+        "{chooser}"
+    );
+    assert!(
+        files[Path::new("front/src/lib.rs")].contains("ByWords"),
+        "{}",
+        files[Path::new("front/src/lib.rs")]
+    );
+    assert!(!files[Path::new("engine/Cargo.toml")].contains("regpolicy"));
+    // The archive builds anywhere, so it carries the images' Dockerfiles.
+    use std::io::Read as _;
+    let bytes =
+        gdl_gen::export(&spec, &dir.join("target"), gdl_gen::Offers::Read).expect("exported");
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+    let mut names = Vec::new();
+    for entry in archive.entries().expect("entries") {
+        let mut entry = entry.expect("entry");
+        let name = entry.path().expect("path").display().to_string();
+        let mut text = String::new();
+        entry.read_to_string(&mut text).expect("text");
+        if name == "routed/front/Cargo.toml" {
+            assert!(
+                text.contains(&format!("regpolicy = {{ git = {url:?}, rev = {rev:?} }}")),
+                "{text}"
+            );
+        }
+        names.push(name);
+    }
+    for name in ["routed/front/Dockerfile", "routed/front/Cargo.toml"] {
+        assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+    }
+}
