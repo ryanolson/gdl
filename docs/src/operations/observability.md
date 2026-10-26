@@ -98,6 +98,12 @@ A segment binary writes the `tracing` events of its nodes, its cell policies, an
 2026-10-26T15:30:27.098937Z  WARN policy_router: no cell serves the model model="mistral"
 ```
 
-The binary's `main` installs the subscriber, not `gdl-runtime`. A program that deploys a segment through the generated library installs its own subscriber, or none. The output goes to stderr because a source segment that serves JSON lines answers on stdout. The lines have no colour codes, which would show as noise in a container's log, even when another crate turns on `tracing-subscriber`'s `ansi` feature. Records of the `log` crate are not shown, unless another crate turns on `tracing-subscriber`'s `tracing-log` feature ([limitations](limitations.md#a-segment-binary-does-not-show-records-of-the-log-crate)).
+The hub binary, `gdl-hub`, writes its own events to stderr by the same rules: `RUST_LOG`, `warn` by default, no colour. Its events include a cell record the directory did not take and a cell directory's watch that failed. `docker compose logs hub` shows them.
+
+```text
+2026-10-26T20:12:25.214550Z  WARN gdl_hub::cell::publish: the directory refused the cell's record as not newer held=(epoch 1793045545212, seq 1) offered=(epoch 1793045545208, seq 2)
+```
+
+Each binary's `main` installs the subscriber, not `gdl-runtime` or the `gdl-hub` library. A program that deploys a segment through the generated library, or serves a hub through `gdl-hub`, installs its own subscriber, or none. The output goes to stderr because a source segment that serves JSON lines answers on stdout. The lines have no colour codes, which would show as noise in a container's log, even when another crate turns on `tracing-subscriber`'s `ansi` feature. Records of the `log` crate are not shown, unless another crate turns on `tracing-subscriber`'s `tracing-log` feature ([limitations](limitations.md#a-segment-binary-does-not-show-records-of-the-log-crate)).
 
 `filter::Targets` parses the same per-target levels without the regular-expression crates that `EnvFilter` needs. It was not chosen: it drops span and field directives, and one bad directive drops the whole filter. The cost of `EnvFilter` is small next to a segment's build. In a binary that only installs the subscriber and logs one event, `EnvFilter` adds 3 crates (`matchers`, `regex-automata`, and `regex-syntax`), 3 s to a cold release build (7.45 s against 4.50 s, `cargo build --release -j 4` on a 20-core aarch64 host), and 0.76 MB to the binary (1.55 MB against 0.79 MB).

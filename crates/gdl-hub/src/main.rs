@@ -3,7 +3,8 @@
 //! on the deployment's ports unless `GDL_HUB__PUBLIC_PORT` and
 //! `GDL_HUB__CONTROL_PORT` name others (0 lets the OS choose), the
 //! variables a segment reads for where its hub is. Once it serves, it
-//! prints the addresses it bound on stderr.
+//! prints the addresses it bound on stderr. Log events go to stderr, at
+//! the level `RUST_LOG` sets (`warn` by default).
 use gdl_model::{DeploymentSpec, HUB_CONTROL_PORT, HUB_PUBLIC_PORT};
 use tokio::signal::unix::{SignalKind, signal};
 use velo_hub::HubConfig;
@@ -21,6 +22,18 @@ fn port(name: &str, default: u16) -> Result<u16, String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // The binary, not the `gdl-hub` library, installs the subscriber: a
+    // program that serves the hub through the library keeps its own.
+    // Colour off, though another crate may turn on the `ansi` feature:
+    // escape codes are noise in a container's log.
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
+        .from_env_lossy();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
     let path = std::env::args_os()
         .nth(1)
         .ok_or("usage: gdl-hub deployment.json")?;

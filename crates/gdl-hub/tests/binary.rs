@@ -1,9 +1,11 @@
 //! The hub binary refuses a cell's settings it cannot run before it binds
-//! a port, and says what to set; and a hub that serves stops on either
-//! signal that stops a container. A hub that starts here takes ports the
+//! a port, and says what to set; a hub that serves stops on either signal
+//! that stops a container; and it writes its log to stderr, at the level
+//! `RUST_LOG` sets. A hub that starts here takes ports the
 //! OS chooses, through `GDL_HUB__PUBLIC_PORT` and `GDL_HUB__CONTROL_PORT`.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, TcpStream};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -85,13 +87,22 @@ fn the_binary_refuses_a_backend_it_cannot_publish_to() {
     }
 }
 
-/// A hub process, killed when the test ends however it ends.
-struct Serving(Child);
+/// A hub process, killed when the test ends however it ends, and each
+/// line of its stderr, in order.
+struct Serving {
+    child: Child,
+    lines: mpsc::Receiver<String>,
+    /// The lines before the one that says it serves, which a task the
+    /// hub starts before it serves can write.
+    before: Vec<String>,
+    /// The port of the control listener.
+    control: u16,
+}
 
 impl Drop for Serving {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -99,26 +110,78 @@ impl Serving {
     /// A hub for `deployment` on ports the OS chooses, once it says that it
     /// serves.
     fn start(deployment: &std::path::Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_gdl-hub"))
+        Self::start_with(deployment, |_| {})
+    }
+
+    /// As [`Serving::start`], with the command changed by `configure`
+    /// first.
+    fn start_with(deployment: &std::path::Path, configure: impl FnOnce(&mut Command)) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_gdl-hub"));
+        command
             .arg(deployment)
             .env("GDL_HUB__PUBLIC_PORT", "0")
             .env("GDL_HUB__CONTROL_PORT", "0")
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the binary runs");
+            .stderr(Stdio::piped());
+        configure(&mut command);
+        let mut child = command.spawn().expect("the binary runs");
         let stderr = child.stderr.take().expect("stderr");
-        let serving = Self(child);
-        let (tx, rx) = mpsc::channel();
+        let (tx, lines) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if line.starts_with("gdl-hub: serving") {
-                    let _ = tx.send(());
+                if tx.send(line).is_err() {
+                    return;
                 }
             }
         });
-        rx.recv_timeout(Duration::from_secs(10))
-            .expect("the hub says that it serves");
-        serving
+        let mut serving = Self {
+            child,
+            lines,
+            before: Vec::new(),
+            control: 0,
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let line = serving
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|_| {
+                    panic!("the hub says that it serves; it wrote {:?}", serving.before)
+                });
+            if line.starts_with("gdl-hub: serving") {
+                serving.control = line
+                    .rsplit(':')
+                    .next()
+                    .and_then(|port| port.parse().ok())
+                    .unwrap_or_else(|| panic!("a control port in {line:?}"));
+                return serving;
+            }
+            serving.before.push(line);
+        }
+    }
+
+    /// Every line the hub has written, up to the first that `last`
+    /// accepts, within `within`.
+    fn lines_until(&mut self, within: Duration, last: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut lines = std::mem::take(&mut self.before);
+        if lines.iter().any(|line| last(line)) {
+            return lines;
+        }
+        let deadline = Instant::now() + within;
+        loop {
+            match self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(line) => {
+                    let done = last(&line);
+                    lines.push(line);
+                    if done {
+                        return lines;
+                    }
+                }
+                Err(_) => panic!("no awaited line within {within:?}; the hub wrote {lines:?}"),
+            }
+        }
     }
 
     /// Send `signal` (`TERM`, `INT`), and the hub's exit status within
@@ -126,13 +189,13 @@ impl Serving {
     fn stop(&mut self, signal: &str, within: Duration) -> ExitStatus {
         let sent = Command::new("kill")
             .arg(format!("-{signal}"))
-            .arg(self.0.id().to_string())
+            .arg(self.child.id().to_string())
             .status()
             .expect("kill");
         assert!(sent.success(), "kill -{signal}");
         let started = Instant::now();
         loop {
-            if let Some(status) = self.0.try_wait().expect("the hub's state") {
+            if let Some(status) = self.child.try_wait().expect("the hub's state") {
                 return status;
             }
             assert!(
@@ -187,5 +250,108 @@ fn the_hub_stops_on_sigint() {
         status.success(),
         "{status:?} (signal {:?})",
         status.signal()
+    );
+}
+
+/// The record that `path` holds: its epoch, or None while there is none.
+fn epoch(path: &std::path::Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    let entry: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    entry["record"]["epoch"].as_u64()
+}
+
+/// Wait up to 10 s for `path` to hold a record that `accept` takes.
+fn wait_for_record(path: &std::path::Path, accept: impl Fn(u64) -> bool) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(epoch) = epoch(path).filter(|&epoch| accept(epoch)) {
+            return epoch;
+        }
+        assert!(Instant::now() < deadline, "no such record at {path:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The error the hub logs when another hub of its cell publishes with a
+/// later epoch.
+const OVERTAKEN: &str = "another hub publishes this cell with a later epoch";
+
+/// The warn event the hub logs, just before [`OVERTAKEN`], when the
+/// directory refuses its record.
+const REFUSED: &str = "the directory refused the cell's record as not newer";
+
+/// The stderr of a hub run with `rust_log` (none: the variable unset),
+/// whose cell another hub has since published with a later epoch, from its
+/// start up to the `error` line that says so. A drain makes the hub write
+/// its record again, the directory refuses the write with a `warn` event,
+/// and the hub logs the `error` event next, in the same task: so once the
+/// `error` line is on stderr, the `warn` line is there too, unless the
+/// filter dropped it.
+fn overtaken(rust_log: Option<&str>) -> Vec<String> {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-log-")
+        .tempdir()
+        .expect("a directory");
+    let deployment = deployment(&dir);
+    let cells = dir.path().join("cells");
+    let cell = |command: &mut Command| {
+        command
+            .env("GDL_CELL__NAME", "model-x-01-us-east-1")
+            .env("GDL_CELL__CLASS", "model_x")
+            .env("GDL_CELL__REGION", "us-east-1")
+            .env("GDL_CELL__HUB", "model-x-01-hub:1337")
+            .env("GDL_CELL__DIRECTORY", "dir")
+            .env("GDL_CELL__DIR", &cells);
+    };
+    let record = cells.join("model_x").join("model-x-01-us-east-1.json");
+    let mut first = Serving::start_with(&deployment, |command| {
+        cell(command);
+        // The runner's own `RUST_LOG` must not choose the level.
+        match rust_log {
+            Some(filter) => command.env("RUST_LOG", filter),
+            None => command.env_remove("RUST_LOG"),
+        };
+    });
+    let stored = wait_for_record(&record, |_| true);
+    let _second = Serving::start_with(&deployment, cell);
+    wait_for_record(&record, |epoch| epoch > stored);
+    // Held open until the lines are read: the drain is answered only
+    // once its record is stored, which this one never is.
+    let mut drain = TcpStream::connect((Ipv4Addr::LOCALHOST, first.control)).expect("connect");
+    drain
+        .write_all(
+            b"POST /v1/ext/gdl-cell/drain HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        )
+        .expect("drain");
+    first.lines_until(Duration::from_secs(10), |line| {
+        line.contains("ERROR") && line.contains(OVERTAKEN)
+    })
+}
+
+/// Without `RUST_LOG`, the binary writes `warn` events to stderr, without
+/// colour codes.
+#[test]
+fn the_hub_logs_warnings_by_default() {
+    let lines = overtaken(None);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(" WARN ") && line.contains(REFUSED)),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains('\x1b')),
+        "{lines:#?}"
+    );
+}
+
+/// `RUST_LOG` sets the level: at `error`, the `warn` event is not written,
+/// and the `error` that follows it is.
+#[test]
+fn rust_log_sets_the_hubs_level() {
+    let lines = overtaken(Some("error"));
+    assert!(
+        !lines.iter().any(|line| line.contains(" WARN ")),
+        "{lines:#?}"
     );
 }

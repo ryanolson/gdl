@@ -182,8 +182,8 @@ These are the limits a user can run into today. Each entry says what happens, wh
 ## Logs
 
 ### A segment binary does not show records of the `log` crate
-- **What:** a node or a dependency that logs through the `log` crate, not `tracing`, writes nothing to a segment binary's stderr, unless a crate in the segment turns on `tracing-subscriber`'s `tracing-log` feature. See [Health and metrics](observability.md#logs).
-- **Why:** nothing in the runtime uses `log`, so the generated crate leaves out `tracing-subscriber`'s bridge from it.
+- **What:** a node or a dependency that logs through the `log` crate, not `tracing`, writes nothing to a segment binary's stderr, unless a crate in the segment turns on `tracing-subscriber`'s `tracing-log` feature. The hub binary drops `log` records the same way. See [Health and metrics](observability.md#logs).
+- **Why:** nothing in the runtime or the hub uses `log`, so the generated crate and `gdl-hub` leave out `tracing-subscriber`'s bridge from it.
 - **Workaround:** log through `tracing`, or deploy the segment from your own program, with a subscriber that takes `log` records.
 - **Lifts:** the bridge (`tracing-subscriber`'s `tracing-log` feature) in the generated crate's dependencies.
 
