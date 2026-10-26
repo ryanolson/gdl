@@ -400,16 +400,19 @@ mod tests {
     }
 
     #[derive(serde::Deserialize)]
+    struct Routed {
+        #[allow(dead_code, reason = "a field to read, never read")]
+        hint: String,
+    }
+
+    #[derive(serde::Deserialize, gdl::Projection)]
+    #[gdl(of = Routed)]
     struct Hinted {
         #[allow(dead_code, reason = "a field to read, never read")]
         hint: String,
     }
 
-    impl gdl::Projection for Hinted {
-        type Of = String;
-    }
-
-    /// Reads a projection of `String`'s fields.
+    /// Reads a projection of `Routed`'s fields.
     struct ByName;
 
     impl gdl::CellPolicy for ByName {
@@ -437,14 +440,14 @@ mod tests {
             crossing.encoding = encoding;
             crossing
         };
-        let string = std::any::TypeId::of::<String>();
+        let routed = std::any::TypeId::of::<Routed>();
         for encoding in [Encoding::Msgpack, Encoding::Json] {
             by_name(encoding)
-                .check_head("a", string, "String")
+                .check_head("a", routed, "Routed")
                 .expect("an edge of the type, in an encoding that names fields");
         }
         let error = by_name(Encoding::MsgpackArray)
-            .check_head("a", string, "String")
+            .check_head("a", routed, "Routed")
             .expect_err("a positional encoding");
         let message = error.to_string();
         assert_eq!(error.kind(), ErrorKind::Placement);
@@ -457,7 +460,7 @@ mod tests {
             .expect_err("another type");
         let message = error.to_string();
         assert!(
-            message.contains("String") && message.contains("u32"),
+            message.contains("Routed") && message.contains("u32"),
             "{message}"
         );
         let own = crossing(Vec::new(), Within::Policy(Policy::RoundRobin));

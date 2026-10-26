@@ -41,13 +41,10 @@ struct Hint {
     first_turn: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Projection)]
+#[gdl(of = Routed)]
 struct Hinted {
     hint: Hint,
-}
-
-impl Projection for Hinted {
-    type Of = Routed;
 }
 
 /// Reads the whole head.

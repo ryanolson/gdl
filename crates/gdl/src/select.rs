@@ -33,6 +33,7 @@ use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
 
 mod affinity;
+mod fields;
 mod least;
 
 pub use affinity::{Affinity, AffinityConfig};
@@ -102,6 +103,11 @@ pub(crate) mod sealed {
         fn by_name() -> bool {
             false
         }
+        /// Refuse a head whose fields cross under names the edge does not
+        /// carry, saying which: checked when its router is registered.
+        fn names() -> std::result::Result<(), String> {
+            Ok(())
+        }
     }
 
     /// Read `bytes` as a `T`, or say why not.
@@ -150,39 +156,83 @@ pub(crate) mod sealed {
         fn by_name() -> bool {
             true
         }
+
+        fn names() -> std::result::Result<(), String> {
+            super::fields::check::<P, P::Of>()
+        }
     }
 }
 
-/// A part of a request's head, read by the names of its fields: a type
+/// A part of a request's head, read by the names of its fields: a struct
 /// that declares some fields of the edge's type [`Of`](Projection::Of),
 /// under the same names and types. A router reads only those, and the
 /// decoder skips the others, so it never builds the rest of a large
 /// request.
 ///
-/// The runtime checks `Of` against the crossing's edge when the segment
-/// starts, and refuses an edge whose encoding is positional
-/// (`msgpack_array`), which has no field names to read by. A field that
-/// `Of` does not have fails each request's read with `Codec`.
+/// Implemented only by `derive(gdl::Projection)`, which names `Of` in
+/// `#[gdl(of = <type>)]` and checks at compile time that `Of` has each
+/// field, under its name and of its exact type. A field that `Of` lacks,
+/// or has as another type, does not build, and the error names it.
+/// The derive refuses `#[serde(deny_unknown_fields)]`, since a projection
+/// skips `Of`'s other fields, and a field's `#[serde(alias)]`. Registering
+/// a router that reads a projection compares the field names that each
+/// type's `Deserialize` reads, so a serde `rename` on one side only is
+/// refused, naming the field. It cannot see the names `Of` writes, and
+/// `docs/src/operations/limitations.md` says what passes it. The runtime checks `Of` against the crossing's edge when the
+/// segment starts, and refuses an edge whose encoding is positional
+/// (`msgpack_array`), which has no field names to read by.
+///
+/// The derive reads each field through `Of`, so `Of`'s fields must be
+/// visible where the projection is defined: `pub` when `Of` is another
+/// crate's.
 ///
 /// ```
 /// #[derive(serde::Deserialize)]
-/// struct Routed { request: String, hint: Hint }
+/// pub struct Routed { pub request: String, pub hint: Hint }
 /// #[derive(serde::Deserialize)]
-/// struct Hint { model: String }
+/// pub struct Hint { pub model: String }
 ///
 /// /// The part of `Routed` a router reads.
-/// #[derive(serde::Deserialize)]
+/// #[derive(serde::Deserialize, gdl::Projection)]
+/// #[gdl(of = Routed)]
 /// struct Hinted { hint: Hint }
 ///
-/// impl gdl::Projection for Hinted {
-///     type Of = Routed;
-/// }
 /// // A policy or selector then reads `type Head = gdl::Projected<Hinted>`.
 /// ```
-pub trait Projection: DeserializeOwned + Send + Sync + 'static {
+pub trait Projection: ProjectionDerived + DeserializeOwned + Send + Sync + 'static {
     /// The type of the edge it reads a part of: the request that crosses.
-    type Of: 'static;
+    type Of: DeserializeOwned + 'static;
+
+    /// Read each field through `Of`: the derive's compile-time check,
+    /// never called.
+    #[doc(hidden)]
+    fn __fields(_: &Self::Of) {}
 }
+
+/// The seal on [`Projection`], which only `derive(gdl::Projection)`
+/// implements.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` implements `Projection` by hand",
+    note = "derive it with `#[derive(gdl::Projection)]` and `#[gdl(of = <type>)]`: the derive checks each field against the edge type"
+)]
+pub trait ProjectionDerived {}
+
+/// Read a projection's field of type `T` from the edge type's field,
+/// which must be a `T` itself: `F` is inferred from the field, so nothing
+/// coerces.
+#[doc(hidden)]
+pub fn field<F: SameType<T>, T>(_: &F) {}
+
+/// `T` itself, and nothing else.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the projection reads this field as `{T}`, but the edge type has it as `{Self}`",
+    note = "a projection's field has the type of the edge type's field of that name"
+)]
+pub trait SameType<T> {}
+
+impl<T> SameType<T> for T {}
 
 /// The head read as the projection `P`: a router's `Head` that reads a
 /// part of the edge's type rather than the whole.
@@ -485,6 +535,8 @@ impl Selectors {
     pub fn add_shared<S: Selector>(&mut self, name: &str, selector: Arc<S>) -> Result<()> {
         gdl_model::check_selector_name(name)
             .map_err(|why| Error::new(ErrorKind::Placement, why))?;
+        <S::Head as sealed::Sealed>::names()
+            .map_err(|why| Error::new(ErrorKind::Placement, format!("selector `{name}` {why}")))?;
         if self.named.contains_key(name) {
             return Err(Error::new(
                 ErrorKind::Placement,

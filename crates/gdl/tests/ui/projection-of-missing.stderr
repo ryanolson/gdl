@@ -1,0 +1,5 @@
+error: a projection names the edge type it reads a part of: `#[gdl(of = <type>)]`
+ --> tests/ui/projection-of-missing.rs:3:8
+  |
+3 | struct Hinted {
+  |        ^^^^^^

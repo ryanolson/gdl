@@ -483,6 +483,9 @@ impl CellPolicies {
     pub fn add_shared<P: CellPolicy>(&mut self, name: &str, policy: Arc<P>) -> Result<()> {
         gdl_model::check_cell_policy_name(name)
             .map_err(|why| Error::new(ErrorKind::Placement, why))?;
+        <P::Head as Sealed>::names().map_err(|why| {
+            Error::new(ErrorKind::Placement, format!("cell policy `{name}` {why}"))
+        })?;
         if OWN.contains(&name) {
             return Err(Error::new(
                 ErrorKind::Placement,
@@ -592,9 +595,9 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::*;
-    use crate::select::{Projected, Projection};
+    use crate::select::Projected;
 
-    #[derive(Serialize)]
+    #[derive(Serialize, Deserialize)]
     struct Routed {
         request: Vec<String>,
         hint: Hint,
@@ -605,13 +608,10 @@ mod tests {
         model: String,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Deserialize, gdl::Projection)]
+    #[gdl(of = Routed)]
     struct Hinted {
         hint: Hint,
-    }
-
-    impl Projection for Hinted {
-        type Of = Routed;
     }
 
     /// The index of the cell named as the hint's model.

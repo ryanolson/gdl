@@ -34,13 +34,10 @@ struct Hint {
 }
 
 /// The part of [`Routed`] the policy reads: only its hint.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Projection)]
+#[gdl(of = Routed)]
 struct Hinted {
     hint: Hint,
-}
-
-impl Projection for Hinted {
-    type Of = Routed;
 }
 
 /// Sends a request to a cell whose name starts with its model, and,
@@ -198,4 +195,65 @@ fn a_policy_is_registered_by_name() {
     for name in ["ByModel", "by__model", "by_model_", ""] {
         assert!(policies.add(name, ByModel).is_err(), "{name:?} was taken");
     }
+}
+
+/// The edge type as it names its hint on the wire: `routing_hint`.
+#[derive(Debug, Deserialize)]
+struct Renamed {
+    #[allow(dead_code, reason = "only its names are read")]
+    request: Internal,
+    #[serde(rename = "routing_hint")]
+    #[allow(dead_code, reason = "only its names are read")]
+    hint: Hint,
+}
+
+/// Reads `hint` by its Rust name, which is not the name it crosses under.
+#[derive(Debug, Deserialize, Projection)]
+#[gdl(of = Renamed)]
+struct Unrenamed {
+    hint: Hint,
+}
+
+struct ByUnrenamed;
+
+impl CellPolicy for ByUnrenamed {
+    type Head = Projected<Unrenamed>;
+
+    fn choose(&self, request: CellRequest<'_, Projected<Unrenamed>>, _: &[Cell]) -> Option<usize> {
+        (!request.head().hint.model.is_empty()).then_some(0)
+    }
+}
+
+impl gdl::Selector for ByUnrenamed {
+    type Head = Projected<Unrenamed>;
+
+    async fn select<'a>(
+        &'a self,
+        _: gdl::Request<'a, Self::Head>,
+        instances: gdl::Instances<'a>,
+    ) -> gdl::Result<gdl::Choice<'a>> {
+        Ok(gdl::Choice::new(instances.get(0).expect("one instance")))
+    }
+}
+
+/// A projection whose field crosses under another name than the edge
+/// type's would fail every request's read, so it is refused when it is
+/// registered, as a policy and as a selector, naming the field.
+#[test]
+fn a_projection_of_a_field_the_wire_names_otherwise_is_refused() {
+    let error = CellPolicies::new()
+        .add("by_unrenamed", ByUnrenamed)
+        .expect_err("the edge carries no `hint`");
+    assert_eq!(error.kind(), gdl::ErrorKind::Placement, "{error}");
+    let message = error.to_string();
+    assert!(
+        message.contains("by_unrenamed") && message.contains("`hint`"),
+        "{message}"
+    );
+    assert!(message.contains("routing_hint"), "{message}");
+    let error = gdl::Selectors::new()
+        .add("by_unrenamed", ByUnrenamed)
+        .expect_err("the edge carries no `hint`");
+    assert_eq!(error.kind(), gdl::ErrorKind::Placement, "{error}");
+    assert!(error.to_string().contains("`hint`"), "{error}");
 }

@@ -1,0 +1,5 @@
+error: a projection skips the fields it does not read, so it cannot deny unknown fields
+  --> tests/ui/projection-deny-unknown.rs:11:1
+   |
+11 | #[serde(deny_unknown_fields)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

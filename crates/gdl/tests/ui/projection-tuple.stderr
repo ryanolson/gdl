@@ -1,0 +1,5 @@
+error: a projection reads fields by name, so its fields are named
+ --> tests/ui/projection-tuple.rs:9:14
+  |
+9 | struct Hinted(u64);
+  |              ^^^^^

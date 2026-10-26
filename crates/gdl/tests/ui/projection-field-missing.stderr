@@ -1,0 +1,11 @@
+error[E0609]: no field `hnit` on type `&Routed`
+  --> tests/ui/projection-field-missing.rs:12:5
+   |
+12 |     hnit: u64,
+   |     ^^^^ unknown field
+   |
+help: a field with a similar name exists
+   |
+12 -     hnit: u64,
+12 +     hint: u64,
+   |

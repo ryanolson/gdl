@@ -126,7 +126,7 @@ A registered policy implements `gdl::CellPolicy`. It runs in the chooser, once p
 - the chooser's region, the clock, the cells that declined this request, and the cells the chooser damps;
 - the attempt's turn, and a random draw made from it when the policy asks.
 
-It returns the index of a cell, or none, which fails the request with `Routing`. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no cell is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`.
+It returns the index of a cell, or none, which fails the request with `Routing`. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no cell is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`. Its fields are checked against the edge type before the segment starts: their Rust names and types when it builds, and the names each type's `Deserialize` reads when the policy is registered ([Write a cell policy](../guides/write-a-cell-policy.md#1-read-only-what-you-route-by)).
 
 The inputs are plain `gdl` types (`Cell`, `CellRequest`, `Damped`, `Load`), so a policy crate builds them in its own tests, with no hub or runtime. `home_first` and `round_robin` (`gdl::HomeFirst`, `gdl::RoundRobin`) implement the same trait, and take the same inputs.
 

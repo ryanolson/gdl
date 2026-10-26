@@ -1,0 +1,5 @@
+error: a projection reads the one name its edge type writes, so its field takes no alias
+  --> tests/ui/projection-alias.rs:12:5
+   |
+12 |     #[serde(alias = "routing_hint")]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

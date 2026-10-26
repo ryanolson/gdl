@@ -53,13 +53,10 @@ struct Hint {
 }
 
 /// The part of [`Routed`] the router reads.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Projection)]
+#[gdl(of = Routed)]
 struct Hinted {
     hint: Hint,
-}
-
-impl Projection for Hinted {
-    type Of = Routed;
 }
 
 /// The cell whose name starts with the request's model.
@@ -79,14 +76,11 @@ impl CellPolicy for ByModel {
 }
 
 /// Reads the head as a projection of another type than the edge's.
-#[derive(Deserialize)]
+#[derive(Deserialize, Projection)]
+#[gdl(of = Internal)]
 struct Misread {
     #[allow(dead_code, reason = "read only to be refused")]
     messages: Vec<String>,
-}
-
-impl Projection for Misread {
-    type Of = Internal;
 }
 
 struct Misreading;

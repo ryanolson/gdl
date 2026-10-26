@@ -14,14 +14,11 @@ pub struct Routed {
     shard: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Projection)]
+#[gdl(of = Routed)]
 struct Hint {
     #[allow(dead_code, reason = "startup must refuse before a head is read")]
     shard: u64,
-}
-
-impl Projection for Hint {
-    type Of = Routed;
 }
 
 struct ByShard;

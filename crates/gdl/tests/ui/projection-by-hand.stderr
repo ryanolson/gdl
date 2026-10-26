@@ -1,0 +1,17 @@
+error[E0277]: `Hinted` implements `Projection` by hand
+  --> tests/ui/projection-by-hand.rs:13:26
+   |
+13 | impl gdl::Projection for Hinted {
+   |                          ^^^^^^ unsatisfied trait bound
+   |
+help: the trait `ProjectionDerived` is not implemented for `Hinted`
+  --> tests/ui/projection-by-hand.rs:9:1
+   |
+ 9 | struct Hinted {
+   | ^^^^^^^^^^^^^
+   = note: derive it with `#[derive(gdl::Projection)]` and `#[gdl(of = <type>)]`: the derive checks each field against the edge type
+note: required by a bound in `Projection`
+  --> src/select.rs
+   |
+   | pub trait Projection: ProjectionDerived + DeserializeOwned + Send + Sync + 'static {
+   |                       ^^^^^^^^^^^^^^^^^ required by this bound in `Projection`

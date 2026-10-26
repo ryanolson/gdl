@@ -15,6 +15,10 @@
 //!
 //! The design is described in the book under `docs/src`, starting at `docs/src/introduction.md`.
 
+// `derive(gdl::Projection)` names gdl as `::gdl`, which its own tests use.
+#[cfg(test)]
+extern crate self as gdl;
+
 mod codec;
 mod compose;
 mod cx;
@@ -111,6 +115,12 @@ pub use gdl_macros::gdl_export as export;
 /// `config` and `metrics` must be every such instantiation's `Build`'s.
 pub use gdl_macros::Node;
 
+/// A part of a request's head that a router reads: implements
+/// [`Projection`] for a struct of some fields of the edge type named in
+/// `#[gdl(of = <type>)]`, and checks at compile time that the edge type
+/// has each one, under its name and of its type.
+pub use gdl_macros::Projection;
+
 /// What `gdl-runtime` uses of the definitions' internals: the request
 /// context's scopes, the bounds on a stream, and the per-segment figures a
 /// request's visit records. Not a stable interface.
@@ -130,6 +140,7 @@ pub mod __runtime {
 #[doc(hidden)]
 pub mod __private {
     pub use crate::metrics::{Construct, MetricsDerived, metric};
+    pub use crate::select::{ProjectionDerived, SameType, field};
     pub use gdl_message::__private::*;
     pub use gdl_model::__private::*;
 

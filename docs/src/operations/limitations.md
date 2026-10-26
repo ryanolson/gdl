@@ -25,10 +25,16 @@ These are the limits a user can run into today. Each entry says what happens, wh
 ### A selector from another crate needs code that registers it
 - **What:** a generated segment binary knows only gdl's own selectors (`affinity`, `least_loaded`), and a placement that names another one fails that segment's start. Register it with `builder.selector::<S>("<name>")` in a hand-written `SegmentBinary`, or in `RuntimeConfig::selectors` in process. See [Write a selector](../guides/write-a-selector.md). The generator binding selector crates would lift this.
 
-### A projection's fields are checked per request, not at start
-- **What:** a segment checks at start that a `gdl::Projected<P>` head names the edge's type (`P::Of`), and that the edge's encoding names fields. It does not check that the edge type has each field of `P`, under that name and type. A field that is missing or misspelled passes the start, then fails every request's read with `Codec`.
-- **Why:** a message type carries no description of its fields that the runtime could compare.
-- **Workaround:** in the policy crate's tests, encode a value of the edge type and decode the projection from those bytes.
+### A projection is not checked against what its edge type writes
+- **What:** `derive(gdl::Projection)` checks each field's Rust name and type against the edge type when it builds. Registering the router compares the field names that each type's `Deserialize` reads, from the list serde's derive gives `deserialize_struct`. Four edge types pass these checks, and the projection still cannot read what they write:
+  - one that writes a field under a name it does not read, with `rename(serialize = ...)`, or that reads a name only as an `alias`;
+  - one whose serde renames give a field the name of another field: the projection reads that other field, and when the two have the same type it routes by the wrong value with no error;
+  - one, or a projection, that reads no plain struct (a `#[serde(flatten)]` field, or a hand-written `Deserialize`), which gives no list of names;
+  - one whose field has its own codec (`#[serde(with = ...)]`, `serialize_with`), when the projection's field of the same type does not use it: the name and the type match, and the bytes do not.
+
+  In the first and fourth cases, and in the third when a field is renamed on one side only, every request's read fails with `Codec`.
+- **Why:** serde's list is flat and holds only the names a type reads. It does not say which field has a name, nor which names or codecs the type writes with, and gdl has no value of the edge type to write.
+- **Workaround:** in the policy crate's tests, encode a value of the edge type and decode the projection from those bytes. `crates/gdl/tests/projection.rs` shows the first two cases.
 
 ### A cell policy from another crate needs code that registers it
 - **What:** a generated segment binary knows only gdl's own cell policies (`round_robin`, `home_first`), and a chooser whose placement names another one refuses to launch. Register it with `builder.cell_policy("<name>", policy)` in a hand-written `SegmentBinary`, or in `RuntimeConfig::cell_policies` in process. See [Write a cell policy](../guides/write-a-cell-policy.md). The generator binding policy crates would lift this.

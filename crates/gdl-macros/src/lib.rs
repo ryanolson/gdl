@@ -3,7 +3,8 @@
 //! from it. Reached through `gdl_runtime::graph!`; see that macro for the syntax.
 //! Also the markers that offer a crate's messages and nodes to graphs:
 //! `derive(Message)` and `#[export]`, each reached through `gdl_message` or
-//! through `gdl`, and `derive(Node)`, reached through `gdl`.
+//! through `gdl`, and `derive(Node)`, reached through `gdl`. Also
+//! `derive(Projection)`, reached through `gdl`.
 
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as Tokens, TokenTree};
@@ -15,6 +16,7 @@ mod export;
 mod message;
 mod metrics;
 mod node;
+mod projection;
 
 /// The expansion behind `gdl_runtime::graph!`, which calls it as
 /// `graph! { $crate; <graph> }`. The leading path is how the expansion names
@@ -142,6 +144,14 @@ pub fn config(input: TokenStream) -> TokenStream {
 pub fn metrics(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     result(metrics::expand(&input))
+}
+
+/// A part of a request's head that a router reads, checked against the
+/// edge type it names.
+#[proc_macro_derive(Projection, attributes(gdl))]
+pub fn projection(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    result(projection::expand(&input))
 }
 
 /// Describe the typed entry clients of a hosted service.

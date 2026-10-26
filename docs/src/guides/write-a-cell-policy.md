@@ -17,30 +17,29 @@ use gdl::Projection;
 
 /// What crosses into the model's class.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct Routed {
-    request: Internal,
-    hint: Hint,
+pub struct Routed {
+    pub request: Internal,
+    pub hint: Hint,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct Hint {
-    model: String,
-    fingerprint: [u8; 16],
-    first_turn: bool,
+pub struct Hint {
+    pub model: String,
+    pub fingerprint: [u8; 16],
+    pub first_turn: bool,
 }
 
 /// The part of `Routed` the policy reads.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Projection)]
+#[gdl(of = Routed)]
 struct Hinted {
     hint: Hint,
 }
-
-impl Projection for Hinted {
-    type Of = Routed;
-}
 ```
 
-`Of` names the edge type. The segment refuses to start when the edge carries another type, or when the edge is encoded as `msgpack_array`, which has no field names. [Runtime feature costs](../operations/feature-costs.md#cell-policies) measures what a projection saves.
+`#[gdl(of = ...)]` names the edge type. A projection is always derived, and the derive checks that the edge type has each field, under its name and of its exact type. A field that the edge type lacks does not build, and the error names it. The derive reads each field through the edge type, so the edge type's fields must be visible where the projection is: `pub` when the edge type is in another crate.
+
+The derive refuses `#[serde(deny_unknown_fields)]` on a projection, which skips the edge type's other fields, and `#[serde(alias)]` on its fields. The policy's registration compares the field names that each type's `Deserialize` reads, which serde's `rename` and `rename_all` change. It refuses a projection field whose name the edge type does not read, and names the field. [Known limitations](../operations/limitations.md#a-projection-is-not-checked-against-what-its-edge-type-writes) lists what passes this check. The segment refuses to start when the edge carries another type than `Of`, or when the edge is encoded as `msgpack_array`, which has no field names. [Runtime feature costs](../operations/feature-costs.md#cell-policies) measures what a projection saves.
 
 ## 2. Implement `gdl::CellPolicy`
 
