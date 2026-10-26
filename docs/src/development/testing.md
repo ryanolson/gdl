@@ -47,6 +47,7 @@ Most tests wait for events, so a busy host makes them slower but does not fail t
 - A test that fails all three tries fails the run.
 - nextest cannot stop load from other processes. On a host far over its core count, a timing test can still fail.
 - Add a test to the group only when its bound is what it proves and a busy host breaks it. Many tests prove a bound with seconds to spare, and load does not break those. A bound that only stands in for an event becomes a wait on that event.
+- A runtime bound that a test shortens only to run faster, such as `setup_timeout_ms`, is not what the test proves. Keep it far above what the step takes: a busy host can leave a process unscheduled for a second or more. `one_of_two_engines_stopped_mid_answer_retires_alone` (`crates/gdl-gen/tests/lifecycle.rs`) failed at 500 ms and uses 5 s.
 
 ## Velo in one process
 
@@ -56,6 +57,8 @@ Tests that need two or more velo nodes run them in one process, over TCP on OS-a
 - **Process fixtures.** `crates/gdl-runtime/tests/common/` builds deployments of several segments, each a velo node, and a TCP proxy (`proxy.rs`) in front of a hub's port. The proxy can forward, hold connections silent, refuse them, fall silent at a `DELETE`, or hide a cell's drain from the hub that follows it.
 
 An instance that stopped is an address that refuses connections: `Refusing` in `crates/gdl-runtime/src/dist/fabric/refusing.rs`. Do not stop a node to make one. The port it frees is not reserved. Another node, in this test binary or another copy of it, can bind the port at once. On a busy host, the stopped node's own listener can still be open when its shutdown returns. Either one accepts the connection and never answers velo's handshake. The send then waits out velo's 30 s handshake timeout and does not fail as unsent.
+
+For the same reason, a port that a test picks and frees before another process binds it can be taken in between. Bind port 0 in the process that serves where you can. A hub that must publish its address before it serves cannot, so `crates/gdl-gen/tests/policy.rs` starts it again on new ports when its bind finds a port taken.
 
 ## Fault hooks
 

@@ -79,12 +79,12 @@ fn tables<H>(chooser: &Running<H>) -> Cells {
         .expect("a global instance in a cell chooses")
 }
 
-/// Whether `cell` is followed in `state` with `entries` eligible, and
-/// with a load summary, so that a test passes under `home_first` too,
-/// which chooses no cell without one.
+/// Whether `cell` is followed in `state` with `entries` eligible. Not
+/// whether it has a load summary: every test that waits with this routes
+/// by `round_robin`, which reads none, and a summary comes only after a
+/// chain of periods that a busy host can stretch past [`WAIT`].
 fn holds(cells: &Cells, cell: &str, state: CellState, entries: usize) -> bool {
-    followed(cells, "f", cell)
-        .is_some_and(|m| m.state == state && m.eligible.len() == entries && m.load.is_some())
+    followed(cells, "f", cell).is_some_and(|m| m.state == state && m.eligible.len() == entries)
 }
 
 /// The request failed with `Routing`, naming the class it could not
@@ -266,14 +266,22 @@ async fn a_cell_that_goes_away_is_not_chosen() {
 }
 
 /// With `[routing] B = "round_robin"` and two entry instances in the one
-/// cell, requests alternate between them.
+/// cell, requests alternate between them. The cell's hub makes no load
+/// summary within the test: the `round_robin` cell policy reads none, so
+/// the test waits only for the cell and its entries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn round_robin_takes_turns_within_the_chosen_cell() {
     let spec = spec_of(placement().route("B", RequestRouter::RoundRobin));
     let events = Events::new();
     let directory = Resolving::new();
     let (hub, chooser) = global(&spec, &directory, Selectors::new(), &events).await;
-    let m1 = model(&spec, &directory, M1, "m1-hub:1337", 2, 2, &events).await;
+    let cell = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 2,
+        entries: 2,
+    };
+    let m1 = model_unsummarized(&spec, &directory, cell, &events).await;
     let cells = tables(&chooser);
     until(&cells, "the cell ready with both entries", |cells| {
         holds(cells, M1, CellState::Ready, 2)

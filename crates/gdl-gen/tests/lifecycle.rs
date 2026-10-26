@@ -119,7 +119,17 @@ fn every_process_stopped_mid_answer_finishes_it() {
 #[test]
 fn one_of_two_engines_stopped_mid_answer_retires_alone() {
     let chat = Chat::new("gdl-life-retire-");
-    let counts = "[instances]\nengine = 2\n[runtime]\nsetup_timeout_ms = 500\n";
+    // The setup bound is also how long a stopped engine waits once the
+    // front has promised to avoid it, and every process waits it out as it
+    // stops. Shorter than the default 10 s, so that the test does not wait
+    // that long, but far longer than a setup step takes: a peer that a busy
+    // host leaves unscheduled for a moment still answers in time. Each exit
+    // below may take that long on top of `EXIT`.
+    const SETUP: Duration = Duration::from_secs(5);
+    let counts = format!(
+        "[instances]\nengine = 2\n[runtime]\nsetup_timeout_ms = {}\n",
+        SETUP.as_millis()
+    );
     let engine = format!(
         "{counts}[node.Engine]\ndelay_ms = 1000\n[system]\nhost = \"127.0.0.1\"\nport = 0\n"
     );
@@ -131,8 +141,8 @@ fn one_of_two_engines_stopped_mid_answer_retires_alone() {
     // engine's stderr unread.
     let logs = engines.each_mut().map(|engine| engine.stderr());
     let addresses = [0, 1].map(|n| listener(&logs[n].find("system listener at", WAIT)));
-    let mut post = chat.spawn("post", &chat.config("post", counts), false);
-    let mut front = chat.spawn("front", &chat.config("front", counts), true);
+    let mut post = chat.spawn("post", &chat.config("post", &counts), false);
+    let mut front = chat.spawn("front", &chat.config("front", &counts), true);
     let errors = front.stderr();
     errors.find("front: ready", WAIT);
     ask(&mut front, REQUEST);
@@ -175,7 +185,7 @@ fn one_of_two_engines_stopped_mid_answer_retires_alone() {
         "the answer was cut short: {answer} {rest:?}"
     );
     assert_eq!(rest[2], r#"{"done":null}"#);
-    let status = engines[stopped].exits_within(EXIT);
+    let status = engines[stopped].exits_within(EXIT + SETUP);
     assert!(status.success(), "{status}");
     ask(&mut front, REQUEST);
     let next: Vec<String> = (0..4).map(|_| out.next(WAIT)).collect();
@@ -190,7 +200,7 @@ fn one_of_two_engines_stopped_mid_answer_retires_alone() {
         ("engine", remaining),
         ("post", &mut post),
     ] {
-        let status = process.exits_within(EXIT);
+        let status = process.exits_within(EXIT + SETUP);
         assert!(status.success(), "{name}: {status}");
     }
 }

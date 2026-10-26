@@ -111,28 +111,40 @@ impl Cell {
     }
 
     /// Start the cell's hub, once it says that it serves: the hub, and its
-    /// stderr, read for as long as it runs.
-    fn hub(&self, bin: &Path, deployment: &Path, cells: &Path) -> (Running, Lines) {
-        let mut hub = Running(
-            Command::new(bin.join("gdl-hub"))
-                .arg(deployment)
-                .envs(self.variables(cells))
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("a hub"),
-        );
-        let stderr = hub.stderr();
+    /// stderr, read for as long as it runs. Its ports were free when they
+    /// were chosen, but another process can bind one before the hub does:
+    /// then the hub starts again on ports chosen afresh, a few times.
+    fn hub(&mut self, bin: &Path, deployment: &Path, cells: &Path) -> (Running, Lines) {
         let mut said = Vec::new();
-        loop {
-            match stderr.try_next(Duration::from_secs(10)) {
-                Some(line) if line.starts_with("gdl-hub: serving") => break,
-                Some(line) => said.push(line),
-                None => panic!("hub {} does not serve: {said:?}", self.name),
+        for _ in 0..5 {
+            let mut hub = Running(
+                Command::new(bin.join("gdl-hub"))
+                    .arg(deployment)
+                    .envs(self.variables(cells))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("a hub"),
+            );
+            let stderr = hub.stderr();
+            said.clear();
+            while let Some(line) = stderr.try_next(Duration::from_secs(10)) {
+                if line.starts_with("gdl-hub: serving") {
+                    return (hub, stderr);
+                }
+                said.push(line);
             }
+            if !said
+                .iter()
+                .any(|line| line.contains("Address already in use"))
+            {
+                break;
+            }
+            self.public = free_port();
+            self.control = free_port();
         }
-        (hub, stderr)
+        panic!("hub {} does not serve: {said:?}", self.name);
     }
 
     /// Start an instance of `segment` in this cell, with `extra` in its
@@ -257,13 +269,18 @@ fn a_bound_policy_chooses_the_cell_of_each_request() {
     let cells = temp.path().join("cells");
     std::fs::create_dir_all(&cells).expect("cell directory");
 
-    let global = Cell::new(GLOBAL, "global", None);
-    let models = [
+    let mut global = Cell::new(GLOBAL, "global", None);
+    let mut models = [
         Cell::new(LLAMA, "model", Some(GLOBAL)),
         Cell::new(QWEN, "model", Some(GLOBAL)),
     ];
-    let _hubs: Vec<(Running, Lines)> = std::iter::once(&global)
-        .chain(&models)
+    // Another process holds the global hub's public port, as one can take
+    // a chosen port on a busy host: the hub starts on others. The port is
+    // one the OS gave the listener, so that holding it cannot race as well.
+    let taken = TcpListener::bind("127.0.0.1:0").expect("a port");
+    global.public = taken.local_addr().expect("its address").port();
+    let _hubs: Vec<(Running, Lines)> = std::iter::once(&mut global)
+        .chain(&mut models)
         .map(|cell| cell.hub(&bin, &deployment, &cells))
         .collect();
     let _models: Vec<Instance> = models
@@ -494,4 +511,103 @@ fn a_policy_library_name_is_preserved_when_loading_spec_text() {
     let spec = gdl_gen::Spec::from_text(&text, &graph, temp.path()).expect("spec from text");
     gdl_gen::check(&spec, &target("gdl-gen-tests"), gdl_gen::Offers::Read)
         .expect("loading the same spec from text preserves the policy's library name");
+}
+
+/// The end-to-end policy test still passes when another process binds the
+/// first port it frees, at once, as one can on a busy host: no bind of a
+/// port the test picked can fail it before the hub's retry. An
+/// `LD_PRELOAD` library takes the port in the test's own process, since
+/// nothing else can act between the free and the next bind. It runs the
+/// end-to-end test again, so it takes as long.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_competing_binder_does_not_bypass_the_hub_retry() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-port-race-")
+        .tempdir()
+        .expect("scratch");
+    let source = temp.path().join("intercept.c");
+    let library = temp.path().join("intercept.so");
+    // Run the actual policy test with a socket that takes its first port
+    // as soon as free_port releases it. Other executables are unaffected.
+    std::fs::write(
+        &source,
+        r#"
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+static int enabled, picked_fd = -1, taken_fd = -1;
+static struct sockaddr_in picked;
+
+__attribute__((constructor)) static void enable(void) {
+    char exe[4096] = {0};
+    readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    enabled = strstr(exe, "/deps/policy-") != NULL;
+}
+
+int bind(int fd, const struct sockaddr *addr, socklen_t len) {
+    int (*real_bind)(int, const struct sockaddr *, socklen_t) = dlsym(RTLD_NEXT, "bind");
+    int result = real_bind(fd, addr, len);
+    if (enabled && picked_fd == -1 && taken_fd == -1 && result == 0 &&
+        addr->sa_family == AF_INET && ((const struct sockaddr_in *)addr)->sin_port == 0) {
+        socklen_t size = sizeof(picked);
+        if (getsockname(fd, (struct sockaddr *)&picked, &size) != 0) abort();
+        picked_fd = fd;
+    }
+    return result;
+}
+
+int close(int fd) {
+    int (*real_close)(int) = dlsym(RTLD_NEXT, "close");
+    int result = real_close(fd);
+    if (enabled && fd == picked_fd && taken_fd == -1) {
+        int (*real_bind)(int, const struct sockaddr *, socklen_t) = dlsym(RTLD_NEXT, "bind");
+        taken_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (real_bind(taken_fd, (const struct sockaddr *)&picked, sizeof(picked)) != 0) abort();
+        fprintf(stderr, "review: competing binder took freed port %u\n", ntohs(picked.sin_port));
+    }
+    return result;
+}
+"#,
+    )
+    .expect("interceptor source");
+    let compiled = Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .arg("-ldl")
+        .output()
+        .expect("compile interceptor");
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    // No limit of its own: the run includes the nested builds, which take
+    // minutes when cold, and the test it runs bounds each of its waits.
+    let result = Command::new(std::env::current_exe().expect("policy test binary"))
+        .args([
+            "--exact",
+            "a_bound_policy_chooses_the_cell_of_each_request",
+            "--nocapture",
+        ])
+        .env("LD_PRELOAD", &library)
+        .output()
+        .expect("policy test with a competing binder");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("review: competing binder took freed port"),
+        "the competing binder did not run: {stderr}"
+    );
+    assert!(
+        result.status.success(),
+        "the policy test failed after its freed port was taken:\n{stderr}\n{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
 }
