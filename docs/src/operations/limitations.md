@@ -41,10 +41,6 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **When:** a native run under a hub outside a container.
 - **Workaround:** set `listen` to a routable address, or set `HOSTNAME`. See [Discovery](../concepts/hub.md).
 
-### The `gdl-hub` binary has fixed ports and takes no settings file
-- **What:** it always serves on 1337 (public) and 8337 (control). A segment's `[hub] public_port` and `control_port` apply only to a hub embedded in that segment.
-- **Workaround:** map the ports at the container. See [Discovery](../concepts/hub.md).
-
 ### A hub that does not take `ready` leaves the instance unrouted
 - **What:** if the `ready` announcement fails within `rendezvous_ms`, the instance prints a line and serves on. Instances already serving never add it. Joiners still route to it, since their rosters come from `loaded`.
 - **Workaround:** restart the instance once the hub is healthy. See [Segment lifecycle](../concepts/lifecycle.md).

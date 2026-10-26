@@ -42,7 +42,7 @@ The launch refuses:
 | `control_port` | 8337 (`gdl_model::HUB_CONTROL_PORT`) | the hub's control listener |
 | `heartbeat_ms` | 5000 | the lease's heartbeat. 0 is refused |
 
-The `gdl-hub` binary always serves on 1337 and 8337. [Discovery: rosters and the hub](../concepts/hub.md) describes the lease.
+The `gdl-hub` binary serves on 1337 and 8337, unless `GDL_HUB__PUBLIC_PORT` and `GDL_HUB__CONTROL_PORT` name other ports. [Discovery: rosters and the hub](../concepts/hub.md) describes the lease.
 
 ## `[runtime]`
 

@@ -29,7 +29,9 @@ gdl-hub deployment.json          # serve the deployment's hub
 gdl-hub --healthcheck            # exit 0 if the local hub answers GET /v1/health with 200
 ```
 
-`deployment.json` holds the graph's manifest and the placement (`gdl_model::DeploymentSpec`). `cargo gdl compose` writes it ([Deploy with Docker Compose](../guides/compose-deploy.md)). The binary reads no settings file. It serves on the fixed ports `gdl_model::HUB_PUBLIC_PORT` (1337) and `HUB_CONTROL_PORT` (8337). A segment's `[hub] public_port` and `control_port` matter only for a hub that a program embeds on other ports, as the tests do. A cell's hub takes its cell's settings from `GDL_CELL__*` variables ([Classes and cells](cells.md)).
+`deployment.json` holds the graph's manifest and the placement (`gdl_model::DeploymentSpec`). `cargo gdl compose` writes it ([Deploy with Docker Compose](../guides/compose-deploy.md)). The binary reads no settings file. It serves on `gdl_model::HUB_PUBLIC_PORT` (1337) and `HUB_CONTROL_PORT` (8337), unless `GDL_HUB__PUBLIC_PORT` and `GDL_HUB__CONTROL_PORT` name other ports. A segment reads the same variables for where its hub is. Port 0 lets the OS choose. Once it serves, the binary prints the addresses it bound on stderr (`gdl-hub: serving, public ..., control ...`).
+
+The binary stops on SIGINT or SIGTERM. Docker stops a container with SIGTERM, and the hub is the first process of its container. The kernel ignores a signal that such a process does not handle. So a hub that handled only SIGINT ran until Docker killed it, 10 s later. A cell's hub takes its cell's settings from `GDL_CELL__*` variables ([Classes and cells](cells.md)).
 
 ### Admission
 
