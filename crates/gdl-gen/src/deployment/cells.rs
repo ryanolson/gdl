@@ -91,14 +91,14 @@ pub(super) fn bundle(
             serde_json::to_string_pretty(&spec_of).map_err(io)?,
         );
         let hub_dockerfile = dir.join("hub/Dockerfile");
-        let text = bundle.hub_dockerfile(&deployment.display().to_string());
+        let text = bundle.hub_dockerfile(&deployment);
         bundle.files.insert(hub_dockerfile.clone(), text);
         let hub = Image {
             name: match laid.among_several() {
                 true => format!("{}:{}", emit::package_name(&graph, "hub"), laid.name),
                 false => emit::package_name(&graph, "hub"),
             },
-            dockerfile: hub_dockerfile.display().to_string(),
+            build: bundle.build(&hub_dockerfile),
         };
         // Each segment that a cell of the layout runs, built once.
         let mut images = BTreeMap::new();
@@ -122,7 +122,7 @@ pub(super) fn bundle(
             let grace = bundle.segment_image(&dir, segment, &package, None, unawaited)?;
             let image = Image {
                 name: package,
-                dockerfile: dir.join(segment).join("Dockerfile").display().to_string(),
+                build: bundle.build(&dir.join(segment).join("Dockerfile")),
             };
             images.insert(segment, (image, grace, hosts(nodes, stdin.as_ref())));
         }
@@ -198,7 +198,8 @@ pub(super) fn bundle(
 /// An image of the bundle: its name, and the Dockerfile that builds it.
 struct Image {
     name: String,
-    dockerfile: String,
+    /// The `build` of a service that builds it.
+    build: Value,
 }
 
 impl Image {
@@ -208,7 +209,7 @@ impl Image {
     /// the bundle builds it.
     fn build(&self, service: &mut Value, built: &mut BTreeSet<String>) {
         if built.insert(self.name.clone()) {
-            service["build"] = json!({"context": ".", "dockerfile": self.dockerfile});
+            service["build"] = self.build.clone();
         }
     }
 }

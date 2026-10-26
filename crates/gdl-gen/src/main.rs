@@ -7,7 +7,7 @@
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
 //! cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
 //! cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
-//! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--target-dir <dir>]
+//! cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
 //! cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]
 //! ```
 //!
@@ -29,7 +29,10 @@
 //! `compose` writes a Docker Compose bundle; a spec with classes or several
 //! layouts it deploys only by cell, with `--fleet`: one hub per cell, and
 //! each cell's segments. With `--fleet` it runs the same check as `check`
-//! first, and writes nothing if it fails. `export` writes the generated crates as a `.tar.gz` with
+//! first, and writes nothing if it fails. With `--local` its images build
+//! the crates the spec names by path, and gdl and its hub from `[gdl]
+//! path`, from a build context that holds them and the bundle, so the
+//! bundle builds only on this machine. `export` writes the generated crates as a `.tar.gz` with
 //! `build-all.sh`, to build each segment on its own. Programs are built in `--target-dir`, else `$CARGO_TARGET_DIR`,
 //! else `target` beside the spec or the crate.
 
@@ -44,13 +47,14 @@ const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <d
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
        cargo gdl check --spec <gdl.toml> [--fleet <fleet.toml>] [--target-dir <dir>]
        cargo gdl diagram --spec <gdl.toml> --format dot|mermaid [--target-dir <dir>]
-       cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--target-dir <dir>]
+       cargo gdl compose --spec <gdl.toml> --out <directory> [--fleet <fleet.toml>] [--local] [--target-dir <dir>]
        cargo gdl export --spec <gdl.toml> --out <file.tar.gz> [--target-dir <dir>]";
 
 enum Command {
     Compose {
         out: PathBuf,
         fleet: Option<PathBuf>,
+        local: bool,
     },
     Check {
         fleet: Option<PathBuf>,
@@ -91,7 +95,7 @@ fn args() -> Result<Args, String> {
     let (mut spec, mut out, mut catalog, mut target, mut format, mut krate) =
         (None, None, None, None, None, None);
     let mut fleet = None;
-    let (mut check, mut verify) = (false, false);
+    let (mut check, mut verify, mut local) = (false, false, false);
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -107,6 +111,7 @@ fn args() -> Result<Args, String> {
             Some("--fleet") => fleet = Some(value()?),
             Some("--check") => check = true,
             Some("--verify") => verify = true,
+            Some("--local") => local = true,
             Some(other) if !other.starts_with("--") && krate.is_none() => {
                 krate = Some(other.to_string());
             }
@@ -129,6 +134,7 @@ fn args() -> Result<Args, String> {
         "compose" => Command::Compose {
             out: out.ok_or_else(|| USAGE.to_string())?,
             fleet: fleet.take(),
+            local: std::mem::take(&mut local),
         },
         "check" => Command::Check {
             fleet: fleet.take(),
@@ -148,8 +154,8 @@ fn args() -> Result<Args, String> {
         _ => return Err(USAGE.to_string()),
     };
     let needs_spec = !matches!(command, Command::Extract { .. } | Command::Catalog(_));
-    // `--fleet` is for the commands that took it above.
-    if (needs_spec && spec.is_none()) || fleet.is_some() {
+    // `--fleet` and `--local` are for the commands that took them above.
+    if (needs_spec && spec.is_none()) || fleet.is_some() || local {
         return Err(USAGE.to_string());
     }
     Ok(Args {
@@ -231,7 +237,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let problems = gdl_gen::check_files(file, fleet.as_deref(), &target(beside(file)));
             return Ok(report(&problems));
         }
-        Command::Compose { out, fleet } => {
+        Command::Compose { out, fleet, local } => {
             let fleet = match fleet {
                 None => None,
                 Some(path) => {
@@ -251,7 +257,16 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             };
             let spec = spec()?;
             let target = target(spec.dir());
-            gdl_gen::compose(&spec, fleet.as_ref(), out, &target)?;
+            let sources = match local {
+                true => gdl_gen::Sources::Local,
+                false => gdl_gen::Sources::Fetched,
+            };
+            if let Some(root) = gdl_gen::compose(&spec, fleet.as_ref(), out, &target, sources)? {
+                eprintln!(
+                    "cargo gdl: --local: the images build from {}, so this bundle builds only on this machine",
+                    root.display()
+                );
+            }
         }
         Command::Export { out } => {
             let spec = spec()?;

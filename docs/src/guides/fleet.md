@@ -2,7 +2,7 @@
 
 This guide deploys one graph as three cells on one Docker host: a global cell that runs the frontend, and two model cells that run the engine. It uses the `api` example. [Classes and cells](../concepts/cells.md) explains the terms. [Deploy with Docker Compose](compose-deploy.md) covers a bundle without cells.
 
-You need Docker with Compose, and a spec whose node and message crates come from Git or crates.io, as `examples/api/deploy.toml` does. The fleet runs on one host, because the only directory backend a hub process publishes to is `dir`, a directory that every hub shares.
+You need Docker with Compose, and a spec whose node and message crates come from Git or crates.io, as `examples/api/deploy.toml` does. To run crates that are not pushed, see [Run local sources](#run-local-sources). The fleet runs on one host, because the only directory backend a hub process publishes to is `dir`, a directory that every hub shares.
 
 ## 1. Split the graph into classes
 
@@ -86,6 +86,18 @@ docker run --rm --network fleet_default curlimages/curl:8.10.1 -s http://global-
 ```
 
 The global cell answers 200 once its own quorum holds and a model cell is `ready` and followed. `docker compose down` stops the fleet. The cell directory's volume is on tmpfs, open to every user: it is empty again once no container uses it, so the next deployment starts with a fresh directory.
+
+## Run local sources
+
+To test crates that are not pushed, add `--local`. The spec must name its node and message crates and gdl by path, as `examples/api/gdl.toml` does. Add the classes of step 1 to it, and run from the repository's root:
+
+```bash
+cargo gdl compose --local --spec examples/api/gdl.toml --fleet fleet.toml --out target/fleet
+cd target/fleet
+docker compose up --build
+```
+
+The bundle has the same services, hubs, and variables as above. Each image builds from the repository as it is on this machine: the hub from `[gdl] path`, and each segment from the crates that the spec names by path. One service still builds each image, and the cells of one class run it. Write the bundle under the repository's `target/`, since the build context must hold it. The bundle builds only on this machine ([Local sources](compose-deploy.md#local-sources)).
 
 ## How the bundle starts
 

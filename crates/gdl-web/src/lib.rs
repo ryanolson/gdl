@@ -380,7 +380,11 @@ async fn apply(State(composer): Shared, Json(draft): Json<Draft>) -> Response {
             let (_, spec) = prepare(&composer, &draft).map_err(|(_, problems)| problems)?;
             let target = &composer.config.target;
             host::place(&target.join("deployments"), &project, running, |dir| {
-                gdl_gen::compose(&spec, None, dir, target).map_err(|e| e.to_string())
+                // The composer deploys fetched sources only: a bundle of
+                // local ones would build this host's files.
+                gdl_gen::compose(&spec, None, dir, target, gdl_gen::Sources::Fetched)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             })
             .map_err(|error| error.lines().map(str::to_string).collect::<Vec<_>>())
         }

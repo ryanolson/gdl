@@ -555,8 +555,14 @@ fn compose_serves_a_source_without_a_frontend_on_stdin() {
     )
     .expect("spec");
     let spec = gdl_gen::Spec::load(&dir.join("gdl.toml")).expect("spec");
-    let files = gdl_gen::compose_files(&spec, None, &dir.join("out"), &dir.join("target"))
-        .expect("a deployment whose source reads stdin");
+    let files = gdl_gen::compose_files(
+        &spec,
+        None,
+        &dir.join("out"),
+        &dir.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a deployment whose source reads stdin");
     let compose: serde_json::Value =
         serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
     assert_eq!(

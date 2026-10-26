@@ -1,7 +1,7 @@
 use gdl_model::Fleet;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
@@ -64,15 +64,31 @@ fn validate_image(image: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+use crate::paths::display;
 use crate::{
     Error, Files, Offers, Spec, emit,
     spec::{CrateSource, GdlDep, Source},
 };
 
 mod cells;
+mod context;
 mod variables;
 
-/// Render a Docker Compose deployment from Git or registry dependencies.
+/// Where a bundle's images take the crates they build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sources {
+    /// Cargo fetches every crate from Git or crates.io in the image build,
+    /// so the bundle builds from its own files, on any Docker host. The
+    /// composer's only mode.
+    Fetched,
+    /// The images build the crates the spec names by path, and the gdl
+    /// runtime and hub of its `[gdl] path`, as they are on this machine,
+    /// from a build context that holds them and the bundle. For testing
+    /// code that is not pushed: the bundle builds only on this machine.
+    Local,
+}
+
+/// Render a Docker Compose deployment, its images built from `sources`.
 /// Without `fleet`, it deploys the spec's one placement with one hub. With
 /// it, it deploys by cell: one hub per cell, and each cell's segments of
 /// its class in its layout ([`cells`]). A spec with classes or several
@@ -84,42 +100,93 @@ pub fn compose_files(
     fleet: Option<&Fleet>,
     out: &Path,
     target: &Path,
+    sources: Sources,
 ) -> Result<Files, Error> {
+    Ok(bundle_files(spec, fleet, out, target, sources)?.0)
+}
+
+/// [`compose_files`], and the root of the build context of a bundle of
+/// local sources.
+fn bundle_files(
+    spec: &Spec,
+    fleet: Option<&Fleet>,
+    out: &Path,
+    target: &Path,
+    sources: Sources,
+) -> Result<(Files, Option<PathBuf>), Error> {
     let by_cell = cells::by_cell(spec);
     if let (None, Some(why)) = (fleet, &by_cell) {
         return Err(Error::new(format!(
             "`compose` deploys a spec {why} by cell, as its fleet file says: give it `--fleet <fleet.toml>`"
         )));
     }
-    let (spec, bundle) = Bundle::prepare(spec, out, target)?;
-    let Some(fleet) = fleet else {
-        return single(&spec, bundle, target);
+    let (spec, bundle) = Bundle::prepare(spec, out, target, sources)?;
+    let local = bundle.local_root();
+    let mut files = match fleet {
+        None => single(&spec, bundle, target)?,
+        Some(fleet) => {
+            let (checked, layouts) = crate::checked(&spec, target, Offers::Read);
+            let checked = checked?;
+            fleet
+                .check(Some(&layouts))
+                .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
+            if by_cell.is_none() {
+                single(&spec, bundle, target)?
+            } else {
+                let stdin = stdin_source(&spec, &checked.manifest)?;
+                cells::bundle(&spec, fleet, bundle, &checked.manifest, &layouts, stdin)?
+            }
+        }
     };
-    let (checked, layouts) = crate::checked(&spec, target, Offers::Read);
-    let checked = checked?;
-    fleet
-        .check(Some(&layouts))
-        .map_err(|errors| Error::from(gdl_model::Problems::from(errors)))?;
-    if by_cell.is_none() {
-        return single(&spec, bundle, target);
+    if local.is_some() {
+        mark_local(&mut files)?;
     }
-    let stdin = stdin_source(&spec, &checked.manifest)?;
-    cells::bundle(&spec, fleet, bundle, &checked.manifest, &layouts, stdin)
+    Ok((files, local))
+}
+
+/// Say, in the bundle's `compose.yaml` and its README, that its images
+/// build local sources, and so build only on this machine. `compose.yaml`
+/// is JSON, which has no comments, so it says so in an extension field,
+/// which Compose ignores.
+fn mark_local(files: &mut Files) -> Result<(), Error> {
+    const NOTE: &str = "This bundle builds local sources: its images build from a context outside the bundle, which holds every crate it builds from by path. It builds only on the machine that wrote it, and every change to those crates rebuilds its images.";
+    let path = Path::new("compose.yaml");
+    let mut compose: serde_json::Value =
+        serde_json::from_str(files.get(path).map_or("{}", String::as_str)).map_err(io)?;
+    if let Some(compose) = compose.as_object_mut() {
+        compose.insert("x-gdl-local-sources".into(), NOTE.into());
+    }
+    files.insert(
+        path.into(),
+        serde_json::to_string_pretty(&compose).map_err(io)?,
+    );
+    if let Some(readme) = files.get_mut(Path::new("README.md")) {
+        readme.push_str(&format!("\n{NOTE}\n"));
+    }
+    Ok(())
 }
 
 /// What every bundle of a spec starts from: its deployment settings, how
-/// its hub is installed, its generated crates, and its graph's name.
+/// its hub is installed, its generated crates, its graph's name, and the
+/// build context of a bundle that builds local sources.
 struct Bundle {
     settings: Settings,
     hub_install: String,
     files: Files,
     graph: String,
+    context: Option<context::Context>,
 }
 
 impl Bundle {
     /// `spec` as a bundle deploys it, and what its bundle starts from:
-    /// refused unless every crate it builds can be fetched.
-    fn prepare(spec: &Spec, out: &Path, target: &Path) -> Result<(Spec, Self), Error> {
+    /// refused unless every crate it builds can be fetched, or, with local
+    /// sources, unless a build context holds them and the bundle in `out`.
+    fn prepare(
+        spec: &Spec,
+        out: &Path,
+        target: &Path,
+        sources: Sources,
+    ) -> Result<(Spec, Self), Error> {
         // A deployment discovers its segments through the hub, whether or
         // not the spec says anything else about it.
         let mut spec = spec.clone();
@@ -142,30 +209,79 @@ impl Bundle {
                     .map(|binding| binding.package.as_str()),
             )
             .collect();
-        if !local.is_empty() {
+        if !local.is_empty() && sources == Sources::Fetched {
             return Err(Error::new(format!(
                 "Deploy requires Git or crates.io node and message packages. Re-import these local packages from Git or crates.io: {}",
                 local.join(", ")
             )));
         }
-        let hub_install = match &spec.gdl {
-            GdlDep::Git { url, rev } => format!("--git {} --rev {}", quote(url), quote(rev)),
-            GdlDep::Version(version) => format!("--version {}", quote(version)),
-            GdlDep::Path(_) => {
+        let deps = match sources {
+            Sources::Fetched => emit::Deps::Exported,
+            Sources::Local => emit::Deps::Local,
+        };
+        let (files, graph) = crate::render_with(&spec, out, target, deps, Offers::Read)?;
+        let context = match (sources, &spec.gdl) {
+            // The manifests name their crates from `out` resolved, so the
+            // context must be found from it too.
+            (Sources::Local, GdlDep::Path(runtime)) => Some(context::Context::find(
+                &crate::dump::absolute(out)?,
+                &files,
+                runtime,
+            )?),
+            (Sources::Local, _) => {
+                return Err(Error::new(
+                    "`--local` builds gdl and its hub from the sources [gdl] path names; this spec names gdl by Git or version, so build it without `--local`",
+                ));
+            }
+            (Sources::Fetched, _) => None,
+        };
+        let hub_install = match (&spec.gdl, &context) {
+            (_, Some(context)) => format!("--path {}", quote(&format!("/app/{}", context.hub()))),
+            (GdlDep::Git { url, rev }, None) => {
+                format!("--git {} --rev {}", quote(url), quote(rev))
+            }
+            (GdlDep::Version(version), None) => format!("--version {}", quote(version)),
+            (GdlDep::Path(_), None) => {
                 return Err(Error::new(
                     "Deploy requires GDL from Git or crates.io; start the server with --gdl-git and --gdl-rev",
                 ));
             }
         };
-        let (files, graph) =
-            crate::render_with(&spec, out, target, emit::Deps::Exported, Offers::Read)?;
         let bundle = Self {
             settings,
             hub_install,
             files,
             graph,
+            context,
         };
         Ok((spec, bundle))
+    }
+
+    /// The `build` of a service whose image the Dockerfile at `dockerfile`,
+    /// a path in the bundle, builds; and that Dockerfile's ignore file, for
+    /// a bundle of local sources.
+    fn build(&mut self, dockerfile: &Path) -> serde_json::Value {
+        let Some(context) = &self.context else {
+            return json!({"context": ".", "dockerfile": display(dockerfile)});
+        };
+        let mut ignore = dockerfile.as_os_str().to_owned();
+        ignore.push(".dockerignore");
+        self.files.insert(ignore.into(), context.ignore());
+        json!({"context": context.seen_from_bundle(), "dockerfile": context.in_bundle(dockerfile)})
+    }
+
+    /// `path`, a path in the bundle, as the image build sees it under
+    /// `/app`.
+    fn in_build(&self, path: &Path) -> String {
+        match &self.context {
+            Some(context) => context.in_bundle(path),
+            None => display(path),
+        }
+    }
+
+    /// The root of the build context, for a bundle of local sources.
+    fn local_root(&self) -> Option<PathBuf> {
+        self.context.as_ref().map(|c| c.root().to_path_buf())
     }
 
     /// Every image the settings name, checked.
@@ -188,13 +304,15 @@ impl Bundle {
 
     /// The Dockerfile of a hub that admits the deployment in
     /// `deployment`, a path in the bundle.
-    fn hub_dockerfile(&self, deployment: &str) -> String {
+    fn hub_dockerfile(&self, deployment: &Path) -> String {
         let settings = &self.settings;
         dockerfile(
-            &self.hub_install,
-            "gdl-hub",
-            deployment,
-            true,
+            &format!(
+                "cargo install {} --locked --root /build-tools gdl-hub",
+                self.hub_install
+            ),
+            "/build-tools/bin/gdl-hub",
+            &self.in_build(deployment),
             &settings.build_image,
             settings.hub_image.as_ref().unwrap_or(&settings.base_image),
         )
@@ -214,24 +332,35 @@ impl Bundle {
         unawaited: Option<&str>,
     ) -> Result<u64, Error> {
         let settings = &self.settings;
-        let files = &mut self.files;
         let crate_dir = dir.join(segment);
         let path = crate_dir.join("config.toml");
-        files.insert(
-            crate_dir.join("Dockerfile"),
-            dockerfile(
-                &format!("/app/{}/Cargo.toml", crate_dir.display()),
-                package,
-                &path.display().to_string(),
-                false,
-                &settings.build_image,
-                settings
-                    .segment
-                    .get(segment)
-                    .and_then(|s| s.base_image.as_ref())
-                    .unwrap_or(&settings.base_image),
-            ),
+        let manifest = format!("/app/{}/Cargo.toml", self.in_build(&crate_dir));
+        let mut build = format!("cargo build --release --manifest-path {}", quote(&manifest));
+        // The segment is a workspace of its own, which a fresh resolve
+        // would give the newest commit of each Git dependency, such as
+        // velo's branch: the gdl workspace's lock pins the versions its
+        // runtime was built and tested with.
+        if let Some(lock) = self.context.as_ref().and_then(|c| c.lock()) {
+            let into = format!("/app/{}/Cargo.lock", self.in_build(&crate_dir));
+            build = format!(
+                "cp {} {} && {build}",
+                quote(&format!("/app/{lock}")),
+                quote(&into)
+            );
+        }
+        let text = dockerfile(
+            &build,
+            &format!("/build/release/{package}"),
+            &self.in_build(&path),
+            &settings.build_image,
+            settings
+                .segment
+                .get(segment)
+                .and_then(|s| s.base_image.as_ref())
+                .unwrap_or(&settings.base_image),
         );
+        let files = &mut self.files;
+        files.insert(crate_dir.join("Dockerfile"), text);
         let hub = hub.map_or(String::new(), |host| {
             format!("[hub]\nhost = \"{host}\"\n\n")
         });
@@ -291,11 +420,12 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
     );
     bundle.validate_images()?;
     let mut services = serde_json::Map::new();
+    let build = bundle.build(Path::new("hub/Dockerfile"));
     services.insert(
         "hub".into(),
-        json!({"build":{"context":".","dockerfile":"hub/Dockerfile"},"healthcheck":hub_healthcheck()}),
+        json!({"build":build,"healthcheck":hub_healthcheck()}),
     );
-    let hub = bundle.hub_dockerfile("deployment.json");
+    let hub = bundle.hub_dockerfile(Path::new("deployment.json"));
     bundle.files.insert("hub/Dockerfile".into(), hub);
     let source = placement
         .segments()
@@ -309,7 +439,8 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
         // Health is reported, never waited on: no segment depends on another's, since segments
         // whose paths return wait for each other, and an order over them deadlocks. The start
         // period covers loading models.
-        let mut service = json!({"build":{"context":".","dockerfile":format!("{segment}/Dockerfile")},"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"stop_grace_period":format!("{grace}s"),"healthcheck":segment_healthcheck(),"ports":bundle.ports(segment)});
+        let build = bundle.build(&Path::new(segment).join("Dockerfile"));
+        let mut service = json!({"build":build,"depends_on":{"hub":{"condition":"service_healthy"}},"init":true,"stop_grace_period":format!("{grace}s"),"healthcheck":segment_healthcheck(),"ports":bundle.ports(segment)});
         if hosts(nodes, stdin.as_ref()) {
             keep_stdin_open(&mut service);
             reads_stdin = Some(segment);
@@ -430,26 +561,15 @@ fn drain_bound(config: &toml::Table) -> std::time::Duration {
     )
 }
 
-fn dockerfile(
-    manifest: &str,
-    package: &str,
-    config: &str,
-    hub: bool,
-    builder: &str,
-    base: &str,
-) -> String {
-    let build = if hub {
-        format!("cargo install {manifest} --locked --root /build-tools gdl-hub")
-    } else {
-        format!("cargo build --release --manifest-path {}", quote(manifest))
-    };
-    let binary = if hub {
-        format!("/build-tools/bin/{package}")
-    } else {
-        format!("/build/release/{package}")
-    };
+/// A Dockerfile that runs `build` in `builder`, and copies the `binary`
+/// it builds and the settings at `config`, a path in the build context,
+/// into `base`.
+fn dockerfile(build: &str, binary: &str, config: &str, builder: &str, base: &str) -> String {
+    // The JSON form keeps a path with spaces, which a local bundle's can
+    // hold, one source.
+    let config = serde_json::Value::from(config);
     format!(
-        "# {}\nFROM {builder} AS build\nWORKDIR /app\nCOPY . /app\nENV CARGO_TARGET_DIR=/build\nRUN {build}\nFROM {base}\nCOPY --from=build {binary} /usr/local/bin/segment\nCOPY {config} /etc/gdl/config\nENTRYPOINT [\"/usr/local/bin/segment\",\"/etc/gdl/config\"]\n",
+        "# {}\nFROM {builder} AS build\nWORKDIR /app\nCOPY . /app\nENV CARGO_TARGET_DIR=/build\nRUN {build}\nFROM {base}\nCOPY --from=build {binary} /usr/local/bin/segment\nCOPY [{config}, \"/etc/gdl/config\"]\nENTRYPOINT [\"/usr/local/bin/segment\",\"/etc/gdl/config\"]\n",
         emit::MARKER,
     )
 }
@@ -457,17 +577,25 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Write a Compose build context whose dependencies are fetched by Cargo.
-pub fn compose(spec: &Spec, fleet: Option<&Fleet>, out: &Path, target: &Path) -> Result<(), Error> {
+/// Write a Compose bundle into `out`, which must not exist, its images
+/// built from `sources`. Returns the root of the build context of a bundle
+/// of local sources, which the bundle names only relative to itself.
+pub fn compose(
+    spec: &Spec,
+    fleet: Option<&Fleet>,
+    out: &Path,
+    target: &Path,
+    sources: Sources,
+) -> Result<Option<PathBuf>, Error> {
     if out.exists() {
         return Err(Error::new(
             "Compose output already exists; choose a fresh directory",
         ));
     }
     let out = crate::dump::absolute(out)?;
-    let files = compose_files(spec, fleet, &out, target)?;
+    let (files, local) = bundle_files(spec, fleet, &out, target, sources)?;
     crate::write(&out, &files)?;
-    Ok(())
+    Ok(local)
 }
 fn io(e: impl std::fmt::Display) -> Error {
     Error::new(e.to_string())
@@ -488,7 +616,7 @@ pub fn compose_bundle(spec: &Spec, target: &Path) -> Result<ComposeBundle, Error
         .tempdir()
         .map_err(io)?;
     let out = temp.path().join("deployment");
-    compose(spec, None, &out, target)?;
+    compose(spec, None, &out, target, Sources::Fetched)?;
     let mut files = Files::new();
     let mut pending = vec![out.clone()];
     while let Some(dir) = pending.pop() {

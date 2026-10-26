@@ -8,8 +8,14 @@ fn compose_starts_segments_only_after_hub_health() {
         .prefix("gdl-compose-test-")
         .tempdir()
         .expect("valid test fixture");
-    let files = gdl_gen::compose_files(&spec, None, temp.path(), &root.join("target"))
-        .expect("valid test fixture");
+    let files = gdl_gen::compose_files(
+        &spec,
+        None,
+        temp.path(),
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("valid test fixture");
     let compose: serde_json::Value =
         serde_json::from_str(&files[Path::new("compose.yaml")]).expect("valid test fixture");
     for name in ["front", "engine"] {
@@ -84,6 +90,7 @@ fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
         None,
         &root.join("target/deployment-test"),
         &root.join("target"),
+        gdl_gen::Sources::Fetched,
     )
     .expect("valid test fixture");
     assert!(files[Path::new("front/Dockerfile")].contains("FROM ubuntu:24.04\n"));
@@ -118,8 +125,14 @@ fn the_default_images_are_distroless_and_the_pinned_toolchain() {
         .prefix("gdl-compose-defaults-")
         .tempdir()
         .expect("a directory");
-    let files =
-        gdl_gen::compose_files(&spec, None, temp.path(), &root.join("target")).expect("a bundle");
+    let files = gdl_gen::compose_files(
+        &spec,
+        None,
+        temp.path(),
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
     for dockerfile in ["front/Dockerfile", "engine/Dockerfile", "hub/Dockerfile"] {
         let text = &files[Path::new(dockerfile)];
         assert!(
@@ -173,6 +186,7 @@ fn deployment_rejects_local_node_and_message_crates() {
         None,
         &root.join("target/rejected"),
         &root.join("target"),
+        gdl_gen::Sources::Fetched,
     );
     assert!(result.is_err(), "local packages must not be deployable");
     assert!(
@@ -228,8 +242,14 @@ fn a_source_that_reads_stdin_keeps_it_open() {
         .prefix("gdl-compose-stdin-")
         .tempdir()
         .expect("a directory");
-    let files = gdl_gen::compose_files(&chat_spec(), None, temp.path(), &root.join("target"))
-        .expect("a bundle");
+    let files = gdl_gen::compose_files(
+        &chat_spec(),
+        None,
+        temp.path(),
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
     let compose: serde_json::Value =
         serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
     let services = &compose["services"];
@@ -333,8 +353,14 @@ fn a_classed_bundle_agrees_on_the_placement_hash() {
         .tempdir()
         .expect("a directory");
     let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
-    let files = gdl_gen::compose_files(&spec, Some(&fleet), temp.path(), &root.join("target"))
-        .expect("a bundle");
+    let files = gdl_gen::compose_files(
+        &spec,
+        Some(&fleet),
+        temp.path(),
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
     let deployment: gdl_model::DeploymentSpec =
         serde_json::from_str(&files[Path::new("deployment.json")]).expect("the hubs' spec");
     assert_eq!(deployment.placement.hash(), expected);
@@ -378,8 +404,14 @@ fn a_bundle_without_classes_is_pinned() {
         .prefix("gdl-compose-pin-")
         .tempdir()
         .expect("a directory");
-    let files =
-        gdl_gen::compose_files(&spec, None, temp.path(), &root.join("target")).expect("a bundle");
+    let files = gdl_gen::compose_files(
+        &spec,
+        None,
+        temp.path(),
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
     let expected = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bundle/api.txt"),
     )
@@ -433,8 +465,14 @@ fn a_bundle_without_classes_waits_only_on_liveness() {
         .prefix("gdl-compose-live-")
         .tempdir()
         .expect("a directory");
-    let files =
-        gdl_gen::compose_files(&spec, None, temp.path(), &root.join("target")).expect("a bundle");
+    let files = gdl_gen::compose_files(
+        &spec,
+        None,
+        temp.path(),
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
     let compose: serde_json::Value =
         serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
     assert_liveness(&compose, |_| "hub".into());
@@ -505,8 +543,14 @@ fn fleet_bundle(
         .prefix("gdl-compose-fleet-")
         .tempdir()
         .expect("a directory");
-    let files = gdl_gen::compose_files(spec, Some(fleet), temp.path(), &root.join("target"))
-        .expect("a bundle");
+    let files = gdl_gen::compose_files(
+        spec,
+        Some(fleet),
+        temp.path(),
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect("a bundle");
     let compose = serde_json::from_str(&files[Path::new("compose.yaml")]).expect("compose.yaml");
     (files, compose)
 }
@@ -726,7 +770,7 @@ fn a_fleet_of_two_layouts_builds_each_layouts_images_once() {
         for needle in [
             format!("--manifest-path '/app/{layout}/{segment}/Cargo.toml'"),
             format!("COPY --from=build /build/release/api-{layout}-{segment} "),
-            format!("COPY {layout}/{segment}/config.toml /etc/gdl/config"),
+            format!("COPY [\"{layout}/{segment}/config.toml\", \"/etc/gdl/config\"]"),
         ] {
             assert!(dockerfile.contains(&needle), "{needle}\nin:\n{dockerfile}");
         }
@@ -735,7 +779,9 @@ fn a_fleet_of_two_layouts_builds_each_layouts_images_once() {
     for (layout, placement) in [("split", SPLIT), ("whole", WHOLE)] {
         let hub = &files[&Path::new(layout).join("hub/Dockerfile")];
         assert!(
-            hub.contains(&format!("COPY {layout}/deployment.json /etc/gdl/config")),
+            hub.contains(&format!(
+                "COPY [\"{layout}/deployment.json\", \"/etc/gdl/config\"]"
+            )),
             "{hub}"
         );
         let deployment: gdl_model::DeploymentSpec =
@@ -886,9 +932,15 @@ fn compose_without_a_fleet_refuses_a_spec_that_deploys_by_cell() {
             .tempdir()
             .expect("a directory");
         let out = temp.path().join("bundle");
-        let error = gdl_gen::compose(&spec, None, &out, &root.join("target"))
-            .expect_err("a spec that deploys by cell")
-            .to_string();
+        let error = gdl_gen::compose(
+            &spec,
+            None,
+            &out,
+            &root.join("target"),
+            gdl_gen::Sources::Fetched,
+        )
+        .expect_err("a spec that deploys by cell")
+        .to_string();
         assert_eq!(
             error,
             format!(
@@ -918,9 +970,15 @@ fn compose_refuses_a_fleet_that_check_refuses_and_writes_nothing() {
         ("", "the fleet has no cells, so there is nothing to deploy"),
     ] {
         let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
-        let error = gdl_gen::compose(&placed(SPLIT), Some(&fleet), &out, &root.join("target"))
-            .expect_err("a refused fleet")
-            .to_string();
+        let error = gdl_gen::compose(
+            &placed(SPLIT),
+            Some(&fleet),
+            &out,
+            &root.join("target"),
+            gdl_gen::Sources::Fetched,
+        )
+        .expect_err("a refused fleet")
+        .to_string();
         assert!(error.contains(expected), "{error}");
         assert!(!out.exists());
     }
@@ -938,9 +996,15 @@ fn a_segment_that_publishes_ports_runs_in_one_cell() {
         .prefix("gdl-compose-ports-")
         .tempdir()
         .expect("a directory");
-    let error = gdl_gen::compose_files(&spec, Some(&fleet), temp.path(), &root.join("target"))
-        .expect_err("two cells publish one port")
-        .to_string();
+    let error = gdl_gen::compose_files(
+        &spec,
+        Some(&fleet),
+        temp.path(),
+        &root.join("target"),
+        gdl_gen::Sources::Fetched,
+    )
+    .expect_err("two cells publish one port")
+    .to_string();
     assert!(
         error.contains(
             "segment `front` publishes host port `8082:8082`, and runs in cells `global-eu`, `global-us`"
@@ -985,9 +1049,15 @@ fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
             .prefix("gdl-compose-ports-")
             .tempdir()
             .expect("a directory");
-        let error = gdl_gen::compose_files(&spec, Some(&fleet), temp.path(), &root.join("target"))
-            .expect_err("two cells bind one host port")
-            .to_string();
+        let error = gdl_gen::compose_files(
+            &spec,
+            Some(&fleet),
+            temp.path(),
+            &root.join("target"),
+            gdl_gen::Sources::Fetched,
+        )
+        .expect_err("two cells bind one host port")
+        .to_string();
         assert!(
             error.contains(&format!(
                 "segment `engine` publishes host port `{fixed}`, and runs in cells `model-x-01`, `model-x-02`"

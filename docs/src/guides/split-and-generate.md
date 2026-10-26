@@ -15,7 +15,7 @@ This guide takes a graph from a spec to checked, generated segment crates. [Spec
 | `check --spec <gdl.toml> [--fleet <fleet.toml>]` | Checks the spec as `generate` does, and a fleet file against it. Prints every problem. | nothing |
 | `diagram --spec <gdl.toml> --format dot\|mermaid` | Draws the placed graph. Takes a spec of one layout. | stdout |
 | `export --spec <gdl.toml> --out <file.tar.gz>` | Writes the generated crates as one archive with `build-all.sh`. Takes a spec of one layout. | the archive |
-| `compose --spec <gdl.toml> --out <dir> [--fleet <fleet.toml>]` | Writes a Docker Compose bundle. A spec with classes or several layouts needs `--fleet`. | `--out` |
+| `compose --spec <gdl.toml> --out <dir> [--fleet <fleet.toml>] [--local]` | Writes a Docker Compose bundle. A spec with classes or several layouts needs `--fleet`. With `--local`, the images build local sources, and the bundle builds only on this machine. | `--out` |
 
 Every command that builds or fetches takes `--target-dir <dir>`. The default is `$CARGO_TARGET_DIR`, else `target` beside the spec (or beside the crate, for `extract`). Each command exits non-zero on a problem.
 

@@ -6,7 +6,7 @@ This guide turns a graph spec into a Docker Compose deployment: one hub and one 
 
 A bundle builds on a Docker host from the bundle alone, so Cargo must be able to fetch every crate:
 
-- The spec is a graph spec. Its message and node crates come from Git or crates.io. A local `path` crate is refused, with the names of the crates to import again.
+- The spec is a graph spec. Its message and node crates come from Git or crates.io. A local `path` crate is refused, with the names of the crates to import again. To test crates that are not pushed, use `--local` ([Local sources](#local-sources)).
 - `[gdl]` names `gdl-runtime` by `git` and `rev`, or by `version`. The hub is installed from the same source. The revision must carry the runtime that the generator emits for, so move the pin when the generator and the runtime change together.
 - The source is pinned to a `Frontend`, or its binary reads JSON requests on stdin. A binary reads stdin when its graph has one source, the source's request is one value, and both its request and its item cross segments ([Code generation](../concepts/generation.md)). A source with neither is refused, since its segment serves nothing that a container can reach.
 
@@ -44,6 +44,18 @@ The output directory must not exist. The bundle holds:
 - `hub/Dockerfile`: installs `gdl-hub` from the `[gdl]` source.
 - `<segment>/`: the segment's generated crate, its `Dockerfile`, and its `config.toml`.
 - `compose.yaml` and a `README.md`.
+
+### Local sources
+
+To test code that is not pushed, write the bundle with `--local`. Its images build the crates that the spec names by path, and gdl and its hub from `[gdl] path`, as they are on this machine:
+
+```bash
+cargo gdl compose --local --spec examples/http/gdl.toml --out target/http-bundle
+cd target/http-bundle
+docker compose up --build
+```
+
+The build context is the nearest directory that holds the bundle, every crate that the generated manifests name by path, and the Cargo workspace of each. Write the bundle inside that directory, for example under the repository's `target/`. If the bundle and the crates share no directory but `/`, the command fails. The bundle names the context only by a relative path. `compose.yaml` says, in its field `x-gdl-local-sources`, that the bundle builds only on this machine, and the command says so on stderr, with the context's path. Each Dockerfile has an ignore file beside it, which leaves build output and Git history out of the context. A spec that names gdl by Git or version builds without `--local`. The composer does not offer this mode. With `--fleet`, each cell's hub and segments build the same way ([Deploy a fleet of cells](fleet.md#run-local-sources)).
 
 ## 3. Start it
 

@@ -37,6 +37,11 @@ pub(crate) enum Deps {
     /// by its place there; where a listed crate sits on disk decides
     /// nothing.
     Exported,
+    /// By paths relative to each manifest, and each manifest its own
+    /// workspace root: a Compose bundle that builds the crates as they are
+    /// on this machine, from a build context that holds them and the
+    /// bundle, where the relative paths resolve as they do on disk.
+    Local,
 }
 
 impl Deps {
@@ -46,17 +51,21 @@ impl Deps {
         let target = crate::dump::absolute(target).unwrap_or_else(|_| target.to_path_buf());
         let path = match self {
             Self::Exported => target,
-            Self::Relative => relative(from, &target),
+            Self::Relative | Self::Local => relative(from, &target),
         };
         crate::dump::toml_string(&display(&path))
     }
 
-    /// What ends a manifest: an empty `[workspace]` for an exported one.
+    /// What ends a manifest: an empty `[workspace]` for one that is built
+    /// outside the workspace it was written in.
     pub(crate) fn workspace(self) -> &'static str {
         match self {
             Self::Relative => "",
             Self::Exported => {
                 "\n# Its own workspace, wherever the tarball is expanded.\n[workspace]\n"
+            }
+            Self::Local => {
+                "\n# Its own workspace, though a workspace may hold the bundle.\n[workspace]\n"
             }
         }
     }
@@ -312,6 +321,13 @@ fn regenerate_command(
     deps: Deps,
 ) -> String {
     let file = spec.file.file_name().unwrap_or_default();
+    if deps == Deps::Local {
+        let spec_file = display(&relative(crate_dir, &spec_dir.join(file)));
+        return format!(
+            "cargo gdl compose --local --spec \"{}\" --out <directory>",
+            spec_file.escape_debug()
+        );
+    }
     if deps == Deps::Exported {
         // A spec given as text is in the archive, beside the segments.
         if spec.text.is_some() {
