@@ -1,4 +1,4 @@
-use super::{Cell, CellChoice, CellPolicy, CellRequest, CellState, cut};
+use super::{Cell, CellChoice, CellPolicy, CellRequest, CellState, NoCell, cut};
 use crate::select::Encoded;
 
 /// `round_robin`: the cells the chooser follows take turns, whatever their
@@ -110,9 +110,14 @@ impl CellPolicy for RoundRobin {
 
     /// [`choose_where`](RoundRobin::choose_where), keeping every cell, with
     /// no lease.
-    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<CellChoice> {
+    fn choose(
+        &self,
+        request: CellRequest<'_, Encoded>,
+        cells: &[Cell],
+    ) -> Result<CellChoice, NoCell> {
         self.choose_where(request, cells, |_| true)
             .map(CellChoice::new)
+            .ok_or_else(NoCell::new)
     }
 }
 
@@ -155,6 +160,7 @@ mod tests {
                     .with_turn(turn);
                 RoundRobin
                     .choose(request, cells)
+                    .ok()
                     .map(|choice| choice.at())
                     .map_or_else(|| "-".to_string(), |at| cells[at].name.clone())
             })
@@ -288,6 +294,7 @@ mod tests {
                         .map(|at| cells[at].name.clone());
                     let alone = RoundRobin
                         .choose(request, &copy)
+                        .ok()
                         .map(|choice| choice.at())
                         .map(|at| copy[at].name.clone());
                     assert_eq!(whole, alone, "mask {mask:06b}, turn {turn}");

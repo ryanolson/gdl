@@ -17,8 +17,14 @@ struct Route<P>(PhantomData<fn() -> P>);
 impl<P: Projection> CellPolicy for Route<P> {
     type Head = Projected<P>;
 
-    fn choose(&self, _: CellRequest<'_, Self::Head>, cells: &[Cell]) -> Option<gdl::CellChoice> {
-        (!cells.is_empty()).then(|| gdl::CellChoice::new(0))
+    fn choose(
+        &self,
+        _: CellRequest<'_, Self::Head>,
+        cells: &[Cell],
+    ) -> Result<gdl::CellChoice, gdl::NoCell> {
+        (!cells.is_empty())
+            .then(|| gdl::CellChoice::new(0))
+            .ok_or_else(gdl::NoCell::new)
     }
 }
 

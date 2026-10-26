@@ -49,7 +49,7 @@ pub use items::{Items, items};
 pub use metrics::Metrics;
 pub use policy::{
     Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, CellState, ChoiceLease, Damped,
-    HomeFirst, Load, LoadSummary, RoundRobin,
+    HomeFirst, Load, LoadSummary, NoCell, RoundRobin,
 };
 /// The prometheus version node metrics are built with: a node crate names
 /// its metric types through here, so they are the types the runtime

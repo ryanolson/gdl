@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use arc_swap::ArcSwap;
 use futures::future::BoxFuture;
 use gdl::__runtime::{ChoiceHeld, Erased, ErasedPolicy, Picked};
-use gdl::{CellChoice, CellPolicies, CellRequest, Cx, Error, ErrorKind, Instances, Result};
+use gdl::{CellPolicies, CellRequest, Cx, Error, ErrorKind, Instances, NoCell, Result};
 use gdl_model::{Encoding, Layout};
 use velo::InstanceId;
 
@@ -59,7 +59,8 @@ impl Crossing {
     /// and head `head`, then an instance of it by `policy`, with the
     /// chosen cell's [`id`](CellTable::id) and a lease on its follow,
     /// which holds the cell policy's lease on the choice, if it gave one, or
-    /// `None` when no cell but those in `excluded` may take it: one load
+    /// [`NoCell`], with the policy's reason if it gave one, when no cell
+    /// but those in `excluded` may take it: one load
     /// of the table, a read of the clock, two counter increments, the cell
     /// policy's read of the head and its passes over the followed cells,
     /// and the lease, with no lock and no allocation of the runtime's. A
@@ -73,28 +74,29 @@ impl Crossing {
         policy: Policy,
         random: &RandomState,
         excluded: &[u64],
-    ) -> Result<Option<(InstanceId, u64, CellLease)>> {
+    ) -> Result<Result<(InstanceId, u64, CellLease), NoCell>> {
         for _ in 0..CHOICES {
             let table = self.target.table.load();
-            let Some((cell, choice)) = self.cell(&table, cx, head, excluded)? else {
-                return Ok(None);
+            let (cell, choice) = match self.cell(&table, cx, head, excluded)? {
+                Ok(chosen) => chosen,
+                Err(no) => return Ok(Err(no)),
             };
             let Some(lease) = CellLease::take(&cell.leases) else {
                 continue;
             };
             let sequence = cell.turn.fetch_add(1, Ordering::Relaxed);
-            return Ok(Some((
+            return Ok(Ok((
                 cell.eligible[turn(policy, sequence, cell.eligible.len(), random)],
                 cell.id,
                 lease.with_choice(choice),
             )));
         }
-        Ok(None)
+        Ok(Err(NoCell::new()))
     }
 
     /// Choose a cell for one attempt, then ask `selector` to choose among
-    /// that cell's eligible entry instances alone; `None` when no cell but
-    /// those in `excluded` may take it. A selector may wait, so the choice
+    /// that cell's eligible entry instances alone; [`NoCell`] when no cell
+    /// but those in `excluded` may take it. A selector may wait, so the choice
     /// is checked when it returns: if the instance is no
     /// longer eligible in the cell's current table, or the cell itself no
     /// longer is by the cell policy (it stopped taking work, or, under
@@ -111,12 +113,13 @@ impl Crossing {
         head: &'a [u8],
         encoding: gdl_model::Encoding,
         excluded: &'a [u64],
-    ) -> BoxFuture<'a, Result<Option<Chosen>>> {
+    ) -> BoxFuture<'a, Result<Result<Chosen, NoCell>>> {
         Box::pin(async move {
             for _ in 0..CHOICES {
                 let table = self.target.table.load_full();
-                let Some((cell, choice)) = self.cell(&table, cx, head, excluded)? else {
-                    return Ok(None);
+                let (cell, choice) = match self.cell(&table, cx, head, excluded)? {
+                    Ok(chosen) => chosen,
+                    Err(no) => return Ok(Err(no)),
                 };
                 let cell = Arc::clone(cell);
                 let picked = selector
@@ -144,7 +147,7 @@ impl Crossing {
                 let lease = still_eligible(&current, &cell, chosen, policy)
                     .and_then(|now| CellLease::take(&now.leases));
                 if let Some(lease) = lease {
-                    return Ok(Some((chosen, cell.id, picked, lease.with_choice(choice))));
+                    return Ok(Ok((chosen, cell.id, picked, lease.with_choice(choice))));
                 }
             }
             Err(Error::routing(format!(
@@ -155,12 +158,24 @@ impl Crossing {
     }
 
     /// The request's `Routing` error when no cell of the class may take
-    /// it: a request never waits for a cell to appear.
-    pub(crate) fn no_cell(&self) -> Error {
-        Error::routing(format!(
-            "no ready cell of class `{}` has an instance of segment `{}`",
-            self.target.class, self.target.segment
-        ))
+    /// it (`no`): a request never waits for a cell to appear. A policy's
+    /// reason follows its name, the class, and the segment; it replaces
+    /// the claim that no cell is ready, since a policy may refuse while
+    /// every cell is. The reason is copied into the message, which is
+    /// built here in any case: a reason costs the policy's own allocation,
+    /// if it made one, and its bytes in the message.
+    pub(crate) fn no_cell(&self, no: NoCell) -> Error {
+        let target = &self.target;
+        match no.reason() {
+            None => Error::routing(format!(
+                "no ready cell of class `{}` has an instance of segment `{}`",
+                target.class, target.segment
+            )),
+            Some(reason) => Error::routing(format!(
+                "cell policy `{}` of class `{}` chose no cell for segment `{}`: {reason}",
+                target.name, target.class, target.segment
+            )),
+        }
     }
 
     /// The class this hand-off enters.
@@ -187,16 +202,17 @@ impl Crossing {
     /// The cell the policy chooses from `table` for one attempt of the
     /// request with context `cx` and head `head`, of those not in
     /// `excluded`, by the summaries' ages now, with the policy's lease on
-    /// the choice, if it gave one: one relaxed increment of the attempts'
-    /// count, which a policy that draws at random hashes when it asks.
-    /// Fails when the policy cannot read the head.
+    /// the choice, if it gave one, or the policy's [`NoCell`]: one relaxed
+    /// increment of the attempts' count, which a policy that draws at
+    /// random hashes when it asks. Fails when the policy cannot read the
+    /// head.
     fn cell<'t>(
         &self,
         table: &'t EntryTable,
         cx: &Cx,
         head: &[u8],
         excluded: &[u64],
-    ) -> Result<Option<(&'t Arc<CellTable>, Option<ChoiceHeld>)>> {
+    ) -> Result<Result<Celled<'t>, NoCell>> {
         let target = &self.target;
         let turn = self.draws.fetch_add(1, Ordering::Relaxed) as u64;
         let damped = target.damping.view();
@@ -206,17 +222,18 @@ impl Crossing {
             .with_damped(&damped)
             .with_turn(turn)
             .with_random(&self.random);
-        let Some((at, choice)) = target
-            .policy
-            .choose(request, self.encoding, &table.views)?
-            .map(CellChoice::into_parts)
-        else {
-            return Ok(None);
+        let (at, choice) = match target.policy.choose(request, self.encoding, &table.views)? {
+            Ok(choice) => choice.into_parts(),
+            Err(no) => return Ok(Err(no)),
         };
         // A policy names a cell by its place in the views it was given,
         // which are the table's, index for index; a place past them is
         // no cell.
-        Ok(table.cells.get(at).map(|cell| (cell, choice)))
+        Ok(table
+            .cells
+            .get(at)
+            .map(|cell| (cell, choice))
+            .ok_or_else(NoCell::new))
     }
 
     /// Refuse a cell policy that reads the head as a type the crossing's
@@ -283,6 +300,10 @@ fn still_eligible<'t>(
 /// [`id`](CellTable::id), what the selector picked, and the lease on the
 /// cell's follow.
 pub(crate) type Chosen = (InstanceId, u64, Picked, CellLease);
+
+/// A cell policy's choice: the chosen cell's table, and the policy's lease
+/// on the choice, if it gave one.
+type Celled<'t> = (&'t Arc<CellTable>, Option<ChoiceHeld>);
 
 /// What a hand-off into another class chooses from: the class, its entry
 /// segment, the chooser's table of that segment's cells, the chooser's
@@ -431,8 +452,8 @@ mod tests {
             &self,
             _: CellRequest<'_, gdl::Projected<Hinted>>,
             _: &[gdl::Cell],
-        ) -> Option<gdl::CellChoice> {
-            None
+        ) -> std::result::Result<gdl::CellChoice, NoCell> {
+            Err(NoCell::new())
         }
     }
 
@@ -515,15 +536,135 @@ mod tests {
             vec![cell("m", CellState::Unavailable, &[])],
             Within::Policy(Policy::RoundRobin),
         );
-        assert!(
-            crossing
-                .pick(&cx, &[], Policy::RoundRobin, &RandomState::new(), &[])
-                .expect("a pick")
-                .is_none()
-        );
-        let error = crossing.no_cell();
+        let no = crossing
+            .pick(&cx, &[], Policy::RoundRobin, &RandomState::new(), &[])
+            .expect("a pick")
+            .expect_err("no cell");
+        assert_eq!(no, gdl::NoCell::new());
+        let error = crossing.no_cell(no);
         assert_eq!(error.kind(), gdl::ErrorKind::Routing);
-        assert!(error.to_string().contains("`model_x`"), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "routing error: no ready cell of class `model_x` has an instance of segment `f`"
+        );
+    }
+
+    /// Refuses every request, naming why.
+    struct Refusing;
+
+    impl gdl::CellPolicy for Refusing {
+        type Head = gdl::Encoded;
+
+        fn choose(
+            &self,
+            _: CellRequest<'_, gdl::Encoded>,
+            _: &[gdl::Cell],
+        ) -> std::result::Result<gdl::CellChoice, gdl::NoCell> {
+            Err(gdl::NoCell::because("no set serves model `mistral`"))
+        }
+    }
+
+    /// A policy's reason for choosing no cell reaches the request's
+    /// `Routing` error, by a pick and by a selector's choice alike, after
+    /// the policy, the class, and the segment, and with no claim that no
+    /// cell is ready: every cell here is.
+    #[tokio::test]
+    async fn a_policy_reason_for_no_cell_reaches_the_error() {
+        let ids = ids(1);
+        let mut crossing = crossing(
+            vec![cell("m", CellState::Ready, &ids)],
+            Within::Policy(Policy::RoundRobin),
+        );
+        crossing.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(Refusing)));
+        crossing.target.name = Arc::from("refusing");
+        let cx = Cx::new();
+        let picked = crossing
+            .pick(&cx, &[], Policy::RoundRobin, &RandomState::new(), &[])
+            .expect("a pick")
+            .expect_err("no cell");
+        let selector = gdl::__runtime::Typed(Arc::new(gdl::LeastLoaded::new()));
+        let Err(chosen) = crossing
+            .choose(&selector, &cx, &[], Default::default(), &[])
+            .await
+            .expect("a choice")
+        else {
+            panic!("a cell");
+        };
+        for no in [picked, chosen] {
+            assert_eq!(no.reason(), Some("no set serves model `mistral`"));
+            let error = crossing.no_cell(no);
+            assert_eq!(error.kind(), gdl::ErrorKind::Routing);
+            assert_eq!(
+                error.to_string(),
+                "routing error: cell policy `refusing` of class `model_x` chose no cell for segment `f`: \
+                 no set serves model `mistral`"
+            );
+        }
+    }
+
+    /// Refuses every request with no reason, a fixed one, or one built
+    /// for the request.
+    enum Reasoning {
+        None,
+        Fixed,
+        Built(&'static str),
+    }
+
+    impl gdl::CellPolicy for Reasoning {
+        type Head = gdl::Encoded;
+
+        fn choose(
+            &self,
+            _: CellRequest<'_, gdl::Encoded>,
+            _: &[gdl::Cell],
+        ) -> std::result::Result<gdl::CellChoice, NoCell> {
+            Err(match self {
+                Self::None => NoCell::new(),
+                Self::Fixed => NoCell::because("no set serves the model"),
+                Self::Built(model) => NoCell::because(format!("no set serves model `{model}`")),
+            })
+        }
+    }
+
+    /// What choosing no cell costs, in time, for the record in the book: a
+    /// pick that the policy refuses and the request's error made from it,
+    /// with no reason, a fixed one, and one built for the request. Ignored:
+    /// it times, and asserts nothing. Run it in release:
+    /// `cargo test --release -p gdl-runtime --lib cost_of_no_cell -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a timing, not a check"]
+    fn cost_of_no_cell_and_its_reason() {
+        const PICKS: u32 = 1_000_000;
+        let ids = ids(1);
+        let cx = Cx::new();
+        let random = RandomState::new();
+        for (name, policy) in [
+            ("no reason", Reasoning::None),
+            ("a fixed reason", Reasoning::Fixed),
+            ("a built reason", Reasoning::Built("mistral")),
+        ] {
+            let mut crossing = crossing(
+                vec![cell("m", CellState::Ready, &ids)],
+                Within::Policy(Policy::RoundRobin),
+            );
+            crossing.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(policy)));
+            let mut best = Duration::MAX;
+            for _ in 0..5 {
+                let start = Instant::now();
+                for _ in 0..PICKS {
+                    let picked = crossing
+                        .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                        .expect("a pick");
+                    let Err(no) = picked else { panic!("a cell") };
+                    std::hint::black_box(crossing.no_cell(no));
+                }
+                best = best.min(start.elapsed());
+            }
+            println!(
+                "no cell, {name}: {:.1} ns",
+                best.as_nanos() as f64 / f64::from(PICKS)
+            );
+        }
     }
 
     /// A cell the request excluded is passed over, by the policy and by a
@@ -548,9 +689,9 @@ mod tests {
                 .expect("a pick")
                 .map(|(id, cell, _)| (id, cell))
         };
-        assert_eq!(pick(&[]), Some((ids[0], m1)));
-        assert_eq!(pick(&[m1]), Some((ids[1], m2)));
-        assert_eq!(pick(&[m1, m2]), None);
+        assert_eq!(pick(&[]), Ok((ids[0], m1)));
+        assert_eq!(pick(&[m1]), Ok((ids[1], m2)));
+        assert_eq!(pick(&[m1, m2]), Err(gdl::NoCell::new()));
         let selector = gdl::__runtime::Typed(Arc::new(gdl::LeastLoaded::new()));
         let cx = Cx::new();
         let chosen = crossing
@@ -558,12 +699,12 @@ mod tests {
             .await
             .expect("a choice")
             .map(|(id, cell, _, _)| (id, cell));
-        assert_eq!(chosen, Some((ids[1], m2)));
+        assert_eq!(chosen, Ok((ids[1], m2)));
         let none = crossing
             .choose(&selector, &cx, &[], Default::default(), &[m1, m2])
             .await
             .expect("no error");
-        assert!(none.is_none());
+        assert!(none.is_err());
     }
 
     /// The first call waits at a gate, then takes `target`; later calls
@@ -690,7 +831,7 @@ mod tests {
                 crossing
                     .choose(&selector, &cx, &[], Default::default(), &[])
                     .await
-                    .map(|chosen| chosen.map(|(id, cell, _, _)| (id, cell)))
+                    .map(|chosen| chosen.ok().map(|(id, cell, _, _)| (id, cell)))
             }
         });
         tokio::time::timeout(WAIT, waiting.arrived.notified())

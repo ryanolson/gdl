@@ -10,6 +10,7 @@
 //! itself, so that it tests its policy without a hub or a runtime.
 
 use std::any::TypeId;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::{BuildHasher, RandomState};
@@ -39,7 +40,7 @@ pub use round_robin::RoundRobin;
 /// offer, and again for each cell that declines it, up to `[runtime]
 /// cell_failovers` more times. It is synchronous and runs on every
 /// hand-off into the class, so it should take no lock and allocate
-/// nothing.
+/// nothing when it chooses a cell.
 pub trait CellPolicy: Send + Sync + 'static {
     /// What the policy reads of the request's head: the head's own type,
     /// [`Encoded`](crate::Encoded), or a [`Projected`](crate::Projected)
@@ -47,12 +48,17 @@ pub trait CellPolicy: Send + Sync + 'static {
     /// the segment starts.
     type Head: Head;
 
-    /// The cell in `cells` to send this attempt to, or `None` when no
-    /// cell may take it, which fails the request with `Routing`. `cells`
-    /// are the class's cells the chooser follows, in a fixed order: by
-    /// class and cell. A choice with a lease learns whether its cell
-    /// accepted the offer ([`CellChoice::with_lease`]).
-    fn choose(&self, request: CellRequest<'_, Self::Head>, cells: &[Cell]) -> Option<CellChoice>;
+    /// The cell in `cells` to send this attempt to, or [`NoCell`] when no
+    /// cell may take it, which fails the request with `Routing` and the
+    /// reason the policy gave, if any. `cells` are the class's cells the
+    /// chooser follows, in a fixed order: by class and cell. A choice with
+    /// a lease learns whether its cell accepted the offer
+    /// ([`CellChoice::with_lease`]).
+    fn choose(
+        &self,
+        request: CellRequest<'_, Self::Head>,
+        cells: &[Cell],
+    ) -> Result<CellChoice, NoCell>;
 
     /// Whether `cell`, which this policy chose, may still be sent to at
     /// `now`: a choice that waited on a selector is checked again with
@@ -130,6 +136,45 @@ impl fmt::Debug for CellChoice {
             .field("at", &self.at)
             .field("lease", &self.lease.is_some())
             .finish()
+    }
+}
+
+/// A cell policy chose no cell for this attempt, with a short reason or
+/// none. The first attempt's `NoCell` fails the request with `Routing`,
+/// and its reason follows the class and the segment in the error, so a
+/// policy can name what no cell serves: "no set serves model `mistral`".
+/// A failover attempt's `NoCell` ends the failover, and the request fails
+/// with the last cell's refusal, which says more than the policy can.
+///
+/// `NoCell` is two words, as a reason is a [`Cow`]: a policy's return is
+/// no larger than an `Option<CellChoice>` would be, and a choice costs
+/// nothing more. A fixed reason allocates nothing; a reason built per
+/// request allocates only when no cell is chosen.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NoCell {
+    reason: Option<Cow<'static, str>>,
+}
+
+impl NoCell {
+    /// No cell, with no reason: the error says that no ready cell of the
+    /// class has an instance of the segment.
+    #[inline]
+    pub fn new() -> Self {
+        Self { reason: None }
+    }
+
+    /// No cell, because of `reason`: a short phrase, such as "no set
+    /// serves model `mistral`", that the request's `Routing` error carries.
+    pub fn because(reason: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            reason: Some(reason.into()),
+        }
+    }
+
+    /// The reason the policy gave, if it gave one.
+    #[inline]
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
     }
 }
 
@@ -495,7 +540,7 @@ pub trait ErasedPolicy: Send + Sync + 'static {
         request: CellRequest<'_, ()>,
         encoding: Encoding,
         cells: &[Cell],
-    ) -> Result<Option<CellChoice>>;
+    ) -> Result<Result<CellChoice, NoCell>>;
 
     fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool;
 
@@ -517,7 +562,7 @@ impl<P: CellPolicy> ErasedPolicy for TypedPolicy<P> {
         request: CellRequest<'_, ()>,
         encoding: Encoding,
         cells: &[Cell],
-    ) -> Result<Option<CellChoice>> {
+    ) -> Result<Result<CellChoice, NoCell>> {
         let head = <P::Head as Sealed>::decode(request.bytes, encoding)?;
         Ok(self.0.choose(request.with_head(&head), cells))
     }
@@ -704,12 +749,13 @@ mod tests {
             &self,
             request: CellRequest<'_, Projected<Hinted>>,
             cells: &[Cell],
-        ) -> Option<CellChoice> {
+        ) -> std::result::Result<CellChoice, NoCell> {
             let model = &request.head().hint.model;
             cells
                 .iter()
                 .position(|cell| cell.name() == model)
                 .map(CellChoice::new)
+                .ok_or_else(NoCell::new)
         }
     }
 
@@ -747,6 +793,26 @@ mod tests {
         assert_eq!(std::mem::size_of::<CellChoice>(), 16);
     }
 
+    /// A policy's return with a reason is no larger than one without
+    /// could be, so a choice pays nothing for it; a fixed reason is
+    /// borrowed, and a reason built for the request is kept.
+    #[test]
+    fn no_cell_carries_its_reason_at_no_cost_to_a_choice() {
+        use std::mem::size_of;
+
+        assert_eq!(
+            size_of::<std::result::Result<CellChoice, NoCell>>(),
+            size_of::<Option<CellChoice>>()
+        );
+        assert_eq!(NoCell::new().reason(), None);
+        assert_eq!(NoCell::default(), NoCell::new());
+        let fixed = NoCell::because("draining");
+        assert!(matches!(fixed.reason, Some(Cow::Borrowed("draining"))));
+        let model = "mistral";
+        let built = NoCell::because(format!("no set serves model `{model}`"));
+        assert_eq!(built.reason(), Some("no set serves model `mistral`"));
+    }
+
     /// A projection reads its fields from the whole request in either
     /// encoding that names fields, and names the edge type it projects,
     /// not its own; a request without its fields fails with `Codec`.
@@ -770,7 +836,7 @@ mod tests {
                     .choose(request, encoding, &cells)
                     .expect("read")
                     .map(|choice| choice.at()),
-                Some(1),
+                Ok(1),
                 "{encoding:?}"
             );
             let other = crate::codec::encoder::<Hint>(encoding)(&routed.hint).expect("encoded");

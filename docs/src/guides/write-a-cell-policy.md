@@ -44,7 +44,7 @@ The derive refuses `#[serde(deny_unknown_fields)]` on a projection, which skips 
 ## 2. Implement `gdl::CellPolicy`
 
 ```rust
-use gdl::{Cell, CellChoice, CellPolicy, CellRequest, Projected};
+use gdl::{Cell, CellChoice, CellPolicy, CellRequest, NoCell, Projected};
 
 /// The first cell that serves the request's model.
 struct ByModel;
@@ -52,22 +52,27 @@ struct ByModel;
 impl CellPolicy for ByModel {
     type Head = Projected<Hinted>;
 
-    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<CellChoice> {
-        let model = &request.head().hint.model;
-        let at = cells.iter().position(|cell| {
-            cell.name().starts_with(model.as_str())
-                && cell.takes_work()
-                && !request.is_excluded(cell)
-        })?;
-        Some(CellChoice::new(at))
+    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Result<CellChoice, NoCell> {
+        let model = request.head().hint.model.as_str();
+        let serves = |cell: &Cell| cell.name().starts_with(model);
+        if !cells.iter().any(serves) {
+            return Err(NoCell::because(format!("no cell serves model `{model}`")));
+        }
+        let at = cells
+            .iter()
+            .position(|cell| serves(cell) && cell.takes_work() && !request.is_excluded(cell))
+            .ok_or_else(NoCell::new)?;
+        Ok(CellChoice::new(at))
     }
 }
 ```
 
-- Return a `CellChoice` of the index in `cells` of the cell to offer this attempt to, or `None` when no cell may take it. `None` fails the request with `Routing`.
+- Return a `CellChoice` of the index in `cells` of the cell to offer this attempt to, or a `NoCell` when no cell may take it. A `NoCell` fails the request with `Routing`.
+- Give a `NoCell` a short reason with `NoCell::because` when the error should say why, such as the model that no cell serves. The error then reads ``cell policy `by_model` of class `model` chose no cell for segment `d`: no cell serves model `mistral` ``. `NoCell::new()` gives no reason, and the error says that no ready cell has an instance of the segment.
+- A reason is a `Cow<'static, str>`. A fixed `&'static str` allocates nothing. A reason that you `format!` allocates only when no cell is chosen. The reason reaches the error only on the first attempt. After a decline, the request fails with the last cell's refusal.
 - Skip a cell that `request.is_excluded` names: it declined this request.
 - `request` also gives the chooser's region, the clock, the damped cells (`request.damped()`), the attempt's turn, and a random draw (`request.draw()`).
-- `choose` is not `async`, and it runs once per attempt. Take no lock and allocate nothing in it.
+- `choose` is not `async`, and it runs once per attempt. Take no lock in it, and allocate nothing when it chooses a cell.
 - Override `eligible` when a cell can stop fitting while a selector waits, as `home_first` does for a stale summary. By default, a cell is eligible while it takes work.
 
 ### Choose as gdl's own policies do, among the cells you keep
@@ -81,10 +86,12 @@ use tokio::time::Instant;
 impl CellPolicy for ByModel {
     type Head = Projected<Hinted>;
 
-    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Option<CellChoice> {
+    fn choose(&self, request: CellRequest<'_, Projected<Hinted>>, cells: &[Cell]) -> Result<CellChoice, NoCell> {
         let model = request.head().hint.model.as_str();
-        let at = HomeFirst.choose_where(request, cells, |cell| cell.name().starts_with(model))?;
-        Some(CellChoice::new(at))
+        let at = HomeFirst
+            .choose_where(request, cells, |cell| cell.name().starts_with(model))
+            .ok_or_else(NoCell::new)?;
+        Ok(CellChoice::new(at))
     }
 
     fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
@@ -119,7 +126,7 @@ impl ChoiceLease for Record {
 }
 
 // In `choose`:
-Some(CellChoice::new(at).with_lease(Record { store, fingerprint, cell: cells[at].name().into() }))
+Ok(CellChoice::new(at).with_lease(Record { store, fingerprint, cell: cells[at].name().into() }))
 ```
 
 - The runtime calls `accepted` once if the chosen cell accepts the offer. Then it holds the lease while the sending segment holds the request, as it holds a selector's lease, and drops it.
@@ -145,7 +152,7 @@ let cells = [
 let cx = Cx::new();
 let head = Projected(Hinted { hint: Hint { model: "qwen".into(), fingerprint: [0; 16], first_turn: true } });
 let request = CellRequest::new(&cx, &head, "us-east-1", now);
-assert_eq!(ByModel.choose(request, &cells).map(|choice| choice.at()), Some(1));
+assert_eq!(ByModel.choose(request, &cells).map(|choice| choice.at()), Ok(1));
 ```
 
 Both versions of `ByModel` choose `qwen-1` here. The `home_first` version takes no cell whose summary is missing, or has no period (`LoadSummary::default()` has none). `with_excluded`, `with_damped` (a `gdl::Damped`), and `with_turn` set the rest. `crates/gdl/tests/policies.rs` has more.

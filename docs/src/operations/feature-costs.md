@@ -156,6 +156,37 @@ The same comparison on a quiet host (gb300, aarch64 Neoverse-V2, 72 cores, load 
 
 With the lease as a `Box<dyn ChoiceLease>`, a choice and the offer's lease were three words each. Every pick paid for that, with or without a lease. Behind one more box, each is two words, and a choice costs what an index did. A lease then allocates twice. `send_forward`'s future went from 896 to 848 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`), and the front's call future stayed at 11,504 bytes (`requests sizes 0`).
 
+### A reason for no cell
+
+A policy's `choose` returns `Result<CellChoice, NoCell>`. A `NoCell` holds an optional reason as a `Cow<'static, str>`, so the return is 24 bytes, as `Option<CellChoice>` was (`no_cell_carries_its_reason_at_no_cost_to_a_choice`). `send_forward`'s future stays at 848 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). A pick allocates nothing, also under a registered policy that builds a reason when it refuses (`a_pick_allocates_nothing_under_either_policy`).
+
+On a quiet host (gb300, aarch64 Neoverse-V2, rustc 1.93.1), pinned to core 8, load average under 4, three runs each, with a spread of 0.1 ns or less per row. Base `56bcf77`, change `b9e783b`. The control is the change without its new tests in the library's test binary, so that it differs from the change only by where the code is placed:
+
+| Measure | Base | Control | Change |
+|---|---|---|---|
+| pick, `round_robin`, four idle cells | 121.9 ns | 123.5 to 123.6 ns | 124.5 to 124.6 ns |
+| pick, `home_first`, four idle cells | 164.6 to 164.7 ns | 165.5 ns | 164.8 ns |
+| boundary pick | 133 ns | 135 ns | 136 ns |
+| boundary pick and acceptance | 150 to 151 ns | 155 ns | 154 ns |
+| accepted first offer over loopback, cells | 27.6 to 28.1 us | | 28.4 to 31.8 us |
+| accepted first offer over loopback, roster | 27.5 to 28.0 us | | 27.4 to 31.2 us |
+
+The offers over loopback vary from run to run, the roster's as much as the cells', so they show no change. The control and the change differ by up to 1 ns either way, from code placement alone. The rest, 1 to 3 ns per `round_robin` pick and per boundary pick, is the change's path, which this measurement does not split further. An accepted offer takes about 28 us, so this is under 0.01% of it.
+
+What choosing no cell costs, as a pick that the policy refuses and the request's error made from it, measured the same way at `b9e783b`:
+
+```bash
+cargo test --release -p gdl-runtime --lib cost_of_no_cell -- --ignored --nocapture --test-threads=1
+```
+
+| No cell | Time |
+|---|---|
+| no reason | 123.4 ns |
+| a fixed reason | 142.1 ns |
+| a reason built with `format!` | 162.5 ns |
+
+The error message is built in every case. A reason adds its bytes to the message, and a built reason adds the policy's own allocation, only when no cell is chosen.
+
 ## Reading the followed cells
 
 A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by, then, in the bench, one cell found by name among four and one withdrawal looked up. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`).

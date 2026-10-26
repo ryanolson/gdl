@@ -9,8 +9,8 @@ pub struct Whole;
 impl CellPolicy for Whole {
     type Head = Words;
 
-    fn choose(&self, _: CellRequest<'_, Words>, _: &[Cell]) -> Option<gdl::CellChoice> {
-        None
+    fn choose(&self, _: CellRequest<'_, Words>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        Err(gdl::NoCell::new())
     }
 }
 
@@ -20,8 +20,8 @@ pub struct Bytes;
 impl CellPolicy for Bytes {
     type Head = Encoded;
 
-    fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Option<gdl::CellChoice> {
-        None
+    fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        Err(gdl::NoCell::new())
     }
 }
 
@@ -36,8 +36,8 @@ pub struct Unit;
 impl CellPolicy for Unit {
     type Head = ();
 
-    fn choose(&self, _: CellRequest<'_, ()>, _: &[Cell]) -> Option<gdl::CellChoice> {
-        None
+    fn choose(&self, _: CellRequest<'_, ()>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        Err(gdl::NoCell::new())
     }
 }
 
@@ -50,8 +50,8 @@ pub mod globbed {
     impl CellPolicy for Globbed {
         type Head = Encoded;
 
-        fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Option<gdl::CellChoice> {
-            None
+        fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+            Err(gdl::NoCell::new())
         }
     }
 }
@@ -83,8 +83,8 @@ pub mod nested {
     impl CellPolicy for Parted {
         type Head = Projected<Part>;
 
-        fn choose(&self, _: CellRequest<'_, Projected<Part>>, _: &[Cell]) -> Option<gdl::CellChoice> {
-            None
+        fn choose(&self, _: CellRequest<'_, Projected<Part>>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+            Err(gdl::NoCell::new())
         }
     }
 }
@@ -100,8 +100,8 @@ mod hidden {
     impl CellPolicy for Hidden {
         type Head = Encoded;
 
-        fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Option<gdl::CellChoice> {
-            None
+        fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+            Err(gdl::NoCell::new())
         }
     }
 }
@@ -112,8 +112,8 @@ pub struct Generic<T>(T);
 impl<T: Send + Sync + 'static> CellPolicy for Generic<T> {
     type Head = Encoded;
 
-    fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Option<gdl::CellChoice> {
-        None
+    fn choose(&self, _: CellRequest<'_, Encoded>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        Err(gdl::NoCell::new())
     }
 }
 
@@ -126,8 +126,8 @@ pub mod parent {
     impl CellPolicy for FromParent {
         type Head = ();
 
-        fn choose(&self, _: CellRequest<'_, ()>, _: &[Cell]) -> Option<gdl::CellChoice> {
-            None
+        fn choose(&self, _: CellRequest<'_, ()>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+            Err(gdl::NoCell::new())
         }
     }
 }
@@ -166,8 +166,8 @@ pub mod aliased {
         impl Routing for Renamed {
             type Head = gdl::Encoded;
 
-            fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, _: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-                None
+            fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+                Err(gdl::NoCell::new())
             }
         }
     }
@@ -184,8 +184,8 @@ pub mod crate_import {
     impl gdl::CellPolicy for ThroughCrate {
         type Head = ();
 
-        fn choose(&self, _: CellRequest<'_, ()>, _: &[Cell]) -> Option<gdl::CellChoice> {
-            None
+        fn choose(&self, _: CellRequest<'_, ()>, _: &[Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+            Err(gdl::NoCell::new())
         }
     }
 }

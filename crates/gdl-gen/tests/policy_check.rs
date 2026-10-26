@@ -106,8 +106,8 @@ pub struct ByModel;
 impl gdl::CellPolicy for ByModel {
     type Head = ();
 
-    fn choose(&self, _: gdl::CellRequest<'_, ()>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    fn choose(&self, _: gdl::CellRequest<'_, ()>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
     }
 }
 
@@ -250,8 +250,8 @@ impl gdl::Build for ByModel {
 
 impl gdl::CellPolicy for ByModel {
     type Head = gdl::Encoded;
-    fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
     }
 }
 "#,
@@ -387,8 +387,8 @@ mod implementation {
     impl CellPolicy for ByModel {
         type Head = gdl::Encoded;
 
-        fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-            None
+        fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+            Err(gdl::NoCell::new())
         }
     }
 
@@ -496,8 +496,8 @@ mod implementation {
     impl Routing for ByModel {
         type Head = gdl::Encoded;
 
-        fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-            None
+        fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+            Err(gdl::NoCell::new())
         }
     }
 
@@ -1032,8 +1032,8 @@ fn check_refuses_a_policy_that_reads_another_message() {
 impl gdl::CellPolicy for ByModel {
     type Head = policy_messages::Answer;
 
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
     }
 }
 "#,
@@ -1062,8 +1062,8 @@ pub struct Ask {
 impl gdl::CellPolicy for ByModel {
     type Head = Ask;
 
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
     }
 }
 "#,
@@ -1082,8 +1082,8 @@ fn check_refuses_a_policy_that_reads_unit_where_a_message_crosses() {
 impl gdl::CellPolicy for ByModel {
     type Head = ();
 
-    fn choose(&self, _: gdl::CellRequest<'_, ()>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    fn choose(&self, _: gdl::CellRequest<'_, ()>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
     }
 }
 "#,
@@ -1109,8 +1109,8 @@ pub struct Part {{
 impl gdl::CellPolicy for ByModel {{
     type Head = gdl::Projected<Part>;
 
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {{
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {{
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
     }}
 }}
 "#
@@ -1139,8 +1139,8 @@ fn check_accepts_an_encoded_head_on_any_edge() {
 impl gdl::CellPolicy for ByModel {
     type Head = gdl::Encoded;
 
-    fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    fn choose(&self, _: gdl::CellRequest<'_, gdl::Encoded>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
     }
 }
 "#,
@@ -1181,8 +1181,8 @@ impl gdl::Build for ByModel {
 impl gdl::CellPolicy for ByModel {
     type Head = gdl::Projected<Part>;
 
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Option<gdl::CellChoice> {
-        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new)
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, cells: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> {
+        cells.iter().position(gdl::Cell::takes_work).map(gdl::CellChoice::new).ok_or_else(gdl::NoCell::new)
     }
 }
 
@@ -1254,13 +1254,13 @@ impl gdl::Build for ByModel {
 #[cfg(feature = "matching")]
 impl gdl::CellPolicy for ByModel {
     type Head = policy_messages::Ask;
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Option<gdl::CellChoice> { None }
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> { Err(gdl::NoCell::new()) }
 }
 
 #[cfg(not(feature = "matching"))]
 impl gdl::CellPolicy for ByModel {
     type Head = policy_messages::Answer;
-    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Option<gdl::CellChoice> { None }
+    fn choose(&self, _: gdl::CellRequest<'_, Self::Head>, _: &[gdl::Cell]) -> Result<gdl::CellChoice, gdl::NoCell> { Err(gdl::NoCell::new()) }
 }
 "#,
     );

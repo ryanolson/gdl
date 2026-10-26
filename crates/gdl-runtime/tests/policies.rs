@@ -14,7 +14,7 @@ use common::cells::{
 };
 use common::{WAIT, collect};
 use gdl::{
-    Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, Cx, Items, Next, Projected,
+    Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, Cx, Items, Next, NoCell, Projected,
     Projection, Sink, items,
 };
 use gdl_model::CellSettings;
@@ -59,7 +59,8 @@ struct Hinted {
     hint: Hint,
 }
 
-/// The cell whose name starts with the request's model.
+/// The cell whose name starts with the request's model; a model that no
+/// cell serves is named in the request's error.
 struct ByModel;
 
 impl CellPolicy for ByModel {
@@ -69,16 +70,17 @@ impl CellPolicy for ByModel {
         &self,
         request: CellRequest<'_, Projected<Hinted>>,
         cells: &[Cell],
-    ) -> Option<CellChoice> {
-        let model = &request.head().hint.model;
+    ) -> Result<CellChoice, NoCell> {
+        let model = request.head().hint.model.as_str();
+        let serves = |cell: &Cell| cell.name().starts_with(model);
+        if !cells.iter().any(serves) {
+            return Err(NoCell::because(format!("no cell serves model `{model}`")));
+        }
         cells
             .iter()
-            .position(|cell| {
-                cell.name().starts_with(model.as_str())
-                    && cell.takes_work()
-                    && !request.is_excluded(cell)
-            })
+            .position(|cell| serves(cell) && cell.takes_work() && !request.is_excluded(cell))
             .map(CellChoice::new)
+            .ok_or_else(NoCell::new)
     }
 }
 
@@ -95,8 +97,12 @@ struct Misreading;
 impl CellPolicy for Misreading {
     type Head = Projected<Misread>;
 
-    fn choose(&self, _: CellRequest<'_, Projected<Misread>>, _: &[Cell]) -> Option<CellChoice> {
-        None
+    fn choose(
+        &self,
+        _: CellRequest<'_, Projected<Misread>>,
+        _: &[Cell],
+    ) -> Result<CellChoice, NoCell> {
+        Err(NoCell::new())
     }
 }
 
@@ -210,7 +216,8 @@ fn routed(model: &str) -> Routed {
 /// Two model cells of one class, and a frontend whose policy reads only
 /// the request's hint: two requests that differ only in the hint's model
 /// reach different cells, each the cell that serves the model, with the
-/// whole request. A model no cell serves fails with `Routing`.
+/// whole request. A model no cell serves fails with `Routing`, which
+/// names the model as the policy gave it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_hint_chooses_the_cell_across_the_class_cut() {
     let spec = spec("by_model");
@@ -283,7 +290,10 @@ async fn the_hint_chooses_the_cell_across_the_class_cut() {
     }
     let error = ask("mistral").await.expect_err("no cell serves mistral");
     assert_eq!(error.kind(), gdl::ErrorKind::Routing, "{error}");
-    assert!(error.to_string().contains("`model`"), "{error}");
+    let message = error.to_string();
+    for part in ["`model`", "by_model", "no cell serves model `mistral`"] {
+        assert!(message.contains(part), "{part}: {message}");
+    }
     for (hub, model) in models {
         model.stop().await;
         hub.shutdown().await.expect("valid test fixture");
@@ -476,7 +486,11 @@ impl gdl::Build for Gated {
 impl CellPolicy for Gated {
     type Head = Projected<Hinted>;
 
-    fn choose(&self, request: CellRequest<'_, Self::Head>, cells: &[Cell]) -> Option<CellChoice> {
+    fn choose(
+        &self,
+        request: CellRequest<'_, Self::Head>,
+        cells: &[Cell],
+    ) -> Result<CellChoice, NoCell> {
         ByModel.choose(request, cells)
     }
 }

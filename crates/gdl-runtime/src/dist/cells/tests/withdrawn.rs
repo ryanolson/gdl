@@ -356,7 +356,7 @@ fn a_gate_reads_the_availability_of_the_entry_it_sends_to() {
             &routed.views,
         )
         .map(|choice| choice.at()),
-        Some(0),
+        Ok(0),
         "g's cell policy can choose the cell"
     );
     assert!(

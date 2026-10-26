@@ -12,7 +12,8 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use gdl::__runtime::{ErasedPolicy, TypedPolicy};
 use gdl::{
-    Cell, CellChoice, CellPolicy, CellRequest, CellState, Cx, Encoding, Projected, Projection,
+    Cell, CellChoice, CellPolicy, CellRequest, CellState, Cx, Encoding, NoCell, Projected,
+    Projection,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -55,12 +56,17 @@ struct Whole;
 impl CellPolicy for Whole {
     type Head = Routed;
 
-    fn choose(&self, request: CellRequest<'_, Routed>, cells: &[Cell]) -> Option<CellChoice> {
+    fn choose(
+        &self,
+        request: CellRequest<'_, Routed>,
+        cells: &[Cell],
+    ) -> Result<CellChoice, NoCell> {
         let model = &request.head().hint.model;
         cells
             .iter()
             .position(|cell| cell.name() == model)
             .map(CellChoice::new)
+            .ok_or_else(NoCell::new)
     }
 }
 
@@ -74,12 +80,13 @@ impl CellPolicy for Hinting {
         &self,
         request: CellRequest<'_, Projected<Hinted>>,
         cells: &[Cell],
-    ) -> Option<CellChoice> {
+    ) -> Result<CellChoice, NoCell> {
         let model = &request.head().hint.model;
         cells
             .iter()
             .position(|cell| cell.name() == model)
             .map(CellChoice::new)
+            .ok_or_else(NoCell::new)
     }
 }
 
@@ -122,7 +129,7 @@ fn read(c: &mut Criterion) {
                 b.iter(|| {
                     let request = CellRequest::new(&cx, &(), "r", Instant::now()).with_bytes(bytes);
                     let chosen = policy.choose(request, encoding, &cells).expect("read");
-                    assert_eq!(black_box(chosen).map(|choice| choice.at()), Some(1));
+                    assert_eq!(black_box(chosen).map(|choice| choice.at()), Ok(1));
                 });
             });
         }

@@ -658,7 +658,7 @@ impl Runtime {
                     let (instance, cell, mut held) = self
                         .choose_cell(crossing, cx, &mut envelope, &[])
                         .await?
-                        .ok_or_else(|| crossing.no_cell())?;
+                        .map_err(|no| crossing.no_cell(no))?;
                     let (offering, sent) = self.deliver(instance, &envelope, timed)?;
                     return match super::cells::answer(offering.await, crossing, cell, &mut held) {
                         Answer::Accepted(accepted) => Ok(Handed {

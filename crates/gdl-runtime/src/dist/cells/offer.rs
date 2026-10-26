@@ -14,7 +14,7 @@
 //! chooser's damping of a cell that declined ([`super::damping`]), written
 //! only when a cell declines, or when a damped cell accepts.
 
-use gdl::{Cx, Result};
+use gdl::{Cx, NoCell, Result};
 use velo::InstanceId;
 
 use super::Crossing;
@@ -48,15 +48,15 @@ impl Runtime {
     /// of it by the hop's router: the instance, the cell's
     /// [`id`](super::CellTable::id), and what the offer holds while the
     /// request is held, a selector's lease and the lease on the cell's
-    /// follow, with the selector's meta added to `envelope`. `None` when
-    /// no such cell may take it.
+    /// follow, with the selector's meta added to `envelope`. [`NoCell`]
+    /// when no such cell may take it.
     pub(crate) async fn choose_cell(
         &self,
         crossing: &Crossing,
         cx: &Cx,
         envelope: &mut Forward,
         offered: &[u64],
-    ) -> Result<Option<(InstanceId, u64, Held)>> {
+    ) -> Result<Result<(InstanceId, u64, Held), NoCell>> {
         match crossing.within() {
             Within::Policy(policy) => Ok(crossing
                 .pick(cx, &envelope.payload, *policy, self.random(), offered)?
@@ -103,7 +103,9 @@ impl Runtime {
             if let Within::Selector { .. } = crossing.within() {
                 envelope.cx = WireCx::of(cx);
             }
-            let Some((instance, cell, mut held)) =
+            // A policy's reason for no cell is dropped here: the last
+            // refusal says more about this request than the policy can.
+            let Ok((instance, cell, mut held)) =
                 self.choose_cell(crossing, cx, envelope, &offered).await?
             else {
                 break;
@@ -456,7 +458,8 @@ mod tests {
         assert_eq!(reading.0.load(Ordering::SeqCst), 2, "a choice per cell");
     }
 
-    /// Sends a prompt to the cell whose name is its text.
+    /// Sends a prompt to the cell whose name is its text, and says why
+    /// when there is none or that cell declined.
     struct ByText;
 
     impl gdl::CellPolicy for ByText {
@@ -466,12 +469,16 @@ mod tests {
             &self,
             request: gdl::CellRequest<'_, Prompt>,
             cells: &[gdl::Cell],
-        ) -> Option<gdl::CellChoice> {
+        ) -> std::result::Result<gdl::CellChoice, NoCell> {
             let text = &request.head().text;
-            cells
+            let at = cells
                 .iter()
                 .position(|cell| cell.name() == text)
-                .map(gdl::CellChoice::new)
+                .ok_or_else(|| NoCell::because(format!("no cell is named `{text}`")))?;
+            if request.is_excluded(&cells[at]) {
+                return Err(NoCell::because(format!("cell `{text}` declined")));
+            }
+            Ok(gdl::CellChoice::new(at))
         }
     }
 
@@ -479,7 +486,10 @@ mod tests {
     /// and chooses the cell: two requests that differ only in the field
     /// it reads are offered to different cells, each to the one it names,
     /// over velo. A head it cannot read fails the request with `Codec`,
-    /// and offers it to no cell.
+    /// and offers it to no cell. A head that names no cell fails with
+    /// `Routing` and the policy's reason. A cell that declines leaves the
+    /// request its refusal, not the reason the policy gives for choosing
+    /// no other cell.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_registered_policy_chooses_the_cell_by_the_head() {
         let layout = layout_under(gdl_model::CellPolicy {
@@ -513,14 +523,26 @@ mod tests {
         )
         .expect("a runtime");
         let accepted = crate::dist::envelope::encode(&Ok::<Accepted, Error>(None)).expect("encode");
+        let declined = crate::dist::envelope::encode(&Err::<Accepted, Error>(Error::new(
+            ErrorKind::Overloaded,
+            "full",
+        )))
+        .expect("encode");
+        let full = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let offers: Vec<Arc<AtomicUsize>> = entries.iter().map(|_| Arc::default()).collect();
         for (entry, offers) in entries.iter().zip(&offers) {
-            let (offers, accepted) = (Arc::clone(offers), accepted.clone());
+            let (offers, accepted, declined) =
+                (Arc::clone(offers), accepted.clone(), declined.clone());
+            let full = Arc::clone(&full);
             Fabric::new(entry.clone(), None, None, Duration::from_secs(30))
                 .register(&rt.names().forward, move |_| {
                     offers.fetch_add(1, Ordering::SeqCst);
-                    let accepted = accepted.clone();
-                    Box::pin(async move { accepted })
+                    let reply = if full.load(Ordering::SeqCst) {
+                        declined.clone()
+                    } else {
+                        accepted.clone()
+                    };
+                    Box::pin(async move { reply })
                 })
                 .expect("a handler");
         }
@@ -596,11 +618,23 @@ mod tests {
         assert_eq!(offered(), [1, 2]);
         let error = send(prompt("m3")).await.expect_err("no cell is m3");
         assert_eq!(error.kind(), ErrorKind::Routing, "{error}");
+        assert!(
+            error.to_string().contains("no cell is named `m3`"),
+            "{error}"
+        );
         let error = send(b"not json".to_vec())
             .await
             .expect_err("no head to read");
         assert_eq!(error.kind(), ErrorKind::Codec, "{error}");
         assert_eq!(offered(), [1, 2], "a request no cell may take was offered");
+        full.store(true, Ordering::SeqCst);
+        let error = send(prompt("m1")).await.expect_err("m1 declined");
+        assert_eq!(offered(), [2, 2], "m1 was offered it once");
+        assert_eq!(error.kind(), ErrorKind::Overloaded, "{error}");
+        assert!(
+            error.to_string().contains("full") && !error.to_string().contains("declined"),
+            "{error}"
+        );
     }
 
     /// The crossing into `model_x` of [`layout`], over `cells`, each with
@@ -763,7 +797,7 @@ mod tests {
             for _ in 0..5 {
                 let start = std::time::Instant::now();
                 for _ in 0..PICKS {
-                    std::hint::black_box(
+                    let _ = std::hint::black_box(
                         crossing
                             .pick(&cx, &[], Policy::RoundRobin, &random, &[])
                             .expect("a pick"),
@@ -865,7 +899,8 @@ mod tests {
         }
     }
 
-    /// Chooses as `home_first` or `round_robin` among every cell but `m2`.
+    /// Chooses as `home_first` or `round_robin` among every cell but `m2`,
+    /// and builds a reason when none is left.
     struct KeptBut(bool);
 
     impl gdl::CellPolicy for KeptBut {
@@ -875,7 +910,7 @@ mod tests {
             &self,
             request: gdl::CellRequest<'_, gdl::Encoded>,
             cells: &[gdl::Cell],
-        ) -> Option<gdl::CellChoice> {
+        ) -> std::result::Result<gdl::CellChoice, NoCell> {
             let keep = |cell: &gdl::Cell| cell.name() != "m2";
             let at = if self.0 {
                 gdl::HomeFirst.choose_where(request, cells, keep)
@@ -883,6 +918,7 @@ mod tests {
                 gdl::RoundRobin.choose_where(request, cells, keep)
             };
             at.map(gdl::CellChoice::new)
+                .ok_or_else(|| NoCell::because(format!("none of {} cells is kept", cells.len())))
         }
     }
 
@@ -890,7 +926,8 @@ mod tests {
     /// nor under a registered one that runs either over the cells it
     /// keeps, also while a cell's damping window lasts, which takes the
     /// pass that sets which damped cells are passed over, and with a cell
-    /// excluded.
+    /// excluded. The registered ones build a reason when they choose no
+    /// cell, which allocates then and only then.
     #[test]
     fn a_pick_allocates_nothing_under_either_policy() {
         let cx = Cx::new();
@@ -938,6 +975,21 @@ mod tests {
             if name.starts_with("kept") {
                 assert!(!chosen.contains(&cell_id("model_x", "m2")), "{name}");
             }
+            let every = ["m1", "m2", "m3", "m4"].map(|cell| cell_id("model_x", cell));
+            let before = counted();
+            counting(true);
+            let no = crossing
+                .pick(&cx, &[], Policy::RoundRobin, &random, &every)
+                .expect("a pick")
+                .expect_err("no cell");
+            counting(false);
+            let built = counted() - before;
+            if name.starts_with("kept") {
+                assert_eq!(no.reason(), Some("none of 4 cells is kept"));
+                assert!(built > 0, "a {name} reason was built");
+            } else {
+                assert_eq!((no, built), (NoCell::new(), 0), "{name}");
+            }
         }
     }
 
@@ -958,9 +1010,11 @@ mod tests {
             &self,
             request: gdl::CellRequest<'_, gdl::Encoded>,
             cells: &[gdl::Cell],
-        ) -> Option<gdl::CellChoice> {
-            let at = gdl::RoundRobin.choose_where(request, cells, |_| true)?;
-            Some(gdl::CellChoice::new(at).with_lease(Idle(0)))
+        ) -> std::result::Result<gdl::CellChoice, NoCell> {
+            let at = gdl::RoundRobin
+                .choose_where(request, cells, |_| true)
+                .ok_or_else(NoCell::new)?;
+            Ok(gdl::CellChoice::new(at).with_lease(Idle(0)))
         }
     }
 

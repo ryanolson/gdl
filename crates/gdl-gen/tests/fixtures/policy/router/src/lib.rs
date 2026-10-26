@@ -35,19 +35,25 @@ impl Build for ByModel {
 impl CellPolicy for ByModel {
     type Head = Ask;
 
-    fn choose(&self, request: CellRequest<'_, Ask>, cells: &[Cell]) -> Option<CellChoice> {
+    fn choose(
+        &self,
+        request: CellRequest<'_, Ask>,
+        cells: &[Cell],
+    ) -> std::result::Result<CellChoice, gdl::NoCell> {
         let model = &request.head().model;
-        let chosen = self.models.get(model).and_then(|cell| {
-            cells.iter().position(|c| {
-                c.name() == cell.as_str() && c.takes_work() && !request.is_excluded(c)
-            })
-        });
+        let Some(cell) = self.models.get(model) else {
+            tracing::warn!(model, "no cell serves the model");
+            return Err(gdl::NoCell::because(format!("no cell serves model `{model}`")));
+        };
+        let chosen = cells
+            .iter()
+            .position(|c| c.name() == cell.as_str() && c.takes_work() && !request.is_excluded(c));
         // The reason reaches only the log, as a set router's does: the
         // binary's tests read it there.
         match chosen {
             Some(index) => tracing::info!(model, cell = cells[index].name(), "chose a cell"),
             None => tracing::warn!(model, "no cell serves the model"),
         }
-        chosen.map(CellChoice::new)
+        chosen.map(CellChoice::new).ok_or_else(gdl::NoCell::new)
     }
 }

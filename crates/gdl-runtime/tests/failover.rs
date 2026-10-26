@@ -26,7 +26,7 @@ use common::{Chunk, Events, Plan, Prompt, WAIT, collect, prompt, reference_graph
 use futures::StreamExt;
 use gdl::{
     Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, Choice, ChoiceLease, Cx, Encoded,
-    ErrorKind, Instances, Next, Request, RoundRobin, Selector, Selectors,
+    ErrorKind, Instances, Next, NoCell, Request, RoundRobin, Selector, Selectors,
 };
 use gdl_runtime::{
     CellState, Cells, Deployment, DeploymentSpec, Register, RequestRouter, RuntimeConfig,
@@ -869,9 +869,15 @@ impl Drop for Told {
 impl CellPolicy for Outcomes {
     type Head = Encoded;
 
-    fn choose(&self, request: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<CellChoice> {
-        let at = RoundRobin.choose_where(request, cells, |_| true)?;
-        Some(CellChoice::new(at).with_lease(Told {
+    fn choose(
+        &self,
+        request: CellRequest<'_, Encoded>,
+        cells: &[Cell],
+    ) -> Result<CellChoice, NoCell> {
+        let at = RoundRobin
+            .choose_where(request, cells, |_| true)
+            .ok_or_else(NoCell::new)?;
+        Ok(CellChoice::new(at).with_lease(Told {
             log: Arc::clone(&self.0),
             cell: cells[at].name().to_string(),
         }))

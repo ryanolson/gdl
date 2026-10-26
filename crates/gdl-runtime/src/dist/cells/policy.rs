@@ -53,8 +53,16 @@ mod tests {
     impl gdl::CellPolicy for Last {
         type Head = Encoded;
 
-        fn choose(&self, _: CellRequest<'_, Encoded>, cells: &[Cell]) -> Option<gdl::CellChoice> {
-            cells.len().checked_sub(1).map(gdl::CellChoice::new)
+        fn choose(
+            &self,
+            _: CellRequest<'_, Encoded>,
+            cells: &[Cell],
+        ) -> Result<gdl::CellChoice, gdl::NoCell> {
+            cells
+                .len()
+                .checked_sub(1)
+                .map(gdl::CellChoice::new)
+                .ok_or_else(gdl::NoCell::new)
         }
     }
 
@@ -139,7 +147,7 @@ mod tests {
                 .choose(request, Default::default(), &cells)
                 .expect("no head to read")
                 .map(|choice| choice.at()),
-            Some(1)
+            Ok(1)
         );
     }
 }

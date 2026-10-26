@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gdl::{
     Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, CellState, Cx, Damped, HomeFirst,
-    Load, LoadSummary, Projected, Projection, RoundRobin,
+    Load, LoadSummary, NoCell, Projected, Projection, RoundRobin,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -41,7 +41,8 @@ struct Hinted {
 }
 
 /// Sends a request to a cell whose name starts with its model, and,
-/// among those, as `home_first` would.
+/// among those, as `home_first` would. It names a model that no cell
+/// serves.
 struct ByModel;
 
 impl CellPolicy for ByModel {
@@ -51,11 +52,16 @@ impl CellPolicy for ByModel {
         &self,
         request: CellRequest<'_, Projected<Hinted>>,
         cells: &[Cell],
-    ) -> Option<CellChoice> {
+    ) -> Result<CellChoice, NoCell> {
         let model = request.head().hint.model.as_str();
+        let serves = |cell: &Cell| cell.name().starts_with(model);
+        if !cells.iter().any(serves) {
+            return Err(NoCell::because(format!("no cell serves model `{model}`")));
+        }
         HomeFirst
-            .choose_where(request, cells, |cell| cell.name().starts_with(model))
+            .choose_where(request, cells, serves)
             .map(CellChoice::new)
+            .ok_or_else(NoCell::new)
     }
 
     /// As `home_first` checks it, since it chooses as `home_first` does.
@@ -110,9 +116,12 @@ fn the_hint_chooses_the_cell() {
             .choose(CellRequest::new(&cx, &head, HOME, now), &cells)
             .map(|choice| choice.at())
     };
-    assert_eq!(chosen("llama"), Some(0));
-    assert_eq!(chosen("qwen"), Some(1));
-    assert_eq!(chosen("mistral"), None);
+    assert_eq!(chosen("llama"), Ok(0));
+    assert_eq!(chosen("qwen"), Ok(1));
+    assert_eq!(
+        chosen("mistral"),
+        Err(NoCell::because("no cell serves model `mistral`"))
+    );
 }
 
 /// A policy reads the request's excluded cells and the cells' state as
@@ -131,10 +140,14 @@ fn a_policy_sees_what_the_runtime_gives_it() {
     let request = CellRequest::new(&cx, &head, HOME, now).with_excluded(&excluded);
     assert_eq!(request.region(), HOME);
     assert_eq!(request.now(), now);
-    assert_eq!(ByModel.choose(request, &cells).map(|c| c.at()), Some(1));
+    assert_eq!(ByModel.choose(request, &cells).map(|c| c.at()), Ok(1));
     let excluded = [cells[0].id(), cells[1].id()];
     let request = CellRequest::new(&cx, &head, HOME, now).with_excluded(&excluded);
-    assert!(ByModel.choose(request, &cells).is_none(), "a draining cell");
+    assert_eq!(
+        ByModel.choose(request, &cells).map(|c| c.at()),
+        Err(NoCell::new()),
+        "a draining cell, with no reason"
+    );
     // A cell is named the same in every table: its class and name.
     assert_eq!(
         cells[0].id(),
@@ -174,7 +187,10 @@ fn a_policy_chooses_as_gdls_own_among_the_cells_it_keeps() {
         (0..64)
             .filter_map(|turn| {
                 let request = CellRequest::new(&cx, &head, HOME, now).with_turn(turn);
-                ByModel.choose(request, &cells).map(|choice| choice.at())
+                ByModel
+                    .choose(request, &cells)
+                    .ok()
+                    .map(|choice| choice.at())
             })
             .collect()
     };
@@ -226,7 +242,7 @@ fn the_guide_fixture_works_with_home_first() {
         Some(1),
         "the guide's first policy works with this fixture"
     );
-    assert_eq!(ByModel.choose(request, &cells).map(|c| c.at()), Some(1));
+    assert_eq!(ByModel.choose(request, &cells).map(|c| c.at()), Ok(1));
 }
 
 /// gdl's own policies take the same inputs that a policy crate builds:
@@ -247,7 +263,10 @@ fn home_first_runs_on_inputs_a_policy_crate_builds() {
                 let request = CellRequest::new(&cx, &gdl::Encoded, HOME, now)
                     .with_damped(damped)
                     .with_turn(turn);
-                HomeFirst.choose(request, &cells).map(|choice| choice.at())
+                HomeFirst
+                    .choose(request, &cells)
+                    .ok()
+                    .map(|choice| choice.at())
             })
             .map(|at| cells[at].name())
             .collect()
@@ -263,7 +282,10 @@ fn home_first_runs_on_inputs_a_policy_crate_builds() {
         .with_entries(1)
         .with_load(idle(now - Duration::from_secs(31)))];
     let request = CellRequest::new(&cx, &gdl::Encoded, HOME, now);
-    assert!(HomeFirst.choose(request, &stale).is_none());
+    assert_eq!(
+        HomeFirst.choose(request, &stale).map(|c| c.at()),
+        Err(NoCell::new())
+    );
     assert!(!HomeFirst.eligible(&stale[0], HOME, now));
     assert!(HomeFirst.eligible(&cells[0], HOME, now));
 }
@@ -314,8 +336,10 @@ impl CellPolicy for ByUnrenamed {
         &self,
         request: CellRequest<'_, Projected<Unrenamed>>,
         _: &[Cell],
-    ) -> Option<CellChoice> {
-        (!request.head().hint.model.is_empty()).then(|| CellChoice::new(0))
+    ) -> Result<CellChoice, NoCell> {
+        (!request.head().hint.model.is_empty())
+            .then(|| CellChoice::new(0))
+            .ok_or_else(NoCell::new)
     }
 }
 
