@@ -71,6 +71,9 @@ pub fn cell_from_vars(
 /// pace its settings give ([`CellTiming::from_settings`]): `relay`, reporting to its parent's hub
 /// ([`HubDirectory`]), or `dir`. `memory` is one directory inside one
 /// process, which no other hub could read, so a hub process refuses it.
+/// Settings made in code are checked as reading them checks them
+/// ([`gdl_model::check_hub_timing`]): a timing the hub cannot run at is
+/// refused, naming its key.
 pub fn hub_builder(
     config: HubConfig,
     spec: DeploymentSpec,
@@ -80,6 +83,9 @@ pub fn hub_builder(
         return Ok(Hub::builder(config).extension(GraphAdmission::new(spec)));
     };
     let builder = Hub::builder(config).extension(GraphAdmission::new(spec.clone()));
+    // Settings made in code skip the reader's checks.
+    gdl_model::check_hub_timing(&cell.timing)
+        .map_err(|problem| CellError::new(problem.to_string()))?;
     let timing = CellTiming::from_settings(&cell.timing);
     match &cell.directory {
         DirectoryBackend::Relay { parent_hub } => {

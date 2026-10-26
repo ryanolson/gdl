@@ -408,6 +408,45 @@ fn settings(directory: DirectoryBackend) -> CellSettings {
     }
 }
 
+/// A lease that expires between heartbeats must be refused for settings built in Rust too.
+#[test]
+fn hub_builder_refuses_a_typed_lease_no_longer_than_its_heartbeat() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-timing-")
+        .tempdir()
+        .expect("a directory");
+    let mut cell = settings(DirectoryBackend::Dir {
+        path: dir.path().to_path_buf(),
+    });
+    assert!(hub_builder(config(), spec(), Some(cell.clone())).is_ok());
+    cell.timing.lease = cell.timing.heartbeat;
+    let result = hub_builder(config(), spec(), Some(cell));
+    assert!(
+        result.is_err(),
+        "hub_builder accepted lease_ms = heartbeat_ms = 10000"
+    );
+    let error = result.err().expect("the invalid lease is refused");
+    assert!(error.to_string().contains("lease_ms"), "{error}");
+}
+
+/// A watch buffer past its ceiling, built in code, is refused as the
+/// reader refuses it, naming its key, before the hub takes its slots.
+#[test]
+fn hub_builder_refuses_a_typed_watch_buffer_past_its_ceiling() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-timing-")
+        .tempdir()
+        .expect("a directory");
+    let mut cell = settings(DirectoryBackend::Dir {
+        path: dir.path().to_path_buf(),
+    });
+    cell.timing.watch_buffer = HubTiming::MAX_WATCH_BUFFER + 1;
+    let Err(error) = hub_builder(config(), spec(), Some(cell)) else {
+        panic!("hub_builder accepted a watch buffer past its ceiling");
+    };
+    assert!(error.to_string().contains("watch_buffer"), "{error}");
+}
+
 /// With `dir`, the hub runs the cell's extension, which publishes the
 /// cell's record into the directory's files.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

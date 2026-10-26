@@ -350,7 +350,7 @@ impl CellSettings {
             });
             Problems::from(problem)
         })?;
-        Ok(Self::try_from(table)?)
+        Self::try_from(table)
     }
 
     fn problems(&self, layout: &Layout, segment: Option<&str>) -> Vec<Problem> {
@@ -647,11 +647,11 @@ impl Backend {
 }
 
 impl TryFrom<Table> for CellSettings {
-    type Error = Problem;
+    type Error = Problems;
 
-    fn try_from(table: Table) -> Result<Self, Problem> {
+    fn try_from(table: Table) -> Result<Self, Problems> {
         let at = |key: &str, message: String| {
-            Problem::at(Some("cell".into()), Some(key.into()), message)
+            Problems::from(Problem::at(Some("cell".into()), Some(key.into()), message))
         };
         if let Some(parent_hub) = &table.parent_hub {
             if !matches!(table.directory, Backend::Relay) {
@@ -665,7 +665,7 @@ impl TryFrom<Table> for CellSettings {
             }
             check_hub_address(parent_hub).map_err(|why| at("parent_hub", why))?;
         }
-        let timing = hub_timing(&table).map_err(|(key, why)| at(key, why))?;
+        let timing = hub_timing(&table)?;
         let directory = match (table.directory, table.dir) {
             (Backend::Relay, None) => DirectoryBackend::Relay {
                 parent_hub: table.parent_hub,
@@ -718,80 +718,103 @@ impl TryFrom<Table> for CellSettings {
 }
 
 /// The hub's timing that `table` sets, each key it leaves out at its
-/// default, or the key that is refused and why. The lease is checked
-/// against the heartbeat as the hub will run them, defaults included, and
-/// a refusal names the one of the two that was set, the lease when both
-/// were.
-fn hub_timing(table: &Table) -> Result<HubTiming, (&'static str, String)> {
-    let at_least_one = |key: &'static str, value: u64| {
-        if value == 0 {
-            Err((key, "is 0; it is at least 1".to_string()))
-        } else {
-            Ok(())
-        }
-    };
+/// default, or the key that is refused and why ([`check_hub_timing`]).
+/// The lease is checked against the heartbeat as the hub will run them,
+/// defaults included, and a refusal names the one of the two that was
+/// set, the lease when both were.
+fn hub_timing(table: &Table) -> Result<HubTiming, Problems> {
     let defaults = HubTiming::default();
     let millis_or =
         |value: Option<u64>, default: Duration| value.map_or(default, Duration::from_millis);
-    if let Some(heartbeat) = table.heartbeat_ms {
-        at_least_one("heartbeat_ms", heartbeat)?;
-    }
-    if let Some(lease) = table.lease_ms {
-        at_least_one("lease_ms", lease)?;
-    }
-    let heartbeat = millis_or(table.heartbeat_ms, defaults.heartbeat);
-    let lease = millis_or(table.lease_ms, defaults.lease);
-    if lease <= heartbeat {
-        let (heartbeat_ms, lease_ms) = (millis(heartbeat), millis(lease));
-        return Err(if table.lease_ms.is_some() {
-            (
-                "lease_ms",
+    let caps = &table.watch_caps;
+    let timing = HubTiming {
+        hold: millis_or(table.hold_ms, defaults.hold),
+        heartbeat: millis_or(table.heartbeat_ms, defaults.heartbeat),
+        lease: millis_or(table.lease_ms, defaults.lease),
+        watch_buffer: table.watch_buffer.unwrap_or(defaults.watch_buffer),
+        watch_caps: WatchCaps {
+            cell: caps.cell.unwrap_or(defaults.watch_caps.cell),
+            relay: caps.relay.unwrap_or(defaults.watch_caps.relay),
+            follow: caps.follow.unwrap_or(defaults.watch_caps.follow),
+        },
+    };
+    check_hub_timing(&timing).map_err(|problems| {
+        // The lease left at its default: the heartbeat that was set is
+        // what to change.
+        let lease = |problem: &Problem| problem.key.as_deref() == Some("lease_ms");
+        if table.lease_ms.is_none() && problems.0.iter().any(lease) {
+            Problems::from(Problem::at(
+                Some("cell".into()),
+                Some("heartbeat_ms".into()),
                 format!(
-                    "is {lease_ms}; it must be longer than the heartbeat, {heartbeat_ms} ms, or readers let the record lapse between two publishes"
+                    "is {}; it must be shorter than the lease, {} ms by default: set `lease_ms` longer too",
+                    millis(timing.heartbeat),
+                    millis(timing.lease)
                 ),
-            )
+            ))
         } else {
-            (
-                "heartbeat_ms",
-                format!(
-                    "is {heartbeat_ms}; it must be shorter than the lease, {lease_ms} ms by default: set `lease_ms` longer too"
-                ),
-            )
-        });
+            problems
+        }
+    })?;
+    Ok(timing)
+}
+
+/// Whether a cell's hub can run at `timing`: a heartbeat and a lease of at
+/// least 1 ms, a lease longer than the heartbeat, so that readers do not
+/// let the record lapse between two publishes, a watch buffer from 1 to
+/// [`HubTiming::MAX_WATCH_BUFFER`], and no watch cap of 0. The problem
+/// names its key in `[cell]`. Reading [`CellSettings`] applies it; a hub
+/// applies it again to settings made in code.
+pub fn check_hub_timing(timing: &HubTiming) -> Result<(), Problems> {
+    let at = |key: &str, message: String| {
+        Err(Problems::from(Problem::at(
+            Some("cell".into()),
+            Some(key.into()),
+            message,
+        )))
+    };
+    let (heartbeat_ms, lease_ms) = (millis(timing.heartbeat), millis(timing.lease));
+    if timing.heartbeat < Duration::from_millis(1) {
+        return at("heartbeat_ms", "is 0; it is at least 1".into());
     }
-    let watch_buffer = table.watch_buffer.unwrap_or(defaults.watch_buffer);
-    if watch_buffer == 0 {
-        return Err(("watch_buffer", "is 0; it is at least 1".into()));
+    if timing.lease < Duration::from_millis(1) {
+        return at("lease_ms", "is 0; it is at least 1".into());
     }
-    if watch_buffer > HubTiming::MAX_WATCH_BUFFER {
-        return Err((
+    if timing.lease <= timing.heartbeat {
+        return at(
+            "lease_ms",
+            format!(
+                "is {lease_ms}; it must be longer than the heartbeat, {heartbeat_ms} ms, or readers let the record lapse between two publishes"
+            ),
+        );
+    }
+    if timing.watch_buffer == 0 {
+        return at("watch_buffer", "is 0; it is at least 1".into());
+    }
+    if timing.watch_buffer > HubTiming::MAX_WATCH_BUFFER {
+        return at(
             "watch_buffer",
             format!(
-                "is {watch_buffer}; it is at most {}",
+                "is {}; it is at most {}",
+                timing.watch_buffer,
                 HubTiming::MAX_WATCH_BUFFER
             ),
-        ));
+        );
     }
-    let cap = |key: &'static str, value: Option<usize>, default: usize| match value {
-        Some(0) => Err((
-            key,
-            "is 0, which refuses every watch; it is at least 1".to_string(),
-        )),
-        Some(cap) => Ok(cap),
-        None => Ok(default),
-    };
-    let caps = &table.watch_caps;
-    Ok(HubTiming {
-        hold: millis_or(table.hold_ms, defaults.hold),
-        heartbeat,
-        lease,
-        watch_buffer,
-        watch_caps: WatchCaps {
-            cell: cap("watch_caps.cell", caps.cell, defaults.watch_caps.cell)?,
-            relay: cap("watch_caps.relay", caps.relay, defaults.watch_caps.relay)?,
-            follow: cap("watch_caps.follow", caps.follow, defaults.watch_caps.follow)?,
-        },
-    })
+    let caps = &timing.watch_caps;
+    for (key, cap) in [
+        ("watch_caps.cell", caps.cell),
+        ("watch_caps.relay", caps.relay),
+        ("watch_caps.follow", caps.follow),
+    ] {
+        if cap == 0 {
+            return at(
+                key,
+                "is 0, which refuses every watch; it is at least 1".into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 impl From<CellSettings> for Table {
