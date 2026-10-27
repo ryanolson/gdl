@@ -331,6 +331,39 @@ fn portable_spec(root: &Path) -> Result<gdl_gen::Spec, gdl_gen::Error> {
     gdl_gen::Spec::from_text(&portable_text(&text), &graph, &root.join("examples/api"))
 }
 
+/// Only a spec that deploys asks for `gdl-runtime`'s `hub` feature, which
+/// brings the hub client and its HTTP stack: a spec without `[deployment]`
+/// generates segments that build without them.
+#[test]
+fn only_a_spec_with_deployment_turns_on_the_hub_feature() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
+    let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
+    let text = portable_text(&text);
+    assert!(!text.contains("[deployment]"), "{text}");
+    for (text, hub) in [(text.clone(), false), (text + "[deployment]\n", true)] {
+        let spec =
+            gdl_gen::Spec::from_text(&text, &graph, &root.join("examples/api")).expect("a spec");
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-hub-feature-")
+            .tempdir()
+            .expect("a directory");
+        let files = gdl_gen::render(&spec, temp.path(), &root.join("target")).expect("rendered");
+        for segment in ["front", "engine"] {
+            let manifest: toml::Table =
+                toml::from_str(&files[&Path::new(segment).join("Cargo.toml")]).expect("toml");
+            let runtime = &manifest["dependencies"]["gdl-runtime"];
+            let features: Vec<&str> = runtime
+                .get("features")
+                .and_then(|features| features.as_array())
+                .map_or(Vec::new(), |features| {
+                    features.iter().filter_map(|f| f.as_str()).collect()
+                });
+            assert_eq!(features.contains(&"hub"), hub, "{segment}: {runtime}");
+        }
+    }
+}
+
 /// A spec's classes reach the hubs' `deployment.json` and every segment's
 /// embedded placement, so all of them agree on the classed hash. A spec
 /// with classes is composed with its fleet.

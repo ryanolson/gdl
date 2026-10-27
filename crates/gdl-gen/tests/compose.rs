@@ -484,12 +484,9 @@ fn a_check_agrees_with_generation() {
     );
 }
 
-/// An archive whose crates all come from a registry or git builds images
-/// too: a `Dockerfile` per segment, from the archive alone, and a script
-/// that builds each. An archive naming a directory has neither (`export.rs`
-/// lists the chat example's entries exactly).
-#[test]
-fn an_archive_of_fetchable_crates_builds_images() {
+/// The archive `export` writes for a two-segment graph whose crates come
+/// from the fixture registry and gdl from git, by path in the archive.
+fn fetchable_archive() -> std::collections::BTreeMap<String, String> {
     use std::io::Read as _;
     let temp = offline_registry("images");
     let dir = temp.path();
@@ -515,6 +512,16 @@ fn an_archive_of_fetchable_crates_builds_images() {
         entry.read_to_string(&mut text).expect("text");
         files.insert(name, text);
     }
+    files
+}
+
+/// An archive whose crates all come from a registry or git builds images
+/// too: a `Dockerfile` per segment, from the archive alone, and a script
+/// that builds each. An archive naming a directory has neither (`export.rs`
+/// lists the chat example's entries exactly).
+#[test]
+fn an_archive_of_fetchable_crates_builds_images() {
+    let files = fetchable_archive();
     let dockerfile = &files["imaged/engine/Dockerfile"];
     for line in [
         "FROM rust:${RUST_VERSION}-slim-bookworm AS build\n",
@@ -535,6 +542,29 @@ fn an_archive_of_fetchable_crates_builds_images() {
         files["imaged/engine/Cargo.toml"]
             .contains("gdl-runtime = { git = \"https://example.com/gdl\", rev = \"abc123\" }")
     );
+}
+
+/// An exported image builds in `rust:<rust-version>`, the oldest Rust that
+/// gdl builds with, not the toolchain `rust-toolchain.toml` pins. A compose
+/// bundle's images build in the pinned toolchain instead
+/// (`deployment.rs`, `the_default_images_are_distroless_and_the_pinned_toolchain`).
+#[test]
+fn an_exported_image_builds_with_gdls_rust_version() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workspace: toml::Table =
+        toml::from_str(&std::fs::read_to_string(root.join("Cargo.toml")).expect("the workspace"))
+            .expect("the workspace");
+    let version = workspace["workspace"]["package"]["rust-version"]
+        .as_str()
+        .expect("a rust-version");
+    let files = fetchable_archive();
+    for segment in ["front", "engine"] {
+        let dockerfile = &files[&format!("imaged/{segment}/Dockerfile")];
+        assert!(
+            dockerfile.contains(&format!("ARG RUST_VERSION={version}\n")),
+            "{segment}: {dockerfile}"
+        );
+    }
 }
 
 /// A source without a frontend takes its requests on stdin, which
