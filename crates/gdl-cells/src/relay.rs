@@ -27,6 +27,10 @@ use crate::{
 /// silence is not a withdrawal, and its version stays held, so an older
 /// write is still refused.
 ///
+/// So it does not keep the contract's first rule ([`CellDirectory`]): a
+/// record whose lease has passed is gone from a new watch, and every
+/// record is gone when the hub restarts.
+///
 /// Its writes are not checked beyond the trait's rules: the hub writes to
 /// it only what its children's reports carry once it has verified them.
 #[derive(Debug, Clone, Default)]

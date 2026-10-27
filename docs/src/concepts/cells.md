@@ -178,21 +178,60 @@ self.records.set(key, value, gdl::Expected::Absent);     // does not wait
 
 ## The cell directory
 
-The cell directory holds one record per cell, keyed by class and name. Each record is written only by its own cell's hub. The `gdl_cells::CellDirectory` trait has three operations:
+The cell directory holds one record per cell, keyed by class and name. Each record is written only by its own cell's hub. Publishing is how a cell becomes visible: its hub calls `publish` when it starts, on each change, and as its heartbeat. Where the record goes is the backend's business. The `gdl_cells::CellDirectory` trait has three operations:
 
 - `publish` stores a record if it is newer than what the directory holds.
 - `withdraw` removes a record and leaves a tombstone at its version, so a late publish cannot bring it back. A newer epoch can.
 - `watch` yields the class's current records, then `Synced` with a resume token, then each change with its token. A token the backend no longer serves, a token of another class, or a watcher that falls behind its buffer ends the watch with `Resnapshot`. The caller then watches again from the start.
 
-| Backend | Where | Use |
-|---|---|---|
-| `memory` (`MemoryDirectory`) | one directory shared by every hub in one process | tests |
-| `dir` (`DirDirectory`) | one file per cell, `<dir>/<class>/<cell>.json`, in a directory every hub on one host shares | hubs on one host |
-| `relay` (`gdl_hub::HubDirectory`) | each child cell's hub reports its record to its parent cell's hub, which holds its children's records in memory (`RelayDirectory`) | the default; cells on several hosts, and every fleet bundle |
+### The contract
+
+A backend keeps four rules:
+
+1. **Kept until withdrawn.** A published record stays until its cell withdraws it, and so does a withdrawal, across the backend's own restart. Nothing deletes a record by time: one whose lease has passed is still in a new watch's snapshot. A reader applies the lease on its own clock: a cell that goes silent stops being discovered, but its record stays.
+2. **Every record.** `watch(class)` yields every record of the class, in every region, whatever its parent or hashes. The reading hub picks the cells it follows.
+3. **Snapshot, then changes.** A watch gives a snapshot, then the changes after it. It resumes from a token, or says `Resnapshot`. A backend may fold several writes of one cell into the latest, as `dir` does between two polls, since a reader keeps only each cell's newest record.
+4. **Whole.** A record arrives as it was published, every field of it, never with a part of another version. A backend that stores a part apart, such as a list in a second table, installs a record only once it holds the matching part.
+
+Behind the `conformance` feature, `gdl_cells::conformance::run` holds a backend to these rules, with cases for each rule and for the trait's ordering. A backend that does not keep a rule yet says so (`Backend::keeps`). The suite then requires the rule's cases to fail on that rule, so what a backend says of itself stays true.
+
+| Backend | Where | Use | Rules kept |
+|---|---|---|---|
+| `memory` (`MemoryDirectory`) | one directory shared by every hub in one process | tests | 2, 3, 4. Its records live only as long as its process |
+| `dir` (`DirDirectory`) | one file per cell, `<dir>/<class>/<cell>.json`, in a directory every hub on one host shares | hubs on one host | all four |
+| `relay` (`gdl_hub::HubDirectory`) | each child cell's hub reports its record to its parent cell's hub, which holds its children's records in memory (`RelayDirectory`) | the default; cells on several hosts, and every fleet bundle | 3 and 4. A restart of the parent's hub loses the records, and a record whose lease has passed is left out of a new watch (rule 1). A hub's watch gives only its own children (rule 2) |
 
 A hub process publishes to `relay` or to `dir`, which needs `directory = "dir"` and the path in `dir`. It refuses `memory`, since no other process can read it.
 
-The `dir` backend writes a temporary file and renames it over the cell's file, so a reader in any process finds a whole file. A watch polls the class's directory every 50 ms, only while the class has a watch in that process. Two writes of one cell between two polls are seen as one, the later. A resume token is valid only in the process whose watch made it. A file the backend cannot read or write is `DirectoryError::Unavailable`. Behind the `conformance` feature, `gdl_cells::conformance::run` is the suite every backend must pass.
+The `dir` backend writes a temporary file and renames it over the cell's file, so a reader in any process finds a whole file. A watch polls the class's directory every 50 ms, only while the class has a watch in that process. Two writes of one cell between two polls are seen as one, the later. A resume token is valid only in the process whose watch made it. A file the backend cannot read or write is `DirectoryError::Unavailable`.
+
+### Other backends
+
+A backend can live in its own crate. `gdl_hub::hub_builder_with` builds a cell's hub with any `CellDirectory` value. The cell's settings then name no directory: a `directory`, `parent_hub`, or `dir` key is refused, so that nothing they say is left unread. A backend that needs routes on a hub, as a parent's hub that takes its children's records does, adds its own extension to the builder that `hub_builder_with` returns.
+
+Three kinds of backend fit the trait. gdl builds none of them yet, and the table does not pick one:
+
+| Kind | `publish` | `watch(class)` | What keeps a record until it is withdrawn |
+|---|---|---|---|
+| A database that every hub reads, such as DynamoDB global tables | Write the cell's item. A part kept in a second table is written first, and the record names its version. | Read the class's items: a snapshot, then changes. | The table, with no expiry on a live record. |
+| Registration with a parent cell's hub, over velo. `relay` is this kind. | Report the record to the parent's hub. | The records the parent's hub holds. Another parent's children need a tier above it. | The parent's hub, which must keep what it holds across its restart. |
+| A top-level hub that broadcasts, for example over a NATS supercluster | Report to the top-level hub, which publishes to the broadcast. Or each cell's hub publishes to the broadcast itself. | Read the broadcast, for example a key-value bucket: a snapshot, then changes. | The broadcast's store. |
+
+A backend can mix them: publish through a parent's hub, and watch a broadcast. In the broadcast kind, a cell's hub that publishes straight to the broadcast store needs only the trait. A top-level hub that takes its children's reports and broadcasts them needs a route of its own on that hub. The backend adds it as an extension; the `relay` backend's report route only fills the hub's own `RelayDirectory`, and cannot be reused for this.
+
+### What a hub built outside gdl must provide
+
+A cell's hub can be a process that does not link gdl's hub. Its parent's hub and the parent's choosers depend on what follows. Only the record is behind a trait today. The rest is gdl's own code, and a hub built outside gdl must serve the same wire protocol.
+
+| What | Who uses it | Where it is | Behind a trait |
+|---|---|---|---|
+| The cell's record: `publish` when the hub starts, on each change, and as its heartbeat; `withdraw` once the cell has drained | the parent's hub, through its directory watch | `gdl_cells::CellDirectory` (`crates/gdl-cells/src/directory.rs`) | yes |
+| The cell's watch, `GET /v1/ext/gdl-cell/watch`, as server-sent `gdl_watch::CellWatchEvent`s: the cell's name, class, epoch, state, and load summary, then its entry instances with their velo `PeerInfo`, then `synced`, then each change | the parent's hub, which follows the cell and relays it to its choosers | `crates/gdl-hub/src/cell/feed.rs`; the events in `crates/gdl-watch/src/lib.rs`, a crate that links velo | no |
+| `POST /v1/ext/gdl-cell/release`: the parent's hub has let go of its follow | the cell's hub, which waits for it before it says that its drain is unfollowed | `crates/gdl-hub/src/cell/followers.rs`; sent by `crates/gdl-hub/src/follow/release.rs` | no |
+| `POST /v1/ext/gdl-cell/avoided`: every chooser of the parent's cell avoids a retiring entry instance | the cell's hub, which ends that instance's wait early | `crates/gdl-hub/src/cell/retiring.rs`; sent by `crates/gdl-hub/src/follow/release.rs` | no |
+| An entry instance that takes a chooser's hand-off over velo: it accepts, or declines as full or gone before it accepts, and then serves the request's stream | the parent's choosers | `crates/gdl-runtime/src/dist/cells/offer.rs`, and the entry side of a hop in `gdl-runtime` | no: a generated segment does it |
+
+Under the `relay` backend, the cell's hub also reports its record to its parent's hub (`POST /v1/ext/gdl-cell/report`). `HubDirectory` does this as its `publish`, so a hub with another backend does not serve or send it. The routes for a cell's own instances (`/health`, `/drain`, `/instances/{id}/load`) concern only the cell itself, and its parent does not read them.
 
 ### The relay backend
 

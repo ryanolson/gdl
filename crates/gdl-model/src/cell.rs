@@ -337,28 +337,30 @@ impl CellSettings {
         refuse(self.problems(layout, Some(segment)))
     }
 
-    /// Whether these settings fit the cell's hub in `layout`: the rule of
-    /// [`CellSettings::check`] without an instance's own segment, since a
-    /// hub has none. Every problem is reported.
+    /// Whether these settings fit the cell's hub in `layout`, publishing
+    /// to the directory they name: the rule of [`CellSettings::check`]
+    /// without an instance's own segment, since a hub has none. Every
+    /// problem is reported.
     ///
     /// A hub also needs `parent_hub` with the `relay` backend when another
-    /// class sends to its cell's class, since it reports there.
+    /// class sends to its cell's class, since it reports there
+    /// ([`missing_parent_hub`]).
     pub fn check_hub(&self, layout: &Layout) -> Result<(), Problems> {
         let mut problems = self.problems(layout, None);
         let entered = sent_to(layout, &self.class);
         if let (DirectoryBackend::Relay { parent_hub: None }, Some(parent)) =
             (&self.directory, entered)
         {
-            problems.push(Problem::at(
-                Some("cell".into()),
-                Some("parent_hub".into()),
-                format!(
-                    "missing: class `{parent}` sends to class `{}`, so with directory = \"relay\" the cell's hub reports its record to its parent's hub, at this address",
-                    self.class
-                ),
-            ));
+            problems.push(missing_parent_hub(parent, &self.class));
         }
         refuse(problems)
+    }
+
+    /// [`CellSettings::check_hub`] for a hub whose program gives it its
+    /// directory: what the settings' own directory needs is not checked,
+    /// since the hub does not publish there.
+    pub fn check_hub_given_directory(&self, layout: &Layout) -> Result<(), Problems> {
+        refuse(self.problems(layout, None))
     }
 
     /// Read a `[cell]` table from `deserializer`, a TOML table or a
@@ -453,6 +455,19 @@ impl CellSettings {
                 .collect()
         }
     }
+}
+
+/// The problem of a cell's hub under the `relay` backend that has no
+/// parent's hub to report its record to, though class `parent` sends to
+/// its class, `class`.
+pub fn missing_parent_hub(parent: &str, class: &str) -> Problem {
+    Problem::at(
+        Some("cell".into()),
+        Some("parent_hub".into()),
+        format!(
+            "missing: class `{parent}` sends to class `{class}`, so with directory = \"relay\" the cell's hub reports its record to its parent's hub, at this address"
+        ),
+    )
 }
 
 /// A class that sends to `class` in `layout`, if any.

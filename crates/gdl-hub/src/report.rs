@@ -70,6 +70,11 @@ impl HubDirectory {
         self.cadence.subscribe()
     }
 
+    /// Whether the cell's hub reports to a parent's hub.
+    pub(crate) fn reports_up(&self) -> bool {
+        self.parent.is_some()
+    }
+
     /// The records the cell's children report, for the hub's gate alone.
     pub(crate) fn children(&self) -> &RelayDirectory {
         &self.children

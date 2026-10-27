@@ -50,6 +50,10 @@ Each record carries an epoch and a sequence number, and a lease as a duration. A
 
 **Rejected: a backend's TTL as liveness.** A store's own expiry is cleanup at best. For example, DynamoDB deletes expired items "typically within a few days" ([TTL](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/TTL.html)).
 
+**Rejected: a backend that deletes a record by time.** A cell that goes silent is missing, not gone. A record that its backend deletes after a while reads, to a hub that starts later, as a cell that never existed, so an outage looks like a removal. So a backend keeps a record until its cell withdraws it, across its own restart ([The contract](../concepts/cells.md#the-contract)), and only an explicit withdrawal removes a cell.
+
+**Rejected: a closed set of backends in the hub.** A hub that took only the backends its settings can name would need gdl to build every backend, and a deployment could not bring its own. A cell's hub needs only the trait, so `gdl_hub::hub_builder_with` takes any `CellDirectory`, and a backend such as a database or a broadcast tier lives in its own crate.
+
 Each cell writes only its own record. So every conflict is "the same writer's newer version wins", and an eventually consistent store is safe. A withdrawal is a write ordered like a publish, and leaves a tombstone, so a late write cannot bring a withdrawn cell back.
 
 Expiry governs discovery only. A follow over a live link keeps its cell whatever the directory says, so a directory outage removes no healthy cell.

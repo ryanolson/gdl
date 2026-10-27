@@ -9,9 +9,10 @@
 //! process; [`DirDirectory`], one file per cell under a directory that
 //! every hub on one host shares, for Compose; and [`RelayDirectory`], the
 //! records a parent cell's hub holds for the children that report to it.
-//! Behind the `conformance` feature, [`conformance`] is the
-//! suite every backend must pass; a backend crate enables the feature in
-//! its dev-dependencies and runs [`conformance::run`] from a test.
+//! Behind the `conformance` feature, [`conformance`] is the suite that
+//! holds a backend to the trait's rules; a backend crate enables the
+//! feature in its dev-dependencies and runs [`conformance::run`] from a
+//! test.
 //!
 //! A backend crate and the hub both depend on this crate, so it holds no
 //! transport: no velo, no velo-hub, no HTTP. The hub's publishing (its

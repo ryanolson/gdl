@@ -251,6 +251,8 @@ pub struct CellReadiness<D: CellDirectory> {
     /// Under the `relay` backend, the cadence of the parent's answers to
     /// the cell's reports, which the record is written at.
     cadence: Option<watch::Receiver<Option<Duration>>>,
+    /// The class that sends to the cell's class, whose cell is its parent.
+    sender: Option<String>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -271,7 +273,7 @@ impl<D: CellDirectory> CellReadiness<D> {
     ) -> Result<Self, CellError> {
         let layout = gdl_model::layout(&spec.graph, &spec.placement)
             .map_err(|e| CellError::new(e.to_string()))?;
-        cell.check_hub(&layout)
+        cell.check_hub_given_directory(&layout)
             .map_err(|e| CellError::new(e.to_string()))?;
         let hub = cell.hub.clone().ok_or_else(|| {
             CellError::new(
@@ -302,10 +304,12 @@ impl<D: CellDirectory> CellReadiness<D> {
             return Err(at("lost_chooser_ms", "is 0; it is at least 1".into()));
         }
         // A cell of a class that nothing sends to has no parent to name.
-        let entered = layout
+        let sender = layout
             .boundaries()
             .iter()
-            .any(|boundary| boundary.into == cell.class);
+            .find(|boundary| boundary.into == cell.class)
+            .map(|boundary| boundary.from.clone());
+        let entered = sender.is_some();
         let record = CellRecord {
             name: cell.name.clone(),
             class: cell.class.clone(),
@@ -383,6 +387,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             released: Mutex::new(Some(released)),
             reports: None,
             cadence: None,
+            sender,
             tasks: Mutex::default(),
         })
     }
@@ -402,8 +407,15 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// Refuses a lease shorter than [`gdl_model::HubTiming::MIN_RELAY_LEASE`]:
     /// the parent asks for a report no more often than every
     /// [`gdl_model::HubTiming::MIN_RELAY_CADENCE`], so a shorter lease
-    /// lapses at the parent between reports.
+    /// lapses at the parent between reports. Refuses a `directory` with no
+    /// parent's hub for a cell of a class that another sends to, which
+    /// would have nowhere to report its record.
     pub fn with_reports(mut self, directory: &HubDirectory) -> Result<Self, CellError> {
+        if let (Some(sender), false) = (&self.sender, directory.reports_up()) {
+            return Err(CellError::new(
+                gdl_model::missing_parent_hub(sender, &self.record.class).to_string(),
+            ));
+        }
         gdl_model::check_relay_lease(self.timing.lease).map_err(|why| {
             CellError::new(
                 gdl_model::Problem::at(Some("cell".into()), Some("lease_ms".into()), why)

@@ -105,6 +105,11 @@ where
     fn watchers(&self, directory: &Wrapped<F>, class: &str) -> usize {
         directory.inner.watchers(class)
     }
+
+    // The case of each wrapping is not about a restart.
+    async fn restart(&self, directory: Wrapped<F>) -> Wrapped<F> {
+        directory
+    }
 }
 
 /// A backend that stores a publish it refuses as not newer must fail the

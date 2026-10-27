@@ -1,4 +1,5 @@
-//! The `dir` backend passes the directory conformance suite, and holds
+//! The `dir` backend passes the directory conformance suite and keeps
+//! every rule of the contract, and holds
 //! what files shared between processes add: two handles over one
 //! directory, each standing for a process, see each other's writes; a
 //! withdrawal's tombstone stops a stale write from the other; a reader
@@ -53,6 +54,11 @@ impl Backend for Dir {
 
     fn watchers(&self, directory: &DirDirectory, class: &str) -> usize {
         directory.watchers(class)
+    }
+
+    // A new process over the same files.
+    async fn restart(&self, directory: DirDirectory) -> DirDirectory {
+        DirDirectory::with_limits(directory.root(), self.limits)
     }
 }
 

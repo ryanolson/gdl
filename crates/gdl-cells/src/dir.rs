@@ -150,6 +150,11 @@ impl DirDirectory {
         }
     }
 
+    /// The shared directory, as given.
+    pub fn root(&self) -> &std::path::Path {
+        &self.shared.root
+    }
+
     /// How many watches of `class` this process has open.
     pub fn watchers(&self, class: &str) -> usize {
         self.shared

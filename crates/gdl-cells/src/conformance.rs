@@ -6,15 +6,47 @@
 //! dev-dependencies and calls [`run`] from a test. Every wait in a case
 //! is bounded, so a broken backend fails rather than hangs, and every case
 //! runs, so one failure does not hide another.
+//!
+//! Each of the trait's four rules ([`Rule`]) has its own cases. A backend
+//! that does not keep a rule yet says so ([`Backend::keeps`]), and then
+//! the rule's cases must fail on the rule itself: so what a backend says
+//! of itself stays true, and a backend that comes to keep the rule fails
+//! the suite until it says so.
 
 use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, time::Duration};
 
 use futures::{FutureExt, Stream, StreamExt};
 
 use crate::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, ResumeToken, Version,
-    Withdrawal,
+    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, LoadSummary, ResumeToken,
+    Version, Withdrawal,
 };
+
+/// The smallest [`Backend::buffer`] the suite takes.
+pub const MIN_BUFFER: usize = 3;
+
+/// A rule of the directory contract ([`CellDirectory`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Rule {
+    /// A published record stays until its cell withdraws it, across the
+    /// backend's own restart. Nothing deletes it by time.
+    Kept,
+    /// A watch of a class yields every record of the class, whatever its
+    /// region, parent, or hashes.
+    EveryRecord,
+    /// A watch gives a snapshot, then the changes after it (several
+    /// writes of one cell may fold into the latest), and resumes from a
+    /// token or says [`CellEvent::Resnapshot`]. Every backend keeps it:
+    /// one that cannot resume says `Resnapshot`.
+    ///
+    /// The suite takes a fold of several publishes of one cell, but not
+    /// of a publish into the withdrawal after it on a resumed watch: the
+    /// resume case expects each of those changes.
+    Changes,
+    /// A record arrives whole: a watch yields each record as it was
+    /// published, never with a part of another version.
+    Whole,
+}
 
 /// A directory backend under test.
 pub trait Backend: Sync {
@@ -26,46 +58,123 @@ pub trait Backend: Sync {
     fn fresh<const N: usize>(&self) -> impl Future<Output = [Self::Directory; N]> + Send;
 
     /// How many changes a watcher may fall behind by: one more, and it is
-    /// cut off with [`CellEvent::Resnapshot`].
+    /// cut off with [`CellEvent::Resnapshot`]. The suite makes up to
+    /// [`MIN_BUFFER`] changes before a watcher reads them, so it takes no
+    /// smaller buffer.
     fn buffer(&self) -> usize;
 
     /// How many of a class's latest changes a resume token is served
     /// across: a token followed by more changes than this yields
-    /// [`CellEvent::Resnapshot`].
+    /// [`CellEvent::Resnapshot`]. 0 for a backend that never resumes, and
+    /// says `Resnapshot` for every token.
     fn history(&self) -> usize;
 
     /// How many watches of `class` the backend holds for `directory`.
     fn watchers(&self, directory: &Self::Directory, class: &str) -> usize;
+
+    /// The backend restarted: `directory`, the last of its handles to
+    /// what the case made, is dropped as its process ends, and the
+    /// handle returned reads what the backend keeps across the restart.
+    fn restart(&self, directory: Self::Directory) -> impl Future<Output = Self::Directory> + Send;
+
+    /// Whether the backend keeps `rule`. One that does not must fail the
+    /// rule's cases on the rule itself. Every backend keeps
+    /// [`Rule::Changes`].
+    fn keeps(&self, rule: Rule) -> bool {
+        let _ = rule;
+        true
+    }
 }
 
 /// Run every case against `backend`, and panic naming each case that
 /// failed. Call it in a tokio runtime with its timer enabled, as
 /// `#[tokio::test]` builds.
 pub async fn run<B: Backend>(backend: &B) {
+    assert!(
+        backend.buffer() >= MIN_BUFFER,
+        "the suite makes up to {MIN_BUFFER} changes before a watcher reads them, so it takes no buffer under {MIN_BUFFER}, not {}",
+        backend.buffer()
+    );
+    assert!(
+        backend.keeps(Rule::Changes),
+        "every backend keeps {:?}: one that cannot resume says `Resnapshot`",
+        Rule::Changes
+    );
     let mut failed = Vec::new();
     macro_rules! case {
         ($name:ident) => {
-            eprintln!("directory conformance: {}", stringify!($name));
-            if AssertUnwindSafe($name(backend))
-                .catch_unwind()
-                .await
-                .is_err()
-            {
-                failed.push(stringify!($name));
+            case!($name, None)
+        };
+        ($name:ident, $rule:expr) => {
+            let rule: Option<Rule> = $rule;
+            let kept = rule.is_none_or(|rule| backend.keeps(rule));
+            let name = stringify!($name);
+            eprintln!(
+                "directory conformance: {name}{}",
+                if kept {
+                    ""
+                } else {
+                    " (a rule the backend does not keep: must fail on it)"
+                }
+            );
+            let outcome = AssertUnwindSafe($name(backend)).catch_unwind().await;
+            match (rule, kept, outcome) {
+                (_, true, Ok(())) => {}
+                (_, true, Err(_)) => failed.push(name.to_owned()),
+                (Some(rule), false, Ok(())) => failed.push(format!(
+                    "{name} (passed, though the backend says it does not keep {rule:?})"
+                )),
+                (Some(rule), false, Err(panic)) => {
+                    let why = message(&*panic);
+                    if !why.starts_with(&marker(rule)) {
+                        failed.push(format!("{name} (failed, but not on {rule:?}: {why})"));
+                    }
+                }
+                (None, false, _) => unreachable!("a case without a rule is always kept"),
             }
         };
     }
     case!(malformed_writes_are_refused);
     case!(writes_are_ordered_by_epoch_and_seq);
-    case!(a_watch_sees_its_class_snapshot_then_changes);
-    case!(a_watch_resumes_after_a_token);
-    case!(a_lagging_watcher_is_cut_off);
+    case!(
+        a_watch_sees_its_class_snapshot_then_changes,
+        Some(Rule::Changes)
+    );
+    case!(a_watch_resumes_after_a_token, Some(Rule::Changes));
+    case!(a_lagging_watcher_is_cut_off, Some(Rule::Changes));
     case!(a_dropped_watch_is_released);
+    case!(a_record_stays_until_withdrawn, Some(Rule::Kept));
+    case!(
+        a_watch_sees_every_record_of_its_class,
+        Some(Rule::EveryRecord)
+    );
+    case!(a_record_arrives_whole, Some(Rule::Whole));
     assert!(
         failed.is_empty(),
         "directory conformance failed: {}",
         failed.join(", ")
     );
+}
+
+/// What a panic of a case says.
+fn message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|why| (*why).to_owned()))
+        .unwrap_or_default()
+}
+
+/// How a panic that breaks `rule` begins, which [`broke`] writes.
+fn marker(rule: Rule) -> String {
+    format!("rule {rule:?} broken: ")
+}
+
+/// Fail the case for breaking `rule`, saying `why`: unlike any other
+/// failure of the case, this is how a backend that does not keep the rule
+/// is expected to fail it.
+fn broke(rule: Rule, why: impl std::fmt::Display) -> ! {
+    panic!("{}{why}", marker(rule))
 }
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -140,10 +249,26 @@ async fn ends(watch: &mut impl Events, what: &str) {
     }
 }
 
-/// The records of a snapshot, by cell name, and its `Synced` token. The
-/// whole snapshot is bounded, not only each of its events, so a snapshot
-/// that never ends fails the case.
+/// The next event is `Resnapshot`, and then the watch ends.
+async fn resnapshot(watch: &mut impl Events, what: &str) {
+    assert_eq!(next(watch, what).await, CellEvent::Resnapshot, "{what}");
+    ends(watch, what).await;
+}
+
+/// The records of a snapshot, by cell name, and its `Synced` token.
 async fn snapshot(watch: &mut impl Events) -> (Vec<(String, Version)>, ResumeToken) {
+    let (records, token) = snapshot_records(watch).await;
+    let records = records
+        .into_iter()
+        .map(|record| (record.name.clone(), record.version()))
+        .collect();
+    (records, token)
+}
+
+/// The whole records of a snapshot, sorted by cell name, and its `Synced`
+/// token. The whole snapshot is bounded, not only each of its events, so
+/// a snapshot that never ends fails the case.
+async fn snapshot_records(watch: &mut impl Events) -> (Vec<CellRecord>, ResumeToken) {
     within("the whole snapshot", async {
         let mut records = Vec::new();
         loop {
@@ -152,12 +277,12 @@ async fn snapshot(watch: &mut impl Events) -> (Vec<(String, Version)>, ResumeTok
             // the task's budget, so that the loop yields once it is spent.
             tokio::task::consume_budget().await;
             match next(watch, "the snapshot").await {
-                CellEvent::Current(record) => records.push((record.name.clone(), record.version())),
+                CellEvent::Current(record) => records.push(record),
                 CellEvent::Synced {
                     token,
                     snapshot: true,
                 } => {
-                    records.sort();
+                    records.sort_by(|a, b| a.name.cmp(&b.name));
                     return (records, token);
                 }
                 other => panic!("the snapshot: {other:?}"),
@@ -424,36 +549,54 @@ async fn a_watch_resumes_after_a_token<B: Backend>(backend: &B) {
     let last = withdrawn(&mut live, "m1", 1, 2).await;
     drop(live);
 
-    // From a change's token: exactly the changes after it, then live ones.
+    // A token is served while no more changes follow it than the backend
+    // keeps; a backend that keeps none never resumes. Any other token
+    // yields `Resnapshot`, and the watch ends.
+    let served = |changes: usize| backend.history() > 0 && changes <= backend.history();
+
+    // From a change's token, which two changes follow: exactly the changes
+    // after it, then live ones.
     let mut resumed = watch(&reader, MODEL, Some(after_m1.clone()));
-    match next(&mut resumed, "the resumed watch's start").await {
-        CellEvent::Synced {
-            token,
-            snapshot: false,
-        } => assert_eq!(token, after_m1),
-        other => panic!("a resumed watch starts with `Synced`, not {other:?}"),
+    let replayed = served(2);
+    if replayed {
+        match next(&mut resumed, "the resumed watch's start").await {
+            CellEvent::Synced {
+                token,
+                snapshot: false,
+            } => assert_eq!(token, after_m1),
+            other => panic!("a resumed watch starts with `Synced`, not {other:?}"),
+        }
+        put(&mut resumed, "m2", 1, 1).await;
+        withdrawn(&mut resumed, "m1", 1, 2).await;
+    } else {
+        resnapshot(&mut resumed, "a token two changes ago").await;
     }
-    put(&mut resumed, "m2", 1, 1).await;
-    withdrawn(&mut resumed, "m1", 1, 2).await;
     publish(&writer, record(MODEL, "m3", 1, 1))
         .await
         .expect("m3");
-    put(&mut resumed, "m3", 1, 1).await;
+    if replayed {
+        put(&mut resumed, "m3", 1, 1).await;
+    }
     drop(resumed);
 
-    // From the snapshot's token: every change since.
+    // From the snapshot's token, which four changes follow: every change
+    // since.
     let mut resumed = watch(&writer, MODEL, Some(start));
-    assert!(matches!(
-        next(&mut resumed, "the start").await,
-        CellEvent::Synced {
-            snapshot: false,
-            ..
-        }
-    ));
-    put(&mut resumed, "m1", 1, 1).await;
-    put(&mut resumed, "m2", 1, 1).await;
-    withdrawn(&mut resumed, "m1", 1, 2).await;
-    put(&mut resumed, "m3", 1, 1).await;
+    if served(4) {
+        assert!(matches!(
+            next(&mut resumed, "the start").await,
+            CellEvent::Synced {
+                snapshot: false,
+                ..
+            }
+        ));
+        put(&mut resumed, "m1", 1, 1).await;
+        put(&mut resumed, "m2", 1, 1).await;
+        withdrawn(&mut resumed, "m1", 1, 2).await;
+        put(&mut resumed, "m3", 1, 1).await;
+    } else {
+        resnapshot(&mut resumed, "a token four changes ago").await;
+    }
     drop(resumed);
 
     // Another class's token is not served, though that class has changes
@@ -550,4 +693,256 @@ async fn a_dropped_watch_is_released<B: Backend>(backend: &B) {
         CellEvent::Resnapshot
     );
     assert_eq!(backend.watchers(&directory, MODEL), 0);
+}
+
+/// Rule [`Rule::Kept`]: a record whose lease has passed is still held,
+/// and a restart of the backend keeps every record and every withdrawal.
+async fn a_record_stays_until_withdrawn<B: Backend>(backend: &B) {
+    let [writer, reader] = within("a fresh directory", backend.fresh()).await;
+    let lease = Duration::from_millis(20);
+    // Fields away from their defaults, so that a backend that keeps only
+    // some of them fails.
+    let m1 = CellRecord {
+        home: Some("global-us".into()),
+        contract: 7,
+        placement: 8,
+        state: CellState::Degraded,
+        hub: "m1-kept:4242".into(),
+        lease,
+        load: Some(LoadSummary {
+            admitted: 3,
+            limit: 16,
+            instances: 2,
+            refusals: 1,
+            period_ms: 10_000,
+        }),
+        ..record(MODEL, "m1", 1, 1)
+    };
+    publish(&writer, m1.clone())
+        .await
+        .expect("a record with a short lease");
+    publish(&writer, record(MODEL, "m2", 1, 1))
+        .await
+        .expect("a record");
+    withdraw(&writer, withdrawal(MODEL, "m2", 1, 2))
+        .await
+        .expect("its withdrawal");
+
+    // The rule is about time passing, so the case lets it pass: ten
+    // leases, on whichever clock the backend keeps, and four of the `dir`
+    // backend's polls.
+    tokio::time::sleep(lease * 10).await;
+    let (now, _) = snapshot_records(&mut watch(&reader, MODEL, None)).await;
+    if now != [m1.clone()] {
+        broke(
+            Rule::Kept,
+            format_args!("once m1's lease passed, a new watch holds {now:?}, not m1"),
+        );
+    }
+
+    drop(writer);
+    let restarted = within("a restart", backend.restart(reader)).await;
+    // Every field of the record is kept, not only its version.
+    let (now, _) = snapshot_records(&mut watch(&restarted, MODEL, None)).await;
+    if now != [m1] {
+        broke(
+            Rule::Kept,
+            format_args!("after a restart, the directory holds {now:?}, not m1"),
+        );
+    }
+    // A withdrawal is kept too, at its own version, or a late write of a
+    // withdrawn cell would bring it back.
+    match publish(&restarted, record(MODEL, "m2", 1, 2)).await {
+        Err(DirectoryError::NotNewer {
+            held: Version { epoch: 1, seq: 2 },
+            ..
+        }) => {}
+        Err(DirectoryError::NotNewer { held, .. }) => broke(
+            Rule::Kept,
+            format_args!(
+                "after a restart, the directory holds m2 at {held:?}, not its withdrawal's (1, 2)"
+            ),
+        ),
+        Ok(()) => broke(
+            Rule::Kept,
+            "after a restart, a write of m2 at its withdrawal's version was taken",
+        ),
+        Err(error) => panic!("after a restart, a write of m2: {error}"),
+    }
+}
+
+/// Rule [`Rule::EveryRecord`]: every watch of a class, through any
+/// handle, sees every record of the class, in every region, of every
+/// parent, and of any hashes: which cells to follow is the reader's
+/// choice.
+async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
+    let directories: [B::Directory; 3] = within("a fresh directory", backend.fresh()).await;
+    let records = [
+        record(MODEL, "m1", 1, 1),
+        CellRecord {
+            region: "eu-west-1".into(),
+            home: Some("global-eu".into()),
+            ..record(MODEL, "m2", 1, 1)
+        },
+        CellRecord {
+            home: Some("global-us".into()),
+            contract: 9,
+            placement: 8,
+            ..record(MODEL, "m3", 1, 1)
+        },
+    ];
+    for (directory, record) in directories.iter().zip(records.clone()) {
+        publish(directory, record).await.expect("a model cell");
+    }
+    let mut watches = Vec::new();
+    for (handle, directory) in directories.iter().enumerate() {
+        let mut watch = watch(directory, MODEL, None);
+        let (held, _) = snapshot_records(&mut watch).await;
+        if held != records {
+            let names: Vec<_> = held.iter().map(|record| record.name.as_str()).collect();
+            broke(
+                Rule::EveryRecord,
+                format_args!(
+                    "a watch through handle {handle} holds {names:?}, not m1, m2, and m3 as published: {held:?}"
+                ),
+            );
+        }
+        watches.push(watch);
+    }
+
+    let m4 = CellRecord {
+        region: "ap-south-1".into(),
+        home: Some("global-ap".into()),
+        ..record(MODEL, "m4", 1, 1)
+    };
+    publish(&directories[2], m4.clone())
+        .await
+        .expect("a cell in a third region");
+    for (handle, watch) in watches.iter_mut().enumerate() {
+        // Only a put that never comes, or another change in its place,
+        // breaks the rule; a watch that fails or ends is a failure of its
+        // own.
+        match tokio::time::timeout(WAIT, watch.next()).await {
+            Ok(Some(Ok(CellEvent::Put { record, .. }))) if record == m4 => {}
+            Err(_) => broke(
+                Rule::EveryRecord,
+                format_args!("the watch through handle {handle} never got the put of m4"),
+            ),
+            Ok(Some(Ok(event))) => broke(
+                Rule::EveryRecord,
+                format_args!("the watch through handle {handle} got {event:?}, not the put of m4"),
+            ),
+            Ok(Some(Err(error))) => panic!("the watch through handle {handle} failed: {error}"),
+            Ok(None) => panic!("the watch through handle {handle} ended"),
+        }
+    }
+}
+
+/// A record with every field set, at `seq`: each field but the name,
+/// class, and epoch differs between two seqs, so that a part of one
+/// version with the rest of another equals neither.
+fn whole(seq: u64) -> CellRecord {
+    CellRecord {
+        name: "m1".into(),
+        class: MODEL.into(),
+        region: format!("region-{seq}"),
+        home: Some(format!("global-{seq}")),
+        contract: 100 + seq,
+        placement: 200 + seq,
+        state: if seq.is_multiple_of(2) {
+            CellState::Ready
+        } else {
+            CellState::Degraded
+        },
+        epoch: 1,
+        seq,
+        hub: format!("m1-{seq}:1337"),
+        lease: Duration::from_secs(30 + seq),
+        load: Some(LoadSummary {
+            admitted: 10 * seq,
+            limit: 64 + seq,
+            instances: 2 + seq as u32,
+            refusals: seq,
+            period_ms: 10_000 + seq,
+        }),
+    }
+}
+
+/// The next changes of `watch` are the puts of `first` and then `second`,
+/// two versions of one cell, each whole; or only the put of `second`,
+/// which rule 3 lets a backend fold `first` into.
+async fn whole_changes(
+    watch: &mut impl Events,
+    first: &CellRecord,
+    second: &CellRecord,
+    what: &str,
+) {
+    let mut expected = [first, second].into_iter();
+    while let Some(published) = expected.next() {
+        match next(watch, what).await {
+            CellEvent::Put { record, .. } if record == *published => {}
+            CellEvent::Put { record, .. }
+                if published == first && record.version() == second.version() =>
+            {
+                if record != *second {
+                    broke(
+                        Rule::Whole,
+                        format_args!("published {second:?}, and {what} is {record:?}"),
+                    );
+                }
+                expected.next();
+            }
+            CellEvent::Put { record, .. } => broke(
+                Rule::Whole,
+                format_args!("published {published:?}, and {what} is {record:?}"),
+            ),
+            other => panic!("{what}: {other:?}"),
+        }
+    }
+}
+
+/// Rule [`Rule::Whole`]: a record arrives as it was published, every
+/// field of it, in a snapshot, as a change, and as each change a resumed
+/// watch replays. A backend that stores a part of a record apart (a
+/// second table, say) installs the record only with its matching part.
+async fn a_record_arrives_whole<B: Backend>(backend: &B) {
+    let [writer, reader] = within("a fresh directory", backend.fresh()).await;
+    let mut live = watch(&reader, MODEL, None);
+    let (_, start) = snapshot(&mut live).await;
+
+    let first = whole(1);
+    publish(&writer, first.clone()).await.expect("a record");
+    let (held, _) = snapshot_records(&mut watch(&reader, MODEL, None)).await;
+    if held != [first.clone()] {
+        broke(
+            Rule::Whole,
+            format_args!("published {first:?}, and a snapshot holds {held:?}"),
+        );
+    }
+    // Both writes are made before the live watch reads either, so that a
+    // backend that joins a queued change to a part written since serves
+    // the first with the second's part.
+    let second = whole(2);
+    publish(&writer, second.clone())
+        .await
+        .expect("a newer record");
+    whole_changes(&mut live, &first, &second, "a watch's change").await;
+    // A resumed watch replays both versions, each whole.
+    let mut resumed = watch(&reader, MODEL, Some(start));
+    match next(&mut resumed, "the resumed watch's start").await {
+        CellEvent::Synced {
+            snapshot: false, ..
+        } => whole_changes(&mut resumed, &first, &second, "a resumed watch's change").await,
+        // A backend whose history does not cover both says so: there is
+        // no replay.
+        CellEvent::Resnapshot => {}
+        other => panic!("the resumed watch's start: {other:?}"),
+    }
+    let (held, _) = snapshot_records(&mut watch(&reader, MODEL, None)).await;
+    if held != [second.clone()] {
+        broke(
+            Rule::Whole,
+            format_args!("published {second:?}, and a snapshot holds {held:?}"),
+        );
+    }
 }

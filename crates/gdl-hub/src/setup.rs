@@ -5,7 +5,7 @@ use std::ffi::OsString;
 
 use figment::value::{Dict, Map, Tag, Value};
 use figment::{Figment, Metadata, Profile, Provider, Source};
-use gdl_cells::DirDirectory;
+use gdl_cells::{CellDirectory, DirDirectory};
 use gdl_model::{CellSettings, DeploymentSpec, DirectoryBackend, Origin, Problems, cell_variable};
 use velo_hub::{Hub, HubBuilder, HubConfig};
 
@@ -74,7 +74,8 @@ pub fn cell_from_vars(
 /// process, which no other hub could read, so a hub process refuses it.
 /// Settings made in code are checked as reading them checks them
 /// ([`gdl_model::check_hub_timing`]): a timing the hub cannot run at is
-/// refused, naming its key.
+/// refused, naming its key. [`hub_builder_with`] takes a directory that
+/// the settings cannot name.
 pub fn hub_builder(
     config: HubConfig,
     spec: DeploymentSpec,
@@ -83,29 +84,75 @@ pub fn hub_builder(
     let Some(cell) = cell else {
         return Ok(Hub::builder(config).extension(GraphAdmission::new(spec)));
     };
-    // Settings made in code skip the reader's checks.
-    gdl_model::check_hub_timing(&cell.timing)
-        .map_err(|problem| CellError::new(problem.to_string()))?;
-    let builder = Hub::builder(config)
-        .extension(GraphAdmission::new(spec.clone()))
-        .extension(KeyedRecords::new(cell.timing.keyed_capacity)?);
-    let timing = CellTiming::from_settings(&cell.timing);
     match &cell.directory {
         DirectoryBackend::Relay { parent_hub } => {
             let directory = HubDirectory::new(parent_hub.clone())?;
+            let (builder, timing) = cell_hub(config, &spec, &cell)?;
             let readiness = CellReadiness::new(&spec, cell, directory.clone(), timing)?
                 .with_reports(&directory)?;
             Ok(builder.extension(readiness))
         }
         DirectoryBackend::Dir { path } => {
             let directory = DirDirectory::new(path.clone());
-            let readiness = CellReadiness::new(&spec, cell, directory, timing)?;
-            Ok(builder.extension(readiness))
+            let cell = CellSettings {
+                directory: DirectoryBackend::DEFAULT,
+                ..cell
+            };
+            hub_builder_with(config, spec, cell, directory)
         }
         DirectoryBackend::Memory => Err(CellError::new(
             "[cell] directory = \"memory\" is a directory inside one process, which no other hub can read: a hub process publishes with GDL_CELL__DIRECTORY=relay, the default, and GDL_CELL__PARENT_HUB=<its parent cell's hub> for a class that another sends to",
         )),
     }
+}
+
+/// The hub of `spec` with the cell `cell`: [`GraphAdmission`], the cell's
+/// keyed record service ([`KeyedRecords`]), and the cell's
+/// [`CellReadiness`] publishing its record to `directory`, and
+/// watching it for its children, at the pace its settings give. Any
+/// backend fits, from any crate: making the cell visible is
+/// [`CellDirectory::publish`], and where the record goes is the backend's
+/// business. A backend that needs routes of its own on the hub, as a
+/// parent's hub that takes its children's records does, adds its own
+/// extension to the builder this returns.
+///
+/// `cell` names no directory of its own: settings whose `directory`,
+/// `parent_hub`, or `dir` key is set are refused, so that nothing they say
+/// is left unread. The rest is checked as [`hub_builder`] checks it.
+/// [`cell_from_env`] reads the settings of the `gdl-hub` binary, whose
+/// default backend is `relay`, so it asks a child cell for `parent_hub`:
+/// a program that gives its hub a directory makes its settings itself.
+pub fn hub_builder_with<D: CellDirectory>(
+    config: HubConfig,
+    spec: DeploymentSpec,
+    cell: CellSettings,
+    directory: D,
+) -> Result<HubBuilder, CellError> {
+    if cell.directory != DirectoryBackend::DEFAULT {
+        return Err(CellError::new(format!(
+            "[cell] directory: the hub's program gives it its directory, so the settings name none, and these name {:?}",
+            cell.directory
+        )));
+    }
+    let (builder, timing) = cell_hub(config, &spec, &cell)?;
+    let readiness = CellReadiness::new(&spec, cell, directory, timing)?;
+    Ok(builder.extension(readiness))
+}
+
+/// The hub of `spec` with admission, and the timing `cell`'s settings
+/// give, once it is checked: settings made in code skip the reader's
+/// checks.
+fn cell_hub(
+    config: HubConfig,
+    spec: &DeploymentSpec,
+    cell: &CellSettings,
+) -> Result<(HubBuilder, CellTiming), CellError> {
+    gdl_model::check_hub_timing(&cell.timing)
+        .map_err(|problem| CellError::new(problem.to_string()))?;
+    let builder = Hub::builder(config)
+        .extension(GraphAdmission::new(spec.clone()))
+        .extension(KeyedRecords::new(cell.timing.keyed_capacity)?);
+    Ok((builder, CellTiming::from_settings(&cell.timing)))
 }
 
 /// The `GDL_CELL__` variables of `vars`, one provider to each, in their

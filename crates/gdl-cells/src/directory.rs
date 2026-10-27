@@ -8,6 +8,14 @@ use crate::{CellRecord, Version, Withdrawal};
 /// Where cell records are published and watched: one record per cell,
 /// keyed by its class and name, each written only by its own cell's hub.
 ///
+/// Publishing is how a cell becomes visible: its hub calls
+/// [`CellDirectory::publish`] as it starts, on each change, and as its
+/// heartbeat. Where the record goes is the backend's business: a database
+/// that every hub reads, the hub of a parent cell that the record is
+/// reported to, a store that a top-level hub broadcasts, or a mix of
+/// these. A backend can live in its own crate: `gdl_hub::hub_builder_with`
+/// takes any directory.
+///
 /// A cell's writes, its publishes and its withdrawal, are ordered by
 /// their [`Version`]: a write that is not newer than what the directory
 /// holds for the cell is refused with [`DirectoryError::NotNewer`],
@@ -15,9 +23,41 @@ use crate::{CellRecord, Version, Withdrawal};
 /// tombstone at its version, so a late publish cannot bring the record
 /// back; a newer epoch can.
 ///
-/// Expiry is not here: every reader enforces a record's lease on its own
-/// clock ([`crate::CellView`]), whatever the backend does with TTLs, so
-/// the rule is one rule.
+/// # The contract
+///
+/// A backend keeps four rules, and the conformance suite (the
+/// `conformance` module, behind the feature of that name) holds each with
+/// cases of its own:
+///
+/// 1. **Kept until withdrawn.** A published record stays until its cell
+///    withdraws it, across the backend's own restart, and so does a
+///    withdrawal. Nothing deletes a record by time: one whose lease has
+///    passed is still in a new watch's snapshot.
+/// 2. **Every record.** `watch(class)` yields every record of the class,
+///    in every region, whatever its parent or hashes. The reader picks
+///    the cells it follows.
+/// 3. **Snapshot, then changes.** A watch gives a snapshot, then the
+///    changes after it, and resumes from a token or says
+///    [`CellEvent::Resnapshot`] ([`CellDirectory::watch`]). A backend may
+///    fold several writes of one cell into the latest, as `dir` does
+///    between two polls: a reader keeps only each cell's newest record,
+///    so it misses no state.
+/// 4. **Whole.** A record arrives as it was published, every field of it,
+///    never with a part of another version. A backend that stores a part
+///    apart, such as a list in a second table, installs a record only
+///    once it holds the matching part.
+///
+/// The backends in this crate and the rules they keep today:
+///
+/// | Backend | 1 | 2 | 3 | 4 |
+/// |---|---|---|---|---|
+/// | [`crate::DirDirectory`] | yes | yes | yes | yes |
+/// | [`crate::MemoryDirectory`] | no: it lives as long as its process | yes | yes | yes |
+/// | relay: [`crate::RelayDirectory`], in a parent cell's hub | no: in the hub's memory, and a record whose lease passed is left out of a new watch | no: a hub holds only its own children's records | yes | yes |
+///
+/// Expiry is the reader's: every reader applies a record's lease on its
+/// own clock ([`crate::CellView`]), so the rule is one rule, whatever the
+/// backend holds.
 pub trait CellDirectory: Send + Sync + 'static {
     /// A watch of one class: see [`CellDirectory::watch`]. Dropping it
     /// releases what the backend holds for it.

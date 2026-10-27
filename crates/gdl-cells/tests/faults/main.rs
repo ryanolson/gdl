@@ -3,6 +3,7 @@
 //! within its bounds.
 
 mod endless;
+mod rules;
 mod wrapped;
 
 use std::{panic::AssertUnwindSafe, pin::Pin, time::Duration};

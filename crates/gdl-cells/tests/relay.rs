@@ -1,8 +1,12 @@
 //! The `relay` backend's directory, the records a parent cell's hub holds
-//! for its children, passes the directory conformance suite: every case
-//! applies to it. A child's lease runs on the parent's clock, so a record
-//! that has not been renewed for its lease is left out of a new watch's
-//! snapshot, as a reader that had watched all along would have dropped it.
+//! for its children, passes the directory conformance suite, and keeps
+//! every rule but [`Rule::Kept`]. A child's lease runs on the parent's
+//! clock, so a record that has not been renewed for its lease is left out
+//! of a new watch's snapshot, as a reader that had watched all along would
+//! have dropped it; and the records live in the hub's memory, so a
+//! restart loses them. As a store it keeps [`Rule::EveryRecord`]; the
+//! relay backend as a whole does not, since a parent's hub takes only its
+//! own children's reports (`crates/gdl-hub/tests/relay.rs`).
 
 use std::time::Duration;
 
@@ -10,7 +14,7 @@ use futures::StreamExt;
 use gdl_cells::{
     CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryLimits, RelayDirectory,
     Version, Withdrawal,
-    conformance::{self, Backend},
+    conformance::{self, Backend, Rule},
 };
 
 struct Relay(MemoryLimits);
@@ -33,6 +37,15 @@ impl Backend for Relay {
 
     fn watchers(&self, directory: &RelayDirectory, class: &str) -> usize {
         directory.watchers(class)
+    }
+
+    // The parent's hub holds its children's records in memory.
+    async fn restart(&self, _: RelayDirectory) -> RelayDirectory {
+        RelayDirectory::with_limits(self.0)
+    }
+
+    fn keeps(&self, rule: Rule) -> bool {
+        rule != Rule::Kept
     }
 }
 

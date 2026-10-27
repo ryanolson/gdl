@@ -274,6 +274,10 @@ fn the_relay_backend_takes_the_parent_hub_where_a_class_is_sent_to() {
         error.to_string(),
         "[cell] parent_hub: missing: class `global` sends to class `model_x`, so with directory = \"relay\" the cell's hub reports its record to its parent's hub, at this address"
     );
+    // A hub whose program gives it its directory reports nowhere either.
+    orphan
+        .check_hub_given_directory(&classed())
+        .expect("a hub with a given directory reads no parent hub");
 
     // A cell of a class that nothing sends to reports nowhere.
     let top = settings("name = 'g'\nclass = 'global'\nregion = 'r'\nparent_hub = 'other:1337'\n");

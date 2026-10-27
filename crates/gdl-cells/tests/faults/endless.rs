@@ -3,16 +3,18 @@ use std::{sync::mpsc, thread, time::Duration};
 use futures::stream;
 use gdl_cells::{
     CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, ResumeToken, Withdrawal,
-    conformance::Backend,
+    conformance::{self, Backend, Rule},
 };
 
 use crate::{Events, failure};
 
 /// A backend whose snapshot never ends, though each of its records comes
-/// well within a wait's bound: after 10 ms, or at once when `ready`.
+/// well within a wait's bound: after 10 ms, or at once when `ready`. It
+/// says it keeps every rule but `disowns`.
 #[derive(Clone, Copy)]
 struct Endless {
     ready: bool,
+    disowns: Option<Rule>,
 }
 
 impl CellDirectory for Endless {
@@ -60,7 +62,7 @@ impl Backend for Endless {
     }
 
     fn buffer(&self) -> usize {
-        1
+        conformance::MIN_BUFFER
     }
 
     fn history(&self) -> usize {
@@ -70,22 +72,37 @@ impl Backend for Endless {
     fn watchers(&self, _: &Endless, _: &str) -> usize {
         0
     }
+
+    async fn restart(&self, directory: Endless) -> Endless {
+        directory
+    }
+
+    fn keeps(&self, rule: Rule) -> bool {
+        self.disowns != Some(rule)
+    }
 }
 
-const CASES: [&str; 6] = [
+const CASES: [&str; 9] = [
     "malformed_writes_are_refused",
     "writes_are_ordered_by_epoch_and_seq",
     "a_watch_sees_its_class_snapshot_then_changes",
     "a_watch_resumes_after_a_token",
     "a_lagging_watcher_is_cut_off",
     "a_dropped_watch_is_released",
+    "a_record_stays_until_withdrawn",
+    "a_watch_sees_every_record_of_its_class",
+    "a_record_arrives_whole",
 ];
 
 /// Every case fails in bounded time, rather than one case running forever
 /// and the rest never running.
 #[tokio::test(start_paused = true)]
 async fn a_snapshot_that_never_ends_fails_every_case_in_bounded_time() {
-    let why = failure(&Endless { ready: false }).await;
+    let why = failure(&Endless {
+        ready: false,
+        disowns: None,
+    })
+    .await;
     for case in CASES {
         assert!(why.contains(case), "{why}");
     }
@@ -115,7 +132,11 @@ fn an_always_ready_snapshot_that_never_ends_fails_every_case_in_bounded_time() {
                     tokio::task::yield_now().await;
                 }
             });
-            failure(&Endless { ready: true }).await
+            failure(&Endless {
+                ready: true,
+                disowns: None,
+            })
+            .await
         });
         let _ = answer.send(why);
     });
@@ -125,4 +146,20 @@ fn an_always_ready_snapshot_that_never_ends_fails_every_case_in_bounded_time() {
     for case in CASES {
         assert!(why.contains(case), "{why}");
     }
+}
+
+/// A backend that says it does not keep a rule must fail the rule's case
+/// on the rule itself: failing it on anything else, here a snapshot that
+/// never ends, fails the suite.
+#[tokio::test(start_paused = true)]
+async fn a_disowned_rule_must_fail_on_the_rule_itself() {
+    let why = failure(&Endless {
+        ready: false,
+        disowns: Some(Rule::Kept),
+    })
+    .await;
+    assert!(
+        why.contains("a_record_stays_until_withdrawn (failed, but not on Kept: "),
+        "{why}"
+    );
 }

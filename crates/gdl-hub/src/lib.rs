@@ -58,7 +58,7 @@ pub use follow::FollowsWatch;
 pub use keyed::KeyedRecords;
 pub use quorum::Quorum;
 pub use report::{HubDirectory, VerifiedReport};
-pub use setup::{cell_from_env, cell_from_vars, hub_builder};
+pub use setup::{cell_from_env, cell_from_vars, hub_builder, hub_builder_with};
 
 use gdl_model::{DeploymentSpec, SegmentRegistration};
 use velo_hub::{Committed, Extension, RegistrationView, Rejection, Txn};
