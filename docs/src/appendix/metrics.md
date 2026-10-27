@@ -79,6 +79,24 @@ A chooser registers two more families: what became of each offer it made to a ce
 - The cells bound the series: seven and one for each cell of each class the chooser sends to that its hub followed.
 - The chooser counts the decline that the entry gave, not what it did with it. A gone decline of an offer made under an earlier generation of the cell damps the cell, and still counts as `declined_gone`.
 
+## A cell hub's record tables
+
+An instance under a cell's hub registers one more family: what became of each write to a table of the hub's records ([A node's handle on the records](../concepts/cells.md#a-nodes-handle-on-the-records)). It has no `dynamo_endpoint`. The launch registers it once the instance has registered with its hub, when `RuntimeConfig::metrics` holds a registry.
+
+| Name | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `cell_record_writes_total` | counter | `table`, `outcome` | Writes (`CellRecords::set`) to the table, by how each ended. |
+
+| `outcome` | The write |
+|---|---|
+| `applied` | The hub applied it. |
+| `refused` | The hub refused it: the record did not match what the write expected. |
+| `dropped` | The write queue was full, so the write was never sent. |
+| `unanswered` | The hub could not be asked, or did not answer within 1 s. The write may have applied. |
+
+- A table's four series appear at zero when a node takes the table, and stay for the life of the process. Two handles on one table count into the same series.
+- A dropped write never reaches the hub, so the callback never gets it. The others each reach the callback once.
+
 ## Buckets
 
 All five histograms use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. Buckets are cumulative. A histogram's `_count` equals its `+Inf` bucket, both computed from the same read of the internal bins.
@@ -89,6 +107,6 @@ Each error family has one series for each of these ten values, at zero from the 
 
 ## Reserved names
 
-`gdl_model::RUNTIME_METRICS` holds 19 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, the two cell families, and dynamo's `request_duration_seconds`. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
+`gdl_model::RUNTIME_METRICS` holds 20 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, the two cell families, `cell_record_writes_total`, and dynamo's `request_duration_seconds`. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
 
 `gdl_model::RUNTIME_LABELS` holds the four labels a node's metric cannot use: `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.

@@ -31,6 +31,7 @@ mod items;
 mod meter;
 mod metrics;
 mod policy;
+mod records;
 mod role;
 mod select;
 mod service;
@@ -55,6 +56,11 @@ pub use policy::{
 /// its metric types through here, so they are the types the runtime
 /// registers and serves.
 pub use prometheus;
+pub use records::{
+    CellRecords, Checked, Expected, HubRecords, Record, RecordsUnavailable, Written,
+};
+#[doc(hidden)]
+pub use records::{RecordAnswer, RecordLink, RecordOp, RecordReply};
 pub use role::{Backward, Build, Forward, Frontend, Next, Operator, Sink};
 pub use select::{
     Affinity, AffinityConfig, Choice, Encoded, Head, Instance, InstanceId, Instances, LeastLoaded,

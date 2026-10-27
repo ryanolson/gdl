@@ -21,7 +21,9 @@ use gdl::Build;
 use gdl::Cx;
 use gdl::Metrics;
 use gdl::Result;
-use gdl::{Affinity, CellPolicies, CellPolicy, FollowedCells, LeastLoaded, Selector, Selectors};
+use gdl::{
+    Affinity, CellPolicies, CellPolicy, FollowedCells, HubRecords, LeastLoaded, Selector, Selectors,
+};
 use gdl_model::{DeploymentSpec, GraphConfig, MetricField};
 
 /// What one segment's binary hosts and serves: the parts that differ
@@ -121,6 +123,7 @@ pub async fn run_segment<B: SegmentBinary>(
         B::GRAPH_CONFIG,
         registry.clone(),
         config.selector_tables().clone(),
+        config.runtime.records.clone(),
     )?;
     let hosts = B::build(settings, &builder).await?;
     // gdl's own selectors, configured in the settings and not registered
@@ -214,6 +217,10 @@ pub struct Builder {
     /// What every node and selector it builds reads the chooser's cells
     /// through ([`FollowedCells::current`]), bound at the launch.
     followed: FollowedCells,
+    /// What every node and selector it builds takes its cell hub's record
+    /// tables from ([`gdl::CellRecords::current`]): the runtime's own,
+    /// bound at the launch.
+    records: HubRecords,
 }
 
 /// One built selector's or cell policy's [`Build::ready`].
@@ -224,6 +231,7 @@ impl Builder {
         graph: &str,
         registry: prometheus::Registry,
         tables: BTreeMap<String, toml::Table>,
+        records: HubRecords,
     ) -> std::result::Result<Self, Failure> {
         Ok(Self {
             graph: toml::from_str(graph)?,
@@ -234,6 +242,7 @@ impl Builder {
             cell_policies: Mutex::new(CellPolicies::new()),
             readiness: Mutex::new(Vec::new()),
             followed: FollowedCells::new(),
+            records,
         })
     }
 
@@ -309,7 +318,10 @@ impl Builder {
         let providers = Figment::from(Serialized::defaults(table));
         let built = self
             .followed
-            .scope(build_node::<S>(&providers, &GraphConfig::new(), metrics))
+            .scope(
+                self.records
+                    .scope(build_node::<S>(&providers, &GraphConfig::new(), metrics)),
+            )
             .await
             .map_err(|e| format!("building selector {name}: {e}"))?;
         let built = Arc::new(built);
@@ -359,7 +371,10 @@ impl Builder {
         let graph = self.graph.get(node).unwrap_or(&none);
         let providers = Figment::from(Serialized::defaults(table.unwrap_or_default()));
         self.followed
-            .scope(build_node::<T>(&providers, graph, metrics))
+            .scope(
+                self.records
+                    .scope(build_node::<T>(&providers, graph, metrics)),
+            )
             .await
             .map_err(|e| format!("building {node}: {e}").into())
     }

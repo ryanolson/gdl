@@ -26,7 +26,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 
 | Crate | For | Contents |
 |---|---|---|
-| `gdl` | Authors of nodes and routers | The request context, role traits, local composition, selectors, cell policies, the followed cells' view, metrics, and the derives. No velo |
+| `gdl` | Authors of nodes and routers | The request context, role traits, local composition, selectors, cell policies, the followed cells' view, the cell hub's record tables, metrics, and the derives. No velo |
 | `gdl-runtime` | Programs that run a graph | Segments, crossings over velo, discovery, the segment binary, and `graph!`. Re-exports `gdl` and the model |
 | `gdl-model` | Tools | The manifest, placement, layout, diagrams, and the fleet file, without the runtime. Builds for wasm |
 | `gdl-syntax` | The macro and the generator | The graph parser and checked model |

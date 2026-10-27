@@ -1126,6 +1126,7 @@ mod chooser;
 #[cfg(test)]
 mod drains;
 mod load;
+mod records;
 
 pub(crate) use cell::{CellDrain, Parent};
 pub(crate) use chooser::ChooserHub;

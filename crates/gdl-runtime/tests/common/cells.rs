@@ -236,9 +236,11 @@ async fn unresolved_cell_hub_of(
     let readiness = Arc::new(
         CellReadiness::new(spec, cell, directory.clone(), timing).expect("valid test fixture"),
     );
+    // A cell's hub runs the record service too, as `hub_builder` mounts it.
     let hub = Hub::builder(hub_config())
         .extension(GraphAdmission::new(spec.clone()))
         .extension(Arc::clone(&readiness))
+        .extension(gdl_hub::KeyedRecords::new(1024).expect("a capacity"))
         .serve()
         .await
         .expect("the hub serves");

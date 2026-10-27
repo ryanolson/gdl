@@ -110,6 +110,10 @@ name = "draining"
 required-features = ["hub"]
 
 [[test]]
+name = "records"
+required-features = ["hub"]
+
+[[test]]
 name = "unknown"
 required-features = ["hub"]
 

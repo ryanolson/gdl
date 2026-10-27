@@ -19,7 +19,7 @@ use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
 use gdl::__runtime::{Erased, Lease};
 use gdl::Cx;
-use gdl::{CellPolicies, FollowedCells, HomeFirstAt, Selectors};
+use gdl::{CellPolicies, FollowedCells, HomeFirstAt, HubRecords, Selectors};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::{Layout, RequestRouter};
 
@@ -112,6 +112,14 @@ pub struct RuntimeConfig {
     /// tables. A segment that sends into no other class, or runs without a
     /// hub, leaves it unbound.
     pub followed: FollowedCells,
+    /// The record service through which the segment's nodes take tables of
+    /// their cell's hub ([`gdl::CellRecords::current`]). Not a setting: a
+    /// `ProcessConfig` with a `[hub]` and a `[cell]` makes one that tables
+    /// can be taken from, a segment binary's `Builder` gives it to the
+    /// nodes it builds, and the launch binds it to the hub once the
+    /// instance has registered there. Without both, it is not bound. Give
+    /// each instance its own.
+    pub records: HubRecords,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -195,6 +203,7 @@ impl Default for RuntimeConfig {
             selectors: Selectors::new(),
             cell_policies: CellPolicies::new(),
             followed: FollowedCells::new(),
+            records: HubRecords::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -281,6 +290,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             selectors: Selectors::new(),
             cell_policies: CellPolicies::new(),
             followed: FollowedCells::new(),
+            records: HubRecords::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };

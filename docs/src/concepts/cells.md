@@ -150,6 +150,32 @@ A record maps a key to a value and a version. Key and value are bytes. The table
 
 A table of 2048 records or more is split into shards, each of at least 1024 records, up to 64. Each shard has its own lock, so operations on keys of different shards never wait for each other, and a request with many operations takes each key's lock alone. Each shard evicts its own least recently used record, so a large table evicts one of its least recently used records, not always the oldest. A smaller table is one shard and evicts exactly the oldest. Versions come from one counter for the whole table, taken under the shard's lock with the write. The cost of a round trip is in [Keyed record service cost](../operations/keyed-cost.md). [Cells design](../development/cells-design.md#keyed-records-by-request-and-answer) gives the alternatives that were rejected.
 
+#### A node's handle on the records
+
+A node or a cell policy takes a handle on a named table of its cell hub's records with `gdl::CellRecords::current(name)`, in `build`, as it takes `FollowedCells::current()`. The handle lives in `gdl`, so a node crate does not link velo. The runtime binds it to the hub.
+
+```rust,ignore
+async fn build(config: LookupConfig, (): ()) -> gdl::Result<Self> {
+    let records = gdl::CellRecords::current("fingerprints")?;
+    records.on_answer(|key, written| { /* update the cache of `key` */ });
+    Ok(Self { records })
+}
+
+// Per request.
+let found = self.records.get(key).await?;                // record and version, or none
+let checked = self.records.check(key, version).await?;   // unchanged, newer, or gone
+self.records.set(key, value, gdl::Expected::Absent);     // does not wait
+```
+
+- `current` decides before the nodes are built. An instance with a `[hub]` and a `[cell]` gets a handle. Any other instance, and a call outside a build, gets `RecordsUnavailable::Unbound`, so the node can use a store of its own. The launch binds the handles once the instance has registered with its hub, before it waits for its nodes to be ready.
+- `get` and `check` each send one request at once and wait for the answer. They fail if the instance has not reached its hub yet. Bound the wait with a timeout of your own.
+- `set` copies the write into a bounded queue and returns. It does not allocate (`crates/gdl-runtime/tests/allocs.rs`). A task sends the queue in one request 5 ms after its first write, or as soon as 64 KiB are queued. The queue holds 128 KiB, split by key over 8 locks, so writers of different keys rarely meet on one lock.
+- A handle has one request on its way at a time. The hub applies requests as they arrive, so two requests on their way could reach it out of order. With one at a time, writes to one key through one handle reach the hub in the order they were queued. While the hub is slow to answer, writes queue, and the next request goes out as soon as the answer comes. Two handles on one table have two queues, so their writes to one key can reach the hub in either order. When a write's part of the queue is full, the write is dropped, `set` returns `false`, and `cell_record_writes_total{outcome="dropped"}` counts it ([metrics](../appendix/metrics.md#a-cell-hubs-record-tables)). A write of more than 16 KiB never fits.
+- Each write's answer reaches the callback given to `on_answer`, with the write's key: applied at a version, refused with the record that the hub holds, or unanswered when no answer came within 1 s. A write that the queue dropped gets no answer. An unanswered request can still reach the hub, so the next request waits until it ends: the hub answers it, or velo-hub's client gives up after 60 s. Meanwhile writes queue, then drop.
+- The hub has one table. The handle puts the table's name, after one byte of its length, in front of each key, so the tables of one cell keep their keys apart. They share the hub's capacity and its least recently used order.
+- `eviction_age` gives the eviction age of the last answer. It is a time until eviction only when the table is full. Below `keyed_capacity`, the hub evicts nothing, and the age is only the age of its oldest record, which is short soon after the hub starts. A cache that checks a record at half the age needs a floor of its own, such as 10 s, and a ceiling, such as 5 minutes.
+- Once the instance's hub session ends, each request fails without reaching the hub, and each write is unanswered.
+
 ## The cell directory
 
 The cell directory holds one record per cell, keyed by class and name. Each record is written only by its own cell's hub. The `gdl_cells::CellDirectory` trait has three operations:

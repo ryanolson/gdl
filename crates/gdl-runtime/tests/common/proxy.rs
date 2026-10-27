@@ -49,6 +49,8 @@ struct Tamper {
     hold: tokio::sync::watch::Sender<Option<Vec<u8>>>,
     /// Signalled when a request is held.
     held: tokio::sync::Notify,
+    /// Signalled when the hub answers a request released after a hold.
+    answered: tokio::sync::Notify,
 }
 
 impl Proxy {
@@ -106,6 +108,11 @@ impl Proxy {
         self.tamper.held.notified().await;
     }
 
+    /// Resolves once the hub answers a request released after a hold.
+    pub async fn answered_after_hold(&self) {
+        self.tamper.answered.notified().await;
+    }
+
     pub fn set(&self, mode: Mode) {
         let _ = self.mode.send(mode);
     }
@@ -153,6 +160,7 @@ async fn relay(
     // What a hub sent that may be the start of a state to replace, held
     // until the bytes after it come.
     let mut held_down: Vec<u8> = Vec::new();
+    let mut awaiting_held = false;
     loop {
         let now = *mode.borrow_and_update();
         match now {
@@ -173,7 +181,7 @@ async fn relay(
             changed = mode.changed() => if changed.is_err() {
                 return;
             },
-            read = from_client.read(&mut up) => match read {
+            read = from_client.read(&mut up), if !awaiting_held => match read {
                 Ok(n) if n > 0 => {
                     let mut seen = tail.clone();
                     seen.extend_from_slice(&up[..n]);
@@ -197,6 +205,9 @@ async fn relay(
                     if let Some(pattern) = pattern
                         && seen.windows(pattern.len()).any(|w| w == pattern.as_slice())
                     {
+                        // Retain the request after its client times out,
+                        // as a server that already buffered its body can.
+                        awaiting_held = true;
                         held.tamper.held.notify_one();
                         let mut hold = held.tamper.hold.subscribe();
                         let _ = hold.wait_for(Option::is_none).await;
@@ -211,6 +222,10 @@ async fn relay(
             },
             read = from_server.read(&mut down) => match read {
                 Ok(n) if n > 0 => {
+                    if awaiting_held {
+                        awaiting_held = false;
+                        held.tamper.answered.notify_one();
+                    }
                     let mut out = std::mem::take(&mut held_down);
                     out.extend_from_slice(&down[..n]);
                     if now == Mode::Undrained {

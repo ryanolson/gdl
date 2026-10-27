@@ -244,6 +244,12 @@ impl<H: Hosted> ProcessConfig<H> {
             .map_err(|e| placement(e.to_string()))?;
         let hosted = H::deserialize(&Value::Dict(Tag::Default, hosted))
             .map_err(|e| placement(e.to_string()))?;
+        let mut runtime = settings.runtime;
+        // Decided before the nodes are built, which take their tables
+        // then: only a cell's hub has the record service.
+        if settings.hub.is_some() && cell.is_some() {
+            runtime.records = gdl::HubRecords::under_hub();
+        }
         let config = Self {
             listen: settings.listen,
             roster: settings.roster,
@@ -255,7 +261,7 @@ impl<H: Hosted> ProcessConfig<H> {
             selector: settings.selector,
             cell,
             cell_origins,
-            runtime: settings.runtime,
+            runtime,
             hosted,
         };
         config.discovery()?;
@@ -472,6 +478,19 @@ impl<H> ProcessConfig<H> {
                     Duration::from_millis(*heartbeat_ms),
                 )
                 .await?;
+                // The nodes, built already, reach the cell hub's records
+                // from now, so that a node can read them while it gets
+                // ready.
+                if self.cell.is_some() {
+                    self.runtime
+                        .records
+                        .bind(session.records_link(node.instance_id()));
+                    if let Some(registry) = &self.runtime.metrics {
+                        self.runtime.records.register(registry).map_err(|e| {
+                            placement(format!("registering the record tables' metrics: {e}"))
+                        })?;
+                    }
+                }
                 // The nodes load while the lease is kept; a lease lost
                 // meanwhile (the hub restarted) ends the wait, since the
                 // roster taken afterwards would be refused anyway.
