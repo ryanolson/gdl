@@ -454,7 +454,7 @@ impl Bundle {
         // or move a Git dependency to its newest commit.
         let locked = match &self.context {
             Some(context) => {
-                let patch = context.patch(&self.files, &crate_dir);
+                let patch = context.patch(&self.files, &crate_dir)?;
                 if let Some(manifest) = self.files.get_mut(&crate_dir.join("Cargo.toml")) {
                     manifest.push_str(&patch);
                     // The host's Rust may be newer than the image's: Cargo

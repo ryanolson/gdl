@@ -1727,3 +1727,1259 @@ fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
         String::from_utf8_lossy(&outside.stderr)
     );
 }
+
+/// A crate by path that stands in for crates.io's `name` at version 1.0.0,
+/// in `dir`: a workspace of its own, as a crate outside the repository's
+/// workspace must be.
+fn pinned_crate(dir: &Path, name: &str) {
+    std::fs::create_dir_all(dir.join("src")).expect("a pinned crate");
+    std::fs::write(dir.join("src/lib.rs"), "").expect("a library");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[workspace]\n"
+        ),
+    )
+    .expect("a manifest");
+}
+
+/// `cargo gdl compose --local` of the spec in `holder/http` into `out`,
+/// offline: the host's own patch of a crate that crates.io lacks resolves
+/// only so, as Cargo otherwise reads the index to check it.
+fn compose_offline(holder: &Path, out: &Path) -> std::process::Output {
+    Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "compose",
+            "--local",
+        ])
+        .arg("--spec")
+        .arg(holder.join("http/gdl.toml"))
+        .arg("--out")
+        .arg(out)
+        .arg("--target-dir")
+        .arg(target("gdl-gen-tests"))
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("compose")
+}
+
+/// The node crate's workspace pins a crates.io dependency to a copy by
+/// path with `[patch.crates-io]`. A segment is a workspace of its own,
+/// and Cargo reads `[patch]` only from the workspace it builds, so the
+/// segment carries the patch, its path written from the segment: its lock
+/// takes the copy the host builds. Every cargo here runs offline, where
+/// crates.io has no such crate, so without the patch no lock is written.
+#[test]
+fn a_local_bundle_carries_the_patch_of_its_node_crates_workspace() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-patch-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\ngdl-host-pinned = \"1\"\n",
+        "",
+    );
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node crate's manifest");
+    std::fs::write(
+        &node,
+        format!("{manifest}\n[patch.crates-io]\ngdl-host-pinned = {{ path = \"../pinned\" }}\n"),
+    )
+    .expect("the host's patch");
+    pinned_crate(&holder.path().join("pinned"), "gdl-host-pinned");
+    offline_lock(holder.path());
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        composed.status.success(),
+        "the segment resolves the host's pin offline:\n{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    assert!(
+        manifest.contains("[patch.\"crates-io\"]\ngdl-host-pinned = { path = \"../../pinned\" }\n"),
+        "{manifest}"
+    );
+    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let entries = locked(&lock, "gdl-host-pinned");
+    assert_eq!(entries.len(), 1, "one gdl-host-pinned in:\n{lock}");
+    assert!(
+        !entries[0].contains("source ="),
+        "the copy by path: {}",
+        entries[0]
+    );
+}
+
+/// The node crate's workspace patches the Git source it takes gdl from
+/// with gdl by path, as a host that builds against a gdl checkout does:
+/// the segment patches the same name of the same source. gdl's entry wins,
+/// so the segment has one table for the source and one `gdl` in it, which
+/// TOML requires, and one copy of gdl in its lock. A host cannot patch in
+/// another copy of gdl: the gdl-runtime it takes by path brings this one.
+#[test]
+fn gdls_patch_wins_over_the_hosts_patch_of_the_same_gdl_source() {
+    let (_repo, url, rev) = stub_gdl(&[]);
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-patch-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(holder.path(), &gdl_from_git(&url, &rev), "");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node crate's manifest");
+    std::fs::write(
+        &node,
+        format!("{manifest}\n[patch.\"{url}\"]\ngdl = {{ path = \"../../crates/gdl\" }}\n"),
+    )
+    .expect("the host's patch of gdl");
+    offline_lock(holder.path());
+
+    let out = holder.path().join("bundle");
+    gdl_gen::compose(
+        &spec_in(holder.path()),
+        None,
+        &out,
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect("a bundle");
+    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    assert_eq!(manifest.matches("[patch.").count(), 1, "{manifest}");
+    assert!(
+        manifest.contains(&format!(
+            "[patch.\"{url}\"]\ngdl = {{ path = \"../../../crates/gdl\" }}\ngdl-message = {{ path = \"../../../crates/gdl-message\" }}\n"
+        )),
+        "{manifest}"
+    );
+    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let entries = locked(&lock, "gdl");
+    assert_eq!(entries.len(), 1, "one gdl in:\n{lock}");
+    assert!(!entries[0].contains("source ="), "{}", entries[0]);
+}
+
+/// The http example's spec in `holder/http`, as [`http_from_git`] left it.
+fn spec_in(holder: &Path) -> gdl_gen::Spec {
+    let dir = holder.join("http");
+    let text = std::fs::read_to_string(dir.join("gdl.toml")).expect("the spec");
+    let graph = std::fs::read_to_string(dir.join("http.gdl")).expect("the graph");
+    gdl_gen::Spec::from_text(&text, &graph, &dir).expect("a spec")
+}
+
+/// A crate that the node crate's workspace patches in by path is built
+/// from the context, so the context holds it. One outside every directory
+/// the bundle shares with its crates leaves the root as the only common
+/// one, and the bundle is refused, with the crate's directory named.
+#[test]
+fn a_crate_patched_in_from_outside_the_context_widens_it() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-patch-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let outside = tempfile::Builder::new()
+        .prefix("gdl-local-patched-")
+        .tempdir()
+        .expect("a directory outside the repository");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\ngdl-host-pinned = \"1\"\n",
+        "",
+    );
+    let pinned = outside.path().join("pinned");
+    pinned_crate(&pinned, "gdl-host-pinned");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node crate's manifest");
+    std::fs::write(
+        &node,
+        format!(
+            "{manifest}\n[patch.crates-io]\ngdl-host-pinned = {{ path = \"{}\" }}\n",
+            pinned.display()
+        ),
+    )
+    .expect("the host's patch");
+    offline_lock(holder.path());
+
+    let composed = compose_offline(holder.path(), &holder.path().join("bundle"));
+    assert!(!composed.status.success(), "a context of the whole disk");
+    let error = String::from_utf8_lossy(&composed.stderr);
+    assert!(error.contains("would be `/`"), "{error}");
+    assert!(error.contains(&pinned.display().to_string()), "{error}");
+}
+
+/// A crate that the node crate takes by path, in a workspace of its own,
+/// patches crates.io: Cargo applies a patch only from the workspace it
+/// builds, so the host, building the node crate's workspace, does not
+/// apply it, and the segment does not carry it either.
+#[test]
+fn a_local_bundle_leaves_out_the_patch_of_a_transitive_crates_workspace() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-patch-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\nhelper = { path = \"../helper\" }\n",
+        "",
+    );
+    let helper = holder.path().join("helper");
+    std::fs::create_dir_all(helper.join("src")).expect("a path dependency");
+    std::fs::write(helper.join("src/lib.rs"), "").expect("a library");
+    std::fs::write(
+        helper.join("Cargo.toml"),
+        "[package]\nname = \"helper\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n\
+         [patch.crates-io]\ngdl-host-pinned = { path = \"../pinned\" }\n",
+    )
+    .expect("a workspace that patches");
+    pinned_crate(&holder.path().join("pinned"), "gdl-host-pinned");
+    offline_lock(holder.path());
+
+    let out = holder.path().join("bundle");
+    gdl_gen::compose(
+        &spec_in(holder.path()),
+        None,
+        &out,
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect("a bundle");
+    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    assert!(!manifest.contains("[patch"), "{manifest}");
+}
+
+/// Cargo accepts a version string as a patch from Git to crates.io. The
+/// segment must keep that source change when it writes its own lock.
+#[test]
+fn a_local_bundle_carries_a_version_string_patch() {
+    let (_repo, url, rev) = stub_gdl(&[("itoa", "")]);
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-string-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        &format!(
+            "gdl = {{ path = \"../../crates/gdl\" }}\nitoa = {{ git = \"{url}\", rev = \"{rev}\" }}\n"
+        ),
+        "",
+    );
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node crate's manifest");
+    std::fs::write(
+        &node,
+        format!("{manifest}\n[patch.\"{url}\"]\nitoa = \"=1.0.18\"\n"),
+    )
+    .expect("a version string patch");
+    offline_lock(holder.path());
+
+    let out = holder.path().join("bundle");
+    gdl_gen::compose(
+        &spec_in(holder.path()),
+        None,
+        &out,
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect("the host builds with the crates.io patch");
+    let host_lock =
+        std::fs::read_to_string(holder.path().join("http/Cargo.lock")).expect("the host's lock");
+    let host_entries = locked(&host_lock, "itoa");
+    assert_eq!(host_entries.len(), 1, "{host_entries:#?}");
+    assert!(host_entries[0].contains("registry+"), "{host_entries:#?}");
+    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let entries = locked(&lock, "itoa");
+    assert!(
+        entries.iter().all(|entry| !entry.contains("git+")),
+        "the segment must keep the host's crates.io patch: {entries:#?}"
+    );
+}
+
+/// Cargo names crates.io by its Git index URL too. The host's patch and
+/// the generated gdl patch must agree on the identity of that source.
+#[test]
+fn a_local_bundle_merges_the_crates_io_index_url_with_its_gdl_patch() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-index-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(holder.path(), "gdl = \"=0.1.0\"\n", "");
+    let fork = holder.path().join("fork");
+    pinned_crate(&fork, "gdl");
+    let fork_manifest = fork.join("Cargo.toml");
+    let text = std::fs::read_to_string(&fork_manifest).expect("the fork's manifest");
+    std::fs::write(fork_manifest, text.replace("1.0.0", "0.1.0")).expect("gdl's version");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node)
+        .expect("the node crate's manifest")
+        .replace(
+            "gdl-runtime = { path = \"../../crates/gdl-runtime\" }\n",
+            "",
+        );
+    std::fs::write(
+        &node,
+        format!(
+            "{manifest}\n[patch.\"https://github.com/rust-lang/crates.io-index\"]\ngdl = {{ path = \"../fork\" }}\n"
+        ),
+    )
+    .expect("the host's patch by the index URL");
+    offline_lock(holder.path());
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        composed.status.success(),
+        "the segment must merge equivalent Cargo source keys: {}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let manifest = std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the manifest");
+    assert_eq!(manifest.matches("[patch.").count(), 1, "{manifest}");
+}
+
+/// Docker copies a symlink without its target. A patch reached through a
+/// symlink still needs its source directory inside the build context.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_patch_outside_the_context_widens_it() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-link-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let outside = tempfile::Builder::new()
+        .prefix("gdl-local-linked-")
+        .tempdir()
+        .expect("a directory outside the repository");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\ngdl-host-pinned = \"1\"\n",
+        "",
+    );
+    let pinned = outside.path().join("pinned");
+    pinned_crate(&pinned, "gdl-host-pinned");
+    std::os::unix::fs::symlink(&pinned, holder.path().join("pinned")).expect("the patch symlink");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node crate's manifest");
+    std::fs::write(
+        &node,
+        format!("{manifest}\n[patch.crates-io]\ngdl-host-pinned = {{ path = \"../pinned\" }}\n"),
+    )
+    .expect("a patch through the symlink");
+    offline_lock(holder.path());
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        !composed.status.success(),
+        "compose accepted a context that cannot copy the patch target {}: {}",
+        pinned.display(),
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let error = String::from_utf8_lossy(&composed.stderr);
+    assert!(error.contains("would be `/`"), "{error}");
+    assert!(error.contains(&pinned.display().to_string()), "{error}");
+}
+
+/// A patch key may rename the package it supplies. A renamed gdl patch
+/// must give way to the runtime's gdl just like an entry named `gdl`.
+#[test]
+fn a_renamed_host_gdl_patch_gives_way_to_the_runtime() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-renamed-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(holder.path(), "gdl = \"=0.1.0\"\n", "");
+    let fork = holder.path().join("fork");
+    pinned_crate(&fork, "gdl");
+    let fork_manifest = fork.join("Cargo.toml");
+    let text = std::fs::read_to_string(&fork_manifest).expect("the fork's manifest");
+    std::fs::write(fork_manifest, text.replace("1.0.0", "0.1.0")).expect("gdl's version");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node)
+        .expect("the node crate's manifest")
+        .replace(
+            "gdl-runtime = { path = \"../../crates/gdl-runtime\" }\n",
+            "",
+        );
+    std::fs::write(
+        &node,
+        format!(
+            "{manifest}\n[patch.crates-io]\ngdl-node = {{ package = \"gdl\", path = \"../fork\" }}\n"
+        ),
+    )
+    .expect("a renamed patch entry");
+    offline_lock(holder.path());
+
+    let composed = compose_offline(holder.path(), &holder.path().join("bundle"));
+    assert!(
+        composed.status.success(),
+        "the runtime's gdl must replace the renamed host patch: {}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+}
+
+/// The segment replaces the host's gdl patch with its runtime's gdl.
+/// A discarded patch outside the context must not widen that context.
+#[test]
+fn an_overridden_gdl_patch_does_not_widen_the_context() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-overridden-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let outside = tempfile::Builder::new()
+        .prefix("gdl-local-discarded-")
+        .tempdir()
+        .expect("a directory outside the context");
+    http_from_git(holder.path(), "gdl = \"=0.1.0\"\n", "");
+    let fork = outside.path().join("gdl");
+    pinned_crate(&fork, "gdl");
+    let manifest = fork.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).expect("the fork's manifest");
+    std::fs::write(manifest, text.replace("1.0.0", "0.1.0")).expect("gdl's version");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node)
+        .expect("the node crate's manifest")
+        .replace(
+            "gdl-runtime = { path = \"../../crates/gdl-runtime\" }\n",
+            "",
+        );
+    std::fs::write(
+        &node,
+        format!(
+            "{manifest}\n[patch.crates-io]\ngdl = {{ path = {} }}\n",
+            serde_json::to_string(fork.to_str().expect("UTF-8")).expect("a path string")
+        ),
+    )
+    .expect("the host's gdl patch");
+    offline_lock(holder.path());
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's resolve");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        composed.status.success(),
+        "gdl's winning patch needs no discarded source in the context: {}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let manifest =
+        std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the segment manifest");
+    assert!(!manifest.contains("gdl-local-discarded-"), "{manifest}");
+}
+
+/// A patch alias can use a gdl package's name for another package.
+/// Its TOML key must not replace the generated patch of gdl itself.
+#[test]
+fn a_host_patch_alias_does_not_replace_the_generated_gdl_entry() {
+    let (_repo, url, rev) = stub_gdl(&[("gdl-host-pinned", "")]);
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-alias-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(holder.path(), &gdl_from_git(&url, &rev), "");
+    pinned_crate(&holder.path().join("pinned"), "gdl-host-pinned");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node crate's manifest");
+    std::fs::write(
+        &node,
+        format!(
+            "{manifest}\n[patch.\"{url}\"]\n\
+             gdl = {{ package = \"gdl-host-pinned\", path = \"../pinned\" }}\n\
+             runtime-gdl = {{ package = \"gdl\", path = \"../../crates/gdl\" }}\n\
+             gdl-message = {{ path = \"../../crates/gdl-message\" }}\n"
+        ),
+    )
+    .expect("the host's patch aliases");
+    offline_lock(holder.path());
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's resolve");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+
+    gdl_gen::compose(
+        &spec_in(holder.path()),
+        None,
+        &holder.path().join("bundle"),
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect("the host alias must not overwrite the segment's gdl patch");
+}
+
+/// Cargo lets a patch name a configured registry. A host patch of gdl
+/// under that name is left out like any host patch of gdl, so the
+/// segment's own patch of the registry's index is its one table.
+#[test]
+fn a_named_registry_patch_shares_the_generated_source_table() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-registry-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { version = \"=0.1.0\", registry = \"review\" }\n",
+        "",
+    );
+    let fork = holder.path().join("fork");
+    pinned_crate(&fork, "gdl");
+    let fork_manifest = fork.join("Cargo.toml");
+    let text = std::fs::read_to_string(&fork_manifest).expect("the fork's manifest");
+    std::fs::write(fork_manifest, text.replace("1.0.0", "0.1.0")).expect("gdl's version");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node)
+        .expect("the node crate's manifest")
+        .replace(
+            "gdl-runtime = { path = \"../../crates/gdl-runtime\" }\n",
+            "",
+        );
+    std::fs::write(
+        &node,
+        format!("{manifest}\n[patch.review]\ngdl = {{ path = \"../fork\" }}\n"),
+    )
+    .expect("the host's patch by registry name");
+    offline_lock(holder.path());
+    let index = "https://github.com/rust-lang/crates.io-index";
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .env("CARGO_REGISTRIES_REVIEW_INDEX", index)
+        .output()
+        .expect("the host's resolve");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+
+    let out = holder.path().join("bundle");
+    let composed = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "compose",
+            "--local",
+        ])
+        .arg("--spec")
+        .arg(holder.path().join("http/gdl.toml"))
+        .arg("--out")
+        .arg(&out)
+        .arg("--target-dir")
+        .arg(target("gdl-gen-tests"))
+        .env("CARGO_REGISTRIES_REVIEW_INDEX", index)
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("compose with a named registry patch");
+    assert!(
+        composed.status.success(),
+        "a host patch of gdl by registry name must not reach the segment: {}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let manifest =
+        std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the segment manifest");
+    assert_eq!(manifest.matches("[patch.").count(), 1, "{manifest}");
+}
+
+/// A host can lock a patched version below the version in gdl's lock.
+/// Seeding the segment with gdl's lock must not discard that patch.
+#[test]
+fn a_host_patch_below_the_seeded_lock_version_is_used() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-seed-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\nitoa = \"1\"\n",
+        "",
+    );
+    pinned_crate(&holder.path().join("pinned"), "itoa");
+    let pin = holder.path().join("pinned/Cargo.toml");
+    let text = std::fs::read_to_string(&pin).expect("the patch's manifest");
+    std::fs::write(pin, text.replace("1.0.0", "1.0.17")).expect("the patched version");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node crate's manifest");
+    std::fs::write(
+        &node,
+        format!("{manifest}\n[patch.crates-io]\nitoa = {{ path = \"../pinned\" }}\n"),
+    )
+    .expect("the host's patch");
+    offline_lock(holder.path());
+    let updated = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "update",
+            "--offline",
+            "--package",
+            "itoa",
+            "--precise",
+            "1.0.17",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("lock the host's patched version");
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's resolve");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    let host: serde_json::Value = serde_json::from_slice(&host.stdout).expect("host metadata");
+    let patched = host["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "itoa")
+        .expect("the host's itoa");
+    assert_eq!(patched["version"], "1.0.17");
+    assert!(
+        patched["source"].is_null(),
+        "the host builds its patch: {patched}"
+    );
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        composed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let manifest =
+        std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the segment's manifest");
+    assert!(
+        manifest.contains("itoa = { path = \"../../pinned\" }"),
+        "{manifest}"
+    );
+    let lock: toml::Table = std::fs::read_to_string(out.join("main/Cargo.lock"))
+        .expect("the segment's lock")
+        .parse()
+        .expect("a lock file");
+    let itoa = lock["package"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"].as_str() == Some("itoa"))
+        .expect("the segment's itoa");
+    assert!(
+        itoa.get("source").is_none(),
+        "the segment silently drops the host's path patch: {itoa}"
+    );
+    assert_eq!(itoa["version"].as_str(), Some("1.0.17"));
+}
+
+/// An alias discarded because its name collides with gdl's patch needs
+/// no source directory in the context, just like a discarded gdl fork.
+#[test]
+fn a_discarded_patch_alias_does_not_widen_the_context() {
+    let (_repo, url, rev) = stub_gdl(&[("gdl-host-pinned", "")]);
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-alias-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let outside = tempfile::Builder::new()
+        .prefix("gdl-discarded-alias-")
+        .tempdir()
+        .expect("a directory outside the context");
+    http_from_git(holder.path(), &gdl_from_git(&url, &rev), "");
+    pinned_crate(outside.path(), "gdl-host-pinned");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node crate's manifest");
+    std::fs::write(
+        &node,
+        format!(
+            "{manifest}\n[patch.\"{url}\"]\n\
+             gdl = {{ package = \"gdl-host-pinned\", path = {} }}\n\
+             runtime-gdl = {{ package = \"gdl\", path = \"../../crates/gdl\" }}\n\
+             gdl-message = {{ path = \"../../crates/gdl-message\" }}\n",
+            serde_json::to_string(outside.path().to_str().expect("UTF-8")).expect("a path string")
+        ),
+    )
+    .expect("the host's patch aliases");
+    offline_lock(holder.path());
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's resolve");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+
+    gdl_gen::compose(
+        &spec_in(holder.path()),
+        None,
+        &holder.path().join("bundle"),
+        &target("gdl-gen-tests"),
+        gdl_gen::Sources::Local,
+    )
+    .expect("a discarded patch alias must not widen the context");
+}
+
+/// A host's dev dependency uses its patch, but the segment does not build
+/// that dependency. Its unused patch must not force a package update.
+#[test]
+fn a_patch_used_only_by_a_host_dev_dependency_allows_a_bundle() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-dev-patch-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(holder.path(), "gdl = { path = \"../../crates/gdl\" }\n", "");
+    pinned_crate(&holder.path().join("pinned"), "gdl-host-pinned");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node)
+        .expect("the node's manifest")
+        .replace(
+            "[dev-dependencies]",
+            "[dev-dependencies]\ngdl-host-pinned = \"1\"",
+        );
+    std::fs::write(
+        &node,
+        format!("{manifest}\n[patch.crates-io]\ngdl-host-pinned = {{ path = \"../pinned\" }}\n"),
+    )
+    .expect("the host's dev dependency and patch");
+    offline_lock(holder.path());
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's resolve");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    let host: serde_json::Value = serde_json::from_slice(&host.stdout).expect("host metadata");
+    assert!(
+        host["packages"]
+            .as_array()
+            .expect("packages")
+            .iter()
+            .any(|package| package["name"] == "gdl-host-pinned" && package["source"].is_null()),
+        "the host builds its patched dev dependency: {host}"
+    );
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        composed.status.success(),
+        "a host-only dev dependency must not prevent a segment's lock:\n{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let lock: toml::Table = lock.parse().expect("a lock file");
+    assert!(
+        lock["package"]
+            .as_array()
+            .expect("packages")
+            .iter()
+            .all(|package| package["name"].as_str() != Some("gdl-host-pinned")),
+        "the segment does not build the node's dev dependency: {lock}"
+    );
+}
+
+/// The runtime builds both major versions of thiserror. Updating the
+/// patched version must select that package without rejecting the other.
+#[test]
+fn a_host_patch_allows_multiple_locked_versions_of_its_package() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-versions-patch-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\nthiserror = \"2\"\n",
+        "",
+    );
+    pinned_crate(&holder.path().join("pinned"), "thiserror");
+    let pinned = holder.path().join("pinned/Cargo.toml");
+    let manifest = std::fs::read_to_string(&pinned).expect("the patch's manifest");
+    std::fs::write(&pinned, manifest.replace("1.0.0", "2.0.20"))
+        .expect("a version below the seeded lock");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node's manifest");
+    std::fs::write(
+        &node,
+        format!("{manifest}\n[patch.crates-io]\nthiserror = {{ path = \"../pinned\" }}\n"),
+    )
+    .expect("the host's patch");
+    offline_lock(holder.path());
+    let updated = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "update",
+            "--offline",
+            "--package",
+            "thiserror@2.0.21",
+            "--precise",
+            "2.0.20",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's update");
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let lock =
+        std::fs::read_to_string(holder.path().join("http/Cargo.lock")).expect("the host's lock");
+    let entries = locked(&lock, "thiserror");
+    assert_eq!(entries.len(), 2, "both major versions in {lock}");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.contains("version = \"2.0.20\"") && !entry.contains("source =")),
+        "the host builds its path patch: {entries:?}"
+    );
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        composed.status.success(),
+        "a second major version must not prevent selecting the host's patch:\n{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    assert!(
+        locked(&lock, "thiserror")
+            .iter()
+            .any(|entry| entry.contains("version = \"2.0.20\"") && !entry.contains("source =")),
+        "the segment builds the host's path patch: {lock}"
+    );
+}
+
+/// Cargo removes parent steps before it opens a patch path. Following
+/// a symlink before `..` instead can select a different patched crate.
+#[cfg(unix)]
+#[test]
+fn a_patch_path_applies_parent_steps_before_following_symlinks() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-parent-patch-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\ngdl-host-pinned = \"1\"\n",
+        "",
+    );
+    pinned_crate(&holder.path().join("http/pinned"), "gdl-host-pinned");
+    pinned_crate(&holder.path().join("other/pinned"), "gdl-host-pinned");
+    let other = holder.path().join("other/pinned/Cargo.toml");
+    let manifest = std::fs::read_to_string(&other).expect("the other crate's manifest");
+    std::fs::write(other, manifest.replace("1.0.0", "1.0.1")).expect("a different version");
+    std::fs::create_dir_all(holder.path().join("other/anchor")).expect("the symlink target");
+    std::os::unix::fs::symlink(
+        holder.path().join("other/anchor"),
+        holder.path().join("http/link"),
+    )
+    .expect("a symlink beside the host's pin");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node's manifest");
+    std::fs::write(
+        &node,
+        format!(
+            "{manifest}\n[patch.crates-io]\ngdl-host-pinned = {{ path = \"link/../pinned\" }}\n"
+        ),
+    )
+    .expect("a patch path with a parent step");
+    offline_lock(holder.path());
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's resolve");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    let host: serde_json::Value = serde_json::from_slice(&host.stdout).expect("host metadata");
+    let pin = host["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "gdl-host-pinned")
+        .expect("the host's pin");
+    assert_eq!(pin["version"], "1.0.0");
+    assert_eq!(
+        Path::new(pin["manifest_path"].as_str().expect("a path")),
+        holder.path().join("http/pinned/Cargo.toml")
+    );
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        composed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let entries = locked(&lock, "gdl-host-pinned");
+    assert_eq!(entries.len(), 1, "one patched crate: {lock}");
+    assert!(
+        entries[0].contains("version = \"1.0.0\""),
+        "the segment must select the same patch as Cargo on the host: {}",
+        entries[0]
+    );
+}
+
+/// An unrelated workspace member's gdl source does not discard a patch
+/// alias that the segment carries. The context must still hold its path.
+#[test]
+fn an_unreached_members_gdl_source_does_not_hide_a_carried_patch_path() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-local-member-patch-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    let outside = tempfile::Builder::new()
+        .prefix("gdl-member-patch-")
+        .tempdir()
+        .expect("a directory outside the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\ngdl-host-pinned = \"1\"\n",
+        "",
+    );
+    pinned_crate(outside.path(), "gdl-host-pinned");
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node's manifest");
+    std::fs::write(&node, manifest.replace("[workspace]\n", ""))
+        .expect("a node in the host workspace");
+    std::fs::create_dir_all(holder.path().join("observer/src")).expect("another member");
+    std::fs::write(holder.path().join("observer/src/lib.rs"), "").expect("a library");
+    std::fs::write(
+        holder.path().join("observer/Cargo.toml"),
+        "[package]\nname = \"observer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+         [dependencies]\ngdl = \"0.1.0\"\n",
+    )
+    .expect("a member the segment does not reach");
+    std::fs::write(
+        holder.path().join("Cargo.toml"),
+        format!(
+            "[workspace]\nmembers = [\"http\", \"observer\"]\nresolver = \"3\"\n\
+             [patch.crates-io]\n\
+             gdl = {{ package = \"gdl-host-pinned\", path = {} }}\n\
+             runtime-gdl = {{ package = \"gdl\", path = \"../crates/gdl\" }}\n",
+            serde_json::to_string(outside.path().to_str().expect("UTF-8")).expect("a path string")
+        ),
+    )
+    .expect("the host's patch aliases");
+    std::fs::copy(root().join("Cargo.lock"), holder.path().join("Cargo.lock"))
+        .expect("the workspace lock");
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's resolve");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    let host: serde_json::Value = serde_json::from_slice(&host.stdout).expect("host metadata");
+    assert!(
+        host["packages"]
+            .as_array()
+            .expect("packages")
+            .iter()
+            .any(|package| package["name"] == "gdl-host-pinned" && package["source"].is_null()),
+        "the host builds the patched crate: {host}"
+    );
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    if !composed.status.success() {
+        let error = String::from_utf8_lossy(&composed.stderr);
+        assert!(error.contains("would be `/`"), "{error}");
+        assert!(
+            error.contains(outside.path().to_str().expect("UTF-8")),
+            "{error}"
+        );
+        return;
+    }
+    let manifest =
+        std::fs::read_to_string(out.join("main/Cargo.toml")).expect("the segment's manifest");
+    assert!(
+        manifest.contains("package = \"gdl-host-pinned\""),
+        "{manifest}"
+    );
+    let compose: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("compose.yaml")).expect("compose.yaml"),
+    )
+    .expect("JSON");
+    let context = out
+        .join(
+            compose["services"]["main"]["build"]["context"]
+                .as_str()
+                .expect("the context"),
+        )
+        .canonicalize()
+        .expect("the context's directory");
+    assert!(
+        outside.path().starts_with(&context),
+        "the segment carries {manifest}, but its build context {context:?} leaves out the patched crate {:?}",
+        outside.path()
+    );
+}
+
+/// Updating one patch can move its patched dependency too. The next
+/// update must use the lock that the first update wrote.
+#[test]
+fn dependent_host_patches_use_the_current_lock() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-dependent-patches-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\nthiserror = \"2\"\n",
+        "",
+    );
+    for name in ["thiserror", "thiserror-impl"] {
+        let dir = holder.path().join(name);
+        pinned_crate(&dir, name);
+        let manifest = dir.join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).expect("a patch manifest");
+        let deps = match name {
+            "thiserror" => "[dependencies]\nthiserror-impl = \"=2.0.20\"\n",
+            _ => "",
+        };
+        std::fs::write(manifest, text.replace("1.0.0", "2.0.20") + deps)
+            .expect("the patched version and dependencies");
+    }
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node's manifest");
+    std::fs::write(
+        &node,
+        format!(
+            "{manifest}\n[patch.crates-io]\n\
+             thiserror = {{ path = \"../thiserror\" }}\n\
+             thiserror-impl = {{ path = \"../thiserror-impl\" }}\n"
+        ),
+    )
+    .expect("the host's patches");
+    offline_lock(holder.path());
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "update",
+            "--offline",
+            "--package",
+            "thiserror@2.0.21",
+            "--precise",
+            "2.0.20",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's update");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    let lock =
+        std::fs::read_to_string(holder.path().join("http/Cargo.lock")).expect("the host's lock");
+    for name in ["thiserror", "thiserror-impl"] {
+        assert!(
+            locked(&lock, name).iter().any(|entry| {
+                entry.contains("version = \"2.0.20\"") && !entry.contains("source =")
+            }),
+            "the host builds its patch of {name}: {lock}"
+        );
+    }
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        composed.status.success(),
+        "updating the parent patch must not invalidate the next selector:\n{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    for name in ["thiserror", "thiserror-impl"] {
+        assert!(
+            locked(&lock, name).iter().any(|entry| {
+                entry.contains("version = \"2.0.20\"") && !entry.contains("source =")
+            }),
+            "the segment builds its patch of {name}: {lock}"
+        );
+    }
+}
+
+/// Cargo resolves a patched crate's relative dependencies from the
+/// symlink path. Resolving that link must not change the selected crates.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_patch_keeps_its_relative_dependencies() {
+    let holder = tempfile::Builder::new()
+        .prefix("gdl-symlink-dependencies-")
+        .tempdir_in(root())
+        .expect("a directory in the context");
+    http_from_git(
+        holder.path(),
+        "gdl = { path = \"../../crates/gdl\" }\ngdl-host-pinned = \"1\"\n",
+        "",
+    );
+    let pinned = holder.path().join("vendor/pinned");
+    pinned_crate(&pinned, "gdl-host-pinned");
+    let manifest = pinned.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).expect("the patch's manifest");
+    std::fs::write(
+        manifest,
+        text + "[dependencies]\ngdl-host-helper = { path = \"../helper\" }\n",
+    )
+    .expect("the patch's sibling dependency");
+    pinned_crate(&holder.path().join("http/helper"), "gdl-host-helper");
+    pinned_crate(&holder.path().join("vendor/helper"), "gdl-host-helper");
+    let other = holder.path().join("vendor/helper/Cargo.toml");
+    let text = std::fs::read_to_string(&other).expect("the other helper's manifest");
+    std::fs::write(other, text.replace("1.0.0", "1.0.1"))
+        .expect("a different sibling beside the target");
+    std::os::unix::fs::symlink(&pinned, holder.path().join("http/pinned"))
+        .expect("a link to the patch");
+    let node = holder.path().join("http/Cargo.toml");
+    let text = std::fs::read_to_string(&node).expect("the node's manifest");
+    std::fs::write(
+        &node,
+        format!("{text}\n[patch.crates-io]\ngdl-host-pinned = {{ path = \"pinned\" }}\n"),
+    )
+    .expect("a patch through the link");
+    offline_lock(holder.path());
+    let host = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&node)
+        .output()
+        .expect("the host's resolve");
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    let host: serde_json::Value = serde_json::from_slice(&host.stdout).expect("host metadata");
+    let helper = host["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "gdl-host-helper")
+        .expect("the host's helper");
+    assert_eq!(helper["version"], "1.0.0");
+    assert_eq!(
+        Path::new(helper["manifest_path"].as_str().expect("the helper's path")),
+        holder.path().join("http/helper/Cargo.toml")
+    );
+
+    let out = holder.path().join("bundle");
+    let composed = compose_offline(holder.path(), &out);
+    assert!(
+        composed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&composed.stderr)
+    );
+    let lock = std::fs::read_to_string(out.join("main/Cargo.lock")).expect("the segment's lock");
+    let helpers = locked(&lock, "gdl-host-helper");
+    assert_eq!(helpers.len(), 1, "one helper: {lock}");
+    assert!(
+        helpers[0].contains("version = \"1.0.0\""),
+        "the segment selects a different sibling from the host: {}",
+        helpers[0]
+    );
+}

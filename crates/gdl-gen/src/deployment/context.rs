@@ -31,10 +31,38 @@ pub(super) struct Context {
     /// What each crate outside the bundle and the gdl workspace that the
     /// bundle reaches by path depends on, by its directory, absolute.
     crates: BTreeMap<PathBuf, Vec<Dependency>>,
+    /// The `[patch]` entries of the workspace of each crate in `crates`
+    /// and of each gdl package, by the crate's directory, absolute.
+    patches: BTreeMap<PathBuf, Vec<Patch>>,
     /// Each crate by path whose workspace `cargo metadata` could not read,
     /// with the reason. The image build can still build such a crate: a
     /// dependency's own dev-dependencies, for one, need not exist.
     unread: Vec<String>,
+}
+
+/// An entry of a host workspace's `[patch]` tables: Cargo applies it to
+/// every crate the workspace builds.
+#[derive(Clone, Debug, PartialEq)]
+struct Patch {
+    /// The key of its table: `crates-io`, a registry, or a URL.
+    key: String,
+    /// The name it patches: a package's, unless the entry has `package`.
+    name: String,
+    /// The entry as written, but its `path` absolute.
+    value: toml::Table,
+    /// The root of the workspace whose manifest holds it, absolute.
+    workspace: PathBuf,
+}
+
+/// The gdl packages a segment patches: by source, each package's directory,
+/// by name.
+type GdlPatches = BTreeMap<String, BTreeMap<String, PathBuf>>;
+
+/// A host entry a segment carries: the package it patches, and the root
+/// of the workspace whose lock says which copy the host builds.
+pub(super) struct HostPatch {
+    pub(super) package: String,
+    pub(super) workspace: PathBuf,
 }
 
 /// A dependency of a crate the bundle reaches by path, as `cargo metadata`
@@ -70,7 +98,7 @@ impl Context {
         needed.extend(by_path.iter().cloned());
         let workspaces: Vec<PathBuf> = needed.iter().filter_map(|dir| workspace_of(dir)).collect();
         needed.extend(workspaces);
-        let root = needed
+        let mut root = needed
             .iter()
             .map(PathBuf::as_path)
             .reduce(common)
@@ -80,14 +108,81 @@ impl Context {
             .components()
             .all(|c| matches!(c, Component::RootDir | Component::Prefix(_)))
         {
-            let paths: Vec<String> = needed.iter().map(|p| display(p)).collect();
-            return Err(Error::new(format!(
-                "`--local`: the build context would be `{}`: the bundle and the crates it builds from by path share no other directory; write the bundle into a directory beside them, such as `target/` of their repository ({})",
-                display(&root),
-                paths.join(", ")
-            )));
+            return Err(shared_only_the_root(&root, &needed));
         }
-        let (crates, unread) = path_crates(&by_path, out, &gdl.members, &root);
+        let Walked {
+            mut crates,
+            mut patches,
+            mut unread,
+        } = path_crates(&by_path, out, &gdl.members, &root);
+        // The segments take gdl's crates by path, from its workspace.
+        let own = workspace_patches(&gdl.root);
+        if !own.is_empty() {
+            for dir in gdl.members.values() {
+                patches.insert(dir.clone(), own.clone());
+            }
+        }
+        // A crate that a host workspace patches in by path is built as any
+        // other crate by path: the context must hold it and its workspace.
+        // Each gdl package that a crate the bundle reaches by path takes
+        // from another source, by source: a host entry of that name there
+        // gives way ([`tables`]).
+        let taken: BTreeSet<(String, &str)> = reachable(&by_path, &crates)
+            .into_iter()
+            .flat_map(|dir| crates.get(dir).into_iter().flatten())
+            .filter(|dependency| gdl.members.contains_key(&dependency.name))
+            .filter_map(|dependency| {
+                let source = dependency.source.as_deref()?;
+                Some((source_id(&patch_key(source)), dependency.name.as_str()))
+            })
+            .collect();
+        let patched: BTreeSet<PathBuf> = by_path
+            .iter()
+            .flat_map(|dir| patches.get(dir).into_iter().flatten())
+            // The segment never carries a host's patch of gdl ([`tables`]).
+            .filter(|entry| !gdl.members.contains_key(entry.package()))
+            .filter(|entry| !taken.contains(&(source_id(&entry.key), entry.name.as_str())))
+            .filter_map(Patch::path)
+            .collect();
+        if !patched.is_empty() {
+            // Docker copies a symlink without its target: the context
+            // holds both.
+            let targets: Vec<PathBuf> = patched
+                .iter()
+                .filter_map(|dir| crate::paths::resolve(dir).ok())
+                .collect();
+            needed.extend(patched.iter().chain(&targets).cloned());
+            let workspaces: Vec<PathBuf> = patched
+                .iter()
+                .chain(&targets)
+                .filter_map(|dir| workspace_of(dir))
+                .collect();
+            needed.extend(workspaces);
+            root = needed
+                .iter()
+                .map(PathBuf::as_path)
+                .reduce(common)
+                .unwrap_or(out)
+                .to_path_buf();
+            let unwalked = patched
+                .into_iter()
+                .filter(|dir| !crates.contains_key(dir))
+                .collect();
+            // Cargo applies a patch only from the workspace it builds, and
+            // the host builds the patched crate in the patching workspace:
+            // the patched crate's own workspace patches nothing.
+            let mut more = path_crates(&unwalked, out, &gdl.members, &root);
+            for (dir, dependencies) in more.crates {
+                crates.entry(dir).or_insert(dependencies);
+            }
+            unread.append(&mut more.unread);
+        }
+        if root
+            .components()
+            .all(|c| matches!(c, Component::RootDir | Component::Prefix(_)))
+        {
+            return Err(shared_only_the_root(&root, &needed));
+        }
         let from = |path: &Path| relative(&root, path);
         let context = Self {
             bundle: from(out),
@@ -96,6 +191,7 @@ impl Context {
             members: gdl.members,
             rust_version: gdl.rust_version,
             crates,
+            patches,
             unread,
             root,
         };
@@ -149,16 +245,53 @@ impl Context {
     }
 
     /// The `[patch]` tables of the segment crate in `krate`, a path in the
-    /// bundle, whose manifest and every other generated one `files` holds:
-    /// each gdl package that a crate it reaches by path takes from another
-    /// source, from the gdl workspace, by path. A segment takes gdl from
-    /// `[gdl] path`, and a node crate may take it from Git: two copies,
-    /// whose types differ. The segment is a workspace of its own, so its
-    /// patch applies to every crate it builds. Empty when there is none.
-    pub(super) fn patch(&self, files: &Files, krate: &Path) -> String {
+    /// bundle, whose manifest and every other generated one `files` holds.
+    ///
+    /// The segment is a workspace of its own, so its patch applies to every
+    /// crate it builds, and Cargo reads no other workspace's. It carries
+    /// the `[patch]` entries of the workspace of each crate that a
+    /// generated manifest names by path, which the host applies when it
+    /// builds that crate, so that the segment builds the same copies. It
+    /// also patches each gdl package that a crate it reaches by path takes
+    /// from another source, from the gdl workspace, by path: a segment
+    /// takes gdl from `[gdl] path`, and a node crate may take it from Git:
+    /// two copies, whose types differ. A host entry that patches a gdl
+    /// package, from any source, is left out. Two host workspaces
+    /// that patch one name of one source differently are refused: the
+    /// segment cannot build what both build. Empty when there is nothing
+    /// to patch.
+    pub(super) fn patch(&self, files: &Files, krate: &Path) -> Result<String, Error> {
+        let (gdl, host) = self.reached(files, krate);
+        let segment = normalize(&self.root.join(&self.bundle).join(krate));
+        tables(&segment, &gdl, &host, |name| self.is_gdl(name))
+    }
+
+    /// The host entries that the segment crate in `krate` carries, with
+    /// the workspace of each, as [`Self::patch`] writes them, before two
+    /// spellings of one entry merge.
+    pub(super) fn host_patches(&self, files: &Files, krate: &Path) -> Vec<HostPatch> {
+        let (gdl, host) = self.reached(files, krate);
+        host.into_iter()
+            .filter(|entry| {
+                let named = gdl.iter().any(|(key, names)| {
+                    source_id(key) == source_id(&entry.key) && names.contains_key(&entry.name)
+                });
+                !named
+            })
+            .map(|entry| HostPatch {
+                package: entry.package().to_string(),
+                workspace: entry.workspace.clone(),
+            })
+            .collect()
+    }
+
+    /// The gdl packages that the segment crate in `krate` patches, by
+    /// source, with their directories, and the host entries it carries.
+    fn reached(&self, files: &Files, krate: &Path) -> (GdlPatches, Vec<&Patch>) {
         let out = self.root.join(&self.bundle);
         let segment = normalize(&out.join(krate));
-        let mut sources: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+        let mut gdl: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+        let mut host: Vec<&Patch> = Vec::new();
         let mut seen = BTreeSet::new();
         let mut queue = vec![segment.clone()];
         while let Some(dir) = queue.pop() {
@@ -167,7 +300,16 @@ impl Context {
             }
             if let Ok(inside) = dir.strip_prefix(&out) {
                 if let Some(text) = files.get(&inside.join("Cargo.toml")) {
-                    queue.extend(path_dependencies(&dir, text));
+                    for named in path_dependencies(&dir, text) {
+                        let entries = self.patches.get(&named).into_iter().flatten();
+                        for entry in entries.filter(|entry| !self.is_gdl(entry.package())) {
+                            // A crate patched in is built: it may take gdl
+                            // from another source too.
+                            queue.extend(entry.path());
+                            host.push(entry);
+                        }
+                        queue.push(named);
+                    }
                 }
                 continue;
             }
@@ -179,25 +321,21 @@ impl Context {
                     continue;
                 };
                 if let Some(member) = self.members.get_key_value(&dependency.name) {
-                    sources
-                        .entry(patch_key(source))
-                        .or_default()
-                        .insert(member.0);
+                    gdl.entry(patch_key(source)).or_default().insert(member.0);
                 }
             }
         }
-        let mut text = String::new();
-        for (source, names) in sources {
-            if text.is_empty() {
-                text.push_str("\n# Crates this segment reaches by path take these gdl crates from another\n# source: it builds one copy of each, from [gdl] path.\n");
-            }
-            text.push_str(&format!("[patch.{}]\n", toml_string(&source)));
-            for name in names {
-                let path = display(&relative(&segment, &self.members[name]));
-                text.push_str(&format!("{name} = {{ path = {} }}\n", toml_string(&path)));
-            }
-        }
-        text
+        let gdl = gdl
+            .into_iter()
+            .map(|(key, names)| {
+                let names = names
+                    .into_iter()
+                    .map(|name| (name.to_string(), self.members[name].clone()))
+                    .collect();
+                (key, names)
+            })
+            .collect();
+        (gdl, host)
     }
 
     /// The ignore file of each of the bundle's Dockerfiles: build output
@@ -261,6 +399,36 @@ fn writable(what: &str, path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// The refusal of a build context at `root`, the file system's root, which
+/// is all that the directories `needed` share.
+fn shared_only_the_root(root: &Path, needed: &BTreeSet<PathBuf>) -> Error {
+    let paths: Vec<String> = needed.iter().map(|p| display(p)).collect();
+    Error::new(format!(
+        "`--local`: the build context would be `{}`: the bundle and the crates it builds from by path share no other directory; write the bundle into a directory beside them, such as `target/` of their repository ({})",
+        display(root),
+        paths.join(", ")
+    ))
+}
+
+impl Patch {
+    /// The package it patches: `package` when the entry renames it.
+    fn package(&self) -> &str {
+        self.value
+            .get("package")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(&self.name)
+    }
+
+    /// The directory of the copy it patches in, absolute, when it gives
+    /// one by path.
+    fn path(&self) -> Option<PathBuf> {
+        self.value
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .map(PathBuf::from)
+    }
+}
+
 /// The gdl workspace: the workspace of `[gdl] path`.
 struct Workspace {
     /// Its root, absolute.
@@ -317,8 +485,9 @@ fn path_crates(
     out: &Path,
     gdl: &BTreeMap<String, PathBuf>,
     root: &Path,
-) -> (BTreeMap<PathBuf, Vec<Dependency>>, Vec<String>) {
+) -> Walked {
     let mut crates = BTreeMap::new();
+    let mut patches = BTreeMap::new();
     let mut unread = Vec::new();
     let mut queue: Vec<PathBuf> = dirs.iter().cloned().collect();
     while let Some(dir) = queue.pop() {
@@ -339,6 +508,13 @@ fn path_crates(
                 continue;
             }
         };
+        let workspace = metadata["workspace_root"]
+            .as_str()
+            .map(|root| normalize(Path::new(root)));
+        let entries = workspace
+            .as_deref()
+            .map(workspace_patches)
+            .unwrap_or_default();
         for (_, krate, dependencies) in packages(&metadata) {
             let dependencies: Vec<Dependency> = dependencies
                 .iter()
@@ -354,12 +530,86 @@ fn path_crates(
                 })
                 .collect();
             queue.extend(dependencies.iter().filter_map(|d| d.path.clone()));
+            patches.insert(krate.clone(), entries.clone());
             crates.insert(krate, dependencies);
         }
         // A crate that names no workspace lists none of its own.
         crates.entry(dir).or_default();
     }
-    (crates, unread)
+    Walked {
+        crates,
+        patches,
+        unread,
+    }
+}
+
+/// What [`path_crates`] reads of the crates the bundle reaches by path.
+struct Walked {
+    /// What each crate depends on, by its directory, absolute.
+    crates: BTreeMap<PathBuf, Vec<Dependency>>,
+    /// The `[patch]` entries of each crate's workspace, by its directory.
+    patches: BTreeMap<PathBuf, Vec<Patch>>,
+    /// Each crate whose workspace could not be read, with the reason.
+    unread: Vec<String>,
+}
+
+/// The crates in `crates` that the crates in `dirs` reach by path, `dirs`
+/// among them. `crates` also holds the other members of their workspaces,
+/// which nothing may build.
+fn reachable<'c>(
+    dirs: &BTreeSet<PathBuf>,
+    crates: &'c BTreeMap<PathBuf, Vec<Dependency>>,
+) -> BTreeSet<&'c PathBuf> {
+    let mut seen = BTreeSet::new();
+    let mut queue: Vec<&PathBuf> = dirs.iter().collect();
+    while let Some(dir) = queue.pop() {
+        let Some((dir, dependencies)) = crates.get_key_value(dir) else {
+            continue;
+        };
+        if seen.insert(dir) {
+            queue.extend(dependencies.iter().filter_map(|d| d.path.as_ref()));
+        }
+    }
+    seen
+}
+
+/// The `[patch]` entries of the workspace whose root is `workspace`,
+/// absolute, each `path` made absolute with its `..` steps applied, as
+/// Cargo applies them. A symlink stays: Cargo reads the patched crate's
+/// own relative paths from the link, not from its target. An entry that is a version
+/// alone is the table Cargo reads it as. `cargo metadata` has read the
+/// manifest, so it parses.
+fn workspace_patches(workspace: &Path) -> Vec<Patch> {
+    let Ok(text) = std::fs::read_to_string(workspace.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let tables = manifest.get("patch").and_then(toml::Value::as_table);
+    let mut entries = Vec::new();
+    for (key, table) in tables.into_iter().flatten() {
+        for (name, value) in table.as_table().into_iter().flatten() {
+            let mut value = match value {
+                toml::Value::Table(table) => table.clone(),
+                toml::Value::String(_) => {
+                    toml::Table::from_iter([("version".into(), value.clone())])
+                }
+                _ => continue,
+            };
+            if let Some(path) = value.get("path").and_then(toml::Value::as_str) {
+                let path = normalize(&workspace.join(path));
+                value.insert("path".into(), toml::Value::String(display(&path)));
+            }
+            entries.push(Patch {
+                key: key.clone(),
+                name: name.clone(),
+                value,
+                workspace: workspace.to_path_buf(),
+            });
+        }
+    }
+    entries
 }
 
 /// `cargo metadata --no-deps` of the crate in `dir`, run in `cwd`, which
@@ -421,6 +671,118 @@ fn path_dependencies(krate: &Path, text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The `[patch]` tables of the segment crate in `segment`, absolute: the
+/// gdl packages that `gdl` lists by source, with their directories, and the
+/// host workspaces' entries `host`, merged one table per source.
+///
+/// A host entry that patches a package for which `is_gdl` holds is left
+/// out, from any source: the segment builds one copy of gdl, from `[gdl]
+/// path`, and gdl's own entries cover each source a crate it reaches takes
+/// gdl from. So is a host entry whose name is one of gdl's entries in the
+/// same table, which TOML cannot hold twice. Two host entries that patch
+/// one name of one source alike are one; two that differ are refused. Each
+/// path is written from the segment. With no host entry, the text is the
+/// gdl patch alone, as it was before the segment carried any host's.
+fn tables(
+    segment: &Path,
+    gdl: &GdlPatches,
+    host: &[&Patch],
+    is_gdl: impl Fn(&str) -> bool,
+) -> Result<String, Error> {
+    // Each source's table is written as gdl names it, else as the first
+    // host that patches it does: two spellings of one source are one.
+    let mut spelled: BTreeMap<String, &str> = gdl
+        .keys()
+        .map(|key| (source_id(key), key.as_str()))
+        .collect();
+    let mut merged: BTreeMap<&str, BTreeMap<&str, &Patch>> = BTreeMap::new();
+    for &entry in host {
+        let key = *spelled.entry(source_id(&entry.key)).or_insert(&entry.key);
+        let named = gdl
+            .get(key)
+            .is_some_and(|names| names.contains_key(&entry.name));
+        if named || is_gdl(entry.package()) {
+            continue;
+        }
+        let names = merged.entry(key).or_default();
+        match names.get(entry.name.as_str()) {
+            Some(first) if first.value != entry.value => {
+                return Err(Error::new(format!(
+                    "`--local`: segment crate {} builds crates of two workspaces that patch `{}` from {} differently, {} with {} and {} with {}; Cargo reads only the segment's patch, which can give one: patch it alike in both",
+                    display(segment),
+                    entry.name,
+                    toml_string(&entry.key),
+                    display(&first.workspace),
+                    toml::Value::Table(first.value.clone()),
+                    display(&entry.workspace),
+                    toml::Value::Table(entry.value.clone()),
+                )));
+            }
+            Some(_) => {}
+            None => {
+                names.insert(&entry.name, entry);
+            }
+        }
+    }
+    let mut keys: BTreeSet<&str> = gdl.keys().map(String::as_str).collect();
+    keys.extend(merged.keys());
+    let mut text = String::new();
+    for key in keys {
+        if text.is_empty() {
+            text.push_str(match merged.is_empty() {
+                true => "\n# Crates this segment reaches by path take these gdl crates from another\n# source: it builds one copy of each, from [gdl] path.\n",
+                false => "\n# The patches of the workspace of each crate this segment takes by path,\n# which Cargo reads only from the workspace it builds, so that the segment\n# builds what the host builds; and the gdl crates that crates it reaches by\n# path take from another source: it builds one copy of each, from [gdl] path.\n",
+            });
+        }
+        text.push_str(&format!("[patch.{}]\n", toml_string(key)));
+        let mut lines = BTreeMap::new();
+        for (name, dir) in gdl.get(key).into_iter().flatten() {
+            let path = display(&relative(segment, dir));
+            lines.insert(
+                name.as_str(),
+                format!("{{ path = {} }}", toml_string(&path)),
+            );
+        }
+        for (&name, entry) in merged.get(key).into_iter().flatten() {
+            let mut value = entry.value.clone();
+            if let Some(dir) = entry.path() {
+                let path = display(&relative(segment, &dir));
+                value.insert("path".into(), toml::Value::String(path));
+            }
+            lines.insert(name, toml::Value::Table(value).to_string());
+        }
+        for (name, value) in lines {
+            text.push_str(&format!("{} = {value}\n", toml_key(name)));
+        }
+    }
+    Ok(text)
+}
+
+/// The source that the `[patch]` key `key` names, as Cargo compares
+/// sources: crates.io by its name or its Git index, and a URL without a
+/// trailing `/` or `.git`, and on GitHub in lower case.
+fn source_id(key: &str) -> String {
+    let url = key.trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    match url {
+        "crates-io" | "https://github.com/rust-lang/crates.io-index" => "crates-io".to_string(),
+        _ if url.starts_with("https://github.com/") => url.to_lowercase(),
+        _ => url.to_string(),
+    }
+}
+
+/// `name` as a TOML key: bare when it can be, as a crate's name can.
+fn toml_key(name: &str) -> String {
+    let bare = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    match bare {
+        true => name.to_string(),
+        false => toml_string(name),
+    }
+}
+
 /// The key of the `[patch]` table that replaces packages from `source`, as
 /// `cargo metadata` names a source: a Git repository's URL without its
 /// reference, `crates-io`, or another registry's URL. Cargo names
@@ -461,7 +823,201 @@ fn common<'p>(a: &'p Path, b: &Path) -> &'p Path {
 
 #[cfg(test)]
 mod tests {
-    use super::patch_key;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    use super::{Patch, patch_key, source_id, tables};
+
+    /// A host workspace at `workspace` patching `name` from `key` with
+    /// `value`, its path absolute, as [`super::workspace_patches`] reads it.
+    fn entry(workspace: &str, key: &str, name: &str, value: &str) -> Patch {
+        Patch {
+            key: key.into(),
+            name: name.into(),
+            value: value.parse().expect("an entry"),
+            workspace: workspace.into(),
+        }
+    }
+
+    /// gdl's patch of `gdl` and `gdl-message` from `key`, in `/work/gdl`.
+    fn gdl(key: &str) -> BTreeMap<String, BTreeMap<String, PathBuf>> {
+        let names = ["gdl", "gdl-message"]
+            .map(|name| (name.into(), Path::new("/work/gdl/crates").join(name)));
+        BTreeMap::from([(key.into(), BTreeMap::from(names))])
+    }
+
+    const SEGMENT: &str = "/work/host/target/bundle/main";
+
+    fn is_gdl(name: &str) -> bool {
+        ["gdl", "gdl-message"].contains(&name)
+    }
+    const GDL: &str = "ssh://git@github.com/NVIDIA-dev/dynamo-gdl.git";
+
+    /// With no host entry, the text is gdl's patch alone, byte for byte as
+    /// a segment wrote it before it carried a host's.
+    #[test]
+    fn without_a_host_patch_the_text_is_gdls_alone() {
+        let text = tables(Path::new(SEGMENT), &gdl(GDL), &[], is_gdl).expect("tables");
+        assert_eq!(
+            text,
+            format!(
+                "\n# Crates this segment reaches by path take these gdl crates from another\n# source: it builds one copy of each, from [gdl] path.\n[patch.\"{GDL}\"]\ngdl = {{ path = \"../../../../gdl/crates/gdl\" }}\ngdl-message = {{ path = \"../../../../gdl/crates/gdl-message\" }}\n"
+            )
+        );
+        assert_eq!(
+            tables(Path::new(SEGMENT), &BTreeMap::new(), &[], is_gdl).expect("tables"),
+            ""
+        );
+    }
+
+    /// A host entry by path is written from the segment; one from Git
+    /// stays from Git, every key as written. Both share gdl's table of
+    /// their source, which is written once.
+    #[test]
+    fn a_host_entry_keeps_its_source_and_its_path_is_written_from_the_segment() {
+        let git = entry(
+            "/work/host",
+            "crates-io",
+            "dynamo-protocols",
+            "git = \"https://github.com/ai-dynamo/frontend-crates\"\nrev = \"7ff4b858\"",
+        );
+        let path = entry(
+            "/work/host",
+            "crates-io",
+            "pinned",
+            "path = \"/work/host/vendor/pinned\"\npackage = \"pinned-fork\"",
+        );
+        let text = tables(
+            Path::new(SEGMENT),
+            &gdl("crates-io"),
+            &[&git, &path],
+            is_gdl,
+        )
+        .expect("tables");
+        assert_eq!(text.matches("[patch.").count(), 1, "{text}");
+        assert!(
+            text.ends_with(
+                "[patch.\"crates-io\"]\n\
+                 dynamo-protocols = { git = \"https://github.com/ai-dynamo/frontend-crates\", rev = \"7ff4b858\" }\n\
+                 gdl = { path = \"../../../../gdl/crates/gdl\" }\n\
+                 gdl-message = { path = \"../../../../gdl/crates/gdl-message\" }\n\
+                 pinned = { package = \"pinned-fork\", path = \"../../../vendor/pinned\" }\n"
+            ),
+            "{text}"
+        );
+        let parsed: toml::Table = text.parse().expect("TOML");
+        assert_eq!(parsed["patch"].as_table().map(toml::Table::len), Some(1));
+    }
+
+    /// A host entry that patches a gdl package gives way to gdl's, from
+    /// any source and under any name: the segment builds the one copy from
+    /// `[gdl] path`. An entry named as one of gdl's in the same table gives
+    /// way too, whatever it patches; under another source it stays.
+    #[test]
+    fn gdls_entry_wins_over_a_hosts_for_the_same_package_and_source() {
+        let same = entry("/work/host", GDL, "gdl", "path = \"/work/host/gdl-fork\"");
+        let renamed = entry(
+            "/work/host",
+            "crates-io",
+            "fork",
+            "package = \"gdl\"\npath = \"/work/host/gdl-fork\"",
+        );
+        let alias = entry(
+            "/work/host",
+            GDL,
+            "gdl-message",
+            "package = \"pinned\"\npath = \"/work/host/pinned\"",
+        );
+        let kept = entry(
+            "/work/host",
+            "crates-io",
+            "gdl-message",
+            "package = \"pinned\"\npath = \"/work/host/pinned\"",
+        );
+        let other = entry(
+            "/work/host",
+            "crates-io",
+            "gdl",
+            "path = \"/work/host/gdl-fork\"",
+        );
+        let text = tables(
+            Path::new(SEGMENT),
+            &gdl(GDL),
+            &[&same, &other, &renamed, &alias, &kept],
+            is_gdl,
+        )
+        .expect("tables");
+        assert_eq!(
+            text.matches("gdl-fork").count(),
+            0,
+            "no host patch of gdl is carried: {text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "[patch.\"{GDL}\"]\ngdl = {{ path = \"../../../../gdl/crates/gdl\" }}\ngdl-message = {{ path = \"../../../../gdl/crates/gdl-message\" }}\n"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "[patch.\"crates-io\"]\ngdl-message = { package = \"pinned\", path = \"../../../pinned\" }\n"
+            ),
+            "{text}"
+        );
+    }
+
+    /// Two host workspaces that patch one name of one source alike give
+    /// one entry; two that differ are refused, both named.
+    #[test]
+    fn host_workspaces_that_patch_a_name_differently_are_refused() {
+        let a = entry(
+            "/work/a",
+            "crates-io",
+            "pinned",
+            "path = \"/work/vendor/pinned\"",
+        );
+        let b = entry(
+            "/work/b",
+            "crates-io",
+            "pinned",
+            "path = \"/work/vendor/pinned\"",
+        );
+        let text = tables(Path::new(SEGMENT), &BTreeMap::new(), &[&a, &b], is_gdl).expect("alike");
+        assert_eq!(text.matches("pinned = ").count(), 1, "{text}");
+
+        let c = entry("/work/c", "crates-io", "pinned", "version = \"=1.2.3\"");
+        let error = tables(Path::new(SEGMENT), &BTreeMap::new(), &[&a, &c], is_gdl)
+            .expect_err("two patches of one name")
+            .to_string();
+        assert!(error.contains("`pinned`"), "{error}");
+        assert!(
+            error.contains("/work/a") && error.contains("/work/c"),
+            "{error}"
+        );
+    }
+
+    /// Two keys name one source when Cargo takes them for one: crates.io
+    /// by name or by its Git index, and a URL with or without a trailing
+    /// `/` or `.git`, on GitHub in any case. A sparse index is its own.
+    #[test]
+    fn a_source_id_is_the_source_as_cargo_compares_it() {
+        for (a, b) in [
+            ("crates-io", "https://github.com/rust-lang/crates.io-index"),
+            ("crates-io", "https://github.com/rust-lang/crates.io-index/"),
+            (
+                "https://github.com/NVIDIA-dev/dynamo-gdl.git",
+                "https://github.com/nvidia-dev/dynamo-gdl",
+            ),
+            ("file:///work/gdl/", "file:///work/gdl"),
+        ] {
+            assert_eq!(source_id(a), source_id(b), "{a} and {b}");
+        }
+        assert_ne!(
+            source_id("crates-io"),
+            source_id("sparse+https://index.crates.io/")
+        );
+        assert_ne!(source_id("file:///work/Gdl"), source_id("file:///work/gdl"));
+    }
 
     /// The key is the source as a manifest names it, so that one table
     /// patches every reference to the repository.
@@ -492,5 +1048,70 @@ mod tests {
         ] {
             assert_eq!(patch_key(source), key, "{source}");
         }
+    }
+
+    /// The generated manifest takes the runtime by path, so its workspace
+    /// patches apply just like those of any other direct path dependency.
+    #[test]
+    fn a_context_carries_the_runtime_workspaces_patch() {
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-runtime-patch-")
+            .tempdir()
+            .expect("a workspace");
+        let root = temp.path().canonicalize().expect("the workspace path");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"gdl-runtime\", \"gdl-hub\"]\nexclude = [\"pinned\"]\nresolver = \"3\"\n\
+             [patch.crates-io]\ngdl-host-pinned = { path = \"pinned\" }\n",
+        )
+        .expect("the root manifest");
+        for name in ["gdl-runtime", "gdl-hub", "pinned"] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(dir.join("src")).expect("a crate");
+            std::fs::write(dir.join("src/lib.rs"), "").expect("a library");
+            let (package, extra) = match name {
+                "gdl-runtime" => (name, "[dependencies]\ngdl-host-pinned = \"=1.0.0\"\n"),
+                "pinned" => ("gdl-host-pinned", "[workspace]\n"),
+                _ => (name, ""),
+            };
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{package}\"\nversion = \"1.0.0\"\nedition = \"2024\"\n{extra}"
+                ),
+            )
+            .expect("a manifest");
+        }
+        let host = std::process::Command::new("timeout")
+            .args([
+                "30",
+                env!("CARGO"),
+                "metadata",
+                "--offline",
+                "--format-version",
+                "1",
+            ])
+            .arg("--manifest-path")
+            .arg(root.join("Cargo.toml"))
+            .output()
+            .expect("the runtime's patched resolve");
+        assert!(
+            host.status.success(),
+            "{}",
+            String::from_utf8_lossy(&host.stderr)
+        );
+        let files = crate::Files::from([(
+            PathBuf::from("main/Cargo.toml"),
+            "[package]\nname = \"segment\"\nversion = \"1.0.0\"\n[workspace]\n\
+             [dependencies]\ngdl-runtime = { path = \"../../gdl-runtime\" }\n"
+                .into(),
+        )]);
+        let context = super::Context::find(&root.join("bundle"), &files, &root.join("gdl-runtime"))
+            .expect("the context");
+        let patch = context.patch(&files, Path::new("main")).expect("the patch");
+        assert!(
+            patch.contains("gdl-host-pinned"),
+            "the segment loses the runtime workspace's patch: {patch:?}"
+        );
     }
 }
