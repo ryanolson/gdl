@@ -279,7 +279,9 @@ impl Workspace {
     /// the one resolved package that fits.
     pub fn extract(&self, spec: &str) -> Result<Extraction, Error> {
         let package = self.graph.package(spec).map_err(Error)?;
-        Ok(markers::extract(&self.graph, &self.settings, package))
+        Ok(on_own_stack(|| {
+            markers::extract(&self.graph, &self.settings, package)
+        }))
     }
 
     /// What the package whose manifest is in `dir` offers, if this
@@ -287,7 +289,9 @@ impl Workspace {
     /// version may be two, from two sources.
     pub fn extract_in(&self, dir: &Path) -> Option<Extraction> {
         let package = self.graph.package_in(dir)?;
-        Some(markers::extract(&self.graph, &self.settings, package))
+        Some(on_own_stack(|| {
+            markers::extract(&self.graph, &self.settings, package)
+        }))
     }
 
     /// Where package `spec` (a name, or `name@version`) is: its version,
@@ -362,6 +366,18 @@ impl Workspace {
             lib: package.lib.as_ref().map(|(name, _)| name.clone()),
         }
     }
+}
+
+/// The stack the reader reads on, which it owns, so that what it can read
+/// does not depend on its caller's thread: a spawned thread's default is
+/// 2 MiB, and syn's parse recurses once per nested type argument. How deep
+/// it holds is in `docs/src/operations/limitations.md`.
+const STACK: usize = 256 << 20;
+
+/// Run `read` on a stack of its own, of [`STACK`] bytes, on this thread:
+/// its thread-local state, such as the cost tests' counts, is the same.
+fn on_own_stack<T>(read: impl FnOnce() -> T) -> T {
+    stacker::grow(STACK, read)
 }
 
 /// Where a resolved package is.

@@ -731,8 +731,9 @@ async fn a_symlinked_path_dependency_is_refused() {
 }
 
 /// A crate that the parser cannot read without running out of stack (a
-/// thousand nested references) is refused, and the server goes on: the
-/// crate is read in a child, which is what gives out.
+/// million nested references, past what the reader's own stack holds) is
+/// refused, and the server goes on: the crate is read in a child, which is
+/// what gives out.
 #[tokio::test]
 async fn a_crate_the_reader_cannot_survive_is_refused_not_fatal() {
     let temp = tempfile::Builder::new()
@@ -743,7 +744,7 @@ async fn a_crate_the_reader_cannot_survive_is_refused_not_fatal() {
         package(&work.join("deep"), "deep", "Prompt", "");
         std::fs::write(
             work.join("deep/src/lib.rs"),
-            format!("pub struct S({}u8);\n", "&".repeat(1000)),
+            format!("pub struct S({}u8);\n", "&".repeat(1_000_000)),
         )
         .expect("source");
         package(&work.join("fine"), "fine", "Prompt", "");

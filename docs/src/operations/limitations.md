@@ -181,6 +181,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** each is a rare way to write a message, and following it would cost more than it finds. The reader errs towards local or leaves the alias out.
 - **Workaround:** name variants and standard types by path, derive as `serde::Serialize` from a dependency on serde, and run `cargo gdl extract --verify`.
 
+### A source nested thousands of levels deep crashes the reader
+- **What:** the reader stops the process with a segmentation fault when a source file nests a type thousands of levels deep: past about 5,000 levels of type arguments (`Identity<Identity<…>>`) in a debug build, and past about 35,000 in a release build.
+- **Why:** syn's parse recurses once per level, and the reader cannot bound that recursion from outside. The reader parses on a 256 MiB stack of its own (`stacker::grow` in `crates/gdl-extract/src/lib.rs`), whatever thread calls it. On a caller's 2 MiB thread, it used to overflow at 37 levels in a debug build and at 272 in a release build. A depth bound checked before syn reads the file was rejected: syn also recurses where no `<` or bracket marks a level (`&&&T`, `!!!x`), and a count of `<` cannot tell type arguments from comparisons. Such a bound would either miss a crash or refuse a crate that builds.
+- **Workaround:** the composer reads each crate in a child process, so a crash refuses that crate and the server goes on.
+- **Test:** `deeply_nested_aliases_read_without_overflowing_the_stack` in `crates/gdl-extract/tests/read.rs` reads 300 levels on a 2 MiB thread.
+
 ### The reader does not check the bounds of a generic node's role impl
 - **What:** the reader gives an alias of a generic node the role of the impl whose self type matches, even when the alias's arguments do not meet the impl's bounds. Without configuration, the alias's crate builds and registers the node with no role, the generator plans the graph on the role the reader found, and the segment does not build. With `#[gdl(config = ..)]`, the alias's crate does not build (``error[E0277]: the trait bound `NotBuilder: Builder` is not satisfied``).
 - **Why:** the reader builds nothing and does not judge trait bounds.

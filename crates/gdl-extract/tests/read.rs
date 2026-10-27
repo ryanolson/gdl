@@ -1746,3 +1746,57 @@ problem: DIR/src/lib.rs:278:10: node `NM`: the crate implements no role trait fo
 problem: DIR/src/lib.rs:280:10: node `NN`: the crate implements no role trait for it
 problem: DIR/src/lib.rs:282:10: node `NO`: the crate implements no role trait for it
 "#;
+
+/// An impl and an export through 300 nested `Identity<..>` aliases, read
+/// on a thread with a 2 MiB stack, the default for a spawned thread. syn's
+/// parse of the file recurses once per nested argument, and on the
+/// caller's stack it overflowed at 37 levels in a debug build and 272 in
+/// a release one, aborting the process. The reader reads on a stack of
+/// its own, so it reads the crate, and refuses the export as nested too
+/// deep for it to read.
+#[test]
+fn deeply_nested_aliases_read_without_overflowing_the_stack() {
+    let n = 300;
+    let nested = format!("{}Hold<u8>{}", "Identity<".repeat(n), ">".repeat(n));
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-deep-nesting-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path().to_path_buf();
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"deep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        format!(
+            "#[derive(gdl_message::Message)]\npub struct Words;\n\
+             #[derive(gdl::Node)]\npub struct Hold<B>(B);\n\
+             pub type Identity<T> = T;\n\
+             impl gdl::Sink for {nested} {{ type Req = Words; type Item = Words; }}\n\
+             #[gdl::export]\npub type Held = {nested};\n"
+        ),
+    )
+    .expect("source");
+    let workspace =
+        Workspace::load(&dir.join("Cargo.toml"), &Cargo::trusted()).expect("cargo metadata");
+    let extraction = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || workspace.extract("deep").expect("the package"))
+        .expect("thread")
+        .join()
+        .expect("the reader returned");
+    assert!(extraction.offer.nodes.is_empty());
+    assert!(extraction.problems.is_empty(), "{:?}", extraction.problems);
+    let [skipped] = extraction.offer.skipped.as_slice() else {
+        panic!("one skipped export: {:?}", extraction.offer.skipped);
+    };
+    assert_eq!(skipped.name, "Held");
+    assert!(
+        skipped.problem.ends_with("nests too deep to read"),
+        "{}",
+        skipped.problem
+    );
+}
