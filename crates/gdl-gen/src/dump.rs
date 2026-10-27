@@ -12,9 +12,15 @@ use std::process::Command;
 use crate::Error;
 use crate::spec::Contract;
 
-/// The manifest of `contract`. `target` is the cargo target directory to
-/// build in; reusing one across runs keeps the build incremental.
-pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl_model::Manifest, Error> {
+/// The manifest of `contract`. `seed` is the lock file the program starts
+/// from ([`write_program`]): for a contract crate, the lock of its
+/// workspace ([`workspace_lock`]). `target` is the cargo target directory
+/// to build in; reusing one across runs keeps the build incremental.
+pub fn manifest(
+    contract: &Contract,
+    seed: Option<&str>,
+    target: &Path,
+) -> Result<gdl_model::Manifest, Error> {
     let path = absolute(&contract.path)?;
     let dependencies = format!(
         "{package} = {{ path = {path} }}\n",
@@ -27,17 +33,39 @@ pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl_model::Manifes
     );
     // One program per contract, as for catalogues: a run that reads another
     // contract does not relink this one.
-    let name = format!("gdl-manifest-{:016x}", hash(&(&dependencies, &main)));
+    let name = format!("gdl-manifest-{:016x}", hash(&(&dependencies, &main, seed)));
     let text = run(
         target,
         &name,
         "the contract's manifest",
         &dependencies,
         &main,
-        None,
+        seed,
     )?;
     gdl_model::Manifest::from_toml(&text)
         .map_err(|e| Error::new(format!("reading the manifest: {e}")))
+}
+
+/// The lock file of the workspace that holds the crate in `dir`, if it has
+/// one. Cargo names the workspace, so a crate that a parent workspace
+/// excludes, or that names its own root, gets the lock its own build uses.
+/// `None` when Cargo cannot place the crate in a workspace: the program
+/// then builds unseeded, which needs the registry index but works.
+pub(crate) fn workspace_lock(dir: &Path) -> Option<String> {
+    // Cargo reads `--manifest-path` from where it runs.
+    let dir = absolute(dir).ok()?;
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .current_dir(&dir)
+        .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .arg("--manifest-path")
+        .arg(dir.join("Cargo.toml"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let manifest = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim_end());
+    std::fs::read_to_string(manifest.parent()?.join("Cargo.lock")).ok()
 }
 
 /// A name for generated content: the same content, the same name, within
@@ -246,6 +274,34 @@ mod tests {
         assert!(!unseeded.join("Cargo.lock").exists());
     }
 
+    /// A contract's program starts from the lock of the workspace that
+    /// builds the contract: a member's is its workspace's, and a crate that
+    /// is its own workspace has its own, or none.
+    #[test]
+    fn the_seed_is_the_lock_of_the_workspace_that_holds_the_crate() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let asr = std::fs::read_to_string(root.join("examples/asr/Cargo.lock")).expect("lock");
+        assert_eq!(
+            workspace_lock(&root.join("examples/asr/contract")).as_deref(),
+            Some(asr.as_str())
+        );
+
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-gen-workspace-lock-")
+            .tempdir()
+            .expect("dir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"alone\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "").expect("lib");
+        assert_eq!(workspace_lock(dir.path()), None);
+        std::fs::write(dir.path().join("Cargo.lock"), "# its own\n").expect("lock");
+        assert_eq!(workspace_lock(dir.path()).as_deref(), Some("# its own\n"));
+    }
+
     /// Every dump of one contract in a target directory builds and runs
     /// the same program path, so a dump must hold the directory's lock from
     /// its build until its program has run: otherwise another dump can
@@ -284,13 +340,14 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let spec = crate::Spec::load(&root.join("examples/asr/gdl.toml")).expect("spec");
         let contract = spec.contract().expect("a contract spec").clone();
+        let seed = workspace_lock(&contract.path);
         let target = root.join("target/gdl-gen-tests");
         // Built once, so the next dump neither compiles nor links; that one
         // is timed, and the wait below is many times as long. A dump that
         // ignored the lock would finish well inside it.
-        manifest(&contract, &target).expect("manifest");
+        manifest(&contract, seed.as_deref(), &target).expect("manifest");
         let started = std::time::Instant::now();
-        manifest(&contract, &target).expect("manifest");
+        manifest(&contract, seed.as_deref(), &target).expect("manifest");
         // Bounded above too: other tests share this target directory, and a
         // timed run that waited for their builds would hold the lock below
         // for tens of seconds. A dump that ignored the lock still finishes
@@ -301,7 +358,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let waiting = target.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(manifest(&contract, &waiting).map(|m| m.name));
+            let _ = tx.send(manifest(&contract, seed.as_deref(), &waiting).map(|m| m.name));
         });
         assert!(
             rx.recv_timeout(wait).is_err(),

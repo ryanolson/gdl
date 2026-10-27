@@ -180,7 +180,15 @@ fn compiled_manifest(spec: &Spec, target: &Path) -> Manifest {
         lib,
         path: dir,
     };
-    dump::manifest(&contract, target).expect("compiled")
+    // The generated contract has no workspace, so no lock of its own. It
+    // starts from the gdl workspace's lock, as the segments of a bundle of
+    // local sources do: the gdl runtime brings nearly every registry crate
+    // the contract builds, and the message crates add few.
+    let GdlDep::Path(gdl) = &spec.gdl else {
+        panic!("a gdl runtime by path");
+    };
+    let seed = dump::workspace_lock(gdl).expect("the gdl workspace's lock");
+    dump::manifest(&contract, Some(&seed), target).expect("compiled")
 }
 
 /// The generated contract depends on the gdl runtime and on each message

@@ -438,7 +438,11 @@ fn prepare(
         spec::Source::Contract(contract) => {
             return Ok(Prepared {
                 contract: contract.clone(),
-                manifest: dump::manifest(contract, target)?,
+                manifest: dump::manifest(
+                    contract,
+                    dump::workspace_lock(&contract.path).as_deref(),
+                    target,
+                )?,
                 files: Files::new(),
                 graph: None,
             });
