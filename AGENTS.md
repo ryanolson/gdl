@@ -33,7 +33,7 @@ timeout <limit> cargo test --workspace --doc      # doctests: nextest does not r
 node --test crates/gdl-web/tests/editor.cjs       # the composer's page, outside cargo
 (cd examples/http && timeout <limit> cargo nextest run)  # the example workspaces are outside the root workspace
 (cd examples/api && timeout <limit> cargo nextest run)
-bash scripts/build-book.sh                         # the book, with its link check (INSTALL_TOOLS=1 fetches or builds the tools)
+bash scripts/build-book.sh                         # the book, with its link and heading checks (INSTALL_TOOLS=1 fetches or builds the tools)
 ```
 
 - Always run tests under `timeout`, and size the limit to the run: two to three times the last measured time of the same target, rounded up to the next minute. A tight limit shows a hang at once; a large fixed one hides it. Build first with `--no-run`, so that the limit does not have to cover compilation. Keep the measured times in agent memory, not here: they change as the suite does. nextest prints each test's time and the run's (`Summary`).

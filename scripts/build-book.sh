@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the mdBook in docs/ and check its internal links.
+# Build the mdBook in docs/ and check its internal links and the headings they name.
 #
 # With INSTALL_TOOLS=1, download the pinned tool versions first (x86_64 Linux
 # release binaries, as on GitHub-hosted runners). The versions match
@@ -43,3 +43,6 @@ mdbook build "${root}/docs"
 
 # With more than one renderer, mdBook writes the HTML to book/html/.
 test -f "${root}/docs/book/html/index.html"
+
+# mdbook-linkcheck does not check the heading after `#`; this does.
+python3 "${root}/scripts/book/anchors.py" "${root}/docs/book/html"

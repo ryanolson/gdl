@@ -1,3 +1,4 @@
 target/
 .book-tools/
 agent-docs/
+__pycache__/

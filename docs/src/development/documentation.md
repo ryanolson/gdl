@@ -45,7 +45,7 @@ Build the book and check its links:
 bash scripts/build-book.sh
 ```
 
-A link to a missing page fails the build. A link to a missing heading (`page.md#heading`) does not, because `mdbook-linkcheck` 0.7.7 does not check the part after `#`. CI runs the same script, and the reference test, on each pull request and on each push to `main` (`.github/workflows/ci.yml`). Each push to `main` also publishes the book to the repository's private GitHub Pages site (`.github/workflows/pages.yml`). To preview while you edit, serve the book:
+A link to a missing page fails the build, and so does a link to a missing heading (`page.md#heading`). `mdbook-linkcheck` 0.7.7 does not check the part after `#`, so the script then runs `scripts/book/anchors.py`, which reads the built HTML and checks each heading link against the ids of the page it resolves to. It skips the links of the print page, which joins every chapter, and the heading links that mdBook writes on the 404 page. It needs `python3`. Its tests run with `python3 -m unittest discover -s scripts/book/tests`. CI runs the same script, the heading check's tests, and the reference test, on each pull request and on each push to `main` (`.github/workflows/ci.yml`). Each push to `main` also publishes the book to the repository's private GitHub Pages site (`.github/workflows/pages.yml`). To preview while you edit, serve the book:
 
 ```bash
 mdbook serve docs --open

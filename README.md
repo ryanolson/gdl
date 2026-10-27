@@ -102,7 +102,7 @@ cargo nextest run --workspace --no-run              # build first: the timeout t
 timeout 300 cargo nextest run --workspace
 timeout 60 cargo test --workspace --doc             # doctests: nextest does not run them
 node --test crates/gdl-web/tests/editor.cjs         # the composer's page
-bash scripts/build-book.sh                          # needs mdbook, mdbook-mermaid, mdbook-linkcheck
+bash scripts/build-book.sh                          # needs mdbook, mdbook-mermaid, mdbook-linkcheck, python3
 ```
 
 The tests start velo nodes in one process on ports that the OS assigns. The example workspaces are outside the root workspace, so run their tests from their directories. See [Testing](docs/src/development/testing.md).
