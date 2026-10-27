@@ -36,68 +36,76 @@ where
     I: Inner<F::Out>,
     B: BackwardChain<I::Item>,
 {
-    async fn generate(&self, cx: Cx, req: Req) -> Result<Items<B::Out>> {
-        // Every attempt spends cooperative budget: an operator retrying
-        // attempts that fail at once would otherwise loop without ever
-        // yielding, starving the task that would cancel it.
-        tokio::task::coop::consume_budget().await;
-        cx.check()?;
-        let attempt = cx.child();
-        // Dropping this future before it returns drops the guard and cancels
-        // the attempt; on success the guard moves into the response stream,
-        // which cancels the attempt when the stream ends or is dropped.
-        let guard = attempt.cancel_on_drop();
-        let run = async {
-            let req = self.fwd.run(&attempt, req).await?;
-            // A forward stage can finish in the same instant the attempt is
-            // interrupted; the inner end must not start for a dead attempt.
+    // A block, not an `async fn`: the block uses `req` where it was
+    // captured, where an `async fn` would move it into a local first.
+    #[allow(clippy::manual_async_fn)]
+    fn generate(&self, cx: Cx, req: Req) -> impl Future<Output = Result<Items<B::Out>>> + Send {
+        async move {
+            // Every attempt spends cooperative budget: an operator retrying
+            // attempts that fail at once would otherwise loop without ever
+            // yielding, starving the task that would cancel it.
+            tokio::task::coop::consume_budget().await;
+            cx.check()?;
+            let attempt = cx.child();
+            // Dropping this future before it returns drops the guard and cancels
+            // the attempt; on success the guard moves into the response stream,
+            // which cancels the attempt when the stream ends or is dropped.
+            let guard = attempt.cancel_on_drop();
+            // Built where it is pinned, so it is not moved there. The forward
+            // chain hands the request on to the inner end, not back here: each
+            // return would move the whole request once more.
+            let at = &attempt;
+            let mut run = pin!(self.fwd.run(at, req, move |req| async move {
+                // A forward stage can finish in the same instant the attempt is
+                // interrupted; the inner end must not start for a dead attempt.
+                let attempt = at;
+                attempt.check()?;
+                // The inner end always runs in its own scope below the attempt:
+                // a terminal item from it stops it even while a backward node
+                // still holds that item, and a node that cancels its own context
+                // gets the same outcome whether or not backward nodes follow.
+                let scope = attempt.child();
+                let producer = Producer::of(&scope);
+                let items = self.inner.call(scope, req).await?;
+                let items = producer.fuse(items);
+                // As before the inner end: no backward stage starts for an
+                // attempt interrupted while the inner end was finishing.
+                attempt.check()?;
+                Ok(self.bwd.apply(attempt, items))
+            }));
+            let mut done = pin!(attempt.done());
+            // The first pass polls `run` before the cancel, so an attempt that
+            // finishes at once never registers a waiter (two more locks of the
+            // attempt's token); the checks inside `run` and below still see a
+            // cancel that came first. Later passes poll the cancel first, and no
+            // pass polls `run` twice. As in `tokio::select!`, a pass with the
+            // task's budget spent yields at once: the cancel would yield for it
+            // and `run`, polled alone, could finish a cancelled attempt.
+            let mut first = true;
+            let items = poll_fn(|task| {
+                if !tokio::task::coop::has_budget_remaining() {
+                    task.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                if !first && let Poll::Ready(reason) = done.as_mut().poll(task) {
+                    return Poll::Ready(Err(reason));
+                }
+                if let Poll::Ready(result) = run.as_mut().poll(task) {
+                    return Poll::Ready(result);
+                }
+                if std::mem::take(&mut first)
+                    && let Poll::Ready(reason) = done.as_mut().poll(task)
+                {
+                    return Poll::Ready(Err(reason));
+                }
+                Poll::Pending
+            })
+            .await?;
+            // Success is reported only for a live attempt; dropping `items` on
+            // the error path ends whatever the inner end started.
             attempt.check()?;
-            // The inner end always runs in its own scope below the attempt:
-            // a terminal item from it stops it even while a backward node
-            // still holds that item, and a node that cancels its own context
-            // gets the same outcome whether or not backward nodes follow.
-            let scope = attempt.child();
-            let producer = Producer::of(&scope);
-            let items = self.inner.call(scope, req).await?;
-            let items = producer.fuse(items);
-            // As before the inner end: no backward stage starts for an
-            // attempt interrupted while the inner end was finishing.
-            attempt.check()?;
-            Ok::<_, crate::Error>(self.bwd.apply(&attempt, items))
-        };
-        let mut run = pin!(run);
-        let mut done = pin!(attempt.done());
-        // The first pass polls `run` before the cancel, so an attempt that
-        // finishes at once never registers a waiter (two more locks of the
-        // attempt's token); the checks inside `run` and below still see a
-        // cancel that came first. Later passes poll the cancel first, and no
-        // pass polls `run` twice. As in `tokio::select!`, a pass with the
-        // task's budget spent yields at once: the cancel would yield for it
-        // and `run`, polled alone, could finish a cancelled attempt.
-        let mut first = true;
-        let items = poll_fn(|task| {
-            if !tokio::task::coop::has_budget_remaining() {
-                task.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            if !first && let Poll::Ready(reason) = done.as_mut().poll(task) {
-                return Poll::Ready(Err(reason));
-            }
-            if let Poll::Ready(result) = run.as_mut().poll(task) {
-                return Poll::Ready(result);
-            }
-            if std::mem::take(&mut first)
-                && let Poll::Ready(reason) = done.as_mut().poll(task)
-            {
-                return Poll::Ready(Err(reason));
-            }
-            Poll::Pending
-        })
-        .await?;
-        // Success is reported only for a live attempt; dropping `items` on
-        // the error path ends whatever the inner end started.
-        attempt.check()?;
-        Ok(bound(&attempt, guard, items))
+            Ok(bound(&attempt, guard, items))
+        }
     }
 }
 
@@ -129,8 +137,8 @@ impl<S> Clone for SinkStage<S> {
 impl<S: Sink> Inner<S::Req> for SinkStage<S> {
     type Item = S::Item;
 
-    async fn call(&self, cx: Cx, req: S::Req) -> Result<Items<S::Item>> {
-        self.0.generate(cx, req).await
+    fn call(&self, cx: Cx, req: S::Req) -> impl Future<Output = Result<Items<S::Item>>> + Send {
+        self.0.generate(cx, req)
     }
 }
 
@@ -163,12 +171,15 @@ where
 {
     type Item = O::UpItem;
 
-    async fn call(&self, cx: Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
+    fn call(&self, cx: Cx, req: O::UpReq) -> impl Future<Output = Result<Items<O::UpItem>>> + Send {
         // The operator's future holds the future of the hop it calls, and
         // that one the hops below it. Held inline, the hop above would carry
         // all of them, and a future is moved whole: one allocation here costs
         // less than the moves it saves (docs/src/operations/feature-costs.md).
-        Box::pin(self.op.generate(cx, req, self.next.clone())).await
+        // Cloned first: a clone that writes into the future as it is built
+        // keeps the compiler from building it in place.
+        let next = self.next.clone();
+        boxed(|| self.op.generate(cx, req, next))
     }
 }
 
@@ -178,15 +189,25 @@ pub trait ForwardChain<In>: Clone + Send + Sync + 'static {
     /// The request type after the whole chain.
     type Out: Send + 'static;
 
-    /// Run the chain on one request.
-    fn run(&self, cx: &Cx, req: In) -> impl Future<Output = Result<Self::Out>> + Send;
+    /// Run the chain on one request, then `then` on the request it makes.
+    ///
+    /// The request goes on to `then` rather than back to the caller: each
+    /// future that returned it would move the whole request once more.
+    fn run<T, K, Fut>(&self, cx: &Cx, req: In, then: K) -> impl Future<Output = Result<T>> + Send
+    where
+        K: FnOnce(Self::Out) -> Fut + Send,
+        Fut: Future<Output = Result<T>> + Send;
 }
 
 impl<In: Send + 'static> ForwardChain<In> for () {
     type Out = In;
 
-    async fn run(&self, _cx: &Cx, req: In) -> Result<In> {
-        Ok(req)
+    fn run<T, K, Fut>(&self, _cx: &Cx, req: In, then: K) -> impl Future<Output = Result<T>> + Send
+    where
+        K: FnOnce(In) -> Fut + Send,
+        Fut: Future<Output = Result<T>> + Send,
+    {
+        then(req)
     }
 }
 
@@ -197,12 +218,25 @@ where
 {
     type Out = R::Out;
 
-    async fn run(&self, cx: &Cx, req: F::In) -> Result<R::Out> {
-        // Each forward stage may have side effects; none starts for an
-        // attempt that an earlier stage, or anything else, has interrupted.
-        cx.check()?;
-        let req = self.0.forward(cx, req).await?;
-        self.1.run(cx, req).await
+    // As in `Hop::generate`: a block that uses `req` where it was captured,
+    // and a match where `?` would move the request again.
+    #[allow(clippy::manual_async_fn)]
+    fn run<T, K, Fut>(&self, cx: &Cx, req: F::In, then: K) -> impl Future<Output = Result<T>> + Send
+    where
+        K: FnOnce(R::Out) -> Fut + Send,
+        Fut: Future<Output = Result<T>> + Send,
+    {
+        async move {
+            // Each forward stage may have side effects; none starts for an
+            // attempt that an earlier stage, or anything else, has
+            // interrupted.
+            cx.check()?;
+            let req = match self.0.forward(cx, req).await {
+                Ok(req) => req,
+                Err(error) => return Err(error),
+            };
+            self.1.run(cx, req, then).await
+        }
     }
 }
 
@@ -319,8 +353,26 @@ impl<N: Clone, Item> Clone for Join<N, Item> {
 }
 impl<Req: Send + 'static, Item: Send + 'static, N: Next<Req, Item>> Inner<Req> for Join<N, Item> {
     type Item = Item;
-    async fn call(&self, cx: Cx, request: Req) -> Result<Items<Item>> {
+    fn call(&self, cx: Cx, request: Req) -> impl Future<Output = Result<Items<Item>>> + Send {
         // On the heap for the reason `OperatorStage::call` gives.
-        Box::pin(self.next.generate(cx, request)).await
+        boxed(|| self.next.generate(cx, request))
     }
+}
+
+/// A future on the heap, built there. `Box::pin(make())` builds the future
+/// on the stack and then copies it whole into its box. Here the allocation
+/// comes first, and `build` writes the future into it.
+#[inline(always)]
+fn boxed<F: Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    let slot = Box::new_uninit();
+    Box::into_pin(Box::write(slot, build(make)))
+}
+
+/// Out of line on purpose: the compiler then passes the allocation to it as
+/// the place to return into. Inlined, a default release build (16 codegen
+/// units) still built the future on the stack and copied it
+/// (`tests/codegen.rs`, `an_operators_future_is_built_on_the_heap`).
+#[inline(never)]
+fn build<F>(make: impl FnOnce() -> F) -> F {
+    make()
 }

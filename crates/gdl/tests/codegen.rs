@@ -34,8 +34,9 @@ fn home_first_keeps_its_thresholds_in_code() {
     );
 }
 
-/// A node boundary (`Fuse`, `Bounded`) returns its inner stream's poll as its
-/// own, so an item is written once, where the consumer reads it. A boundary
+/// A node boundary (`Fuse`, `Bounded`) and a streamed request's items
+/// (`UntilError`) return their inner stream's poll as their own, so an item
+/// is written once, where the consumer reads it. A boundary
 /// that holds the poll across a call copies the whole poll, once per item
 /// at each boundary: four copies of each chunk on an endpoint's two hops.
 /// The `copies` example's 2 KiB items cross both boundaries, and its
@@ -50,14 +51,7 @@ fn a_node_boundary_does_not_copy_an_item() {
         let (_, body) = definitions(&ir)
             .find(|(signature, _)| signature.contains(name) && signature.contains("9poll_next"))
             .unwrap_or_else(|| panic!("{name}'s poll_next definition"));
-        body.lines()
-            .filter(|line| line.contains("@llvm.memcpy") || line.contains("@llvm.memmove"))
-            .filter_map(|line| {
-                let (_, size) = line.rsplit_once(", i64 ")?;
-                size.split(',').next()?.trim().parse().ok()
-            })
-            .filter(|size| *size >= ITEM)
-            .collect()
+        copy_sizes(body).filter(|size| *size >= ITEM).collect()
     };
     assert!(
         !copies("copies..Copying$u20$").is_empty(),
@@ -69,6 +63,37 @@ fn a_node_boundary_does_not_copy_an_item() {
         Vec::<u64>::new(),
         "Bounded"
     );
+    assert_eq!(
+        copies("gdl..items..UntilError$LT$"),
+        Vec::<u64>::new(),
+        "UntilError"
+    );
+}
+
+/// An operator's future, and a join's, is built on the heap: `boxed`
+/// allocates first and builds the future in the allocation. `Box::pin`
+/// builds it on the stack and copies it whole into its box: 4,640 B on each
+/// call in an endpoint. The `copies` example's operator holds 16 KiB while
+/// it waits, so a copy that large moves its future; its `boxed` function is
+/// the control. Every other function is searched: the copy lands wherever
+/// the compiler inlines the code that makes it.
+#[test]
+fn an_operators_future_is_built_on_the_heap() {
+    let ir = release_ir("example", "copies");
+    const FUTURE: u64 = 16 * 1024;
+    const CONTROL: &str = "6copies5boxed";
+    let copies = |control: bool| -> Vec<u64> {
+        definitions(&ir)
+            .filter(|(signature, _)| signature.contains(CONTROL) == control)
+            .flat_map(|(_, body)| copy_sizes(body))
+            .filter(|size| *size >= FUTURE)
+            .collect()
+    };
+    assert!(
+        !copies(true).is_empty(),
+        "the boxed control must show a copy of the future"
+    );
+    assert_eq!(copies(false), Vec::<u64>::new());
 }
 
 #[test]
@@ -123,9 +148,12 @@ fn release_ir(kind: &str, name: &str) -> String {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace.join("target"));
-    let selected = match kind {
-        "lib" => vec!["--lib"],
-        _ => vec!["--example", name],
+    // An example builds as a release build does by default, in 16 units:
+    // whether a future is built in place can depend on it. Asked for IR,
+    // rustc would build in one unit.
+    let (selected, units) = match kind {
+        "lib" => (vec!["--lib"], vec![]),
+        _ => (vec!["--example", name], vec!["-C", "codegen-units=16"]),
     };
     let built = Command::new(env!("CARGO"))
         .current_dir(workspace)
@@ -134,6 +162,7 @@ fn release_ir(kind: &str, name: &str) -> String {
         .args(["rustc", "-p", "gdl", "--release"])
         .args(selected)
         .args(["--message-format=json", "--", "--emit=llvm-ir"])
+        .args(units)
         .output()
         .expect("compile gdl's release IR");
     assert!(
@@ -154,21 +183,22 @@ fn release_ir(kind: &str, name: &str) -> String {
             })
         })
         .expect("the target's artifact");
-    let ir = match kind {
+    match kind {
         "lib" => {
             let stem = artifact
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .and_then(|stem| stem.strip_prefix("lib"))
                 .expect("a Rust library name");
-            artifact.with_file_name(format!("{stem}.ll"))
+            std::fs::read_to_string(artifact.with_file_name(format!("{stem}.ll")))
+                .expect("the emitted IR")
         }
         // Cargo reports the executable it copies out, named without the
         // hash that names this build's IR. The hashed executable with the
         // same bytes is this build's; other builds leave their own.
         _ => {
             let built = std::fs::read(&artifact).expect("the executable");
-            std::fs::read_dir(artifact.parent().expect("the artifact's directory"))
+            let hashed = std::fs::read_dir(artifact.parent().expect("the artifact's directory"))
                 .expect("the artifact's directory")
                 .filter_map(|entry| entry.ok())
                 .map(|entry| entry.path())
@@ -180,11 +210,45 @@ fn release_ir(kind: &str, name: &str) -> String {
                             .is_some_and(|file| file.starts_with(&format!("{name}-")))
                 })
                 .find(|path| std::fs::read(path).is_ok_and(|bytes| bytes == built))
-                .map(|path| path.with_extension("ll"))
-                .expect("the hashed executable of this build")
+                .expect("the hashed executable of this build");
+            // One file per unit, named after the hashed executable.
+            let prefix = format!(
+                "{}.",
+                hashed
+                    .file_name()
+                    .and_then(|file| file.to_str())
+                    .expect("a name")
+            );
+            let mut units: Vec<PathBuf> = std::fs::read_dir(hashed.parent().expect("a directory"))
+                .expect("the artifact's directory")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|file| file.to_str())
+                        .is_some_and(|file| file.starts_with(&prefix) && file.ends_with(".rcgu.ll"))
+                })
+                .collect();
+            units.sort();
+            // Fewer units than asked for could leave another build's files
+            // under the same names.
+            assert_eq!(units.len(), 16, "the example's units: {units:?}");
+            units
+                .iter()
+                .map(|unit| std::fs::read_to_string(unit).expect("the emitted IR"))
+                .collect()
         }
-    };
-    std::fs::read_to_string(ir).expect("the emitted IR")
+    }
+}
+
+/// The size of each copy of constant size in a function's body.
+fn copy_sizes(body: &str) -> impl Iterator<Item = u64> {
+    body.lines()
+        .filter(|line| line.contains("@llvm.memcpy") || line.contains("@llvm.memmove"))
+        .filter_map(|line| {
+            let (_, size) = line.rsplit_once(", i64 ")?;
+            size.split(',').next()?.trim().parse().ok()
+        })
 }
 
 /// Each function the IR defines, as its signature line and its body.

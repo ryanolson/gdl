@@ -207,3 +207,79 @@ async fn a_hop_polls_a_waiting_inner_end_once_a_pass() {
     assert_eq!(polls.load(std::sync::atomic::Ordering::Relaxed), passes);
     assert_eq!(items.count().await, 2);
 }
+
+/// A request far larger than anything else in a future, so a future's size
+/// counts the places it holds the request.
+struct Large([u64; 1024]);
+
+/// Answers a large request with one number.
+struct Sum;
+
+impl Sink for Sum {
+    type Req = Large;
+    type Item = u64;
+
+    async fn generate(&self, _cx: Cx, req: Large) -> Result<Items<u64>> {
+        Ok(items(stream::iter([Ok(req.0[1])])))
+    }
+}
+
+/// Passes a large request on.
+struct Hand;
+
+impl Operator for Hand {
+    type UpReq = Large;
+    type UpItem = u64;
+    type DownReq = Large;
+    type DownItem = u64;
+
+    async fn generate<N: Next<Large, u64>>(
+        &self,
+        cx: Cx,
+        req: Large,
+        next: N,
+    ) -> Result<Items<u64>> {
+        next.generate(cx, req).await
+    }
+}
+
+/// An inner end returns its node's future, or that future on the heap,
+/// and holds no request of its own: a future around the node's would copy
+/// the request into itself first, and then into the node's future.
+#[test]
+fn an_inner_end_adds_no_future_of_its_own() {
+    use gdl::Inner;
+    let sum = Arc::new(Sum);
+    let alone = std::mem::size_of_val(&sum.generate(Cx::new(), Large([0; 1024])));
+    let sink = SinkStage::new(Arc::clone(&sum));
+    let called = std::mem::size_of_val(&sink.call(Cx::new(), Large([0; 1024])));
+    assert_eq!(called, alone, "SinkStage::call");
+
+    let below = Source::new(Hop::new((), SinkStage::new(sum), ()));
+    let heap = std::mem::size_of::<std::pin::Pin<Box<()>>>();
+    let operator = OperatorStage::new(Arc::new(Hand), below.clone());
+    let called = std::mem::size_of_val(&operator.call(Cx::new(), Large([0; 1024])));
+    assert_eq!(called, heap, "OperatorStage::call");
+    let join = Join::<_, u64>::new(below);
+    let called = std::mem::size_of_val(&join.call(Cx::new(), Large([0; 1024])));
+    assert_eq!(called, heap, "Join::call");
+}
+
+/// A hop's future holds the request in as few places as it moves through:
+/// as the hop took it, and as the attempt hands it to the inner end. A sink's
+/// own future is the third place; an operator's is on the heap. Each further
+/// place is one more copy of the whole request on each call.
+#[test]
+fn a_hop_holds_its_request_in_few_places() {
+    let places = |future_size: usize| future_size / std::mem::size_of::<Large>();
+    let over_sink = Hop::new((), SinkStage::new(Arc::new(Sum)), ());
+    let size = std::mem::size_of_val(&over_sink.generate(Cx::new(), Large([0; 1024])));
+    assert_eq!(places(size), 3, "a hop over a sink");
+    let over_operator = Hop::new(
+        (),
+        OperatorStage::new(Arc::new(Hand), Source::new(over_sink)),
+        (),
+    );
+    let size = std::mem::size_of_val(&over_operator.generate(Cx::new(), Large([0; 1024])));
+    assert_eq!(places(size), 2, "a hop over an operator");
+}

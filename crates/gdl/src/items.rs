@@ -63,10 +63,16 @@ impl<T> Stream for UntilError<T> {
             return Poll::Ready(None);
         };
         let polled = inner.as_mut().poll_next(cx);
+        // As in `Fuse`: returned as it came, with no call while it is held.
+        // Dropping the input is a call, so an ending takes the poll first.
         match polled {
             Poll::Ready(Some(Ok(_))) => self.ready_run += 1,
-            Poll::Ready(Some(Err(_)) | None) => self.inner = None,
             Poll::Pending => self.ready_run = 0,
+            Poll::Ready(Some(Err(_)) | None) => {
+                let error = error_of(polled);
+                self.inner = None;
+                return Poll::Ready(error.map(Err));
+            }
         }
         polled
     }
@@ -435,6 +441,36 @@ mod tests {
         );
         assert!(!attempt.is_cancelled());
         assert!(out.next().await.is_none());
+    }
+
+    /// The input goes at its error or its end, before the consumer drops
+    /// the stream: a remote input releases its anchor there.
+    #[tokio::test]
+    async fn a_stream_until_its_error_drops_its_input_at_the_error() {
+        struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        for last in [Some(Error::node("x")), None] {
+            let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = Dropped(std::sync::Arc::clone(&dropped));
+            let input =
+                futures::stream::iter([Ok(1)].into_iter().chain(last.map(Err))).map(move |item| {
+                    let _ = &flag;
+                    item
+                });
+            let mut out = until_error(items(input));
+            assert_eq!(out.next().await.map(|r| r.ok()), Some(Some(1)));
+            assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+            let _ = out.next().await;
+            assert!(
+                dropped.load(std::sync::atomic::Ordering::SeqCst),
+                "the input outlived its ending"
+            );
+            assert!(out.next().await.is_none());
+        }
     }
 
     #[tokio::test]

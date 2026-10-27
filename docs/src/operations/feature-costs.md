@@ -360,3 +360,32 @@ cargo bench -p gdl-runtime --bench remote -- 'request/reference-local|request/re
 | `chat-stream`: server CPU per request | 350.6 to 354.0 µs | 347.2 to 368.7 µs |
 
 The copies gdl made were part of the endpoint's `memcpy`, not most of it. On the stream, `Fuse` still holds 13.3% with its callees: the endpoint's own stream below it, the reply converter's `unfold`, moves its state on each chunk. Server CPU per stream does not change beyond its spread.
+
+### Copies of a request
+
+A request is copied whole each time a future takes it by value or returns it. In an endpoint's shape, a gdb trace of every `memcpy` counted the copies that gdl itself made, per request with three chunks: 21,240 B before this change and 8,368 B after it. Of those 21,240 B, 4,640 B was the operator's future copied into its box, and most of the rest was the 768 B request moving through the hop, the forward chain, and the inner ends ([Node contexts](../development/runtime-design.md#node-contexts)). All `memcpy` bytes per request fell from 50,933 to 38,189. The rest are the probe's own: its chunks, its reply converter, and its nodes' `async fn` arguments.
+
+The same `hop` bench on the gb300 runner, core 9, load average 2.5 to 3.8, three runs each. Base `0fa33eb8`, change `4931dcaf`:
+
+```bash
+cargo bench -p gdl-runtime --bench hop -- --warm-up-time 1 --measurement-time 3
+cargo bench -p gdl-runtime --bench requests -- sizes 0
+cargo bench -p gdl-runtime --bench remote -- 'request/reference-local|request/reference-1-segment' --warm-up-time 1 --measurement-time 3
+```
+
+| Row | Base | Change |
+|---|---|---|
+| `chunks/request` | 2.28 to 2.30 µs | 2.07 to 2.10 µs |
+| `chunks/stream`, 256 items | 17.5 to 17.6 µs | 16.8 to 17.2 µs |
+| `request/gdl` | 2.41 to 2.47 µs | 2.31 to 2.34 µs |
+| `request/gdl-streamed` | 2.50 to 2.51 µs | 2.30 to 2.32 µs |
+| `items/gdl`, 10,000 `u64` items | 267 to 270 µs | 269 to 273 µs |
+| `items/gdl-streamed` | 307 to 317 µs | 293 to 297 µs |
+| `items/direct`, the control | 46.3 to 50.3 µs | 41.1 to 52.6 µs |
+| `request/reference-local` | 10.26 to 10.42 µs | 10.25 to 10.40 µs |
+| `request/reference-1-segment` | 11.73 to 12.21 µs | 12.13 to 12.25 µs |
+
+- **A request with one chunk takes 9% less.** A streamed request takes 8% less: its items also no longer copy through `UntilError`, and `items/gdl-streamed` takes 4% less.
+- **`items/gdl` does not change** beyond its spread. Its request is a `u64`.
+- **The runtime's segment rows do not change** beyond their spread. `requests sizes 0` prints 11,504 B for the front's call future at both commits.
+- **The crossing does not change.** `python3 scripts/bench/items.py count` (cores 16 to 23, five rounds) gives 8,937 and 9,117 user instructions per item at 16 B, and 10,334 and 10,182 at 1 KiB, inside the band of [crossing-item-send](hot-paths.md#crossing-item-send).
