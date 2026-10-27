@@ -339,7 +339,7 @@ fn named_by_bounds(
     for bound in bounds {
         let clause = bound
             .as_deref()
-            .and_then(|b| syn::parse_str::<syn::WhereClause>(&format!("where {b}")).ok())?;
+            .and_then(|b| crate::bounded::parse::<syn::WhereClause>(&format!("where {b}")))?;
         for predicate in &clause.predicates {
             let predicate = match predicate {
                 // A bound on serde's `'de` holds for some input lifetimes

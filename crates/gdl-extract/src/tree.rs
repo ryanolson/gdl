@@ -513,7 +513,7 @@ impl Reader<'_> {
                 return None;
             }
         };
-        match syn::parse_file(&text) {
+        match crate::bounded::file(&text) {
             // A file's own `#![cfg]` can remove all of it.
             Ok(file) => Some(match self.settings.attributes(&file.attrs, self.features) {
                 Some(_) => file.items,

@@ -86,7 +86,13 @@ impl Graph {
     /// [`MAX_DEPTH`](crate::MAX_DEPTH) is refused before it is parsed, so
     /// no text can overflow the caller's stack.
     pub fn parse(tokens: proc_macro2::TokenStream) -> syn::Result<Self> {
-        crate::depth::check(&tokens)?;
+        crate::check_depth(&tokens, crate::MAX_DEPTH, &|| {
+            format!(
+                "this nests more than {} levels deep, and a graph may not: \
+                 each bracket, `<`, prefix operator, and keyword such as `return` is a level",
+                crate::MAX_DEPTH
+            )
+        })?;
         Self::check(syn::parse2::<GraphInput>(tokens)?)
     }
 
@@ -345,58 +351,17 @@ pub fn identifier(word: &str) -> String {
 /// raw, and are rejected above). Escaping a word that is a keyword only in a
 /// later edition costs nothing.
 pub(crate) fn is_keyword(word: &str) -> bool {
-    matches!(
-        word,
-        "abstract"
-            | "as"
-            | "async"
-            | "await"
-            | "become"
-            | "box"
-            | "break"
-            | "const"
-            | "continue"
-            | "do"
-            | "dyn"
-            | "else"
-            | "enum"
-            | "extern"
-            | "false"
-            | "final"
-            | "fn"
-            | "for"
-            | "gen"
-            | "if"
-            | "impl"
-            | "in"
-            | "let"
-            | "loop"
-            | "macro"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "override"
-            | "priv"
-            | "pub"
-            | "ref"
-            | "return"
-            | "static"
-            | "struct"
-            | "trait"
-            | "true"
-            | "try"
-            | "type"
-            | "typeof"
-            | "unsafe"
-            | "unsized"
-            | "use"
-            | "virtual"
-            | "where"
-            | "while"
-            | "yield"
-    )
+    KEYWORDS.contains(&word)
 }
+
+/// The keywords of every edition, strict and reserved.
+pub(crate) const KEYWORDS: [&str; 48] = [
+    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "do", "dyn",
+    "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let",
+    "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "return",
+    "static", "struct", "trait", "true", "try", "type", "typeof", "unsafe", "unsized", "use",
+    "virtual", "where", "while", "yield",
+];
 
 struct Builder<'a> {
     nodes: &'a [Node],

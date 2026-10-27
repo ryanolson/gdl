@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use gdl_extract::{Cargo, Extraction, Origin, Workspace};
+use gdl_extract::{Cargo, Extraction, Origin, READ_DEPTH, Workspace};
 
 fn workspace() -> Workspace {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/read/Cargo.toml");
@@ -1799,6 +1799,220 @@ fn deeply_nested_aliases_read_without_overflowing_the_stack() {
         "{}",
         skipped.problem
     );
+}
+
+/// A package `deep` whose library is `source`, read on a thread with a
+/// 2 MiB stack: the reader reads on a stack of its own.
+fn read_on_small_stack(source: String) -> Extraction {
+    read_files_on_small_stack(&[("lib.rs".to_string(), source)])
+}
+
+/// [`read_on_small_stack`], with these files under `src`.
+fn read_files_on_small_stack(files: &[(String, String)]) -> Extraction {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-read-depth-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path().to_path_buf();
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"deep\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    for (name, source) in files {
+        std::fs::write(dir.join("src").join(name), source).expect("source");
+    }
+    let workspace =
+        Workspace::load(&dir.join("Cargo.toml"), &Cargo::trusted()).expect("cargo metadata");
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || workspace.extract("deep").expect("the package"))
+        .expect("thread")
+        .join()
+        .expect("the reader returned")
+}
+
+/// A crate whose alias, impl, and export are `levels` deep as the depth
+/// bound counts them: the `=` of `type X =` is one level, and each `<` one
+/// more. The alias comes first, on line 2, so the first problem is there.
+fn deep_crate(levels: usize) -> String {
+    let n = levels - 2;
+    let nested = format!("{}Hold<u8>{}", "Identity<".repeat(n), ">".repeat(n));
+    format!(
+        "pub type Identity<T> = T;\npub type X = {nested};\n\
+         pub fn f(x: X) -> X {{ x }}\n\
+         #[derive(gdl_message::Message)]\npub struct Words;\n\
+         #[derive(gdl::Node)]\npub struct Hold<B>(B);\n\
+         impl gdl::Sink for {nested} {{ type Req = Words; type Item = Words; }}\n\
+         #[gdl::export]\npub type Held = {nested};\n"
+    )
+}
+
+/// The reader reads a source file as deep as the bound, and refuses one
+/// level more with a problem at the `<` that goes too deep, on any
+/// caller's stack. rustc 1.93.1 with default settings builds about 4,030
+/// levels of an alias chain, and the reader's own stack held 5,080 levels
+/// of it in a debug build. 36,000 levels, which rustc builds with
+/// `RUST_MIN_STACK=1073741824`, used to crash the reader.
+#[test]
+fn a_source_is_read_to_the_depth_bound_and_refused_past_it() {
+    let at = read_on_small_stack(deep_crate(READ_DEPTH));
+    assert!(at.problems.is_empty(), "{:?}", at.problems);
+    assert_eq!(at.offer.skipped.len(), 1, "{:?}", at.offer.skipped);
+    let past = read_on_small_stack(deep_crate(READ_DEPTH + 1));
+    let [problem] = past.problems.as_slice() else {
+        panic!("one problem: {:?}", past.problems);
+    };
+    // `pub type X = `, then the `Identity<`s, then `Hold`.
+    let column = 1 + 13 + 9 * (READ_DEPTH - 1) + 4;
+    assert!(
+        problem.ends_with(&format!(
+            "src/lib.rs:2:{column}: does not parse: \
+             it nests more than {READ_DEPTH} levels deep, deeper than the reader reads"
+        )),
+        "{problem}"
+    );
+    let far = read_on_small_stack(deep_crate(36_000));
+    assert!(
+        far.problems[0].contains(&format!("more than {READ_DEPTH} levels deep")),
+        "{:?}",
+        far.problems
+    );
+}
+
+/// Each kind of nesting that syn parses by recursion, or that builds a tree
+/// which nests once per step, at the most the bound admits, in a module of
+/// its own: the reader reads them all on its own stack, from a caller's
+/// 2 MiB thread, and refuses each with one step more. Where a kind's weight
+/// in the count were too low, its module would overflow the stack here.
+#[test]
+fn every_kind_of_nesting_reads_to_the_bound() {
+    // Each kind's most steps, as the count weighs them: a level for a
+    // prefix or an assignment, an eighth for a cast or a `?`, a level and an
+    // eighth for a `let`'s `=` and `&&`, two for `||`.
+    type Kind = (&'static str, usize, fn(usize) -> String);
+    let kinds: Vec<Kind> = vec![
+        ("dyns", 4094, |k| {
+            format!(
+                "pub trait A<T> {{}}\npub type X = Box<{}u8{}>;\n",
+                "dyn A<".repeat(k),
+                ">".repeat(k)
+            )
+        }),
+        ("assign", 4094, |k| {
+            format!("pub fn f(mut a: u8) {{ {}1; }}\n", "a = ".repeat(k))
+        }),
+        ("compound", 4094, |k| {
+            format!("pub fn f(mut a: u8) {{ {}1; }}\n", "a += ".repeat(k))
+        }),
+        ("ranges", 4093, |k| {
+            format!("pub fn f() {{ let _ = {}1; }}\n", ".. ".repeat(k))
+        }),
+        ("not", 4093, |k| {
+            format!("pub fn f(a: bool) -> bool {{ {}a }}\n", "!".repeat(k))
+        }),
+        ("negate", 4093, |k| {
+            format!("pub fn f(a: i8) -> i8 {{ {}a }}\n", "- ".repeat(k))
+        }),
+        ("deref", 4093, |k| {
+            format!("pub fn f(a: u8) {{ let _ = {}a; }}\n", "*".repeat(k))
+        }),
+        ("borrow", 4093, |k| {
+            format!("pub fn f(a: u8) {{ let _ = {}a; }}\n", "&".repeat(k))
+        }),
+        ("borrow_mut", 4093, |k| {
+            format!(
+                "pub fn f(mut a: u8) {{ let _ = {}a; }}\n",
+                "&mut ".repeat(k)
+            )
+        }),
+        ("casts", 32751, |k| {
+            format!("pub fn f(a: u8) {{ let _ = a{}; }}\n", " as u8".repeat(k))
+        }),
+        ("tries", 32751, |k| {
+            format!("pub fn f(a: u8) {{ let _ = a{}; }}\n", "?".repeat(k))
+        }),
+        ("lets", 3638, |k| {
+            format!(
+                "pub fn f(a: u8) {{ if {}true {{}} }}\n",
+                "let 1 = a && ".repeat(k)
+            )
+        }),
+        ("closures", 2046, |k| {
+            format!("pub fn f() {{ let _ = {}1; }}\n", "|| ".repeat(k))
+        }),
+        ("returns", 4094, |k| {
+            format!("pub fn f() {{ {}; }}\n", "return ".repeat(k))
+        }),
+    ];
+    let fits = |text: &str| {
+        let tokens: proc_macro2::TokenStream = text.parse().expect("tokens");
+        gdl_syntax::check_depth(&tokens, READ_DEPTH, &String::new).is_ok()
+    };
+    for (name, most, kind) in &kinds {
+        assert!(
+            fits(&kind(*most)),
+            "{name}: {most} steps are within the bound"
+        );
+        assert!(
+            !fits(&kind(most + 1)),
+            "{name}: {} steps are past it",
+            most + 1
+        );
+    }
+    let source = |extra: usize| {
+        let mut files = vec![(
+            "lib.rs".to_string(),
+            kinds
+                .iter()
+                .map(|(name, _, _)| format!("pub mod {name};\n"))
+                .collect::<String>(),
+        )];
+        for (name, most, kind) in &kinds {
+            files.push((format!("{name}.rs"), kind(most + extra)));
+        }
+        files
+    };
+    let at = read_files_on_small_stack(&source(0));
+    assert!(at.problems.is_empty(), "{:?}", at.problems);
+    let past = read_files_on_small_stack(&source(1));
+    for (name, _, _) in &kinds {
+        assert!(
+            past.problems
+                .iter()
+                .any(|p| p.contains(&format!("src/{name}.rs:"))
+                    && p.contains(&format!("more than {READ_DEPTH} levels deep"))),
+            "{name}: {:?}",
+            past.problems
+        );
+    }
+}
+
+/// Long code that syn reads in a loop is not deep, however long: a list of
+/// negative numbers, a match with a `return` in each arm, a chain of `if`
+/// statements, doc comments, and a macro's body. rustc builds this file.
+#[test]
+fn long_flat_code_reads() {
+    let n = 10_000;
+    let source = format!(
+        "//! The crate.\n{docs}\
+         pub const A: [i8; {n}] = [{negative}];\n\
+         pub fn f(c: u16) -> u16 {{ match c {{ {arms}_ => 0 }} }}\n\
+         pub fn g(c: u16) -> u16 {{ {ifs}0 }}\n\
+         macro_rules! m {{ ($($t:tt)*) => {{}}; }}\nm! {{ {body} }}\n",
+        docs = "//! A line.\n".repeat(n),
+        negative = "-1, ".repeat(n),
+        arms = (0..n)
+            .map(|i| format!("{i} => return {i}, "))
+            .collect::<String>(),
+        ifs = (0..n)
+            .map(|i| format!("if c < {i} {{ return {i}; }} "))
+            .collect::<String>(),
+        body = "& - ! * | a < b ".repeat(n),
+    );
+    let read = read_on_small_stack(source);
+    assert!(read.problems.is_empty(), "{:?}", read.problems);
 }
 
 /// Where the wire check stops for depth: a hand-written impl bounds its

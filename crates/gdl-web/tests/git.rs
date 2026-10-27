@@ -730,12 +730,10 @@ async fn a_symlinked_path_dependency_is_refused() {
     server.abort();
 }
 
-/// A crate that the parser cannot read without running out of stack (a
-/// million nested references, past what the reader's own stack holds) is
-/// refused, and the server goes on: the crate is read in a child, which is
-/// what gives out.
+/// A crate nested past what the reader's own stack holds (a million nested
+/// references) is refused with the depth problem, and the server goes on.
 #[tokio::test]
-async fn a_crate_the_reader_cannot_survive_is_refused_not_fatal() {
+async fn a_crate_nested_past_the_readers_depth_is_refused_not_fatal() {
     let temp = tempfile::Builder::new()
         .prefix("gdl-web-git-")
         .tempdir()
@@ -752,10 +750,7 @@ async fn a_crate_the_reader_cannot_survive_is_refused_not_fatal() {
     .await;
     let (status, body) = import(app.clone(), &url, "deep").await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body.contains("could not be read") || body.contains("stack"),
-        "{body}"
-    );
+    assert!(body.contains("levels deep"), "{body}");
     // The server is still here, and reads the next crate.
     let (status, body) = import(app, &url, "fine").await;
     assert_eq!(status, 200, "{body}");

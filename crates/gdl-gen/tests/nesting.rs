@@ -7,22 +7,12 @@ use std::path::Path;
 use gdl_gen::{Format, Offers, Sources, Spec};
 use gdl_syntax::MAX_DEPTH;
 
-/// A type of each kind that syn recurses on, nested `depth` levels as the
-/// bound counts them. A kind that takes two levels a step starts with `&`
-/// when `depth` is odd.
+/// A type of each kind that syn recurses on, or nests a chain of, `depth`
+/// levels deep as the bound counts them.
 fn shapes(depth: usize) -> Vec<(&'static str, String)> {
-    let pairs = |open: &str, close: &str| {
-        let steps = depth / 2;
-        format!(
-            "{}{}Prompt{}",
-            "&".repeat(depth % 2),
-            open.repeat(steps),
-            close.repeat(steps)
-        )
-    };
     let nested =
         |open: &str, close: &str| format!("{}Prompt{}", open.repeat(depth), close.repeat(depth));
-    // The array's brackets are the first level of the last four.
+    // The array's brackets are the first level of the rest.
     let length = |prefix: &str, value: &str, suffix: &str| {
         let steps = depth - 1;
         format!(
@@ -37,14 +27,77 @@ fn shapes(depth: usize) -> Vec<(&'static str, String)> {
         ("tuples", nested("(", ",)")),
         ("slices", nested("[", "]")),
         ("references", nested("&", "")),
-        ("pointers", pairs("*const ", "")),
-        ("trait objects", pairs("dyn A<", ">")),
-        ("fn arguments", pairs("fn(", ")")),
-        ("fn returns", pairs("fn() -> ", "")),
+        ("pointers", nested("*const ", "")),
+        ("trait objects", nested("dyn A<", ">")),
+        ("fn arguments", nested("fn(", ")")),
+        ("fn returns", nested("fn() -> ", "")),
         ("turbofish", length("f::<", "x", ">") + "()"),
         ("negation", length("-", "1", "")),
         ("return", length("return ", "1", "")),
         ("blocks", length("{", "1", "}")),
+        // A closure's `|` is a level, and the `|` that ends its
+        // parameters a step.
+        (
+            "closures",
+            format!("[Prompt; {}1]", "|a, b| ".repeat((depth - 1) * 8 / 9)),
+        ),
+        // The innermost `if`'s block is a level deeper than its `if`.
+        (
+            "conditions",
+            format!(
+                "[Prompt; {}a{}]",
+                "if ".repeat(depth - 2),
+                " {}".repeat(depth - 2)
+            ),
+        ),
+        // syn recurses on an assignment's right side, a prefix's operand,
+        // and a range's end: a level each.
+        ("assignments", length("a = ", "1", "")),
+        ("compound assignments", length("a += ", "1", "")),
+        ("ranges", length(".. ", "1", "")),
+        ("negations", length("!", "a", "")),
+        ("dereferences", length("*", "a", "")),
+        ("borrows", length("&", "a", "")),
+        ("mutable borrows", length("&mut ", "a", "")),
+        // A `let` in a condition is a level for its `=`, and its `&&` a
+        // step; the block is a level deeper than the last `let`.
+        (
+            "let chains",
+            format!(
+                "[Prompt; if {}{{}}]",
+                vec!["let a = 1"; (8 * depth - 23) / 9].join(" && ") + " "
+            ),
+        ),
+        // A chain's step is an eighth of a level, inside the array's.
+        (
+            "casts",
+            format!("[Prompt; a{}]", " as u8".repeat((depth - 1) * 8)),
+        ),
+        (
+            "try operators",
+            format!("[Prompt; a{}]", "?".repeat((depth - 1) * 8)),
+        ),
+        (
+            "binary operators",
+            format!("[Prompt; a{}]", " + a".repeat((depth - 1) * 8)),
+        ),
+        (
+            "method calls",
+            format!("[Prompt; a{}]", ".f".repeat((depth - 1) * 8)),
+        ),
+        // A call's own brackets are a level deeper than its steps.
+        (
+            "calls",
+            format!("[Prompt; f{}]", "()".repeat((depth - 2) * 8)),
+        ),
+        // An `if` is a level, and its blocks one more.
+        (
+            "else-if chains",
+            format!(
+                "[Prompt; if a {{ 1 }} {}else {{ 0 }}]",
+                "else if a { 1 } ".repeat((depth - 3) * 8)
+            ),
+        ),
     ]
 }
 

@@ -31,6 +31,7 @@
 //! `HashMap`, and `BTreeMap`, and no other.
 
 mod attrs;
+mod bounded;
 mod canon;
 mod catalog;
 mod cfg;
@@ -49,6 +50,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+pub use bounded::READ_DEPTH;
 pub use catalog::{Catalog, Entry, rfc3339};
 #[cfg(feature = "count-reads")]
 pub use reads::lookup_reads;
