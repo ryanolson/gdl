@@ -12,6 +12,11 @@ use std::sync::{Arc, OnceLock};
 
 use crate::policy::{Cell, Damped};
 
+mod index;
+
+pub(crate) use index::NO_MODELS;
+pub use index::{ModelIndex, ModelSet};
+
 tokio::task_local! {
     /// The handle of the segment whose nodes are being built.
     static BUILDING: FollowedCells;
@@ -77,6 +82,30 @@ impl FollowedCells {
         G: Into<String>,
         M: Into<String>,
     {
+        Self::fixed_with_models(
+            cells,
+            withdrawn,
+            gone,
+            std::iter::empty::<(String, ModelIndex)>(),
+        )
+    }
+
+    /// [`FollowedCells::fixed_with_gone`], with each class's model index
+    /// ([`ClassCells::models`]) from `models`. A class given no index has
+    /// [`ModelIndex::NONE`]: no model, not synced.
+    pub fn fixed_with_models<C, N, G, M, K>(
+        cells: impl IntoIterator<Item = Cell>,
+        withdrawn: impl IntoIterator<Item = (C, N)>,
+        gone: impl IntoIterator<Item = (G, M)>,
+        models: impl IntoIterator<Item = (K, ModelIndex)>,
+    ) -> Self
+    where
+        C: Into<String>,
+        N: Into<String>,
+        G: Into<String>,
+        M: Into<String>,
+        K: Into<String>,
+    {
         let mut classes: BTreeMap<String, (Vec<Cell>, Vec<Box<str>>)> = BTreeMap::new();
         for cell in cells {
             classes
@@ -97,6 +126,13 @@ impl FollowedCells {
             .into_iter()
             .map(|(class, name)| (class.into(), name.into()))
             .collect();
+        let mut models: BTreeMap<String, ModelIndex> = models
+            .into_iter()
+            .map(|(class, index)| (class.into(), index))
+            .collect();
+        for class in models.keys() {
+            classes.entry(class.clone()).or_default();
+        }
         let fixed = Fixed(
             classes
                 .into_iter()
@@ -108,7 +144,8 @@ impl FollowedCells {
                         .iter()
                         .filter(|cell| gone.iter().any(|(c, n)| *c == class && n == cell.name()))
                         .fold(Damped::EMPTY, |damped, cell| damped.with_gone(cell));
-                    (class, (cells.into(), withdrawn.into(), damped))
+                    let index = models.remove(&class).unwrap_or_default();
+                    (class, (cells.into(), withdrawn.into(), damped, index))
                 })
                 .collect(),
         );
@@ -205,6 +242,7 @@ pub struct ClassCells<'a> {
     cells: &'a [Cell],
     withdrawn: &'a [Box<str>],
     damped: &'a Damped,
+    models: &'a ModelIndex,
 }
 
 /// What a view holds gone when its source says nothing of it.
@@ -219,6 +257,7 @@ impl<'a> ClassCells<'a> {
             cells,
             withdrawn,
             damped: &NONE_GONE,
+            models: &NO_MODELS,
         }
     }
 
@@ -227,6 +266,40 @@ impl<'a> ClassCells<'a> {
     #[doc(hidden)]
     pub fn with_damped(self, damped: &'a Damped) -> Self {
         Self { damped, ..self }
+    }
+
+    /// The view with the class's model index, from the same table as its
+    /// cells.
+    #[doc(hidden)]
+    pub fn with_models(self, models: &'a ModelIndex) -> Self {
+        Self { models, ..self }
+    }
+
+    /// The class's model index: for each model, every cell of the class
+    /// whose record lists it, followed or not, from the same table as
+    /// [`ClassCells::cells`]. A model gate reads it to tell a model no cell
+    /// lists (404) from one whose cells cannot take work now (503):
+    ///
+    /// ```
+    /// # use gdl::{CellCondition, ClassCells, ModelState};
+    /// fn answer(cells: ClassCells<'_>, model: &str) -> u16 {
+    ///     let index = cells.models();
+    ///     let Some(sets) = index.sets(model, None) else {
+    ///         // Not listed: unknown once the directory was read.
+    ///         return if index.is_synced() { 404 } else { 503 };
+    ///     };
+    ///     let routed = sets.iter().any(|set| {
+    ///         set.state() == ModelState::Ready
+    ///             && set.is_offered()
+    ///             && cells.cell(set.cell()).is_some_and(gdl::Cell::takes_work)
+    ///     });
+    ///     if routed { 200 } else { 503 }
+    /// }
+    /// # let _ = (answer, CellCondition::Live);
+    /// ```
+    #[inline]
+    pub fn models(&self) -> &'a ModelIndex {
+        self.models
     }
 
     /// The followed cells, by name: what the class's cell policy chooses
@@ -273,16 +346,20 @@ impl<'a> ClassCells<'a> {
     }
 }
 
-/// Fixed tables: per class, its cells by name, its withdrawn cells, and
-/// its gone cells.
-type Tables = BTreeMap<String, (Box<[Cell]>, Box<[Box<str>]>, Damped)>;
+/// Fixed tables: per class, its cells by name, its withdrawn cells, its
+/// gone cells, and its model index.
+type Tables = BTreeMap<String, (Box<[Cell]>, Box<[Box<str>]>, Damped, ModelIndex)>;
 
 struct Fixed(Tables);
 
 impl CellSource for Fixed {
     fn read(&self, class: &str, _entry: Option<&str>, read: &mut dyn FnMut(ClassCells<'_>)) {
-        if let Some((cells, withdrawn, damped)) = self.0.get(class) {
-            read(ClassCells::new(cells, withdrawn).with_damped(damped));
+        if let Some((cells, withdrawn, damped, models)) = self.0.get(class) {
+            read(
+                ClassCells::new(cells, withdrawn)
+                    .with_damped(damped)
+                    .with_models(models),
+            );
         }
     }
 }
@@ -347,6 +424,62 @@ mod tests {
             followed.read("model_x", |cells| cells.is_gone("m1")),
             Some(false),
             "fixed tables hold no cell gone"
+        );
+    }
+
+    /// Fixed tables give each class the model index they were given, from
+    /// the same read as its cells; a class given none reads `NONE`, and a
+    /// class given only an index is read as followed with no cell.
+    #[test]
+    fn fixed_tables_read_each_classs_model_index() {
+        use gdl_cells::{CellCondition, ModelState};
+        let index = ModelIndex::new(
+            true,
+            [(
+                gdl_model::ModelKey::new("qwen"),
+                ModelSet::new("m2", "eu-west", ModelState::Ready, CellCondition::Missing),
+            )],
+        );
+        let followed = FollowedCells::fixed_with_models(
+            [
+                Cell::new("model_x", "m1", "r", CellState::Ready).with_entries(1),
+                Cell::new("model_y", "y1", "r", CellState::Ready),
+            ],
+            std::iter::empty::<(String, String)>(),
+            std::iter::empty::<(String, String)>(),
+            [
+                ("model_x", index.clone()),
+                ("model_z", ModelIndex::new(true, [])),
+            ],
+        );
+        let x = followed
+            .read("model_x", |cells| {
+                let sets = cells.models().sets("qwen", None).expect("listed");
+                (
+                    cells.cells().len(),
+                    sets[0].cell().to_string(),
+                    sets[0].condition(),
+                    cells.cell(sets[0].cell()).is_some(),
+                )
+            })
+            .expect("model_x");
+        assert_eq!(x, (1, "m2".to_string(), CellCondition::Missing, false));
+        assert_eq!(
+            followed.read("model_y", |cells| cells.models().is_synced()),
+            Some(false),
+            "no index given"
+        );
+        assert_eq!(
+            followed.read("model_z", |cells| (
+                cells.cells().len(),
+                cells.models().is_synced()
+            )),
+            Some((0, true))
+        );
+        assert_eq!(
+            FollowedCells::fixed(std::iter::empty::<Cell>(), [("model_x", "m3")])
+                .read("model_x", |cells| *cells.models() == ModelIndex::NONE),
+            Some(true)
         );
     }
 

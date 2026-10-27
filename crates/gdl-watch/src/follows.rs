@@ -1,6 +1,6 @@
 //! The relay of what a cell's hub follows, as typed events.
 
-use gdl_cells::{CellState, LoadSummary};
+use gdl_cells::{CellCondition, CellState, LoadSummary};
 use serde::{Deserialize, Serialize};
 use velo::{InstanceId, PeerInfo};
 
@@ -104,10 +104,27 @@ pub enum FollowEvent {
         /// the event arrives.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         load_age_ms: Option<u64>,
+        /// What the hub knows of the cell's record, in a snapshot, as a
+        /// [`FollowEvent::Listed`] would say it: a field of a known event,
+        /// so that a reader of an earlier build reads the follow as it did.
+        /// `None` after the snapshot, where a `listed` event says it, and
+        /// from a hub of an earlier build.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listing: Option<Listing>,
     },
     /// The snapshot is complete: the events before this one are every
-    /// follow as the watch began.
-    Synced,
+    /// follow as the watch began, and every cell the hub lists.
+    Synced {
+        /// Whether the hub's watch of the cell directory had completed its
+        /// first snapshot of every class it sends to when this watch
+        /// began: until then, a model the listings do not name may still
+        /// be listed by a record the hub has not read. A hub ends each
+        /// watch whose snapshot said `false` once it has, so that a reader
+        /// learns it from the next watch's snapshot. `false` from a hub of
+        /// an earlier build, which lists nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        listed: bool,
+    },
     /// A followed cell's state changed.
     State {
         /// The cell's class.
@@ -206,6 +223,33 @@ pub enum FollowEvent {
         /// The follow's generation.
         generation: u64,
     },
+    /// What the hub knows of a cell's record changed: its region, its
+    /// condition, and its models, for its choosers' model index. The hub
+    /// lists every cell of a class it sends to whose record it has read
+    /// and whose hashes are its own, followed or not, until the cell
+    /// withdraws its record; `listing` is `None` once it has. A snapshot
+    /// sends one for each listed cell that has no follow in it, before
+    /// the marker, and gives a followed cell's on its
+    /// [`FollowEvent::Follow`]. A watch of one follow
+    /// (`GET /v1/ext/gdl-cell/follows/{class}/{cell}`) never sends one,
+    /// so that a reader of an earlier build, which fails closed for the
+    /// cell at this kind and reads it again from that watch, reads it
+    /// whole.
+    ///
+    /// `generation` names the cell's latest follow, or 0 for a cell the
+    /// hub never followed: it orders nothing, and is there for a reader
+    /// that does not know this kind.
+    Listed {
+        /// The cell's class.
+        class: String,
+        /// The cell, named within its class.
+        cell: String,
+        /// The generation of the cell's latest follow, or 0.
+        generation: u64,
+        /// What the hub knows, or `None` once the cell withdrew.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listing: Option<Listing>,
+    },
     /// The cell withdrew its record from the cell directory after its
     /// drain: it was drained on purpose. It may come after the follow's
     /// [`FollowEvent::Dropped`]. A later follow of the cell, which a hub
@@ -233,8 +277,23 @@ impl FollowEvent {
             | Self::Left { class, cell, .. }
             | Self::Offering { class, cell, .. }
             | Self::Dropped { class, cell, .. }
-            | Self::Withdrawn { class, cell, .. } => Some((class, cell)),
-            Self::Synced => None,
+            | Self::Withdrawn { class, cell, .. }
+            | Self::Listed { class, cell, .. } => Some((class, cell)),
+            Self::Synced { .. } => None,
         }
     }
+}
+
+/// What a hub knows of one cell's record, for its choosers' model index:
+/// the cell's region and condition, and its models, from the record or
+/// the follow link, whichever has the higher version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listing {
+    /// The region the cell runs in, from its record.
+    pub region: String,
+    /// Whether the cell is live, scaled to 0, or missing.
+    pub condition: CellCondition,
+    /// The cell's model entries, with their version.
+    #[serde(default)]
+    pub models: crate::ModelList,
 }

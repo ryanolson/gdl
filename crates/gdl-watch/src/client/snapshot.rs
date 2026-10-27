@@ -32,6 +32,7 @@ fn sent(event: &CellWatchEvent) -> Vec<u8> {
 
 fn cell() -> CellWatchEvent {
     CellWatchEvent::Cell {
+        models: None,
         name: "m".into(),
         class: "model_x".into(),
         epoch: 1,

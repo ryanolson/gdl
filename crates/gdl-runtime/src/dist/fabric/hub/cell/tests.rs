@@ -18,6 +18,7 @@ const WITHIN: Duration = Duration::from_millis(300);
 
 fn cell(state: CellState) -> CellWatchEvent {
     CellWatchEvent::Cell {
+        models: None,
         name: "m".into(),
         class: "model_x".into(),
         epoch: 1,

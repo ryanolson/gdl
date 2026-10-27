@@ -86,7 +86,10 @@ fn own_snapshot(
     events: Vec<FollowEvent>,
     now: Instant,
 ) {
-    for event in events.into_iter().chain([FollowEvent::Synced]) {
+    for event in events
+        .into_iter()
+        .chain([FollowEvent::Synced { listed: false }])
+    {
         follows.own(key(cell), watch, Ok(Watched::Event(event)), now);
     }
 }
@@ -224,7 +227,12 @@ fn an_unknown_event_of_the_cells_own_watch_leaves_it_unread() {
     // once, unread, never first as read.
     let changes = cells.changes();
     let before = *changes.borrow();
-    follows.own(key(M1), 1, Ok(Watched::Event(FollowEvent::Synced)), now);
+    follows.own(
+        key(M1),
+        1,
+        Ok(Watched::Event(FollowEvent::Synced { listed: false })),
+        now,
+    );
     assert_eq!(*changes.borrow() - before, 1, "published once");
     let m1 = table(&cells, M1).expect("followed");
     assert!(m1.unread && m1.eligible.is_empty(), "{m1:?}");
@@ -368,7 +376,7 @@ async fn the_follower_reads_an_unread_cell_from_its_own_watch() {
     let mut watch: Vec<_> = ready(M1, 1, &[&x])
         .into_iter()
         .chain(ready(M2, 1, &[&y]))
-        .chain([FollowEvent::Synced])
+        .chain([FollowEvent::Synced { listed: false }])
         .map(Watched::Event)
         .collect();
     watch.push(Watched::Unknown(unknown(M1, 1)));
@@ -383,7 +391,7 @@ async fn the_follower_reads_an_unread_cell_from_its_own_watch() {
         Watched::Event(follow(M1, 1, CellState::Degraded)),
         Watched::Event(loaded(M1, 1)),
         Watched::Event(exposed(M1, 1, &z)),
-        Watched::Event(FollowEvent::Synced),
+        Watched::Event(FollowEvent::Synced { listed: false }),
         Watched::Event(retired(M1, 1, &z)),
         Watched::Event(exposed(M1, 1, &x)),
     ]]);

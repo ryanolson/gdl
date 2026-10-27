@@ -50,7 +50,7 @@ pub use command::{
     CHILD_SCALE_TO_ZERO_ROUTE, CHILD_WITHDRAW_ROUTE, LIFT_ROUTE, REVOKE_ROUTE,
     child_scale_to_zero_path, child_withdraw_path,
 };
-pub use follows::FollowEvent;
+pub use follows::{FollowEvent, Listing};
 pub use keyed::{
     Expected, KEYED_EXTENSION, KEYED_ROUTE, KeyedAnswer, KeyedAsk, KeyedOp, KeyedRecord,
     KeyedReply, keyed_path,
@@ -301,6 +301,23 @@ pub struct LoadReport {
     pub models: Option<Vec<gdl_model::InstanceModel>>,
 }
 
+/// A cell's model entries, in the order of their keys, and the version of
+/// the list ([`gdl_cells::CellRecord::models_version`]): a reader that
+/// has the list from more than one path keeps the higher version.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ModelList {
+    /// The entries.
+    #[serde(default)]
+    pub entries: Vec<gdl_cells::ModelEntry>,
+    /// The list's version.
+    #[serde(default)]
+    pub version: u64,
+    /// The models an operator revoked on the cell: none of them is in
+    /// `entries` ([`gdl_cells::CellRecord::revoked`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<gdl_model::ModelKey>,
+}
+
 /// One event of a cell's watch, `GET /v1/ext/gdl-cell/watch` on the cell
 /// hub's public listener: each server-sent event's data is one of these,
 /// as JSON tagged by `event`.
@@ -352,6 +369,22 @@ pub enum CellWatchEvent {
         /// record: `None` while no usable entry instance has a report the
         /// hub counts, and always for a class that no hop enters.
         load: Option<LoadSummary>,
+        /// The cell's model entries and their version, as in its record.
+        /// A field of a known event, so that a follower of an earlier
+        /// build ignores it and reads the cell as it did: a kind of its
+        /// own in every snapshot would withhold the cell from it on every
+        /// watch. `None` from a hub of an earlier build.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        models: Option<ModelList>,
+    },
+    /// The cell's model entries changed: the whole list, at its new
+    /// version, as the cell's record will carry it. A follower of an
+    /// earlier build does not know this kind, and fails closed for the
+    /// cell until it has read it again, from a snapshot, which carries the
+    /// list as a field of [`CellWatchEvent::Cell`] instead.
+    Models {
+        /// The list.
+        models: ModelList,
     },
     /// The snapshot is complete: the events before this one are the cell
     /// as the watch began.

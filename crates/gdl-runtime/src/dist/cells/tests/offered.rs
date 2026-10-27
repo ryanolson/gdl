@@ -220,6 +220,7 @@ fn an_event_passes_over_no_follow_to_acknowledge() {
             now,
             [
                 FollowEvent::Follow {
+                    listing: None,
                     class: "model_x".into(),
                     cell: cell.clone(),
                     generation: 1,

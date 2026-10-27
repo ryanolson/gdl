@@ -16,7 +16,7 @@ NOTE: gdl is experimental. Its design and tests are still in progress, and its A
 - **Live rosters.** Instances join, retire, and drain while the others serve. See [Segment lifecycle](docs/src/concepts/lifecycle.md).
 - **Selectors and offers.** Route a crossing by round robin, random, or a selector you write, and fail over when an instance declines. See [Routing, selectors, and offers](docs/src/concepts/routing.md).
 - **Dynamo-shaped health and metrics.** A segment binary and the hub binary also write their logs to stderr, at the level `RUST_LOG` sets. See [Health and metrics](docs/src/operations/observability.md).
-- **Cells.** One graph across several deployments, each with its own hub. A cell policy chooses the cell for each request: gdl's, or one from your crate that the spec binds or your code registers. A node beside the chooser can read the same cells, and which were drained on purpose. See [Classes and cells](docs/src/concepts/cells.md), [Write a cell policy](docs/src/guides/write-a-cell-policy.md), and [What a node reads](docs/src/concepts/cell-routing.md#what-a-node-reads).
+- **Cells.** One graph across several deployments, each with its own hub. A cell policy chooses the cell for each request: gdl's, or one from your crate that the spec binds or your code registers. A node beside the chooser can read the same cells, which were drained on purpose, and which cells list each model. See [Classes and cells](docs/src/concepts/cells.md), [Write a cell policy](docs/src/guides/write-a-cell-policy.md), [What a node reads](docs/src/concepts/cell-routing.md#what-a-node-reads), and [The model index](docs/src/concepts/cell-routing.md#the-model-index).
 - **Docker Compose bundles.** `cargo gdl compose` writes a hub and a service per segment, and mounts the file secrets a spec names without reading them. See [Deploy with Docker Compose](docs/src/guides/compose-deploy.md).
 - **A composer.** Draw a graph in a browser, place it, and deploy it with Compose. See [Compose in the browser](docs/src/guides/composer.md).
 
@@ -26,7 +26,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 
 | Crate | For | Contents |
 |---|---|---|
-| `gdl` | Authors of nodes and routers | The request context, role traits, local composition, selectors, cell policies, the followed cells' view, the cell hub's record tables, metrics, and the derives. No velo |
+| `gdl` | Authors of nodes and routers | The request context, role traits, local composition, selectors, cell policies, the followed cells' view and model index, the cell hub's record tables, metrics, and the derives. No velo |
 | `gdl-runtime` | Programs that run a graph | Segments, crossings over velo, discovery, the segment binary, and `graph!`. Re-exports `gdl` and the model |
 | `gdl-model` | Tools | The manifest, placement, layout, diagrams, and the fleet file, without the runtime. Builds for wasm |
 | `gdl-syntax` | The macro and the generator | The graph parser and checked model |

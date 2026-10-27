@@ -24,10 +24,15 @@ use gdl_watch::{FollowEvent, Unoffered};
 use velo_hub::Hub;
 
 async fn next(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> FollowEvent {
-    tokio::time::timeout(WAIT, watch.next())
-        .await
-        .expect("an event in time")
-        .expect("the watch goes on")
+    loop {
+        let event = tokio::time::timeout(WAIT, watch.next())
+            .await
+            .expect("an event in time")
+            .expect("the watch goes on");
+        if let Some(event) = common::plain_follow(event) {
+            return event;
+        }
+    }
 }
 
 /// The events the watch has now. The hub applies an acknowledgement and
@@ -378,8 +383,11 @@ async fn a_lost_link_is_not_offered_at_once_and_closes_once_acknowledged() {
     assert_eq!(next(&mut watch).await, dropped(generation));
     // A watch begun now holds nothing of the lost follow.
     let mut again = global_hub_relay(&global_hub);
-    let snapshot = through(&mut again, |event| *event == FollowEvent::Synced).await;
-    assert_eq!(snapshot, [FollowEvent::Synced]);
+    let snapshot = through(&mut again, |event| {
+        matches!(event, FollowEvent::Synced { .. })
+    })
+    .await;
+    assert_eq!(snapshot, [FollowEvent::Synced { listed: false }]);
     global_hub.shutdown().await.expect("the hub stops");
 }
 
@@ -434,7 +442,10 @@ async fn a_cell_that_recovers_as_its_follow_closes_is_followed_again() {
         .get(&key)
         .expect("followed");
     let mut watch = global_cell.follows();
-    through(&mut watch, |event| *event == FollowEvent::Synced).await;
+    through(&mut watch, |event| {
+        matches!(event, FollowEvent::Synced { .. })
+    })
+    .await;
 
     for instance in &mut instances[1..] {
         instance.withdraw(SegmentPhase::Ready).await;

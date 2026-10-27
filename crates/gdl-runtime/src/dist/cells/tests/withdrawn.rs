@@ -220,7 +220,7 @@ fn a_new_follow_in_a_cells_own_snapshot_clears_its_withdrawal() {
     let asked = follows.asked().pop().expect("a watch of its own");
     for event in [
         follow(M1, 1, CellState::Draining),
-        FollowEvent::Synced,
+        FollowEvent::Synced { listed: false },
         dropped(M1, 1),
         withdrawn(M1, 1),
     ] {
@@ -243,7 +243,7 @@ fn a_new_follow_in_a_cells_own_snapshot_clears_its_withdrawal() {
     for event in [
         follow(M1, 2, CellState::Ready),
         super::exposed(M1, 2, &entry),
-        FollowEvent::Synced,
+        FollowEvent::Synced { listed: false },
     ] {
         follows.own(
             asked.key.clone(),
@@ -417,7 +417,9 @@ fn a_withdrawal_during_the_switch_to_a_cells_own_watch_is_kept() {
     follows.own(
         asked.key,
         asked.watch,
-        Ok(gdl_watch::Watched::Event(FollowEvent::Synced)),
+        Ok(gdl_watch::Watched::Event(FollowEvent::Synced {
+            listed: false,
+        })),
         now,
     );
     assert_eq!(read(&node, M1).0, None, "the recovery snapshot is empty");
@@ -448,7 +450,7 @@ fn an_empty_own_snapshot_does_not_revive_a_stale_withdrawal() {
     // the previous cell's withdrawal. The restarted cell then loses its link.
     for event in [
         follow(M1, 2, CellState::Ready),
-        FollowEvent::Synced,
+        FollowEvent::Synced { listed: false },
         unoffered(M1, 2, 2),
         dropped(M1, 2),
     ] {
@@ -470,7 +472,9 @@ fn an_empty_own_snapshot_does_not_revive_a_stale_withdrawal() {
     follows.own(
         asked.key,
         asked.watch,
-        Ok(gdl_watch::Watched::Event(FollowEvent::Synced)),
+        Ok(gdl_watch::Watched::Event(FollowEvent::Synced {
+            listed: false,
+        })),
         now,
     );
     assert_eq!(read(&node, M1), (None, false), "the snapshot is empty");

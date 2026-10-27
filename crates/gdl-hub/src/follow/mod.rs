@@ -22,7 +22,7 @@
 //! directory may still show the cell taking work when its link said it
 //! does not, and following it again would only close again.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -95,6 +95,8 @@ impl<D: CellDirectory> Follower<D> {
             current: HashMap::new(),
             closed: HashMap::new(),
             links: JoinSet::new(),
+            lapses: BTreeSet::new(),
+            leases: HashMap::new(),
             follower: &self,
         };
         let mut backoff = Backoff::new(REWATCH, REWATCH_CAP);
@@ -102,13 +104,18 @@ impl<D: CellDirectory> Follower<D> {
             let mut watch = std::pin::pin!(self.directory.watch(&self.class, None));
             let mut synced = None;
             let end = loop {
+                let lapse = follows.next_lapse();
                 tokio::select! {
                     event = watch.next() => match event {
                         Some(Ok(event)) => {
-                            if matches!(event, CellEvent::Synced { .. }) {
+                            let snapshot = matches!(event, CellEvent::Synced { .. });
+                            if snapshot {
                                 synced.get_or_insert_with(tokio::time::Instant::now);
                             }
                             follows.directory(event);
+                            if snapshot {
+                                self.relay.synced(&self.class);
+                            }
                         }
                         Some(Err(error)) => {
                             tracing::warn!(class = self.class, %error, "the cell directory's watch failed");
@@ -117,6 +124,7 @@ impl<D: CellDirectory> Follower<D> {
                         None => break WatchEnd::Closed,
                     },
                     Some(ended) = follows.links.join_next() => follows.ended(ended),
+                    () = until(lapse) => follows.lapse(Instant::now()),
                 }
             };
             // A watch that failed or ended may have been part way through
@@ -127,9 +135,11 @@ impl<D: CellDirectory> Follower<D> {
             let pause = tokio::time::sleep(backoff.wait(synced, end, tokio::time::Instant::now()));
             tokio::pin!(pause);
             loop {
+                let lapse = follows.next_lapse();
                 tokio::select! {
                     () = &mut pause => break,
                     Some(ended) = follows.links.join_next() => follows.ended(ended),
+                    () = until(lapse) => follows.lapse(Instant::now()),
                 }
             }
         }
@@ -149,6 +159,14 @@ impl<D: CellDirectory> Follower<D> {
     }
 }
 
+/// Wait until `at`; for ever without one.
+async fn until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The follower's state, owned by its task.
 struct Follows<'a, D> {
     /// The class's records, as the directory shows them.
@@ -163,6 +181,12 @@ struct Follows<'a, D> {
     /// the relay closed it, and the backoff of the cell's links, once it
     /// has ended and waited to follow again. Dropping the set ends them.
     links: JoinSet<(String, u64, bool, Backoff)>,
+    /// When each listed `serving` record's lease passes, in order, and
+    /// by cell: the relay lists the cell missing from then until a newer
+    /// write. A lease passes with no event, so the follower keeps the one
+    /// timer, for the earliest.
+    lapses: BTreeSet<(Instant, String)>,
+    leases: HashMap<String, Instant>,
     follower: &'a Follower<D>,
 }
 
@@ -200,14 +224,66 @@ impl<D: CellDirectory> Follows<'_, D> {
         let now = Instant::now();
         self.view.apply(event, now);
         if let Some(cell) = cell {
+            self.list(&cell, now);
             self.decide(&cell, now, None);
         }
         if let Some(withdrawal) = withdrawal
             && self.view.withdrawn(&withdrawal.cell) == Some(withdrawal.version())
         {
+            self.unlease(&withdrawal.cell);
             self.follower
                 .relay
                 .withdrawn(&self.follower.class, &withdrawal.cell);
+        }
+    }
+
+    /// List `cell` from the record the view holds of it, if any, whatever
+    /// its parent, region, or state: what its choosers' model index
+    /// knows. A record of another deployment is not listed. One the view
+    /// no longer holds, after a snapshot that dropped it, stays listed as
+    /// it was: silence never removes a cell, and only a withdrawal does.
+    fn list(&mut self, cell: &str, now: Instant) {
+        let Some((record, changed)) = self.view.seen(cell) else {
+            return;
+        };
+        let relay = &self.follower.relay;
+        if record.contract != self.follower.contract || record.placement != self.follower.placement
+        {
+            self.unlease(cell);
+            relay.unlist(&self.follower.class, cell);
+            return;
+        }
+        let lapses = record
+            .leased()
+            .then(|| changed + record.lease)
+            .filter(|&at| at >= now);
+        relay.record(record, record.leased() && lapses.is_none());
+        self.unlease(cell);
+        if let Some(at) = lapses {
+            self.lapses.insert((at, cell.to_string()));
+            self.leases.insert(cell.to_string(), at);
+        }
+    }
+
+    fn unlease(&mut self, cell: &str) {
+        if let Some(at) = self.leases.remove(cell) {
+            self.lapses.remove(&(at, cell.to_string()));
+        }
+    }
+
+    /// When the next listed lease passes, if one is held.
+    fn next_lapse(&self) -> Option<Instant> {
+        self.lapses.first().map(|(at, _)| *at)
+    }
+
+    /// The leases that passed by `now`: their cells are listed missing.
+    fn lapse(&mut self, now: Instant) {
+        while let Some((at, _)) = self.lapses.first()
+            && *at <= now
+        {
+            let (_, cell) = self.lapses.pop_first().expect("one was just found");
+            self.leases.remove(&cell);
+            self.follower.relay.lapsed(&self.follower.class, &cell);
         }
     }
 

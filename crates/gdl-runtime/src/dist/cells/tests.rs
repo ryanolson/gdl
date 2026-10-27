@@ -5,6 +5,7 @@ mod avoided;
 mod bounded;
 mod counted;
 mod declines;
+mod models;
 mod offered;
 mod reread;
 mod rewatch;
@@ -141,6 +142,7 @@ fn peer() -> PeerInfo {
 
 fn follow(cell: &str, generation: u64, state: CellState) -> FollowEvent {
     FollowEvent::Follow {
+        listing: None,
         class: "model_x".into(),
         cell: cell.into(),
         generation,
@@ -533,6 +535,7 @@ fn only_the_entry_segments_sent_to_are_kept() {
                 peer: x.clone(),
             },
             FollowEvent::Follow {
+                listing: None,
                 class: "model_y".into(),
                 cell: M2.into(),
                 generation: 1,
@@ -651,7 +654,7 @@ async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
         vec![
             follow(M1, 1, CellState::Ready),
             exposed(M1, 1, &x),
-            FollowEvent::Synced,
+            FollowEvent::Synced { listed: false },
             follow(M2, 1, CellState::Ready),
         ],
         // A new relay process, cut before its snapshot is complete.
@@ -659,7 +662,7 @@ async fn a_watch_cut_short_in_its_snapshot_changes_nothing() {
         vec![
             follow(M1, 4, CellState::Ready),
             exposed(M1, 4, &y),
-            FollowEvent::Synced,
+            FollowEvent::Synced { listed: false },
         ],
     ]);
     let (opened, mut watching) = tokio::sync::watch::channel(0);
@@ -746,7 +749,7 @@ async fn a_stalled_watch_holds_no_unregistration() {
     let watches = VecDeque::from([vec![
         follow(M1, 1, CellState::Ready),
         exposed(M1, 1, &x),
-        FollowEvent::Synced,
+        FollowEvent::Synced { listed: false },
         left(M1, 1, &x),
     ]]);
     let (opened, mut watching) = tokio::sync::watch::channel(0);
@@ -860,6 +863,7 @@ fn a_cells_summary_is_fresh_for_the_periods_the_chooser_is_given() {
         table.cells[at].load.and_then(|load| load.fresh_until())
     };
     let first = FollowEvent::Follow {
+        listing: None,
         class: "model_x".into(),
         cell: M1.into(),
         generation: 1,
@@ -877,6 +881,7 @@ fn a_cells_summary_is_fresh_for_the_periods_the_chooser_is_given() {
     // from when it was made.
     let held = Duration::from_millis(400);
     let replayed = FollowEvent::Follow {
+        listing: None,
         class: "model_x".into(),
         cell: M1.into(),
         generation: 1,
@@ -908,6 +913,7 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
     let start = Instant::now();
     let second = Duration::from_secs(1);
     let first = FollowEvent::Follow {
+        listing: None,
         class: "model_x".into(),
         cell: M1.into(),
         generation: 1,
@@ -959,6 +965,7 @@ async fn a_cells_load_is_kept_with_the_time_it_arrived() {
     let mut snapshot = follows.snapshot();
     snapshot.apply(
         FollowEvent::Follow {
+            listing: None,
             class: "model_x".into(),
             cell: M1.into(),
             generation: 1,
@@ -988,6 +995,7 @@ async fn a_relayed_summary_is_dated_back_by_its_age() {
     let (mut follows, cells, _, _) = follower();
     let second = Duration::from_secs(1);
     let aged = |age: Option<Duration>| FollowEvent::Follow {
+        listing: None,
         class: "model_x".into(),
         cell: M1.into(),
         generation: 1,

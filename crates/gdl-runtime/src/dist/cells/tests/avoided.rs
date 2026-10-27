@@ -146,7 +146,7 @@ fn a_cell_read_from_its_own_watch_acknowledges_its_retirements() {
     for event in [
         follow(M1, 1, CellState::Ready),
         retired(M1, 1, &x),
-        FollowEvent::Synced,
+        FollowEvent::Synced { listed: false },
     ] {
         follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
@@ -196,7 +196,7 @@ async fn a_retirement_is_acknowledged_without_a_pass_over_the_follows() {
         events.extend([
             follow(M1, 1, CellState::Ready),
             exposed(M1, 1, &x),
-            FollowEvent::Synced,
+            FollowEvent::Synced { listed: false },
             retired(M1, 1, &x),
         ]);
         let watches = VecDeque::from([events.into_iter().map(Watched::Event).collect()]);

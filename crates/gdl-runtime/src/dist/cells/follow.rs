@@ -43,8 +43,9 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use gdl::Load;
+use gdl::ModelIndex;
 use gdl_cells::{CellState, LoadSummary};
-use gdl_watch::{FollowEvent, UnknownFollowEvent, Watched};
+use gdl_watch::{FollowEvent, Listing, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
 
@@ -134,7 +135,14 @@ pub(crate) struct Follows<R> {
     /// arrive late on another watch, also after a snapshot that no longer
     /// shows the cell.
     newest: BTreeMap<Key, u64>,
+    /// Each class's model index as last made, with what it was made from:
+    /// the count of the listings' changes, and each followed cell with
+    /// whether it is offered.
+    indexes: HashMap<String, IndexMade>,
 }
+
+/// A class's model index, and what it was made from.
+type IndexMade = ((u64, Vec<(String, bool)>), Arc<ModelIndex>);
 
 impl<R: Registry> Follows<R> {
     pub(crate) fn new(
@@ -168,6 +176,7 @@ impl<R: Registry> Follows<R> {
             watches: 0,
             withdrawn: BTreeMap::new(),
             newest: BTreeMap::new(),
+            indexes: HashMap::new(),
         }
     }
 
@@ -188,7 +197,10 @@ impl<R: Registry> Follows<R> {
     pub(super) fn take(&mut self, event: FollowEvent, now: Instant) {
         // Looked up only while a cell has a watch of its own, which is rare.
         if !self.own.is_empty()
-            && !matches!(event, FollowEvent::Withdrawn { .. })
+            && !matches!(
+                event,
+                FollowEvent::Withdrawn { .. } | FollowEvent::Listed { .. }
+            )
             && let Some((class, cell)) = event.cell()
             && self
                 .own
@@ -385,6 +397,7 @@ impl<R: Registry> Follows<R> {
         for id in released {
             self.schedule(id, now);
         }
+        followed.listings_changed += self.followed.listings_changed + 1;
         self.followed = followed;
         let shown: Vec<(Key, u64)> = self
             .followed
@@ -414,11 +427,18 @@ impl<R: Registry> Follows<R> {
             }
         }
         self.tables = tables;
-        for segment in self.wanted.values().flatten() {
+        let wanted = Arc::clone(&self.wanted);
+        for segment in wanted.values().flatten() {
             self.store(segment);
         }
         self.forget_gone(None);
-        for follow in follows().filter(|follow| !follow.offers()) {
+        for follow in self
+            .followed
+            .follows
+            .values()
+            .chain(self.followed.closing.values())
+            .filter(|follow| !follow.offers())
+        {
             follow.leases.unoffer();
             self.poll = Some(now);
         }
@@ -581,7 +601,8 @@ impl<R: Registry> Follows<R> {
                 }
             }
         }
-        for segment in segments {
+        let segments = segments.clone();
+        for segment in &segments {
             self.store(segment);
         }
         self.forget_gone(Some(key));
@@ -612,26 +633,52 @@ impl<R: Registry> Follows<R> {
     /// cell's view for the cell policy, which copies its names. The follow
     /// set bounds it (the children of the chooser's own cell); no other
     /// cell's instances are read or copied.
-    fn store(&self, segment: &str) {
+    fn store(&mut self, segment: &str) {
         let cells = self
             .tables
             .get(segment)
             .map(|cells| cells.values().cloned().collect())
             .unwrap_or_default();
-        let withdrawn = self
+        let class = self
             .wanted
             .iter()
             .find(|(_, segments)| segments.contains(segment))
-            .map(|(class, _)| {
-                self.withdrawn
-                    .keys()
-                    .filter(|(of, _)| of == class)
-                    .map(|(_, cell)| Box::from(cell.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.cells
-            .store(segment, EntryTable::new(cells).with_withdrawn(withdrawn));
+            .map(|(class, _)| class.clone());
+        let Some(class) = class else {
+            self.cells.store(segment, EntryTable::new(cells));
+            return;
+        };
+        let withdrawn = self
+            .withdrawn
+            .keys()
+            .filter(|(of, _)| *of == class)
+            .map(|(_, cell)| Box::from(cell.as_str()))
+            .collect();
+        let models = self.index(&class);
+        self.cells.store(
+            segment,
+            EntryTable::new(cells)
+                .with_withdrawn(withdrawn)
+                .with_models(models),
+        );
+    }
+
+    /// `class`'s model index: the one made last, unless what it is made
+    /// from changed since. A table is stored on every summary a cell
+    /// sends, and the index changes far less often.
+    fn index(&mut self, class: &str) -> Arc<ModelIndex> {
+        let offers = self.followed.offers(class);
+        let changed = self.followed.listings_changed;
+        if let Some((made, index)) = self.indexes.get(class)
+            && made.0 == changed
+            && made.1 == offers
+        {
+            return Arc::clone(index);
+        }
+        let index = Arc::new(self.followed.index(class));
+        self.indexes
+            .insert(class.to_string(), ((changed, offers), Arc::clone(&index)));
+        index
     }
 
     /// The follow `generation` of `key` is shown: a later one than its
@@ -683,6 +730,16 @@ struct Followed {
     fresh_periods: u32,
     /// Where each cell's offers are counted, if the chooser records them.
     meters: Option<CellMeters>,
+    /// What the hub lists of each cell of the classes sent to, followed or
+    /// not, for the model index: a snapshot holds every listed cell, so it
+    /// replaces them whole.
+    listings: BTreeMap<Key, Listing>,
+    /// Whether the snapshot said the hub's listings were whole.
+    listed: bool,
+    /// Raised on every change of `listings` or `listed`, and carried over
+    /// a snapshot, so that the follower makes a class's index again only
+    /// when it may have changed.
+    listings_changed: u64,
 }
 
 /// What one event changed in a cell's follow, beyond its table.
@@ -720,6 +777,9 @@ impl Followed {
             generations: HashMap::new(),
             fresh_periods,
             meters,
+            listings: BTreeMap::new(),
+            listed: false,
+            listings_changed: 0,
         }
     }
 
@@ -753,9 +813,13 @@ impl Followed {
                 state,
                 load,
                 load_age_ms,
+                listing,
             } => {
                 let segments = wanted.get(&class)?;
                 let key = (class, cell);
+                if let Some(listing) = listing {
+                    self.list(key.clone(), Some(listing));
+                }
                 if self
                     .generations
                     .get(&key)
@@ -930,9 +994,78 @@ impl Followed {
                 }
                 Some((key, Change::Withdrawn(generation)))
             }
-            // The snapshot's marker, which the task reads.
-            FollowEvent::Synced => None,
+            FollowEvent::Listed {
+                class,
+                cell,
+                listing,
+                ..
+            } => {
+                if !wanted.contains_key(&class) {
+                    return None;
+                }
+                let key = (class, cell);
+                self.list(key.clone(), listing);
+                Some((key, Change::Table))
+            }
+            // The snapshot's marker, which the task reads; it says whether
+            // the listings are whole.
+            FollowEvent::Synced { listed } => {
+                self.listed = listed;
+                self.listings_changed += 1;
+                None
+            }
         }
+    }
+
+    /// List `key`'s cell as `listing` says, or no longer.
+    fn list(&mut self, key: Key, listing: Option<Listing>) {
+        match listing {
+            Some(listing) => {
+                self.listings.insert(key, listing);
+            }
+            None => {
+                self.listings.remove(&key);
+            }
+        }
+        self.listings_changed += 1;
+    }
+
+    /// The model index of `class`'s cells as this view lists them, each
+    /// with whether this instance offers it work.
+    fn index(&self, class: &str) -> ModelIndex {
+        let sets = self
+            .listings
+            .iter()
+            .filter(|((of, _), _)| of == class)
+            .flat_map(|(key, listing)| {
+                let offered = self.follows.get(key).is_some_and(Follow::offers);
+                listing.models.entries.iter().map(move |entry| {
+                    (
+                        entry.key(),
+                        gdl::ModelSet::new(
+                            key.1.clone(),
+                            listing.region.clone(),
+                            entry.state,
+                            listing.condition,
+                        )
+                        .with_offered(offered),
+                    )
+                })
+            });
+        ModelIndex::new(self.listed, sets)
+    }
+
+    /// What `class`'s index is made from, beside the listings: each
+    /// followed cell, and whether this instance offers it work.
+    fn offers(&self, class: &str) -> Vec<(String, bool)> {
+        let mut offers: Vec<(String, bool)> = self
+            .follows
+            .iter()
+            .filter(|((of, _), _)| of == class)
+            .map(|((_, cell), follow)| (cell.clone(), follow.offers()))
+            .collect();
+        offers.sort_unstable();
+        offers
     }
 
     /// An event of a kind this build does not know names `key`'s follow of

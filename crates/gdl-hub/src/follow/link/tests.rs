@@ -127,6 +127,7 @@ async fn linked(
         .await
         .expect("the link reads");
     let cell = CellWatchEvent::Cell {
+        models: None,
         name: "m".into(),
         class: "model_x".into(),
         epoch: 1,

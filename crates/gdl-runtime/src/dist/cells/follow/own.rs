@@ -138,7 +138,7 @@ impl<R: Registry> Follows<R> {
                     }
                 }
             }
-            Ok(Watched::Event(FollowEvent::Synced)) => {
+            Ok(Watched::Event(FollowEvent::Synced { .. })) => {
                 let (filling, unknown) = (own.filling.take(), own.unknown);
                 match filling {
                     Some(filling) => {

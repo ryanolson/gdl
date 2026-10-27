@@ -606,3 +606,59 @@ impl<D: CellDirectory> CellDirectory for Named<D> {
 pub fn address(hub: &Hub) -> String {
     format!("127.0.0.1:{}", hub.public_addr().port())
 }
+
+/// `event` as a hub without the model index sent it: the follow without
+/// its listing, and the marker without its flag. `None` for a `listed`
+/// event, which only the model index reads ([`crate`]'s `listed` tests).
+pub fn plain_follow(event: gdl_watch::FollowEvent) -> Option<gdl_watch::FollowEvent> {
+    use gdl_watch::FollowEvent;
+    match event {
+        FollowEvent::Listed { .. } => None,
+        FollowEvent::Synced { .. } => Some(FollowEvent::Synced { listed: false }),
+        FollowEvent::Follow {
+            class,
+            cell,
+            generation,
+            region,
+            state,
+            load,
+            load_age_ms,
+            ..
+        } => Some(FollowEvent::Follow {
+            class,
+            cell,
+            generation,
+            region,
+            state,
+            load,
+            load_age_ms,
+            listing: None,
+        }),
+        event => Some(event),
+    }
+}
+
+/// `event` as a hub without the model index sent it: the cell without its
+/// models. `None` for a `models` event.
+pub fn plain_cell(event: gdl_watch::CellWatchEvent) -> Option<gdl_watch::CellWatchEvent> {
+    use gdl_watch::CellWatchEvent;
+    match event {
+        CellWatchEvent::Models { .. } => None,
+        CellWatchEvent::Cell {
+            name,
+            class,
+            epoch,
+            state,
+            load,
+            ..
+        } => Some(CellWatchEvent::Cell {
+            name,
+            class,
+            epoch,
+            state,
+            load,
+            models: None,
+        }),
+        event => Some(event),
+    }
+}

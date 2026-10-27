@@ -109,6 +109,7 @@ impl Watch {
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
         self.write(head.as_bytes()).await;
         self.send(&CellWatchEvent::Cell {
+            models: None,
             name: M.into(),
             class: "model_x".into(),
             epoch: record.epoch,
@@ -219,7 +220,7 @@ fn of(event: &FollowEvent, of: &str) -> bool {
         | FollowEvent::Left { cell, .. }
         | FollowEvent::Dropped { cell, .. }
         | FollowEvent::Withdrawn { cell, .. } => cell == of,
-        FollowEvent::Synced => false,
+        FollowEvent::Synced { .. } | FollowEvent::Listed { .. } => false,
     }
 }
 
@@ -395,7 +396,7 @@ impl Shown for CellWatchEvent {
 
 impl Shown for FollowEvent {
     fn synced(&self) -> bool {
-        matches!(self, Self::Synced)
+        matches!(self, Self::Synced { .. })
     }
 
     fn entry(&self) -> bool {

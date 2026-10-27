@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
@@ -67,12 +68,53 @@ impl Watchers {
             snapshot: snapshot.into_iter(),
             events,
             closed: self.closed.clone(),
+            ends: None,
             _counted: counted,
         };
         Box::pin(futures::stream::unfold(watch, |mut watch| async move {
             let event = watch.next().await?;
             Some((event, watch))
         }))
+    }
+
+    /// [`Watchers::stream`], with its snapshot and its subscription taken
+    /// by `take` only once `ready` is done, or the hub stops, which ends
+    /// the watch with nothing sent. `take` may also give a signal that
+    /// ends the watch after its snapshot.
+    pub(crate) fn stream_after<E: Clone + Send + 'static>(
+        &self,
+        counted: Counted,
+        ready: impl Future<Output = ()> + Send + 'static,
+        take: impl FnOnce() -> (Vec<E>, broadcast::Receiver<E>, Option<CancellationToken>)
+        + Send
+        + 'static,
+    ) -> BoxStream<'static, E> {
+        let closed = self.closed.clone();
+        let begun = async move {
+            tokio::select! {
+                biased;
+                () = closed.cancelled() => return None,
+                () = ready => {}
+            }
+            let (snapshot, events, ends) = take();
+            Some(Watch {
+                snapshot: snapshot.into_iter(),
+                events,
+                closed,
+                ends,
+                _counted: counted,
+            })
+        };
+        Box::pin(
+            futures::stream::once(begun)
+                .filter_map(std::future::ready)
+                .flat_map(|watch| {
+                    futures::stream::unfold(watch, |mut watch| async move {
+                        let event = watch.next().await?;
+                        Some((event, watch))
+                    })
+                }),
+        )
     }
 
     /// How many watches are open, as it changes.
@@ -97,6 +139,9 @@ struct Watch<E> {
     snapshot: std::vec::IntoIter<E>,
     events: broadcast::Receiver<E>,
     closed: CancellationToken,
+    /// Ends the watch after its snapshot, as `closed` does, for this
+    /// watch alone.
+    ends: Option<CancellationToken>,
     _counted: Counted,
 }
 
@@ -110,9 +155,16 @@ impl<E: Clone> Watch<E> {
         if let Some(event) = self.snapshot.next() {
             return Some(event);
         }
+        let ends = async {
+            match &self.ends {
+                Some(ends) => ends.cancelled().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             biased;
             () = self.closed.cancelled() => None,
+            () = ends => None,
             received = self.events.recv() => match received {
                 Ok(event) => {
                     #[cfg(test)]

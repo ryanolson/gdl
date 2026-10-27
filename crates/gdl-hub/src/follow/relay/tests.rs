@@ -113,16 +113,16 @@ async fn a_snapshot_sends_the_summary_with_its_age() {
     };
     let mut cell = of(Some(load));
     tokio::time::advance(second * 4).await;
-    assert_eq!(load_age(&cell.snapshot(1, None)), Some(4000));
+    assert_eq!(load_age(&cell.snapshot(1, None, None)), Some(4000));
     assert_eq!(
-        load_age(&cell.snapshot(1, None)),
+        load_age(&cell.snapshot(1, None, None)),
         Some(4000),
         "as old again"
     );
 
     sent(&mut cell, CellWatchEvent::Load { load: Some(load) });
     tokio::time::advance(second).await;
-    assert_eq!(load_age(&cell.snapshot(1, None)), Some(1000));
+    assert_eq!(load_age(&cell.snapshot(1, None, None)), Some(1000));
 
     cell.withhold(1, |_| {});
     tokio::time::advance(second * 2).await;
@@ -130,14 +130,14 @@ async fn a_snapshot_sends_the_summary_with_its_age() {
     tokio::time::advance(second / 2).await;
     cell.restore(fresh, 1, |_| {});
     assert_eq!(
-        load_age(&cell.snapshot(1, None)),
+        load_age(&cell.snapshot(1, None, None)),
         Some(500),
         "as old as the reading, the same summary"
     );
 
     sent(&mut cell, CellWatchEvent::Load { load: None });
-    assert_eq!(load_age(&cell.snapshot(1, None)), None);
-    assert_eq!(load_age(&of(None).snapshot(1, None)), None);
+    assert_eq!(load_age(&cell.snapshot(1, None, None)), None);
+    assert_eq!(load_age(&of(None).snapshot(1, None, None)), None);
 }
 
 /// An instance retired is never exposed, even if its cell's watch named
@@ -185,7 +185,7 @@ fn an_acknowledged_retirement_changes_nothing_for_a_follower() {
     assert_eq!(sent(&mut cell, retired(false)).len(), 1);
     assert_eq!(sent(&mut cell, retired(true)), []);
     assert!(cell.exposes() && !cell.withheld);
-    let shown = cell.snapshot(1, None);
+    let shown = cell.snapshot(1, None, None);
     assert!(shown.contains(&exposed(&staying)), "{shown:?}");
 }
 
@@ -274,7 +274,7 @@ fn offering(generation: u64, revision: u64, offered: bool) -> FollowEvent {
 fn only_the_current_generation_writes() {
     let relay = held();
     let mut watch = relay.watch(None);
-    assert_eq!(pending(&mut watch), [FollowEvent::Synced]);
+    assert_eq!(pending(&mut watch), [FollowEvent::Synced { listed: false }]);
     let (first, _) = relay.begin("model_x", "m");
     let instance = peer();
     relay.install(first, installed_cell("m", CellState::Ready));
@@ -287,6 +287,7 @@ fn only_the_current_generation_writes() {
     relay.install(second, installed_cell("m", CellState::Unavailable));
     relay.apply("model_x", "m", second, ready(&instance));
     let follow = |generation, state| FollowEvent::Follow {
+        listing: None,
         class: "model_x".into(),
         cell: "m".into(),
         generation,
@@ -330,7 +331,7 @@ fn only_the_current_generation_writes() {
             first_exposed,
             follow(second, CellState::Unavailable),
             offering(second, 1, false),
-            FollowEvent::Synced,
+            FollowEvent::Synced { listed: false },
         ]
     );
     relay.forget("model_x", "m");
@@ -354,7 +355,7 @@ fn with_no_chooser_a_follow_closes_as_it_is_not_offered() {
         gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     let mut watch = relay.watch(None);
-    assert_eq!(pending(&mut watch), [FollowEvent::Synced]);
+    assert_eq!(pending(&mut watch), [FollowEvent::Synced { listed: false }]);
     let (first, close) = relay.begin("model_x", "m");
     relay.install(first, installed_cell("m", CellState::Ready));
     relay.apply("model_x", "m", first, state(CellState::Draining));

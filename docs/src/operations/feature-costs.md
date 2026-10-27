@@ -266,6 +266,17 @@ The load of the damping costs about 21 ns per read. It is what lets a gone mark 
 
 At `d133902`, on the same host at load average 3.7, `followed/read` took 48.4 ns and 47.7 ns.
 
+With the model index ([The model index](../concepts/cell-routing.md#the-model-index)), the read also passes the class's index, and `followed/model` is a gate's decision: one model looked up among 100, each listed by two cells, and its first cell checked. On gb300, core 5, rustc 1.93.1, two runs each, the base `41bf1b6` at load average 2.7 to 2.9 and the change `ced9231` at 3.5 to 3.8:
+
+| Read | Base | Change |
+|---|---|---|
+| `followed/read` | 66.5 ns, 66.4 ns | 63.3 ns, 63.8 ns |
+| `followed/gone` | 72.5 ns, 72.5 ns | 70.6 ns, 70.6 ns |
+| `followed/model` | | 81.8 ns, 80.4 ns |
+| not bound | 0.82 ns, 0.84 ns | 0.82 ns, 0.83 ns |
+
+The index adds no cost to a read that does not use it. A lookup in it costs about 10 ns over `followed/gone`.
+
 On the shared aarch64 host above (Cortex-X925 and Cortex-A725), at load averages from 10 to 24, without the filter, at `03be278` with the change:
 
 | Read | Time |

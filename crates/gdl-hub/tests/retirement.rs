@@ -575,7 +575,7 @@ async fn a_retiree_that_leaves_is_waited_for_no_more() {
     let (mut cell, _choosers) = followed(1).await;
     let _watch = cell.retire(true).await;
     let mut relay = cell.global.1.follows();
-    while next(&mut relay).await != FollowEvent::Synced {}
+    while !matches!(next(&mut relay).await, FollowEvent::Synced { .. }) {}
     let id = cell.retiring.id();
     let Followed {
         retiring, global, ..

@@ -43,19 +43,19 @@ pub use compose::{
 };
 pub use cx::{Cx, Deadline, RequestId};
 pub use error::{Error, ErrorKind, Result};
-pub use followed::{ClassCells, FollowedCells};
+pub use followed::{ClassCells, FollowedCells, ModelIndex, ModelSet};
 pub use gdl_macros::{Config, Endpoints, Metrics};
 pub use gdl_model::{
     ConfigField, ConfigSchema, ConfigValue, Encoding, InstanceModel, InstanceModelState,
-    MetricField, MetricKind,
+    MetricField, MetricKind, ModelKey,
 };
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 pub use metrics::Metrics;
 pub use models::InstanceModels;
 pub use policy::{
-    Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, CellState, ChoiceLease, Damped,
-    HomeFirst, HomeFirstAt, Load, LoadSummary, NoCell, RoundRobin,
+    Cell, CellChoice, CellCondition, CellPolicies, CellPolicy, CellRequest, CellState, ChoiceLease,
+    Damped, HomeFirst, HomeFirstAt, Load, LoadSummary, ModelState, NoCell, RoundRobin,
 };
 /// The prometheus version node metrics are built with: a node crate names
 /// its metric types through here, so they are the types the runtime

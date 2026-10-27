@@ -21,6 +21,7 @@ use tokio::time::Instant;
 
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
+use crate::followed::{ModelIndex, NO_MODELS};
 use crate::select::{Head, sealed::Sealed};
 
 mod damped;
@@ -28,7 +29,7 @@ mod home_first;
 mod round_robin;
 
 pub use damped::{Damped, Window};
-pub use gdl_cells::{CellState, LoadSummary};
+pub use gdl_cells::{CellCondition, CellState, LoadSummary, ModelState};
 pub use home_first::{HomeFirst, HomeFirstAt};
 pub use round_robin::RoundRobin;
 
@@ -409,6 +410,7 @@ pub struct CellRequest<'a, H> {
     now: Instant,
     turn: u64,
     random: Option<&'a RandomState>,
+    models: &'a ModelIndex,
 }
 
 impl<H> Clone for CellRequest<'_, H> {
@@ -437,6 +439,7 @@ impl<'a, H> CellRequest<'a, H> {
             now,
             turn: 0,
             random: None,
+            models: &NO_MODELS,
         }
     }
 
@@ -478,6 +481,25 @@ impl<'a, H> CellRequest<'a, H> {
         self
     }
 
+    /// The request with the class's model index: the runtime gives the
+    /// index of the table the policy chooses from, and a policy's test
+    /// builds one with [`ModelIndex::new`].
+    #[inline]
+    pub fn with_models(mut self, models: &'a ModelIndex) -> Self {
+        self.models = models;
+        self
+    }
+
+    /// The class's model index, from the same table as the cells the
+    /// policy chooses from: for each model, every cell of the class that
+    /// lists it ([`ModelIndex`]). [`ModelIndex::NONE`] for a request built
+    /// without one. A policy that sends a request only to the cells that
+    /// serve its model keeps them with `choose_where`.
+    #[inline]
+    pub fn models(&self) -> &'a ModelIndex {
+        self.models
+    }
+
     /// The same attempt, with `head` read from its bytes.
     fn with_head<'b, G>(&self, head: &'b G) -> CellRequest<'b, G>
     where
@@ -493,6 +515,7 @@ impl<'a, H> CellRequest<'a, H> {
             now: self.now,
             turn: self.turn,
             random: self.random,
+            models: self.models,
         }
     }
 

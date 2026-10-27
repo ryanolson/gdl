@@ -84,6 +84,7 @@ fn relayed_retired(cell: &str, generation: u64, id: InstanceId) -> FollowEvent {
 
 fn follow(cell: &str, generation: u64, state: CellState) -> FollowEvent {
     FollowEvent::Follow {
+        listing: None,
         class: "model_x".into(),
         cell: cell.into(),
         generation,
@@ -172,7 +173,7 @@ fn a_withheld_cell_is_unavailable_until_it_is_read_again() {
         [
             follow("m", m, CellState::Unavailable),
             offering("m", m, 2, false),
-            FollowEvent::Synced
+            FollowEvent::Synced { listed: false }
         ],
         "watched alone, it is withheld and not offered, its instances hidden"
     );
@@ -529,6 +530,9 @@ fn a_snapshot_shows_offering_only_for_a_follow_not_offered() {
     let mut alone = relay.watch_of("model_x", "m");
     assert_eq!(
         pending(&mut alone),
-        [follow("m", m, CellState::Ready), FollowEvent::Synced]
+        [
+            follow("m", m, CellState::Ready),
+            FollowEvent::Synced { listed: false }
+        ]
     );
 }

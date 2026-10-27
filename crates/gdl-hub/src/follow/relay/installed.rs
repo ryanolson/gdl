@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gdl_cells::{CellState, LoadSummary};
-use gdl_watch::{CellWatchEvent, FollowEvent};
+use gdl_watch::{CellWatchEvent, FollowEvent, Listing, ModelList};
 use tokio::time::Instant;
 use velo_hub::velo::{InstanceId, PeerInfo};
 
@@ -32,6 +32,9 @@ pub(crate) struct Installed {
     /// Whether the cell is withheld: its watch sent an event of a kind
     /// this build does not know, and it has not been read again since.
     pub(super) withheld: bool,
+    /// The cell's model entries as its watch last sent them: `None` from a
+    /// hub of an earlier build.
+    models: Option<ModelList>,
 }
 
 impl Installed {
@@ -56,7 +59,19 @@ impl Installed {
             ready: HashMap::new(),
             sent: HashSet::new(),
             withheld: false,
+            models: None,
         }
+    }
+
+    /// The cell with the model entries its watch's first event carried.
+    pub(crate) fn with_models(mut self, models: Option<ModelList>) -> Self {
+        self.models = models;
+        self
+    }
+
+    /// The cell's model entries as its watch last sent them.
+    pub(super) fn models(&self) -> Option<&ModelList> {
+        self.models.as_ref()
     }
 
     /// The state the relay shows: the one the cell last sent, or
@@ -164,6 +179,9 @@ impl Installed {
         // The cell's hub sent the summary again in the reading, so it is
         // as new as the reading even when it has not changed.
         self.received = fresh.received;
+        if fresh.models.is_some() {
+            self.models = fresh.models;
+        }
         self.withheld = false;
         self.state = fresh.state;
         send(FollowEvent::State {
@@ -277,6 +295,10 @@ impl Installed {
                     });
                 }
             }
+            // The relay lists the cell's models from the version it holds
+            // ([`super::Shared::relist`]); a chooser sees nothing of the
+            // follow change.
+            CellWatchEvent::Models { models } => self.models = Some(models),
             // A watch has one snapshot, which the link reads before it
             // installs the cell.
             CellWatchEvent::Cell { .. } | CellWatchEvent::Synced => {}
@@ -284,17 +306,19 @@ impl Installed {
     }
 
     /// The follow as a watch of the relay begins with it: the cell, with
-    /// its summary's age, then `offering`, then its retired instances, then
-    /// those it exposes.
+    /// its summary's age and `listing`, then `offering`, then its retired
+    /// instances, then those it exposes.
     pub(super) fn snapshot(
         &self,
         generation: u64,
         offering: Option<FollowEvent>,
+        listing: Option<Listing>,
     ) -> Vec<FollowEvent> {
         let mut retired: Vec<(&InstanceId, &String)> = self.retired.iter().collect();
         retired.sort_by_key(|(id, segment)| (*segment, id.as_u128()));
         let mut events = Vec::with_capacity(1 + self.retired.len() + self.ready.len());
         events.push(FollowEvent::Follow {
+            listing,
             class: self.class.clone(),
             cell: self.cell.clone(),
             generation,

@@ -45,6 +45,7 @@ use std::time::Duration;
 
 use futures::Stream;
 use futures::stream::BoxStream;
+use gdl_cells::CellRecord;
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -54,10 +55,12 @@ use velo_hub::velo::InstanceId;
 
 mod changes;
 mod installed;
+mod listed;
 
 pub(crate) use installed::Installed;
 
 use changes::Changes;
+use listed::Listings;
 
 use super::avoid::Avoiding;
 use super::offer::{Choosers, Offer};
@@ -65,6 +68,11 @@ use super::release::{Release, Told};
 use crate::CellHealth;
 use crate::fanout::Watchers;
 use gdl_watch::{Avoids, CellWatchEvent, FollowEvent, Unoffered};
+
+/// How long a watch of the relay begun before the hub has read the cell
+/// directory's first snapshot of each class it sends to waits for it
+/// before it takes its own snapshot.
+const LISTED_WAIT: Duration = Duration::from_secs(2);
 
 /// A retirement the relay waits for its choosers to avoid: the follow, by
 /// its cell's class and name and its generation, and the instance.
@@ -117,6 +125,7 @@ impl Relay {
                 swept: Instant::now(),
                 releases,
                 retirements: watch::Sender::new(HashSet::new()),
+                listings: Listings::default(),
             })),
             watchers: Watchers::new(),
             one: Watchers::new(),
@@ -187,6 +196,7 @@ impl Relay {
     /// followed, say so, naming its latest follow, which may have closed.
     pub(crate) fn withdrawn(&self, class: &str, cell: &str) {
         let mut shared = self.lock();
+        shared.unlist(class, cell);
         let Some(&generation) = shared
             .generations
             .get(class)
@@ -199,6 +209,42 @@ impl Relay {
             cell: cell.to_string(),
             generation,
         });
+    }
+
+    /// The hub sends to `classes`: its listings are whole once each one's
+    /// directory watch has completed a snapshot ([`Relay::synced`]).
+    pub(crate) fn expect(&self, classes: impl IntoIterator<Item = String>) {
+        self.lock().listings.expect(classes);
+    }
+
+    /// The directory watch of `class` completed a snapshot. Once every
+    /// class's has, each watch of the relay whose snapshot said the
+    /// listings were not whole ends, and its reader learns they are from
+    /// its next.
+    pub(crate) fn synced(&self, class: &str) {
+        self.lock().listings.synced(class);
+    }
+
+    /// The follower read `record`, of a cell of this deployment, whose
+    /// lease has `lapsed` or not: the cell is listed, and its choosers are
+    /// sent what changed.
+    pub(crate) fn record(&self, record: &CellRecord, lapsed: bool) {
+        let mut shared = self.lock();
+        shared.listings.record(record, lapsed);
+        shared.relist(&record.class, &record.name);
+    }
+
+    /// The record of the cell `cell` of `class` lapsed.
+    pub(crate) fn lapsed(&self, class: &str, cell: &str) {
+        let mut shared = self.lock();
+        shared.listings.lapse(class, cell, true);
+        shared.relist(class, cell);
+    }
+
+    /// The cell `cell` of `class` is of another deployment now: it is no
+    /// longer listed.
+    pub(crate) fn unlist(&self, class: &str, cell: &str) {
+        self.lock().unlist(class, cell);
     }
 
     /// The snapshot of the follow `generation` of `installed`'s cell is
@@ -224,7 +270,7 @@ impl Relay {
                 .offer
                 .event(&installed.class, &installed.cell, generation)
         });
-        for event in installed.snapshot(generation, offering) {
+        for event in installed.snapshot(generation, offering, None) {
             changes.send(event);
         }
         let counted = installed.counted();
@@ -233,6 +279,8 @@ impl Relay {
         if counted {
             shared.count(&class, true);
         }
+        shared.listings.lose(&class, &cell, false);
+        shared.relist(&class, &cell);
         shared.settle(&class, &cell, generation);
     }
 
@@ -329,6 +377,7 @@ impl Relay {
         if recounted != counted {
             shared.count(class, recounted);
         }
+        shared.relist(class, cell);
         if !offered {
             shared.settle(class, cell, generation);
         }
@@ -513,15 +562,39 @@ impl Relay {
     /// ([`super::offer`]).
     pub(crate) fn watch(&self, chooser: Option<InstanceId>) -> FollowsWatch {
         let counted = self.watchers.count();
-        let (snapshot, events) = {
-            let mut shared = self.lock();
-            if let Some(chooser) = chooser {
-                shared.choosers.opened(chooser, Instant::now());
+        let mut shared = self.lock();
+        if let Some(chooser) = chooser {
+            shared.choosers.opened(chooser, Instant::now());
+        }
+        let events = match shared.listings.unsynced() {
+            None => {
+                let (snapshot, events) = (shared.snapshot(), shared.changes.subscribe_all());
+                drop(shared);
+                self.watchers.stream(counted, snapshot, events)
             }
-            (shared.snapshot(), shared.changes.subscribe_all())
+            // A watch begun as the hub starts waits a little for the
+            // directory's first snapshots, so that its own says the
+            // listings are whole; one that still does not is ended once
+            // they are, and its reader learns it from the next one's
+            // marker.
+            Some(unsynced) => {
+                drop(shared);
+                let ready = async move {
+                    let _ = tokio::time::timeout(LISTED_WAIT, unsynced.cancelled_owned()).await;
+                };
+                let shared = Arc::clone(&self.shared);
+                self.watchers.stream_after(counted, ready, move || {
+                    let shared = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                    (
+                        shared.snapshot(),
+                        shared.changes.subscribe_all(),
+                        shared.listings.unsynced(),
+                    )
+                })
+            }
         };
         FollowsWatch {
-            events: self.watchers.stream(counted, snapshot, events),
+            events,
             release: None,
             chooser: chooser.map(|id| ChooserWatch {
                 shared: Arc::clone(&self.shared),
@@ -605,6 +678,8 @@ struct Shared {
     releases: mpsc::UnboundedSender<Release>,
     /// The retirements waited for, for whoever needs to see them.
     retirements: watch::Sender<HashSet<Retirement>>,
+    /// Every cell of the classes sent to whose record the follower read.
+    listings: Listings,
 }
 
 /// One cell's current follow: its generation, what it exposes once its
@@ -667,6 +742,11 @@ impl Shared {
             avoiding,
             ..
         } = cells.remove(cell).expect("the follow was just found");
+        // The relay closes a follow in `settle`, never here: a follow that
+        // ends here lost its link, or was replaced, so its cell is missing
+        // until a later one is installed.
+        self.listings.lose(class, cell, true);
+        self.relist(class, cell);
         let Some(installed) = installed else {
             return;
         };
@@ -885,7 +965,9 @@ impl Shared {
         self.changes.work.snapshot();
         let mut events = Vec::new();
         self.snapshot_of(class, cell, &mut events);
-        events.push(FollowEvent::Synced);
+        events.push(FollowEvent::Synced {
+            listed: self.listings.whole(),
+        });
         events
     }
 
@@ -906,10 +988,31 @@ impl Shared {
             cells.extend(closing.keys().map(|cell| (class.as_str(), cell.as_str())));
         }
         let mut events = Vec::new();
-        for (class, cell) in cells {
+        for (class, cell) in &cells {
             self.snapshot_of(class, cell, &mut events);
         }
-        events.push(FollowEvent::Synced);
+        // A cell with a current follow has its listing on the follow's
+        // event; every other one is sent apart.
+        let mut listed: Vec<(&str, &str)> = self
+            .listings
+            .cells()
+            .filter(|(class, cell)| {
+                self.follow(class, cell)
+                    .is_none_or(|follow| follow.installed.is_none())
+            })
+            .collect();
+        listed.sort_unstable();
+        for (class, cell) in listed {
+            events.push(FollowEvent::Listed {
+                class: class.to_string(),
+                cell: cell.to_string(),
+                generation: self.generation(class, cell),
+                listing: self.listings.listing(class, cell),
+            });
+        }
+        events.push(FollowEvent::Synced {
+            listed: self.listings.whole(),
+        });
         events
     }
 
@@ -920,7 +1023,11 @@ impl Shared {
         let closing = self.closing.get(class).and_then(|cells| cells.get(cell));
         for (generation, closing) in closing.into_iter().flatten() {
             let offering = closing.offer.event(class, cell, *generation);
-            events.extend(closing.installed.snapshot(*generation, Some(offering)));
+            events.extend(
+                closing
+                    .installed
+                    .snapshot(*generation, Some(offering), None),
+            );
         }
         if let Some(follow) = self.follow(class, cell)
             && let Some(installed) = &follow.installed
@@ -929,7 +1036,57 @@ impl Shared {
                 .offer
                 .shown()
                 .then(|| follow.offer.event(class, cell, follow.generation));
-            events.extend(installed.snapshot(follow.generation, offering));
+            let listing = self.listings.listing(class, cell);
+            events.extend(installed.snapshot(follow.generation, offering, listing));
+        }
+    }
+
+    /// The generation of the latest follow of the cell `cell` of `class`,
+    /// or 0 if it was never followed.
+    fn generation(&self, class: &str, cell: &str) -> u64 {
+        self.generations
+            .get(class)
+            .and_then(|cells| cells.get(cell))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Send the listing of the cell `cell` of `class` if it changed, with
+    /// the models its current follow's link sent, if newer.
+    fn relist(&mut self, class: &str, cell: &str) {
+        let Shared {
+            follows, listings, ..
+        } = self;
+        if let Some(models) = follows
+            .get(class)
+            .and_then(|cells| cells.get(cell))
+            .and_then(|follow| follow.installed.as_ref())
+            .and_then(Installed::models)
+        {
+            listings.link_models(class, cell, models);
+        }
+        if let Some(listing) = self.listings.changed(class, cell) {
+            let generation = self.generation(class, cell);
+            self.changes.send(FollowEvent::Listed {
+                class: class.to_string(),
+                cell: cell.to_string(),
+                generation,
+                listing: Some(listing),
+            });
+        }
+    }
+
+    /// The cell `cell` of `class` is no longer listed: its choosers are
+    /// told, if they were shown it.
+    fn unlist(&mut self, class: &str, cell: &str) {
+        if self.listings.remove(class, cell) {
+            let generation = self.generation(class, cell);
+            self.changes.send(FollowEvent::Listed {
+                class: class.to_string(),
+                cell: cell.to_string(),
+                generation,
+                listing: None,
+            });
         }
     }
 }

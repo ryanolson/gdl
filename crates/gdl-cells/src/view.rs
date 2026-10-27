@@ -90,6 +90,17 @@ impl CellView {
             .map(|seen| &seen.record)
     }
 
+    /// The record of `cell`, whether or not its lease has passed, with when
+    /// this view saw its `seq` change, from which its lease runs: `None`
+    /// once it is withdrawn, or dropped by a completed snapshot, or never
+    /// seen. For a reader that keeps a silent cell in view, as a model
+    /// index does, where [`CellView::get`] hides it.
+    pub fn seen(&self, cell: &str) -> Option<(&CellRecord, Instant)> {
+        self.cells
+            .get(cell)
+            .map(|seen| (&seen.record, seen.changed))
+    }
+
     /// The version of `cell`'s withdrawal, if the view holds it withdrawn:
     /// by a withdrawal it was shown, or by a completed snapshot that did
     /// not hold the cell.

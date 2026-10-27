@@ -389,7 +389,8 @@ impl Crossing {
             .with_excluded(excluded)
             .with_damped(damped)
             .with_turn(turn)
-            .with_random(&self.random);
+            .with_random(&self.random)
+            .with_models(&table.models);
         let (at, choice) = match target.policy.choose(request, self.encoding, &table.views)? {
             Ok(choice) => choice.into_parts(),
             Err(no) => return Ok(Err(no)),
@@ -1151,6 +1152,73 @@ mod tests {
             .expect("the selector read a JSON head")
             .expect("a cell");
         assert_eq!(chosen, ids[0]);
+    }
+
+    /// Chooses the first cell the model index lists `qwen-32b` in, as
+    /// offered: what a policy that routes by model does.
+    struct ByModel;
+
+    impl gdl::CellPolicy for ByModel {
+        type Head = gdl::Encoded;
+
+        fn choose(
+            &self,
+            request: CellRequest<'_, gdl::Encoded>,
+            cells: &[gdl::Cell],
+        ) -> std::result::Result<gdl::CellChoice, NoCell> {
+            let sets = request
+                .models()
+                .sets("qwen-32b", None)
+                .ok_or_else(|| NoCell::because("no cell lists qwen-32b"))?;
+            cells
+                .iter()
+                .position(|cell| {
+                    sets.iter()
+                        .any(|set| set.is_offered() && set.cell() == cell.name())
+                })
+                .map(gdl::CellChoice::new)
+                .ok_or_else(|| NoCell::because("no offered cell serves qwen-32b"))
+        }
+    }
+
+    /// A cell policy reads the class's model index from the table it
+    /// chooses from, as a node does.
+    #[tokio::test]
+    async fn a_policy_reads_the_model_index_of_its_table() {
+        let ids = ids(2);
+        let mut crossing = crossing(
+            vec![
+                cell("m1", CellState::Ready, &ids[..1]),
+                cell("m2", CellState::Ready, &ids[1..]),
+            ],
+            Within::Policy(Policy::RoundRobin),
+        );
+        crossing.target.policy = Arc::new(gdl::__runtime::TypedPolicy(Arc::new(ByModel)));
+        let set = |cell: &str| {
+            gdl::ModelSet::new(
+                cell,
+                "home",
+                gdl::ModelState::Ready,
+                gdl::CellCondition::Live,
+            )
+            .with_offered(true)
+        };
+        let index = gdl::ModelIndex::new(true, [(gdl::ModelKey::new("qwen-32b"), set("m2"))]);
+        let table = crossing.target.table.load_full();
+        crossing.target.table.store(Arc::new(
+            EntryTable::new(table.cells.clone()).with_models(Arc::new(index)),
+        ));
+        let selector = gdl::__runtime::Typed(Arc::new(Reading));
+        let head = serde_json::to_vec(&Prompt {
+            text: "hello".into(),
+        })
+        .expect("encoded");
+        let (chosen, ..) = crossing
+            .choose(&selector, &Cx::new(), &head, gdl_model::Encoding::Json, &[])
+            .await
+            .expect("chosen")
+            .expect("a cell");
+        assert_eq!(chosen, ids[1], "the cell the index lists");
     }
 
     #[tokio::test]

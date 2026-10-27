@@ -109,7 +109,7 @@ async fn a_relay_snapshot_that_never_completes_is_not_installed() {
     second.answer().await;
     second.send(&follow(M1, 1, CellState::Ready)).await;
     second.send(&exposed(M1, 1, &y)).await;
-    second.send(&FollowEvent::Synced).await;
+    second.send(&FollowEvent::Synced { listed: false }).await;
     let mut changes = cells.changes();
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -141,7 +141,7 @@ async fn a_cells_reading_that_never_completes_leaves_it_unread() {
     relay.answer().await;
     relay.send(&follow(M1, 1, CellState::Ready)).await;
     relay.send(&exposed(M1, 1, &x)).await;
-    relay.send(&FollowEvent::Synced).await;
+    relay.send(&FollowEvent::Synced { listed: false }).await;
     // Before the reading is asked for, so that its bound has run by then.
     let began = tokio::time::Instant::now();
     relay

@@ -128,6 +128,7 @@ impl Watch {
     ) {
         self.answer().await;
         self.send(&CellWatchEvent::Cell {
+            models: None,
             name: M.into(),
             class: "model_x".into(),
             epoch: record.epoch,
@@ -183,6 +184,9 @@ async fn next_of(
             .await
             .unwrap_or_else(|_| panic!("an event of {cell} in time; others: {others:?}"))
             .expect("the relay's watch goes on");
+        let Some(event) = common::plain_follow(event) else {
+            continue;
+        };
         if concerns(&event, cell) {
             return event;
         }
@@ -204,7 +208,9 @@ fn concerns(event: &FollowEvent, of: &str) -> bool {
         | FollowEvent::Left { cell, .. }
         | FollowEvent::Dropped { cell, .. }
         | FollowEvent::Withdrawn { cell, .. } => cell == of,
-        FollowEvent::Offering { .. } | FollowEvent::Synced => false,
+        FollowEvent::Offering { .. } | FollowEvent::Synced { .. } | FollowEvent::Listed { .. } => {
+            false
+        }
     }
 }
 
@@ -302,15 +308,17 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
             .expect("an event in time")
             .expect("the watch goes on")
             .expect("the watch does not fail");
-        match item.event().expect("a known event") {
-            FollowEvent::Synced => break,
-            event => snapshot.push(event),
+        match common::plain_follow(item.event().expect("a known event")) {
+            Some(FollowEvent::Synced { .. }) => break,
+            Some(event) => snapshot.push(event),
+            None => {}
         }
     }
     assert_eq!(
         snapshot,
         [
             FollowEvent::Follow {
+                listing: None,
                 class: "model_x".into(),
                 cell: M.into(),
                 generation,
@@ -339,8 +347,9 @@ async fn a_followed_cell_is_withheld_for_an_unknown_event_until_it_is_read_again
         tokio::time::timeout(WAIT, none.next())
             .await
             .expect("an event in time")
-            .and_then(|item| item.expect("the watch does not fail").event()),
-        Some(FollowEvent::Synced),
+            .and_then(|item| item.expect("the watch does not fail").event())
+            .and_then(common::plain_follow),
+        Some(FollowEvent::Synced { listed: false }),
         "a cell the hub does not follow"
     );
     let mut second = server.next().await;
@@ -483,6 +492,7 @@ async fn an_unknown_event_in_the_first_snapshot_installs_the_cell_withheld() {
     first.answer().await;
     first
         .send(&CellWatchEvent::Cell {
+            models: None,
             name: M.into(),
             class: "model_x".into(),
             epoch: like.epoch,
@@ -722,6 +732,7 @@ async fn an_unknown_event_in_the_reading_keeps_the_cell_withheld() {
     second.answer().await;
     second
         .send(&CellWatchEvent::Cell {
+            models: None,
             name: M.into(),
             class: "model_x".into(),
             epoch: setup.like.epoch,

@@ -248,7 +248,7 @@ async fn deadlines_are_kept_while_the_relay_waits_at_its_cap() {
         follow(M1, 1, CellState::Ready),
         exposed(M1, 1, &x),
         exposed(M1, 1, &y),
-        FollowEvent::Synced,
+        FollowEvent::Synced { listed: false },
         retired(M1, 1, &y),
         left(M1, 1, &x),
     ];
@@ -313,7 +313,12 @@ async fn deadlines_are_kept_while_the_relay_waits_at_its_cap() {
 /// refusals, once a watch has then been healthy for 30 s.
 #[tokio::test(start_paused = true)]
 async fn a_healthy_watch_is_asked_for_again_within_the_base() {
-    let snapshot = || vec![follow(M1, 1, CellState::Ready), FollowEvent::Synced];
+    let snapshot = || {
+        vec![
+            follow(M1, 1, CellState::Ready),
+            FollowEvent::Synced { listed: false },
+        ]
+    };
     for refusals in [0, 6] {
         let (follows, _, _, _) = follower();
         let script = std::iter::repeat_n(Err(()), refusals)
@@ -346,7 +351,13 @@ async fn followers_that_fail_together_spread_their_next_watch() {
     let mut opens = Vec::new();
     for _ in 0..32 {
         let (follows, _, _, _) = follower();
-        let source = Timed::new([Ok((vec![FollowEvent::Synced], Duration::ZERO))], true);
+        let source = Timed::new(
+            [Ok((
+                vec![FollowEvent::Synced { listed: false }],
+                Duration::ZERO,
+            ))],
+            true,
+        );
         opens.push(source.opened.subscribe());
         tasks.push(tokio::spawn(run(source, follows)));
     }
@@ -418,7 +429,7 @@ async fn a_failure_after_a_healthy_span_advances_the_backoff() {
         let task = tokio::spawn(run(Served::at(&server.address), follows));
         let mut first = server.next().await;
         first.answer().await;
-        first.send(&FollowEvent::Synced).await;
+        first.send(&FollowEvent::Synced { listed: false }).await;
         // Within the watch's idle bound, for longer than the healthy span.
         for _ in 0..7 {
             tokio::time::sleep(Duration::from_secs(5)).await;

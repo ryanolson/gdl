@@ -323,14 +323,7 @@ pub(super) enum Offer<'a> {
     Earlier(Option<&'a [InstanceModel]>),
 }
 
-/// The cell's model entries, in the order of their keys, the version of
-/// their list, and the revoked models: what its record carries.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct ModelList {
-    pub(super) entries: Vec<ModelEntry>,
-    pub(super) version: u64,
-    pub(super) revoked: Vec<ModelKey>,
-}
+pub(super) use gdl_watch::ModelList;
 
 /// What the cell's last record holds of its models: the entries, the
 /// list's version, and the revoked models.

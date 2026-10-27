@@ -39,7 +39,8 @@ pub use directory::{CellDirectory, CellEvent, DirectoryError, ResumeToken};
 pub use memory::{MemoryDirectory, MemoryLimits, MemoryWatch};
 pub use operator::{CellCommand, CommandWrite, last_record};
 pub use record::{
-    CellRecord, CellState, LoadSummary, ModelEntry, ModelState, Presence, Version, Withdrawal,
+    CellCondition, CellRecord, CellState, LoadSummary, ModelEntry, ModelState, Presence, Version,
+    Withdrawal,
 };
 pub use relay::RelayDirectory;
 pub use view::CellView;

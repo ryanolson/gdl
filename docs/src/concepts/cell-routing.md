@@ -14,8 +14,8 @@ A parent's hub learns about a child over two links with different jobs.
 
 | Link | Carries | If it fails |
 |---|---|---|
-| The cell directory | which cells exist: name, class, region, parent, hashes, state, epoch, hub address | no new child is found; a child already followed stays followed |
-| The follow link: the parent's hub watches the child's hub (`GET /v1/ext/gdl-cell/watch`) | the child's state and epoch, its load summary each period, and its entry instances, ready and retired, with their velo `PeerInfo` | the follow is not offered from that moment: this is the liveness signal |
+| The cell directory | which cells exist: name, class, region, parent, hashes, state, epoch, hub address, presence, models | no new child is found; a child already followed stays followed |
+| The follow link: the parent's hub watches the child's hub (`GET /v1/ext/gdl-cell/watch`) | the child's state and epoch, its load summary each period, its models when they change, and its entry instances, ready and retired, with their velo `PeerInfo` | the follow is not offered from that moment: this is the liveness signal |
 
 The directory is off the routing path. A record that expires or is withdrawn ends no follow and does not change whether a follow is offered. A newer epoch in the directory ends the follow of the hub it replaces.
 
@@ -52,7 +52,9 @@ A cell's instances are exposed only while the state it last sent is `ready` or `
 
 When the hub's watch of the cell directory shows that a cell it followed withdrew its record, the relay sends `withdrawn`, naming the cell's latest follow. It may come after that follow's `dropped`. Only an explicit withdrawal sends it: a record that expires, a link that fails, and a directory snapshot that no longer holds the record send nothing. A snapshot of the relay holds no `withdrawn`.
 
-`GET /v1/ext/gdl-cell/follows/{class}/{cell}` watches one cell's follows alone. A chooser uses it to read one cell again after an event it does not know (see [unknown events](#an-event-of-an-unknown-kind)).
+The relay also lists every cell whose record the hub has read, followed or not, for the choosers' model index ([The model index](#the-model-index)). The snapshot gives a followed cell's listing on its `follow`, and sends a `listed` event for each other cell before `synced`. After that it sends `listed` for each change. `synced` says whether the hub's watch of the directory had read its first snapshot of every class the hub sends to.
+
+`GET /v1/ext/gdl-cell/follows/{class}/{cell}` watches one cell's follows alone. It sends no `listed` event. A chooser uses it to read one cell again after an event it does not know (see [unknown events](#an-event-of-an-unknown-kind)).
 
 ## Offered and not offered
 
@@ -89,6 +91,8 @@ For each entry segment its hops enter, and each followed cell, the chooser keeps
 - whether it is offered, and at which revision (`FollowedCell::offered`, `revision`);
 - its exposed entry instances;
 - its retired entry instances, which are never routed to again.
+
+Beside the cells, each table holds the class's model index ([The model index](#the-model-index)), which every table of the class shares.
 
 A newer generation replaces a cell's table at once. The older generation keeps its instances until the hub drops it. `Launch::cells` reads the tables (`gdl_runtime::Cells`).
 
@@ -148,6 +152,59 @@ How a drained cell reads, from the chooser's view:
 Silence is never a decommission. A cell's record is withdrawn only by its own hub after a drain, or by an operator on its parent's hub when its hub is gone ([A cell whose hub is gone](cells.md#a-cell-whose-hub-is-gone)). A cell that this chooser cannot see reads as not available, so a gate answers 503 for it, not 404. Two choosers can then answer differently for a while: one that saw the withdrawal reads it, and one that started after it does not. [Limitations](../operations/limitations.md) lists this.
 
 Each entry instance is registered with the chooser's velo node before a table holds it. It is unregistered `drain_ms` after no follow holds it, unless the chooser's own membership still routes to it or is still draining it. The membership, in turn, does not unregister a peer that a table holds. So a velo peer in both is unregistered by whichever lets go of it last.
+
+## The model index
+
+The model index says, for each model and routing key, which cells of the class list it in their records. A model gate in front of a set router reads it to answer 404 for a model that no cell lists, and 503 for a model whose cells cannot take work now. The router reads the same index from the same table, so the two never disagree.
+
+### What the hub lists
+
+The parent's hub lists every record of each class it sends to, a child or not, in any region, if the record has the hub's contract and placement hashes. For each cell it keeps the region, the condition, and the models. A cell stays listed until it withdraws its record. Nothing else removes it: not a lease that passes, not a directory snapshot that no longer holds the record, and not a lost link.
+
+| Condition | When |
+|---|---|
+| `live` | the record is `serving` and fresh, and the cell's follow, if the hub follows it, has not lost its link |
+| `scaled_to_zero` | the record says the cell was scaled to 0 on purpose ([Presence](cells.md#presence)). It never lapses |
+| `missing` | the record is `serving`, and its lease passed without a new write, or the follow's link ended and no later follow is installed yet |
+
+The hub learns a followed cell's models from its record and from the follow link. The child's hub sends its list in the `cell` event of its watch's snapshot, and a `models` event each time the list changes. The parent keeps the list with the higher `models_version`, since the two paths race. The version never goes down, also across a restart of the child's hub.
+
+A hub reads a record's lease on its own clock, from when it first saw the record's `seq`. So a new hub reads a silent cell as `live` for up to one lease, then as `missing`.
+
+### The relay's marker
+
+Until the hub's watch of the directory has read its first snapshot of every class the hub sends to, the listings are not whole: a record the hub has not read may still list a model. The relay's `synced` says so with `listed`. A watch of the relay that begins before then waits up to 2 s for it. A watch whose snapshot still says `listed: false` is ended once the listings are whole, so its reader learns it from its next snapshot. A hub of an earlier build sends no `listed`, so its choosers read the index as not synced.
+
+### What the chooser builds
+
+The chooser keeps the listings of its current relay watch. A new snapshot replaces them whole. For each class it builds a `gdl::ModelIndex` from the listings and its own follows: each model's state in each cell, the cell's condition, and whether the chooser offers the cell work. It builds the index again only when a listing or a follow's offered state changes. A cell's load summary arrives each period, and does not rebuild it.
+
+```rust,ignore
+// Per request, in a gate: one load of the class's table.
+let answer = self.followed.read("model_x", |cells| {
+    let index = cells.models();
+    let Some(sets) = index.sets(model, None) else {
+        // No cell lists it. Unknown only once the directory was read.
+        return if index.is_synced() { NotFound } else { Unavailable };
+    };
+    let routed = |set: &gdl::ModelSet| {
+        set.state() == gdl::ModelState::Ready
+            && set.is_offered()
+            && cells.cell(set.cell()).is_some_and(gdl::Cell::takes_work)
+            && !cells.is_gone(set.cell())
+    };
+    if sets.iter().any(routed) { Pass } else { Unavailable }
+});
+```
+
+- `ClassCells::models()` gives the index of the table the read loaded. A cell policy reads the same index with `CellRequest::models()`.
+- `ModelIndex::sets(model, routing_key)` gives the cells that list the model, by name, or `None` when no cell does. It is one binary search, with no lock and no allocation.
+- `ModelIndex::is_synced()` tells a model that is not known yet from one that no cell lists.
+- A cell of another parent, or in a region the chooser does not follow, is listed and not offered. So a model that only another region serves is listed, and the gate answers 503 until this cell may route there.
+- A model that moves from one cell to another shows both: the old cell's `drained` entry and the new cell's `starting` entry.
+- A model an operator revoked on a cell is not in that cell's list ([Revoking a model](cells.md#revoking-a-model)), so the index does not list the cell for it. With no other cell, the model is unknown. An operator's withdrawal of a cell unlists it, as the cell's own withdrawal does.
+- A test of a node builds a handle with `FollowedCells::fixed_with_models`, with a `ModelIndex::new` for each class.
+- A gate's read of the index, a model looked up among 100 and one of its cells checked, costs about 81 ns on a quiet host (see [Feature costs](../operations/feature-costs.md#reading-the-followed-cells)).
 
 ## Choosing a cell
 
@@ -306,6 +363,8 @@ A segment can decline offers from other cells by its own policy, before it admit
 A reader ignores a field it does not know in a known event. An event of a kind it does not know makes it fail closed for the cell that the event names, until it has read that cell again.
 
 - **A parent's hub** withholds the cell. The relay shows it `unavailable` at once, which hides its instances and keeps it out of the `requires` count, and not offered at the follow's next revision. The follow does not close while the cell is withheld. The hub reads the cell again from a new watch of the child's hub. If the new watch's snapshot also has an unknown event, the cell stays withheld, and the hub tries again after the refollow wait.
+- A parent's hub of an earlier build does not know `models`, so it withholds the cell until it reads it again. The new snapshot carries the models as a field of `cell`, which it ignores.
+- A chooser of an earlier build does not know `listed`. It leaves the cell unread, and reads it again from the watch of its follow alone, which sends no `listed`.
 - **A chooser** leaves the cell unread (`FollowedCell::unread`). The cell is not offered, its tables show none of its instances, and its follow refuses new leases. The chooser opens `GET /v1/ext/gdl-cell/follows/{class}/{cell}` at once and reads the cell from it until its next relay watch. Meanwhile it still applies a `withdrawn` for the cell from the relay watch, since no snapshot carries one. The relay watch and every other cell go on. Being unread is not acknowledged to the hub: it has no revision.
 - An unknown relay event that names no cell, an event that is not JSON, or a known event whose fields do not parse, ends the watch.
 

@@ -33,7 +33,10 @@ impl Changes {
     }
 
     pub(super) fn send(&mut self, event: FollowEvent) {
+        // A watch of one follow is how a reader of an earlier build reads
+        // a cell again after a kind it does not know, so it carries none.
         if !self.one.is_empty()
+            && !matches!(event, FollowEvent::Listed { .. })
             && let Some((class, cell)) = event.cell()
             && let Some(cells) = self.one.get_mut(class)
             && let Some(channel) = cells.get(cell)

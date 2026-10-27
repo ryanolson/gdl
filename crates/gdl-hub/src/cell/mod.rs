@@ -396,6 +396,9 @@ impl<D: CellDirectory> CellReadiness<D> {
             releases,
             timing.lost_chooser,
         ));
+        // Known before any watch of the relay can begin, so that one begun
+        // as the hub starts waits for the directory's first snapshots.
+        relay.expect(sends.iter().cloned());
         Ok(Self {
             directory: Arc::new(directory),
             record,

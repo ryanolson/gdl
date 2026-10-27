@@ -85,7 +85,7 @@ impl Classify for CellWatchEvent {
     type Unknown = UnknownEvent;
 
     const KINDS: &'static [&'static str] = &[
-        "cell", "synced", "state", "load", "ready", "retired", "left",
+        "cell", "synced", "state", "load", "ready", "retired", "left", "models",
     ];
 
     fn unknown(data: &str) -> Option<UnknownEvent> {
@@ -116,6 +116,7 @@ impl Classify for FollowEvent {
         "offering",
         "dropped",
         "withdrawn",
+        "listed",
     ];
 
     fn unknown(data: &str) -> Option<UnknownFollowEvent> {
@@ -139,7 +140,7 @@ impl Classify for FollowEvent {
     }
 
     fn synced(&self) -> bool {
-        matches!(self, Self::Synced)
+        matches!(self, Self::Synced { .. })
     }
 }
 
@@ -166,6 +167,7 @@ mod tests {
         // added, until it is listed here.
         let cell: Vec<CellWatchEvent> = vec![
             CellWatchEvent::Cell {
+                models: None,
                 name: "m".into(),
                 class: "c".into(),
                 epoch: 1,
@@ -191,6 +193,9 @@ mod tests {
                 segment: "f".into(),
                 instance,
             },
+            CellWatchEvent::Models {
+                models: crate::ModelList::default(),
+            },
         ];
         for event in &cell {
             match event {
@@ -200,7 +205,8 @@ mod tests {
                 | CellWatchEvent::Load { .. }
                 | CellWatchEvent::Ready { .. }
                 | CellWatchEvent::Retired { .. }
-                | CellWatchEvent::Left { .. } => {}
+                | CellWatchEvent::Left { .. }
+                | CellWatchEvent::Models { .. } => {}
             }
         }
         let tags: Vec<String> = cell.iter().map(tag).collect();
@@ -209,6 +215,7 @@ mod tests {
         let (class, name) = (String::from("c"), String::from("m"));
         let relay: Vec<FollowEvent> = vec![
             FollowEvent::Follow {
+                listing: None,
                 class: class.clone(),
                 cell: name.clone(),
                 generation: 1,
@@ -217,7 +224,7 @@ mod tests {
                 load: None,
                 load_age_ms: None,
             },
-            FollowEvent::Synced,
+            FollowEvent::Synced { listed: false },
             FollowEvent::State {
                 class: class.clone(),
                 cell: name.clone(),
@@ -264,15 +271,21 @@ mod tests {
                 generation: 1,
             },
             FollowEvent::Withdrawn {
+                class: class.clone(),
+                cell: name.clone(),
+                generation: 1,
+            },
+            FollowEvent::Listed {
                 class,
                 cell: name,
-                generation: 1,
+                generation: 0,
+                listing: None,
             },
         ];
         for event in &relay {
             match event {
                 FollowEvent::Follow { .. }
-                | FollowEvent::Synced
+                | FollowEvent::Synced { .. }
                 | FollowEvent::State { .. }
                 | FollowEvent::Load { .. }
                 | FollowEvent::Exposed { .. }
@@ -280,14 +293,15 @@ mod tests {
                 | FollowEvent::Left { .. }
                 | FollowEvent::Offering { .. }
                 | FollowEvent::Dropped { .. }
-                | FollowEvent::Withdrawn { .. } => {}
+                | FollowEvent::Withdrawn { .. }
+                | FollowEvent::Listed { .. } => {}
             }
         }
         let tags: Vec<String> = relay.iter().map(tag).collect();
         assert_eq!(tags, FollowEvent::KINDS);
         // Every event of the relay but its marker names its follow, which
         // a reader fails closed for when it does not know the event.
-        for event in relay.iter().filter(|event| **event != FollowEvent::Synced) {
+        for event in relay.iter().filter(|event| !event.synced()) {
             let value = serde_json::to_value(event).expect("an event serializes");
             for field in ["class", "cell", "generation"] {
                 assert!(value.get(field).is_some(), "{event:?} names no {field}");
@@ -369,5 +383,82 @@ mod tests {
             retired,
             serde_json::json!({ "event": "retired", "segment": "f", "instance": instance })
         );
+    }
+
+    /// A reader of an earlier build reads the model index's fields of known
+    /// events as the events it knew, and the new kinds as kinds it does not
+    /// know: the relay's names its follow, so the reader fails closed for
+    /// that cell alone, and reads it again.
+    #[test]
+    fn an_earlier_reader_reads_the_index_fields_as_it_did() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        #[serde(tag = "event", rename_all = "snake_case")]
+        enum Earlier {
+            Synced,
+            Cell { name: String, epoch: u64 },
+            Follow { cell: String, generation: u64 },
+        }
+        let read = |event: &serde_json::Value| -> Earlier {
+            serde_json::from_value(event.clone()).expect("an earlier reader reads it")
+        };
+        let marker = serde_json::to_value(FollowEvent::Synced { listed: true }).expect("json");
+        assert_eq!(read(&marker), Earlier::Synced);
+        let cell = serde_json::to_value(CellWatchEvent::Cell {
+            name: "m".into(),
+            class: "c".into(),
+            epoch: 3,
+            state: CellState::Ready,
+            load: None,
+            models: Some(crate::ModelList {
+                entries: Vec::new(),
+                version: 9,
+                revoked: Vec::new(),
+            }),
+        })
+        .expect("json");
+        assert_eq!(
+            read(&cell),
+            Earlier::Cell {
+                name: "m".into(),
+                epoch: 3
+            }
+        );
+        let listing = crate::Listing {
+            region: "r".into(),
+            condition: gdl_cells::CellCondition::Missing,
+            models: crate::ModelList::default(),
+        };
+        let follow = serde_json::to_value(FollowEvent::Follow {
+            class: "c".into(),
+            cell: "m".into(),
+            generation: 2,
+            region: "r".into(),
+            state: CellState::Ready,
+            load: None,
+            load_age_ms: None,
+            listing: Some(listing.clone()),
+        })
+        .expect("json");
+        assert_eq!(
+            read(&follow),
+            Earlier::Follow {
+                cell: "m".into(),
+                generation: 2
+            }
+        );
+        // Each new kind is unknown to a reader that knew only the earlier
+        // ones, and the relay's names the follow to fail closed for.
+        let listed = FollowEvent::Listed {
+            class: "c".into(),
+            cell: "m".into(),
+            generation: 2,
+            listing: Some(listing),
+        };
+        let data = serde_json::to_string(&listed).expect("json");
+        let probe: serde_json::Value = serde_json::from_str(&data).expect("json");
+        assert_eq!(probe["event"], "listed");
+        assert_eq!(probe["cell"], "m");
+        assert_eq!(probe["generation"], 2);
+        assert!(serde_json::from_str::<Earlier>(&data).is_err());
     }
 }

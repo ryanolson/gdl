@@ -49,10 +49,10 @@ Each server-sent event's data is one JSON value tagged by `event`.
 
 | Watch | Snapshot, in order | Changes |
 |---|---|---|
-| Cell's watch (`CellWatchEvent`) | `cell` (name, class, epoch, state, load); `state` with `unfollowed: true` if already sent; `retired`; `ready` (segment, `PeerInfo`); `synced` | `state`; `load` once a period while there is a summary, and once when there is none; `ready`; `retired`; `retired` again with `acknowledged: true`; `left`; `state` again with `unfollowed: true` |
-| Relay (`FollowEvent`) | for each follow: `follow` (class, cell, generation, region, state, load, and `load_age_ms`, how long ago the hub received the load), `offering` if not offered, `retired`, `exposed`; then one `synced` | `state`, `load`, `offering` (revision, offered), `exposed`, `retired`, `left`, `dropped`, `withdrawn` (after the hub's directory watch shows the cell's withdrawal; it names the cell's latest follow and may come after its `dropped`) |
+| Cell's watch (`CellWatchEvent`) | `cell` (name, class, epoch, state, load, and `models`, the cell's model entries and their version); `state` with `unfollowed: true` if already sent; `retired`; `ready` (segment, `PeerInfo`); `synced` | `state`; `load` once a period while there is a summary, and once when there is none; `models` when the list changes; `ready`; `retired`; `retired` again with `acknowledged: true`; `left`; `state` again with `unfollowed: true` |
+| Relay (`FollowEvent`) | for each follow: `follow` (class, cell, generation, region, state, load, `load_age_ms`, how long ago the hub received the load, and the current follow's `listing`), `offering` if not offered, `retired`, `exposed`; then `listed` for each listed cell with no follow; then one `synced`, with `listed: true` once the hub has read the directory's first snapshot of every class it sends to | `state`, `load`, `offering` (revision, offered), `exposed`, `retired`, `left`, `dropped`, `withdrawn` (after the hub's directory watch shows the cell's withdrawal; it names the cell's latest follow and may come after its `dropped`), `listed` (region, condition, models; no `listing` once the cell withdrew) |
 
-Every relay event except `synced` names its class, cell, and generation. A chooser of an earlier build does not know `withdrawn`: it leaves the cell unread until it reads it again, if it still follows the cell, which by then is draining and not offered. `unfollowed` and `acknowledged` are fields of known events, not kinds of their own, so an earlier reader ignores them. A later build adds to an event only as an optional field.
+Every relay event except `synced` names its class, cell, and generation. `listed` names the cell's latest follow, or generation 0 for a cell the hub never followed. The watch of one follow sends no `listed`. A chooser of an earlier build does not know `withdrawn`: it leaves the cell unread until it reads it again, if it still follows the cell, which by then is draining and not offered. `unfollowed`, `acknowledged`, `models` on `cell`, `listing` on `follow`, and `listed` on `synced` are fields of known events, not kinds of their own, so an earlier reader ignores them. A reader of an earlier build fails closed for the cell at a `models` or `listed` event, and reads it again. A later build adds to an event only as an optional field.
 
 ## Limits and timing
 
@@ -61,6 +61,7 @@ Every relay event except `synced` names its class, cell, and generation. A choos
 | Event size a reader accepts | 4 MiB | `WatchLimits::EVENT` |
 | Snapshot size a reader accepts | 64 MiB | `WatchLimits::SNAPSHOT` |
 | Time from asking to `synced` | 30 s | `WatchLimits::SYNCED_WITHIN` |
+| Wait of a relay watch for the directory's first snapshots, before its own | 2 s, fixed | `LISTED_WAIT` in `crates/gdl-hub/src/follow/relay.rs` |
 | Idle time before a reader ends a watch | 30 s without a byte | `CellWatcher` |
 | Keep-alive | every 10 s | the hub |
 | Events a watcher may fall behind | 1024 by default, then its watch ends | `[cell] watch_buffer` |

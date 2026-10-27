@@ -150,6 +150,23 @@ pub enum Presence {
     ScaledToZero,
 }
 
+/// Whether a cell is expected to answer, as a reader judges it from the
+/// cell's record and its follow: what a model gate tells a model whose
+/// cells are all silent (503) from one decommissioned (404) by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellCondition {
+    /// The cell is `serving`, its record is fresh, and its follow, if the
+    /// reader's hub follows it, has not been lost.
+    Live,
+    /// The cell was scaled to 0 on purpose ([`Presence::ScaledToZero`]).
+    ScaledToZero,
+    /// The cell is `serving`, but its lease has passed without a new
+    /// write, or its follow's link was lost and has not been read again:
+    /// expected, but silent.
+    Missing,
+}
+
 /// One model a cell serves, in its record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelEntry {

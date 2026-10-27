@@ -336,11 +336,24 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **Why:** the report route and the read of a child's record trust the private network, as an instance's registration and velo's traffic do. No credential crosses cells until the private CA exists.
 - **Lifts:** hub TLS with client certificates and authenticated names, from the private CA.
 
-### Nothing reads a cell's models yet
-- **What:** a cell's hub publishes its presence and its models in its record. A parent's hub reads only the presence: it does not follow a cell scaled to 0, and ends a follow of one. No hub, chooser, or node reads the models.
-- **Revoked models:** a revoked model is not in the record's models, so a model index will not find it there. A gate that reads `FollowedCells` today answers 404 only for a cell that withdrew, by its drain or an operator's command.
-- **Why:** the record is the writer's side. The model index that choosers and a model gate read is not built.
-- **Lifts:** a model index built from directory records, in the chooser's table.
+### Under `relay`, the model index lists only the hub's own children
+- **What:** a hub builds its choosers' model index from what its watch of the directory gives. Under `relay`, that is only the records its own children report ([The relay directory has no mesh](#the-relay-directory-has-no-mesh)). So a model that only another parent's children serve is not listed, and a gate answers 404 for it, not 503. A parent's hub lists each of its children, silent or not, until the child withdraws.
+- **Why:** the index takes whatever the backend yields. No backend that every region reads is built yet.
+- **Test:** `a_parent_lists_its_childrens_models_and_no_other_cells` in `crates/gdl-hub/tests/relay.rs`.
+- **Workaround:** a backend that keeps every rule, such as `dir` on one host.
+- **Lifts:** a directory backend that every region reads, or the relay mesh among parent hubs.
+
+### A new hub reads a silent cell as live for one lease
+- **What:** a hub dates a record from when it first sees its `seq`, on its own clock. So a hub that starts reads a cell that went silent before as `live` for up to one lease (30 s by default), then as `missing`.
+- **Impact:** a reader that goes by the condition alone reads the cell as live. A gate that also requires an offered cell answers 503 all the same: a cell its hub cannot reach is never offered, and a child whose link fails reads `missing` at once.
+- **Why:** a reader never trusts a time in the record: clocks across regions differ.
+- **Test:** `a_new_hub_lists_a_silent_cell_with_its_models` in `crates/gdl-hub/tests/listed.rs`.
+
+### A withdrawal missed by the hub keeps the cell listed
+- **What:** a hub removes a cell from its listings only at a withdrawal that its watch of the directory shows. A withdrawal made while the watch was down reaches the hub as a snapshot that no longer holds the record, and the cell stays listed as `missing`, so a gate answers 503 for its models, not 404, until the hub restarts.
+- **Why:** silence never removes a cell. A record missing from a snapshot may have been lost for any reason.
+- **Workaround:** restart the hub, whose new watch's snapshot no longer holds the record.
+- **Lifts:** a directory that keeps each withdrawal in its snapshot.
 
 ### Two rare restarts lose part of a model's history
 - **What:** a hub that took the report that ends a drain, and restarted before it stored a record that says `drained`, reads the earlier record: the model is `unavailable`, not `drained`, until the cell withdraws. And under a parent of an earlier build, which answers no read of a child's record, a restarted hub whose epoch equals its predecessor's to the millisecond can publish a lower `models_version` than its predecessor did.
@@ -422,8 +435,8 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 ### A cell's withdrawal reaches only the choosers that saw it
 - **What:** a chooser reads a cell as withdrawn ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)) only if its hub's watch of the cell directory showed the withdrawal while the chooser watched the relay. The relay's snapshot holds no withdrawal, and a directory snapshot holds only current records. So a chooser that starts after the withdrawal, a chooser whose hub restarted since, and a hub whose directory watch was down at that moment, read the cell as neither followed nor withdrawn. A model gate then answers 503 for a model whose sets were all drained, not 404, and two gate instances can answer differently until the one that saw the withdrawal restarts.
 - **Why:** silence is never a decommission. A record missing from a snapshot may have expired or been lost, so only an explicit withdrawal counts. Keeping withdrawals in the relay's snapshot would only move the gap to a hub restart.
-- **Workaround:** take a decommissioned model out of the gate's own model-to-set map.
-- **Lifts:** model availability in the cell record and in events.
+- **Workaround:** a gate reads the model index instead ([The model index](../concepts/cell-routing.md#the-model-index)): a cell that withdrew is no longer listed, and a model whose every cell drained shows only `drained` entries.
+- **Lifts:** a directory that keeps each withdrawal in its snapshot.
 
 ### The names a watch, a release, and an acknowledgement carry are not authenticated
 - **What:** nothing checks the class, cell, run, and generation a caller names, or the chooser that a watch of the relay names. Anyone who can reach a cell's hub can hold a draining cell's early end off until the bound, or bring it forward by releasing a watch it did not open. A watch of the relay in a chooser's name can only keep the hub waiting for that chooser, as it would if the chooser watched. It can also tell the hub that the cells following it avoid a retired entry instance when they do not. `POST /drain` on the control listener and `POST /release` and `POST /avoided` on the public listener need no credential. A chooser that still picks the instance after it stopped taking work is refused and offers the request to another cell.
@@ -442,6 +455,7 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 
 ### A watch event of a kind a reader does not know withholds its cell
 - **What:** a reader of a cell's watch or a hub's relay that meets an event kind it does not know fails closed for the cell the event concerns. A hub withholds the cell: its relay shows it `unavailable`, no chooser chooses it, and no requirement counts it, until the hub reads the cell again from a new watch. A cell whose every reading carries such an event stays withheld while the link lives, so its follow never closes by acknowledgement and a drain waits out its bound. A chooser leaves the cell unread until it reads it from a watch of the follow alone. An event of an unknown kind that names no follow ends the watch, as does an event that is not JSON or does not parse.
+- **The model index:** a chooser of an earlier build under a hub of this build fails closed at each `listed` event. It reads the cell again from a watch of its follow alone, also for a cell it never followed. So it opens one such watch for each listed cell it does not follow, on every watch of the relay, and one for each change of a listing. Each counts against the cap on watches of one follow (16384 by default). A parent's hub of an earlier build withholds a child of this build at each `models` event, until it reads the child again, so a cell whose models change often is withheld often.
 - **Why:** an event a reader cannot read may say what keeps it from the cell, such as a retirement, so skipping it is unsafe. The cost falls only on readers of earlier builds, and only for the cells such an event names.
 - **Workaround:** add new information to a known event as an optional field, which earlier readers ignore. Add a kind of event rarely, since each new kind costs each earlier reader its cell until it has read it again. See [Cell hub routes and watch events](../appendix/hub-api.md).
 

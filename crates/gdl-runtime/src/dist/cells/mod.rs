@@ -306,7 +306,8 @@ impl Cells {
 }
 
 /// What a node reads of the tables: the table an entry segment's cell
-/// policy chooses from, with the class's withdrawn cells, in one load, and
+/// policy chooses from, with the class's withdrawn cells and its model
+/// index, in one load, and
 /// the cells the chooser holds gone, in one more. No table is made for a
 /// gone mark: the next read sees the damping the chooser's choices read.
 /// The two loads are not one moment, but a mark holds the follow it was
@@ -327,7 +328,11 @@ impl gdl::__runtime::CellSource for Cells {
         };
         let table = slot.load();
         let damped = self.shared.damping.view();
-        read(gdl::ClassCells::new(&table.views, &table.withdrawn).with_damped(&damped));
+        read(
+            gdl::ClassCells::new(&table.views, &table.withdrawn)
+                .with_damped(&damped)
+                .with_models(&table.models),
+        );
     }
 }
 
@@ -416,6 +421,9 @@ pub(crate) struct EntryTable {
     /// so that a node reads both from one snapshot. A withdrawn cell may
     /// still be in `cells` until its follow is dropped.
     pub(crate) withdrawn: Box<[Box<str>]>,
+    /// The class's model index, shared by the tables of each of its entry
+    /// segments, and made again only when what it lists changes.
+    pub(crate) models: Arc<gdl::ModelIndex>,
 }
 
 impl EntryTable {
@@ -426,12 +434,19 @@ impl EntryTable {
             cells,
             views,
             withdrawn: Box::default(),
+            models: Arc::default(),
         }
     }
 
     /// The table with the class's `withdrawn` cells, sorted.
     pub(crate) fn with_withdrawn(mut self, withdrawn: Box<[Box<str>]>) -> Self {
         self.withdrawn = withdrawn;
+        self
+    }
+
+    /// The table with the class's model index.
+    pub(crate) fn with_models(mut self, models: Arc<gdl::ModelIndex>) -> Self {
+        self.models = models;
         self
     }
 }

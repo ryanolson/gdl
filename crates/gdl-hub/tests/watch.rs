@@ -42,10 +42,15 @@ async fn watching(hub: &Hub) -> BoxStream<'static, CellWatchEvent> {
 }
 
 async fn next(watch: &mut (impl Stream<Item = CellWatchEvent> + Unpin)) -> CellWatchEvent {
-    tokio::time::timeout(WAIT, watch.next())
-        .await
-        .expect("an event in time")
-        .expect("the watch goes on")
+    loop {
+        let event = tokio::time::timeout(WAIT, watch.next())
+            .await
+            .expect("an event in time")
+            .expect("the watch goes on");
+        if let Some(event) = common::plain_cell(event) {
+            return event;
+        }
+    }
 }
 
 /// Wait for the watch to end.
@@ -98,6 +103,7 @@ fn state(state: CellState) -> CellWatchEvent {
 /// The model cell's first event, in `state`, under `epoch`.
 fn cell(epoch: u64, state: CellState) -> CellWatchEvent {
     CellWatchEvent::Cell {
+        models: None,
         name: CELL.into(),
         class: "model_x".into(),
         epoch,
@@ -147,7 +153,9 @@ impl View {
                 let known = self.ready.remove(instance).is_some() | self.retired.remove(instance);
                 assert!(known, "an instance that left was never sent");
             }
-            CellWatchEvent::Synced | CellWatchEvent::Load { .. } => {}
+            CellWatchEvent::Synced
+            | CellWatchEvent::Load { .. }
+            | CellWatchEvent::Models { .. } => {}
         }
     }
 }
@@ -345,6 +353,7 @@ async fn a_class_no_hop_enters_is_watched_for_its_state_alone() {
         snapshot(&mut watch).await,
         [
             CellWatchEvent::Cell {
+                models: None,
                 name: GLOBAL.into(),
                 class: "global".into(),
                 epoch: published.epoch,
@@ -402,9 +411,15 @@ async fn a_watcher_that_falls_behind_its_buffer_is_ended() {
     .await;
     records.until(CellState::Ready).await;
 
-    let behind_events = tokio::time::timeout(WAIT, behind.by_ref().collect::<Vec<_>>())
-        .await
-        .expect("the watch that fell behind ends");
+    let behind_events = tokio::time::timeout(
+        WAIT,
+        behind
+            .by_ref()
+            .filter_map(|event| std::future::ready(common::plain_cell(event)))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("the watch that fell behind ends");
     assert_eq!(
         behind_events,
         [

@@ -455,7 +455,7 @@ async fn expected(watch: &mut gdl_hub::FollowsWatch) -> Vec<gdl_runtime::Followe
             .expect("the snapshot within the wait")
             .expect("the relay lives");
         match event {
-            FollowEvent::Synced => break,
+            FollowEvent::Synced { .. } => break,
             FollowEvent::Follow {
                 class,
                 cell,

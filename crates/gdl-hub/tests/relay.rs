@@ -1277,3 +1277,84 @@ async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
     assert!(first.models_version > 3);
     child.hub.shutdown().await.expect("the child's hub stops");
 }
+
+/// Under `relay`, a parent's hub lists its children's models for its
+/// choosers' model index, from the records they report, and only theirs:
+/// it holds no other cell's record, so a cell of another parent, which
+/// reports elsewhere, is never listed here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parent_lists_its_childrens_models_and_no_other_cells() {
+    let spec = spec();
+    let parent = relay_cell(&spec, global(), quiet_timing()).await;
+    let elsewhere = relay_cell(
+        &spec,
+        CellSettings {
+            name: "global-02".into(),
+            hub: Some("global-02-hub:1337".into()),
+            ..global()
+        },
+        quiet_timing(),
+    )
+    .await;
+    let declared = |model: &str| gdl_model::ModelKey::new(model);
+    let _child = relay_cell(
+        &spec,
+        CellSettings {
+            models: vec![declared("qwen-32b")],
+            ..model("model-x-01", &address(&parent.hub))
+        },
+        quiet_timing(),
+    )
+    .await;
+    let _other = relay_cell(
+        &spec,
+        CellSettings {
+            models: vec![declared("mistral-24b")],
+            home: Some("global-02".into()),
+            ..model("model-x-02", &address(&elsewhere.hub))
+        },
+        quiet_timing(),
+    )
+    .await;
+    holds(
+        &elsewhere.directory,
+        "model_x",
+        "the other parent's child",
+        |cells| cells.contains_key("model-x-02"),
+    )
+    .await;
+
+    let listed = tokio::time::timeout(WAIT, async {
+        loop {
+            let mut watch = parent.readiness.follows();
+            let mut cells = Vec::new();
+            loop {
+                match watch.next().await.expect("the watch goes on") {
+                    gdl_watch::FollowEvent::Listed {
+                        cell,
+                        listing: Some(listing),
+                        ..
+                    } => cells.push((cell, listing)),
+                    gdl_watch::FollowEvent::Synced { .. } => break,
+                    _ => {}
+                }
+            }
+            if !cells.is_empty() {
+                return cells;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the child listed in time");
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    let (cell, listing) = &listed[0];
+    assert_eq!(cell, "model-x-01");
+    let models: Vec<&str> = listing
+        .models
+        .entries
+        .iter()
+        .map(|entry| entry.model.as_str())
+        .collect();
+    assert_eq!(models, ["qwen-32b"]);
+}

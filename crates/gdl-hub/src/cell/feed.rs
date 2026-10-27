@@ -123,7 +123,7 @@ impl Feed {
     pub(super) fn raise_floor(&self, floor: u64) {
         let mut shared = self.lock();
         if shared.models.raise_floor(floor) {
-            self.models.send_replace(Arc::new(shared.models.list()));
+            self.models_changed(&shared);
         }
     }
 
@@ -135,7 +135,7 @@ impl Feed {
         let mut shared = self.lock();
         shared.models.restore(held, floor);
         shared.update_models();
-        self.models.send_replace(Arc::new(shared.models.list()));
+        self.models_changed(&shared);
     }
 
     /// Revoke the model `key`, or lift its revocation when `revoked` is
@@ -162,6 +162,17 @@ impl Feed {
 
     fn lock(&self) -> MutexGuard<'_, Shared> {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The cell's model entries changed: for the record, and for each
+    /// cell that follows this one, under the lock that orders the watch's
+    /// events.
+    fn models_changed(&self, shared: &Shared) {
+        let list = shared.models.list();
+        shared.send(CellWatchEvent::Models {
+            models: list.clone(),
+        });
+        self.models.send_replace(Arc::new(list));
     }
 
     /// A watch of the cell: its snapshot, then each change. It begins once
@@ -410,7 +421,7 @@ impl Feed {
                 entry.said = said;
                 shared.loads.put(owner, lease.epoch, load, now);
                 if changed && shared.update_models() {
-                    self.models.send_replace(Arc::new(shared.models.list()));
+                    self.models_changed(&shared);
                 }
                 Ok(())
             }
@@ -445,7 +456,7 @@ impl Feed {
         // An instance that is no longer usable no longer serves its
         // models: seen here, once a period, as its report is dropped.
         if shared.update_models() {
-            self.models.send_replace(Arc::new(shared.models.list()));
+            self.models_changed(&shared);
         }
         // The summary's period paces the followers' leases too, so a watch
         // is marked lost up to a period after its lease; that is never a
@@ -749,6 +760,7 @@ impl Shared {
             epoch,
             state: self.state,
             load: self.loads.summary(),
+            models: Some(self.models.list()),
         });
         if self.followers.unfollowed() {
             events.push(unfollowed());

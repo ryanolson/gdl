@@ -40,10 +40,15 @@ async fn follows(hub: &Hub) -> BoxStream<'static, FollowEvent> {
 }
 
 async fn next(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> FollowEvent {
-    tokio::time::timeout(WAIT, watch.next())
-        .await
-        .expect("an event in time")
-        .expect("the watch goes on")
+    loop {
+        let event = tokio::time::timeout(WAIT, watch.next())
+            .await
+            .expect("an event in time")
+            .expect("the watch goes on");
+        if let Some(event) = common::plain_follow(event) {
+            return event;
+        }
+    }
 }
 
 /// The snapshot: every event up to and including the marker.
@@ -51,7 +56,7 @@ async fn snapshot(watch: &mut (impl Stream<Item = FollowEvent> + Unpin)) -> Vec<
     let mut events = Vec::new();
     loop {
         let event = next(watch).await;
-        let synced = event == FollowEvent::Synced;
+        let synced = matches!(event, FollowEvent::Synced { .. });
         events.push(event);
         if synced {
             return events;
@@ -215,7 +220,7 @@ impl Relay {
                 );
                 assert!(installed.is_none(), "{cell} installed twice");
             }
-            FollowEvent::Synced => {}
+            FollowEvent::Synced { .. } | FollowEvent::Listed { .. } => {}
             FollowEvent::Load {
                 cell, generation, ..
             }
@@ -510,6 +515,7 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
         first,
         [
             FollowEvent::Follow {
+                listing: None,
                 class: "model_x".into(),
                 cell: CELL.into(),
                 generation,
@@ -532,7 +538,7 @@ async fn a_follow_is_its_state_first_then_retired_then_ready() {
                 segment: "f".into(),
                 peer: serving_peer.clone(),
             },
-            FollowEvent::Synced,
+            FollowEvent::Synced { listed: false },
         ]
     );
     let mut relay = Relay::of(&first);
@@ -740,7 +746,10 @@ async fn a_hub_serving_another_cell_or_epoch_is_not_installed() {
     )
     .await;
     let mut last = follows(&global_hub).await;
-    assert_eq!(snapshot(&mut last).await, [FollowEvent::Synced]);
+    assert_eq!(
+        snapshot(&mut last).await,
+        [FollowEvent::Synced { listed: false }]
+    );
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
 }
@@ -1023,9 +1032,12 @@ async fn a_relay_watcher_that_falls_behind_is_ended() {
         },
     )
     .await;
-    let mut behind = global_cell.follows();
+    // Opened once the hub's snapshot says its listings are whole: one
+    // opened before waits for them, and so takes its snapshot only when
+    // first read.
     let mut watch = follows(&global_hub).await;
     let mut relay = Relay::of(&snapshot(&mut watch).await);
+    let mut behind = global_cell.follows();
 
     let (_quorum, _) = meet_the_quorum(&model_hub).await;
     let mut more = Vec::new();
@@ -1038,10 +1050,16 @@ async fn a_relay_watcher_that_falls_behind_is_ended() {
         relay.exposed(CELL).len() == 7
     })
     .await;
-    let behind_events = tokio::time::timeout(WAIT, behind.by_ref().collect::<Vec<_>>())
-        .await
-        .expect("the watch that fell behind ends");
-    assert_eq!(behind_events, [FollowEvent::Synced]);
+    let behind_events = tokio::time::timeout(
+        WAIT,
+        behind
+            .by_ref()
+            .filter_map(|event| std::future::ready(common::plain_follow(event)))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("the watch that fell behind ends");
+    assert_eq!(behind_events, [FollowEvent::Synced { listed: false }]);
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
 }
@@ -1063,7 +1081,10 @@ async fn dropping_a_relay_watch_releases_it() {
     let inside = global_cell.follows();
     count(1).await;
     let mut outside = follows(&global_hub).await;
-    assert_eq!(snapshot(&mut outside).await, [FollowEvent::Synced]);
+    assert_eq!(
+        snapshot(&mut outside).await,
+        [FollowEvent::Synced { listed: false }]
+    );
     count(2).await;
     drop(inside);
     count(1).await;
@@ -1071,7 +1092,10 @@ async fn dropping_a_relay_watch_releases_it() {
     count(0).await;
 
     let mut last = global_cell.follows();
-    assert_eq!(snapshot(&mut last).await, [FollowEvent::Synced]);
+    assert_eq!(
+        snapshot(&mut last).await,
+        [FollowEvent::Synced { listed: false }]
+    );
     global_hub.shutdown().await.expect("the hub stops");
     let ended = tokio::time::timeout(WAIT, last.next())
         .await

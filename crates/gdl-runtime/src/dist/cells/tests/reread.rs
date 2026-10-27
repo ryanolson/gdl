@@ -65,7 +65,10 @@ fn reread(
 ) {
     follows.unknown(unknown(generation));
     let Asked { key, watch, .. } = follows.asked().pop().expect("a watch of its own");
-    for event in events.into_iter().chain([FollowEvent::Synced]) {
+    for event in events
+        .into_iter()
+        .chain([FollowEvent::Synced { listed: false }])
+    {
         follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
 }
@@ -96,7 +99,7 @@ fn a_lease_is_carried_through_a_reading_and_refused_while_unread() {
         follow(M1, 1, CellState::Ready),
         offering(1, 2, false),
         exposed(M1, 1, &p),
-        FollowEvent::Synced,
+        FollowEvent::Synced { listed: false },
     ] {
         follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
@@ -204,7 +207,7 @@ fn an_offered_cell_left_unread_refuses_a_lease() {
     for event in [
         follow(M1, 1, CellState::Ready),
         exposed(M1, 1, &p),
-        FollowEvent::Synced,
+        FollowEvent::Synced { listed: false },
     ] {
         follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
@@ -239,7 +242,7 @@ fn an_unknown_event_of_a_closing_generation_on_its_own_watch_changes_nothing() {
         exposed(M1, 1, &p),
         follow(M1, 2, CellState::Ready),
         exposed(M1, 2, &q),
-        FollowEvent::Synced,
+        FollowEvent::Synced { listed: false },
     ] {
         follows.own(key.clone(), watch, Ok(Watched::Event(event)), now);
     }
@@ -286,7 +289,12 @@ fn an_unknown_event_of_a_closing_generation_in_its_own_snapshot_changes_nothing(
         follows.own(key.clone(), watch, item(event), now);
     }
     follows.own(key.clone(), watch, Ok(Watched::Unknown(unknown(1))), now);
-    follows.own(key.clone(), watch, item(FollowEvent::Synced), now);
+    follows.own(
+        key.clone(),
+        watch,
+        item(FollowEvent::Synced { listed: false }),
+        now,
+    );
     assert!(offer(&cells).is_some(), "the cell left unread");
     assert!(follows.asked().is_empty(), "the cell read again");
 }

@@ -770,6 +770,7 @@ mod tests {
     #[test]
     fn a_follows_load_age_is_optional() {
         let follow = |load_age_ms| FollowEvent::Follow {
+            listing: None,
             class: "model_x".into(),
             cell: "m".into(),
             generation: 2,

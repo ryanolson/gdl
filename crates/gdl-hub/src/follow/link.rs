@@ -173,6 +173,7 @@ async fn snapshot(events: &mut Events, record: &CellRecord) -> Option<Snapshot> 
             epoch,
             state,
             load,
+            models,
         }) if name == record.name && class == record.class && epoch == record.epoch => {
             Installed::new(
                 name,
@@ -182,6 +183,7 @@ async fn snapshot(events: &mut Events, record: &CellRecord) -> Option<Snapshot> 
                 state,
                 load,
             )
+            .with_models(models)
         }
         Watched::Event(CellWatchEvent::Cell { name, epoch, .. }) => {
             tracing::info!(

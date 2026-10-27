@@ -350,10 +350,13 @@ async fn read<S: Source, R: Registry>(
                         continue;
                     }
                 };
-                let marker = matches!(event, FollowEvent::Synced);
+                let marker = matches!(event, FollowEvent::Synced { .. });
                 match snapshot.take() {
-                    Some(complete) if marker => {
+                    Some(mut complete) if marker => {
                         let now = Instant::now();
+                        // The marker says whether the hub's listings are
+                        // whole.
+                        complete.apply(event, now);
                         follows.resnapshot(complete, now);
                         synced = Some(now);
                         own = Own::default();

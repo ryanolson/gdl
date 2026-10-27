@@ -126,6 +126,7 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
     let start = Instant::now();
     for event in [
         FollowEvent::Follow {
+            listing: None,
             class: "model_x".into(),
             cell: "m1".into(),
             generation: 1,
