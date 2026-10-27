@@ -296,4 +296,13 @@ pub struct Listing {
     /// The cell's model entries, with their version.
     #[serde(default)]
     pub models: crate::ModelList,
+    /// How long the cell had been silent when the hub sent this, in
+    /// milliseconds, while it is missing: since its record's last write
+    /// when its lease passed, or since its follow's link was lost,
+    /// whichever came first. A reader dates the silence back by it. An
+    /// age, not an instant, since the hub's clock and the reader's are
+    /// not the same. Absent for a cell that is not missing, and from a hub
+    /// of an earlier build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_age_ms: Option<u64>,
 }

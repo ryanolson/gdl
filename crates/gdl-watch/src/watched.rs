@@ -427,7 +427,23 @@ mod tests {
             region: "r".into(),
             condition: gdl_cells::CellCondition::Missing,
             models: crate::ModelList::default(),
+            missing_age_ms: Some(4000),
         };
+        // A listing's age is a field a reader of an earlier build ignores.
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct EarlierListing {
+            region: String,
+            condition: gdl_cells::CellCondition,
+        }
+        let aged = serde_json::to_value(&listing).expect("json");
+        assert_eq!(aged["missing_age_ms"], 4000);
+        assert_eq!(
+            serde_json::from_value::<EarlierListing>(aged).expect("an earlier reader reads it"),
+            EarlierListing {
+                region: "r".into(),
+                condition: gdl_cells::CellCondition::Missing,
+            }
+        );
         let follow = serde_json::to_value(FollowEvent::Follow {
             class: "c".into(),
             cell: "m".into(),

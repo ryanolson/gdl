@@ -8,8 +8,13 @@
 //! A cell's models come from its record and from its follow link,
 //! whichever has the higher version, since the two race, and the version
 //! never goes down, also across a restart of the cell's hub.
+//!
+//! A missing cell's listing says how long it has been silent, as an age at
+//! the moment it is sent. The listings hold the instant on the hub's
+//! clock, and the caller passes the time, as to a `CellView`.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use gdl_cells::{CellCondition, CellRecord, Presence};
 use gdl_watch::{Listing, ModelList};
@@ -34,15 +39,17 @@ pub(super) struct Listings {
 struct Listed {
     region: String,
     presence: Presence,
-    /// The record's lease passed without a new write.
-    lapsed: bool,
+    /// The record's lease passed without a new write: when the follower
+    /// saw its last write.
+    lapsed: Option<Instant>,
     /// The cell's follow's link ended without the relay closing it, and
-    /// no later follow has been installed.
-    lost: bool,
+    /// no later follow has been installed: when it ended.
+    lost: Option<Instant>,
     /// The newest list seen, from the record or the link.
     models: ModelList,
-    /// What the relay last sent of the cell after a snapshot.
-    sent: Option<Listing>,
+    /// What the relay last sent of the cell after a snapshot, with no age,
+    /// and since when it was silent then.
+    sent: Option<(Listing, Option<Instant>)>,
     /// Whether anything above changed since `sent`: a heartbeat or a
     /// summary changes nothing, and is not compared, or copied.
     dirty: bool,
@@ -51,10 +58,11 @@ struct Listed {
 }
 
 impl Listed {
+    /// The listing, with no age.
     fn listing(&self) -> Listing {
         let condition = if self.presence == Presence::ScaledToZero {
             CellCondition::ScaledToZero
-        } else if self.lapsed || self.lost {
+        } else if self.lapsed.is_some() || self.lost.is_some() {
             CellCondition::Missing
         } else {
             CellCondition::Live
@@ -63,7 +71,30 @@ impl Listed {
             region: self.region.clone(),
             condition,
             models: self.models.clone(),
+            missing_age_ms: None,
         }
+    }
+
+    /// Since when a missing cell has been silent: the earlier of its
+    /// record's last write, once its lease passed, and the loss of its
+    /// link. A cell scaled to 0 is not silent, whatever came before.
+    fn silent(&self) -> Option<Instant> {
+        if self.presence == Presence::ScaledToZero {
+            return None;
+        }
+        match (self.lapsed, self.lost) {
+            (Some(lapsed), Some(lost)) => Some(lapsed.min(lost)),
+            (lapsed, lost) => lapsed.or(lost),
+        }
+    }
+
+    /// `listing` as sent at `now`, with the silence's age.
+    fn aged(mut listing: Listing, silent: Option<Instant>, now: Instant) -> Listing {
+        listing.missing_age_ms = silent.map(|since| {
+            let age = now.saturating_duration_since(since);
+            u64::try_from(age.as_millis()).unwrap_or(u64::MAX)
+        });
+        listing
     }
 
     /// Take `models` if they are newer than the list held, or the first
@@ -113,9 +144,9 @@ impl Listings {
         (!self.expected.is_empty() && !self.whole()).then(|| self.unsynced.clone())
     }
 
-    /// Take `record`, whose lease has `lapsed` or not, as what is known of
-    /// its cell.
-    pub(super) fn record(&mut self, record: &CellRecord, lapsed: bool) {
+    /// Take `record` as what is known of its cell: `lapsed` holds when the
+    /// follower saw its last write, if its lease has passed.
+    pub(super) fn record(&mut self, record: &CellRecord, lapsed: Option<Instant>) {
         let listed = self
             .classes
             .entry(record.class.clone())
@@ -125,7 +156,7 @@ impl Listings {
                 region: record.region.clone(),
                 presence: record.presence,
                 lapsed,
-                lost: false,
+                lost: None,
                 models: ModelList::default(),
                 sent: None,
                 dirty: true,
@@ -148,17 +179,19 @@ impl Listings {
         }
     }
 
-    /// The record of the cell `cell` of `class` lapsed, or a newer write
-    /// of it came.
-    pub(super) fn lapse(&mut self, class: &str, cell: &str, lapsed: bool) {
+    /// The record of the cell `cell` of `class`, last written when
+    /// `lapsed` says, lapsed.
+    pub(super) fn lapse(&mut self, class: &str, cell: &str, lapsed: Instant) {
         if let Some(listed) = self.get_mut(class, cell) {
-            Listed::set(&mut listed.lapsed, lapsed, &mut listed.dirty);
+            Listed::set(&mut listed.lapsed, Some(lapsed), &mut listed.dirty);
         }
     }
 
-    /// The cell's follow was lost, or a new one installed.
-    pub(super) fn lose(&mut self, class: &str, cell: &str, lost: bool) {
+    /// The cell's follow was lost at `lost`, or, with `None`, a new one
+    /// installed. A loss while the cell is already lost keeps the first.
+    pub(super) fn lose(&mut self, class: &str, cell: &str, lost: Option<Instant>) {
         if let Some(listed) = self.get_mut(class, cell) {
+            let lost = lost.map(|at| listed.lost.unwrap_or(at));
             Listed::set(&mut listed.lost, lost, &mut listed.dirty);
         }
     }
@@ -184,25 +217,27 @@ impl Listings {
         sent
     }
 
-    /// The cell's listing as it is now, if it is listed.
-    pub(super) fn listing(&self, class: &str, cell: &str) -> Option<Listing> {
+    /// The cell's listing as it is at `now`, if it is listed.
+    pub(super) fn listing(&self, class: &str, cell: &str, now: Instant) -> Option<Listing> {
         self.classes
             .get(class)
             .and_then(|cells| cells.get(cell))
-            .map(Listed::listing)
+            .map(|listed| Listed::aged(listed.listing(), listed.silent(), now))
     }
 
-    /// The cell's listing if it changed since it was last sent, marked
-    /// sent.
-    pub(super) fn changed(&mut self, class: &str, cell: &str) -> Option<Listing> {
+    /// The cell's listing at `now` if it changed since it was last sent,
+    /// marked sent. Its silence growing older is no change; a silence that
+    /// begins earlier, as when a lost cell's lease passes, is.
+    pub(super) fn changed(&mut self, class: &str, cell: &str, now: Instant) -> Option<Listing> {
         let listed = self.get_mut(class, cell).filter(|listed| listed.dirty)?;
         listed.dirty = false;
-        let listing = listed.listing();
-        if listed.sent.as_ref() == Some(&listing) {
+        let shown = (listed.listing(), listed.silent());
+        if listed.sent.as_ref() == Some(&shown) {
             return None;
         }
-        listed.sent = Some(listing.clone());
-        Some(listing)
+        let aged = Listed::aged(shown.0.clone(), shown.1, now);
+        listed.sent = Some(shown);
+        Some(aged)
     }
 
     /// Every listed cell, by class and name.
@@ -220,3 +255,6 @@ impl Listings {
             .and_then(|cells| cells.get_mut(cell))
     }
 }
+
+#[cfg(test)]
+mod tests;

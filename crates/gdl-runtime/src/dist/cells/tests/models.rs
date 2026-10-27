@@ -7,6 +7,7 @@
 //! so a reader tells a model not known yet from one no cell lists.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gdl::{CellCondition, CellState, FollowedCells, ModelState};
 use gdl_cells::{LoadSummary, ModelEntry};
@@ -34,6 +35,15 @@ fn listing(condition: CellCondition, models: &[(&str, ModelState)], version: u64
             version,
             revoked: Vec::new(),
         },
+        missing_age_ms: None,
+    }
+}
+
+/// `listing`, missing for `age_ms` when the hub sent it.
+fn missing(models: &[(&str, ModelState)], version: u64, age_ms: Option<u64>) -> Listing {
+    Listing {
+        missing_age_ms: age_ms,
+        ..listing(CellCondition::Missing, models, version)
     }
 }
 
@@ -217,6 +227,83 @@ fn a_model_that_moves_shows_both_cells() {
         )],
         "a cell that withdrew is no longer listed"
     );
+}
+
+/// A missing cell's silence reaches the index as an instant on the
+/// chooser's clock: the age the hub sent, dated back from when the
+/// listing arrived, from a snapshot's follow or a `listed` event alike. An
+/// index made later keeps it. A cell that is not missing, and one whose
+/// hub sent no age, has none.
+#[test]
+fn a_missing_cells_silence_is_dated_back_by_its_age() {
+    let (mut follows, cells, _, _) = follower();
+    let node = handle(&cells);
+    let since = |node: &FollowedCells, cell: &str| {
+        node.read("model_x", |cells| {
+            cells
+                .models()
+                .sets("qwen-32b", None)
+                .unwrap_or_default()
+                .iter()
+                .find(|set| set.cell() == cell)
+                .map(|set| (set.condition(), set.missing_since()))
+        })
+        .expect("the chooser sends to model_x")
+    };
+    let qwen = [("qwen-32b", ModelState::Ready)];
+    let now = Instant::now();
+
+    let mut snapshot = follows.snapshot();
+    let mut first = follow(M1, 1, CellState::Ready);
+    if let FollowEvent::Follow { listing: shown, .. } = &mut first {
+        *shown = Some(missing(&qwen, 3, Some(12_000)));
+    }
+    snapshot.apply(first, now);
+    snapshot.apply(listed(M2, Some(missing(&qwen, 1, None))), now);
+    snapshot.apply(FollowEvent::Synced { listed: true }, now);
+    follows.resnapshot(snapshot, now);
+    let lapsed = now - Duration::from_secs(12);
+    assert_eq!(
+        since(&node, M1),
+        Some((CellCondition::Missing, Some(lapsed))),
+        "silent for 12 s when the snapshot came"
+    );
+    assert_eq!(
+        since(&node, M2),
+        Some((CellCondition::Missing, None)),
+        "a hub that sent no age"
+    );
+
+    // A listing that arrives later is dated back from its own arrival.
+    let later = now + Duration::from_secs(5);
+    follows.apply(listed(M2, Some(missing(&qwen, 1, Some(3_000)))), later);
+    assert_eq!(
+        since(&node, M2),
+        Some((CellCondition::Missing, Some(later - Duration::from_secs(3))))
+    );
+
+    // An index made a minute on, for a change of offer, keeps the instant.
+    follows.apply(
+        FollowEvent::Offering {
+            class: "model_x".into(),
+            cell: M1.into(),
+            generation: 1,
+            revision: 2,
+            offered: false,
+        },
+        now + Duration::from_secs(60),
+    );
+    assert_eq!(
+        since(&node, M1),
+        Some((CellCondition::Missing, Some(lapsed)))
+    );
+
+    // Live again: no silence.
+    follows.apply(
+        listed(M1, Some(listing(CellCondition::Live, &qwen, 4))),
+        later,
+    );
+    assert_eq!(since(&node, M1), Some((CellCondition::Live, None)));
 }
 
 /// The index is made again when what it lists or what the chooser offers

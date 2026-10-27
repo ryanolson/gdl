@@ -207,9 +207,26 @@ async fn a_new_hub_lists_a_silent_cell_with_its_models() {
         }
     };
     assert_eq!(models(&missing), [("qwen-32b", ModelState::Ready)]);
+    // Silent since the hub first saw the write, a lease before it lapsed.
+    let age = |listing: &Listing| listing.missing_age_ms.map(Duration::from_millis);
+    assert!(
+        age(&missing).is_some_and(|age| age >= lease),
+        "silent for at least the lease: {missing:?}"
+    );
+    assert_eq!(
+        age(scaled_listing),
+        None,
+        "a cell scaled to 0 is not silent"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let (events, _) = snapshot(&mut global.follows()).await;
     let shown = listings(&events);
     assert_eq!(shown.len(), 2, "still listed: {shown:?}");
+    let again = shown[0].1.as_ref().and_then(age).expect("still silent");
+    assert!(
+        again >= age(&missing).expect("aged") + Duration::from_millis(50),
+        "a later snapshot sends the silence older: {again:?}"
+    );
     assert_eq!(
         shown[1].1.as_ref().map(|listing| listing.condition),
         Some(CellCondition::ScaledToZero),
@@ -393,6 +410,11 @@ async fn a_followed_cells_models_come_over_its_link() {
     )
     .await;
     assert_eq!(models(&lost), [("qwen-32b", ModelState::Ready)], "kept");
+    assert!(
+        lost.missing_age_ms
+            .is_some_and(|age| Duration::from_millis(age) < WAIT),
+        "silent since the link was lost: {lost:?}"
+    );
     global_hub.shutdown().await.expect("the hub stops");
 }
 

@@ -225,19 +225,21 @@ impl Relay {
         self.lock().listings.synced(class);
     }
 
-    /// The follower read `record`, of a cell of this deployment, whose
-    /// lease has `lapsed` or not: the cell is listed, and its choosers are
-    /// sent what changed.
-    pub(crate) fn record(&self, record: &CellRecord, lapsed: bool) {
+    /// The follower read `record`, of a cell of this deployment: the cell
+    /// is listed, and its choosers are sent what changed. `lapsed` holds
+    /// when the follower saw the record's last write, if its lease has
+    /// passed.
+    pub(crate) fn record(&self, record: &CellRecord, lapsed: Option<std::time::Instant>) {
         let mut shared = self.lock();
         shared.listings.record(record, lapsed);
         shared.relist(&record.class, &record.name);
     }
 
-    /// The record of the cell `cell` of `class` lapsed.
-    pub(crate) fn lapsed(&self, class: &str, cell: &str) {
+    /// The record of the cell `cell` of `class`, which the follower saw
+    /// last written at `written`, lapsed.
+    pub(crate) fn lapsed(&self, class: &str, cell: &str, written: std::time::Instant) {
         let mut shared = self.lock();
-        shared.listings.lapse(class, cell, true);
+        shared.listings.lapse(class, cell, written);
         shared.relist(class, cell);
     }
 
@@ -279,7 +281,7 @@ impl Relay {
         if counted {
             shared.count(&class, true);
         }
-        shared.listings.lose(&class, &cell, false);
+        shared.listings.lose(&class, &cell, None);
         shared.relist(&class, &cell);
         shared.settle(&class, &cell, generation);
     }
@@ -745,7 +747,8 @@ impl Shared {
         // The relay closes a follow in `settle`, never here: a follow that
         // ends here lost its link, or was replaced, so its cell is missing
         // until a later one is installed.
-        self.listings.lose(class, cell, true);
+        self.listings
+            .lose(class, cell, Some(std::time::Instant::now()));
         self.relist(class, cell);
         let Some(installed) = installed else {
             return;
@@ -964,7 +967,7 @@ impl Shared {
         #[cfg(test)]
         self.changes.work.snapshot();
         let mut events = Vec::new();
-        self.snapshot_of(class, cell, &mut events);
+        self.snapshot_of(class, cell, std::time::Instant::now(), &mut events);
         events.push(FollowEvent::Synced {
             listed: self.listings.whole(),
         });
@@ -988,8 +991,10 @@ impl Shared {
             cells.extend(closing.keys().map(|cell| (class.as_str(), cell.as_str())));
         }
         let mut events = Vec::new();
+        // One instant for the snapshot: every silence is aged to it.
+        let now = std::time::Instant::now();
         for (class, cell) in &cells {
-            self.snapshot_of(class, cell, &mut events);
+            self.snapshot_of(class, cell, now, &mut events);
         }
         // A cell with a current follow has its listing on the follow's
         // event; every other one is sent apart.
@@ -1007,7 +1012,7 @@ impl Shared {
                 class: class.to_string(),
                 cell: cell.to_string(),
                 generation: self.generation(class, cell),
-                listing: self.listings.listing(class, cell),
+                listing: self.listings.listing(class, cell, now),
             });
         }
         events.push(FollowEvent::Synced {
@@ -1019,7 +1024,13 @@ impl Shared {
     /// The follows of the cell `cell` of `class` as a watch of the relay
     /// begins with them, into `events`: its closing follows, then its
     /// current one, if installed.
-    fn snapshot_of(&self, class: &str, cell: &str, events: &mut Vec<FollowEvent>) {
+    fn snapshot_of(
+        &self,
+        class: &str,
+        cell: &str,
+        now: std::time::Instant,
+        events: &mut Vec<FollowEvent>,
+    ) {
         let closing = self.closing.get(class).and_then(|cells| cells.get(cell));
         for (generation, closing) in closing.into_iter().flatten() {
             let offering = closing.offer.event(class, cell, *generation);
@@ -1036,7 +1047,7 @@ impl Shared {
                 .offer
                 .shown()
                 .then(|| follow.offer.event(class, cell, follow.generation));
-            let listing = self.listings.listing(class, cell);
+            let listing = self.listings.listing(class, cell, now);
             events.extend(installed.snapshot(follow.generation, offering, listing));
         }
     }
@@ -1065,7 +1076,10 @@ impl Shared {
         {
             listings.link_models(class, cell, models);
         }
-        if let Some(listing) = self.listings.changed(class, cell) {
+        if let Some(listing) = self
+            .listings
+            .changed(class, cell, std::time::Instant::now())
+        {
             let generation = self.generation(class, cell);
             self.changes.send(FollowEvent::Listed {
                 class: class.to_string(),

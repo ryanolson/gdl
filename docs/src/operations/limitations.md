@@ -345,7 +345,7 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 
 ### A new hub reads a silent cell as live for one lease
 - **What:** a hub dates a record from when it first sees its `seq`, on its own clock. So a hub that starts reads a cell that went silent before as `live` for up to one lease (30 s by default), then as `missing`.
-- **Impact:** a reader that goes by the condition alone reads the cell as live. A gate that also requires an offered cell answers 503 all the same: a cell its hub cannot reach is never offered, and a child whose link fails reads `missing` at once.
+- **Impact:** a reader that goes by the condition alone reads the cell as live. A gate that also requires an offered cell answers 503 all the same: a cell its hub cannot reach is never offered, and a child whose link fails reads `missing` at once. The silence a missing listing gives (`missing_age_ms`) also counts from when the new hub first saw the record, so it is short by the time the cell was silent before the hub started.
 - **Why:** a reader never trusts a time in the record: clocks across regions differ.
 - **Test:** `a_new_hub_lists_a_silent_cell_with_its_models` in `crates/gdl-hub/tests/listed.rs`.
 

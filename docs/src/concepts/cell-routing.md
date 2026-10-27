@@ -171,13 +171,15 @@ The hub learns a followed cell's models from its record and from the follow link
 
 A hub reads a record's lease on its own clock, from when it first saw the record's `seq`. So a new hub reads a silent cell as `live` for up to one lease, then as `missing`.
 
+A `missing` listing also says how long the cell has been silent, in `missing_age_ms`. The silence begins at the record's last write, once its lease has passed, or when the follow's link was lost, whichever came first, on the hub's clock. The hub sends it as an age at the moment it sends the listing, never as an instant, since the hub and the chooser can run on different hosts with different clocks. So a cell whose last write came 40 s ago, with a lease of 30 s, is listed as missing with an age of 40 s. A new watch's snapshot sends the age again, older.
+
 ### The relay's marker
 
 Until the hub's watch of the directory has read its first snapshot of every class the hub sends to, the listings are not whole: a record the hub has not read may still list a model. The relay's `synced` says so with `listed`. A watch of the relay that begins before then waits up to 2 s for it. A watch whose snapshot still says `listed: false` is ended once the listings are whole, so its reader learns it from its next snapshot. A hub of an earlier build sends no `listed`, so its choosers read the index as not synced.
 
 ### What the chooser builds
 
-The chooser keeps the listings of its current relay watch. A new snapshot replaces them whole. For each class it builds a `gdl::ModelIndex` from the listings and its own follows: each model's state in each cell, the cell's condition, and whether the chooser offers the cell work. It builds the index again only when a listing or a follow's offered state changes. A cell's load summary arrives each period, and does not rebuild it.
+The chooser keeps the listings of its current relay watch. A new snapshot replaces them whole. When a missing cell's listing arrives, the chooser dates its silence back by the age, once, to an instant on its own clock. For each class it builds a `gdl::ModelIndex` from the listings and its own follows: each model's state in each cell, the cell's condition, since when a missing cell has been silent, and whether the chooser offers the cell work. It builds the index again only when a listing or a follow's offered state changes. A cell's load summary arrives each period, and does not rebuild it.
 
 ```rust,ignore
 // Per request, in a gate: one load of the class's table.
@@ -200,6 +202,7 @@ let answer = self.followed.read("model_x", |cells| {
 - `ClassCells::models()` gives the index of the table the read loaded. A cell policy reads the same index with `CellRequest::models()`.
 - `ModelIndex::sets(model, routing_key)` gives the cells that list the model, by name, or `None` when no cell does. It is one binary search, with no lock and no allocation.
 - `ModelIndex::is_synced()` tells a model that is not known yet from one that no cell lists.
+- `ModelSet::missing_since()` gives the instant a missing cell went silent, on the chooser's clock. A gate takes `Instant::now()` once and subtracts, to say "no heartbeat for 40 s". It is `None` for a cell that is not missing, and for one whose hub, of an earlier build, sends no age.
 - A cell of another parent, or in a region the chooser does not follow, is listed and not offered. So a model that only another region serves is listed, and the gate answers 503 until this cell may route there.
 - A model that moves from one cell to another shows both: the old cell's `drained` entry and the new cell's `starting` entry.
 - A model an operator revoked on a cell is not in that cell's list ([Revoking a model](cells.md#revoking-a-model)), so the index does not list the cell for it. With no other cell, the model is unknown. An operator's withdrawal of a cell unlists it, as the cell's own withdrawal does.

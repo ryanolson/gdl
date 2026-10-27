@@ -336,7 +336,25 @@ async fn under_relay_a_parent_scales_a_gone_child_to_zero() {
 async fn a_followed_child_withdrawn_by_the_operator_reads_as_withdrawn() {
     let directory = common::Resolving::new();
     let (parent, readiness) = common::serve_cell(global_default(), &directory, timing()).await;
-    let mut relay = readiness.follows();
+    // A watch begun before the hub has read the directory takes its
+    // snapshot when it is first read, and one whose snapshot says the
+    // listings are not whole ends once they are: read the snapshot now,
+    // or the watch could begin after the withdrawal and never see it.
+    let mut relay = tokio::time::timeout(WAIT, async {
+        loop {
+            let mut relay = readiness.follows();
+            while let Some(event) = relay.next().await {
+                if let gdl_watch::FollowEvent::Synced { listed } = event {
+                    if listed {
+                        return relay;
+                    }
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the relay's snapshot, its listings whole, in time");
     let (child, _readiness) = common::serve_cell(
         common::model(CHILD, "us-east-1", "model-x-02-hub:1337"),
         &directory,

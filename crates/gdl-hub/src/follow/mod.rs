@@ -184,9 +184,10 @@ struct Follows<'a, D> {
     /// When each listed `serving` record's lease passes, in order, and
     /// by cell: the relay lists the cell missing from then until a newer
     /// write. A lease passes with no event, so the follower keeps the one
-    /// timer, for the earliest.
+    /// timer, for the earliest. By cell, also when the follower saw the
+    /// record's last write, which the cell has been silent since.
     lapses: BTreeSet<(Instant, String)>,
-    leases: HashMap<String, Instant>,
+    leases: HashMap<String, (Instant, Instant)>,
     follower: &'a Follower<D>,
 }
 
@@ -257,16 +258,19 @@ impl<D: CellDirectory> Follows<'_, D> {
             .leased()
             .then(|| changed + record.lease)
             .filter(|&at| at >= now);
-        relay.record(record, record.leased() && lapses.is_none());
+        relay.record(
+            record,
+            (record.leased() && lapses.is_none()).then_some(changed),
+        );
         self.unlease(cell);
         if let Some(at) = lapses {
             self.lapses.insert((at, cell.to_string()));
-            self.leases.insert(cell.to_string(), at);
+            self.leases.insert(cell.to_string(), (at, changed));
         }
     }
 
     fn unlease(&mut self, cell: &str) {
-        if let Some(at) = self.leases.remove(cell) {
+        if let Some((at, _)) = self.leases.remove(cell) {
             self.lapses.remove(&(at, cell.to_string()));
         }
     }
@@ -282,8 +286,10 @@ impl<D: CellDirectory> Follows<'_, D> {
             && *at <= now
         {
             let (_, cell) = self.lapses.pop_first().expect("one was just found");
-            self.leases.remove(&cell);
-            self.follower.relay.lapsed(&self.follower.class, &cell);
+            let (_, written) = self.leases.remove(&cell).expect("each lapse has its lease");
+            self.follower
+                .relay
+                .lapsed(&self.follower.class, &cell, written);
         }
     }
 

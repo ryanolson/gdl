@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use gdl::Load;
 use gdl::ModelIndex;
-use gdl_cells::{CellState, LoadSummary};
+use gdl_cells::{CellCondition, CellState, LoadSummary};
 use gdl_watch::{FollowEvent, Listing, UnknownFollowEvent, Watched};
 use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
@@ -731,9 +731,10 @@ struct Followed {
     /// Where each cell's offers are counted, if the chooser records them.
     meters: Option<CellMeters>,
     /// What the hub lists of each cell of the classes sent to, followed or
-    /// not, for the model index: a snapshot holds every listed cell, so it
-    /// replaces them whole.
-    listings: BTreeMap<Key, Listing>,
+    /// not, for the model index, with since when a missing cell has been
+    /// silent, dated back on arrival: a snapshot holds every listed cell,
+    /// so it replaces them whole.
+    listings: BTreeMap<Key, (Listing, Option<Instant>)>,
     /// Whether the snapshot said the hub's listings were whole.
     listed: bool,
     /// Raised on every change of `listings` or `listed`, and carried over
@@ -818,7 +819,7 @@ impl Followed {
                 let segments = wanted.get(&class)?;
                 let key = (class, cell);
                 if let Some(listing) = listing {
-                    self.list(key.clone(), Some(listing));
+                    self.list(key.clone(), Some(listing), now);
                 }
                 if self
                     .generations
@@ -1004,7 +1005,7 @@ impl Followed {
                     return None;
                 }
                 let key = (class, cell);
-                self.list(key.clone(), listing);
+                self.list(key.clone(), listing, now);
                 Some((key, Change::Table))
             }
             // The snapshot's marker, which the task reads; it says whether
@@ -1017,11 +1018,17 @@ impl Followed {
         }
     }
 
-    /// List `key`'s cell as `listing` says, or no longer.
-    fn list(&mut self, key: Key, listing: Option<Listing>) {
+    /// List `key`'s cell as `listing`, which arrived at `now`, says, or
+    /// no longer. A missing cell's silence is dated back here, once, so
+    /// that an index made later reads the same instant.
+    fn list(&mut self, key: Key, listing: Option<Listing>, now: Instant) {
         match listing {
             Some(listing) => {
-                self.listings.insert(key, listing);
+                let silent = listing
+                    .missing_age_ms
+                    .filter(|_| listing.condition == CellCondition::Missing)
+                    .and_then(|age| now.checked_sub(Duration::from_millis(age)));
+                self.listings.insert(key, (listing, silent));
             }
             None => {
                 self.listings.remove(&key);
@@ -1037,19 +1044,21 @@ impl Followed {
             .listings
             .iter()
             .filter(|((of, _), _)| of == class)
-            .flat_map(|(key, listing)| {
+            .flat_map(|(key, (listing, silent))| {
                 let offered = self.follows.get(key).is_some_and(Follow::offers);
                 listing.models.entries.iter().map(move |entry| {
-                    (
-                        entry.key(),
-                        gdl::ModelSet::new(
-                            key.1.clone(),
-                            listing.region.clone(),
-                            entry.state,
-                            listing.condition,
-                        )
-                        .with_offered(offered),
+                    let set = gdl::ModelSet::new(
+                        key.1.clone(),
+                        listing.region.clone(),
+                        entry.state,
+                        listing.condition,
                     )
+                    .with_offered(offered);
+                    let set = match silent {
+                        Some(since) => set.with_missing_since(*since),
+                        None => set,
+                    };
+                    (entry.key(), set)
                 })
             });
         ModelIndex::new(self.listed, sets)

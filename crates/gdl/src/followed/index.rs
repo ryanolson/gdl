@@ -6,6 +6,7 @@
 
 use gdl_cells::{CellCondition, ModelState};
 use gdl_model::ModelKey;
+use tokio::time::Instant;
 
 /// For each model and routing key, the cells of one class that list it.
 /// A chooser's hub learns them from every record of the class in the cell
@@ -121,14 +122,15 @@ impl ModelIndex {
 }
 
 /// One cell that lists a model, in a [`ModelIndex`]: the model's state in
-/// the cell's list, the cell's condition, and whether the chooser offers
-/// the cell work.
+/// the cell's list, the cell's condition, since when a missing cell has
+/// been silent, and whether the chooser offers the cell work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSet {
     cell: Box<str>,
     region: Box<str>,
     state: ModelState,
     condition: CellCondition,
+    missing_since: Option<Instant>,
     offered: bool,
 }
 
@@ -146,8 +148,15 @@ impl ModelSet {
             region: region.into().into_boxed_str(),
             state,
             condition,
+            missing_since: None,
             offered: false,
         }
+    }
+
+    /// The same, missing since `since`, on the reader's clock.
+    pub fn with_missing_since(mut self, since: Instant) -> Self {
+        self.missing_since = Some(since);
+        self
     }
 
     /// The same, offered or not.
@@ -178,6 +187,18 @@ impl ModelSet {
     #[inline]
     pub fn condition(&self) -> CellCondition {
         self.condition
+    }
+
+    /// Since when a [`CellCondition::Missing`] cell has been silent, on the
+    /// chooser's clock: its record's last write when its lease passed, or
+    /// the loss of its follow's link, whichever came first, as the
+    /// chooser's hub saw it. A reader takes `now` once and subtracts, so a
+    /// gate can say how long a cell has had no heartbeat. `None` for a
+    /// cell that is not missing, and for one whose hub, of an earlier
+    /// build, did not say.
+    #[inline]
+    pub fn missing_since(&self) -> Option<Instant> {
+        self.missing_since
     }
 
     /// Whether the chooser offers the cell work: its hub follows the cell,
