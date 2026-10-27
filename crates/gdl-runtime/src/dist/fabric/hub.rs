@@ -938,20 +938,21 @@ pub(crate) async fn bind_under_hub(
         .build()
         .map_err(failure)?;
     let address = if listen.ip().is_unspecified() {
-        container_address(listen.port()).await?
+        container_address(std::env::var("HOSTNAME").ok().as_deref(), listen.port()).await?
     } else {
         listen
     };
     super::build_node(address, Some(Arc::new(client.discovery()))).await
 }
 
-/// This container's routable address: the one its `HOSTNAME` resolves to,
-/// on `port`.
-async fn container_address(port: u16) -> Result<std::net::SocketAddr> {
-    let host = std::env::var("HOSTNAME").map_err(|_| {
+/// This container's routable address: the one its `HOSTNAME`, `host`,
+/// resolves to, on `port`. The caller reads the variable, so that a test
+/// can pass a name without changing the environment other tests share.
+async fn container_address(host: Option<&str>, port: u16) -> Result<std::net::SocketAddr> {
+    let host = host.ok_or_else(|| {
         failure("HOSTNAME is not set; under a hub a segment binds the address its container's hostname resolves to")
     })?;
-    tokio::net::lookup_host((host.as_str(), port))
+    tokio::net::lookup_host((host, port))
         .await
         .map_err(|e| failure(format!("resolving HOSTNAME {host:?}: {e}")))?
         .find(|address| address.is_ipv4())
@@ -1104,6 +1105,44 @@ mod tests {
                 || follower.unsent.contains(&retired.instance_id());
             assert!(promised, "the retired sink was displaced without a promise");
             hub.shutdown().await.expect("valid test fixture");
+        }
+    }
+
+    /// Under a hub, a segment told to listen on an unspecified address
+    /// binds what its `HOSTNAME` resolves to, and fails to start when that
+    /// gives no IPv4 address. The names are IP literals, which resolve
+    /// without DNS.
+    mod container {
+        use super::super::container_address;
+
+        #[tokio::test]
+        async fn an_unset_hostname_fails() {
+            let error = container_address(None, 7000)
+                .await
+                .expect_err("no name gives no address");
+            assert!(error.to_string().contains("HOSTNAME is not set"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn a_hostname_with_no_ipv4_address_fails() {
+            let error = container_address(Some("::1"), 7000)
+                .await
+                .expect_err("an IPv6 literal has no IPv4 address");
+            assert!(
+                error
+                    .to_string()
+                    .contains(r#"HOSTNAME "::1" has no IPv4 address"#),
+                "{error}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_hostname_with_an_ipv4_address_gives_it_on_the_port() {
+            let address = container_address(Some("127.0.0.1"), 7000).await;
+            assert_eq!(
+                address.expect("an IPv4 literal resolves"),
+                "127.0.0.1:7000".parse().expect("valid test fixture")
+            );
         }
     }
 
