@@ -173,6 +173,10 @@ async fn relay(
     // until the bytes after it come.
     let mut held_down: Vec<u8> = Vec::new();
     let mut awaiting_held = false;
+    // Cleared when the client stops sending while a released request
+    // awaits the hub's answer: the relay stays, so that the hub still
+    // answers it, and a client that only half-closed still gets the answer.
+    let mut client_open = true;
     loop {
         let now = *mode.borrow_and_update();
         match now {
@@ -193,7 +197,7 @@ async fn relay(
             changed = mode.changed() => if changed.is_err() {
                 return;
             },
-            read = from_client.read(&mut up), if !awaiting_held => match read {
+            read = from_client.read(&mut up), if client_open => match read {
                 Ok(n) if n > 0 => {
                     let mut seen = tail.clone();
                     seen.extend_from_slice(&up[..n]);
@@ -225,8 +229,6 @@ async fn relay(
                     if let Some(pattern) = pattern
                         && find(&seen, kept, &pattern).is_some()
                     {
-                        // Retain the request after its client times out,
-                        // as a server that already buffered its body can.
                         awaiting_held = true;
                         held.tamper.held.notify_one();
                         let mut hold = held.tamper.hold.subscribe();
@@ -238,6 +240,11 @@ async fn relay(
                     let keep = seen.len().saturating_sub(TAIL);
                     tail = seen[keep..].to_vec();
                 }
+                // Retain the request after its client times out, as a
+                // server that already buffered its body can. The relay
+                // still reads after a release, since the read that was
+                // held may have had only part of the request.
+                _ if awaiting_held => client_open = false,
                 _ => return,
             },
             read = from_server.read(&mut down) => match read {

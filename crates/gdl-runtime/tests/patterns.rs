@@ -1,7 +1,8 @@
 //! The test proxy's patterns, across TCP reads, reused connections, and
 //! pattern changes: a refusal that misses a request split across reads
 //! lets it reach the hub, and a test that relies on it fails against a
-//! correct runtime.
+//! correct runtime; a released hold that stops reading before the request
+//! is whole stalls the client and the hub until the client's timeout.
 
 #[allow(dead_code)] // Only the proxy is used here, not all of it.
 #[path = "common/proxy.rs"]
@@ -188,6 +189,114 @@ async fn check_delete_tail(longer_tail: bool) {
     })
     .await
     .expect("the mode change check finishes");
+}
+
+/// A request held at a read that has only part of it goes on whole once
+/// released: the rest is read while the hub's answer is awaited.
+#[tokio::test]
+async fn a_released_hold_forwards_the_rest_of_a_split_request() {
+    check_hold(true).await;
+}
+
+/// The same, with the whole request in the read that is held.
+#[tokio::test]
+async fn a_released_hold_forwards_a_complete_request() {
+    check_hold(false).await;
+}
+
+/// A request whose client left while it was held still reaches the hub,
+/// and the hub's answer is seen, as a server that already buffered the
+/// request answers it.
+#[tokio::test]
+async fn a_released_hold_outlives_its_client() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (proxy, mut client, mut server) = connection().await;
+        proxy.hold(SERVICE);
+        let request = [PREFIX, SUFFIX].concat();
+        client.write_all(&request).await.expect("whole request");
+        proxy.holding().await;
+        drop(client);
+        proxy.release();
+        let mut received = vec![0; request.len()];
+        server
+            .read_exact(&mut received)
+            .await
+            .expect("the released request reaches upstream");
+        assert_eq!(received, request);
+        server.write_all(OK).await.expect("upstream answer");
+        proxy.answered_after_hold().await;
+    })
+    .await
+    .expect("the hold outlives its client");
+}
+
+/// A client can finish sending its request and keep reading its answer.
+#[tokio::test]
+async fn a_released_hold_answers_a_client_that_half_closes() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (proxy, mut client, mut server) = connection().await;
+        proxy.hold(SERVICE);
+        let request = [PREFIX, SUFFIX].concat();
+        client.write_all(&request).await.expect("whole request");
+        proxy.holding().await;
+        client.shutdown().await.expect("client finishes sending");
+        proxy.release();
+        let mut received = vec![0; request.len()];
+        server
+            .read_exact(&mut received)
+            .await
+            .expect("the released request reaches upstream");
+        assert_eq!(received, request);
+        server.write_all(OK).await.expect("upstream answer");
+        proxy.answered_after_hold().await;
+        assert_eq!(response(&mut client).await, OK);
+    })
+    .await
+    .expect("a half-closed client receives its answer");
+}
+
+async fn check_hold(split: bool) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (proxy, mut client, mut server) = connection().await;
+        proxy.hold(SERVICE);
+        if split {
+            forward(&mut client, &mut server, PREFIX).await;
+            let (name, rest) = SUFFIX.split_at(8);
+            client.write_all(name).await.expect("service name suffix");
+            proxy.holding().await;
+            proxy.release();
+            let mut received = vec![0; name.len()];
+            server
+                .read_exact(&mut received)
+                .await
+                .expect("released name");
+            assert_eq!(received, name);
+
+            client.write_all(rest).await.expect("remaining request");
+            let mut received = vec![0; rest.len()];
+            tokio::time::timeout(Duration::from_secs(1), server.read_exact(&mut received))
+                .await
+                .expect("the released hold must read the rest before awaiting the response")
+                .expect("upstream request suffix");
+            assert_eq!(received, rest);
+        } else {
+            let request = [PREFIX, SUFFIX].concat();
+            client.write_all(&request).await.expect("whole request");
+            proxy.holding().await;
+            proxy.release();
+            let mut received = vec![0; request.len()];
+            server
+                .read_exact(&mut received)
+                .await
+                .expect("released request");
+            assert_eq!(received, request);
+        }
+        server.write_all(OK).await.expect("upstream answer");
+        assert_eq!(response(&mut client).await, OK);
+        proxy.answered_after_hold().await;
+    })
+    .await
+    .expect("the hold check finishes");
 }
 
 async fn connection() -> (proxy::Proxy, TcpStream, TcpStream) {
