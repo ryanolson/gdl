@@ -659,6 +659,7 @@ impl Outbound {
     /// so that an instance whose ledger is empty has no eager output left
     /// to cut. An item larger than velo's eager budget is the exception: see
     /// [`shut_down`].
+    // hot path: roster-stream-retirement
     pub(crate) fn finish(self) -> impl Future<Output = ()> + Send + 'static {
         // Asked for before `finalize`, which consumes the sender.
         let retired = self.sender.retired();

@@ -1,8 +1,8 @@
 # Benchmarking
 
-This chapter says what a performance number in this book may claim, how to take one, and which claims still wait for a dedicated machine. The numbers themselves are in [Crossing performance](crossing-performance.md), [Feature costs](feature-costs.md), [Reader cost](reader-cost.md), and [Keyed record service cost](keyed-cost.md). Velo's rig and rules are in [velo's Benchmarking](https://ai-dynamo.github.io/velo/operations/benchmarking.html).
+This chapter says what a performance number in this book may claim, how to take one, and what the gb300 host found when it checked the claims a laptop measured. The numbers themselves are in [Crossing performance](crossing-performance.md), [Feature costs](feature-costs.md), [Reader cost](reader-cost.md), and [Keyed record service cost](keyed-cost.md). Velo's rig and rules are in [velo's Benchmarking](https://ai-dynamo.github.io/velo/operations/benchmarking.html).
 
-Most figures in this book were taken on a shared machine: an Apple laptop under macOS, or one shared Arm host under Linux. Each table names its machine, command, and base commit. All of them are provisional. The newer tables come from the gb300 bench host: a quiet 72-core Neoverse-V2 server that runs one bench job at a time, where `perf` can count and sample. Nobody has checked it against the setup that the dedicated machines below need, so its numbers are provisional too.
+Most figures in this book were taken on a shared machine: an Apple laptop under macOS, or one shared Arm host under Linux. Each table names its machine, command, and base commit. All of them are provisional. The newer tables come from the gb300 bench host: a 72-core Neoverse-V2 server that runs one bench job at a time, where `perf` can count and sample. The owner counts it as the dedicated machine for the claims in [Claims checked on gb300](#claims-checked-on-gb300). It is not isolated: other processes can run on it, so each of its tables records the load average.
 
 ## What a shared machine may claim
 
@@ -16,7 +16,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 
 ## Method
 
-- **Count instructions, not time.** `crates/gdl-runtime/benches/requests.rs` runs a fixed number of requests through the reference graph. Run it with 10,000 and with 20,000 requests under a counter. The difference divided by 10,000 is the cost of one request, and the setup cancels. The counter is `/usr/bin/time -l` on macOS and `perf stat -e instructions` on Linux. For the cost of one item, the same bench's `lean-<size>` and `direct-<size>` shapes carry `<count>` items on one stream, so the difference between two item counts holds no share of a request.
+- **Count instructions, not time.** `crates/gdl-runtime/benches/requests.rs` runs a fixed number of requests through the reference graph. Run it with 10,000 and with 20,000 requests under a counter. The difference divided by 10,000 is the cost of one request, and the setup cancels. The counter is `/usr/bin/time -l` on macOS and `perf stat -e instructions:u,instructions:k` on Linux. On Linux, gate on user instructions (`:u`) and report kernel instructions beside them: see the trap below. For the cost of one item, the same bench's `lean-<size>` and `direct-<size>` shapes carry `<count>` items on one stream, so the difference between two item counts holds no share of a request.
 - **Interleave.** Build base and change in the same checkout and the same target directory, one after the other, and copy each binary aside. Run them alternately for at least seven rounds. Two builds of identical sources in different directories differed by 7% in instructions, so a comparison across directories means nothing.
 - **Report the median and the range across rounds.** Call a difference real only when it exceeds the range of the base alone. Record the load average with each round.
 - **Wall time** comes from the criterion rows of `crates/gdl-runtime/benches/remote.rs`, base and change in turn, with `--warm-up-time 2 --measurement-time 5`.
@@ -25,6 +25,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 
 ## Measurement traps
 
+- **Kernel instructions are noise on gb300.** About half of a crossing request's instructions run in the kernel: futex waits, epoll, and socket calls. That half varies by up to 15% between rounds of the same build, because it follows how the threads are scheduled. The user half varies by under 1%. Counted together, two segments ranged over ±7% and settled nothing at 1%. The user count leaves out the system calls a change adds, so a change that adds them needs its own check.
 - **A run under compile load is not a number.** One full run showed `request/gdl` at +22% and several `velo-direct` controls at +8% to +14% while the workspace suite compiled. None of it reproduced when the run was repeated alone.
 - **Resident memory is wrong for held memory.** The system allocator keeps freed pages resident, so resident memory grows only for whichever path runs first. Use live heap bytes from a counting allocator.
 - **A bench can allocate for itself.** Extra velo nodes that a bench starts allocate in the background while it counts. A rise of 1.5 allocations per request came from the bench, not from gdl.
@@ -42,7 +43,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 
 ## Dedicated machines
 
-The claims below wait for a machine where the spread is small. No such machine exists yet.
+The claims a laptop measured wait for a machine where the spread is small. The gb300 host stands in for machine 1, on Arm. Machine 2 does not exist yet.
 
 | # | Setup | Settles |
 |---|---|---|
@@ -52,18 +53,214 @@ The claims below wait for a machine where the spread is small. No such machine e
 
 Set the performance governor, fix SMT, pin the bench with `taskset` to isolated cores, and keep the card's interrupts on other cores. Record the kernel, CPU, microcode, rustc, and the commits of gdl and velo.
 
-| Claim to confirm | Laptop result | Table |
-|---|---|---|
-| `retired()` unused costs nothing, and awaiting it adds little | Prototype: 112.6k against 112.7k instructions per stream unused | [velo](../development/velo.md#retired-and-the-rejected-acknowledgement) |
-| Reply renewal | Within the noise of a 57 us crossing | [Reply renewal](crossing-performance.md#reply-renewal) |
-| The reader is linear | Release runs, laptop | [Reader cost](reader-cost.md) |
-| Runtime metrics: at most 2,000 instructions per visit | 1,575 and 2,169 on one segment in two sets | [Runtime metrics](feature-costs.md#runtime-metrics) |
-| Live rosters: 1% per request | Three segments +1.5%, inside the spread | [Live rosters](feature-costs.md#live-rosters) |
-| Deadline sweeps cost nothing per item | Per-item row bimodal, +2.4% with overlapping ranges | [Deadline sweeps](crossing-performance.md#velo-deadline-sweeps) |
-| Selectors: built-ins cost what they did | Within the spread of the base | [Selectors](feature-costs.md#selectors) |
-| Codec timings | Shared Arm host, no hardware counters | [Codec cost](crossing-performance.md#codec-cost) |
+Still to measure on machine 2: time to first item and inter-item p50 and p99 for a three-segment graph, requests per second at saturation, how long a deployment-wide stop takes to drain under load, and the bring-up time to `ready`.
 
-Still to measure there: time to first item and inter-item p50 and p99 for a three-segment graph on machine 2, requests per second at saturation, how long a deployment-wide stop takes to drain under load, and the bring-up time to `ready`.
+## Claims checked on gb300
+
+| Claim | Laptop result | gb300, user instructions | Holds? |
+|---|---|---|---|
+| Velo's `retired()` unused costs nothing | 112.6k against 112.7k per stream (prototype) | Mux +589 per stream (+0.60%), median beyond the base range. Per-stream TCP within the spread | No: it costs 0.6% |
+| Reply renewal costs nothing per request | Within the noise of a 57 us crossing | Wall time only: every row within the spread | Yes |
+| The reader is linear | Release runs | Not measured again: the cost tests count work, which no machine changes | Yes |
+| Runtime metrics: at most 2,000 instructions per visit | 1,575 and 2,169 on one segment | About 2,100 per visit at main (95% interval 1,805 to 2,477) | At the budget. The owner accepts it |
+| Live rosters: three segments +1.5%, accepted for now | +0.9% (two), +1.5% (three) | +1.10% (two), +2.18% (three), both beyond the spread | No. The owner accepts +2.18% for now, and the row is guarded |
+| Deadline sweeps cost nothing per item | Per-item row bimodal, +2.4% | Per-item row within the spread. About −8,000 per stream sent | Yes |
+| Selectors: built-ins cost what they did | Within the spread | Every row within the spread: +0.1% (`round_robin`), +0.45% (`random`) | Yes |
+| Cells: nothing added to a placement without classes | Not measured | The cells commits add nothing. The range moves +0.94% on two segments, from main's message codec work merged into it | Yes for cells. The codec work costs +1.26% on two segments, and the owner accepts it |
+
+Codec timings are not in this list. They are measured in time, not instructions, and [Codec cost](crossing-performance.md#codec-cost) has them.
+
+### Setup
+
+gb300: aarch64 Neoverse-V2, 72 cores, Linux 6.17 with 64 KiB pages, performance governor. Every run is pinned to cores 8 to 15 (`nproc` 8 under `taskset`). rustc 1.93.1, the bench profile as shipped, measured on 2026-10-27. Each table gives the load average at the start of its rounds. A service on the host restarted in a loop during some runs. It raised the load to 15 at times. The user counts did not follow it.
+
+Each comparison builds every commit in turn in one worktree and one target directory, and copies each binary aside. Each round runs every build at 10,000 and 20,000 requests under `perf stat`. The order of the builds and of the counts is reversed every other round. The figure is (count at 20,000 − count at 10,000) / 10,000 user instructions: the median of the rounds, with their range. A change is real only when its median is outside the range of the base.
+
+Wall time is three or five runs of the criterion rows, the builds in turn. Three runs do not settle a difference of a few percent in time. In some comparisons a few rows land outside the base range, some up and some down. The tables below list them, and none of the time rows is a gate.
+
+```bash
+base=<base commit>; change=<change commit>; pkg=gdl-runtime   # pkg=gdl before the crates were split
+src=$(mktemp -d)/src; export CARGO_TARGET_DIR=$(mktemp -d); mkdir -p bin
+git worktree add --detach "$src" "$base"
+for ref in "$base" "$change"; do
+  git -C "$src" checkout -q --detach "$ref"
+  (cd "$src" && cargo bench --locked -p "$pkg" --bench requests --bench remote --bench hop --no-run)
+  for bench in requests remote hop; do
+    cp "$(ls -t "$CARGO_TARGET_DIR"/release/deps/"$bench"-* | grep -v '\.d$' | head -1)" "bin/$ref-$bench"
+  done
+done
+count() {  # user instructions of one run
+  perf stat -x, -e instructions:u -o stat.csv -- taskset -c 8-15 "bin/$1-requests" "$2" "$3" > /dev/null
+  cut -d, -f1 stat.csv | grep -E '^[0-9]+$'
+}
+for round in $(seq 10); do
+  builds="$base $change"; counts="10000 20000"
+  if ((round % 2 == 0)); then builds="$change $base"; counts="20000 10000"; fi
+  for setup in one two three two-random; do   # and one-metrics, two-metrics, three-metrics for the metrics
+    for build in $builds; do
+      for n in $counts; do echo "$round $build $setup $n $(count "$build" "$setup" "$n")"; done
+    done
+  done
+done > counts.txt   # per request: (count at 20000 - count at 10000) / 10000, per round
+for run in 1 2 3; do
+  builds="$base $change"; if ((run % 2 == 0)); then builds="$change $base"; fi
+  for build in $builds; do
+    taskset -c 8-15 "bin/$build-remote" --bench --warm-up-time 1 --measurement-time 3 --output-format bencher \
+      '^(request/reference-[123]-segments?|concurrent-32x1-reference/1-segment|reference-items/2-segments)$'
+    taskset -c 8-15 "bin/$build-hop" --bench --warm-up-time 1 --measurement-time 3 --output-format bencher '^request/gdl$'
+  done
+done
+```
+
+### Velo's retirement signal
+
+Velo `9a0a505`, the commit before `retired()`, gets the `stream_lifecycle` harness of `e512ba0` with its `retired` mode taken out. It is compared with `e512ba0`. Both are built in one checkout, from velo's `examples/` directory.
+
+- The figure is user instructions per stream: the count at the higher stream count minus the count at the lower, divided by the difference in streams. The setup and the warm-up cancel.
+- The messenger mux runs 100,000 and 200,000 streams. Per-stream TCP runs 1,000 and 2,000 streams with `--warmup 200`. Each per-stream run is followed by a 20 s pause, so that the ports are free again.
+- The order of the builds and modes is reversed every other round. The lower stream count always runs first.
+- Seven rounds, load average 1.2 to 1.8 (6.7 in the first).
+
+```bash
+git clone https://github.com/ai-dynamo/velo && cd velo && git checkout --detach 9a0a505
+git show e512ba0:examples/examples/stream_lifecycle.rs \
+  | sed -e 's/use velo::streaming::{MuxConfig, Retirement, StreamFrame};/use velo::streaming::{MuxConfig, StreamFrame};/' \
+        -e '/let retired = (mode == Mode::Retired)/d' \
+        -e '/^            Mode::Retired => {$/,/^            }$/c\            Mode::Retired => anyhow::bail!("no retirement in this build"),' \
+  > examples/examples/stream_lifecycle.rs
+git show e512ba0:examples/Cargo.toml > examples/Cargo.toml
+(cd examples && cargo build --release --example stream_lifecycle)   # copy aside as base
+git checkout -f --detach e512ba0 && (cd examples && cargo build --release --example stream_lifecycle)   # as change
+perf stat -x, -e instructions:u -- taskset -c 8-15 <binary> --mode <plain|retired> --path <mux|per-stream> --streams <n> --warmup <2000|200>
+```
+
+| Path and mode | Base | Change | Change − base |
+|---|---|---|---|
+| Mux, `plain`: `retired()` unused | 98,566 (98,358 to 98,797) | 99,154 (98,780 to 99,591) | +589 (+0.60%) |
+| Mux, `retired` awaited | | 100,622 (100,325 to 100,698) | +1,468 over `plain` |
+| Per-stream TCP, `plain` | 136,799 (130,358 to 144,335) | 139,045 (131,501 to 140,401) | +2,246 (+1.6%), within the spread |
+| Per-stream TCP, `retired` awaited | | 140,162 (139,869 to 141,210) | |
+
+- **The mux row replaces the claim that an unused `retired()` costs nothing.** It costs about 590 user instructions per stream of four 16-byte items, 0.6%. The change median is above the highest base round. The base is the commit before velo `e512ba0`, so the row covers all of that commit: the retirement state, the teardown that writes admitted frames, and the size check of each item.
+- **Per-stream TCP: within the spread.** Each stream opens a connection there, and its spread is ±5%.
+- **Awaiting `retired()`** adds about 1,500 instructions per stream on the mux. After `finalize`, the producer holds a stream for 290 to 304 us at p50 and 627 to 777 us at p99.
+- **The gRPC size check is not measured.** No harness streams over gRPC.
+
+### Reply renewal
+
+gdl `ad11b37`, the commit before renewal, against `8b282c4`, its two commits. Velo `d793db4` and `1bbeb88`, where `velo-direct` is the control. These commits have no `requests` bench, so only criterion rows ran: five runs each, the builds in turn. Load average 2.3 to 15.5 for the `remote` rows and 2.1 to 7.9 for `hop`. Medians:
+
+| Row | Before | After |
+|---|---|---|
+| `request/gdl` (`hop`, one hop in process) | 3,517 ns | 3,517 ns |
+| `request/reference-2-segments` | 125.8 us | 125.8 us |
+| `request/reference-3-segments` | 270.8 us | 268.2 us |
+| `request/upload-2-segments` | 197.4 us | 195.2 us |
+| `request/velo-direct` (control) | 85.6 us | 84.9 us |
+| `reference-items/2-segments` (1,000 items) | 91.2 ms | 90.5 ms |
+
+Every after median is inside the range of the before runs. The claim holds.
+
+### The source reader
+
+The reader's cost tests (`crates/gdl-extract/tests/cost.rs`) count the reader's work: reads from its lookup structures, allocations, and peak memory. They assert that doubling the source at most about doubles each count. A count of work does not depend on the machine, so these tests settle the claim on any host, and no bench was run. [Reader cost](reader-cost.md) has the shapes.
+
+### Runtime metrics
+
+`25fa36d`, the build that recorded per node, against `6b43a49`, the per-segment build the laptop measured, and main at `1aaeb6d`. Each build runs with metrics off and on, on one to three segments: one visit per segment. Seven rounds, load average 2.5 to 10.9. The cost of a visit is (on − off) / visits, from the medians.
+
+| Build | one segment | two segments, per visit | three segments, per visit | Fit through zero |
+|---|---|---|---|---|
+| `25fa36d`, per node (on − off, per request) | 3,032 | 3,256 per request | 4,409 per request | |
+| `6b43a49`, per segment | 2,421 | 2,042 | 1,877 | 1,963 |
+| main `1aaeb6d` | 2,158 | 2,223 | 1,808 | 1,952 |
+
+The fit is the least-squares slope of on − off against the visits, through zero: (d1 + 2 × d2 + 3 × d3) / 14, where dN is on − off with N visits. Within one round, on − off per visit ranges widely: at main −560 to 3,216 on one segment, 1,007 to 4,633 on two, and 550 to 3,185 on three. At `6b43a49` it is −921 to 4,150, 413 to 2,980, and 1,339 to 2,213.
+
+Main alone, thirty rounds. The load average was 11.6 at the first round, 3.2 by the eighth, and 2.3 to 3.1 after:
+
+| Setup | Off | On | On − off, per visit |
+|---|---|---|---|
+| one segment | 52,408 (50,654 to 54,135) | 54,061 (52,738 to 56,045) | 1,653 |
+| two segments | 299,469 (297,444 to 301,891) | 303,354 (301,326 to 304,765) | 1,943 |
+| three segments | 532,308 (528,275 to 536,030) | 538,991 (532,751 to 543,202) | 2,227 |
+
+The fit through zero is 2,105 per visit. Resampling the thirty rounds of each setup 5,000 times puts 95% of the fits between 1,805 and 2,477.
+
+- **Per visit: about 2,100, at the budget of 2,000.** The budget is inside the interval, so the counts settle neither a pass nor a fail. The spread comes from the runs, not from the recording: the rounds of one setup range over 3,500 to 10,500 instructions per request.
+- **The owner accepts about 2,100 instructions per visit as the cost of the metrics** (2026-10-27). The budget is recorded as met at that figure.
+- **Off costs nothing.** With metrics off, `6b43a49` is within the spread of `25fa36d` on two and three segments (−0.5% and −0.2%), and 3.6% lower on one.
+- **Per item: nothing.** In `reference-items/2-segments`, the median with metrics on is at most 0.6% above the median with metrics off in any build, and at main it is 0.8% below it.
+- **32 requests at once** (`concurrent-32x1-reference/1-segment`, three runs, load average 1.6 to 2.7): recording costs +3.3% to +5.4% at main, +3.2% to +4.9% at `6b43a49`, and +4.1% to +6.9% for the per-node build.
+
+### Live rosters
+
+`1ca7eba` against `83e9588`, metrics off, ten rounds, load average 3.3 to 6.5 (14.3 in the last round).
+
+| Setup | Base | Change | Change − base |
+|---|---|---|---|
+| one segment (control, sends no stream) | 58,717 (57,228 to 60,280) | 58,661 (57,398 to 60,528) | −55 (−0.1%) |
+| two segments (one stream sent) | 306,621 (305,854 to 308,038) | 309,999 (308,367 to 312,344) | +3,378 (+1.10%) |
+| three segments (two streams sent) | 546,726 (544,540 to 547,989) | 558,658 (551,915 to 559,340) | +11,931 (+2.18%) |
+
+- **Two and three segments are beyond the spread.** Every round of the change is above every round of the base. The owner accepted +1.5% on three segments from the laptop. gb300 measures +2.18%.
+- **The owner accepts +2.18% on three segments for now** (2026-10-27), and the cost is to be watched. The three-segment row is a guarded row: [Hot paths](hot-paths.md#roster-stream-retirement) gives the check that a change to rosters or to stream retirement runs.
+- **Wall time** (`remote`, three runs, load average 1.8 to 10.1): the change median of `request/reference-2-segments` is above the base range, +3.7% against the base median. The other five rows, `concurrent-32x1000-16B/lean-2-segments` among them, are inside it.
+
+### Velo deadline sweeps
+
+gdl `8c76017` with velo `e512ba0`, against `dc1bc3c` with velo `cee2834`, a change to the lock file only. Ten rounds, load average 2.5 to 7.3.
+
+| Setup | Base | Change | Change − base |
+|---|---|---|---|
+| one segment (control) | 59,066 (57,081 to 60,652) | 58,089 (56,693 to 59,877) | −978 (−1.7%), within the spread |
+| two segments, `round_robin` | 310,429 (307,667 to 312,890) | 302,279 (300,755 to 303,461) | −8,150 (−2.6%) |
+| three segments, `round_robin` | 554,098 (552,722 to 556,028) | 538,031 (535,648 to 541,605) | −16,067 (−2.9%) |
+| two segments, `random` | 311,228 (309,681 to 314,270) | 303,346 (301,160 to 304,697) | −7,882 (−2.5%) |
+
+The saving is about 8,000 user instructions per anchor, one for each stream sent across: one in two segments, two in three. The per-item row, `reference-items/2-segments` (five runs, load average 1.8 to 2.9), ranges over 90.0 to 91.4 ms on the base, median 90.5 ms. The change median, 90.9 ms, is inside that range, and neither build is bimodal here. Sweeps cost nothing per item. The other wall-time rows are inside the base range too.
+
+### Selectors
+
+`d810618` against `b405987`, metrics off, ten rounds, load average 2.8 to 8.3.
+
+| Setup | Base | Change | Change − base |
+|---|---|---|---|
+| one segment (control) | 58,808 (56,253 to 60,618) | 58,350 (57,508 to 59,939) | −458 (−0.8%) |
+| two segments, `round_robin` | 310,381 (307,968 to 312,344) | 310,663 (309,411 to 312,612) | +282 (+0.1%) |
+| three segments, `round_robin` | 555,352 (552,522 to 556,531) | 555,877 (553,916 to 558,058) | +525 (+0.1%) |
+| two segments, `random` | 310,332 (308,707 to 312,380) | 311,722 (309,695 to 313,038) | +1,390 (+0.45%) |
+
+Every change median is inside the range of its base. The built-in policies cost what they did. Wall time (`remote`, three runs, load average 2.0 to 3.0): the change medians of `concurrent-32x1-reference/1-segment` (+2.4% against the base median) and `request/reference-1-segment` (+0.9%) are above the base range, and `concurrent-32x1000-16B/lean-2-segments` (−0.2%) is below it. The other three rows are inside it.
+
+### Cells
+
+Three comparisons. All five commits are built in one target directory and run in turn for ten rounds, load average 2.4 to 3.9 (8.0 in the first). None of the setups has classes. From `f72bc1a` on, a hand-off that a policy or a selector routes is an offer, so the two- and three-segment setups measure the offer path.
+
+| Comparison | one segment | two | three | two, `random` |
+|---|---|---|---|---|
+| Watch and roster series: `872cc29` → `d15b219` | +291 (+0.5%) | −1,818 (−0.6%) | −1,595 (−0.3%) | −1,182 (−0.4%) |
+| The cells series: `6ded81f` → `75ec8cb` | −233 (−0.4%) | +2,844 (+0.94%) | +495 (+0.1%) | +3,248 (+1.07%) |
+| Offers inside a class: `75ec8cb` → `f72bc1a` | −470 (−0.8%) | +752 (+0.25%) | +2,017 (+0.37%) | −339 (−0.1%) |
+
+User instructions per request, the change minus the base. The medians of the three bases: one segment 58.5k to 59.0k, two 302.7k to 306.1k, three 539.3k to 540.9k.
+
+- **The watch and roster series and the offers are within the spread** in every setup.
+- **The cells series moves two segments by about 3,000 instructions, and the cells commits add none of it.** Every round of `75ec8cb` is above every round of `6ded81f`, with both routers. The base ranges are 302.7k to 304.3k (`round_robin`) and 301.7k to 305.1k (`random`). The change ranges are 304.9k to 308.1k and 305.2k to 308.6k. Three segments move +0.1%, within the spread.
+- **The step is main's message codec work.** Two bisects of the two-segment setup, seven rounds each, put it at the merge of main into the cells work (`c188275d`): +5,254 (+1.74%) over its first parent. No other step between `d15b219` and `75ec8cb` is above its base range. The largest other rise is +0.53%, inside it. Two steps fall below it, by −0.44% and −0.20%. On main's own line, from `6ded81f` to `3cdf19a`, with no cells code: choosing a wire encoding per message (`9ce6b6d`) adds 7,682 (+2.55%), and reducing the codec's allocations (`3cdf19a`) takes back 2,321. Net +3,809 (+1.26%), beyond the spread. The owner accepts +1.26% as the price of choosing the encoding per message (2026-10-27). The table:
+
+| Two segments, user instructions | Median (range) |
+|---|---|
+| `6ded81f`, main before the codec work | 303,147 (301,488 to 304,554) |
+| `ad6f75c`, the commit before `9ce6b6d` | 301,595 (300,358 to 304,486) |
+| `9ce6b6d`, a wire encoding per message | 309,277 (307,496 to 310,710) |
+| `3cdf19a`, fewer codec allocations | 306,956 (305,855 to 307,410) |
+| `9336ffc`, the cells work before the merge | 302,745 (300,722 to 303,603) |
+| `30efb73`, a cell drains | 302,720 (301,128 to 303,475) |
+| `aa8b497`, the merge's first parent | 301,696 (301,061 to 303,766) |
+| `c188275`, the merge of main | 306,950 (303,538 to 308,660) |
+
+- **Wall time** (`remote` and `hop`, three runs, load average 1.8 to 5.6): these change medians are outside the base range, given against the base median: `request/gdl` in the cells series (+1.2%) and in the offers (−0.4%), `request/reference-1-segment` in the cells series (−2.4%) and in the offers (+0.7%), and `reference-items/2-segments` in the watch and roster series (+0.4%). The other rows are inside it.
 
 ## Release profiles
 

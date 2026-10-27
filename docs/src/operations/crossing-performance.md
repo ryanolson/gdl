@@ -69,7 +69,7 @@ cargo bench -p gdl-runtime --bench hop --bench remote -- --warm-up-time 2 --meas
 | `request/reference-3-segments` | 117.1 us | 117.1 us |
 | `request/velo-direct` (control) | 40.2 us | 40.3 us |
 
-The cost per request is below the noise of a 57 us crossing. The renewal task did not appear in any request's time.
+The cost per request is below the noise of a 57 us crossing. The renewal task did not appear in any request's time. gb300 confirms it with the commits of renewal alone, `ad11b37` against `8b282c4`: every row is within the spread ([Claims checked on gb300](benchmarking.md#reply-renewal)).
 
 ## Velo deadline sweeps
 
@@ -81,7 +81,7 @@ Velo moved anchors' unattached deadlines and senders' heartbeats from one timer 
 | two segments, `round_robin` | 629,125 | 612,719 | -16,406 (-2.6%) |
 | three segments, `round_robin` | 1,212,451 | 1,181,941 | -30,510 (-2.5%) |
 
-The saving is about 16k instructions per anchor (per stream) and nothing without one. Wall time per request is within the spread. `reference-items/2-segments` is bimodal on both builds, with overlapping ranges, and the change median is 2.4% higher. That is below the 5% block, and unsettled: a dedicated machine decides whether a per-item cost exists.
+The saving is about 16k instructions per anchor (per stream) and nothing without one. Wall time per request is within the spread. `reference-items/2-segments` is bimodal on both builds, with overlapping ranges, and the change median is 2.4% higher. That is below the 5% block. On gb300 the per-item row is within the spread and not bimodal, so sweeps cost nothing per item, and the saving is about 8,000 user instructions per anchor ([Claims checked on gb300](benchmarking.md#velo-deadline-sweeps)).
 
 ## The single-stream limit
 
@@ -191,7 +191,7 @@ The script prints the step table, the leaf functions, and the project functions 
 
 ## Codec cost
 
-Application messages cross as named-field MessagePack (`msgpack`) by default. A fixed layout can choose positional MessagePack (`msgpack_array`), and a message can choose JSON. Named MessagePack keeps omitted fields, including nested ones. JSON has [value restrictions](limitations.md#json-cannot-preserve-every-serde-value).
+Application messages cross as named-field MessagePack (`msgpack`) by default. A fixed layout can choose positional MessagePack (`msgpack_array`), and a message can choose JSON. Named MessagePack keeps omitted fields, including nested ones. JSON has [value restrictions](limitations.md#json-cannot-preserve-every-serde-value). Choosing the encoding per message costs a two-segment request of the reference graph +1.26% in user instructions on gb300, after the allocation work below ([Claims checked on gb300](benchmarking.md#cells)). The owner accepts that cost.
 
 **Crossing overhead, in process.** Encode and decode of one item as velo carries it directly, against gdl's crossing. The crossing's edge codec writes the item straight into velo's frame, as one velo byte item, and the receiver decodes it in the buffer it arrived in ([Crossings](../concepts/crossings.md#what-crosses-the-wire)). The item is a 16 B, 1 KiB, or 16 KiB blob. Two earlier frames are shown for comparison: the `WireItem` frame wrapped the bytes in an enum inside velo's frame, and the byte path with a copy encoded the item into its own buffer, which `send_bytes` copied into the frame.
 

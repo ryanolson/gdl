@@ -31,7 +31,7 @@ Base is `25fa36d`, a build that recorded per node. Off and on are `6b43a49` with
 - **Off is free.** With metrics off the change is within the spread of the base in every row (-0.2%, +0.5%, +0.2%).
 - **Per item: nothing.** `reference-items/2-segments` does not move with metrics on. The per-item work is one branch that tests whether the first item has passed.
 - **32 requests at once:** recording costs 4.6% to 5.0%, against 5.7% to 6.3% for the per-node build in the same runs. That is about 100 ns of 2.2 us per request.
-- **Where the cost goes** is read from the code, not profiled: one `Arc` per visit, four or five clock reads, about six compare-exchanges, the sharded counters, and a count that each `Cx::clone` and `Cx::child` moves while it lives. A profile decides what to cut if the budget fails on a dedicated machine.
+- **Where the cost goes** is read from the code, not profiled: one `Arc` per visit, four or five clock reads, about six compare-exchanges, the sharded counters, and a count that each `Cx::clone` and `Cx::child` moves while it lives. On gb300 the cost is about 2,100 instructions per visit, at the budget, and the owner accepts it ([Claims checked on gb300](benchmarking.md#runtime-metrics)).
 
 One in-flight gauge for requests and responses, instead of two, was measured on one segment only: base `e55e692`, change `751af01`, load average 5.7 falling to 5.5. On minus off was +1,744 and +1,757. The change costs the same as the base with metrics on.
 
@@ -40,7 +40,7 @@ One in-flight gauge for requests and responses, instead of two, was measured on 
 - **A wrapping function** around the root hop's `generate`, to meter the source, cost 8,000 instructions per request with metrics off (127.7k to 135.7k on one segment). The wrapper put the hop's large future inside another, and moving it whole costs a copy per request. The source is now metered by notes at the exits of the one function.
 - **A stream wrapper per node** to see a response's end cost an allocation per sink, operator, and backward node. The reading now rides the boundary every such stream already passes.
 
-To confirm on a dedicated machine: the one-segment cost by `perf stat`, and the scaling at higher core counts, where a shared counter would contend more and a shard per thread costs more memory (64 shards at most, 256 bytes each per node).
+Still to measure: the scaling at higher core counts, where a shared counter would contend more and a shard per thread costs more memory (64 shards at most, 256 bytes each per node).
 
 ## Live rosters
 
@@ -53,7 +53,7 @@ A segment waits for `retired()` at the end of each stream it sends ([Development
 | three segments (two streams sent) | 1,199,499 | 1,217,378 | +17,879 (+1.5%) |
 
 - **About 6k instructions per stream sent.** Read from the code, not profiled: velo has not retired a stream when the pump finishes, so the wait registers a waker (a lock and a push), the pump's task is woken once more, and the future's drop takes the lock again. Under the messenger mux a stream retires when the batch that carries its end is admitted, after the pump has finished, so the wait is pending on almost every stream.
-- **The three-segment median is over the 1% per-request gate** and inside the spread of its runs (base 1,185k to 1,214k, change 1,204k to 1,264k). It is accepted for now. A dedicated machine confirms it.
+- **The three-segment median is over the 1% per-request gate** and inside the spread of its runs (base 1,185k to 1,214k, change 1,204k to 1,264k). It is accepted for now. On gb300, in user instructions, three segments cost +2.18% and two +1.10%, each beyond the spread ([Claims checked on gb300](benchmarking.md#live-rosters)). The owner accepts +2.18% for now, and [Hot paths](hot-paths.md#roster-stream-retirement) guards the row.
 - **Wall time:** every row is within the spread of its base runs. The 32 concurrent streams of 1,000 items, where a wait per stream could contend, have medians of 133.6 ms (base) and 134.8 ms (change) over six runs each.
 
 ## Selectors
@@ -67,7 +67,7 @@ The built-in policies `round_robin` and `random` gained a match on the crossing'
 | three segments, `round_robin` | 1,209,668 | 1,206,951 | -2,717 (-0.2%) |
 | two segments, `random` | 631,140 | 627,335 | -3,805 (-0.6%) |
 
-Every row is inside the range of its base runs. The lower crossing rows are likely the removed map lookup, read from the code and not profiled. Wall time per request and per item is within the spread.
+Every row is inside the range of its base runs. The lower crossing rows are likely the removed map lookup, read from the code and not profiled. Wall time per request and per item is within the spread. gb300 confirms it in user instructions: every row is within the spread ([Claims checked on gb300](benchmarking.md#selectors)).
 
 A named selector costs what it costs. The change build only, five rounds, two segments:
 

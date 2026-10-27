@@ -83,7 +83,7 @@ Seeing each response's end with a wrapper cost an allocation per sink, operator,
 
 ### The gate
 
-The gate is an absolute budget, not a percentage of a trivial node's work: with metrics on, at most **2,000 instructions per visit**, measured as (on − off) / visits per request on the `requests` bench. With metrics off, the change must stay within the spread of repeated runs against the base. Per item, nothing may be measurable on `reference-items/2-segments`. A dedicated machine settles the budget. On the laptop, the one-segment row measured 1,575, 2,169, and 1,757 instructions per visit in three sets, so the budget sits inside the laptop's spread. [Runtime feature costs](../operations/feature-costs.md) has the tables.
+The gate is an absolute budget, not a percentage of a trivial node's work: with metrics on, at most **2,000 instructions per visit**, measured as (on − off) / visits per request on the `requests` bench. With metrics off, the change must stay within the spread of repeated runs against the base. Per item, nothing may be measurable on `reference-items/2-segments`. On the laptop, the one-segment row measured 1,575, 2,169, and 1,757 instructions per visit in three sets, so the budget sits inside the laptop's spread. On gb300, thirty rounds put it at about 2,100 per visit, still with the budget inside the spread, and the owner accepts that cost as at the budget. [Runtime feature costs](../operations/feature-costs.md) has the tables.
 
 Instructions per request come from fixed-count runs: (count at 20,000 − count at 10,000) / 10,000, so the setup cancels, with base, off, and on interleaved over seven rounds.
 
@@ -94,7 +94,7 @@ target/release/deps/remote-<hash> --bench --warm-up-time 2 --measurement-time 5 
   '^(request/reference-[123]-segments?(-metrics)?|concurrent-32x1-reference/.*|reference-items/2-segments(-metrics)?)$'
 ```
 
-`/usr/bin/time -l` is the macOS form that reports instructions retired. On Linux, use `perf stat -e instructions`.
+`/usr/bin/time -l` is the macOS form that reports instructions retired. On Linux, use `perf stat -e instructions:u,instructions:k`. Gate on the user count (`:u`). On gb300 the kernel count varies too much between rounds ([Benchmarking](../operations/benchmarking.md#method)).
 
 ## A chooser's cell counts
 
