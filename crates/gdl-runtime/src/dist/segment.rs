@@ -228,6 +228,15 @@ impl<H> Segment<H> {
         self.rt.admission.admitted()
     }
 
+    /// The requests this instance holds that may still send work to
+    /// another segment: a hand-off it has not yet handed on or run to its
+    /// inner end's stream, and an operator's `next` still held. Counted
+    /// only in a class that a hop enters, whose cells drain segment by
+    /// segment; 0 elsewhere.
+    pub fn senders(&self) -> usize {
+        self.rt.senders()
+    }
+
     /// What its admission holds now, read from counters the admission and
     /// the forward entries keep, without a lock a request takes.
     pub fn load(&self) -> SegmentLoad {

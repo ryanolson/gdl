@@ -1,5 +1,6 @@
 //! Admission: how much work one segment instance accepts at once.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -110,6 +111,7 @@ impl Admission {
         Ok(Share {
             root,
             ledger: Arc::clone(&self.ledger),
+            sending: false,
         })
     }
 
@@ -119,7 +121,40 @@ impl Admission {
         Some(Share {
             root,
             ledger: Arc::clone(&self.ledger),
+            sending: false,
         })
+    }
+
+    /// Count one holder of `root` that may still send work onward, until
+    /// [`Admission::sent`]: an operator's `next`. Sequentially consistent,
+    /// as [`Share::sending`] is. The key names the root's shard, which
+    /// is all a holder needs, in a word.
+    pub(crate) fn sending(&self, root: u128) -> Sender {
+        let at = self.ledger.roots.at(root);
+        self.ledger.roots.shards[at].send();
+        Sender(NonZeroUsize::MIN.saturating_add(at))
+    }
+
+    /// Count one more holder on the shard of `sender`: a clone of it.
+    pub(crate) fn sending_again(&self, sender: Sender) {
+        self.ledger.roots.shards[sender.0.get() - 1].send();
+    }
+
+    /// One holder that [`Admission::sending`] or
+    /// [`Admission::sending_again`] counted will send no more.
+    pub(crate) fn sent(&self, sender: Sender) {
+        self.ledger.roots.shards[sender.0.get() - 1].sent();
+    }
+
+    /// The holders that may still send work onward: forward hand-offs
+    /// this instance took and has not yet handed on or run to their inner
+    /// end's stream, and operators' `next`s still held. Each root's
+    /// holders are counted on its own shard, so a request that passes
+    /// from one holder to the next, the new one counted before the old
+    /// one ends, never reads as none. Read after the instance stops taking
+    /// the work that adds to it, it only falls.
+    pub(crate) fn senders(&self) -> usize {
+        self.ledger.roots.senders()
     }
 
     /// Count one outstanding remote attempt of `root`, or refuse it.
@@ -209,15 +244,47 @@ fn overloaded(why: &str) -> Error {
     Error::new(ErrorKind::Overloaded, why)
 }
 
+/// The shard on which a holder that may still send is counted, as
+/// [`Admission::sending`] gives it: one more than the shard's index, so
+/// that an `Option` of it is a word.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Sender(NonZeroUsize);
+
 /// One entry's share of its root request's admission. The permit is released
 /// when the last share of the root drops.
 pub(crate) struct Share {
     root: u128,
     ledger: Arc<Ledger>,
+    /// Whether the entry is counted as one that may still send work
+    /// onward ([`Admission::senders`]).
+    sending: bool,
+}
+
+impl Share {
+    /// Count this entry, a forward hand-off, as one that may still send
+    /// work onward, until [`Share::sent`] or its drop. Called before the
+    /// entry checks whether the instance still takes work, and
+    /// sequentially consistent, as that check and the instance's own stop
+    /// are: an instance that stops taking work and then reads no sender
+    /// cannot miss an entry that its check let in.
+    pub(crate) fn sending(&mut self) {
+        if !std::mem::replace(&mut self.sending, true) {
+            self.ledger.roots.shard(self.root).send();
+        }
+    }
+
+    /// The entry will send no more work onward: it handed the request on,
+    /// or its inner end returned its stream.
+    pub(crate) fn sent(&mut self) {
+        if std::mem::replace(&mut self.sending, false) {
+            self.ledger.roots.shard(self.root).sent();
+        }
+    }
 }
 
 impl Drop for Share {
     fn drop(&mut self) {
+        self.sent();
         // `remove_if` holds the shard lock across the check, so a concurrent
         // join cannot slip in between the decrement and the removal.
         if let Some(mut held) = self.ledger.held.get_mut(&self.root) {
@@ -238,15 +305,31 @@ impl Drop for Share {
 /// added and removed on its own shard, after each other, so no shard's
 /// count is ever below zero, and the sum of relaxed reads is a count the
 /// ledger held while they were made, give or take the roots that changed
-/// meanwhile.
+/// meanwhile. Each shard also counts its roots' holders that may still
+/// send work onward ([`Admission::senders`]), on the line the root's
+/// admission already touched.
 struct Roots {
     shards: Box<[Shard]>,
 }
 
-/// One shard, alone on its cache line.
+/// One shard, alone on its cache line: its admitted roots, and their
+/// holders that may still send.
 #[repr(align(128))]
 #[derive(Default)]
-struct Shard(AtomicUsize);
+struct Shard {
+    roots: AtomicUsize,
+    senders: AtomicUsize,
+}
+
+impl Shard {
+    fn send(&self) {
+        self.senders.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn sent(&self) {
+        self.senders.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl Roots {
     fn new() -> Self {
@@ -257,25 +340,36 @@ impl Roots {
         }
     }
 
-    fn shard(&self, root: u128) -> &AtomicUsize {
+    fn shard(&self, root: u128) -> &Shard {
+        &self.shards[self.at(root)]
+    }
+
+    /// The index of `root`'s shard.
+    fn at(&self, root: u128) -> usize {
         // The length is a power of two; a root's bits are well mixed.
         let folded = (root as u64) ^ ((root >> 64) as u64);
-        let at = usize::try_from(folded).unwrap_or(usize::MAX) & (self.shards.len() - 1);
-        &self.shards[at].0
+        usize::try_from(folded).unwrap_or(usize::MAX) & (self.shards.len() - 1)
     }
 
     fn add(&self, root: u128) {
-        self.shard(root).fetch_add(1, Ordering::Relaxed);
+        self.shard(root).roots.fetch_add(1, Ordering::Relaxed);
     }
 
     fn remove(&self, root: u128) {
-        self.shard(root).fetch_sub(1, Ordering::Relaxed);
+        self.shard(root).roots.fetch_sub(1, Ordering::Relaxed);
     }
 
     fn count(&self) -> usize {
         self.shards
             .iter()
-            .map(|shard| shard.0.load(Ordering::Relaxed))
+            .map(|shard| shard.roots.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    fn senders(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.senders.load(Ordering::SeqCst))
             .sum()
     }
 }
@@ -315,6 +409,82 @@ mod tests {
         drop(second);
         assert_eq!(admission.admitted(), 0);
         let _other = admission.admit(2).await.expect("the permit was released");
+    }
+
+    /// A hand-off counts as one that may send from when it is marked until
+    /// it has sent, or until its share drops; an operator's `next`, counted
+    /// on the same root before the hand-off ends, keeps the count above
+    /// zero across the passing, and only its end brings it to zero.
+    #[tokio::test]
+    async fn a_request_may_send_until_its_last_holder_ends() {
+        let admission = Admission::new(4, Duration::from_millis(20), 8);
+        let mut handed = admission.admit(7).await.expect("admitted");
+        assert_eq!(admission.senders(), 0, "an entry is not counted unmarked");
+        handed.sending();
+        handed.sending();
+        assert_eq!(admission.senders(), 1, "marked once, however often");
+        let next = admission.sending(7);
+        handed.sent();
+        assert_eq!(admission.senders(), 1, "the next holds the request");
+        handed.sent();
+        assert_eq!(admission.senders(), 1, "a share sends once");
+        admission.sending_again(next);
+        admission.sent(next);
+        assert_eq!(admission.senders(), 1, "a clone of the next holds it");
+        admission.sent(next);
+        assert_eq!(admission.senders(), 0);
+        assert_eq!(
+            std::mem::size_of::<Option<Sender>>(),
+            std::mem::size_of::<usize>(),
+            "a counted next carries one word more than a plain one"
+        );
+        let mut dropped = admission.admit(8).await.expect("admitted");
+        dropped.sending();
+        drop(dropped);
+        assert_eq!(admission.senders(), 0, "a dropped share has sent");
+        drop(handed);
+        assert_eq!(admission.admitted(), 0);
+    }
+
+    /// What counting a holder that may still send costs a request in a
+    /// class that a hop enters, for the record in the book: a hand-off
+    /// marked and settled, and an operator's `next` counted and ended, on
+    /// one thread. Ignored: it times, and asserts nothing. Run it in
+    /// release:
+    /// `cargo test --release -p gdl-runtime --lib cost_of_counting -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "a timing, not a check"]
+    async fn cost_of_counting_a_sender() {
+        const COUNTS: u32 = 2_000_000;
+        let admission = Admission::new(4, Duration::from_millis(20), 8);
+        let mut share = admission.admit(7).await.expect("admitted");
+        let mut best = Duration::MAX;
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            for _ in 0..COUNTS {
+                let share = std::hint::black_box(&mut share);
+                share.sending();
+                share.sent();
+            }
+            best = best.min(start.elapsed());
+        }
+        println!(
+            "a hand-off marked and settled: {:.1} ns",
+            best.as_nanos() as f64 / f64::from(COUNTS)
+        );
+        let mut best = Duration::MAX;
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            for _ in 0..COUNTS {
+                let next = admission.sending(std::hint::black_box(7));
+                admission.sent(next);
+            }
+            best = best.min(start.elapsed());
+        }
+        println!(
+            "a next counted and ended: {:.1} ns",
+            best.as_nanos() as f64 / f64::from(COUNTS)
+        );
     }
 
     #[tokio::test]

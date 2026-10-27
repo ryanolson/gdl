@@ -470,7 +470,7 @@ where
     async fn call(&self, scope: &Cx, req: O::UpReq) -> Result<Items<O::UpItem>> {
         let items = self
             .op
-            .generate(scope.clone(), req, self.next.clone())
+            .generate(scope.clone(), req, self.next.for_request(scope))
             .await?;
         Ok(fuse(items, scope))
     }

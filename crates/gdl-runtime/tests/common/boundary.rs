@@ -522,6 +522,66 @@ async fn instances<H: Register + Send + Sync + 'static>(
     }
 }
 
+/// A model cell whose class splits the model part of the reference graph
+/// over the entry `f` and other segments: its hub, its entry instances,
+/// and one instance of each other segment, in the order they were named.
+pub struct Spread<H> {
+    pub hub: Hub,
+    /// The cell's extension on its hub.
+    pub readiness: Arc<CellReadiness<Resolving>>,
+    pub entries: Vec<Running<H>>,
+    pub interior: Vec<Running<H>>,
+}
+
+/// Start the model cell `cell` of a deployment of `segments`, with
+/// `cell.entries` instances of `f` and one of each of `interior`, with
+/// the shortest load summary period, [`SUMMARY`], and `runtime` as every
+/// instance's `[runtime]` table. `process` changes each instance's
+/// process settings, given its segment.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the deployment, the cell, and how each instance differs"
+)]
+pub async fn model_spread<H: Register + Send + Sync + 'static>(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+    cell: Model<'_>,
+    segments: &'static [&'static str],
+    interior: &[&'static str],
+    runtime: &str,
+    process: &(dyn Fn(&str, &mut ProcessConfig<Nothing>) + Sync),
+    assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
+) -> Spread<H> {
+    let (settings_of_hub, timing, extra) = summarized(cell, runtime);
+    let (hub, readiness) = cell_hub_timed(spec, settings_of_hub, directory, timing).await;
+    let mut all = interior.to_vec();
+    all.extend(std::iter::repeat_n("f", cell.entries));
+    // Each instance's launch waits for the others of its class.
+    let mut running = join_all(all.into_iter().map(|segment| {
+        let mut config = settings(
+            hub.public_addr().port(),
+            hub.control_addr().port(),
+            5_000,
+            &extra,
+        );
+        process(segment, &mut config);
+        async move {
+            let runtime = config.runtime.clone();
+            run_graph_in(&config, segment, segments, spec, runtime, assemble)
+                .await
+                .expect("a model instance serves")
+        }
+    }))
+    .await;
+    let entries = running.split_off(interior.len());
+    Spread {
+        hub,
+        readiness,
+        entries,
+        interior: running,
+    }
+}
+
 /// A request through the source that streams three items, and its
 /// answer: `Ok` when every item came, the error otherwise. The whole
 /// request is bounded by [`WAIT`].

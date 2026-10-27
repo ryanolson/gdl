@@ -17,8 +17,9 @@ use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
 /// A segment's hub registration, kept alive from the moment it is made,
 /// and the phases it announces: `loaded`, once its nodes are ready to work;
 /// `serving`, once its handlers are installed; `ready`, once it routes;
-/// `drained`, once a source has finished its requests; and `retired`, once
-/// it has been stopped. Peers take loaded instances into their rosters,
+/// `drained`, once a source has finished its requests; `retired`, once it
+/// has been stopped; and `detach`, once an instance of a draining cell will
+/// send no more work into it. Peers take loaded instances into their rosters,
 /// send only once those are serving, add a joiner when it is ready, and
 /// stop routing to one that retired.
 pub struct HubSession {
@@ -28,6 +29,7 @@ pub struct HubSession {
     serving: Option<HubServiceRegistration>,
     ready: Option<HubServiceRegistration>,
     drained: Option<HubServiceRegistration>,
+    detached: Option<HubServiceRegistration>,
     retired: Option<HubServiceRegistration>,
     lease: tokio::task::JoinHandle<()>,
     lost: watch::Receiver<Option<String>>,
@@ -70,6 +72,7 @@ impl HubSession {
             serving: None,
             ready: None,
             drained: None,
+            detached: None,
             retired: None,
             lease,
             lost,
@@ -347,18 +350,51 @@ impl HubSession {
         }
     }
 
-    /// Whether every current member of `segments` has announced `drained`.
-    /// A member that left is no longer one, so it is not waited for.
-    pub(crate) async fn all_drained(&self, segments: &[&str]) -> Result<bool> {
+    /// Announce that this instance, of a draining cell, will send no more
+    /// work into its cell, retried until `deadline`.
+    pub(crate) async fn detached(&mut self, deadline: tokio::time::Instant) -> Result<()> {
+        if self.detached.is_none() {
+            self.detached = Some(self.persist(SegmentPhase::Detached, deadline).await?);
+        }
+        Ok(())
+    }
+
+    /// Whether every current member of `segments` has announced that it
+    /// detached: it sends no more work into its draining cell. A member of
+    /// one of `entries` may have announced that it drained instead, which
+    /// an entry of a draining cell does only once it holds no request; a
+    /// source elsewhere drains once its serving body ends, while its
+    /// segment may still hand work on. A member that left is no longer
+    /// one, so it is not waited for.
+    pub(crate) async fn all_detached(&self, segments: &[&str], entries: &[&str]) -> Result<bool> {
         let members = self.members().await?;
-        let mut drained = HashSet::new();
+        let mut detached = HashSet::new();
         for segment in segments {
-            drained.extend(self.instances(segment, SegmentPhase::Drained).await?);
+            detached.extend(self.instances(segment, SegmentPhase::Detached).await?);
+            if entries.contains(segment) {
+                detached.extend(self.instances(segment, SegmentPhase::Drained).await?);
+            }
         }
         Ok(members
             .iter()
             .filter(|m| segments.contains(&m.registration.segment.as_str()))
-            .all(|m| drained.contains(&m.peer.instance_id())))
+            .all(|m| detached.contains(&m.peer.instance_id())))
+    }
+
+    /// Whether every current member of `segments` has announced `drained`.
+    /// A member that left is no longer one, so it is not waited for.
+    pub(crate) async fn all_drained(&self, segments: &[&str]) -> Result<bool> {
+        all_drained(&self.client, &self.registration, segments).await
+    }
+
+    /// What a wait beside the drain asks the hub, apart from the session,
+    /// so that the wait borrows none of it.
+    pub(crate) fn asker(&self) -> HubAsker {
+        HubAsker {
+            client: self.client.clone(),
+            registration: self.registration.clone(),
+            lost: self.lost.clone(),
+        }
     }
 
     /// Leave the hub at once, rather than when the lease runs out, so that
@@ -483,6 +519,50 @@ impl Drop for HubSession {
 }
 
 /// The members of the deployment `registration` belongs to, from the hub.
+/// The questions a wait beside an instance's drain asks its hub, held
+/// apart from its [`HubSession`].
+pub(crate) struct HubAsker {
+    client: HubClient,
+    registration: SegmentRegistration,
+    lost: watch::Receiver<Option<String>>,
+}
+
+impl HubAsker {
+    /// Whether the session's lease is lost, so that no hub answers.
+    pub(crate) fn is_lost(&self) -> bool {
+        self.lost.borrow().is_some()
+    }
+
+    /// [`HubSession::all_drained`].
+    pub(crate) async fn all_drained(&self, segments: &[&str]) -> Result<bool> {
+        all_drained(&self.client, &self.registration, segments).await
+    }
+}
+
+/// Whether every current member of `segments` has announced `drained`. A
+/// member that left is no longer one, so it is not waited for.
+async fn all_drained(
+    client: &HubClient,
+    registration: &SegmentRegistration,
+    segments: &[&str],
+) -> Result<bool> {
+    let members = members(client, registration).await?;
+    let mut drained = HashSet::new();
+    for segment in segments {
+        let name = segment_service(segment, SegmentPhase::Drained);
+        let instances = client
+            .services()
+            .get_instances(&name)
+            .await
+            .map_err(failure)?;
+        drained.extend(instances);
+    }
+    Ok(members
+        .iter()
+        .filter(|m| segments.contains(&m.registration.segment.as_str()))
+        .all(|m| drained.contains(&m.peer.instance_id())))
+}
+
 async fn members(client: &HubClient, registration: &SegmentRegistration) -> Result<Vec<Member>> {
     let members: Vec<Member> = client.ext("gdl").get("/members").await.map_err(failure)?;
     for member in &members {
@@ -1110,10 +1190,17 @@ mod tests {
             &fits,
             SegmentPhase::Serving
         )));
-        assert!(velo_hub::protocol::is_valid_service_name(&segment_service(
-            &fits,
-            SegmentPhase::Loaded
-        )));
+        for phase in [
+            SegmentPhase::Loaded,
+            SegmentPhase::Ready,
+            SegmentPhase::Drained,
+            SegmentPhase::Retired,
+            SegmentPhase::Detached,
+        ] {
+            assert!(velo_hub::protocol::is_valid_service_name(&segment_service(
+                &fits, phase
+            )));
+        }
         let over = "s".repeat(gdl_model::SEGMENT_NAME_LIMIT + 1);
         assert!(!velo_hub::protocol::is_valid_service_name(
             &segment_service(&over, SegmentPhase::Serving)

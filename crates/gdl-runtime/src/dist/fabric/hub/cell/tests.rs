@@ -113,6 +113,10 @@ async fn the_bounds_pass_on_time_while_the_drain_watch_waits_at_its_cap() {
         learned,
         role: super::Role::Entry { bound: BOUND },
         entries: vec!["f".into()],
+        senders: Vec::new(),
+        detaches: true,
+        #[cfg(feature = "fault-injection")]
+        stalls: false,
         foreign: false,
         retired: None,
         watch: tokio::spawn(run(watcher, server.address.clone(), Some(me), learns)),

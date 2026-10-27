@@ -16,9 +16,10 @@ An instance passes through these phases. Each phase is a fact that the instance 
 | ready | the barrier passed and the instance routes | `gdl-ready-<segment>` | none |
 | retired | the instance was stopped | `gdl-retired-<segment>` | `retired/<segment>.<id>` |
 | drained | a source instance has finished its requests | `gdl-drained-<segment>` | `drained/<segment>.<id>` |
+| detached | an instance of a draining cell will send no more work into the cell | `gdl-detach-<segment>` | none |
 | left | the instance has gone | unregistration | `left/<segment>.<id>` |
 
-`<segment>` in a hub service name is the segment's name in hex. A roster directory has no `ready` phase, because nothing joins a roster directory.
+`<segment>` in a hub service name is the segment's name in hex. A roster directory has no `ready` phase, because nothing joins a roster directory. It has no `detached` phase either, because only a cell under a hub drains.
 
 ## Start
 
@@ -138,7 +139,7 @@ Under a hub, a lost lease stops the instance as a stop does. It skips (A) and (B
 
 ### Cells
 
-Under a hub, an instance in a cell also stops when its cell drains. An entry instance of a cell also waits until the cells that follow its cell avoid it, before its `setup_timeout`. [Following and choosing cells](cell-routing.md) describes both.
+Under a hub, an instance in a cell also stops when its cell drains, once no more work can reach it. An entry instance of a cell also waits until the cells that follow its cell avoid it, before its `setup_timeout`. [Following and choosing cells](cell-routing.md) describes both.
 
 ## Limits
 

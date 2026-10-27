@@ -605,6 +605,18 @@ fn shaped<I: Send + 'static, O: Send + 'static>(
             });
             items(input.map(move |item| item.map(&map)))
         }
+        Some(mode) if mode.starts_with("hold:") => {
+            // A stage that holds its response open after its input ended,
+            // until the test lets it go: a response still running here
+            // after the stages before it have finished theirs.
+            let key = mode["hold:".len()..].to_string();
+            let end = futures::stream::once(async move {
+                held(&key).await;
+                None
+            })
+            .filter_map(futures::future::ready);
+            items(input.map(move |item| item.map(&map)).chain(end))
+        }
         Some("discard") => items(input.filter_map(|_| {
             std::thread::sleep(Duration::from_micros(200));
             futures::future::ready(None)
@@ -622,6 +634,38 @@ pub fn ended_helpers() -> &'static Mutex<std::collections::BTreeSet<String>> {
     static ENDED: std::sync::OnceLock<Mutex<std::collections::BTreeSet<String>>> =
         std::sync::OnceLock::new();
     ENDED.get_or_init(Mutex::default)
+}
+
+/// The keys of `hold:<key>` mode that the test has let go of.
+fn holds() -> &'static (Mutex<std::collections::BTreeSet<String>>, Notify) {
+    static HOLDS: std::sync::OnceLock<(Mutex<std::collections::BTreeSet<String>>, Notify)> =
+        std::sync::OnceLock::new();
+    HOLDS.get_or_init(Default::default)
+}
+
+/// Let every stage held in `hold:<key>` mode end its response.
+pub fn let_go(key: &str) {
+    let (released, changed) = holds();
+    released.lock().expect("holds").insert(key.to_string());
+    changed.notify_waiters();
+}
+
+/// Wait until the test lets `key` go, or, for a test that never does, a
+/// bound past the test's own waits.
+async fn held(key: &str) {
+    let (released, changed) = holds();
+    let _ = tokio::time::timeout(WAIT * 6, async {
+        loop {
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if released.lock().expect("holds").contains(key) {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await;
 }
 
 // ----- assembly -----

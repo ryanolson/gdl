@@ -159,6 +159,12 @@ pub struct Faults {
     /// has retired that input, as a host too busy to run the stop watcher
     /// before the run ends would.
     pub stop_after_input_retired: bool,
+    /// Never announce that the instance detached from its draining cell,
+    /// as a build from before the announcement does.
+    pub withhold_detached: bool,
+    /// The announcement that the instance detached never gets an answer,
+    /// as from a hub that stops answering.
+    pub stall_detached: bool,
 }
 
 /// A point a runtime step stops at until a test lets it go. Available only
@@ -507,6 +513,11 @@ pub(crate) struct Runtime {
     /// Whether each hop's hand-offs to this segment are offers, worked out
     /// once.
     offers: Vec<bool>,
+    /// Whether the instance counts the requests it holds that may still
+    /// send work onward ([`Admission::senders`]): only in a class that a
+    /// hop enters, whose cells drain segment by segment. Elsewhere no drain
+    /// reads the count, and a request pays nothing for it.
+    pub(crate) counts_senders: bool,
     names: Names,
     /// Forward hand-offs, backward runs, and request streams this instance
     /// has taken on.
@@ -584,7 +595,11 @@ impl Runtime {
                 .first()
                 .is_some_and(|inner| inner.segment == segment)
         });
+        let counts_senders = layout
+            .class_of(&segment)
+            .is_some_and(|class| !layout.entry_segments(class).is_empty());
         Ok(Self {
+            counts_senders,
             admission: Admission::new(
                 config.admission_limit,
                 config.admission_wait,
@@ -620,6 +635,14 @@ impl Runtime {
     /// ledger the drain waits for, or refused.
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+    }
+
+    /// The requests this instance holds that may still send work onward:
+    /// a forward hand-off not yet handed on or run to its inner end's
+    /// stream, and an operator's `next` still held. Always 0 outside a
+    /// class that a hop enters, which does not count them.
+    pub(crate) fn senders(&self) -> usize {
+        self.admission.senders()
     }
 
     /// Refuse an entry the instance has admitted once it has closed. One

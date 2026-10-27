@@ -10,7 +10,10 @@
 //! only the entry instances, so an interior instance's own sources are
 //! not members of its hub, and without this rule it would count them as
 //! drained and close at once, while an entry instance still holds a
-//! request that will call it.
+//! request that will call it. An instance that will send no more work
+//! into the cell says that it detached; an interior instance whose
+//! senders in the cell have all detached drains then, without waiting for
+//! the entry instances to drain.
 
 use std::time::Duration;
 
@@ -39,6 +42,16 @@ pub(crate) struct CellDrain {
     /// The cell's entry segments, whose instances are the drain sources of
     /// every instance of the cell while it drains.
     entries: Vec<String>,
+    /// The segments of the cell's class that send to the instance's own:
+    /// once each of their instances has detached, no more work reaches it
+    /// from inside the cell.
+    senders: Vec<String>,
+    /// Whether the instance announces that it detached; not when a test
+    /// stands in for a build from before the announcement.
+    detaches: bool,
+    /// Whether the announcement stalls, for a test.
+    #[cfg(feature = "fault-injection")]
+    stalls: bool,
     /// Whether a source segment whose requests reach the instance is of
     /// another class, so that its instances are on another hub.
     foreign: bool,
@@ -173,8 +186,9 @@ impl CellDrain {
         reaching: &[String],
         host: &str,
         public_port: u16,
-        setup: Duration,
+        runtime: &crate::RuntimeConfig,
     ) -> Result<Option<Self>> {
+        let setup = runtime.setup_timeout;
         let entries = layout.entry_segments(&cell.class);
         if entries.is_empty() {
             return Ok(None);
@@ -189,6 +203,23 @@ impl CellDrain {
         let foreign = reaching
             .iter()
             .any(|source| layout.class_of(source) != Some(cell.class.as_str()));
+        // From the layout, not the segments a binary names: a sender left
+        // out would be taken as detached.
+        // Every segment that sends holds a forward run.
+        let senders: std::collections::BTreeSet<String> = layout
+            .hops()
+            .iter()
+            .flat_map(|hop| &hop.forward_runs)
+            .map(|run| run.segment.as_str())
+            .filter(|sender| layout.class_of(sender) == Some(cell.class.as_str()))
+            .filter(|sender| layout.sends_to(sender).contains(segment))
+            .map(String::from)
+            .collect();
+        let senders = senders.into_iter().collect();
+        #[cfg(feature = "fault-injection")]
+        let detaches = !runtime.faults.withhold_detached;
+        #[cfg(not(feature = "fault-injection"))]
+        let detaches = true;
         let watcher =
             CellWatcher::new().map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
         let address = crate::dist::cells::hub_address(host, public_port);
@@ -199,6 +230,10 @@ impl CellDrain {
             learned,
             role,
             entries,
+            senders,
+            detaches,
+            #[cfg(feature = "fault-injection")]
+            stalls: runtime.faults.stall_detached,
             foreign,
             retired: None,
             watch,
@@ -237,8 +272,8 @@ impl CellDrain {
 
     /// Resolves when the cell's drain begins this instance's stop: an entry
     /// instance's once it declines offers ([`CellDrain::declining`]), an
-    /// interior instance's once every entry instance of the cell has
-    /// drained or left `session`'s hub, which it asks every
+    /// interior instance's once no more work can reach it
+    /// ([`CellDrain::unreached`]), which it asks `session`'s hub every
     /// [`HubSession::poll`] while the cell drains.
     pub(crate) async fn stops(&self, session: &HubSession) {
         self.learned().await;
@@ -248,22 +283,88 @@ impl CellDrain {
                     declining.await;
                 }
             }
-            Role::Interior => {
-                let entries: Vec<&str> = self.entries.iter().map(String::as_str).collect();
-                loop {
-                    // A hub can stop answering without closing its
-                    // connections; the lease's own end stops the instance.
-                    let asked = tokio::time::timeout(
-                        HubSession::poll() * 10,
-                        session.all_drained(&entries),
-                    );
-                    if matches!(asked.await, Ok(Ok(true))) {
-                        return;
-                    }
-                    tokio::time::sleep(HubSession::poll()).await;
+            Role::Interior => loop {
+                // A hub can stop answering without closing its
+                // connections; the lease's own end stops the instance.
+                let asked = tokio::time::timeout(HubSession::poll() * 10, self.unreached(session));
+                if matches!(asked.await, Ok(Ok(true))) {
+                    return;
                 }
+                tokio::time::sleep(HubSession::poll()).await;
+            },
+        }
+    }
+
+    /// For an interior instance of a draining cell: whether no more work
+    /// can reach it, asked of `session`'s hub. Every entry instance and
+    /// every instance of the segments of its class that send to it has
+    /// detached, or left; or, as before an instance could detach, every
+    /// entry instance has drained or left, which holds also when an entry
+    /// built before then never says that it detached. `false` for an entry
+    /// instance, and while the cell does not drain.
+    ///
+    /// The entry instances are asked too because a sender that leaves the
+    /// hub may still hold work, as one whose lease is lost does: an entry's
+    /// attempt into the cell returns only once its whole forward path has
+    /// taken the request, so an entry that detached holds no request still
+    /// on its way.
+    pub(crate) async fn unreached(&self, session: &HubSession) -> Result<bool> {
+        if !matches!(self.role, Role::Interior) || self.learned.borrow().drain.is_none() {
+            return Ok(false);
+        }
+        let entries: Vec<&str> = self.entries.iter().map(String::as_str).collect();
+        if !self.senders.is_empty() {
+            let mut quiet = entries.clone();
+            quiet.extend(
+                self.senders
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|sender| !entries.contains(sender)),
+            );
+            if session.all_detached(&quiet, &entries).await? {
+                return Ok(true);
             }
         }
+        session.all_drained(&entries).await
+    }
+
+    /// For an entry instance of a draining cell: whether the segments of
+    /// its class that send to it have all detached, asked of `session`'s
+    /// hub, so that the hand-offs inside the cell bring it no more work;
+    /// at once when none sends to it. A path that leaves the entry and
+    /// comes back makes two segments wait for each other here, and the
+    /// entry then never detaches, as one built before it could.
+    pub(crate) async fn senders_detached(&self, session: &HubSession) -> Result<bool> {
+        if self.senders.is_empty() {
+            return Ok(true);
+        }
+        let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
+        let entries: Vec<&str> = self.entries.iter().map(String::as_str).collect();
+        session.all_detached(&senders, &entries).await
+    }
+
+    /// Whether the instance is an interior one.
+    pub(crate) fn interior(&self) -> bool {
+        matches!(self.role, Role::Interior)
+    }
+
+    /// The cell's entry segments.
+    pub(crate) fn entry_segments(&self) -> &[String] {
+        &self.entries
+    }
+
+    /// Whether the instance announces that it detached from its draining
+    /// cell, once it will send no more work into it.
+    pub(crate) fn detaches(&self) -> bool {
+        self.detaches && self.learned.borrow().drain.is_some()
+    }
+
+    /// Whether a test stalls the announcement that it detached.
+    pub(crate) fn stalls(&self) -> bool {
+        #[cfg(feature = "fault-injection")]
+        return self.stalls;
+        #[cfg(not(feature = "fault-injection"))]
+        false
     }
 
     /// Whether the stop the drain begins retires the instance. An entry

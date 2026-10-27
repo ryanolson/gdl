@@ -24,8 +24,9 @@ pub const SEGMENT_NAME_LIMIT: usize = 58;
 /// A phase of a segment's instance that it announces to its hub, as a
 /// service named by [`segment_service`]: `loaded`, once its nodes are ready
 /// to work; `serving`, once its handlers are installed; `ready`, once it
-/// routes; `drained`, once a source has finished its requests; and
-/// `retired`, once it has been stopped.
+/// routes; `drained`, once a source has finished its requests; `retired`,
+/// once it has been stopped; and `detach`, once an instance of a draining
+/// cell will send no more work into the cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SegmentPhase {
     /// The instance's nodes are ready to work.
@@ -38,6 +39,9 @@ pub enum SegmentPhase {
     Drained,
     /// The instance has been stopped.
     Retired,
+    /// An instance of a draining cell takes no more work from outside the
+    /// cell, and no request it holds will send work into the cell again.
+    Detached,
 }
 
 /// The hub service that announces `segment`'s instances in `phase`. Every
@@ -52,6 +56,7 @@ pub fn segment_service(segment: &str, phase: SegmentPhase) -> String {
         SegmentPhase::Ready => "ready",
         SegmentPhase::Drained => "drained",
         SegmentPhase::Retired => "retired",
+        SegmentPhase::Detached => "detach",
     };
     format!(
         "gdl-{phase}-{}",

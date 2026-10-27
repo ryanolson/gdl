@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use futures::{Future, Stream, StreamExt};
 
-use super::admission::{EgressPermit, Share};
+use super::admission::{EgressPermit, Sender, Share};
 use super::envelope::{Accepted, Forward, Open, VERSION, WireCx};
 use super::fabric::{Canceller, EncodedItem, Frame, Inbound, Outbound, Outgoing, ReplyTo, Retirer};
 use super::offers::{Decline, Refusal, Refused};
@@ -29,6 +29,18 @@ use tokio::time::Instant;
 pub trait Register {
     #[doc(hidden)]
     fn register(&self, entries: &mut Entries);
+
+    /// The `next` an operator is given for the request of `cx`: a clone.
+    /// A hop counts it, and each clone of it, as a holder that may still
+    /// send work onward while it lives, since each may start an attempt.
+    #[doc(hidden)]
+    fn for_request(&self, cx: &Cx) -> Self
+    where
+        Self: Sized + Clone,
+    {
+        let _ = cx;
+        self.clone()
+    }
 }
 
 impl Register for () {
@@ -43,12 +55,26 @@ impl<H: Register, T: Register> Register for (H, T) {
 
 /// A hop of a distributed graph. As an outer end's `next` it starts
 /// attempts; as a registered hop it serves the forward hand-offs and backward
-/// runs this segment hosts.
-pub struct DHop<F, I, B>(Arc<HopCore<F, I, B>>);
+/// runs this segment hosts. The `next` an operator is given for a request
+/// carries the request's root, and it and each clone of it count as a
+/// holder that may still send work onward while they live
+/// ([`Runtime::senders`]).
+pub struct DHop<F, I, B>(Arc<HopCore<F, I, B>>, Option<Sender>);
 
 impl<F, I, B> Clone for DHop<F, I, B> {
     fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
+        if let Some(sender) = self.1 {
+            self.0.rt.admission.sending_again(sender);
+        }
+        Self(Arc::clone(&self.0), self.1)
+    }
+}
+
+impl<F, I, B> Drop for DHop<F, I, B> {
+    fn drop(&mut self) {
+        if let Some(sender) = self.1 {
+            self.0.rt.admission.sent(sender);
+        }
     }
 }
 
@@ -355,16 +381,19 @@ impl<F: DForward, I: DInner, B: DBackward> DHop<F, I, B> {
             None => HopFigures::default(),
         };
         let offer = rt.offered(usize::from(index));
-        Ok(Self(Arc::new(HopCore {
-            offer,
-            rt,
-            index,
-            fwd,
-            inner,
-            bwd,
-            plan,
-            figures,
-        })))
+        Ok(Self(
+            Arc::new(HopCore {
+                offer,
+                rt,
+                index,
+                fwd,
+                inner,
+                bwd,
+                plan,
+                figures,
+            }),
+            None,
+        ))
     }
 }
 
@@ -435,6 +464,15 @@ where
     I: DInner<Req = F::Out>,
     B: DBackward<In = I::Item>,
 {
+    fn for_request(&self, cx: &Cx) -> Self {
+        let core = &self.0;
+        if !core.rt.counts_senders {
+            return Self(Arc::clone(core), None);
+        }
+        let sender = core.rt.admission.sending(cx.id().as_u128());
+        Self(Arc::clone(core), Some(sender))
+    }
+
     fn register(&self, entries: &mut Entries) {
         let core = &self.0;
         let here = core.rt.segment.as_str();
@@ -887,6 +925,11 @@ where
                         // the items on.
                         (Ok(Some(next)), Some(input), Some(egress)) => {
                             handed();
+                            // What it sends on now is the request's input,
+                            // into the anchor the next stage minted: no
+                            // new work.
+                            let mut share = share;
+                            share.sent();
                             Box::pin(send_input(&hop.rt, &cx, next, input, upstream, None)).await;
                             drop((share, egress, lease));
                         }
@@ -941,7 +984,7 @@ where
         let wire = std::mem::take(&mut envelope.cx);
         let root = wire.root();
         let cx = wire.arrive(rt.config.clock_skew, || rt.wall_now())?;
-        let share = match setup(
+        let mut share = match setup(
             &cx,
             rt.config.setup_timeout,
             "admission",
@@ -959,6 +1002,12 @@ where
                 return Err(error.into());
             }
         };
+        // Counted as one that may send before the checks below, so that an
+        // entry instance that declines offers and then reads no sender has
+        // not let one in (`Share::sending`).
+        if rt.counts_senders {
+            share.sending();
+        }
         // A retiring instance that has closed refuses, releasing the share
         // it just took; so does a draining cell's entry, for an offer.
         rt.check_open()?;
@@ -1133,7 +1182,7 @@ where
         // However this task ends, the request's work here ends with it,
         // including anything the inner end started under its context.
         let _end = cx.cancel_on_drop();
-        let _share = share;
+        let mut share = share;
         #[cfg(feature = "fault-injection")]
         if self.rt.config.faults.skip_inner_attach {
             cx.done().await;
@@ -1151,11 +1200,23 @@ where
             Ok(out) => out,
             Err(error) => return meter::ended(owner.as_ref(), Ending::Failed(&error)),
         };
-        self.produce_inner(&cx, value, out, owner).await;
-        drop(egress);
+        self.produce_inner(&cx, value, out, owner, share.as_mut())
+            .await;
+        drop((share, egress));
     }
 
-    async fn produce_inner(&self, cx: &Cx, value: I::Req, out: Outbound, owner: Option<Owner>) {
+    /// Run the inner end and pump its stream to `out`. `sending`, the
+    /// share of the hand-off that reached the inner end, stops counting as
+    /// one that may send once the inner end has returned its stream: an
+    /// operator's later attempts are counted by the `next` it keeps.
+    async fn produce_inner(
+        &self,
+        cx: &Cx,
+        value: I::Req,
+        out: Outbound,
+        owner: Option<Owner>,
+        sending: Option<&mut Share>,
+    ) {
         let cancel = out.cancel_token();
         let stop = out.stop_token();
         let scope = cx.child();
@@ -1179,6 +1240,9 @@ where
                 produced = &mut call => break produced,
             }
         };
+        if let Some(share) = sending {
+            share.sent();
+        }
         let items = match produced {
             Ok(items) => {
                 armed.disarm();

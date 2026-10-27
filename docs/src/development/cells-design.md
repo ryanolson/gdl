@@ -124,6 +124,18 @@ During a cell's drain, the entry instances are the cell's drain sources. Without
 
 **Rejected: draining a cell only by its deadline.** It would hold every interior instance for the full bound, even when the entry instances are already empty.
 
+Each segment leaves when its own part is done. An instance says that it detached once it takes no more work and no request it holds can send work to another segment. An interior instance drains once every entry instance, and every instance of the segments of its class that send to it, has detached. So the rule follows the sends inside the cell, and a segment that only passes requests on, or a sink whose responses ended, leaves before the entry.
+
+The entry instances are always asked, because the hub cannot tell a sender that left from one that lost its lease and still holds work. An entry's attempt into the cell returns only once its whole forward path has taken the request, so an entry that detached has no request still on its way. Only an entry's `drained` counts as detached: an entry of a draining cell says it once it holds no request, but a source elsewhere says it once its serving body ends, while its segment may still hand work on. `a_sender_losing_its_lease_keeps_work_that_it_already_holds` and `a_drained_source_still_keeps_the_requests_its_segment_forwards` hold both.
+
+"Can send" is counted per request, on the shard of the admission ledger that the request's root already touches. A hand-off counts from before its admission checks until it is handed on or its inner end returns a stream. The announcement is tried once, for at most ten hub polls: `drained` and leaving say as much, so a hub that does not take it holds up no drain. Each `next` an operator holds counts too, with its clones, since an operator may start another attempt at any time. The counts of one request share a shard, so a reader never sees a request between two holders as none. Only an instance of a class that a hop enters counts at all.
+
+**Rejected: detach when the entry declines offers.** A request the entry admitted just before may still be in its forward stages, before it opens a backward run or hands the request on. The segments it will reach could see their own count at zero and leave, and the request would fail. `a_request_held_inside_the_cell_keeps_the_segments_it_will_reach` and `an_entry_whose_operator_keeps_its_next_does_not_detach` in `crates/gdl-runtime/tests/detaching.rs` hold this.
+
+**Rejected: a field of the cell's watch.** The hub could say on the watch that every entry instance has detached. But an instance's watch ends once its cell is unfollowed, which comes before an entry can detach. And the rule must cover interior senders too, which the cell's state does not name. A hub service per instance, read as `drained` is, needs no change to the hub: gdl-hub reads only an instance's `ready` and `retired`, and an earlier instance never asks for `detach`.
+
+An entry of an earlier build never says that it detached. An interior instance also drains once every entry instance has drained or left, so such a cell drains as before.
+
 ## Unknown events fail closed for one cell
 
 An event of a kind a reader does not know may say something that would keep it from the cell, such as a retirement or an exclusion. Skipping it is unsafe. So the reader stops routing to that cell until it has read it again.

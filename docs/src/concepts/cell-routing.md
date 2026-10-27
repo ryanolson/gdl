@@ -259,12 +259,29 @@ Avoiding a retiree promises nothing about hand-offs sent to it before. The insta
 1. The cell is `draining` on its health endpoint, record, and watch. Each parent hub marks its follow not offered at the next revision.
 2. Each entry instance learns of the drain from its own cell's watch. It keeps taking new work, stays ready, and keeps reporting its load for a bound: the setup timeout plus twice `summary_ms`. This lets an offer from a chooser with a stale view land.
 3. The bound ends early when the cell's hub says that no other cell follows it: the cell's watch sends `state` again with `unfollowed: true`. A parent's hub releases the cell only once its follow has closed, so no offer from another cell is still on its way. A chooser that lost its watch of its own hub's relay holds the follow open for at most `lost_chooser_ms` ([Closing a follow](#closing-a-follow)). A response it still holds is finished in step 4.
-4. Then the entry instance declines offers from other cells as gone. A chooser whose view is stale offers the request to another cell, and offers this cell no more work until the relay changes its follow ([A cell that is gone](#a-cell-that-is-gone)). It finishes the requests it holds and announces that it has drained. It still takes hand-offs inside the cell until every entry instance has drained or left. Then it closes and leaves. It does not retire: the cell's state already keeps choosers away.
-5. An interior instance serves until every entry instance of the cell has drained or left, then drains as after a stop. While its cell drains, the entry instances are its drain sources, whatever stopped it. The sources outside the cell are not members of its hub, so it cannot see them.
+4. Then the entry instance declines offers from other cells as gone. A chooser whose view is stale offers the request to another cell, and offers this cell no more work until the relay changes its follow ([A cell that is gone](#a-cell-that-is-gone)). Once no request it holds can send work into the cell, it announces that it has detached (below). It finishes the requests it holds and announces that it has drained. It still takes hand-offs inside the cell until every entry instance has drained or left. Then it closes and leaves. It does not retire: the cell's state already keeps choosers away.
+5. An interior instance serves until no more work can reach it: every entry instance, and every instance of the segments of its class that send to it, has detached or left. An entry instance's `drained` counts as detached. Then it drains as after a stop: it closes, announces that it has detached once no request it holds can send work onward, waits until it holds no request, and leaves. Its drain's bound (`drain_ms`) counts from when every entry instance has drained or left, as before, so a response is not cut sooner than it was. As before an instance could detach, it also drains once every entry instance of the cell has drained or left. While its cell drains, those are its drain sources, whatever stopped it. The sources outside the cell are not members of its hub, so it cannot see them.
 6. Once no instance of the cell's class is a member, the hub writes a last draining record, withdraws it, and ends the cell's watches. From then it refuses every registration with 409. To serve the cell again, start its hub again.
 7. Each parent hub that sees the withdrawal in the directory sends `withdrawn` on its relay, and its choosers keep the cell as withdrawn ([What a node reads](#what-a-node-reads)).
 
 A drain cannot be cancelled.
+
+### Each segment leaves when its own part is done
+
+An instance has detached (`gdl-detach-<segment>`) when it takes no more work and no request it holds can send work to another segment. It counts the requests that can: a hand-off it has not yet handed on or run to its inner end's stream, and each `next` an operator holds, with every clone of it. An operator that keeps its `next` may start another attempt at any time, so it counts until it drops that `next`. An entry instance counts from when it declines offers, and only once the segments of its class that send to it have detached. An interior instance counts once it has closed.
+
+So in the chat graph, with `front` the entry of a cell's class and `Truncate` placed alone, a drain goes like this:
+
+| Segment | Leaves when |
+|---|---|
+| `Truncate` alone (only passes the request on) | the entry has detached and it has handed on what it holds |
+| `engine` (the sink) | the entry and `Truncate` have detached and its responses have ended |
+| `post` (`Detokenize`, `Format`) | the entry has detached and its own responses have ended |
+| `front` (the entry) | it holds no request, as in step 4; it leaves last |
+
+A segment whose responses end first leaves first, so the sink usually leaves before the entry. Every response that started before the drain ends: an instance leaves only once it holds no request, and nothing can send it more work.
+
+An entry of an earlier build never says that it detached. Each interior instance then waits for the entry instances to drain or leave, as before. A path that leaves a segment and comes back makes two segments wait for each other to detach, and they drain as before too.
 
 ## A cell's own refusal
 

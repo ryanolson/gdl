@@ -19,6 +19,8 @@ use std::time::Duration;
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use figment::value::{Dict, Tag, Value};
+use futures::FutureExt;
+use futures::future::FusedFuture;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use velo::Velo;
@@ -539,7 +541,7 @@ impl<H> ProcessConfig<H> {
                         &reaching,
                         host,
                         *public_port,
-                        self.runtime.setup_timeout,
+                        &self.runtime,
                     )?;
                 }
                 // The membership leaves to the chooser what its tables hold.
@@ -604,6 +606,8 @@ impl<H> ProcessConfig<H> {
             reports,
             #[cfg(feature = "hub")]
             cell_drain,
+            #[cfg(feature = "hub")]
+            detached: false,
             _leaving: leaving,
         })
     }
@@ -678,6 +682,10 @@ pub struct Launch {
     /// drain.
     #[cfg(feature = "hub")]
     cell_drain: Option<crate::dist::CellDrain>,
+    /// Whether the instance has said that it detached from its draining
+    /// cell.
+    #[cfg(feature = "hub")]
+    detached: bool,
     /// Dropped last, on every way out: says the instance has left.
     _leaving: Leaving,
 }
@@ -740,6 +748,12 @@ pub trait Drains: Send + Sync + 'static {
     /// Requests the instance holds now.
     fn admitted(&self) -> usize;
 
+    /// Requests the instance holds that may still send work to another
+    /// segment. Those it admits by default, which is never fewer.
+    fn senders(&self) -> usize {
+        self.admitted()
+    }
+
     /// Refuse the requests that arrive from now on. Nothing by default,
     /// for a launch that serves no segment.
     fn close(&self) {}
@@ -760,6 +774,10 @@ pub trait Drains: Send + Sync + 'static {
 impl<H: Send + Sync + 'static> Drains for Segment<H> {
     fn admitted(&self) -> usize {
         Segment::admitted(self)
+    }
+
+    fn senders(&self) -> usize {
+        Segment::senders(self)
     }
 
     fn load(&self) -> Option<SegmentLoad> {
@@ -854,10 +872,13 @@ impl Launch {
     /// hand-offs inside its cell, which carry the requests the cell's entry
     /// instances took, until every entry instance has drained or left,
     /// then closes and leaves. An
-    /// interior instance serves until every entry instance of its cell has
-    /// drained or left, then stops as above. While its cell drains, the
-    /// entry instances are an interior instance's drain sources, whatever
-    /// stopped it.
+    /// interior instance serves until no more work can reach it: every
+    /// entry instance, and every instance of the segments of its class that
+    /// send to it, has detached or left, or every entry instance has
+    /// drained or left. Then it stops as above, and leaves once it holds no
+    /// request; its drain's bound counts from when every entry instance
+    /// has drained or left. While its cell drains, the entry instances are
+    /// an interior instance's drain sources, whatever stopped it.
     pub async fn serve<S, F, Fut>(mut self, segment: S, serve: F) -> Result<()>
     where
         S: Drains,
@@ -895,7 +916,7 @@ impl Launch {
                 "stopped by a second signal before the drain finished",
             )
         };
-        let (result, stop, deadline) = match passed {
+        let stopped = match passed {
             Some(Err(error)) => return Err(error),
             // A stop during the barrier comes after this instance said it
             // serves, so peers may already route here: it drains as after
@@ -909,7 +930,8 @@ impl Launch {
                     () = process.stops(2) => return Err(second()),
                     () = self.retire(deadline) => {}
                 }
-                (Err(stopped), Ok(()), deadline)
+                let cutoff = Box::pin(self.cell_cutoff(deadline, false).fuse());
+                (Err(stopped), Ok(()), deadline, cutoff)
             }
             Some(Ok(())) => {
                 self.roster.release();
@@ -956,15 +978,18 @@ impl Launch {
                     }
                 };
                 // The cell's drain stops the instance in its own time.
-                let (ended, stop, retires) = tokio::select! {
-                    result = &mut body => (Some(result), Ok(()), true),
-                    () = process.stops(1) => (None, Ok(()), true),
-                    result = lease => (None, result, true),
-                    () = self.cell_drain_stops() => (None, Ok(()), self.cell_drain_retires()),
+                let (ended, stop, retires, by_cell) = tokio::select! {
+                    result = &mut body => (Some(result), Ok(()), true, false),
+                    () = process.stops(1) => (None, Ok(()), true, false),
+                    result = lease => (None, result, true, false),
+                    () = self.cell_drain_stops() => {
+                        (None, Ok(()), self.cell_drain_retires(), true)
+                    }
                 };
                 #[cfg(feature = "hub")]
                 drop(reporter);
                 let deadline = tokio::time::Instant::now() + self.drain;
+                let mut cutoff = Box::pin(self.cell_cutoff(deadline, by_cell).fuse());
                 process.health.set(Phase::Draining);
                 shutdown.cancel();
                 // The bound ends every wait, the body's too: a request with
@@ -976,7 +1001,7 @@ impl Launch {
                         None => tokio::select! {
                             biased;
                             result = &mut body => result,
-                            () = tokio::time::sleep_until(deadline) => Err(Error::new(
+                            () = &mut cutoff => Err(Error::new(
                                 ErrorKind::Cancelled,
                                 "the drain's bound passed before the serving body finished",
                             )),
@@ -998,13 +1023,14 @@ impl Launch {
                     () = process.stops(2) => return Err(second()),
                     all = async { tokio::join!(finished, retiring, closing) } => all,
                 };
-                (result, stop, deadline)
+                (result, stop, deadline, cutoff)
             }
         };
+        let (result, stop, deadline, mut cutoff) = stopped;
         // A lost lease takes the hub's answers, not this instance's own
         // requests: those are still waited for.
         tokio::select! {
-            () = self.drain(segment.as_ref(), deadline, stop.is_ok()) => {}
+            () = self.drain(segment.as_ref(), deadline, stop.is_ok(), cutoff.as_mut()) => {}
             () = process.stops(2) => return Err(second()),
         }
         let left = deadline
@@ -1065,6 +1091,10 @@ impl Launch {
         deadline: tokio::time::Instant,
         // Only a hub is asked; a roster directory has no lease to lose.
         hub: bool,
+        // When the stop's bound has passed: at `deadline`, or later for an
+        // interior instance whose stop its cell's drain began
+        // ([`Launch::cell_cutoff`]).
+        mut cutoff: std::pin::Pin<&mut futures::future::Fuse<impl Future<Output = ()>>>,
     ) {
         self.cell_drain_settles(segment, deadline, hub).await;
         let sources = self.drain_sources();
@@ -1145,7 +1175,12 @@ impl Launch {
                         }
                         let ask = async {
                             let drained = !blind
-                                && (reaching.is_empty() || session.all_drained(&reaching).await?);
+                                && (reaching.is_empty()
+                                    || session.all_drained(&reaching).await?
+                                    || match &self.cell_drain {
+                                        Some(cell) => cell.unreached(session).await?,
+                                        None => false,
+                                    });
                             let avoiding = avoided.is_some()
                                 || (parent() && session.all_avoid(me, &senders).await?);
                             Ok::<_, Error>((drained, avoiding))
@@ -1179,9 +1214,17 @@ impl Launch {
             () = declining => {}
         }
         segment.close();
-        while segment.admitted() > 0 {
-            if !pause(DRAIN_POLL).await {
+        loop {
+            // Closed, it takes no more work: once no request it holds can
+            // send work into its draining cell, it says so.
+            self.cell_detaches(segment, hub, true).await;
+            if segment.admitted() == 0 || cutoff.is_terminated() {
                 break;
+            }
+            tokio::select! {
+                biased;
+                () = cutoff.as_mut() => break,
+                () = tokio::time::sleep(DRAIN_POLL) => {}
             }
         }
     }

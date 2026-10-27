@@ -125,8 +125,10 @@ impl Launch {
     /// decline offers, wait until it holds no
     /// request, so that every request it took has been answered, and
     /// announce that it has drained, retried until `deadline`; with `hub`
-    /// false (its lease is lost), nothing is announced. Any other instance
-    /// goes on at once.
+    /// false (its lease is lost), nothing is announced. Meanwhile it
+    /// announces that it detached once no request it holds can send work
+    /// into the cell ([`Launch::cell_detaches`]). Any other instance goes
+    /// on at once.
     pub(super) async fn cell_drain_settles(
         &mut self,
         segment: &dyn Drains,
@@ -139,7 +141,11 @@ impl Launch {
         {
             cell.accepting(deadline).await;
             segment.decline_offers();
-            while segment.admitted() > 0 && tokio::time::Instant::now() + DRAIN_POLL <= deadline {
+            loop {
+                self.cell_detaches(segment, hub, false).await;
+                if segment.admitted() == 0 || tokio::time::Instant::now() + DRAIN_POLL > deadline {
+                    break;
+                }
                 tokio::time::sleep(DRAIN_POLL).await;
             }
             if let (Peers::Hub(session), true) = (&mut self.peers, hub)
@@ -153,5 +159,117 @@ impl Launch {
         }
         #[cfg(not(feature = "hub"))]
         let _ = (segment, deadline, hub);
+    }
+
+    /// Resolves when the bound of the stop that ends at `deadline` has
+    /// passed. An interior instance whose stop its cell's drain began
+    /// (`by_cell`) counts its bound from when every entry instance of the
+    /// cell has drained or left, as it did before such a stop could come
+    /// earlier, so that a response the cell took before its drain is not
+    /// cut sooner than it was. If its lease is lost first, it counts its
+    /// bound from the loss, as a stop by a lost lease does.
+    /// What it reads is taken now, so that it borrows nothing of the
+    /// launch.
+    pub(super) fn cell_cutoff(
+        &self,
+        deadline: tokio::time::Instant,
+        by_cell: bool,
+    ) -> impl Future<Output = ()> + Send + use<> {
+        #[cfg(feature = "hub")]
+        let deferred = match (&self.cell_drain, &self.peers) {
+            (Some(cell), Peers::Hub(session)) if by_cell && cell.interior() => {
+                Some((session.asker(), cell.entry_segments().to_vec()))
+            }
+            _ => None,
+        };
+        #[cfg(not(feature = "hub"))]
+        let _ = by_cell;
+        let bound = self.drain;
+        async move {
+            #[cfg(feature = "hub")]
+            if let Some((asker, entries)) = deferred {
+                let entries: Vec<&str> = entries.iter().map(String::as_str).collect();
+                let poll = crate::dist::HubSession::poll();
+                loop {
+                    if asker.is_lost() {
+                        break;
+                    }
+                    let asked = tokio::time::timeout(poll * 10, asker.all_drained(&entries));
+                    if matches!(asked.await, Ok(Ok(true))) {
+                        break;
+                    }
+                    tokio::time::sleep(poll).await;
+                }
+                tokio::time::sleep(bound).await;
+                return;
+            }
+            #[cfg(not(feature = "hub"))]
+            let _ = bound;
+            tokio::time::sleep_until(deadline).await;
+        }
+    }
+
+    /// For an instance of a draining cell that takes no more work, from
+    /// outside the cell or, with `closed` false, from inside it: announce
+    /// that it detached once no request it holds can send work into the
+    /// cell, tried once, for at most ten hub polls. An instance not in
+    /// a draining cell, one that does not detach, or one whose lease is
+    /// lost (`hub` false) announces nothing. An entry instance that only
+    /// declines offers asks its hub first whether the segments of its
+    /// class that send to it have detached, so that no hand-off inside the
+    /// cell adds a request after it read none; one that `closed` takes no
+    /// hand-off at all. Every interior instance waits for its senders to
+    /// detach before it drains, or for the entry instances to drain.
+    pub(super) async fn cell_detaches(&mut self, segment: &dyn Drains, hub: bool, closed: bool) {
+        #[cfg(feature = "hub")]
+        if let (Some(cell), Peers::Hub(session), true) = (&self.cell_drain, &mut self.peers, hub)
+            && cell.detaches()
+            && !self.detached
+        {
+            // The hub is asked only once the count has fallen to none, and
+            // the count is read again after its answer, which may let a
+            // hand-off in first.
+            if !closed {
+                if segment.senders() > 0 {
+                    return;
+                }
+                let asked = tokio::time::timeout(
+                    crate::dist::HubSession::poll() * 10,
+                    cell.senders_detached(session),
+                );
+                if !matches!(asked.await, Ok(Ok(true))) {
+                    return;
+                }
+            }
+            // Read after the instance stopped taking the work that adds to
+            // it, so it only falls from here.
+            if segment.senders() > 0 {
+                return;
+            }
+            // Tried once, briefly: the instance's `drained` and its leaving
+            // say as much, so a hub that does not take it must not hold the
+            // drain that waits here.
+            self.detached = true;
+            let bound = tokio::time::Instant::now() + crate::dist::HubSession::poll() * 10;
+            let announced = async {
+                if cell.stalls() {
+                    std::future::pending::<()>().await;
+                }
+                session.detached(bound).await
+            };
+            let failed = match tokio::time::timeout_at(bound, announced).await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(_) => Some("the hub did not answer in time".to_string()),
+            };
+            if let Some(error) = failed {
+                eprintln!(
+                    "{}: could not announce that it detached, so the cell's other instances wait for it to drain or leave: {error}",
+                    self.segment
+                );
+            }
+        }
+        #[cfg(not(feature = "hub"))]
+        let _ = (segment, hub, closed);
     }
 }

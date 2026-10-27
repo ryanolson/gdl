@@ -376,6 +376,18 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **Cell drain:** `POST /v1/ext/gdl-cell/drain` on a hub's control listener cannot be cancelled. A cell whose class no hop enters, such as a global cell, cannot be drained. Once the last instance leaves, the hub withdraws the cell's record, ends its watches, and refuses every instance that asks to join until it starts again.
 - **Lifts:** retiring interior instances across cells, cancelling a drain, and draining a global cell.
 
+### Some segments of a draining cell wait for the entry to drain
+- **What:** a segment of a draining cell leaves once every entry instance and the segments that send to it have detached, and its own responses have ended ([Each segment leaves when its own part is done](../concepts/cell-routing.md#each-segment-leaves-when-its-own-part-is-done)). These segments still wait for every entry instance to drain or leave, as before:
+  - the segments an operator can reach while it keeps its `next` in the response it returned, as one that retries does, until that response ends;
+  - two segments on a path that leaves one and comes back, which each wait for the other to detach;
+  - every interior segment of a cell whose entry instances are of an earlier build, which never says that it detached.
+- **Workaround:** an operator that drops its `next` once it will start no more attempts lets the segments it reaches leave before its response ends.
+- **Lifts:** a way for an operator to say that it starts no more attempts while it keeps its `next`.
+
+### A sender in a draining cell that loses its lease is read as gone
+- **What:** the hub reads an instance whose lease is lost as gone, though it may still hold work. If an operator in an interior segment sent that work, the segments it will reach may leave first, and the request fails. An entry instance that loses its lease is read as drained in the same way, as it was before segments could leave early.
+- **Lifts:** a hub that tells a lost lease from a departure.
+
 ### A cell's withdrawal reaches only the choosers that saw it
 - **What:** a chooser reads a cell as withdrawn ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)) only if its hub's watch of the cell directory showed the withdrawal while the chooser watched the relay. The relay's snapshot holds no withdrawal, and a directory snapshot holds only current records. So a chooser that starts after the withdrawal, a chooser whose hub restarted since, and a hub whose directory watch was down at that moment, read the cell as neither followed nor withdrawn. A model gate then answers 503 for a model whose sets were all drained, not 404, and two gate instances can answer differently until the one that saw the withdrawal restarts.
 - **Why:** silence is never a decommission. A record missing from a snapshot may have expired or been lost, so only an explicit withdrawal counts. Keeping withdrawals in the relay's snapshot would only move the gap to a hub restart.

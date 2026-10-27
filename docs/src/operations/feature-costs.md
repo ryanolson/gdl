@@ -1,6 +1,6 @@
 # Feature costs
 
-This chapter reports what runtime metrics, live rosters, routing selectors, and registered cell policies add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
+This chapter reports what runtime metrics, live rosters, routing selectors, registered cell policies, and a cell's count of what may still send add to a request, and what a local hop costs. Each was measured against the build before it. All rows are provisional: **Apple M5, macOS, loopback, shared machine**, rustc 1.93.1. [Benchmarking](benchmarking.md) says what that may claim. The method is the same for every feature.
 
 ## Method
 
@@ -276,6 +276,34 @@ On the shared aarch64 host above (Cortex-X925 and Cortex-A725), at load averages
 A run by another agent on the shared host, at load 12.5, measured 83 ns for the bound read.
 
 Nothing reads the handle unless a node does, so a request that no such node handles pays nothing.
+
+## Counting what may still send
+
+An instance of a class that a hop enters counts the requests it holds that may still send work onward ([Each segment leaves when its own part is done](../concepts/cell-routing.md#each-segment-leaves-when-its-own-part-is-done)). A forward hand-off adds one sequentially consistent add and one subtract on its root's shard of the admission ledger. So does each `next` an operator is given, and each clone of it. An instance of any other class counts nothing: a hand-off reads one flag, and the `next` handle carries one word more.
+
+On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.6, three runs, at `66d4119`:
+
+```bash
+cargo test --release -p gdl-runtime --lib dist::admission::tests::cost_of_counting_a_sender -- --ignored --nocapture --exact
+```
+
+| Count, one thread | Time |
+|---|---|
+| a hand-off marked and settled | 15.0 ns, 15.0 ns, 15.0 ns |
+| a `next` counted and ended | 10.7 ns, 10.5 ns, 10.7 ns |
+
+Outside a cell, on the same runner, cores 16 to 23, load average 3.0 to 3.9, three runs each, base `edeaad9`, change `2b14b85`:
+
+```bash
+cargo bench -p gdl-runtime --bench remote -- 'request/reference-[23]-segments$' --warm-up-time 2 --measurement-time 10
+```
+
+| Request | Base | Change |
+|---|---|---|
+| `reference-2-segments` | 133.2, 132.9, 138.2 µs | 133.8, 132.8, 137.2 µs |
+| `reference-3-segments` | 282.8, 281.1, 288.3 µs | 280.0, 281.0, 287.6 µs |
+
+The change is within the spread between runs. No bench runs a request through a cell's entry, so the count in a cell is shown by the timing above alone.
 
 ## Request ids
 
