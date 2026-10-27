@@ -37,6 +37,12 @@ async fn a_global_instance_in_a_cell_serves_with_no_model_cell() {
 /// extension, never says avoid it: so up to its bound, the setup timeout
 /// and twice the summary period, here 200 ms and 1 s, then the setup
 /// timeout.
+///
+/// The interior's body ends only once the entry's has begun, which is
+/// after the entry's barrier passed. With no global instance, no source
+/// that reaches the interior is a member of its hub, so its drain holds
+/// at once: it leaves within a poll of its body's end. An entry still at
+/// its barrier then finds no instance of `d` left, and fails, as it should.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_model_cell_serves_with_no_global_instance() {
     let hub = admission_hub().await;
@@ -62,10 +68,19 @@ async fn a_model_cell_serves_with_no_global_instance() {
         1,
         "the entry met the interior"
     );
+    // Dropped unsent if the entry's barrier fails, which ends the
+    // interior's body too.
+    let (began, entry_began) = tokio::sync::oneshot::channel::<()>();
     let (entry, interior) = tokio::time::timeout(WAIT, async {
         tokio::join!(
-            entry.serve(Idle, |_, _| async { Ok(()) }),
-            interior.serve(Idle, |_, _| async { Ok(()) }),
+            entry.serve(Idle, |_, _| async move {
+                let _ = began.send(());
+                Ok(())
+            }),
+            interior.serve(Idle, |_, _| async move {
+                let _ = entry_began.await;
+                Ok(())
+            }),
         )
     })
     .await
