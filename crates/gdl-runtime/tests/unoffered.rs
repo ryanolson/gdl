@@ -947,3 +947,96 @@ async fn a_lost_chooser_counted_out_still_gets_its_response() {
         hub.shutdown().await.expect("valid test fixture");
     }
 }
+
+/// A chooser that the global's hub counted out while it held a streamed
+/// response from the draining cell watches its relay again while the
+/// response streams. Its new snapshot no longer shows the cell, which the
+/// hub let go of, but the chooser keeps the entry instance registered for
+/// as long as it holds the response: the items go on past the chooser's
+/// drain (2 s), and a client that drops the response still cancels it in
+/// the cell. Once the response has ended, the chooser lets go of the
+/// instance. The response streams for longer than the drain, to show that
+/// the instance outlives it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_counted_out_chooser_that_watches_again_keeps_its_response() {
+    // The model cell's instances keep what they hold for longer than the
+    // chooser's drain, as a deployment's default drain lets them: a
+    // retiring instance stops at its own drain, whatever it holds.
+    const LONG_DRAIN: &str = "[runtime]\nsetup_timeout_ms = 10000\ndrain_ms = 30000\n";
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, global) = global_hub_lost(&spec, &directory).await;
+    let proxy = Proxy::new(hub.public_addr()).await;
+    let chooser = chooser_at(&spec, proxy.port, hub.control_addr().port()).await;
+    let m1 = common::boundary::model_summarized(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        LONG_DRAIN,
+        &|runtime| runtime,
+        &|deployment| reference_graph(deployment, &events),
+    )
+    .await;
+    let cells = tables(&chooser);
+    offered(&cells).await;
+    let entry = followed(&cells, "f", M1).expect("followed").eligible[0];
+    let plan = Plan {
+        endless: true,
+        item_delay_ms: 20,
+        ..Plan::default()
+    };
+    let mut out = chooser
+        .segment
+        .call(Cx::new(), prompt("held", plan))
+        .await
+        .expect("the cell takes the request");
+    let mut next = async || {
+        tokio::time::timeout(WAIT, out.next())
+            .await
+            .expect("an item in time")
+            .expect("the response goes on")
+    };
+    assert!(next().await.is_ok());
+    let mut relay = global.follows();
+    cut(&proxy, &global, 1).await;
+
+    m1.readiness.drain().await.expect("the cell drains");
+    relayed(&mut relay, LOST + WAIT, is_dropped)
+        .await
+        .expect("closed once the lost chooser's bound passed");
+    proxy.set(Mode::Forward);
+    until(&cells, "the chooser watched again", |cells| {
+        followed(cells, "f", M1).is_none()
+    })
+    .await;
+    let past = std::time::Instant::now() + DRAIN + Duration::from_secs(1);
+    while std::time::Instant::now() < past {
+        let item = next().await;
+        assert!(item.is_ok(), "the response failed: {item:?}");
+    }
+    assert!(
+        cells.is_registered(entry),
+        "the entry instance was unregistered while its response is held"
+    );
+
+    drop(out);
+    events.wait_for("D:cancelled:c(held)#0", WAIT).await;
+    unregistered(&cells, entry).await;
+    let ModelCell {
+        hub: model_hub,
+        readiness,
+        entries,
+        sink,
+    } = m1;
+    for entry in entries {
+        entry.ended(WAIT).await.expect("the entry drained");
+    }
+    sink.ended(WAIT)
+        .await
+        .expect("the interior instance drained");
+    withdrawn(&readiness).await;
+    for hub in [hub, model_hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}

@@ -290,3 +290,32 @@ fn an_unknown_event_of_a_closing_generation_in_its_own_snapshot_changes_nothing(
     assert!(offer(&cells).is_some(), "the cell left unread");
     assert!(follows.asked().is_empty(), "the cell read again");
 }
+
+/// A cell whose reading shows no follow any more, while a lease on its
+/// follow is held, keeps the follow's instances registered until the drain
+/// after its last lease ends, as a relay's snapshot that no longer shows
+/// it does.
+#[test]
+fn a_follow_a_reading_no_longer_shows_keeps_its_instances_while_leased() {
+    let (mut follows, cells, recorded, _) = follower();
+    let now = Instant::now();
+    let p = peer();
+    live(
+        &mut follows,
+        now,
+        [follow(M1, 1, CellState::Ready), exposed(M1, 1, &p)],
+    );
+    let held = offer(&cells).expect("offered");
+    recorded.take();
+
+    reread(&mut follows, 1, vec![], now);
+    follows.forget(now + DRAIN * 2);
+    assert_eq!(recorded.take(), [], "unregistered while a lease is held");
+
+    let ended = now + DRAIN * 2;
+    drop(held);
+    assert_eq!(follows.acknowledgements(ended), []);
+    assert_eq!(follows.next_poll(), None);
+    follows.forget(ended + DRAIN);
+    assert_eq!(recorded.take(), [Call::Unregister(p.instance_id())]);
+}

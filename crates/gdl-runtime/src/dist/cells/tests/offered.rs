@@ -345,3 +345,84 @@ fn a_follow_shown_without_its_offering_applies_every_later_revision() {
     assert!(!chosen_from(&cells).offering);
     assert_eq!(follows.acknowledgements(now), [unoffered(1, 4)]);
 }
+
+/// A follow that a watch begun again no longer shows, as when the hub
+/// stopped waiting for this instance and dropped the follow while no watch
+/// was open, keeps its instances registered while a lease on it is held:
+/// what was offered to it may still be under way, and velo fails what is
+/// in flight to a peer it forgets. It refuses a lease from then, also from
+/// a table loaded before, owes its hub no acknowledgement, and lets its
+/// instances go the drain after its last lease ends.
+#[test]
+fn a_follow_a_snapshot_no_longer_shows_keeps_its_instances_while_leased() {
+    let (mut follows, cells, recorded, now) = followed();
+    let entry = table(&cells, M1).expect("followed").eligible[0];
+    let before = chosen_from(&cells);
+    let held = offer(&cells).expect("offered");
+    recorded.take();
+
+    let snapshot = follows.snapshot();
+    follows.resnapshot(snapshot, now);
+    follows.forget(now + DRAIN * 2);
+    assert_eq!(recorded.take(), [], "unregistered while a lease is held");
+    assert!(table(&cells, M1).is_none(), "shown after the snapshot");
+    assert!(
+        CellLease::take(&before.leases).is_none(),
+        "a lease on a follow no longer shown"
+    );
+    let ended = now + DRAIN * 2;
+    assert_eq!(follows.next_poll(), Some(now), "the lease never looked at");
+    assert_eq!(follows.acknowledgements(ended), [], "a dropped follow owed");
+    assert_eq!(follows.next_poll(), Some(ended + ACK_POLL));
+
+    drop(held);
+    assert_eq!(follows.acknowledgements(ended + ACK_POLL), []);
+    assert_eq!(follows.next_poll(), None, "looked at once let go");
+    follows.forget(ended + ACK_POLL);
+    assert_eq!(recorded.take(), [], "unregistered before the drain");
+    follows.forget(ended + ACK_POLL + DRAIN);
+    assert_eq!(recorded.take(), [Call::Unregister(entry)]);
+}
+
+/// A follow the relay drops while a lease on it is held, which a hub that
+/// stopped waiting for this instance may send to a watch begun again
+/// before the drop, keeps its instances registered until the drain after
+/// its last lease ends, as one a snapshot no longer shows does.
+#[test]
+fn a_follow_dropped_while_leased_keeps_its_instances_until_its_last_lease_ends() {
+    let (mut follows, cells, recorded, now) = followed();
+    let entry = table(&cells, M1).expect("followed").eligible[0];
+    let before = chosen_from(&cells);
+    let held = offer(&cells).expect("offered");
+    recorded.take();
+
+    live(&mut follows, now, [dropped(M1, 1)]);
+    follows.forget(now + DRAIN * 2);
+    assert_eq!(recorded.take(), [], "unregistered while a lease is held");
+    assert!(table(&cells, M1).is_none());
+    assert!(CellLease::take(&before.leases).is_none());
+
+    let ended = now + DRAIN * 2;
+    drop(held);
+    assert_eq!(follows.acknowledgements(ended), []);
+    assert_eq!(follows.next_poll(), None);
+    follows.forget(ended + DRAIN);
+    assert_eq!(recorded.take(), [Call::Unregister(entry)]);
+}
+
+/// A follow whose last lease ended before a snapshot that no longer shows
+/// it is let go of at once: its instances are unregistered after the
+/// drain, and nothing is left to look at.
+#[test]
+fn a_follow_a_snapshot_no_longer_shows_with_no_lease_is_let_go_at_once() {
+    let (mut follows, cells, recorded, now) = followed();
+    let entry = table(&cells, M1).expect("followed").eligible[0];
+    drop(offer(&cells).expect("offered"));
+    recorded.take();
+
+    let snapshot = follows.snapshot();
+    follows.resnapshot(snapshot, now);
+    assert_eq!(follows.next_poll(), None, "a follow with no lease kept");
+    follows.forget(now + DRAIN);
+    assert_eq!(recorded.take(), [Call::Unregister(entry)]);
+}

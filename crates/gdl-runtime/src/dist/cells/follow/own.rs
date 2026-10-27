@@ -12,7 +12,7 @@ use velo::InstanceId;
 
 use super::super::lease::Leases;
 use super::super::task::{REWATCH, REWATCH_CAP};
-use super::{Follow, Followed, Follows, Key, Relayed};
+use super::{Follow, Followed, Follows, Key, Leased, Relayed};
 use crate::dist::fabric::Registry;
 
 impl<R: Registry> Follows<R> {
@@ -239,6 +239,14 @@ impl<R: Registry> Follows<R> {
         };
         replaced.extend(current);
         self.followed.closing.extend(closing);
+        // A follow the reading shows again was carried; one it no longer
+        // shows is let go of once no table shows it.
+        let gone: Vec<Leased> = replaced
+            .extract_if(.., |follow| {
+                self.followed.find(key, follow.generation).is_none()
+            })
+            .map(|follow| Leased::of(&follow))
+            .collect();
         for replaced in &replaced {
             self.release(replaced, now);
         }
@@ -268,6 +276,9 @@ impl<R: Registry> Follows<R> {
         self.publish(key);
         for leases in unoffered {
             leases.unoffer();
+        }
+        for leased in gone {
+            self.let_go(leased, now);
         }
         if acknowledging {
             self.poll = Some(now);

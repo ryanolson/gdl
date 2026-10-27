@@ -18,6 +18,12 @@
 //! follower looks for the follows whose last lease has ended every
 //! [`ack::ACK_POLL`] while it has one to acknowledge.
 //!
+//! A follow this instance no longer sees while it holds a lease on it
+//! keeps its instances registered until the last lease ends: a hub that
+//! stopped waiting for this instance, its watch lost, drops the follow
+//! without it, and a watch begun again no longer shows it. It is not
+//! offered from then, and the same look finds its last lease's end.
+//!
 //! An event of a kind this build does not know leaves the cell it names
 //! unread: its tables offer none of its instances until the follower has
 //! read the cell again, from a watch of the cell's follow alone, whose
@@ -98,6 +104,9 @@ pub(crate) struct Follows<R> {
     /// The latest unregistration due for each instance: an earlier entry
     /// in `forget` for one asked for again is passed over.
     due: HashMap<InstanceId, Instant>,
+    /// The follows no longer seen whose leases were held when they went:
+    /// each holds its instances until its last lease ends.
+    leased: Vec<Leased>,
     /// When the follower looks again for a follow to acknowledge, while it
     /// has one.
     poll: Option<Instant>,
@@ -151,6 +160,7 @@ impl<R: Registry> Follows<R> {
             registered: HashSet::new(),
             forget: VecDeque::new(),
             due: HashMap::new(),
+            leased: Vec::new(),
             poll: None,
             avoiding: Avoiding::default(),
             own: HashMap::new(),
@@ -229,7 +239,11 @@ impl<R: Registry> Follows<R> {
                 let named = self.withdrawn.entry(key.clone()).or_insert(generation);
                 *named = (*named).max(generation);
             }
-            Change::Ended(follow) => self.release(&follow, now),
+            Change::Ended(follow) => {
+                self.publish(&key);
+                self.let_go(Leased::of(&follow), now);
+                return;
+            }
             Change::Replaced(earlier) => {
                 self.publish(&key);
                 earlier.unoffer();
@@ -331,11 +345,35 @@ impl<R: Registry> Follows<R> {
                 follow.carry(held);
             }
         }
+        // A follow the snapshot no longer shows holds its instances until
+        // it is let go of, once no table shows it.
+        let gone: Vec<Leased> = self
+            .followed
+            .follows
+            .iter()
+            .chain(
+                self.followed
+                    .closing
+                    .iter()
+                    .map(|((key, _), follow)| (key, follow)),
+            )
+            .filter(|(key, follow)| followed.find(key, follow.generation).is_none())
+            .map(|(_, follow)| Leased::of(follow))
+            .collect();
         let mut held: HashMap<InstanceId, usize> = HashMap::new();
-        for follow in followed.follows.values().chain(followed.closing.values()) {
-            for id in follow.held() {
-                *held.entry(id).or_default() += 1;
-            }
+        let ids = followed
+            .follows
+            .values()
+            .chain(followed.closing.values())
+            .flat_map(Follow::held)
+            .chain(
+                self.leased
+                    .iter()
+                    .chain(&gone)
+                    .flat_map(|leased| leased.held.iter().copied()),
+            );
+        for id in ids {
+            *held.entry(id).or_default() += 1;
         }
         let released: Vec<InstanceId> = self
             .held
@@ -383,6 +421,9 @@ impl<R: Registry> Follows<R> {
         for follow in follows().filter(|follow| !follow.offers()) {
             follow.leases.unoffer();
             self.poll = Some(now);
+        }
+        for leased in gone {
+            self.let_go(leased, now);
         }
         self.cells.changed();
         self.avoid_retired(None, now);
@@ -478,6 +519,41 @@ impl<R: Registry> Follows<R> {
         }
     }
 
+    /// Let go of a follow no table shows any more, whose instances are
+    /// still held: at once if no lease on it is held, else once the last
+    /// one ends ([`Follows::let_go_ended`]). It is marked not offered
+    /// first, so that a lease taken from a table loaded before is either
+    /// refused or seen here.
+    fn let_go(&mut self, leased: Leased, now: Instant) {
+        leased.leases.unoffer();
+        if leased.leases.idle() {
+            for id in leased.held {
+                self.unhold(id, now);
+            }
+            return;
+        }
+        self.leased.push(leased);
+        self.poll = Some(now);
+    }
+
+    /// Let go of the follows no longer seen whose last lease has ended:
+    /// whether any is still leased.
+    fn let_go_ended(&mut self, now: Instant) -> bool {
+        if self.leased.is_empty() {
+            return false;
+        }
+        let ended: Vec<Leased> = self
+            .leased
+            .extract_if(.., |leased| leased.leases.idle())
+            .collect();
+        for leased in ended {
+            for id in leased.held {
+                self.unhold(id, now);
+            }
+        }
+        !self.leased.is_empty()
+    }
+
     fn schedule(&mut self, id: InstanceId, now: Instant) {
         if !self.registered.contains(&id) {
             return;
@@ -570,6 +646,21 @@ impl<R: Registry> Follows<R> {
             .is_some_and(|named| *named < generation)
         {
             self.withdrawn.remove(key);
+        }
+    }
+}
+
+/// A follow no longer seen, kept for the leases on it: what it held.
+struct Leased {
+    leases: Arc<Leases>,
+    held: Vec<InstanceId>,
+}
+
+impl Leased {
+    fn of(follow: &Follow) -> Self {
+        Self {
+            leases: Arc::clone(&follow.leases),
+            held: follow.held().collect(),
         }
     }
 }

@@ -32,11 +32,13 @@ impl<R: Registry> Follows<R> {
     /// earlier, that is not offered, that this instance holds no lease on,
     /// and whose revision it has yet to acknowledge: each is marked as
     /// being sent, until [`Follows::acknowledged`] says whether its hub
-    /// took it. The follower looks again [`ACK_POLL`] later while a follow
-    /// still waits for one.
+    /// took it. A follow no longer seen whose last lease has ended is let
+    /// go of. The follower looks again [`ACK_POLL`] later while a follow
+    /// still waits for either.
     pub(in crate::dist::cells) fn acknowledgements(&mut self, now: Instant) -> Vec<Unoffered> {
+        let leased = self.let_go_ended(now);
         let due = self.followed.due(now);
-        self.poll = self.followed.awaiting().then(|| now + ACK_POLL);
+        self.poll = (leased || self.followed.awaiting()).then(|| now + ACK_POLL);
         due
     }
 
