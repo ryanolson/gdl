@@ -37,7 +37,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-web` | Users | The composer: a page and its server |
 | `gdl-cells` | `gdl`, hub, and runtime | The cell plane's shared types: the cell record, a cell's state and load summary, and the `CellDirectory` backends. No velo |
 | `gdl-watch` | Hub and runtime | The watches a cell's hub serves, as typed events, and their client |
-| `gdl-hub` | Deployments | The discovery hub, and a cell's quorum, health, record, and follows |
+| `gdl-hub` | Deployments | The discovery hub, and a cell's quorum, health, record, follows, and keyed records |
 
 The examples in `examples/` are separate workspaces. See [Run the examples](docs/src/guides/examples.md).
 

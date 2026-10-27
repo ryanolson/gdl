@@ -130,6 +130,26 @@ A hub that restarts ends every watch, so the epoch does not change within one. T
 
 `POST /v1/ext/gdl-cell/drain` on the control listener starts the cell's drain. The cell is `draining` on its health endpoint (503), its record, and its watch by the time the hub answers. The answer is 202 with the health body. It waits up to 5 s for the directory to store the draining record. A second drain is answered the same way. A cell whose class no hop enters, such as a global cell, is refused with 409. [Draining a cell](cell-routing.md#draining-a-cell) describes what the instances do.
 
+### The keyed record service
+
+A cell's hub also keeps a table of keyed records that its own instances read and write: the `gdl-keyed` extension (`gdl_hub::KeyedRecords`), beside `gdl-cell`. A node may read keyed data from its own cell's hub by request and answer. A router still reads only typed request data, which a node computes from what it read. The first use is a session's set: each ingress instance caches which set a session's first turn went to, and on a miss asks its hub, so that a later turn on another instance goes to the same set.
+
+A record maps a key to a value and a version. Key and value are bytes. The table holds at most `keyed_capacity` records, 1,000,000 by default, in least-recently-used order. An instance sends one or more operations in one request, `POST /v1/ext/gdl-keyed/instances/{id}/keyed` on the control listener, with its own credential. So only the hub's own instances reach the table. Each operation gets its own answer, in order:
+
+| Operation | Answer |
+|---|---|
+| `get(key)` | `found` with the record, or `missing` |
+| `set(key, value, expected)` | `applied` with the write's version, or `refused` with the record as it is, if any. `expected` is `replace` (always applies), `absent` (applies only when there is no record), or a version (applies only at that version) |
+| `check(key, version)` | `unchanged`, `newer` with the record, or `gone` |
+
+- Every operation moves its record to the front of the order.
+- Each write that applies gets a version greater than any the table gave before. A reader that holds two records of one key keeps the one with the greater version, so a late answer cannot replace a newer record.
+- Each reply carries the eviction age: the age of the least recently used record, or none while the table is empty. A reader that caches a record checks it again well within this age, so a record in use is touched before the hub evicts it.
+- The hub sends no change messages, and keeps no list of who holds a record. A reader checks a cached record again at a deadline of its own.
+- The table lives in the hub's memory. It is lost when the hub stops, and every instance of the cell ends with its hub.
+
+A table of 2048 records or more is split into shards, each of at least 1024 records, up to 64. Each shard has its own lock, so operations on keys of different shards never wait for each other, and a request with many operations takes each key's lock alone. Each shard evicts its own least recently used record, so a large table evicts one of its least recently used records, not always the oldest. A smaller table is one shard and evicts exactly the oldest. Versions come from one counter for the whole table, taken under the shard's lock with the write. The cost of a round trip is in [Keyed record service cost](../operations/keyed-cost.md). [Cells design](../development/cells-design.md#keyed-records-by-request-and-answer) gives the alternatives that were rejected.
+
 ## The cell directory
 
 The cell directory holds one record per cell, keyed by class and name. Each record is written only by its own cell's hub. The `gdl_cells::CellDirectory` trait has three operations:

@@ -135,6 +135,7 @@ The fleet file fills in each cell's `[cell]` table in its segments' settings. Th
 | `watch_buffer` | events a watcher may fall behind by before its watch ends. From 1 to 65536. Only the hub reads it. | 1024 |
 | `lost_chooser_ms` | how long a chooser may have no watch of the hub's relay open before the hub stops waiting for its acknowledgements. At least 1. Only the hub reads it. | 30000 |
 | `watch_caps.cell`, `watch_caps.relay`, `watch_caps.follow` | how many watches of the cell, of the relay, and of one follow the hub serves at once. At least 1. Only the hub reads them. | 2048, 2048, 16384 |
+| `keyed_capacity` | how many records the hub's keyed record table holds. At least 1. Only the hub reads it. | 1000000 |
 
 An instance refuses to start when its `[cell]` does not fit its deployment: the placement has no classes, the class is not one of them, the instance's segment is not in it, a `ready` key is not a segment of it, or a `requires` key is not a class it sends to or is 0. An instance and a hub both refuse a hub timing out of its bounds, though only the hub runs with it. Each problem names where the key was set, the file and key or the variable.
 
@@ -172,5 +173,6 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 | `[cell] watch_caps.cell` | `2048` | `WatchCaps::DEFAULT_CELL` |
 | `[cell] watch_caps.relay` | `2048` | `WatchCaps::DEFAULT_RELAY` |
 | `[cell] watch_caps.follow` | `16384` | `WatchCaps::DEFAULT_FOLLOW` |
+| `[cell] keyed_capacity` | `1000000` | `HubTiming::DEFAULT_KEYED_CAPACITY` |
 
 The constants are `gdl_model`'s, and the two images are the generator's (`gdl-gen`). Every other optional key has no value unless it is set.

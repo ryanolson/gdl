@@ -1,6 +1,6 @@
 # Benchmarking
 
-This chapter says what a performance number in this book may claim, how to take one, and which claims still wait for a dedicated machine. The numbers themselves are in [Crossing performance](crossing-performance.md), [Feature costs](feature-costs.md), and [Reader cost](reader-cost.md). Velo's rig and rules are in [velo's Benchmarking](https://ai-dynamo.github.io/velo/operations/benchmarking.html).
+This chapter says what a performance number in this book may claim, how to take one, and which claims still wait for a dedicated machine. The numbers themselves are in [Crossing performance](crossing-performance.md), [Feature costs](feature-costs.md), [Reader cost](reader-cost.md), and [Keyed record service cost](keyed-cost.md). Velo's rig and rules are in [velo's Benchmarking](https://ai-dynamo.github.io/velo/operations/benchmarking.html).
 
 Most figures in this book were taken on a shared machine: an Apple laptop under macOS, or one shared Arm host under Linux. Each table names its machine, command, and base commit. All of them are provisional. The newer tables come from the gb300 bench host: a quiet 72-core Neoverse-V2 server that runs one bench job at a time, where `perf` can count and sample. Nobody has checked it against the setup that the dedicated machines below need, so its numbers are provisional too.
 

@@ -37,10 +37,15 @@
 //! watch names it in (`?instance=<id>`, [`gdl_watch::RelayWatcher`]); a
 //! withheld follow does not close while its link reads it again. The watches' events and their client are
 //! `gdl-watch`'s, so that a segment instance reads the relay without
-//! linking the hub.
+//! linking the hub. Beside the cell's extension, a cell's hub runs
+//! [`KeyedRecords`], a table of keyed records that its own instances read
+//! and write by request and answer
+//! (`POST /v1/ext/gdl-keyed/instances/{id}/keyed` on the control
+//! listener, a [`gdl_watch::KeyedAsk`]).
 mod cell;
 mod fanout;
 mod follow;
+mod keyed;
 mod quorum;
 mod report;
 mod setup;
@@ -50,6 +55,7 @@ pub use cell::{
     SegmentHealth,
 };
 pub use follow::FollowsWatch;
+pub use keyed::KeyedRecords;
 pub use quorum::Quorum;
 pub use report::{HubDirectory, VerifiedReport};
 pub use setup::{cell_from_env, cell_from_vars, hub_builder};

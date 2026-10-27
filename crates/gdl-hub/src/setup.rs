@@ -9,7 +9,7 @@ use gdl_cells::DirDirectory;
 use gdl_model::{CellSettings, DeploymentSpec, DirectoryBackend, Origin, Problems, cell_variable};
 use velo_hub::{Hub, HubBuilder, HubConfig};
 
-use crate::{CellError, CellReadiness, CellTiming, GraphAdmission, HubDirectory};
+use crate::{CellError, CellReadiness, CellTiming, GraphAdmission, HubDirectory, KeyedRecords};
 
 /// A cell's settings for its hub, from the environment: `GDL_CELL__NAME`,
 /// `GDL_CELL__READY__<SEGMENT>`, and so on, as an instance reads its
@@ -67,7 +67,8 @@ pub fn cell_from_vars(
 }
 
 /// The hub of `spec`: [`GraphAdmission`], and with `cell`, the cell's
-/// [`CellReadiness`] publishing to the directory its settings name, at the
+/// keyed record service ([`KeyedRecords`], of `[cell] keyed_capacity`
+/// records) and its [`CellReadiness`] publishing to the directory its settings name, at the
 /// pace its settings give ([`CellTiming::from_settings`]): `relay`, reporting to its parent's hub
 /// ([`HubDirectory`]), or `dir`. `memory` is one directory inside one
 /// process, which no other hub could read, so a hub process refuses it.
@@ -82,10 +83,12 @@ pub fn hub_builder(
     let Some(cell) = cell else {
         return Ok(Hub::builder(config).extension(GraphAdmission::new(spec)));
     };
-    let builder = Hub::builder(config).extension(GraphAdmission::new(spec.clone()));
     // Settings made in code skip the reader's checks.
     gdl_model::check_hub_timing(&cell.timing)
         .map_err(|problem| CellError::new(problem.to_string()))?;
+    let builder = Hub::builder(config)
+        .extension(GraphAdmission::new(spec.clone()))
+        .extension(KeyedRecords::new(cell.timing.keyed_capacity)?);
     let timing = CellTiming::from_settings(&cell.timing);
     match &cell.directory {
         DirectoryBackend::Relay { parent_hub } => {

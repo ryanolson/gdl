@@ -29,6 +29,7 @@ use crate::{Layout, Problem, Problems, check_layout_name};
 /// lease_ms = 30000             # optional, the hub's alone: how long readers keep it; longer than the heartbeat
 /// watch_buffer = 1024          # optional, the hub's alone: events a watcher may fall behind by
 /// lost_chooser_ms = 30000      # optional, the hub's alone: how long it waits for a chooser with no watch of its relay
+/// keyed_capacity = 1000000     # optional, the hub's alone: keyed records its table holds
 /// [watch_caps]                 # optional, the hub's alone: watches each route serves at once
 /// relay = 2048
 /// [ready]                      # optional: the quorum of each segment of the class
@@ -95,10 +96,10 @@ pub struct CellSettings {
 }
 
 /// How a cell's hub paces its judgment, its record, and its watches, and
-/// how many of its watches it serves at once: the `[cell]` keys
-/// `hold_ms`, `heartbeat_ms`, `lease_ms`, `watch_buffer`,
-/// `lost_chooser_ms`, and `[watch_caps]`. Each key that is not set takes
-/// its default.
+/// how many of its watches it serves at once, and how many keyed records
+/// it holds: the `[cell]` keys `hold_ms`, `heartbeat_ms`, `lease_ms`,
+/// `watch_buffer`, `lost_chooser_ms`, `[watch_caps]`, and
+/// `keyed_capacity`. Each key that is not set takes its default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HubTiming {
     /// How long every segment's quorum must hold before the cell is
@@ -125,6 +126,9 @@ pub struct HubTiming {
     /// How many watches each of the hub's watch routes serves at once
     /// (`[watch_caps]`).
     pub watch_caps: WatchCaps,
+    /// How many keyed records the hub's keyed record table holds before
+    /// it evicts the least recently used (`keyed_capacity`): at least 1.
+    pub keyed_capacity: usize,
 }
 
 impl HubTiming {
@@ -150,6 +154,12 @@ impl HubTiming {
     /// same time. A chooser that is up watches again within about a second
     /// (its cap on waits between watches), so the bound is far from it.
     pub const DEFAULT_LOST_CHOOSER: Duration = Duration::from_secs(30);
+
+    /// The keyed record table's capacity when `keyed_capacity` is not
+    /// set: 1,000,000 records, about 100 MB of small records when full.
+    /// The table holds only what is written, so an unused one costs
+    /// nothing.
+    pub const DEFAULT_KEYED_CAPACITY: usize = 1_000_000;
 
     /// The largest watch buffer, 65536 events: 64 times the default. The
     /// hub keeps a buffer for the cell and one for each cell it follows,
@@ -177,6 +187,7 @@ impl Default for HubTiming {
             watch_buffer: Self::DEFAULT_WATCH_BUFFER,
             lost_chooser: Self::DEFAULT_LOST_CHOOSER,
             watch_caps: WatchCaps::default(),
+            keyed_capacity: Self::DEFAULT_KEYED_CAPACITY,
         }
     }
 }
@@ -612,6 +623,8 @@ struct Table {
     lost_chooser_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Caps::is_empty")]
     watch_caps: Caps,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keyed_capacity: Option<usize>,
 }
 
 /// The `[watch_caps]` table as written: each cap that is set.
@@ -758,6 +771,7 @@ fn hub_timing(table: &Table) -> Result<HubTiming, Problems> {
             relay: caps.relay.unwrap_or(defaults.watch_caps.relay),
             follow: caps.follow.unwrap_or(defaults.watch_caps.follow),
         },
+        keyed_capacity: table.keyed_capacity.unwrap_or(defaults.keyed_capacity),
     };
     check_hub_timing(&timing).map_err(|problems| {
         // The lease left at its default: the heartbeat that was set is
@@ -784,7 +798,7 @@ fn hub_timing(table: &Table) -> Result<HubTiming, Problems> {
 /// least 1 ms, a lease longer than the heartbeat, so that readers do not
 /// let the record lapse between two publishes, a watch buffer from 1 to
 /// [`HubTiming::MAX_WATCH_BUFFER`], a bound on a lost chooser of at least
-/// 1 ms, and no watch cap of 0. The problem
+/// 1 ms, no watch cap of 0, and a keyed record capacity of at least 1. The problem
 /// names its key in `[cell]`. Reading [`CellSettings`] applies it; a hub
 /// applies it again to settings made in code.
 pub fn check_hub_timing(timing: &HubTiming) -> Result<(), Problems> {
@@ -839,6 +853,12 @@ pub fn check_hub_timing(timing: &HubTiming) -> Result<(), Problems> {
             );
         }
     }
+    if timing.keyed_capacity == 0 {
+        return at(
+            "keyed_capacity",
+            "is 0, which holds no record; it is at least 1".into(),
+        );
+    }
     Ok(())
 }
 
@@ -879,6 +899,10 @@ impl From<CellSettings> for Table {
                 relay: set(settings.timing.watch_caps.relay, WatchCaps::DEFAULT_RELAY),
                 follow: set(settings.timing.watch_caps.follow, WatchCaps::DEFAULT_FOLLOW),
             },
+            keyed_capacity: set(
+                settings.timing.keyed_capacity,
+                HubTiming::DEFAULT_KEYED_CAPACITY,
+            ),
         }
     }
 }

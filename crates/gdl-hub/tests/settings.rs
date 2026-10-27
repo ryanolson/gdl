@@ -120,9 +120,11 @@ fn a_cells_hub_timing_is_read_from_the_environment() {
         jail.set_env("GDL_CELL__WATCH_CAPS__CELL", "3");
         jail.set_env("GDL_CELL__WATCH_CAPS__RELAY", "4");
         jail.set_env("GDL_CELL__WATCH_CAPS__FOLLOW", "5");
+        jail.set_env("GDL_CELL__KEYED_CAPACITY", "10");
         let cell = cell_from_env(&spec())
             .map_err(|e| e.to_string())?
             .ok_or("a cell")?;
+        assert_eq!(cell.timing.keyed_capacity, 10);
         let timing = CellTiming::from_settings(&cell.timing);
         assert_eq!(
             timing,
@@ -301,6 +303,11 @@ fn a_misspelled_or_malformed_cell_variable_is_refused_by_name() {
             "GDL_CELL__LEASE_MS: is 10000; it must be longer than the heartbeat",
         ),
         (
+            "GDL_CELL__KEYED_CAPACITY",
+            "0",
+            "GDL_CELL__KEYED_CAPACITY: is 0, which holds no record",
+        ),
+        (
             "GDL_CELL__WATCH_BUFFER",
             "0",
             "GDL_CELL__WATCH_BUFFER: is 0",
@@ -467,6 +474,24 @@ fn hub_builder_refuses_a_typed_watch_buffer_past_its_ceiling() {
         panic!("hub_builder accepted a watch buffer past its ceiling");
     };
     assert!(error.to_string().contains("watch_buffer"), "{error}");
+}
+
+/// A keyed record capacity of zero, built in code, is refused as the
+/// reader refuses it, naming its key.
+#[test]
+fn hub_builder_refuses_a_typed_keyed_capacity_of_zero() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-timing-")
+        .tempdir()
+        .expect("a directory");
+    let mut cell = settings(DirectoryBackend::Dir {
+        path: dir.path().to_path_buf(),
+    });
+    cell.timing.keyed_capacity = 0;
+    let Err(error) = hub_builder(config(), spec(), Some(cell)) else {
+        panic!("hub_builder accepted a keyed capacity of zero");
+    };
+    assert!(error.to_string().contains("keyed_capacity"), "{error}");
 }
 
 /// With `dir`, the hub runs the cell's extension, which publishes the

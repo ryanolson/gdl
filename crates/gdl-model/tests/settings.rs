@@ -488,7 +488,7 @@ fn a_cell_names_its_layout() {
 fn a_cells_hub_timing_is_read_from_its_table() {
     const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
     let cell = settings(&format!(
-        "{LEAST}hold_ms = 500\nheartbeat_ms = 2000\nlease_ms = 9000\nwatch_buffer = 64\nlost_chooser_ms = 4000\n[watch_caps]\ncell = 3\nrelay = 4\nfollow = 5\n"
+        "{LEAST}hold_ms = 500\nheartbeat_ms = 2000\nlease_ms = 9000\nwatch_buffer = 64\nlost_chooser_ms = 4000\nkeyed_capacity = 10\n[watch_caps]\ncell = 3\nrelay = 4\nfollow = 5\n"
     ));
     assert_eq!(
         cell.timing,
@@ -503,6 +503,7 @@ fn a_cells_hub_timing_is_read_from_its_table() {
                 relay: 4,
                 follow: 5,
             },
+            keyed_capacity: 10,
         }
     );
     let text = toml::to_string(&cell).expect("toml");
@@ -531,6 +532,7 @@ fn with_no_timing_set_a_cells_hub_keeps_its_defaults() {
     assert_eq!(cell.timing.lease, Duration::from_secs(30));
     assert_eq!(cell.timing.watch_buffer, 1024);
     assert_eq!(cell.timing.lost_chooser, Duration::from_secs(30));
+    assert_eq!(cell.timing.keyed_capacity, 1_000_000);
     assert_eq!(
         cell.timing.watch_caps,
         WatchCaps {
@@ -548,6 +550,7 @@ fn with_no_timing_set_a_cells_hub_keeps_its_defaults() {
         "watch_buffer",
         "lost_chooser_ms",
         "watch_caps",
+        "keyed_capacity",
     ] {
         assert!(!text.contains(key), "{key} in {text}");
     }
@@ -559,7 +562,8 @@ fn with_no_timing_set_a_cells_hub_keeps_its_defaults() {
 /// set; a heartbeat or a lease of zero; a watch buffer of zero or past
 /// its ceiling; a cap of zero, which would refuse every watch; a bound of
 /// zero on a lost chooser, which would stop waiting for a chooser the
-/// moment its watch of the relay closes, before it can watch again.
+/// moment its watch of the relay closes, before it can watch again; a
+/// keyed record capacity of zero, which could hold no record.
 #[test]
 fn a_hub_timing_the_hub_cannot_run_with_is_refused_by_key() {
     const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
@@ -602,6 +606,7 @@ fn a_hub_timing_the_hub_cannot_run_with_is_refused_by_key() {
             "watch_caps.follow",
             "at least 1",
         ),
+        ("keyed_capacity = 0\n", "keyed_capacity", "at least 1"),
     ] {
         let value: toml::Value = toml::from_str(&format!("{LEAST}{bad}")).expect("toml");
         let problems = CellSettings::read(value).expect_err(bad);

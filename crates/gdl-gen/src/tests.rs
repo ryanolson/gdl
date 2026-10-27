@@ -1057,6 +1057,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             "WatchCaps::DEFAULT_FOLLOW",
             WatchCaps::DEFAULT_FOLLOW.to_string(),
         ),
+        (
+            "HubTiming::DEFAULT_KEYED_CAPACITY",
+            HubTiming::DEFAULT_KEYED_CAPACITY.to_string(),
+        ),
     ]
 }
 

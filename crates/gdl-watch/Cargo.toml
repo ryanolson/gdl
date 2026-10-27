@@ -11,6 +11,8 @@ publish.workspace = true
 # both depend on this crate rather than the runtime on the hub: it takes
 # velo for the peer types alone, and never velo-hub's server.
 [dependencies]
+# Keys and values of the keyed record table as JSON text.
+base64 = "0.22"
 futures = { workspace = true }
 gdl-cells = { path = "../gdl-cells" }
 gdl-model = { path = "../gdl-model" }

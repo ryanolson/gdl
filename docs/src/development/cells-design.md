@@ -119,6 +119,18 @@ An event of a kind a reader does not know may say something that would keep it f
 
 So a later build adds what it has to say as an optional field of a known event. `unfollowed` and `acknowledged` are fields, not kinds of their own. Both are for the cell's own instances, and say nothing a follower needs. As new kinds, they would make every earlier parent fail closed for a draining cell, and read it again for as long as it drained.
 
+## Keyed records by request and answer
+
+Ingress instances share which set each session went to through their cell's hub. Each instance caches the records it uses. On a miss, it asks the hub and waits one round trip. A record changes only when its set becomes unreachable, so the hub sends no change messages, and a reader checks its cached record again at a deadline. Writes are compare-and-set on a version, so two instances that pick at once agree on the first write, and a late answer never replaces a newer record.
+
+**Rejected: the hub sends every record to every instance, a snapshot and then each change.** Every instance would hold every session of the cell, and every write would cost a message to each of them, for records that change only when a set becomes unreachable.
+
+**Rejected: a broadcast among the instances over velo.** No hub load, but it needs a queue for each peer, an order among writers, and a snapshot for an instance that joins.
+
+**Rejected: a database read on every later turn.** It survives a hub restart, but adds a read to every turn rather than to a miss.
+
+**Rejected: leases with change messages to the holders of a record.** The hub would track who holds each record, for changes that are rare.
+
 ## What stays fixed
 
 A change of graph or placement changes the hashes, so the new version's cells and the old version's cells do not see each other. Such a change is a lockstep rollout of new cells of every class, region by region, blue and green. A new class changes the placement, so it is a rollout too. Builds of the same contract and placement roll per cell.

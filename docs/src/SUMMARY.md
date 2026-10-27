@@ -44,6 +44,7 @@
 - [Hot paths](operations/hot-paths.md)
 - [Runtime feature costs](operations/feature-costs.md)
 - [Source reader cost](operations/reader-cost.md)
+- [Keyed record service cost](operations/keyed-cost.md)
 
 # Development
 

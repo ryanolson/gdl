@@ -27,6 +27,16 @@ A cell's hub serves the `gdl-cell` extension's routes under `/v1/ext/gdl-cell`. 
 - A watch that arrives before the hub first stores the cell's record waits up to 5 s, then gets 503. Every watch ends when the hub stops, or once a drained cell's record is withdrawn. A watch after that gets 503.
 - `GraphAdmission` serves `GET /v1/ext/gdl/members`, whose `PeerInfo` values the watch events carry.
 
+### Keyed records
+
+The keyed record service serves one route under `/v1/ext/gdl-keyed`. The wire types are `gdl_watch`'s (`KeyedAsk`, `KeyedOp`, `KeyedReply`, `KeyedAnswer`).
+
+| Method and path | Listener | Credential | Body | Answers |
+|---|---|---|---|---|
+| `POST /instances/{id}/keyed` | control | the instance's | `KeyedAsk`: a list of `get`, `set`, and `check` operations, each tagged by `op`; keys and values as base64 text | 200 with a `KeyedReply`: one answer for each operation, in order, each tagged by `answer`, and `eviction_age_ms`, the age of the table's least recently used record, or `null` while it is empty. A refused write is an answer, not an error |
+
+A request without the credential of a registered instance is refused before any operation runs. The credential is checked when the headers arrive, so a write whose body arrives after its instance left still applies: a keyed record belongs to no registration, and versions order late writes as they order any other. A request of no operations reads the eviction age and touches nothing.
+
 ## Watch events
 
 Each server-sent event's data is one JSON value tagged by `event`.
@@ -52,6 +62,7 @@ Every relay event except `synced` names its class, cell, and generation. A choos
 | Quorum hold | 2 s by default | `[cell] hold_ms` |
 | Record heartbeat, lease | 10 s, 30 s by default | `[cell] heartbeat_ms`, `lease_ms` |
 | Load summary period | 10 s by default, at least 1 s | `[cell] summary_ms` |
+| Keyed records the table holds | 1,000,000 by default, at least 1 | `[cell] keyed_capacity` |
 | Drain answer wait | up to 5 s | the hub |
 | Chooser acknowledgement poll, resend | 50 ms, 500 ms | the runtime |
 | Wait for a chooser with no relay watch | 30 s by default | `[cell] lost_chooser_ms` |

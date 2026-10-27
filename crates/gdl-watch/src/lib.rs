@@ -10,7 +10,9 @@
 //! ([`Avoids`]), and the one its hub sends the cell's hub once every
 //! chooser of its cell has ([`Avoided`]). And, under the `relay`
 //! directory backend, the report a child cell's hub sends its parent's
-//! hub of its record ([`Report`]).
+//! hub of its record ([`Report`]). And what an instance asks of its own
+//! cell hub's keyed record table, and the hub's answer ([`KeyedAsk`],
+//! [`KeyedReply`]).
 //!
 //! The hub (`gdl-hub`) serves them and a segment instance reads the relay
 //! and its own cell's watch, for the cell's drain, and sends the report, so the wire types, the routes, and the client
@@ -36,6 +38,7 @@ use velo::{InstanceId, PeerInfo};
 mod backoff;
 mod client;
 mod follows;
+mod keyed;
 mod limits;
 mod report;
 mod watched;
@@ -43,6 +46,10 @@ mod watched;
 pub use backoff::{Backoff, WatchEnd};
 pub use client::{CellWatchError, CellWatcher, WatchItem, WatchStream};
 pub use follows::FollowEvent;
+pub use keyed::{
+    Expected, KEYED_EXTENSION, KEYED_ROUTE, KeyedAnswer, KeyedAsk, KeyedOp, KeyedRecord,
+    KeyedReply, keyed_path,
+};
 pub use limits::{WatchFailure, WatchLimits};
 pub use report::{REPORT_ROUTE, Report, ReportRefusal, ReportReply};
 pub use watched::{UnknownEvent, UnknownFollowEvent, Watched};

@@ -12,6 +12,8 @@ futures.workspace = true
 gdl-cells = { path = "../gdl-cells" }
 gdl-model = { path = "../gdl-model" }
 gdl-watch = { path = "../gdl-watch" }
+# The keyed record table's order of use.
+lru = "0.16"
 velo-hub = { workspace = true, features = ["server", "client"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
@@ -30,3 +32,9 @@ tokio = { workspace = true, features = ["test-util"] }
 toml.workspace = true
 # Proves that a verified report cannot be built outside verification.
 trybuild = { workspace = true }
+
+# The keyed record service's round trip and rate: a load run that prints
+# its quantiles, not a criterion bench.
+[[bench]]
+name = "keyed"
+harness = false

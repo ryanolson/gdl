@@ -19,7 +19,7 @@ use gdl_model::{
     CellSettings, DeploymentSpec, HopInfo, Manifest, NodeInfo, Placement, Role, SegmentPhase,
     TypeInfo, segment_service,
 };
-use gdl_watch::{Avoids, LoadReport, Unoffered};
+use gdl_watch::{Avoids, KeyedAsk, KeyedOp, KeyedReply, LoadReport, Unoffered};
 use tokio::sync::watch;
 use velo_hub::client::{ClientError, HubClient, HubServiceRegistration};
 use velo_hub::velo::discovery::ServiceRegistrationGuard;
@@ -247,6 +247,15 @@ impl Instance {
         self.client
             .ext(gdl_watch::EXTENSION)
             .control_post(&gdl_watch::avoids_path(self.id()), avoids)
+            .await
+    }
+
+    /// Ask the hub's keyed record table, as this instance, to apply
+    /// `ops`, in order.
+    pub async fn keyed(&self, ops: Vec<KeyedOp>) -> Result<KeyedReply, ClientError> {
+        self.client
+            .ext(gdl_watch::KEYED_EXTENSION)
+            .control_post(&gdl_watch::keyed_path(self.id()), &KeyedAsk { ops })
             .await
     }
 
