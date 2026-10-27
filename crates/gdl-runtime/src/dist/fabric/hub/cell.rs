@@ -134,6 +134,16 @@ impl Parent {
         learned.acknowledged || learned.unfollowed || Instant::now() >= until
     }
 
+    /// Whether the instance declines offers from other cells now: once its
+    /// cell drains, its bound has passed since it learned of the drain, or
+    /// no cell follows the cell ([`Parent::declining`]).
+    pub(crate) fn declines(&self) -> bool {
+        let learned = *self.learned.borrow();
+        learned
+            .drain
+            .is_some_and(|drain| learned.unfollowed || Instant::now() >= drain + self.bound)
+    }
+
     /// Resolves when the instance declines offers from other cells, as an
     /// entry instance of a draining cell does once its bound has passed
     /// since it learned of the drain, or no cell follows the cell: a drain

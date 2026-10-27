@@ -857,7 +857,11 @@ impl Launch {
     /// learns of the drain while it waits goes on by the drain's rule. A
     /// source's instance
     /// announces that it has drained before it waits, so source segments
-    /// that route to each other never wait for each other. Then it refuses
+    /// that route to each other never wait for each other. An entry
+    /// instance of a cell does not: it announces that it has drained once
+    /// it holds no request, either at the end of its stop or, once a drain
+    /// of its cell that it learns of while it waits makes it decline
+    /// offers, while it waits. Then it refuses
     /// what arrives, waits until it holds no request (a stream holds its
     /// request until velo has handed its output on), stops velo, and
     /// leaves. A peer avoids a retired instance only while its segment has
@@ -1086,8 +1090,10 @@ impl Launch {
     }
 
     /// The drain after the serving body has returned. A
-    /// source's instance announces that it has drained, then the instance
-    /// waits for the first of: (A) every instance of the segments that send
+    /// source's instance announces that it has drained, except an entry
+    /// instance of a cell, which says so only once it holds no request
+    /// ([`Launch::source_drains_early`]). Then the instance waits for the
+    /// first of: (A) every instance of the segments that send
     /// to this one has promised to avoid it, or left, and `setup` has
     /// passed since, so that a hand-off sent before the promise has
     /// arrived; or (B) every instance of the source segments that can reach
@@ -1096,7 +1102,9 @@ impl Launch {
     /// its bound has passed. Any instance of a cell, outside its cell's
     /// drain, never counts (B) while a source of another class reaches it;
     /// an interior one that learns of the drain while it waits then counts
-    /// it once no more work can reach it. Then it closes its
+    /// it once no more work can reach it, and a retired entry instance,
+    /// once that drain makes it decline offers, announces that it has
+    /// drained while it waits, as soon as it holds no request. Then it closes its
     /// entries and waits until it holds no request; a stream
     /// holds its share until velo has handed its output on. Each wait ends at `deadline`.
     /// While its cell drains, an entry instance first waits out its bound,
@@ -1124,6 +1132,8 @@ impl Launch {
         #[cfg(feature = "hub")]
         let parent = self.cell_parent();
         let declining = self.cell_declining(segment);
+        #[cfg(feature = "hub")]
+        let (source_drains_early, declines) = (self.source_drains_early(), self.cell_declines());
         let senders: Vec<&str> = self.senders.iter().map(String::as_str).collect();
         let me = self.node.instance_id();
         let pause = |every: Duration| async move {
@@ -1180,7 +1190,7 @@ impl Launch {
                 }
                 #[cfg(feature = "hub")]
                 Peers::Hub(session) if hub => {
-                    if self.source {
+                    if source_drains_early {
                         let _ = session.drained(deadline).await;
                     }
                     // Rosters differ under a hub, so the hub's members are
@@ -1193,6 +1203,17 @@ impl Launch {
                         // in flight: the hub that would answer it is gone.
                         if session.is_lost() || settled(avoided) {
                             break;
+                        }
+                        // Declined first, so that no offer is taken after
+                        // the instance read that it holds none; tried
+                        // briefly, and again at the next poll.
+                        if declines() {
+                            segment.decline_offers();
+                            if segment.admitted() == 0 {
+                                let poll = crate::dist::HubSession::poll();
+                                let bound = (tokio::time::Instant::now() + poll * 10).min(deadline);
+                                let _ = session.drained(bound).await;
+                            }
                         }
                         let ask = async {
                             // A blind instance asks too, for a drain of its
@@ -1249,6 +1270,7 @@ impl Launch {
                 () = tokio::time::sleep(DRAIN_POLL) => {}
             }
         }
+        self.cell_entry_drained(segment, deadline, hub).await;
     }
 }
 

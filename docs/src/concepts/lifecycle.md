@@ -113,7 +113,7 @@ The steps, in order:
 1. **Retire.** The health phase becomes `draining`, and the serving body's context is cancelled. Meanwhile, the instance announces `retired`, then withdraws `ready` and `loaded`. A roster read after that leaves it out.
 2. **Peers avoid it.** A peer that sees the retirement stops routing to the instance, but only while the segment has another instance that is not retired. Then the peer acknowledges. The acknowledgement is a promise: the peer never routes to that instance again.
 3. **The body ends.** A frontend drains the requests it holds. A JSON-lines source stops reading lines, and finishes the answer it is writing.
-4. **Drained.** A source instance announces `drained` before it waits further. So source segments that route to each other never wait for each other.
+4. **Drained.** A source instance announces `drained` before it waits further. So source segments that route to each other never wait for each other. An entry instance of a cell is the exception: it announces `drained` only once it holds no request ([An interior instance's stop](cell-routing.md#an-interior-instances-stop)).
 5. **Wait for A or B.** The instance waits for whichever holds first:
    - **(A)** every instance of the segments that send to it has acknowledged or left, and then `setup_timeout` has passed. A hand-off sent just before the promise may still be on its way. A segment that nothing sends to has (A) at once, with no wait.
    - **(B)** every instance of the source segments whose requests can reach it has drained or left.

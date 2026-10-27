@@ -70,6 +70,21 @@ impl Launch {
         move || parent.as_ref().is_none_or(crate::dist::Parent::avoids)
     }
 
+    /// Whether this instance, a retired entry instance, now declines
+    /// offers because of a drain of its cell that it learned of while it
+    /// waits ([`crate::dist::Parent::declines`]). It then says `drained`
+    /// once it holds no request, as an entry instance that the drain
+    /// stopped does: every instance of the cell waits for that, and a
+    /// segment that sends back to the entry would otherwise wait for the
+    /// entry while the entry waits for it to leave. Always `false` for any
+    /// other instance. What it reads is taken now, so that the question
+    /// borrows nothing of the launch.
+    #[cfg(feature = "hub")]
+    pub(super) fn cell_declines(&self) -> impl Fn() -> bool + use<> {
+        let parent = self.cell_drain.as_ref().and_then(|cell| cell.parent());
+        move || parent.as_ref().is_some_and(crate::dist::Parent::declines)
+    }
+
     /// For a retired entry instance, decline offers from `segment` from
     /// other cells once a drain of its cell it learned of while it waits
     /// reaches its bound, or no cell follows the cell; then, and for any
@@ -207,6 +222,46 @@ impl Launch {
             let _ = bound;
             tokio::time::sleep_until(deadline).await;
         }
+    }
+
+    /// Whether this instance, a source's, says `drained` as a source does,
+    /// once its serving body ends. An entry instance of a cell does not:
+    /// every instance of a draining cell reads an entry's `drained` as
+    /// "this entry holds no request", and a cell drain that begins later
+    /// would close an interior instance that a request it holds still
+    /// needs. It says it at the end of its drain instead
+    /// ([`Launch::cell_entry_drained`]).
+    #[cfg(feature = "hub")]
+    pub(super) fn source_drains_early(&self) -> bool {
+        self.source && self.cell_drain.as_ref().is_none_or(|cell| cell.interior())
+    }
+
+    /// For an entry instance of a cell that hosts a source and was stopped
+    /// outside its cell's drain: announce that it has drained, retried
+    /// until `deadline`, once it holds no request. One that still holds a
+    /// request at its bound, or whose lease is lost (`hub` false), says
+    /// nothing; its leaving says as much.
+    pub(super) async fn cell_entry_drained(
+        &mut self,
+        segment: &dyn Drains,
+        deadline: tokio::time::Instant,
+        hub: bool,
+    ) {
+        #[cfg(feature = "hub")]
+        if self.source
+            && !self.source_drains_early()
+            && hub
+            && segment.admitted() == 0
+            && let Peers::Hub(session) = &mut self.peers
+            && let Err(error) = session.drained(deadline).await
+        {
+            eprintln!(
+                "{}: could not announce that it drained, so the cell's other instances wait for it to leave: {error}",
+                self.segment
+            );
+        }
+        #[cfg(not(feature = "hub"))]
+        let _ = (segment, deadline, hub);
     }
 
     /// For an instance of a draining cell that takes no more work, from

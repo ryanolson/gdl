@@ -13,6 +13,14 @@
 //! seconds each.
 
 mod common;
+#[path = "retirement/hubwait.rs"]
+mod hubwait;
+#[path = "retirement/nonblind.rs"]
+mod nonblind;
+#[path = "retirement/returning.rs"]
+mod returning_path;
+#[path = "retirement/source.rs"]
+mod source;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

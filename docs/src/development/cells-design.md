@@ -140,6 +140,16 @@ The entry instances are always asked, because the hub cannot tell a sender that 
 
 An entry of an earlier build never says that it detached. An interior instance also drains once every entry instance has drained or left, so such a cell drains as before.
 
+So an entry's `drained` must always mean that it holds no request. An entry instance that also hosts a source does not say `drained` when its serving body ends, as a source elsewhere does. It says it once it holds no request, at the end of its drain. Otherwise a stop of that entry, then a cell drain, would close an interior instance while the entry still held a request bound for it. `a_later_cell_drain_keeps_work_held_by_an_entry_with_a_source` in `crates/gdl-runtime/tests/retirement/source.rs` holds this. The cost: an instance that only that source reaches waits until the entry holds no request, or for its senders to avoid it.
+
+An entry stopped outside the drain, which then learns of it, says `drained` while it waits, once it declines offers and holds no request, as an entry that the drain stopped does. Otherwise, on a path that leaves the entry and comes back, the entry waits for the returning segment to leave, and that segment waits for the entry's `drained`. Both would stay until the entry's drain bound. `a_later_cell_drain_releases_a_stopped_entry_on_a_returning_path` and its source variant in `crates/gdl-runtime/tests/retirement/returning.rs` hold this.
+
+**Rejected: give a stop the cell's entry instances as its drain sources once it learns of a later drain.** It would free two entry segments on a returning path that were both stopped before the drain. But it took away the exit of an interior instance that only a source in the cell reaches, which then waited for unrelated work at an entry. And its extra question to the hub, when it stalled, kept the stop from seeing that its senders had avoided it. `a_late_drain_preserves_a_nonblind_interiors_source_exit` and `a_late_drains_stalled_source_query_keeps_the_avoidance_exit` in `crates/gdl-runtime/tests/retirement/` hold both.
+
+**Rejected: take the early `drained` back when the entry learns of the drain.** The interior instance learns of the drain from its own watch, and can ask the hub before the entry has taken it back.
+
+**Rejected: let each reader tell a source's `drained` from an entry's.** Both are the same hub service, and an entry of an earlier build still says the early one.
+
 ## A model's state keeps its history
 
 A cell's record lists its models, and each entry's state comes from what the cell's usable entry instances say and from the state before it. A model that was `ready` and that no instance can serve now is `unavailable`, never `starting`. An entry leaves the record only once `drained`. So a reader can tell a model that served from one that never did, and a crash from a removal.

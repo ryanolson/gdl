@@ -317,6 +317,10 @@ Avoiding a retiree promises nothing about hand-offs sent to it before. The insta
 
 An interior instance is an instance of a segment of the cell's class that no hop from another class enters. Its sources are in another class, so they are not members of its hub, and it cannot see them drain. When it is stopped outside its cell's drain, it never counts them as drained. It waits until every instance of the segments of its class that send to it has promised to avoid it or has left, and then for the setup timeout ([Segment lifecycle](lifecycle.md)). So a request that an entry instance holds still reaches it. It waits for no cell outside its own. If it learns of its cell's drain while it waits, it also stops waiting once no more work can reach it, as in step 5 of [Draining a cell](#draining-a-cell).
 
+An entry instance that also hosts a source says `drained` only once it holds no request, also when it is stopped outside its cell's drain. A source elsewhere says it once its serving body ends. Every instance of a draining cell reads an entry's `drained` as "this entry holds no request". So a stopped entry, then a cell drain, does not close an interior instance that a request the entry holds still needs.
+
+An entry instance stopped outside its cell's drain that then learns of the drain follows the drain's rule from then, as in step 4 of [Draining a cell](#draining-a-cell). Once its bound has passed, or no other cell follows the cell, it declines offers, and it says `drained` as soon as it holds no request, while it still waits. So on a path that leaves the entry and comes back, the segment that sends back to the entry can leave, and then the entry leaves too.
+
 A peer avoids a retired instance only while the segment has another instance. So the last interior instance of a segment waits until its senders leave, or for its drain's bound (`drain_ms`). In the chat graph, with `front` the entry of a cell's class, an operator who stops the only `engine` instance while `front` keeps serving sees `engine` take requests until `drain_ms` passes.
 
 ## Draining a cell
