@@ -27,6 +27,17 @@ impl Unit<'_> {
         let _ = writeln!(text);
         text.push_str(&self.settings_doc(&hosted, frontend, service, self.serves()));
         let _ = writeln!(text);
+        // Here and not in the library: a program that links the library
+        // and sets its own allocator would fail to link with two.
+        if let Some(allocator) = self.spec.allocator.source() {
+            let _ = writeln!(
+                text,
+                "// The global allocator that the spec's `[binary] allocator` chooses."
+            );
+            let _ = writeln!(text, "#[global_allocator]");
+            let _ = writeln!(text, "static GLOBAL: {ty} = {ty};", ty = allocator.ty);
+            let _ = writeln!(text);
+        }
         let _ = writeln!(text, "fn main() -> std::process::ExitCode {{");
         // The binary, not the runtime, installs the subscriber: a program
         // that deploys the segment through the library keeps its own. On

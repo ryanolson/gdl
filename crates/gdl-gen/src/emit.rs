@@ -553,6 +553,10 @@ impl Unit<'_> {
             let source = source.source(&|path| self.path_to(path));
             let _ = writeln!(text, "{package} = {{ {source} }}");
         }
+        // Only the chosen allocator's crate, so that the lock holds no other.
+        if let Some(allocator) = self.spec.allocator.source() {
+            let _ = writeln!(text, "{} = \"{}\"", allocator.package, allocator.version);
+        }
         let _ = writeln!(
             text,
             "serde = {{ version = \"1\", features = [\"derive\"] }}"

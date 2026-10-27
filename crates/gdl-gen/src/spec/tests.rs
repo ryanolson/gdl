@@ -635,6 +635,37 @@ const GRAPH: &str = "[graph]\npath = \"chat.gdl\"\n[messages]\ncrates = [\"chat-
     [nodes]\ncrates = [\"chat-nodes@0.1.0\"]\n[gdl]\nversion = \"0.1\"\n\
     [segment.front]\nnodes = [\"A\"]\n";
 
+/// `[binary] allocator` chooses each segment binary's global allocator.
+/// The system's is the default, and a spec may name it too. Any other
+/// name is refused, with the choices.
+#[test]
+fn a_spec_chooses_its_binaries_allocator() {
+    let temp = contract_dir("allocator");
+    let dir = temp.path();
+    let file = dir.join("gdl.toml");
+    let unsaid = Spec::parse(CONTRACT, &file, dir).expect("a spec");
+    assert_eq!(unsaid.allocator, Allocator::System);
+    assert_eq!(Allocator::DEFAULT, Allocator::System);
+    for (name, allocator) in [
+        ("system", Allocator::System),
+        ("mimalloc", Allocator::Mimalloc),
+        ("jemalloc", Allocator::Jemalloc),
+    ] {
+        let text = format!("{CONTRACT}[binary]\nallocator = \"{name}\"\n");
+        let spec = Spec::parse(&text, &file, dir).expect("a spec");
+        assert_eq!(spec.allocator, allocator, "{name}");
+    }
+    let text = format!("{CONTRACT}[binary]\nallocator = \"tcmalloc\"\n");
+    let Err(error) = Spec::parse(&text, &file, dir) else {
+        panic!("tcmalloc was taken");
+    };
+    let error = error.to_string();
+    assert!(error.contains("[binary] allocator"), "{error}");
+    for choice in ["system", "mimalloc", "jemalloc"] {
+        assert!(error.contains(choice), "{choice} in: {error}");
+    }
+}
+
 /// Every table of a spec refuses a key it does not know, nested tables
 /// included, and the refusal names the file, the line, the table, and the
 /// key: `<file>:<line>: [<table>] <key>: ...`.
@@ -747,6 +778,11 @@ fn every_spec_table_refuses_an_unknown_key_where_it_is() {
             "pins",
             "[nodes] pins",
         ),
+        (
+            format!("{CONTRACT}[binary]\nallocater = \"mimalloc\"\n"),
+            "allocater",
+            "[binary] allocater",
+        ),
     ];
     for (text, needle, expected) in cases {
         let Err(error) = Spec::parse(&text, &file, dir) else {
@@ -803,7 +839,8 @@ fn a_spec_reads_back_what_it_writes() {
         [deployment.segment.engine.config.runtime]\ndrain_ms = 90000\n\
         [entry.chat]\ntarget = \"A\"\nforward = [\"x::In\"]\nbackward = [\"x::Out\"]\noperator = \"x::Op\"\nnested = { target = \"B\" }\n\
         [config.A]\nenabled = true\nlimit = 3\nname = \"n\"\n\
-        [pipeline_names]\nA = \"chat\"\n";
+        [pipeline_names]\nA = \"chat\"\n\
+        [binary]\nallocator = \"mimalloc\"\n";
     let contract = "[contract]\npath = \"contract\"\nmodule = \"chat_contract::graph\"\n\
         [gdl]\nversion = \"0.1\"\n[segment.front]\nnodes = [\"A\"]\n\
         [bind.A]\ncrate = \"front-nodes\"\npath = \"front\"\ntype = \"front_nodes::A\"\n\
@@ -860,6 +897,7 @@ fn a_spec_reads_back_what_it_writes() {
         "cell_policy",
         "nodes",
         "contract",
+        "binary",
     ] {
         assert!(!written.contains(unsaid), "{unsaid} in:\n{written}");
     }

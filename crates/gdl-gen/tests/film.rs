@@ -233,6 +233,21 @@ fn generated_placements_serve_the_same_response_and_move_the_node_metrics() {
             "{}",
             String::from_utf8_lossy(&built.stderr)
         );
+        // The compact spec chooses mimalloc: its binary links it, and the
+        // build's lock names it and no other allocator. The distributed
+        // spec chooses none, and its binaries and lock have neither.
+        let mimalloc = name == "compact.toml";
+        let lock = std::fs::read_to_string(scratch.path().join("Cargo.lock")).expect("lock");
+        assert_eq!(lock.contains("name = \"mimalloc\"\n"), mimalloc, "{name}");
+        assert!(!lock.contains("jemalloc"), "{name}");
+        for segment in segments {
+            let binary = std::fs::read(target("examples").join(format!("debug/film-{segment}")))
+                .expect("segment binary");
+            let links = binary
+                .windows(b"mi_malloc_aligned".len())
+                .any(|bytes| bytes == b"mi_malloc_aligned");
+            assert_eq!(links, mimalloc, "film-{segment} of {name}");
+        }
 
         let accounting = TcpListener::bind("127.0.0.1:0").expect("accounting listener");
         let accounting_address = accounting.local_addr().expect("accounting address");

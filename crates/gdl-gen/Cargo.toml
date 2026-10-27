@@ -32,6 +32,10 @@ toml = { workspace = true }
 
 [dev-dependencies]
 gdl-hub = { path = "../gdl-hub" }
+# Not used by the tests' code. The film test builds a generated segment that
+# chooses mimalloc offline, from this workspace's lock: this puts the crate
+# in that lock and in the local registry, at the version gdl is tested with.
+mimalloc = "0.1"
 
 [lints]
 workspace = true

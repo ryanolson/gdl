@@ -22,6 +22,10 @@
 //! [gdl]
 //! path = "../../crates/gdl-runtime"   # or: version = "0.1"
 //!
+//! [binary]                       # optional: each segment binary's global
+//! allocator = "mimalloc"         # allocator: "system" (the default),
+//!                                # "mimalloc", or "jemalloc"
+//!
 //! [segment.front]
 //! nodes = ["A", "B", "C", "G"]
 //!
@@ -80,6 +84,8 @@ pub struct Spec {
     /// Cell policy name to implementation: what the segments that choose
     /// cells of a class whose policy has that name build and register.
     pub(crate) cell_policies: BTreeMap<String, Bind>,
+    /// The global allocator of each generated segment binary.
+    pub(crate) allocator: Allocator,
     /// What inspecting the bound crates found wrong. Reported with every
     /// other problem when the spec is validated, not one at a time here.
     pub(crate) problems: Vec<String>,
@@ -245,6 +251,59 @@ impl GdlDep {
     }
 }
 
+/// The global allocator of each generated segment binary: `[binary]
+/// allocator`. Only the binary sets it, so a program that deploys a segment
+/// through its library keeps its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Allocator {
+    /// The system's allocator (glibc's malloc on Linux): nothing is set,
+    /// and the segment crate is what it was before allocators could be
+    /// chosen.
+    System,
+    /// mimalloc, from the `mimalloc` crate.
+    Mimalloc,
+    /// jemalloc, from the `tikv-jemallocator` crate.
+    Jemalloc,
+}
+
+/// The crate a chosen allocator comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AllocatorCrate {
+    /// Its package, as the segment's manifest names it.
+    pub(crate) package: &'static str,
+    /// Its library, as Rust code names it.
+    pub(crate) lib: &'static str,
+    /// The version requirement the manifest gives.
+    pub(crate) version: &'static str,
+    /// The type `#[global_allocator]` names, which is also its value.
+    pub(crate) ty: &'static str,
+}
+
+impl Allocator {
+    /// The allocator of a spec that names none.
+    pub(crate) const DEFAULT: Self = Self::System;
+
+    /// The crate the allocator comes from; none for the system's.
+    pub(crate) fn source(self) -> Option<AllocatorCrate> {
+        match self {
+            Self::System => None,
+            Self::Mimalloc => Some(AllocatorCrate {
+                package: "mimalloc",
+                lib: "mimalloc",
+                version: "0.1",
+                ty: "mimalloc::MiMalloc",
+            }),
+            Self::Jemalloc => Some(AllocatorCrate {
+                package: "tikv-jemallocator",
+                lib: "tikv_jemallocator",
+                version: "0.6",
+                ty: "tikv_jemallocator::Jemalloc",
+            }),
+        }
+    }
+}
+
 /// One node's implementation, or one cell policy's.
 #[derive(Debug, Clone)]
 pub(crate) struct Bind {
@@ -282,6 +341,8 @@ struct Raw {
     #[serde(skip_serializing_if = "Option::is_none")]
     nodes: Option<RawNodes>,
     gdl: RawGdl,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binary: Option<RawBinary>,
     // The placement's tables, or the layouts', kept as written. The
     // placements themselves are read by `Placements::from_toml` from the
     // same text, so that their problems have their lines in the spec.
@@ -411,6 +472,14 @@ struct RawGdl {
     git: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rev: Option<String>,
+}
+
+/// The `[binary]` table: how each segment binary is built.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBinary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allocator: Option<Allocator>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -672,6 +741,10 @@ impl Spec {
             placements,
             bind,
             cell_policies,
+            allocator: raw
+                .binary
+                .and_then(|binary| binary.allocator)
+                .unwrap_or(Allocator::DEFAULT),
             problems: Vec::new(),
         })
     }

@@ -19,5 +19,10 @@ enabled = true
 [gdl]
 path = "../../crates/gdl-runtime"
 
+# The serving binary's global allocator: `system` (the default),
+# `mimalloc`, or `jemalloc`.
+[binary]
+allocator = "mimalloc"
+
 [segment.all]
 nodes = ["Http", "Engine", "UsageTap"]

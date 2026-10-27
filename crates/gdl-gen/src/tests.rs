@@ -1,5 +1,5 @@
 use super::*;
-use crate::spec::{Bind, Contract, GdlDep, Source};
+use crate::spec::{Allocator, Bind, Contract, GdlDep, Source};
 use gdl_model::{HopInfo, Manifest, NodeInfo, Role, TypeInfo};
 
 /// `S => D`: a source and one sink.
@@ -58,6 +58,7 @@ fn spec(placement: gdl_model::Placement, bind: &[(&str, &str)]) -> Spec {
             })
             .collect(),
         cell_policies: BTreeMap::new(),
+        allocator: Allocator::DEFAULT,
         problems: Vec::new(),
     }
 }
@@ -687,6 +688,109 @@ fn only_the_binary_installs_a_log_subscriber() {
     }
 }
 
+/// Only a segment's binary sets the global allocator the spec chooses, and
+/// only its manifest names that allocator's crate: a library that set one
+/// would not link into a program that sets its own. The system's allocator
+/// sets nothing, so a spec that names it generates what one that does not
+/// generates.
+#[test]
+fn only_the_binary_sets_the_chosen_allocator() {
+    let out = Path::new("/work/segments");
+    let unsaid = spec(split(), &[("D", "tiny_nodes::D")]);
+    let system = rendered(&unsaid, &manifest(), out).expect("render");
+    let crates = ["mimalloc", "jemalloc"];
+    for (path, text) in &system {
+        assert!(
+            !text.contains("global_allocator"),
+            "{}:\n{text}",
+            path.display()
+        );
+        for name in crates {
+            assert!(
+                !text.contains(name),
+                "{name} in {}:\n{text}",
+                path.display()
+            );
+        }
+    }
+    let mut named = unsaid.clone();
+    named.allocator = Allocator::System;
+    assert_eq!(rendered(&named, &manifest(), out).expect("render"), system);
+    for (allocator, ty, dependency, other) in [
+        (
+            Allocator::Mimalloc,
+            "mimalloc::MiMalloc",
+            "mimalloc = \"0.1\"\n",
+            "jemalloc",
+        ),
+        (
+            Allocator::Jemalloc,
+            "tikv_jemallocator::Jemalloc",
+            "tikv-jemallocator = \"0.6\"\n",
+            "mimalloc",
+        ),
+    ] {
+        let mut chosen = unsaid.clone();
+        chosen.allocator = allocator;
+        let files = rendered(&chosen, &manifest(), out).expect("render");
+        assert_eq!(
+            files.keys().collect::<Vec<_>>(),
+            system.keys().collect::<Vec<_>>()
+        );
+        for segment in ["front", "engine"] {
+            let main = &files[&PathBuf::from(format!("{segment}/src/main.rs"))];
+            assert!(
+                main.contains(&format!(
+                    "#[global_allocator]\nstatic GLOBAL: {ty} = {ty};\n"
+                )),
+                "{main}"
+            );
+            let manifest = &files[&PathBuf::from(format!("{segment}/Cargo.toml"))];
+            assert!(manifest.contains(dependency), "{manifest}");
+            assert!(!manifest.contains(other), "{manifest}");
+            toml::from_str::<toml::Table>(manifest).expect("the manifest parses");
+        }
+        // Nothing else changes: the libraries set no allocator.
+        for (path, text) in &files {
+            let binary = path.ends_with("src/main.rs") || path.ends_with("Cargo.toml");
+            if !binary {
+                assert_eq!(text, &system[path], "{}", path.display());
+            }
+        }
+    }
+}
+
+/// The chosen allocator's crate is a dependency of every segment, so a
+/// node crate may not take its package or library name; under the system's
+/// allocator the names are free.
+#[test]
+fn a_dependency_may_not_take_the_chosen_allocators_name() {
+    let mut spec = spec(split(), &[("D", "engine_impl::D")]);
+    let bind = spec.bind.get_mut("D").expect("D");
+    bind.package = "mimalloc".into();
+    bind.lib = "engine_impl".into();
+    check(&spec, &manifest()).expect("no allocator is chosen: the name is free");
+    spec.allocator = Allocator::Mimalloc;
+    let error = check(&spec, &manifest())
+        .expect_err("duplicate key")
+        .to_string();
+    assert!(
+        error.contains("segment `engine`: dependency `mimalloc` is both the `mimalloc` dependency and [bind.D]'s package"),
+        "{error}"
+    );
+    let bind = spec.bind.get_mut("D").expect("D");
+    bind.package = "engine-impl".into();
+    bind.lib = "tikv_jemallocator".into();
+    spec.allocator = Allocator::Jemalloc;
+    let error = check(&spec, &manifest())
+        .expect_err("duplicate crate name")
+        .to_string();
+    assert!(
+        error.contains("segment `engine`: crate name `tikv_jemallocator` is both the `tikv_jemallocator` dependency and package `engine-impl`"),
+        "{error}"
+    );
+}
+
 #[test]
 fn only_the_source_segment_serves_json_lines() {
     let out = std::path::Path::new("/work/segments");
@@ -901,6 +1005,10 @@ fn defaults() -> Vec<(&'static str, String)> {
         (
             "DEFAULT_BUILD_IMAGE",
             format!("{:?}", deployment::DEFAULT_BUILD_IMAGE),
+        ),
+        (
+            "Allocator::DEFAULT",
+            serde_json::to_string(&Allocator::DEFAULT).expect("a name"),
         ),
         (
             "CellSettings::DEFAULT_QUORUM",

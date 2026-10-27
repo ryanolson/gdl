@@ -4,7 +4,7 @@ This appendix lists every table and key of `gdl.toml` (the spec), `fleet.toml` (
 
 ## gdl.toml
 
-A spec names the graph with `[contract]` or with `[graph]`, never both. `[messages]` goes with `[graph]`. `[nodes]` goes with `[graph]`, and `[bind.*]` goes with `[contract]`. `[cell_policy.*]` goes with either. `[gdl]` is always required.
+A spec names the graph with `[contract]` or with `[graph]`, never both. `[messages]` goes with `[graph]`. `[nodes]` goes with `[graph]`, and `[bind.*]` goes with `[contract]`. `[cell_policy.*]` and `[binary]` go with either. `[gdl]` is always required.
 
 ### Graph source
 
@@ -77,6 +77,21 @@ A value equal to its default is not recorded. The placement hash covers each cla
 
 A `[deployment]` table, or the `compose` command, makes the generated crates ask for hub discovery. A `[deployment.segment.<name>]` table must name a segment that some layout has. Image names are validated: letters, digits, and `/ _ . : @ -`. A secret's name is letters, digits, `_`, `.`, and `-`, and not `.` or `..`. Its file must be absolute and outside the bundle's build context ([Secrets](../guides/compose-deploy.md#secrets)). [Deploy with Docker Compose](../guides/compose-deploy.md) covers the deployment, and [Hosted frontends](../guides/frontends.md) covers entries.
 
+### Binary
+
+| Key | Meaning | Default |
+|---|---|---|
+| `[binary] allocator` | each segment binary's global allocator: `"system"`, `"mimalloc"`, or `"jemalloc"` | `"system"` |
+
+The generated `main.rs` sets `#[global_allocator]` to the chosen allocator, and the segment's manifest depends on its crate and on no other allocator's: `mimalloc` 0.1, or `tikv-jemallocator` 0.6. A segment's lock therefore holds only the chosen crate. `"system"` sets nothing, so a spec that names it generates the same crates as a spec that does not. Only the binary sets the allocator. A program that deploys a segment through its library keeps its own, since a library that set one would not link into a program that sets another. A node crate may not take the chosen crate's package or library name. The setting is not part of the placement or its hash: it changes how a binary is built, not what crosses a cut. The hub's binary keeps the system allocator.
+
+Both crates build C code with the build image's compiler.
+
+- jemalloc's build also runs `make`, which the slim Rust images lack: the default build image, and the one an export's `Dockerfile` names. Set `[deployment] build_image` to an image that has it, such as `rust:1.93.1-bookworm`.
+- jemalloc fixes its page size when it is built, to the build host's. A binary built on a host of 4 KB pages does not start on a host of 64 KB pages, such as some arm64 servers. Build it with `JEMALLOC_SYS_WITH_LG_PAGE=16` in the build's environment, which runs on both.
+
+mimalloc has neither limit. [Known limitations](../operations/limitations.md#jemalloc-needs-make-and-the-run-hosts-page-size-at-build-time) has the workarounds.
+
 ## fleet.toml
 
 The fleet file lists a deployment's cells. It is not part of the placement's identity. [Classes and cells](../concepts/cells.md) and [Deploy a fleet of cells](../guides/fleet.md) explain it.
@@ -142,6 +157,7 @@ Every default of the spec's placement and deployment tables, the fleet file, and
 | spec `[cells.<class>] policy` | `"round_robin"` | `CellPolicy::DEFAULT_POLICY` |
 | spec `[deployment] base_image` | `"gcr.io/distroless/cc-debian12:nonroot"` | `DEFAULT_BASE_IMAGE` |
 | spec `[deployment] build_image` | `"rust:1.93.1-slim-bookworm"` | `DEFAULT_BUILD_IMAGE` |
+| spec `[binary] allocator` | `"system"` | `Allocator::DEFAULT` |
 | fleet `ready.<segment>`, `[cell] ready.<segment>` | `1` | `CellSettings::DEFAULT_QUORUM` |
 | fleet `requires.<class>`, `[cell] requires.<class>`, for each class the cell's class sends to, when `requires` is unsaid | `1` | `CellSettings::DEFAULT_REQUIRES` |
 | `[cell] directory` | `"relay"` | `DirectoryBackend::DEFAULT` |

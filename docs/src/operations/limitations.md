@@ -259,6 +259,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** generation and composition do not fetch gdl. A `[gdl] path` and the composer's `--gdl-path` are read, and must name the package `gdl-runtime`.
 - **Workaround:** name revision `869699d` or later.
 
+### jemalloc needs `make`, and the run host's page size at build time
+- **What:** a spec with `[binary] allocator = "jemalloc"` fails to build in the default build image of a Compose bundle, and in the image an exported archive's `Dockerfile` builds in. A jemalloc binary built on a host of 4 KB pages does not start on a host of 64 KB pages.
+- **Why:** `tikv-jemalloc-sys` builds jemalloc with `configure` and `make`, and the slim Rust images (`rust:1.93.1-slim-bookworm`) have no `make`. jemalloc reads the build host's page size and fixes it in the binary. See [the spec reference](../appendix/spec-reference.md#binary).
+- **Workaround:** for Compose, set `[deployment] build_image` to an image with `make`, such as `rust:1.93.1-bookworm`. For an export, change the build stage's `FROM` line in each `Dockerfile` the same way. To run on hosts of 64 KB pages, build with `JEMALLOC_SYS_WITH_LG_PAGE=16`, from a build image of your own that sets it. Or choose `mimalloc`, which has neither limit.
+- **Lifts:** a generated build stage that installs `make` and sets the page size for jemalloc.
+
 ### A misspelled first key in a `GDL_` variable is ignored
 - **What:** only variables whose first key is a settings key are read. `GDL_RUNTIM__DRAIN_MS` is dropped without a word, while `GDL_RUNTIME__DRAIN_M` is refused.
 - **Why:** the build scripts' own variables (`GDL_PROFILE`, `GDL_IMAGE_PREFIX`) must not stop a segment.

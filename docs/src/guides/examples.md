@@ -58,4 +58,4 @@ The first request returns NDJSON, one `item` for each word. The second returns `
 
 ## film
 
-`examples/film` has two node crates that depend on `gdl` and never link velo. `gdl-demo-nodes` has an HTTP frontend and a mock engine. `acme-gdl-nodes` has a response-only usage tap and marked re-exports of the `Chunk` and `Usage` messages. Three specs use the same graph: `gdl.toml` (separate segments), `compact.toml` (one process), and `deploy.toml` (pinned Git packages for Compose). `examples/film/README.md` has the node settings and metrics. `crates/gdl-gen/tests/film.rs` runs it natively.
+`examples/film` has two node crates that depend on `gdl` and never link velo. `gdl-demo-nodes` has an HTTP frontend and a mock engine. `acme-gdl-nodes` has a response-only usage tap and marked re-exports of the `Chunk` and `Usage` messages. Three specs use the same graph: `gdl.toml` (separate segments), `compact.toml` (one process, with mimalloc as its allocator), and `deploy.toml` (pinned Git packages for Compose). `examples/film/README.md` has the node settings and metrics. `crates/gdl-gen/tests/film.rs` runs it natively.

@@ -272,13 +272,17 @@ pub(crate) fn validate(
                 &mut problems,
             );
             see(&contract.lib, "the contract".into(), &mut problems);
+            let allocator = spec.allocator.source();
             for fixed in [
                 "gdl_runtime",
                 "serde",
                 "tokio",
                 "toml",
                 "tracing_subscriber",
-            ] {
+            ]
+            .into_iter()
+            .chain(allocator.map(|allocator| allocator.lib))
+            {
                 see(fixed, format!("the `{fixed}` dependency"), &mut problems);
             }
             // Every crate sees these; a dependency of the same name would
@@ -323,7 +327,10 @@ pub(crate) fn validate(
                 "tokio",
                 "toml",
                 "tracing-subscriber",
-            ] {
+            ]
+            .into_iter()
+            .chain(allocator.map(|allocator| allocator.package))
+            {
                 key(fixed, format!("the `{fixed}` dependency"), &mut problems);
             }
             key(&contract.package, "the contract".into(), &mut problems);
