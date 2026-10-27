@@ -77,6 +77,15 @@ After seven rounds, most new findings were deliberate name tricks: a local `mod 
 
 The cap is safe because of a backstop in every build. Each generated segment asserts at compile time that every message it sends or receives across a cut is a wire type: `gdl::__private::crosses`, one assertion per message type per segment, named by the crossing. A trick that fools the reader fails that segment's build with one error that names the message and the crossing, never a running graph.
 
+## The probe records the build's reading
+
+`cargo gdl extract --probe` exists for the wrong "local" that the cap accepts. It builds the program that `--verify` builds, and records the build's reading of each instantiation in the catalogue entry.
+
+- **Opt-in.** A probe runs the crate's build scripts and proc macros, as `--verify` does. The composer's server must run none of a crate's code, so it never probes, and no add probes by default.
+- **On the export.** The build's reading is a field of the instantiation's export entry, beside the reader's. The composer lends its checks the offers that its entries hold, without a copy, so data kept beside the offer would not reach resolution. Resolution takes the reading of the entry whose path the contract names, the build's where it holds one. Taking any listed crate's probe of the same type was tried and dropped. A facade's probe of a directory crate's type then outranked that crate's newer reading after an edit. Two facades that enable different features of one published crate also read its type differently, and the first's probe outranked the second's. A build's reading holds only for the build that made it.
+- **A directory crate is built at each probe.** A hash of the crate's files was the rejected alternative. A path dependency, the lock, or a feature can change an instantiation's wire capability without a change to the crate's own files. Cargo already knows what changed, and a probe with nothing to rebuild costs a fraction of a second. An add without `--probe` drops the data, since it may describe code that is gone.
+- **A published version is probed once.** It never changes, so a held entry with the build's reading of each instantiation needs no build. The probe fills in a held entry that has none, by a rename, and keeps the rest of it as first written. It fills the entry as the file holds it, not as this catalogue loaded it, so a fill that another probe made since stays.
+
 ## The reader is linear in its source
 
 The reader once grew with the product of two lengths in a file, not their sum. Each name a `use` bound copied the item's attributes and the path before its braces. Each module copied its parent's path. Each name's location re-tokenized its whole item, because syn's `span` builds the item's tokens. The wire check of each message, and the role check of each node, walked and resolved every impl in the crate.

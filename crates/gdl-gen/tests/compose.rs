@@ -1611,6 +1611,179 @@ fn verify_dependencies(version: &str, dependency_version: &str) {
     assert_eq!(exports, ["Extra", "Token"]);
 }
 
+/// The `Texts` export of the entry of `package` at `version` in `catalogue`.
+fn texts(catalogue: &Path, package: &str, version: &str) -> gdl_extract::ExportEntry {
+    let file = catalogue.join(package).join(format!("{version}.toml"));
+    let entry = gdl_gen::Entry::from_toml(&std::fs::read_to_string(&file).expect("an entry"))
+        .expect("an entry");
+    entry
+        .offer
+        .exports
+        .into_iter()
+        .find(|e| e.name == "Texts")
+        .expect("`Texts` is exported")
+}
+
+/// `cargo gdl extract <crate> --catalog <dir> [--probe]`, offline, with
+/// `args` after it.
+fn add(
+    krate: &str,
+    catalogue: &Path,
+    probe: bool,
+    args: &[&std::ffi::OsStr],
+) -> std::process::Output {
+    let mut command = Command::new("timeout");
+    command
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "gdl",
+            "extract",
+            krate,
+            "--catalog",
+        ])
+        .arg(catalogue)
+        .args(args)
+        .env("CARGO_HTTP_PROXY", "127.0.0.1:9")
+        .env("CARGO_NET_RETRY", "0");
+    if probe {
+        command.arg("--probe");
+    }
+    command.output().expect("cargo gdl")
+}
+
+/// `--probe` builds the crate's registrations, as `--verify` does, and
+/// records on each instantiation the wire capability the build reports,
+/// which takes precedence over the reader's. The fixture's serde impls
+/// bound their parameter on `Clone`, which the reader does not judge: it
+/// reads `Wrap<String>` as local, and the build as wire. A crate from a
+/// directory is probed again at each add, so an edit shows; an add without
+/// `--probe` drops the data, which may describe code that is gone.
+///
+/// One cold build of the fixture's dependencies, in the target directory
+/// the other `--verify` tests share; each probe after it builds only the
+/// fixture.
+#[test]
+fn probe_records_the_builds_wire_capability() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-probe-")
+        .tempdir()
+        .expect("dir");
+    let krate = temp.path().join("probed");
+    copy_dir(&fixtures().join("probed-protocols"), &krate);
+    // The copy takes gdl-message from where the fixture does.
+    let manifest = krate.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .expect("manifest")
+        .replace(
+            "\"../../../../../gdl-message\"",
+            &toml_string(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-message")),
+        );
+    std::fs::write(&manifest, text).expect("manifest");
+    let catalogue = temp.path().join("catalogue");
+    let target = target();
+    let at = krate.to_str().expect("UTF-8");
+    let add = |probe: bool| {
+        let output = add(
+            at,
+            &catalogue,
+            probe,
+            &["--target-dir".as_ref(), target.as_os_str()],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        texts(&catalogue, "probed-protocols", "0.0.0")
+    };
+
+    let read = add(false);
+    assert_eq!((read.wire, read.probed), (false, None));
+    let probed = add(true);
+    assert_eq!((probed.wire, probed.probed), (false, Some(true)));
+
+    // `String` is not `Copy`: the build now reads `Wrap<String>` as local.
+    let lib = krate.join("src/lib.rs");
+    let source = std::fs::read_to_string(&lib).expect("source");
+    std::fs::write(&lib, source.replace("T: Clone +", "T: Copy +")).expect("source");
+    let edited = add(true);
+    assert_eq!(edited.probed, Some(false));
+
+    let dropped = add(false);
+    assert_eq!(dropped.probed, None);
+}
+
+/// A published version is probed once and kept, since it never changes.
+/// The fixture registry's crate does not depend on gdl-message, so a
+/// probe of it fails: the first `--probe` tries one, and once the
+/// catalogue holds the build's reading, a `--probe` builds nothing and
+/// keeps it.
+#[test]
+fn a_published_version_is_probed_once() {
+    let temp = offline_registry("probe");
+    let dir = temp.path();
+    let catalogue = dir.join("catalogue");
+    let target = |name: &str| dir.join(name).into_os_string();
+    let first = target("first");
+    let output = add(
+        "regprobe@0.1.0",
+        &catalogue,
+        true,
+        &["--target-dir".as_ref(), &first],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a probe was tried");
+    assert!(
+        stderr
+            .contains("regprobe does not depend on gdl-message, so it registers nothing to probe"),
+        "{stderr}"
+    );
+    assert!(!catalogue.exists(), "a failed probe adds nothing");
+
+    // The catalogue takes the build's reading, as a probe that worked
+    // would have added it.
+    let output = add(
+        "regprobe@0.1.0",
+        &catalogue,
+        false,
+        &["--target-dir".as_ref(), &first],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(texts(&catalogue, "regprobe", "0.1.0").probed, None);
+    let mut catalog = gdl_gen::Catalog::load(&catalogue).expect("catalogue");
+    let mut entry = catalog.entries().next().expect("an entry").clone();
+    for export in &mut entry.offer.exports {
+        export.probed = Some(true);
+    }
+    catalog.add(entry).expect("probed");
+    assert_eq!(texts(&catalogue, "regprobe", "0.1.0").probed, Some(true));
+
+    let kept = target("kept");
+    let output = add(
+        "regprobe@0.1.0",
+        &catalogue,
+        true,
+        &["--target-dir".as_ref(), &kept],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(texts(&catalogue, "regprobe", "0.1.0").probed, Some(true));
+    let built: Vec<_> = std::fs::read_dir(Path::new(&kept).join("gdl-gen"))
+        .expect("the fetch's scratch")
+        .map(|e| e.expect("an entry").file_name())
+        .filter(|name| name.to_string_lossy().starts_with("gdl-verify-"))
+        .collect();
+    assert_eq!(built, Vec::<std::ffi::OsString>::new(), "nothing is built");
+}
+
 /// What each listed crate of the chat example offers, as a catalogue would
 /// hold it: read once, from source.
 fn chat_offers() -> Vec<gdl_gen::Offer> {

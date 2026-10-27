@@ -493,6 +493,21 @@ pub struct ExportEntry {
     /// Whether the public path is public: every module above the `pub use`
     /// is `pub`.
     pub public: bool,
+    /// For an instantiation of a generic message, whether a build found it
+    /// a wire type: recorded by `cargo gdl extract --probe`, never by the
+    /// reader. Resolution takes it over `wire`. Left out when no build
+    /// probed it, so an entry without probe data reads and writes as
+    /// before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probed: Option<bool>,
+}
+
+impl ExportEntry {
+    /// Whether it is an instantiation of a generic message, named by an
+    /// exported alias: what `--probe` records a build's reading of.
+    pub fn is_instantiation(&self) -> bool {
+        self.origin.path.contains('<')
+    }
 }
 
 /// A message's identity: where it is defined, wherever it is offered.

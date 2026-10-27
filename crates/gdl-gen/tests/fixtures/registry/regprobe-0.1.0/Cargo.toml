@@ -1,0 +1,8 @@
+# A protocols crate with a generic message, as a registry holds it, for the
+# tests of `cargo gdl extract --probe`. It is read, never built: its
+# markers are text, and it does not depend on gdl-message, so a probe of
+# it fails.
+[package]
+name = "regprobe"
+version = "0.1.0"
+edition = "2024"

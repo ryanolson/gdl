@@ -205,6 +205,61 @@ impl Extracted {
 /// in the offer's `skipped`, is no difference: it is returned, with that
 /// reason, for the caller to report.
 pub fn verify(extracted: &Extracted, target: &Path) -> Result<Vec<String>, Error> {
+    let (registered, mine) = registrations(extracted, target, "verify")?;
+    let problems = differences(&registered, &mine, &extracted.offer);
+    if problems.is_empty() {
+        Ok(left_out(&registered, &mine, &extracted.offer))
+    } else {
+        Err(Error::all(problems))
+    }
+}
+
+/// Build the program [`verify`] builds, in `target`, and record on each
+/// instantiation of a generic message the extracted crate exports whether
+/// the build finds it a wire type. The build sees serde impls and bounds
+/// the reader cannot judge, so its reading takes precedence. It builds the
+/// crate's default features. A crate that exports no instantiation has
+/// nothing to record, and nothing is built. Each instantiation the build
+/// does not register keeps the reader's reading, and is returned as a note
+/// for the caller to report.
+pub fn probe(extracted: &mut Extracted, target: &Path) -> Result<Vec<String>, Error> {
+    if !extracted.offer.exports.iter().any(|e| e.is_instantiation()) {
+        return Ok(Vec::new());
+    }
+    let (registered, mine) = registrations(extracted, target, "probe")?;
+    let mut notes = Vec::new();
+    for export in extracted
+        .offer
+        .exports
+        .iter_mut()
+        .filter(|e| e.is_instantiation())
+    {
+        // An instantiation is compared by its path, as `--verify` compares
+        // it: a build cannot name the packages of its arguments.
+        let built = registered
+            .exports
+            .iter()
+            .find(|e| mine(&e.dir) && e.path == export.path && e.origin.path == export.origin.path);
+        match built {
+            Some(built) => export.probed = Some(built.wire),
+            None => notes.push(format!(
+                "the build registers no `{}` of `{}`: its wire capability is the reader's",
+                export.path, export.origin.path
+            )),
+        }
+    }
+    Ok(notes)
+}
+
+/// What a program that links the extracted crate registers, built in
+/// `target`, and a test for the build directory of an entry that tells
+/// the crate's own entries from those of its dependencies. `command` names
+/// the caller in the error for a crate that registers nothing.
+fn registrations(
+    extracted: &Extracted,
+    target: &Path,
+    command: &str,
+) -> Result<(gdl_message::Catalogue, impl Fn(&str) -> bool + use<>), Error> {
     let located = &extracted.located;
     // The crate's own `gdl-message`, the nearest one: a workspace may hold
     // another, and a dependency for another platform may reach another.
@@ -216,13 +271,13 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<Vec<String>, Error
         [one] => one.clone(),
         [] => {
             return Err(Error::new(format!(
-                "{} does not depend on gdl-message, so it registers nothing to verify",
+                "{} does not depend on gdl-message, so it registers nothing to {command}",
                 located.name
             )));
         }
         several => {
             return Err(Error::new(format!(
-                "{} reaches {} packages gdl-message in as many steps ({}), so `--verify` cannot tell which one it builds with",
+                "{} reaches {} packages gdl-message in as many steps ({}), so `--{command}` cannot tell which one it builds with",
                 located.name,
                 several.len(),
                 several
@@ -263,13 +318,8 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<Vec<String>, Error
 
     // Only this crate's registrations: a dependency registers its own.
     let dir = std::fs::canonicalize(&located.dir).unwrap_or_else(|_| located.dir.clone());
-    let mine = |d: &str| std::fs::canonicalize(d).is_ok_and(|d| d == dir);
-    let problems = differences(&registered, &mine, &extracted.offer);
-    if problems.is_empty() {
-        Ok(left_out(&registered, &mine, &extracted.offer))
-    } else {
-        Err(Error::all(problems))
-    }
+    let mine = move |d: &str| std::fs::canonicalize(d).is_ok_and(|d| d == dir);
+    Ok((registered, mine))
 }
 
 /// The `[dependencies]` line that takes the package `at` under `key` from
@@ -773,6 +823,7 @@ mod tests {
                 wire: true,
                 encoding: Default::default(),
                 public: true,
+                probed: None,
             }],
             nodes: vec![NodeEntry {
                 entries: Vec::new(),

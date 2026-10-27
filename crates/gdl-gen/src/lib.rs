@@ -59,7 +59,7 @@ use std::path::{Path, PathBuf};
 pub use deployment::{ComposeBundle, Sources, compose, compose_bundle, compose_files};
 use emit::MARKER;
 pub use export::export;
-pub use extract::{Crate, Extracted, add_to_catalog, extract, verify};
+pub use extract::{Crate, Extracted, add_to_catalog, extract, probe, verify};
 pub use fleet::check_files;
 /// The working catalogue, its entries, and what a crate offers, read from
 /// its source.

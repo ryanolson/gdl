@@ -398,6 +398,7 @@ fn a_message_exported_only_by_a_facade_is_composed() {
                 wire: true,
                 encoding: Default::default(),
                 public: true,
+                probed: None,
             }],
             Vec::new(),
         ),
@@ -533,6 +534,7 @@ fn an_instantiation_an_alias_offers_is_composed_by_the_alias_name() {
                 wire: true,
                 encoding: gdl_model::Encoding::Json,
                 public: true,
+                probed: None,
             }],
             vec![NodeEntry {
                 entries: Vec::new(),

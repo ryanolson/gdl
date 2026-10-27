@@ -121,6 +121,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                     },
                     encoding: message.encoding,
                     public,
+                    probed: None,
                 }),
                 Ok(None) => {
                     let generic = matches!(
@@ -839,5 +840,6 @@ fn alias(
         wire: ty_wire(resolver, impls, &ty),
         encoding: message.encoding,
         public: reachable,
+        probed: None,
     }))
 }

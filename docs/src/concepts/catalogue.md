@@ -48,6 +48,8 @@ A message is a wire type when it implements `Serialize` and `Deserialize`. Only 
 
 For an instantiation of a generic message, the reader judges each direction of serde on its own. It reads the bounds that serde's derive infers, or the bounds of a hand-written impl. It takes the instantiation for a wire type only where it can show it. Anything it cannot judge makes the instantiation local. A wrong "local" refuses a crossing that would work. A wrong "wire" fails the segment's build, never a running graph: each generated segment asserts at compile time that every message it sends or receives across a cut is a wire type. The error reads `` `T` crosses between segments but is not a wire type ``.
 
+`cargo gdl extract --probe` replaces the reader's judgement of an instantiation with the build's, in a catalogue entry. [`--probe`](#--probe-the-builds-wire-capability) below describes it.
+
 ## Resolution
 
 A message's identity is its origin: the defining package's name, version, and source (a registry, a Git commit, or a path), and its definition path. [Messages and encodings](messages.md) defines identity, including an instantiation's. A spec's `[messages] crates` lists the crates that names resolve against. A listed crate offers what it defines and what it exports.
@@ -69,7 +71,7 @@ A working catalogue is a directory with one file per crate version:
 
 `cargo gdl extract <crate> --catalog <dir>` adds an entry, and the composer's server adds one for each import. `cargo gdl catalog <dir>` prints the index: each entry, each message name with the messages of that name, and each node with the messages at its ports.
 
-- A published version never changes, so its entry is written once. Adding it again keeps the file. The same version from another source is an error that names both sources.
+- A published version never changes, so its entry is written once. Adding it again keeps the file, and gives the entry as the file holds it. Only a probe fills in a published entry later ([`--probe`](#--probe-the-builds-wire-capability)). The same version from another source is an error that names both sources.
 - A crate from a directory changes as it is edited, so it has one entry. Adding it again replaces the entry, and removes the entry of its earlier version.
 - The time is RFC 3339 UTC, to the second. The checksum is the one Cargo locked for a registry crate. A path or Git crate has none.
 - Loading reads every file. No unified index is stored. A file that does not hold the entry its path names is refused.
@@ -81,5 +83,27 @@ An entry written before messages carried an encoding does not load. The load err
 `cargo gdl extract <crate> --verify` reads the crate, then builds a program that links it and prints what the markers registered at compile time. Each marker also registers its entry in a link-time list (`linkme`). The command keeps the entries whose build directory is the crate's own, and fails on each difference from what the reader found. The program also links what the crate's dependencies register, another version of the crate itself among them, and those entries are left out. The program starts from the lock file of the crate's workspace, so it builds the versions that the reader read, and Cargo reads no registry index for them. It takes the crate and the `gdl-message` nearest to it in its dependencies from the sources that lock names: a path, a registry version, or a Git repository under the same branch, tag, or revision. Under any other Git reference, Cargo would see a second source and link a second `gdl-message`. It also takes the workspace's `[patch]` tables, since Cargo applies a patch only from a manifest. A crate that does not depend on `gdl-message` registers nothing, and `--verify` says so without building it. A message that a macro makes shows up here. So does a wire capability that the reader judged wrong.
 
 `--verify` runs third-party build scripts, so it is for a crate's own CI. The composer never runs it. An alias that the reader leaves out on purpose is no difference. `--verify` matches it by the path the build registers it at: a message's alias where it is, and a node's at the crate's root. So an alias of the same name elsewhere is still compared. It prints the alias on stderr with the reason. It compares an instantiation by its path, not by the packages of its arguments, which a build cannot name.
+
+## `--probe`: the build's wire capability
+
+`cargo gdl extract <crate> --catalog <dir> --probe` builds the program that `--verify` builds. For each instantiation of a generic message that the crate exports, it records in the catalogue entry whether the build finds it a wire type. The build sees every serde impl and bound, so its reading takes precedence over the reader's. A probe counts only in the entry that holds it: resolution takes the reading of the entry whose path the contract names the message by. Another crate's build of the same type may have had other features, or an older version of a crate from a directory. An instantiation that the reader takes for local, because its serde impls bound a parameter on `Clone`, is then a wire type in the catalogue.
+
+```toml
+[[exports]]
+name = "Texts"
+path = "probed_protocols::Texts"
+wire = false          # the reader's reading
+probed = true         # the build's reading, which counts
+```
+
+- The probe is opt-in, and never the default. It runs the crate's build scripts and proc macros, and it needs a toolchain and, for a crate whose dependencies are not yet fetched, the network.
+- It builds the crate with its default features only.
+- A published version never changes, so it is probed once. When the catalogue's entry for the version already holds the build's reading of each instantiation, `--probe` builds nothing and keeps the entry. When the entry has no probe data, the probe fills it in, and the rest of the entry stays as it was first written. A Git crate at a commit counts as published.
+- A crate from a directory changes as it is edited, so `--probe` builds it at each add. Cargo rebuilds only what changed. An add without `--probe` replaces the entry, and the new entry has no probe data, since the old data may describe code that is gone.
+- A crate that exports no instantiation has nothing to record, and nothing is built.
+- An instantiation that the build does not register keeps the reader's reading, and `--probe` says so on stderr.
+- An entry without probe data reads as before: the reader's reading counts.
+
+The probe data is used where the catalogue's entries are: the composer's checks and exports. `cargo gdl generate` and `check` read each crate from source, and use the reader's reading. [Known limitations](../operations/limitations.md) gives the probe's cost.
 
 Three checks stand behind the reader even without `--verify`. `derive(Node)` checks its type when the node crate compiles. Each segment build type-checks every binding. Each segment asserts that what crosses its cuts is a wire type. The traits that assertion uses are sealed: a crate cannot implement them by hand for a type that is not a wire type. A wrong read fails a build, and never runs.

@@ -1,7 +1,7 @@
 //! `cargo gdl`: compose gdl graphs from crates.
 //!
 //! ```text
-//! cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--target-dir <dir>]
+//! cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--probe] [--target-dir <dir>]
 //! cargo gdl catalog <dir>
 //! cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
 //! cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
@@ -17,7 +17,11 @@
 //! `<name>/<version>.toml` with its checksum and the time it was added.
 //! `catalog` prints a working catalogue's index. `--verify`
 //! builds the crate as well and fails if what its markers register differs
-//! from what was read. `resolve` prints the message each name of a spec's
+//! from what was read. `--probe` builds it the same way and records, on
+//! each instantiation of a generic message, whether the build finds it a
+//! wire type; that reading takes precedence over the reader's. A published
+//! version whose entry holds a probe is kept, and nothing is built.
+//! `resolve` prints the message each name of a spec's
 //! graph file resolves to. `generate` writes one crate per segment, and the
 //! contract crate of a graph file, into `--out`, each layout's segments in
 //! a directory of their own when the spec has several; with `--check` it writes
@@ -41,7 +45,7 @@ use std::process::ExitCode;
 
 use gdl_gen::Format;
 
-const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--target-dir <dir>]
+const USAGE: &str = "usage: cargo gdl extract <dir | name@version> [--catalog <dir>] [--verify] [--probe] [--target-dir <dir>]
        cargo gdl catalog <dir>
        cargo gdl resolve --spec <gdl.toml> [--target-dir <dir>]
        cargo gdl generate --spec <gdl.toml> --out <dir> [--check] [--target-dir <dir>]
@@ -63,6 +67,7 @@ enum Command {
         krate: gdl_gen::Crate,
         catalog: Option<PathBuf>,
         verify: bool,
+        probe: bool,
     },
     Catalog(PathBuf),
     Resolve,
@@ -95,7 +100,7 @@ fn args() -> Result<Args, String> {
     let (mut spec, mut out, mut catalog, mut target, mut format, mut krate) =
         (None, None, None, None, None, None);
     let mut fleet = None;
-    let (mut check, mut verify, mut local) = (false, false, false);
+    let (mut check, mut verify, mut probe, mut local) = (false, false, false, false);
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -111,6 +116,7 @@ fn args() -> Result<Args, String> {
             Some("--fleet") => fleet = Some(value()?),
             Some("--check") => check = true,
             Some("--verify") => verify = true,
+            Some("--probe") => probe = true,
             Some("--local") => local = true,
             Some(other) if !other.starts_with("--") && krate.is_none() => {
                 krate = Some(other.to_string());
@@ -124,6 +130,7 @@ fn args() -> Result<Args, String> {
                 .map_err(|e| e.to_string())?,
             catalog,
             verify,
+            probe,
         },
         "catalog" => Command::Catalog(PathBuf::from(krate.ok_or_else(|| USAGE.to_string())?)),
         "resolve" => Command::Resolve,
@@ -197,16 +204,28 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             krate,
             catalog,
             verify,
+            probe,
         } => {
             let beside = match krate {
                 gdl_gen::Crate::Path(dir) => dir.clone(),
                 gdl_gen::Crate::Registry { .. } | gdl_gen::Crate::Git { .. } => PathBuf::from("."),
             };
             let target = target(&beside);
-            let extracted = gdl_gen::extract(krate, &target, &gdl_extract::Cargo::trusted())?;
+            let mut extracted = gdl_gen::extract(krate, &target, &gdl_extract::Cargo::trusted())?;
             if *verify {
                 for note in gdl_gen::verify(&extracted, &target)? {
                     eprintln!("cargo gdl: {note}");
+                }
+            }
+            if *probe {
+                let kept = match catalog {
+                    Some(catalog) => gdl_gen::Catalog::load(catalog)?.probed(&extracted.offer),
+                    None => false,
+                };
+                if !kept {
+                    for note in gdl_gen::probe(&mut extracted, &target)? {
+                        eprintln!("cargo gdl: {note}");
+                    }
                 }
             }
             match catalog {

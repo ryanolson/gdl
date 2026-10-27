@@ -8,7 +8,7 @@ This guide takes a graph from a spec to checked, generated segment crates. [Spec
 
 | Command | What it does | Writes |
 |---|---|---|
-| `extract <dir \| name@version> [--catalog <dir>] [--verify]` | Reads a crate's messages, exports, and nodes from its source, building nothing. `--catalog` adds the crate to a working catalogue. `--verify` also builds the crate and fails if what its markers register differs from what was read. | stdout, or a catalogue entry |
+| `extract <dir \| name@version> [--catalog <dir>] [--verify] [--probe]` | Reads a crate's messages, exports, and nodes from its source, building nothing. `--catalog` adds the crate to a working catalogue. `--verify` also builds the crate and fails if what its markers register differs from what was read. `--probe` also builds the crate and records the build's wire capability for each instantiation of a generic message. | stdout, or a catalogue entry |
 | `catalog <dir>` | Prints a working catalogue's index. | stdout |
 | `resolve --spec <gdl.toml>` | Checks a graph file's names and prints the type each one resolves to. | stdout |
 | `generate --spec <gdl.toml> --out <dir> [--check]` | Writes the contract crate of a graph file and one crate per segment. With `--check` it writes nothing and fails on drift. | `--out` |

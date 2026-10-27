@@ -30,7 +30,11 @@ struct Candidate {
     name: String,
     origin: Origin,
     path: String,
+    /// Whether it is a wire type, as the reader read it.
     wire: bool,
+    /// For an instantiation, whether a build found it a wire type, where a
+    /// catalogue entry holds a probe of it.
+    probed: Option<bool>,
     encoding: gdl_model::Encoding,
     /// Whether it is an export, and whether its own package exports it:
     /// what decides the path the contract names it by.
@@ -70,6 +74,7 @@ pub(crate) fn resolve(
                 },
                 path: m.path.clone(),
                 wire: m.wire,
+                probed: None,
                 encoding: m.encoding,
                 export: None,
                 public: m.public,
@@ -81,6 +86,7 @@ pub(crate) fn resolve(
                 origin: e.origin.clone(),
                 path: e.path.clone(),
                 wire: e.wire,
+                probed: e.probed,
                 encoding: e.encoding,
                 export: Some(e.origin.package == offer.package),
                 public: e.public,
@@ -127,7 +133,7 @@ pub(crate) fn resolve(
                 Resolved {
                     origin: pinned.origin.clone(),
                     path: pinned.path.clone(),
-                    wire: pinned.wire,
+                    wire: wire(pinned),
                     encoding: pinned.encoding,
                 },
             );
@@ -181,7 +187,7 @@ pub(crate) fn resolve(
                     Resolved {
                         origin: best.origin.clone(),
                         path: best.path.clone(),
-                        wire: best.wire,
+                        wire: wire(best),
                         encoding: best.encoding,
                     },
                 );
@@ -197,6 +203,15 @@ pub(crate) fn resolve(
     } else {
         Err(problems)
     }
+}
+
+/// Whether the message `chosen` offers is a wire type: as a build found
+/// it, where `chosen`'s entry holds a probe, else as the reader read it.
+/// Another entry's probe of the same type does not count: its build may
+/// have had other features, or an older version of a crate from a
+/// directory.
+fn wire(chosen: &Candidate) -> bool {
+    chosen.probed.unwrap_or(chosen.wire)
 }
 
 /// What may help with a name that no listed crate offers: near names, or
@@ -303,6 +318,7 @@ pub(crate) mod tests {
                     wire: true,
                     encoding: Default::default(),
                     public: true,
+                    probed: None,
                 })
                 .collect(),
             nodes: Vec::new(),
@@ -408,6 +424,82 @@ pub(crate) mod tests {
             ),
             "{carriers}"
         );
+    }
+
+    /// An instantiation's wire capability is the one a build probed, where
+    /// a catalogue holds one, not the reader's.
+    #[test]
+    fn a_probed_instantiation_resolves_as_the_build_read_it() {
+        let wire = |read: bool, probed: Option<bool>| {
+            let mut offer = offer(
+                "app",
+                &[],
+                &[(
+                    "Texts",
+                    "app::Texts",
+                    "app",
+                    "app::Wrap<alloc::string::String>",
+                )],
+            );
+            offer.exports[0].wire = read;
+            offer.exports[0].probed = probed;
+            resolve(&uses(&[("Texts", &["A"])]), &[offer], &BTreeMap::new())
+                .expect("resolved")["Texts"]
+                .wire
+        };
+        assert!(!wire(false, None));
+        assert!(wire(false, Some(true)));
+        assert!(!wire(true, Some(false)));
+    }
+
+    /// A probe counts only in its own entry: a facade's probe does not
+    /// count when the contract names the type through the defining crate's
+    /// export. A pin to the facade's path takes its probe.
+    #[test]
+    fn a_probe_counts_only_through_its_own_entry() {
+        let instantiation = "app::Wrap<alloc::string::String>";
+        let mut defining = offer("app", &[], &[("Texts", "app::Texts", "app", instantiation)]);
+        defining.exports[0].wire = false;
+        defining.exports[0].origin.source = crate::CRATES_IO[0].into();
+        let mut facade = offer(
+            "facade",
+            &[],
+            &[("Texts", "facade::Texts", "app", instantiation)],
+        );
+        facade.exports[0].wire = false;
+        facade.exports[0].probed = Some(true);
+        facade.exports[0].origin.source = crate::CRATES_IO[0].into();
+        let wanted = uses(&[("Texts", &["A"])]);
+        let offers = [defining, facade];
+        let named = resolve(&wanted, &offers, &BTreeMap::new()).expect("resolved");
+        assert_eq!(named["Texts"].path, "app::Texts");
+        assert!(!named["Texts"].wire);
+        let pinned =
+            resolve(&wanted, &offers, &pins(&[("Texts", "facade::Texts")])).expect("pinned");
+        assert!(pinned["Texts"].wire);
+    }
+
+    /// A type from a directory may have changed since another entry probed
+    /// it: a facade's probe does not count when the contract names the
+    /// type through the defining crate's export, whose reading is its own.
+    #[test]
+    fn a_probe_of_a_directory_type_counts_only_where_it_is_held() {
+        let instantiation = "app::Wrap<alloc::string::String>";
+        let mut defining = offer("app", &[], &[("Texts", "app::Texts", "app", instantiation)]);
+        defining.exports[0].wire = false;
+        let mut facade = offer(
+            "facade",
+            &[],
+            &[("Texts", "facade::Texts", "app", instantiation)],
+        );
+        facade.exports[0].probed = Some(true);
+        let wanted = uses(&[("Texts", &["A"])]);
+        let resolved =
+            resolve(&wanted, &[defining, facade.clone()], &BTreeMap::new()).expect("resolved");
+        assert_eq!(resolved["Texts"].path, "app::Texts");
+        assert!(!resolved["Texts"].wire);
+        let alone = resolve(&wanted, &[facade], &BTreeMap::new()).expect("resolved");
+        assert!(alone["Texts"].wire);
     }
 
     /// A graph that names an alias a listed crate leaves out is told why.

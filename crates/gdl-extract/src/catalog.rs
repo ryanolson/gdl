@@ -145,21 +145,7 @@ impl Catalog {
             )));
         }
         if entry.offer.source.starts_with("path+") {
-            let dir = file
-                .parent()
-                .expect("an entry's file is in its package's directory");
-            std::fs::create_dir_all(dir).map_err(|e| Error(format!("{}: {e}", dir.display())))?;
-            static REPLACES: AtomicU64 = AtomicU64::new(0);
-            let partial = dir.join(format!(
-                ".{}.{}.r{}",
-                entry.offer.version,
-                std::process::id(),
-                REPLACES.fetch_add(1, Ordering::Relaxed)
-            ));
-            // Renamed into place: a reader sees the old entry or the new one.
-            std::fs::write(&partial, entry.to_toml())
-                .and_then(|()| std::fs::rename(&partial, &file))
-                .map_err(|e| Error(format!("{}: {e}", file.display())))?;
+            replace(&file, &entry)?;
             let stale: Vec<String> = self
                 .entries
                 .iter()
@@ -182,11 +168,11 @@ impl Catalog {
             self.index(entry);
             return Ok((&self.entries[&key], file));
         }
-        if !self.entries.contains_key(&key) {
+        let fail = |path: &Path, e: std::io::Error| Error(format!("{}: {e}", path.display()));
+        if !self.entries.contains_key(&key) || !file.exists() {
             let dir = file
                 .parent()
                 .expect("an entry's file is in its package's directory");
-            let fail = |path: &Path, e: std::io::Error| Error(format!("{}: {e}", path.display()));
             std::fs::create_dir_all(dir).map_err(|e| fail(dir, e))?;
             // Written beside under a name of this add's own, then linked into
             // place: a link never replaces a file, so the first writer's
@@ -206,11 +192,22 @@ impl Catalog {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(fail(&file, e)),
             }
-            // The file is the entry, whoever wrote it.
-            let text = std::fs::read_to_string(&file).map_err(|e| fail(&file, e))?;
-            let written =
-                Entry::from_toml(&text).map_err(|e| Error(format!("{}: {e}", file.display())))?;
-            self.index(written);
+        }
+        // The file is the entry, whoever wrote it and whatever probe filled
+        // it since this catalogue was loaded. Probed once: it takes the
+        // build's reading of each instantiation it has none of, and keeps
+        // everything else. Two fills at one instant can still lose one's
+        // reading; the catalogue then says a probe is due, and the next one
+        // fills it in.
+        let text = std::fs::read_to_string(&file).map_err(|e| fail(&file, e))?;
+        let held =
+            Entry::from_toml(&text).map_err(|e| Error(format!("{}: {e}", file.display())))?;
+        match filled(&held, &entry) {
+            Some(filled) if held.offer.source == entry.offer.source => {
+                replace(&file, &filled)?;
+                self.index(filled);
+            }
+            _ => self.index(held),
         }
         // Kept only if it is this crate: one version from two sources (a
         // registry, a directory) is two crates, and the catalogue holds one.
@@ -222,6 +219,25 @@ impl Catalog {
             )));
         }
         Ok((held, file))
+    }
+
+    /// Whether the catalogue holds a build's reading of each instantiation
+    /// in its entry of `offer`'s version from `offer`'s source, which must
+    /// be published: then `cargo gdl extract --probe` keeps it and builds
+    /// nothing, since a published version never changes. Never for a
+    /// crate from a directory, which changes as it is edited.
+    pub fn probed(&self, offer: &Offer) -> bool {
+        let key = format!("{}@{}", offer.package, offer.version);
+        !offer.source.starts_with("path+")
+            && self.entries.get(&key).is_some_and(|held| {
+                held.offer.source == offer.source
+                    && held
+                        .offer
+                        .exports
+                        .iter()
+                        .filter(|e| e.is_instantiation())
+                        .all(|e| e.probed.is_some())
+            })
     }
 
     /// Every entry, by `name@version`.
@@ -314,6 +330,51 @@ impl std::fmt::Display for Catalog {
         }
         Ok(())
     }
+}
+
+/// `held` with the build's reading in `probed` of each instantiation
+/// `held` has none of, matched by its public path and its message; none
+/// when that adds nothing.
+fn filled(held: &Entry, probed: &Entry) -> Option<Entry> {
+    let mut filled = held.clone();
+    let mut changed = false;
+    let unprobed = filled
+        .offer
+        .exports
+        .iter_mut()
+        .filter(|e| e.is_instantiation() && e.probed.is_none());
+    for export in unprobed {
+        let wire = probed
+            .offer
+            .exports
+            .iter()
+            .find(|p| p.path == export.path && p.origin == export.origin)
+            .and_then(|p| p.probed);
+        if wire.is_some() {
+            export.probed = wire;
+            changed = true;
+        }
+    }
+    changed.then_some(filled)
+}
+
+/// Write `entry` to `file`: beside it under a name of this write's own,
+/// then renamed into place, so a reader sees the old entry or the new one.
+fn replace(file: &Path, entry: &Entry) -> Result<(), Error> {
+    let dir = file
+        .parent()
+        .expect("an entry's file is in its package's directory");
+    std::fs::create_dir_all(dir).map_err(|e| Error(format!("{}: {e}", dir.display())))?;
+    static REPLACES: AtomicU64 = AtomicU64::new(0);
+    let partial = dir.join(format!(
+        ".{}.{}.r{}",
+        entry.offer.version,
+        std::process::id(),
+        REPLACES.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&partial, entry.to_toml())
+        .and_then(|()| std::fs::rename(&partial, file))
+        .map_err(|e| Error(format!("{}: {e}", file.display())))
 }
 
 /// `time` as RFC 3339 in UTC, to the second: `2026-10-18T21:04:05Z`.

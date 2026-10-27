@@ -360,3 +360,211 @@ fn a_load_keeps_one_reading_of_each_directory() {
     write("0.4.0", "2026-10-18T21:05:00Z");
     assert_eq!(keys(dir), ["read-protocols@0.4.0"]);
 }
+
+/// `entry` with the wire capability a build reported, `wire`, recorded on
+/// each instantiation it exports, as `cargo gdl extract --probe` records
+/// it.
+fn probed(mut entry: Entry, wire: bool) -> Entry {
+    for export in &mut entry.offer.exports {
+        if export.is_instantiation() {
+            export.probed = Some(wire);
+        }
+    }
+    entry
+}
+
+/// An entry without probe data reads and writes as it did before probes
+/// existed, and each export's wire capability is the reader's.
+#[test]
+fn an_entry_without_probe_data_reads_as_before() {
+    let workspace = workspace();
+    let read = entry(&workspace, "read-generic", "2026-10-18T21:04:05Z");
+    let text = read.to_toml();
+    assert!(!text.contains("probed"), "{text}");
+    let loaded = Entry::from_toml(&text).expect("entry");
+    assert_eq!(loaded, read);
+    assert_eq!(loaded.to_toml(), text);
+    assert!(loaded.offer.exports.iter().any(|e| e.is_instantiation()));
+    for export in &loaded.offer.exports {
+        assert_eq!(export.probed, None, "{}", export.name);
+    }
+}
+
+/// A build's reading of each instantiation is written beside the
+/// reader's, and read back.
+#[test]
+fn probe_data_round_trips() {
+    let workspace = workspace();
+    let read = entry(&workspace, "read-generic", "2026-10-18T21:04:05Z");
+    let local = probed(read.clone(), false);
+    let wire = probed(read, true);
+    let instantiations = local
+        .offer
+        .exports
+        .iter()
+        .zip(&wire.offer.exports)
+        .filter(|(e, _)| e.is_instantiation());
+    let mut seen = 0;
+    for (local, wire) in instantiations {
+        assert_eq!((local.probed, wire.probed), (Some(false), Some(true)));
+        seen += 1;
+    }
+    assert!(seen >= 2, "the fixture exports instantiations");
+    let text = wire.to_toml();
+    assert!(text.contains("probed = true"), "{text}");
+    assert_eq!(Entry::from_toml(&text).expect("entry"), wire);
+}
+
+/// A published version is probed once: an add with probe data fills in a
+/// held entry that has none, and is kept after that, whatever a later add
+/// brings. The catalogue then says the version needs no probe.
+#[test]
+fn a_published_version_is_probed_once() {
+    let temp = scratch("probed-once");
+    let dir = temp.path();
+    let workspace = workspace();
+    let read = published(entry(&workspace, "read-generic", "2026-10-18T21:04:05Z"));
+    let mut catalog = Catalog::load(dir).expect("an empty catalogue");
+    let (_, file) = catalog.add(read.clone()).expect("added");
+    assert!(!catalog.probed(&read.offer), "added without a probe");
+
+    // A later add with a probe fills in the held entry, which keeps its
+    // time.
+    let later = Entry {
+        added: "2027-01-01T00:00:00Z".into(),
+        ..read.clone()
+    };
+    let (held, _) = catalog.add(probed(later.clone(), true)).expect("probed");
+    assert_eq!(held, &probed(read.clone(), true));
+    assert!(catalog.probed(&read.offer));
+    let loaded = Catalog::load(dir).expect("loaded");
+    assert_eq!(loaded.entries().next(), Some(&probed(read.clone(), true)));
+    assert!(loaded.probed(&read.offer));
+    let text = std::fs::read_to_string(&file).expect("entry");
+
+    // After that, the probe is kept: an add without one, or with another
+    // reading, leaves the file as it is.
+    let mut catalog = loaded;
+    catalog.add(later.clone()).expect("kept");
+    catalog.add(probed(later, false)).expect("kept");
+    assert_eq!(std::fs::read_to_string(&file).expect("entry"), text);
+    assert!(Catalog::load(dir).expect("loaded").probed(&read.offer));
+}
+
+/// A crate from a directory changes as it is edited, so the catalogue
+/// never says it needs no probe; an add without one drops the last
+/// probe's data, which may describe code that is gone.
+#[test]
+fn a_directory_crate_is_always_probed_again() {
+    let temp = scratch("probed-directory");
+    let dir = temp.path();
+    let workspace = workspace();
+    let read = entry(&workspace, "read-generic", "2026-10-18T21:04:05Z");
+    assert!(read.offer.source.starts_with("path+"));
+    let mut catalog = Catalog::load(dir).expect("an empty catalogue");
+    catalog.add(probed(read.clone(), true)).expect("added");
+    assert!(!catalog.probed(&read.offer));
+    let (held, _) = catalog.add(read.clone()).expect("replaced");
+    assert_eq!(held, &read);
+}
+
+/// A probe's data is kept when another adder wrote the version's entry
+/// first, after this catalogue was loaded: the composer can add a version
+/// while a probe of it builds.
+#[test]
+fn a_probe_fills_an_entry_another_adder_wrote_first() {
+    let temp = scratch("probed-race");
+    let dir = temp.path();
+    let workspace = workspace();
+    let read = published(entry(&workspace, "read-generic", "2026-10-18T21:04:05Z"));
+    let mut probing = Catalog::load(dir).expect("an empty catalogue");
+    let mut other = Catalog::load(dir).expect("an empty catalogue");
+    other.add(read.clone()).expect("added first");
+    let (held, _) = probing.add(probed(read.clone(), true)).expect("probed");
+    assert_eq!(held, &probed(read.clone(), true));
+    assert!(Catalog::load(dir).expect("loaded").probed(&read.offer));
+}
+
+/// Two probes that each fill another instantiation, from catalogues
+/// loaded before either, keep both readings: each fills the file as it is.
+#[test]
+fn probe_fills_from_stale_catalogues_preserve_each_others_readings() {
+    let temp = scratch("probe-fills");
+    let dir = temp.path();
+    let workspace = workspace();
+    let read = published(entry(&workspace, "read-generic", "2026-10-18T21:04:05Z"));
+    let indices: Vec<_> = read
+        .offer
+        .exports
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.is_instantiation())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(indices.len() >= 2, "the fixture offers two instantiations");
+    let mut seed = Catalog::load(dir).expect("empty catalogue");
+    seed.add(read.clone()).expect("unprobed entry");
+    let mut first = Catalog::load(dir).expect("first adder");
+    let mut second = Catalog::load(dir).expect("second adder before any fill");
+    let mut first_probe = read.clone();
+    first_probe.offer.exports[indices[0]].probed = Some(true);
+    let mut second_probe = read;
+    second_probe.offer.exports[indices[1]].probed = Some(true);
+
+    first
+        .add(first_probe)
+        .expect("first probe fills one instantiation");
+    let after_first = Catalog::load(dir).expect("first probe persisted");
+    assert_eq!(
+        after_first.entries().next().expect("entry").offer.exports[indices[0]].probed,
+        Some(true)
+    );
+    second
+        .add(second_probe)
+        .expect("second probe fills another instantiation");
+
+    let loaded = Catalog::load(dir).expect("both probes persisted");
+    let held = loaded.entries().next().expect("entry");
+    assert_eq!(
+        held.offer.exports[indices[0]].probed,
+        Some(true),
+        "the second fill must preserve the first build's reading"
+    );
+    assert_eq!(held.offer.exports[indices[1]].probed, Some(true));
+}
+
+/// Re-importing a published crate refreshes a composer's cached entry
+/// after an external probe fills its file.
+#[test]
+fn an_unprobed_reimport_sees_another_adders_probe() {
+    let temp = scratch("probe-reimport");
+    let dir = temp.path();
+    let workspace = workspace();
+    let read = published(entry(&workspace, "read-generic", "2026-10-18T21:04:05Z"));
+    let mut composer = Catalog::load(dir).expect("empty catalogue");
+    composer.add(read.clone()).expect("initial import");
+    assert!(!composer.probed(&read.offer));
+
+    let mut external = Catalog::load(dir).expect("external probe loads the entry");
+    external
+        .add(probed(read.clone(), true))
+        .expect("probe fills the file");
+    assert!(
+        Catalog::load(dir)
+            .expect("probe persisted")
+            .probed(&read.offer)
+    );
+
+    let (held, _) = composer.add(read).expect("re-import without a build");
+    let export = held
+        .offer
+        .exports
+        .iter()
+        .find(|e| e.is_instantiation())
+        .expect("an instantiation");
+    assert_eq!(
+        export.probed,
+        Some(true),
+        "re-import must return the entry with the persisted probe"
+    );
+}
