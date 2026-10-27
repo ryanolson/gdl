@@ -51,6 +51,9 @@ struct Tamper {
     held: tokio::sync::Notify,
     /// Signalled when the hub answers a request released after a hold.
     answered: tokio::sync::Notify,
+    /// While set, a request that holds it is answered here with the hub's
+    /// `unavailable`, and never passed on.
+    refuse: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 impl Proxy {
@@ -95,7 +98,16 @@ impl Proxy {
 
     /// Hold every request that holds `pattern` until [`Proxy::release`].
     pub fn hold(&self, pattern: &[u8]) {
+        assert!(pattern.len() <= TAIL + 1, "a pattern the relay can find");
         self.tamper.hold.send_replace(Some(pattern.to_vec()));
+    }
+
+    /// Answer every request that holds `pattern` as a hub that refuses it
+    /// does, with a 503 and the code `unavailable`, and close its
+    /// connection: the hub never sees the request.
+    pub fn refuse(&self, pattern: &[u8]) {
+        assert!(pattern.len() <= TAIL + 1, "a pattern the relay can find");
+        *self.tamper.refuse.lock().expect("lock") = Some(pattern.to_vec());
     }
 
     /// Pass the held requests on.
@@ -154,8 +166,8 @@ async fn relay(
     let (mut from_client, mut to_client) = client.split();
     let (mut from_server, mut to_server) = server.split();
     let (mut up, mut down) = ([0u8; 8192], [0u8; 8192]);
-    // The last bytes sent upstream, so that a request line split across
-    // two reads is still recognized.
+    // The last bytes sent upstream, so that a pattern split across two
+    // reads is still recognized, whenever the pattern was set.
     let mut tail: Vec<u8> = Vec::new();
     // What a hub sent that may be the start of a state to replace, held
     // until the bytes after it come.
@@ -185,8 +197,9 @@ async fn relay(
                 Ok(n) if n > 0 => {
                     let mut seen = tail.clone();
                     seen.extend_from_slice(&up[..n]);
+                    let kept = tail.len();
                     let found = (now == Mode::SilentAtDelete)
-                        .then(|| seen.windows(7).position(|w| w == b"DELETE "))
+                        .then(|| find(&seen, kept, b"DELETE "))
                         .flatten();
                     if let Some(at) = found {
                         // What came before the request goes on; the request
@@ -201,9 +214,16 @@ async fn relay(
                         let _ = mode.changed().await;
                         return;
                     }
+                    let refused = held.tamper.refuse.lock().expect("lock").clone();
+                    if let Some(pattern) = refused
+                        && find(&seen, kept, &pattern).is_some()
+                    {
+                        let _ = to_client.write_all(&refusal()).await;
+                        return;
+                    }
                     let pattern = held.tamper.hold.borrow().clone();
                     if let Some(pattern) = pattern
-                        && seen.windows(pattern.len()).any(|w| w == pattern.as_slice())
+                        && find(&seen, kept, &pattern).is_some()
                     {
                         // Retain the request after its client times out,
                         // as a server that already buffered its body can.
@@ -215,7 +235,7 @@ async fn relay(
                     if to_server.write_all(&up[..n]).await.is_err() {
                         return;
                     }
-                    let keep = seen.len().saturating_sub(6);
+                    let keep = seen.len().saturating_sub(TAIL);
                     tail = seen[keep..].to_vec();
                 }
                 _ => return,
@@ -245,6 +265,31 @@ async fn relay(
             },
         }
     }
+}
+
+/// How many bytes of what went upstream a relay keeps: more than any
+/// pattern a test looks for, less one.
+const TAIL: usize = 255;
+
+/// Where `pattern` is in `seen`, whose first `kept` bytes came from earlier
+/// reads. A match wholly in those is not one: it was there to be found
+/// before, under the patterns and the mode of then.
+fn find(seen: &[u8], kept: usize, pattern: &[u8]) -> Option<usize> {
+    seen.windows(pattern.len())
+        .enumerate()
+        .position(|(at, window)| at + pattern.len() > kept && window == pattern)
+}
+
+/// What a hub answers a request it will not take now.
+fn refusal() -> Vec<u8> {
+    let body = br#"{"code":"unavailable","message":"refused by the test proxy"}"#;
+    let mut answer = format!(
+        "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    answer.extend_from_slice(body);
+    answer
 }
 
 /// Replace each [`DRAINING`] in `out` with [`UNDRAINED`], and take off the

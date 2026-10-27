@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use common::proxy::Proxy;
 use common::{Events, Plan, collect, expected, prompt, reference_graph, reference_manifest};
 use figment::providers::{Format, Toml};
 use gdl::Cx;
@@ -69,6 +70,22 @@ fn settings(hub: &velo_hub::Hub, drain_ms: u64, extra: &str) -> ProcessConfig<No
         "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n{extra}\n[runtime]\ndrain_ms = {drain_ms}\nsetup_timeout_ms = {}\n",
         hub.public_addr().port(),
         hub.control_addr().port(),
+        GRACE.as_millis(),
+    );
+    ProcessConfig::from_figment(figment::Figment::from(Toml::string(&text))).expect("settings")
+}
+
+/// Settings for an instance that reaches `hub`'s control port through a
+/// proxy at `control`, and waits at most `rendezvous_ms` at each step of
+/// its launch.
+fn settings_through(
+    hub: &velo_hub::Hub,
+    control: u16,
+    rendezvous_ms: u64,
+) -> ProcessConfig<Nothing> {
+    let text = format!(
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {control}, heartbeat_ms = 200 }}\nrendezvous_ms = {rendezvous_ms}\n[runtime]\ndrain_ms = 20000\nsetup_timeout_ms = {}\n",
+        hub.public_addr().port(),
         GRACE.as_millis(),
     );
     ProcessConfig::from_figment(figment::Figment::from(Toml::string(&text))).expect("settings")
@@ -968,6 +985,127 @@ async fn a_request_waits_at_a_joiners_held_roster() {
         joiner_served,
         new_front_served,
     ] {
+        left(served).await;
+    }
+}
+
+/// A joiner whose `ready` the hub refuses still serves, and says so: a
+/// front that joins after it takes it into its roster from `loaded`, and
+/// routes to it. The front that served before it never routes to it, since
+/// an instance already serving adds a joiner only at its `ready`. The line
+/// goes to stderr, so the scenario runs in a child process of this test
+/// binary, and the test reads what the child printed.
+#[test]
+fn a_joiner_whose_ready_is_refused_serves_but_no_earlier_instance_routes_to_it() {
+    const CHILD: &str = "GDL_TEST_REFUSED_READY_CHILD";
+    const NAME: &str =
+        "a_joiner_whose_ready_is_refused_serves_but_no_earlier_instance_routes_to_it";
+    if std::env::var_os(CHILD).is_some() {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(a_refused_ready());
+        return;
+    }
+    let result = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", NAME, "--nocapture"])
+        .env(CHILD, "1")
+        .output()
+        .expect("the scenario's process");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        result.status.success(),
+        "the scenario failed: {}\n{stderr}\n{}",
+        result.status,
+        String::from_utf8_lossy(&result.stdout),
+    );
+    let refused =
+        "engine: the hub did not take `ready`, so instances already serving will not route here: ";
+    assert_eq!(
+        stderr.matches(refused).count(),
+        1,
+        "the joiner did not say once that its `ready` was refused:\n{stderr}"
+    );
+}
+
+/// The scenario of the test above, in its child process.
+async fn a_refused_ready() {
+    let placement = two();
+    let hub = hub(&placement).await;
+    let config = settings(&hub, 20_000, "");
+    let events = Events::quiet();
+    let ((front_process, front), (engine_process, engine)) = tokio::join!(
+        launch(&config, "front", &placement),
+        launch(&config, "engine", &placement),
+    );
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let engine_segment = start(&engine, "engine", &placement, &events, patient());
+    let (front_rx, front_served) = serve(front, front_segment);
+    let (engine_rx, engine_served) = serve(engine, engine_segment);
+    let front_segment = ready(front_rx).await;
+    let _ = ready(engine_rx).await;
+
+    // A second engine, whose hub refuses its `ready` and nothing else. It
+    // gives up on the announcement after its rendezvous, and serves.
+    let control = Proxy::new(hub.control_addr()).await;
+    control.refuse(format!("gdl-ready-{}", hex("engine")).as_bytes());
+    let (joiner_process, joiner) = launch(
+        &settings_through(&hub, control.port, 2_000),
+        "engine",
+        &placement,
+    )
+    .await;
+    // The joiner's own log: what its engine nodes see.
+    let seen = Events::new();
+    let joiner_segment = start(&joiner, "engine", &placement, &seen, patient());
+    let (joiner_rx, joiner_served) = serve(joiner, joiner_segment);
+    let _ = ready(joiner_rx).await;
+
+    // A front that joins now routes to it: the joiner serves.
+    let (new_front_process, new_front) = launch(&config, "front", &placement).await;
+    let new_front_segment = start(&new_front, "front", &placement, &events, patient());
+    let (new_front_rx, new_front_served) = serve(new_front, new_front_segment);
+    let new_front_segment = ready(new_front_rx).await;
+    let deadline = Instant::now() + WAIT;
+    let mut n = 0;
+    while !seen.snapshot().iter().any(|e| e.starts_with("C:new")) {
+        assert!(
+            Instant::now() < deadline,
+            "the new front never routed to the joiner"
+        );
+        ask(&new_front_segment, &format!("new{n}"))
+            .await
+            .expect("answered");
+        n += 1;
+    }
+    // The front that served before it never does. Round robin would send
+    // it every other request.
+    for n in 0..20 {
+        ask(&front_segment, &format!("old{n}"))
+            .await
+            .expect("answered");
+    }
+    let old: Vec<String> = seen
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.starts_with("C:old"))
+        .collect();
+    assert!(
+        old.is_empty(),
+        "the front that served first routed to the joiner: {old:?}"
+    );
+
+    for process in [
+        &front_process,
+        &engine_process,
+        &joiner_process,
+        &new_front_process,
+    ] {
+        process.stop();
+    }
+    for served in [front_served, engine_served, joiner_served, new_front_served] {
         left(served).await;
     }
 }
