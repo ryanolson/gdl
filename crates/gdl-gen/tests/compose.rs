@@ -1062,6 +1062,411 @@ fn verify_keeps_its_directory_when_a_dependency_sorts_first() {
     verify_dependencies("0.2.0", "0.1.0");
 }
 
+/// An alias the reader leaves out is matched by its path, not its name:
+/// `a::Req` is read and agrees with the build, and `b::Req`, of the same
+/// name, is left out with its reason. Neither is a difference.
+#[test]
+fn verify_matches_a_left_out_alias_by_its_path() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-aliases-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let message = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-message");
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"verify-aliases\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [workspace]\n[dependencies]\ngdl-message = {{ path = {} }}\n",
+            toml_string(&message)
+        ),
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        "#[derive(gdl_message::Message)]\npub struct Token;\n\
+         #[derive(gdl_message::Message)]\npub struct Carried<P>(pub P);\n\
+         pub mod a {\n\
+             #[gdl_message::export]\n\
+             pub type Req = super::Carried<super::Token>;\n\
+         }\n\
+         pub mod b {\n\
+             #[gdl_message::export]\n\
+             pub type Req = super::Carried<std::sync::Arc<super::Token>>;\n\
+         }\n",
+    )
+    .expect("source");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"),
+        dir.join("Cargo.lock"),
+    )
+    .expect("the workspace lock");
+
+    let output = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "gdl",
+            "extract",
+        ])
+        .arg(dir)
+        .arg("--verify")
+        .arg("--target-dir")
+        .arg(target())
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("cargo gdl");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let offer =
+        gdl_gen::Offer::from_toml(&String::from_utf8_lossy(&output.stdout)).expect("an offer");
+    let exports: Vec<&str> = offer.exports.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(exports, ["verify_aliases::a::Req"]);
+    let skipped: Vec<&str> = offer.skipped.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(skipped, ["Req"]);
+    assert_eq!(
+        stderr
+            .matches("left out by the reader on purpose, registered by the build: `Req`")
+            .count(),
+        1,
+        "{stderr}"
+    );
+}
+
+/// A node alias re-exported at the root registers its root path, even
+/// when the reader leaves out its argument in a private module.
+/// Building and linking the fixture can take several seconds.
+#[test]
+fn verify_matches_a_left_out_node_alias_at_its_registered_path() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-node-alias-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let gdl = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl");
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"verify-nodes\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [workspace]\n[dependencies]\ngdl = {{ path = {} }}\n",
+            toml_string(&gdl)
+        ),
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        r#"#[derive(gdl::Message)]
+pub struct Token;
+
+#[derive(gdl::Node)]
+pub struct Relay<B>(std::marker::PhantomData<B>);
+
+impl<B: Send + Sync + 'static> gdl::Build for Relay<B> {
+    type Config = ();
+    type Metrics = ();
+    async fn build(_: (), _: ()) -> gdl::Result<Self> {
+        Ok(Self(std::marker::PhantomData))
+    }
+}
+
+impl<B: Send + Sync + 'static> gdl::Forward for Relay<B> {
+    type In = Token;
+    type Out = Token;
+    async fn forward(&self, _: &gdl::Cx, req: Token) -> gdl::Result<Token> {
+        Ok(req)
+    }
+}
+
+mod nodes {
+    #[gdl::export]
+    pub type Read = super::Relay<super::Token>;
+    #[gdl::export]
+    pub type Hidden = super::Relay<std::sync::Arc<super::Token>>;
+}
+pub use nodes::{Hidden, Read};
+
+#[gdl::export]
+pub type Visible = Relay<std::sync::Arc<Token>>;
+"#,
+    )
+    .expect("source");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"),
+        dir.join("Cargo.lock"),
+    )
+    .expect("the workspace lock");
+
+    let extract = |verify: bool| {
+        let mut command = Command::new("timeout");
+        command
+            .args([
+                CARGO_LIMIT,
+                env!("CARGO_BIN_EXE_cargo-gdl"),
+                "gdl",
+                "extract",
+            ])
+            .arg(dir)
+            .arg("--target-dir")
+            .arg(target())
+            .env("CARGO_NET_OFFLINE", "true");
+        if verify {
+            command.arg("--verify");
+        }
+        command.output().expect("cargo gdl")
+    };
+    let read = extract(false);
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let offer =
+        gdl_gen::Offer::from_toml(&String::from_utf8_lossy(&read.stdout)).expect("an offer");
+    assert_eq!(offer.nodes.len(), 1);
+    assert_eq!(offer.nodes[0].ty, "verify_nodes::Read");
+    assert_eq!(offer.skipped.len(), 2);
+
+    let verified = extract(true);
+    let stderr = String::from_utf8_lossy(&verified.stderr);
+    assert!(verified.status.success(), "{stderr}");
+    for name in ["Hidden", "Visible"] {
+        assert_eq!(
+            stderr
+                .matches(&format!(
+                    "left out by the reader on purpose, registered by the build: `{name}`"
+                ))
+                .count(),
+            1,
+            "{stderr}"
+        );
+    }
+}
+
+/// A skipped message alias must not hide a node of the same name.
+/// Building and linking the fixture can take several seconds.
+#[test]
+fn verify_does_not_hide_a_node_behind_a_skipped_message_alias() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-alias-collision-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let gdl = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl");
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"verify-alias-collision\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [workspace]\n[dependencies]\ngdl = {{ path = {} }}\n",
+            toml_string(&gdl)
+        ),
+    )
+    .expect("manifest");
+    let source = r#"#[derive(gdl::Message)]
+pub struct Token;
+
+#[derive(gdl::Message)]
+pub struct Carried<P>(pub P);
+
+macro_rules! handler {
+    () => {
+        #[derive(gdl::Node)]
+        pub struct Handler;
+
+        impl gdl::Build for Handler {
+            type Config = ();
+            type Metrics = ();
+            async fn build(_: (), _: ()) -> gdl::Result<Self> {
+                Ok(Self)
+            }
+        }
+
+        impl gdl::Forward for Handler {
+            type In = Token;
+            type Out = Token;
+            async fn forward(&self, _: &gdl::Cx, req: Token) -> gdl::Result<Token> {
+                Ok(req)
+            }
+        }
+    };
+}
+handler!();
+"#;
+    std::fs::write(dir.join("src/lib.rs"), source).expect("source");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"),
+        dir.join("Cargo.lock"),
+    )
+    .expect("the workspace lock");
+
+    let extract = |verify: bool| {
+        let mut command = Command::new("timeout");
+        command
+            .args([
+                CARGO_LIMIT,
+                env!("CARGO_BIN_EXE_cargo-gdl"),
+                "gdl",
+                "extract",
+            ])
+            .arg(dir)
+            .arg("--target-dir")
+            .arg(target())
+            .env("CARGO_NET_OFFLINE", "true");
+        if verify {
+            command.arg("--verify");
+        }
+        command.output().expect("cargo gdl")
+    };
+    let difference = "registered by the build, not read from source: node `Handler` at `verify_alias_collision::Handler`";
+    let control = extract(true);
+    let stderr = String::from_utf8_lossy(&control.stderr);
+    assert_eq!(control.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains(difference), "{stderr}");
+
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        format!(
+            "{source}\nmod messages {{\n\
+             #[gdl::export]\n\
+             pub type Handler = super::Carried<std::sync::Arc<super::Token>>;\n\
+             }}\n"
+        ),
+    )
+    .expect("source");
+    let read = extract(false);
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let offer =
+        gdl_gen::Offer::from_toml(&String::from_utf8_lossy(&read.stdout)).expect("an offer");
+    assert!(offer.nodes.is_empty());
+    assert_eq!(offer.skipped.len(), 1);
+    assert_eq!(
+        offer.skipped[0].path.as_deref(),
+        Some("verify_alias_collision::messages::Handler")
+    );
+
+    let verified = extract(true);
+    let stderr = String::from_utf8_lossy(&verified.stderr);
+    assert_eq!(
+        verified.status.code(),
+        Some(1),
+        "a skipped message alias must not hide the build-only node: {stderr}"
+    );
+    assert!(stderr.contains(difference), "{stderr}");
+}
+
+/// A local type alias of a generic node still registers each exported
+/// instantiation at the crate root when the reader leaves out an argument.
+/// Building and linking the fixture can take several seconds.
+#[test]
+fn verify_matches_a_left_out_node_through_a_type_alias() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-node-chain-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let gdl = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl");
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"verify-node-chain\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [workspace]\n[dependencies]\ngdl = {{ path = {} }}\n",
+            toml_string(&gdl)
+        ),
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        r#"#[derive(gdl::Message)]
+pub struct Token;
+
+#[derive(gdl::Node)]
+pub struct Relay<B>(std::marker::PhantomData<B>);
+
+impl<B: Send + Sync + 'static> gdl::Build for Relay<B> {
+    type Config = ();
+    type Metrics = ();
+    async fn build(_: (), _: ()) -> gdl::Result<Self> {
+        Ok(Self(std::marker::PhantomData))
+    }
+}
+
+impl<B: Send + Sync + 'static> gdl::Forward for Relay<B> {
+    type In = Token;
+    type Out = Token;
+    async fn forward(&self, _: &gdl::Cx, req: Token) -> gdl::Result<Token> {
+        Ok(req)
+    }
+}
+
+pub type NamedRelay<B> = Relay<B>;
+
+mod nodes {
+    #[gdl::export]
+    pub type Read = super::NamedRelay<super::Token>;
+    #[gdl::export]
+    pub type Hidden = super::NamedRelay<std::sync::Arc<super::Token>>;
+}
+pub use nodes::{Hidden, Read};
+"#,
+    )
+    .expect("source");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"),
+        dir.join("Cargo.lock"),
+    )
+    .expect("the workspace lock");
+
+    let extract = |verify: bool| {
+        let mut command = Command::new("timeout");
+        command
+            .args([
+                CARGO_LIMIT,
+                env!("CARGO_BIN_EXE_cargo-gdl"),
+                "gdl",
+                "extract",
+            ])
+            .arg(dir)
+            .arg("--target-dir")
+            .arg(target())
+            .env("CARGO_NET_OFFLINE", "true");
+        if verify {
+            command.arg("--verify");
+        }
+        command.output().expect("cargo gdl")
+    };
+    let read = extract(false);
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let offer =
+        gdl_gen::Offer::from_toml(&String::from_utf8_lossy(&read.stdout)).expect("an offer");
+    assert_eq!(offer.nodes.len(), 1);
+    assert_eq!(offer.nodes[0].ty, "verify_node_chain::Read");
+    assert_eq!(offer.skipped.len(), 1);
+    assert_eq!(offer.skipped[0].name, "Hidden");
+    assert!(offer.skipped[0].problem.contains("Arc"));
+
+    let verified = extract(true);
+    let stderr = String::from_utf8_lossy(&verified.stderr);
+    assert!(verified.status.success(), "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("left out by the reader on purpose, registered by the build: `Hidden`")
+            .count(),
+        1,
+        "{stderr}"
+    );
+}
+
 /// Verify the crate `verify-app` at `version`, which depends on
 /// `verify-shared` and on `verify-app` at `dependency_version`, each of
 /// which registers messages.

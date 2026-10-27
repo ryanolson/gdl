@@ -437,6 +437,11 @@ pub struct Offer {
 pub struct Skipped {
     /// The alias's name.
     pub name: String,
+    /// The path the build registers the alias at: a message's alias where
+    /// it is, so two of one name in two modules are two entries, and a
+    /// node's at the crate's root. None for a cell policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// Why, with where.
     pub problem: String,
 }

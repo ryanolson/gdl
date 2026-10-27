@@ -740,6 +740,39 @@ enum Aliased {
     Skipped(Skipped),
 }
 
+/// Whether the generic type that `target` instantiates derives `Node`,
+/// whether or not the reader can name its arguments. A generic alias on
+/// the way (`type Named<B> = Relay<B>`) is followed to what it names.
+fn names_a_node(
+    resolver: &mut Resolver<'_>,
+    krate: usize,
+    module: usize,
+    target: &syn::Type,
+) -> bool {
+    let (mut krate, mut module, mut target) = (krate, module, target.clone());
+    for _ in 0..crate::canon::DEPTH {
+        let syn::Type::Path(path) = &target else {
+            return false;
+        };
+        if path.qself.is_some() {
+            return false;
+        }
+        let (names, absolute) = segments(&path.path);
+        let Some(Def::Type(c, m, i)) = resolver.resolve(krate, module, &names, absolute) else {
+            return false;
+        };
+        let ty = &resolver.crates[c].modules[m].types[i];
+        if derives(ty, "Node") {
+            return true;
+        }
+        let Some(next) = ty.alias.clone() else {
+            return false;
+        };
+        (krate, module, target) = (c, m, next);
+    }
+    false
+}
+
 /// The instantiation that alias `index` of a module names, which is
 /// marked `#[export]`, offered under the alias's name. `reachable` is
 /// whether code outside the crate can name the module.
@@ -767,7 +800,15 @@ fn alias(
     let ty = match canonical(resolver, krate, module, &target, &Env::new()) {
         Ok(ty) => ty,
         Err(problem) => {
+            // Where the build registers it: a node at the crate's root, as
+            // `node` reads one, and a message where its alias is.
+            let path = if names_a_node(resolver, krate, module, &target) {
+                format!("{}::{name}", resolver.crates[krate].name)
+            } else {
+                public_path(resolver, krate, module, &name)
+            };
             return Ok(Aliased::Skipped(Skipped {
+                path: Some(path),
                 name,
                 problem: format!("{at}: {problem}"),
             }));

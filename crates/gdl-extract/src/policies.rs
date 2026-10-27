@@ -120,6 +120,7 @@ fn policy(
         .unwrap_or_default();
     let skip = |why: String| Skipped {
         name: written.clone(),
+        path: None,
         problem: format!("{at}cell policy `{written}` {why}"),
     };
     if !params.is_empty() {

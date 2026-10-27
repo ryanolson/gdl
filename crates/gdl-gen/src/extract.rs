@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use gdl_extract::{Catalog, Entry, Located, Offer, Workspace};
+use gdl_extract::{Catalog, Entry, Located, Offer, Skipped, Workspace};
 
 use crate::Error;
 
@@ -363,7 +363,9 @@ fn differences(
 ) -> Vec<String> {
     // An alias the reader leaves out on purpose is reported by
     // `left_out`, not compared.
-    let ours = |dir: &str, name: &str| mine(dir) && !offer.skipped.iter().any(|s| s.name == name);
+    let ours = |dir: &str, skipped: &dyn Fn(&Skipped) -> bool| {
+        mine(dir) && !offer.skipped.iter().any(skipped)
+    };
     let built: BTreeSet<String> = registered
         .messages
         .iter()
@@ -380,7 +382,7 @@ fn differences(
             registered
                 .exports
                 .iter()
-                .filter(|e| ours(&e.dir, &e.name))
+                .filter(|e| ours(&e.dir, &|s| export_of(s, e)))
                 .map(|e| {
                     format!(
                         "export `{}` at `{}`, of `{}` ({} {}), {}",
@@ -397,7 +399,7 @@ fn differences(
             registered
                 .nodes
                 .iter()
-                .filter(|n| ours(&n.dir, &n.name))
+                .filter(|n| ours(&n.dir, &|s| node_of(s, n)))
                 .map(|n| {
                     let roles: Vec<String> = n
                         .roles
@@ -559,9 +561,14 @@ fn left_out(
         .skipped
         .iter()
         .filter(|s| {
-            let named = |dir: &str, name: &str| mine(dir) && name == s.name;
-            registered.exports.iter().any(|e| named(&e.dir, &e.name))
-                || registered.nodes.iter().any(|n| named(&n.dir, &n.name))
+            registered
+                .exports
+                .iter()
+                .any(|e| mine(&e.dir) && export_of(s, e))
+                || registered
+                    .nodes
+                    .iter()
+                    .any(|n| mine(&n.dir) && node_of(s, n))
         })
         .map(|s| {
             format!(
@@ -570,6 +577,20 @@ fn left_out(
             )
         })
         .collect()
+}
+
+/// Whether the reader left out the export the build registered as `e`.
+/// The match is by path, as the build registers it: two aliases of one
+/// name in two modules are two exports, and a message's alias is no
+/// node's.
+fn export_of(s: &Skipped, e: &gdl_message::ExportInfo) -> bool {
+    s.path.as_deref() == Some(e.path.as_str())
+}
+
+/// Whether the reader left out the node the build registered as `n`, by
+/// path, as [`export_of`] matches.
+fn node_of(s: &Skipped, n: &gdl_message::NodeInfo) -> bool {
+    s.path.as_deref() == Some(n.path.as_str())
 }
 
 fn wire(wire: bool, encoding: gdl_model::Encoding) -> String {
@@ -806,6 +827,7 @@ mod tests {
         offer.exports.clear();
         offer.skipped.push(gdl_extract::Skipped {
             name: "Words".into(),
+            path: Some("facade::Words".into()),
             problem: "src/lib.rs:3:10: `Arc < Words >`: the reader names a crate's own types"
                 .into(),
         });
@@ -818,6 +840,30 @@ mod tests {
             [
                 "left out by the reader on purpose, registered by the build: `Words`: src/lib.rs:3:10: `Arc < Words >`: the reader names a crate's own types"
             ]
+        );
+    }
+
+    /// An alias left out at another path does not hide one of its name
+    /// that the build registers and the reader missed.
+    #[test]
+    fn a_left_out_alias_hides_only_its_own_path() {
+        let mut offer = read();
+        offer.exports.clear();
+        offer.skipped.push(gdl_extract::Skipped {
+            name: "Words".into(),
+            path: Some("facade::other::Words".into()),
+            problem: "src/other.rs:3:10: `Arc < Words >`: the reader names a crate's own types"
+                .into(),
+        });
+        assert_eq!(
+            differences(&registered(true, false), &facade, &offer),
+            [
+                "registered by the build, not read from source: export `Words` at `facade::Words`, of `protocols::Words` (protocols 0.1.0), wire (codec msgpack)"
+            ]
+        );
+        assert_eq!(
+            left_out(&registered(true, false), &facade, &offer),
+            Vec::<String>::new()
         );
     }
 

@@ -416,6 +416,7 @@ pub(crate) mod tests {
         let mut offer = offer("app", &["app::Words"], &[]);
         offer.skipped.push(gdl_extract::Skipped {
             name: "Shared".into(),
+            path: Some("app::Shared".into()),
             problem: "src/lib.rs:3:10: `Arc < Words >`: the reader names a crate's own types and primitives".into(),
         });
         let problems = resolve(&uses(&[("Shared", &["A"])]), &[offer], &BTreeMap::new())

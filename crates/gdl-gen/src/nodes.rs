@@ -603,6 +603,7 @@ mod tests {
         offers[1].package = "engine".into();
         offers[1].skipped.push(gdl_extract::Skipped {
             name: "Engine".into(),
+            path: Some("engine::Engine".into()),
             problem: "src/lib.rs:3:10: `Arc < Builder >`: the reader names a crate's own types and primitives".into(),
         });
         let why = "crate `engine` leaves `Engine` out: src/lib.rs:3:10: `Arc < Builder >`: the reader names a crate's own types and primitives";
