@@ -446,4 +446,40 @@ mod tests {
             Some(Duration::from_millis(989))
         );
     }
+
+    #[test]
+    fn a_get_on_another_shard_can_finish_while_a_writer_holds_a_shard() {
+        let table = std::sync::Arc::new(Table::new(2048, Instant::now()));
+        let key = b"session".to_vec();
+        let shard = table.shard_of(&key);
+        let other = (0u64..)
+            .map(|n| n.to_be_bytes().to_vec())
+            .find(|key| table.shard_of(key) != shard)
+            .expect("a key on another shard");
+        for key in [&key, &other] {
+            applied(table.apply(set(key, b"value", Expected::Replace), Instant::now()));
+        }
+        let (holding, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let writer_table = std::sync::Arc::clone(&table);
+        let writer = std::thread::spawn(move || {
+            // A writer paused inside `Table::apply` holds this lock.
+            let _guard = writer_table.shards[shard]
+                .records
+                .lock()
+                .expect("the shard");
+            holding.send(()).expect("the test is waiting");
+            released
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the test releases the writer");
+        });
+        held.recv_timeout(Duration::from_secs(2))
+            .expect("the writer holds the shard's lock");
+        assert!(matches!(
+            table.apply(get(&other), Instant::now()),
+            KeyedAnswer::Found { .. }
+        ));
+        release.send(()).expect("the writer is waiting");
+        writer.join().expect("the writer ends");
+    }
 }

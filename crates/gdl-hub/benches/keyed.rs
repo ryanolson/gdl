@@ -1,9 +1,10 @@
 //! The keyed record service's round trip and rate on one host: a hub and
 //! its instances in one process, over loopback TCP, as the tests run
 //! them. Prints the round trip of a get, a set, and a batch of sets, each
-//! asked one at a time (p50, p99, p99.9), then how many gets per second
-//! one hub answers while several instances ask at once, with their round
-//! trip under that load.
+//! asked one at a time (p50, p99, p99.9), then the round trip of a get
+//! and of the hub's health route at a low rate, with a pause before each
+//! request, then how many gets per second one hub answers while several
+//! instances ask at once, with their round trip under that load.
 //!
 //! `cargo bench -p gdl-hub --bench keyed`. `GDL_KEYED_BENCH_SECONDS` sets
 //! the length of the rate run, 5 s by default.
@@ -24,6 +25,12 @@ use gdl_watch::{Expected, KeyedAnswer, KeyedOp};
 const KEYS: u64 = 10_000;
 /// Round trips timed for each sequential row, after as many untimed.
 const ROUNDS: usize = 20_000;
+/// Round trips timed for each low-rate row, after a tenth as many untimed.
+const PACED_ROUNDS: usize = 1_000;
+/// The pauses before each request of the low-rate rows. A segment that
+/// asks the hub a few times a second waits far longer; the round trip is
+/// the same from about 1 ms on (`docs/src/operations/keyed-cost.md`).
+const PAUSES: [Duration; 2] = [Duration::from_millis(1), Duration::from_millis(5)];
 /// Sets in each batch of the batch row.
 const BATCH: u64 = 64;
 /// Instances asking at once in the rate run, and the requests each keeps
@@ -87,6 +94,25 @@ async fn sequential(instance: &Instance, ops: impl Fn(u64) -> Vec<KeyedOp>) -> S
     quantiles(&mut times)
 }
 
+/// Time `PACED_ROUNDS` calls of `ask`, each after `pause`, after a tenth
+/// as many untimed: the round trip when the threads and the cores that
+/// serve it have gone idle.
+async fn paced<F: Future<Output = ()>>(pause: Duration, ask: impl Fn(u64) -> F) -> String {
+    let mut times = Vec::with_capacity(PACED_ROUNDS);
+    for n in 0..(PACED_ROUNDS + PACED_ROUNDS / 10) as u64 {
+        // A zero sleep still waits for the timer's next 1 ms tick.
+        if !pause.is_zero() {
+            tokio::time::sleep(pause).await;
+        }
+        let begun = Instant::now();
+        ask(n).await;
+        if n >= (PACED_ROUNDS / 10) as u64 {
+            times.push(begun.elapsed());
+        }
+    }
+    quantiles(&mut times)
+}
+
 fn main() {
     let seconds: u64 = std::env::var("GDL_KEYED_BENCH_SECONDS")
         .ok()
@@ -98,7 +124,11 @@ fn main() {
         .build()
         .expect("a runtime");
     runtime.block_on(async move {
-        let hub = velo_hub::Hub::builder(config())
+        // The run is longer than the in-memory store's 30 s TTL, after
+        // which the instances here lose their registrations.
+        let mut config = config();
+        config.server.ttl = Duration::from_secs(3600);
+        let hub = velo_hub::Hub::builder(config)
             .extension(GraphAdmission::new(spec()))
             .extension(
                 KeyedRecords::new(HubTiming::DEFAULT_KEYED_CAPACITY).expect("the default capacity"),
@@ -129,6 +159,42 @@ fn main() {
             "keyed get: {}",
             sequential(first, |n| vec![KeyedOp::Get { key: key(pick(n)) }]).await
         );
+        // At a low rate: a pause before each request, then the same get,
+        // and the hub's health route as the control that has no keyed
+        // code in it.
+        let http = reqwest::Client::new();
+        let health = format!("http://{}/v1/health", hub.control_addr());
+        println!(
+            "health: {}",
+            paced(Duration::ZERO, |_| async {
+                let answer = http.get(&health).send().await.expect("the hub answers");
+                // Read to the end, so the connection goes back to the pool.
+                answer.bytes().await.expect("the hub answers");
+            })
+            .await
+        );
+        for pause in PAUSES {
+            let ms = pause.as_millis();
+            println!(
+                "keyed get after {ms} ms: {}",
+                paced(pause, |n| async move {
+                    first
+                        .keyed(vec![KeyedOp::Get { key: key(pick(n)) }])
+                        .await
+                        .expect("the hub answers");
+                })
+                .await
+            );
+            println!(
+                "health after {ms} ms: {}",
+                paced(pause, |_| async {
+                    let answer = http.get(&health).send().await.expect("the hub answers");
+                // Read to the end, so the connection goes back to the pool.
+                answer.bytes().await.expect("the hub answers");
+                })
+                .await
+            );
+        }
         println!(
             "keyed set: {}",
             sequential(first, |n| vec![KeyedOp::Set {

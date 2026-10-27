@@ -383,6 +383,34 @@ async fn a_write_with_no_answer_says_so() {
     assert_eq!(error.kind(), ErrorKind::Transport);
 }
 
+/// A get goes to the hub at once: it waits for no queued write, and for
+/// no batch of writes on its way.
+#[tokio::test(start_paused = true)]
+async fn a_get_bypasses_queued_writes_and_a_batch_in_flight() {
+    let link = Arc::new(Memory::default());
+    let (records, mut answers) = linked(&link, "t");
+    assert!(records.set(b"queued", b"value", Expected::Replace));
+    assert_eq!(records.get(b"queued").await.expect("an answer"), None);
+    assert_eq!(link.asks(), [1], "only the get has reached the link");
+
+    let release = link.hold_next();
+    tokio::time::sleep(Duration::from_millis(6)).await;
+    assert_eq!(link.asks(), [1, 1], "the first write is in flight");
+    assert!(records.set(b"next", b"value", Expected::Replace));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(5), records.get(b"queued"))
+            .await
+            .expect("the read bypasses the pending batch")
+            .expect("an answer"),
+        None
+    );
+    assert_eq!(link.asks(), [1, 1, 1], "the second write stays queued");
+    assert!(answers.try_recv().is_err(), "neither write is answered");
+    release.send(()).expect("the first write is still held");
+    assert_eq!(answer(&mut answers).await.0, b"queued");
+    assert_eq!(answer(&mut answers).await.0, b"next");
+}
+
 /// Writes to one key reach the hub in the order they were queued.
 #[tokio::test]
 async fn writes_to_one_key_keep_their_order() {
