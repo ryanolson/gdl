@@ -12,14 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{root, target};
-
-/// The limit, in seconds, on a nested `cargo` or `cargo gdl compose`. It
-/// guards against a hang and claims nothing about speed: each run takes
-/// Cargo's package cache lock, which every cargo on the host shares, so on
-/// a busy host most of its time is a wait for other builds. A compose that
-/// takes 3 s alone took over 30 s so.
-const CARGO_LIMIT: &str = "300";
+use common::{CARGO_LIMIT, root, target};
 
 fn spec(path: &str) -> gdl_gen::Spec {
     gdl_gen::Spec::load(&root().join(path)).expect("a spec")

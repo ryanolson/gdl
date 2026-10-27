@@ -2,7 +2,12 @@
 //! what real crates offer, read from their source by `gdl-extract`, and a
 //! contract generated from the resolution compiles.
 
+mod common;
+
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use common::CARGO_LIMIT;
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compose")
@@ -426,6 +431,201 @@ fn a_registry_crate_enters_the_catalogue_with_its_checksum() {
         (req.package.as_str(), req.path.as_str()),
         ("regproto", "regproto::Words")
     );
+}
+
+/// `cargo gdl extract name@version --verify` on a fetched crate that does
+/// not depend on gdl-message says so and builds nothing: a build of it
+/// could register nothing. The registry fixture's crates name gdl-message
+/// only in their markers, which the reader reads as text.
+#[test]
+fn verify_of_a_fetched_crate_without_gdl_message_says_so() {
+    let temp = offline_registry("verify");
+    let dir = temp.path();
+    let output = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "gdl",
+            "extract",
+            "regproto@0.1.0",
+            "--verify",
+        ])
+        .arg("--target-dir")
+        .arg(dir.join("target"))
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("cargo gdl");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr
+            .contains("regproto does not depend on gdl-message, so it registers nothing to verify"),
+        "{stderr}"
+    );
+}
+
+/// `--verify` compares only the verified crate's registrations, though the
+/// program it builds links its dependencies' too. The build tells them
+/// apart by the directory each was built from (`CARGO_MANIFEST_DIR`), not
+/// by a prediction from `cargo metadata`: here a dependency of another name
+/// and another version of the crate itself both register messages, and
+/// neither is a difference.
+#[test]
+fn verify_leaves_out_what_the_crates_dependencies_register() {
+    verify_dependencies("0.1.0", "0.2.0");
+}
+
+/// [`verify_leaves_out_what_the_crates_dependencies_register`], with the
+/// other version of the crate first in `cargo metadata`'s order: taking
+/// the first package of the crate's name would take the dependency's
+/// registrations for the crate's own.
+#[test]
+fn verify_keeps_its_directory_when_a_dependency_sorts_first() {
+    verify_dependencies("0.2.0", "0.1.0");
+}
+
+/// Verify the crate `verify-app` at `version`, which depends on
+/// `verify-shared` and on `verify-app` at `dependency_version`, each of
+/// which registers messages.
+///
+/// Every cargo here is offline, with the workspace's lock, and shares the
+/// other verify tests' target directory, where gdl-message is built.
+fn verify_dependencies(version: &str, dependency_version: &str) {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-dependencies-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let message = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-message");
+    let write = |path: &str, text: &str| {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("dir");
+        std::fs::write(path, text).expect("file");
+    };
+    let manifest = |name: &str, version: &str, dependencies: &str| {
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2024\"\n\
+             [workspace]\n[dependencies]\ngdl-message = {{ path = {} }}\n{dependencies}",
+            toml_string(&message)
+        )
+    };
+    write("shared/Cargo.toml", &manifest("verify-shared", "0.1.0", ""));
+    write(
+        "shared/src/lib.rs",
+        "#[derive(gdl_message::Message)]\npub struct Token;\n\
+         #[derive(gdl_message::Message)]\npub struct Carried<P>(pub P);\n\
+         #[gdl_message::export]\npub type CarriedToken = Carried<Token>;\n",
+    );
+    write(
+        "two/Cargo.toml",
+        &manifest("verify-app", dependency_version, ""),
+    );
+    write(
+        "two/src/lib.rs",
+        "#[derive(gdl_message::Message)]\npub struct Extra;\n",
+    );
+    write(
+        "app/Cargo.toml",
+        &manifest(
+            "verify-app",
+            version,
+            "verify-shared = { path = \"../shared\" }\n\
+             app_two = { package = \"verify-app\", path = \"../two\" }\n",
+        ),
+    );
+    // Each dependency is named, so that the program links it.
+    write(
+        "app/src/lib.rs",
+        "#[derive(gdl_message::Message)]\npub struct Words;\n\
+         #[gdl_message::export]\npub use verify_shared::Token;\n\
+         #[gdl_message::export]\npub use app_two::Extra;\n",
+    );
+    // A program that links the crate as `--verify`'s does, and prints what
+    // it registers. Each case names its own: the cases share a target
+    // directory, and `cargo run` runs the program after it lets go of the
+    // build lock, so a program of one name could be the other case's.
+    write(
+        "probe/Cargo.toml",
+        &manifest(
+            &format!("verify-probe-{}", version.replace('.', "-")),
+            "0.0.0",
+            "verify-app = { path = \"../app\" }\n",
+        ),
+    );
+    write(
+        "probe/src/main.rs",
+        "use verify_app as _;\n\n\
+         fn main() {\n    print!(\"{}\", gdl_message::Catalogue::linked().to_toml());\n}\n",
+    );
+    for at in ["app", "probe"] {
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"),
+            dir.join(at).join("Cargo.lock"),
+        )
+        .expect("the workspace lock");
+    }
+
+    // The control: the program links what the dependencies register, so
+    // only the filter keeps it out of the comparison.
+    let probe = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "run",
+            "--quiet",
+            "--manifest-path",
+        ])
+        .arg(dir.join("probe/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target())
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("cargo run");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let linked = gdl_message::Catalogue::from_toml(&String::from_utf8_lossy(&probe.stdout))
+        .expect("a catalogue");
+    let built_in = |name: &str| {
+        let message = linked
+            .messages
+            .iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is linked: {linked:?}"));
+        std::fs::canonicalize(&message.dir).expect("a directory")
+    };
+    let canonical = |at: &str| std::fs::canonicalize(dir.join(at)).expect("a directory");
+    assert_eq!(built_in("Token"), canonical("shared"));
+    assert_eq!(built_in("Extra"), canonical("two"));
+    assert!(
+        linked.exports.iter().any(|e| e.name == "CarriedToken"),
+        "{linked:?}"
+    );
+
+    let output = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "gdl",
+            "extract",
+        ])
+        .arg(dir.join("app"))
+        .arg("--verify")
+        .arg("--target-dir")
+        .arg(target())
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("cargo gdl");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let offer =
+        gdl_gen::Offer::from_toml(&String::from_utf8_lossy(&output.stdout)).expect("an offer");
+    let messages: Vec<&str> = offer.messages.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(messages, ["Words"]);
+    let exports: Vec<&str> = offer.exports.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(exports, ["Extra", "Token"]);
 }
 
 /// What each listed crate of the chat example offers, as a catalogue would

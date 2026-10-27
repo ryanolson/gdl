@@ -12,6 +12,13 @@ use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+/// The limit, in seconds, on a nested `cargo` or `cargo gdl compose`. It
+/// guards against a hang and claims nothing about speed: each run takes
+/// Cargo's package cache lock, which every cargo on the host shares, so on
+/// a busy host most of its time is a wait for other builds. A compose that
+/// takes 3 s alone took over 30 s so.
+pub const CARGO_LIMIT: &str = "300";
+
 pub fn root() -> PathBuf {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     dir.parent()
