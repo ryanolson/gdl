@@ -108,6 +108,7 @@ async fn the_later_drain_unregisters_a_peer_both_owners_held() {
         DRAIN,
         wanted,
         gdl::Load::FRESH_PERIODS,
+        None,
     );
     let mut membership = session.follower(
         Arc::clone(&live),

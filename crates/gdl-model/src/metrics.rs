@@ -74,11 +74,12 @@ impl MetricKind {
     }
 }
 
-/// The metrics the runtime records for each segment, and dynamo's
-/// `request_duration_seconds`, which it reserves. A node's own metrics may
-/// not take these names: they would collide in the registry, or, for the
-/// reserved one, a dashboard would read a node's figure as a handler's.
-pub const RUNTIME_METRICS: [&str; 17] = [
+/// The metrics the runtime records for each segment, those a chooser
+/// records of its offers to cells, and dynamo's `request_duration_seconds`,
+/// which it reserves. A node's own metrics may not take these names: they
+/// would collide in the registry, or, for the reserved one, a dashboard
+/// would read a node's figure as a handler's.
+pub const RUNTIME_METRICS: [&str; 19] = [
     "requests_total",
     "errors_total",
     "cancellation_total",
@@ -95,6 +96,8 @@ pub const RUNTIME_METRICS: [&str; 17] = [
     "end_to_end_time_to_first_item_seconds",
     "end_to_end_duration_seconds",
     "uptime_seconds",
+    "cell_offers_total",
+    "cell_failovers_total",
     "request_duration_seconds",
 ];
 

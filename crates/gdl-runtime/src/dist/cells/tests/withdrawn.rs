@@ -332,6 +332,7 @@ fn a_gate_reads_the_availability_of_the_entry_it_sends_to() {
             BTreeSet::from(["f".to_string(), "g".to_string()]),
         )]),
         gdl::Load::FRESH_PERIODS,
+        None,
     );
     let now = Instant::now();
     let mut snapshot = follows.snapshot();

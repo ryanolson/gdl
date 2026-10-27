@@ -216,6 +216,12 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** a registry holds one definition per name. Prometheus refuses a second help or label set, and a second kind would break the scrape.
 - **No listener:** a segment binary records the runtime's per-segment figures only when `[system] port` (or `DYN_SYSTEM_PORT`) turns its listener on. A node's own metrics are still counted, in a registry nobody serves. With no listener nothing can read the figures, so recording them would only cost.
 
+### A chooser's cell series stay for the life of its process
+- **What:** a cell's `cell_offers_total` and `cell_failovers_total` series stay after the cell's follow is dropped, at their last counts. Each cell's counts take up to 8 KiB.
+- **When:** a chooser's hub follows many cells of different names over the chooser's life, for example cells named per deployment.
+- **Why:** an answer to an offer made before the drop can still arrive, and a scrape after the drop must still see the last counts. Dropping the series would lose them. See [Metrics reference](../appendix/metrics.md#a-choosers-cell-families).
+- **Workaround:** reuse cell names, or restart the chooser.
+
 ## Tooling
 
 ### The composer does not list marked message re-exports

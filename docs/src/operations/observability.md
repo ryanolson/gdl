@@ -50,7 +50,8 @@ The registry holds:
 
 - `uptime_seconds`, read at each scrape;
 - each node's own metrics, and each selector's, registered before `build` (see [Define node metrics](../guides/node-metrics.md));
-- the runtime's figures for each segment a request passes through.
+- the runtime's figures for each segment a request passes through;
+- in a chooser, what became of each offer to a cell, by cell and outcome ([A chooser's cell families](../appendix/metrics.md#a-choosers-cell-families)).
 
 The identity labels are applied when the registry gathers, in a hash map's order. Parse the text in tests. Do not compare it as a string.
 
@@ -89,6 +90,17 @@ sequenceDiagram
 Known gaps in these rules are in [Known limitations](limitations.md): a deadline can count in two segments when their clocks pass together, an operator's recovered error inside one segment counts nowhere, a streamed request's input error counts where it enters a response, and after a cancel the source can hold a request in flight until its caller reads.
 
 dynamo's `request_duration_seconds` spans the whole handler, its stream included. gdl splits that span into the request path and the response path. So gdl does not emit the name, and reserves it. `error_type` holds gdl's error kinds, not the names of dynamo's handler steps (`generate`, `deserialization`). A dashboard keyed on dynamo's values needs an adapter. [Metrics design](../development/metrics-design.md) records why the figures take this shape. [Runtime feature costs](feature-costs.md) holds what recording costs.
+
+## Reading a chooser's cell choices
+
+A chooser counts each offer to a cell of another class under the cell and how it ended: `accepted`, `declined_full`, `declined_gone`, `unsent`, `outcome_unknown`, or `failed`. It counts an offer after another cell missed the request as a failover too.
+
+- **Where requests go:** the rate of `cell_offers_total{outcome="accepted"}` by `cell`.
+- **A full cell:** its `declined_full` rises, and `cell_failovers_total` rises on the other cells.
+- **A draining cell:** its `declined_gone` rises, then stops until the relay changes the follow.
+- **A transport fault:** `unsent` says velo refused to send. `outcome_unknown` says the request may have run, and failed for its caller.
+
+The counts are sharded by thread as the runtime's figures are. Counting one offer is one relaxed add, with no lock and no allocation ([Runtime feature costs](feature-costs.md#counting-a-choosers-offers)).
 
 ## Logs
 

@@ -3,6 +3,7 @@
 
 mod avoided;
 mod bounded;
+mod counted;
 mod declines;
 mod offered;
 mod reread;
@@ -99,6 +100,19 @@ fn follower_fresh_for(
     Recorded,
     Arc<crate::dist::roster::Live>,
 ) {
+    follower_counted(fresh_periods, None)
+}
+
+/// [`follower_fresh_for`], counting each cell's offers in `meters`.
+fn follower_counted(
+    fresh_periods: u32,
+    meters: Option<super::CellMeters>,
+) -> (
+    Follows<Recorded>,
+    Cells,
+    Recorded,
+    Arc<crate::dist::roster::Live>,
+) {
     let cells = Cells::new("r", [("model_x", "f")], Damping::default());
     let recorded = Recorded {
         cells: cells.clone(),
@@ -113,6 +127,7 @@ fn follower_fresh_for(
         DRAIN,
         wanted,
         fresh_periods,
+        meters,
     );
     (follows, cells, recorded, live)
 }

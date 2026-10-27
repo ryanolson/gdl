@@ -69,7 +69,7 @@ impl<R: Registry> Follows<R> {
             key.clone(),
             Own {
                 watch,
-                filling: Some(Followed::new(self.fresh_periods)),
+                filling: Some(Followed::new(self.fresh_periods, self.meters.clone())),
                 unknown: false,
                 backoff,
                 synced: None,

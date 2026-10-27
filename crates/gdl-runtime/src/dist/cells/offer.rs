@@ -17,7 +17,8 @@
 use gdl::{Cx, NoCell, Result};
 use velo::InstanceId;
 
-use super::Crossing;
+use super::meter::Outcome;
+use super::{CellLease, Crossing};
 use crate::dist::envelope::{Forward, WireCx};
 use crate::dist::fabric::Offered;
 use crate::dist::offers::{Answer, Missed, delivered};
@@ -29,9 +30,14 @@ use crate::dist::runtime::{Handed, Held, Runtime, Within};
 /// accepted it is no longer; an acceptance is told to the cell policy's
 /// lease in `held`, if it gave one. A hand-off that never left says
 /// nothing of the cell, and changes nothing. An unknown outcome names the
-/// class, since it is not offered to another cell.
+/// class, since it is not offered to another cell. Every answer counts
+/// under the cell and how it ended, when the chooser records its offers:
+/// one relaxed add to the counts the lease on the cell's follow reaches.
 pub(crate) fn answer(offered: Offered, crossing: &Crossing, cell: u64, held: &mut Held) -> Answer {
     let answer = delivered(offered, Some(crossing.class()));
+    if let Some(figures) = held.cell_lease().and_then(CellLease::figures) {
+        figures.offered(Outcome::of(&answer));
+    }
     match &answer {
         Answer::Accepted(_) => {
             crossing.accepted(cell);
@@ -114,7 +120,13 @@ impl Runtime {
                 break;
             };
             let (offering, sent) = self.deliver(instance, envelope, timed)?;
-            match answer(offering.await, crossing, cell, &mut held) {
+            let answer = answer(offering.await, crossing, cell, &mut held);
+            // Counted with the answer, so that an offer whose answer is
+            // never read counts nothing.
+            if let Some(figures) = held.cell_lease().and_then(CellLease::figures) {
+                figures.failover();
+            }
+            match answer {
                 Answer::Accepted(accepted) => {
                     return Ok(Handed {
                         accepted,
@@ -244,7 +256,8 @@ mod tests {
     /// A chooser's first offer, accepted, allocates what the same hand-off
     /// routed by the roster does, with a policy and with a selector that
     /// replaces the request's own meta: nothing for a failover is made
-    /// before a cell declines.
+    /// before a cell declines, and counting the offer's outcome allocates
+    /// nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_accepted_first_offer_allocates_what_a_roster_hand_off_does() {
         let layout = layout();
@@ -274,6 +287,8 @@ mod tests {
             })
             .expect("a handler");
 
+        let registry = prometheus::Registry::new();
+        let meters = super::super::CellMeters::register(&registry).expect("registered");
         let cells = Cells::new(
             "home",
             [("model_x", "d")],
@@ -298,7 +313,9 @@ mod tests {
                 offering: true,
                 revision: 1,
                 changes: 0,
-                leases: Arc::default(),
+                leases: Arc::new(super::super::lease::Leases::counted(Some(
+                    meters.figures("model_x", "m1"),
+                ))),
             })])),
         );
         let crossing = |within: Within| {
@@ -333,6 +350,11 @@ mod tests {
             super::super::damping::WRITES.with(Cell::get),
             writes,
             "an accepted offer to an undamped cell wrote damping state"
+        );
+        // Each crossing sent 31 hand-offs, every one counted.
+        assert_eq!(
+            super::super::meter::tests::offers(&registry, "m1", "accepted"),
+            Some(62.0)
         );
     }
 
@@ -482,6 +504,294 @@ mod tests {
         .expect("the second cell took it");
         assert_eq!(offers.load(Ordering::SeqCst), 2, "one decline, one take");
         assert_eq!(reading.0.load(Ordering::SeqCst), 2, "a choice per cell");
+    }
+
+    /// Every offer counts under its cell and how it ended, and each one
+    /// after the request's first counts as a failover: `m0` has no entry
+    /// velo can reach, so its offers never leave; `m1`'s entry declines
+    /// as full, `m2`'s as gone, and `m3`'s accepts. Each request ends at
+    /// `m3`, so the outcomes add up to the offers made, and the failovers
+    /// to the offers less the requests.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn each_offer_counts_under_its_cell_and_outcome() {
+        use super::super::lease::Leases;
+        use super::super::meter::tests::{offers, scraped};
+        use super::super::meter::{CellMeters, FAILOVERS};
+        const REQUESTS: usize = 20;
+        let layout = layout();
+        let chooser = bind_node(([127, 0, 0, 1], 0).into())
+            .await
+            .expect("a velo node");
+        let mut roster = Roster::new();
+        let mut entries = Vec::new();
+        for _ in 0..3 {
+            let entry = bind_node(([127, 0, 0, 1], 0).into())
+                .await
+                .expect("a velo node");
+            roster.add("d", entry.peer_info());
+            entries.push(entry);
+        }
+        let fabric = Fabric::new(chooser, None, None, Duration::from_secs(30));
+        let rt = Runtime::new(
+            fabric,
+            layout.clone(),
+            "a".into(),
+            &roster,
+            RuntimeConfig {
+                cell_failovers: 3,
+                ..RuntimeConfig::default()
+            },
+            None,
+        )
+        .expect("a runtime");
+        let full = Error::new(ErrorKind::Overloaded, "full");
+        let replies = [
+            crate::dist::offers::refusal(&full, Decline::Full).expect("encode"),
+            crate::dist::offers::refusal(&full, Decline::Gone).expect("encode"),
+            crate::dist::envelope::encode(&Ok::<Accepted, Error>(None)).expect("encode"),
+        ];
+        let answered: Vec<Arc<AtomicUsize>> = entries.iter().map(|_| Arc::default()).collect();
+        for ((entry, reply), answered) in entries.iter().zip(replies).zip(&answered) {
+            let answered = Arc::clone(answered);
+            Fabric::new(entry.clone(), None, None, Duration::from_secs(30))
+                .register(&rt.names().forward, move |_| {
+                    answered.fetch_add(1, Ordering::SeqCst);
+                    let reply = reply.clone();
+                    Box::pin(async move { reply })
+                })
+                .expect("a handler");
+        }
+        let registry = prometheus::Registry::new();
+        let meters = CellMeters::register(&registry).expect("registered");
+        let cells = Cells::new(
+            "home",
+            [("model_x", "d")],
+            super::super::damping::Damping::default(),
+        );
+        // `m0`'s entry is no peer of the chooser's velo node.
+        let ids = std::iter::once(velo::InstanceId::new_v4())
+            .chain(entries.iter().map(|entry| entry.instance_id()));
+        let tables = ids
+            .zip(["m0", "m1", "m2", "m3"])
+            .map(|(id, name)| {
+                Arc::new(CellTable {
+                    class: "model_x".into(),
+                    cell: name.into(),
+                    id: cell_id("model_x", name),
+                    generation: 1,
+                    region: "home".into(),
+                    state: CellState::Ready,
+                    load: super::super::tests::idle(),
+                    eligible: Box::new([id]),
+                    offered: Box::new([crate::dist::roster::selector_id(id)]),
+                    retired: Box::new([]),
+                    unread: false,
+                    turn: Arc::new(AtomicUsize::new(0)),
+                    offering: true,
+                    revision: 1,
+                    changes: 0,
+                    leases: Arc::new(Leases::counted(Some(meters.figures("model_x", name)))),
+                })
+            })
+            .collect();
+        cells.store("d", EntryTable::new(tables));
+        let mut targets = targets(
+            &layout,
+            "a",
+            &cells,
+            &gdl::CellPolicies::new(),
+            gdl::HomeFirstAt::DEFAULT,
+        )
+        .expect("targets");
+        let target = targets.remove(&(0, 1)).expect("the boundary hand-off");
+        let router = Router::Cells(Arc::new(Crossing::new(
+            target,
+            Within::Policy(Policy::RoundRobin),
+            Default::default(),
+        )));
+        for _ in 0..REQUESTS {
+            let cx = Cx::new();
+            let envelope = Forward {
+                version: VERSION,
+                identity: rt.identity,
+                hop: 0,
+                pos: 1,
+                cx: WireCx::of(&cx),
+                reply: ReplyTo::test_value(7),
+                payload: vec![1, 2, 3],
+            };
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                rt.send_forward("d", &router, &cx, envelope, false),
+            )
+            .await
+            .expect("answered in time")
+            .expect("m3 took it");
+        }
+        let count = |cell: &str, outcome: &str| {
+            offers(&registry, cell, outcome)
+                .unwrap_or_else(|| panic!("no series for {cell} {outcome}")) as usize
+        };
+        let answered: Vec<usize> = answered.iter().map(|n| n.load(Ordering::SeqCst)).collect();
+        assert_eq!(count("m1", "declined_full"), answered[0]);
+        assert_eq!(count("m2", "declined_gone"), answered[1]);
+        assert_eq!((count("m3", "accepted"), answered[2]), (REQUESTS, REQUESTS));
+        assert!(count("m0", "unsent") > 0 && answered[0] > 0 && answered[1] > 0);
+        let outcomes = [
+            "accepted",
+            "declined_full",
+            "declined_gone",
+            "unsent",
+            "outcome_unknown",
+            "failed",
+        ];
+        let (mut offered, mut failovers) = (0, 0);
+        for cell in ["m0", "m1", "m2", "m3"] {
+            offered += outcomes.iter().map(|o| count(cell, o)).sum::<usize>();
+            let labels = [("class", "model_x"), ("cell", cell)];
+            failovers += scraped(&registry, FAILOVERS, &labels).expect("a series") as usize;
+        }
+        assert_eq!(
+            offered,
+            count("m0", "unsent") + answered.iter().sum::<usize>()
+        );
+        assert_eq!(failovers, offered - REQUESTS, "every offer but each first");
+    }
+
+    /// A request dropped while its failover waits for the answer counts
+    /// nothing for that offer, neither an outcome nor a failover: `m0`'s
+    /// first offer never leaves, and `m1`'s entry holds the failover until
+    /// the request is gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_failover_counts_no_offer_without_an_answer() {
+        use super::super::lease::Leases;
+        use super::super::meter::tests::{offers, scraped};
+        use super::super::meter::{CellMeters, FAILOVERS};
+
+        let layout = layout();
+        let chooser = bind_node(([127, 0, 0, 1], 0).into())
+            .await
+            .expect("a chooser");
+        let entry = bind_node(([127, 0, 0, 1], 0).into())
+            .await
+            .expect("an entry");
+        let mut roster = Roster::new();
+        roster.add("d", entry.peer_info());
+        let rt = Runtime::new(
+            Fabric::new(chooser, None, None, Duration::from_secs(30)),
+            layout.clone(),
+            "a".into(),
+            &roster,
+            RuntimeConfig::default(),
+            None,
+        )
+        .expect("a runtime");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let accepted = crate::dist::envelope::encode(&Ok::<Accepted, Error>(None)).expect("encode");
+        Fabric::new(entry.clone(), None, None, Duration::from_secs(30))
+            .register(&rt.names().forward, {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                move |_| {
+                    entered.notify_one();
+                    let release = Arc::clone(&release);
+                    let accepted = accepted.clone();
+                    Box::pin(async move {
+                        tokio::time::timeout(Duration::from_secs(5), release.notified())
+                            .await
+                            .expect("the entry is released");
+                        accepted
+                    })
+                }
+            })
+            .expect("a handler");
+        let registry = prometheus::Registry::new();
+        let meters = CellMeters::register(&registry).expect("registered");
+        let cells = Cells::new(
+            "home",
+            [("model_x", "d")],
+            super::super::damping::Damping::default(),
+        );
+        let tables = [
+            ("m0", velo::InstanceId::new_v4()),
+            ("m1", entry.instance_id()),
+        ]
+        .into_iter()
+        .map(|(name, id)| {
+            Arc::new(CellTable {
+                class: "model_x".into(),
+                cell: name.into(),
+                id: cell_id("model_x", name),
+                generation: 1,
+                region: "home".into(),
+                state: CellState::Ready,
+                load: super::super::tests::idle(),
+                eligible: Box::new([id]),
+                offered: Box::new([crate::dist::roster::selector_id(id)]),
+                retired: Box::new([]),
+                unread: false,
+                turn: Arc::new(AtomicUsize::new(0)),
+                offering: true,
+                revision: 1,
+                changes: 0,
+                leases: Arc::new(Leases::counted(Some(meters.figures("model_x", name)))),
+            })
+        })
+        .collect();
+        cells.store("d", EntryTable::new(tables));
+        let mut targets = targets(
+            &layout,
+            "a",
+            &cells,
+            &gdl::CellPolicies::new(),
+            gdl::HomeFirstAt::DEFAULT,
+        )
+        .expect("targets");
+        let router = Router::Cells(Arc::new(Crossing::new(
+            targets.remove(&(0, 1)).expect("the class cut"),
+            Within::Policy(Policy::RoundRobin),
+            Default::default(),
+        )));
+        let cx = Cx::new();
+        let envelope = Forward {
+            version: VERSION,
+            identity: rt.identity,
+            hop: 0,
+            pos: 1,
+            cx: WireCx::of(&cx),
+            reply: ReplyTo::test_value(7),
+            payload: vec![1, 2, 3],
+        };
+        let mut offer = Box::pin(rt.send_forward("d", &router, &cx, envelope, false));
+        tokio::select! {
+            _ = &mut offer => panic!("the entry has not answered"),
+            arrived = tokio::time::timeout(Duration::from_secs(5), entered.notified()) => {
+                arrived.expect("the failover reached the entry");
+            }
+        }
+        assert_eq!(offers(&registry, "m0", "unsent"), Some(1.0));
+        drop(offer);
+        release.notify_one();
+        for outcome in [
+            "accepted",
+            "declined_full",
+            "declined_gone",
+            "unsent",
+            "outcome_unknown",
+            "failed",
+        ] {
+            assert_eq!(offers(&registry, "m1", outcome), Some(0.0));
+        }
+        assert_eq!(
+            scraped(
+                &registry,
+                FAILOVERS,
+                &[("class", "model_x"), ("cell", "m1")],
+            ),
+            Some(0.0),
+            "a dropped unanswered offer must not leave a failover count"
+        );
     }
 
     /// Sends a prompt to the cell whose name is its text, and says why
@@ -978,8 +1288,9 @@ mod tests {
 
     /// What a cell choice and an accepted first offer cost, in time, for
     /// the record in the book: a pick under each policy the runtime
-    /// provides, over four idle cells, and one accepted offer over loopback
-    /// against the same hand-off routed by the roster. Ignored: it times,
+    /// provides, over four idle cells, the count of an offer's outcome,
+    /// and one accepted offer over loopback, its outcome counted, against
+    /// the same hand-off routed by the roster. Ignored: it times,
     /// and asserts nothing. Run it in release:
     /// `cargo test --release -p gdl-runtime --lib cost_of -- --ignored --nocapture`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1010,6 +1321,21 @@ mod tests {
                 best.as_nanos() as f64 / f64::from(PICKS)
             );
         }
+        // What an offer adds to count its outcome under its cell.
+        let meters = super::super::CellMeters::unregistered();
+        let figures = meters.figures("model_x", "m1");
+        let mut best = Duration::MAX;
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            for _ in 0..PICKS {
+                std::hint::black_box(figures).offered(super::super::meter::Outcome::Accepted);
+            }
+            best = best.min(start.elapsed());
+        }
+        println!(
+            "count an outcome: {:.1} ns",
+            best.as_nanos() as f64 / f64::from(PICKS)
+        );
 
         const OFFERS: u32 = 20_000;
         let layout = layout();
@@ -1062,7 +1388,8 @@ mod tests {
                 offering: true,
                 revision: 1,
                 changes: 0,
-                leases: Arc::default(),
+                // Counted, as a chooser whose listener is on counts.
+                leases: Arc::new(super::super::lease::Leases::counted(Some(figures))),
             })])),
         );
         let mut targets = targets(

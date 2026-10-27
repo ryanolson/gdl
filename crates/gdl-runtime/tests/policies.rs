@@ -586,3 +586,78 @@ async fn a_bound_policy_is_waited_for_after_the_chooser_registers() {
     ran.expect("the chooser serves once its policy is ready");
     global.shutdown().await.expect("valid test fixture");
 }
+
+/// The frontend, whose start checks that the registry the runtime records
+/// into already holds the chooser's cell families: a counter of the same
+/// name is refused there.
+struct Counting;
+
+impl gdl_runtime::SegmentBinary for Counting {
+    const PACKAGE: &'static str = "routed-a";
+    const SEGMENT: &'static str = "a";
+    const SEGMENTS: &'static [&'static str] = SEGMENTS;
+    const GRAPH_CONFIG: &'static str = "";
+    type Settings = common::cells::Nothing;
+    type Hosts = ();
+
+    async fn build(
+        settings: common::cells::Nothing,
+        builder: &gdl_runtime::Builder,
+    ) -> Result<(), gdl_runtime::Failure> {
+        Frontend::<true>::build(settings, builder).await
+    }
+
+    fn deployment() -> gdl::Result<DeploymentSpec> {
+        Ok(spec("by_model"))
+    }
+
+    fn start(
+        (): (),
+        node: gdl_runtime::velo::Velo,
+        roster: &gdl_runtime::Roster,
+        runtime: gdl_runtime::RuntimeConfig,
+    ) -> gdl::Result<gdl_runtime::Serving> {
+        let registry = runtime.metrics.as_ref().expect("a listener records");
+        for name in ["cell_offers_total", "cell_failovers_total"] {
+            let counter = prometheus::IntCounter::new(name, "taken").expect("a counter");
+            assert!(
+                registry.register(Box::new(counter)).is_err(),
+                "the chooser's follower did not register `{name}`"
+            );
+        }
+        Frontend::<true>::start((), node, roster, runtime)
+    }
+}
+
+/// A segment binary with its system listener on hands its registry to the
+/// launch, so that the chooser's follower, which starts there, registers
+/// the cells' families in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_segment_binary_records_its_cell_choices() {
+    let spec = spec("by_model");
+    let directory = Resolving::new();
+    let (global, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-policies-")
+        .tempdir()
+        .expect("settings directory");
+    let file = dir.path().join("settings.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n[system]\nhost = \"127.0.0.1\"\nport = 0\n{}{RUNTIME}",
+            global.public_addr().port(),
+            global.control_addr().port(),
+            global_cell(),
+        ),
+    )
+    .expect("settings");
+    tokio::time::timeout(
+        WAIT,
+        gdl_runtime::run_segment::<Counting>(vec![file.into_os_string()]),
+    )
+    .await
+    .expect("the binary ended in time")
+    .expect("the chooser launches and serves");
+    global.shutdown().await.expect("valid test fixture");
+}

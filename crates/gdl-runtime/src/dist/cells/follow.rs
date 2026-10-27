@@ -43,6 +43,7 @@ use tokio::time::Instant;
 use velo::{InstanceId, PeerInfo};
 
 use super::lease::Leases;
+use super::meter::{CellFigures, CellMeters};
 use super::{CellTable, Cells, EntryTable};
 use crate::dist::fabric::Registry;
 use crate::dist::roster::{Live, selector_id};
@@ -82,6 +83,8 @@ pub(crate) struct Follows<R> {
     /// How many of its periods a cell's summary stays fresh after it
     /// arrived.
     fresh_periods: u32,
+    /// Where each cell's offers are counted, if the chooser records them.
+    meters: Option<CellMeters>,
     followed: Followed,
     /// Each entry segment's cells, as last published.
     tables: BTreeMap<String, BTreeMap<Key, Arc<CellTable>>>,
@@ -132,6 +135,7 @@ impl<R: Registry> Follows<R> {
         drain: Duration,
         wanted: Wanted,
         fresh_periods: u32,
+        meters: Option<CellMeters>,
     ) -> Self {
         Self {
             cells,
@@ -140,7 +144,8 @@ impl<R: Registry> Follows<R> {
             drain,
             wanted: Arc::new(wanted),
             fresh_periods,
-            followed: Followed::new(fresh_periods),
+            followed: Followed::new(fresh_periods, meters.clone()),
+            meters,
             tables: BTreeMap::new(),
             held: HashMap::new(),
             registered: HashSet::new(),
@@ -160,7 +165,7 @@ impl<R: Registry> Follows<R> {
     pub(super) fn snapshot(&self) -> Snapshot {
         Snapshot {
             wanted: Arc::clone(&self.wanted),
-            followed: Followed::new(self.fresh_periods),
+            followed: Followed::new(self.fresh_periods, self.meters.clone()),
             unread: BTreeSet::new(),
             unknown: 0,
         }
@@ -585,6 +590,8 @@ struct Followed {
     generations: HashMap<Key, u64>,
     /// How many of its periods a summary stays fresh after it arrived.
     fresh_periods: u32,
+    /// Where each cell's offers are counted, if the chooser records them.
+    meters: Option<CellMeters>,
 }
 
 /// What one event changed in a cell's follow, beyond its table.
@@ -614,13 +621,14 @@ enum Change {
 
 impl Followed {
     /// Nothing followed yet, each summary fresh for `fresh_periods` of its
-    /// periods once it arrives.
-    fn new(fresh_periods: u32) -> Self {
+    /// periods once it arrives, each cell's offers counted in `meters`.
+    fn new(fresh_periods: u32, meters: Option<CellMeters>) -> Self {
         Self {
             follows: HashMap::new(),
             closing: HashMap::new(),
             generations: HashMap::new(),
             fresh_periods,
+            meters,
         }
     }
 
@@ -665,6 +673,12 @@ impl Followed {
                     return None;
                 }
                 self.generations.insert(key.clone(), generation);
+                // Counted by the cell's name, so that every generation of
+                // it counts into one series.
+                let figures = self
+                    .meters
+                    .as_ref()
+                    .map(|meters| meters.figures(&key.0, &key.1));
                 // A newer generation replaces the older at once: nothing
                 // of the older one is carried over, and it holds its
                 // instances until the relay drops it.
@@ -677,6 +691,7 @@ impl Followed {
                         load.and_then(|load| received(load, load_age_ms, now))
                             .map(|load| load.with_fresh_periods(fresh_periods)),
                         segments,
+                        figures,
                     ),
                 );
                 let Some(mut older) = older else {
@@ -933,6 +948,7 @@ impl Follow {
         state: CellState,
         load: Option<Load>,
         segments: &BTreeSet<String>,
+        figures: Option<&'static CellFigures>,
     ) -> Self {
         Self {
             generation,
@@ -946,7 +962,7 @@ impl Follow {
                 .iter()
                 .map(|segment| (segment.clone(), Arc::default()))
                 .collect(),
-            leases: Arc::default(),
+            leases: Arc::new(Leases::counted(figures)),
             revision: 1,
             offered: true,
             changes: 0,

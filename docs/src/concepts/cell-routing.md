@@ -217,6 +217,8 @@ A child cell may decline the hand-off. The chooser then offers the request to an
 
 The chooser offers to at most `[runtime] cell_failovers` more cells (2 by default). With 0, each request is offered to one cell. When every offered cell declines, the request fails with the last refusal, so a full fleet answers `Overloaded`. A refusal is not remembered past its request, except through damping.
 
+A chooser that records metrics counts each offer under its cell and the row of this table it ended in, and each offer after a request's first as a failover ([A chooser's cell families](../appendix/metrics.md#a-choosers-cell-families)). The counts are kept by the cell's name, so a new generation of the cell goes on counting into the same series.
+
 ## Entry retirement across cells
 
 An entry instance is an instance of a segment that a hop from another class enters. When one retires, the cells that follow its cell must stop choosing it.

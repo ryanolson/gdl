@@ -1,6 +1,6 @@
 # Metrics reference
 
-This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. `uptime_seconds` and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`). [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
+This appendix lists every metric the runtime registers, as the code registers it. The runtime's families are in `crates/gdl/src/meter.rs`. A chooser's cell families are in `crates/gdl-runtime/src/dist/cells/meter.rs`. `uptime_seconds` and the identity labels are in `Process::registry` (`crates/gdl-runtime/src/process.rs`). [Health and metrics](../operations/observability.md) says how to read them. [Define node metrics](../guides/node-metrics.md) covers a node's own metrics.
 
 ## Names and labels
 
@@ -14,7 +14,7 @@ The registry adds three labels to every series, `uptime_seconds` and a node's ow
 | `dynamo_component` | the segment |
 | `worker_id` | the instance's velo id, as 32 lowercase hex digits |
 
-Every runtime family also has `dynamo_endpoint`: the entry node of the visit (see [Entries](#entries)). The three error families also have `error_type`.
+Every family in [The runtime's families](#the-runtimes-families) also has `dynamo_endpoint`: the entry node of the visit (see [Entries](#entries)). The three error families also have `error_type`. [A chooser's cell families](#a-choosers-cell-families) have their own labels instead.
 
 ## The runtime's families
 
@@ -52,6 +52,32 @@ An entry is a node where a visit begins. The parts a visit has decide which fami
 
 `inflight_requests` belongs to both the request and the response parts, so every entry has it.
 
+## A chooser's cell families
+
+A chooser registers two more families: what became of each offer it made to a cell of another class ([A hand-off is an offer](../concepts/cell-routing.md#a-hand-off-is-an-offer)). They have no `dynamo_endpoint`. The chooser registers them as its follower starts, when `RuntimeConfig::metrics` holds a registry, so a segment binary records them only while its listener is on.
+
+| Name | Type | Extra labels | Meaning |
+|---|---|---|---|
+| `cell_offers_total` | counter | `class`, `cell`, `outcome` | Offers this chooser made to the cell, by how each ended. |
+| `cell_failovers_total` | counter | `class`, `cell` | Offers this chooser made to the cell after another cell did not take the request. |
+
+`outcome` has one series for each of these six values:
+
+| `outcome` | The answer |
+|---|---|
+| `accepted` | The cell's entry took the request. |
+| `declined_full` | The entry declined it, saying that its cell is full. |
+| `declined_gone` | The entry declined it, saying that its cell is gone. |
+| `unsent` | velo refused to send it. No entry said anything. |
+| `outcome_unknown` | The send failed after velo took it, or no answer came within the setup timeout. The request fails with `OutcomeUnknown`. |
+| `failed` | The entry answered with another error of the request's own, or with an answer the chooser could not read. |
+
+- Each offer counts once, under the cell it went to. So a cell's six series add up to the offers made to it. Each request's first offer is not a failover, so over all cells, `cell_failovers_total` is the sum of `cell_offers_total` less the requests that reached an offer.
+- An offer counts only when the chooser reads its answer. A request that no cell may take (`Routing`), a request whose cell policy or selector fails, and a request dropped while it waits for the answer count nothing.
+- A cell's series appear at zero when the chooser first follows the cell. They are kept by the cell's name, not its follow, so every generation of the cell counts into the same series. They stay for the life of the process, also after the cell's follow is dropped ([limitations](../operations/limitations.md#a-choosers-cell-series-stay-for-the-life-of-its-process)).
+- The cells bound the series: six and one for each cell of each class the chooser sends to that its hub followed.
+- The chooser counts the decline that the entry gave, not what it did with it. A gone decline of an offer made under an earlier generation of the cell damps the cell, and still counts as `declined_gone`.
+
 ## Buckets
 
 All five histograms use these 22 bounds, in seconds: `0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600`. The bounds from 5 ms up are dynamo's. Buckets are cumulative. A histogram's `_count` equals its `+Inf` bucket, both computed from the same read of the internal bins.
@@ -62,6 +88,6 @@ Each error family has one series for each of these ten values, at zero from the 
 
 ## Reserved names
 
-`gdl_model::RUNTIME_METRICS` holds 17 names that a node's own metric cannot take: the 15 families above, `uptime_seconds`, and dynamo's `request_duration_seconds`. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
+`gdl_model::RUNTIME_METRICS` holds 19 names that a node's own metric cannot take: the 15 runtime families above, `uptime_seconds`, the two cell families, and dynamo's `request_duration_seconds`. The runtime never emits `request_duration_seconds`. It is reserved so that no dashboard reads a node's figure under dynamo's handler name.
 
 `gdl_model::RUNTIME_LABELS` holds the four labels a node's metric cannot use: `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.

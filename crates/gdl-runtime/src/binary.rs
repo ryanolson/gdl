@@ -144,6 +144,10 @@ pub async fn run_segment<B: SegmentBinary>(
     // names against these before it registers.
     config.runtime.cell_policies = builder.cell_policies();
     config.runtime.followed = builder.followed.clone();
+    // The runtime records the segment's figures only where a system
+    // listener can serve them: with none, nobody could read them. Before
+    // the launch, where a chooser's follower registers the cells' figures.
+    config.runtime.metrics = process.system_address().map(|_| registry);
     let ready = async {
         tokio::try_join!(B::ready(&hosts), builder.ready())?;
         Ok(())
@@ -151,10 +155,7 @@ pub async fn run_segment<B: SegmentBinary>(
     let launch = config
         .launch(&process, B::SEGMENT, B::SEGMENTS, &deployment, ready)
         .await?;
-    // The runtime records the segment's figures only where a system
-    // listener can serve them: with none, nobody could read them.
     let mut runtime = config.runtime;
-    runtime.metrics = process.system_address().map(|_| registry);
     runtime.selectors = builder.into_selectors();
     let serving = B::start(hosts, launch.node(), launch.roster(), runtime)?;
     (serving.serve)(launch).await?;

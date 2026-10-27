@@ -20,9 +20,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use velo::Velo;
 
-use super::Cells;
 use super::damping::Damping;
 use super::follow::{Asked, Follows, Key};
+use super::{CellMeters, Cells};
 use crate::RuntimeConfig;
 use crate::dist::fabric::{ChooserHub, Registry};
 use crate::dist::roster::Live;
@@ -86,6 +86,13 @@ pub(crate) fn follow(
         }),
         Damping::new(runtime.cell_damping_first, runtime.cell_damping_max),
     );
+    // Registered once, as the follower starts: the process has one
+    // chooser, and its registry one set of the cells' families.
+    let meters = runtime
+        .metrics
+        .as_ref()
+        .map(CellMeters::register)
+        .transpose()?;
     let follows = Follows::new(
         cells.clone(),
         node.clone(),
@@ -93,6 +100,7 @@ pub(crate) fn follow(
         drain,
         wanted,
         runtime.cell_fresh_periods,
+        meters,
     );
     let task = tokio::spawn(run(
         Hub {

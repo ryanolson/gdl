@@ -15,15 +15,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gdl::__runtime::ChoiceHeld;
 
+use super::meter::CellFigures;
+
 /// The bit of a follow's word that says it is not offered; the rest count
 /// the leases.
 const UNOFFERED: usize = 1 << (usize::BITS - 1);
 
-/// One follow's word, shared by every table its follow makes.
+/// One follow's word, shared by every table its follow makes, with the
+/// counts of its cell's offers, if the chooser records them: the same for
+/// every follow of the cell.
 #[derive(Debug, Default)]
-pub(crate) struct Leases(AtomicUsize);
+pub(crate) struct Leases(AtomicUsize, Option<&'static CellFigures>);
 
 impl Leases {
+    /// The word of a follow whose cell's offers count into `figures`.
+    pub(crate) fn counted(figures: Option<&'static CellFigures>) -> Self {
+        Self(AtomicUsize::new(0), figures)
+    }
+
     /// Mark the follow not offered: no lease is taken from now on.
     pub(crate) fn unoffer(&self) {
         self.0.fetch_or(UNOFFERED, Ordering::AcqRel);
@@ -83,6 +92,12 @@ impl CellLease {
     /// its own.
     pub(crate) fn is_of(&self, table: &super::CellTable) -> bool {
         Arc::ptr_eq(&self.follow, &table.leases)
+    }
+
+    /// The counts of the offers to the cell, if the chooser records them.
+    #[inline]
+    pub(crate) fn figures(&self) -> Option<&'static CellFigures> {
+        self.follow.1
     }
 
     /// The cell accepted the offer: tell the cell policy's lease, if it
