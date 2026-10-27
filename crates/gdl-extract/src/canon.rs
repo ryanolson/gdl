@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use quote::ToTokens as _;
 use syn::ext::IdentExt as _;
 
+use crate::external::{Std, standard};
 use crate::resolve::{Def, Resolver, segments};
 
 /// A type, resolved.
@@ -32,63 +33,6 @@ pub(crate) enum Ty {
     /// A type of the standard library's the reader knows, and its
     /// arguments.
     Std(Std, Vec<Ty>),
-}
-
-/// The types of the standard library's the reader names and judges, by
-/// their names alone where the prelude or a `use` of the standard library
-/// brings them (a name trick is not chased).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Std {
-    String,
-    Vec,
-    VecDeque,
-    Option,
-    Box,
-    HashMap,
-    BTreeMap,
-}
-
-impl Std {
-    /// The one of this name.
-    fn named(name: &str) -> Option<Self> {
-        Some(match name {
-            "String" => Self::String,
-            "Vec" => Self::Vec,
-            "VecDeque" => Self::VecDeque,
-            "Option" => Self::Option,
-            "Box" => Self::Box,
-            "HashMap" => Self::HashMap,
-            "BTreeMap" => Self::BTreeMap,
-            _ => return None,
-        })
-    }
-
-    /// Its path, as `core::any::type_name` writes it.
-    fn path(self) -> &'static str {
-        match self {
-            Self::String => "alloc::string::String",
-            Self::Vec => "alloc::vec::Vec",
-            Self::VecDeque => "alloc::collections::vec_deque::VecDeque",
-            Self::Option => "core::option::Option",
-            Self::Box => "alloc::boxed::Box",
-            Self::HashMap => "std::collections::hash::map::HashMap",
-            Self::BTreeMap => "alloc::collections::btree::map::BTreeMap",
-        }
-    }
-
-    /// The arguments it takes, without a default's.
-    fn arity(self) -> usize {
-        match self {
-            Self::String => 0,
-            Self::Vec | Self::VecDeque | Self::Option | Self::Box => 1,
-            Self::HashMap | Self::BTreeMap => 2,
-        }
-    }
-
-    /// Whether the prelude brings it by its name.
-    fn prelude(self) -> bool {
-        matches!(self, Self::String | Self::Vec | Self::Option | Self::Box)
-    }
 }
 
 /// The type each parameter in scope stands for.
@@ -240,37 +184,6 @@ fn of(
         }
         None => Ok(Ty::Def(def, args)),
     }
-}
-
-/// The type of the standard library's that `path`, written in module
-/// `module` of crate `krate`, names, if the reader knows it: by its name
-/// alone where the prelude brings it and nothing in the module binds the
-/// name, or by a path to it from `std`, `alloc`, or `core`, or a `use` of
-/// one.
-fn standard(
-    resolver: &mut Resolver<'_>,
-    krate: usize,
-    module: usize,
-    path: &syn::Path,
-) -> Option<Std> {
-    let name = crate::markers::imported_as(resolver, krate, module, path)?;
-    let std = Std::named(&name)?;
-    // `Vec<T>` alone, which `is_ident` is not, for its arguments.
-    let alone =
-        path.leading_colon.is_none() && path.segments.len() == 1 && path.segments[0].ident == name;
-    let prelude = std.prelude()
-        && alone
-        && crate::identity::binds(resolver, krate, module, &name) == Some(false);
-    (prelude
-        || crate::identity::names_of(
-            resolver,
-            krate,
-            module,
-            path,
-            &name,
-            &["std", "alloc", "core"],
-        ))
-    .then_some(std)
 }
 
 fn unnamed(ty: &syn::Type) -> String {

@@ -1470,3 +1470,116 @@ fn a_crate_offers_its_cell_policies_with_their_heads() {
     let read = gdl_extract::Offer::from_toml(&offer.to_toml()).expect("an entry");
     assert_eq!(&read, offer);
 }
+
+/// How the reader tells an item of a crate it does not read by the way a
+/// path is written, pinned case by case, since each check has its own
+/// rule:
+///
+/// - The export marker is `<crate>::export` or a `use` of exactly that,
+///   any of the `use`s that bind its name, however the path starts, and
+///   whatever the module binds: three names or more is no marker.
+/// - serde's traits and `Default` are told by a path from their crate's
+///   root that nothing in the module rebinds (`::` skips the check), or
+///   by the prelude's bare name: `Default<>` is not bare.
+/// - The standard library's types likewise, with their arguments, and
+///   only those the prelude brings by their bare names.
+/// - A derive is found by its last name, then told by its path.
+/// - `Streamed` is told by its definition, or, where its path leads
+///   into a crate the reader cannot read, by the name a `use` renames.
+#[test]
+fn the_reader_tells_another_crates_items_by_how_they_are_written() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-spelled-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"spelled\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        "use std::collections::VecDeque as Queue;\n\
+         use serde::{Deserialize as De, Serialize as Ser};\n\
+         use crate::Thing as mark;\n\
+         use gdl_message::export as mark;\n\
+         use gdl::Streamed as Input;\n\
+         pub struct Thing;\n\
+         #[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]\n\
+         pub struct Carry<T> { pub value: T }\n\
+         #[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]\n\
+         pub struct Hidden<T> { pub value: u8, #[serde(skip)] pub hidden: T }\n\
+         #[derive(Ser, De, gdl_message::Message)]\n\
+         pub struct RenamedDerive<T>(pub T);\n\
+         #[derive(gdl_message::Message)]\npub struct Words;\n\
+         pub struct EmptyArgs;\n\
+         impl Default<> for EmptyArgs { fn default() -> Self { EmptyArgs } }\n\
+         pub struct Rooted;\n\
+         impl ::core::default::Default for Rooted { fn default() -> Self { Rooted } }\n\
+         pub mod globbed {\n    use elsewhere::*;\n    pub struct Hand;\n    \
+         impl serde::Serialize for Hand {}\n    \
+         impl<'de> serde::Deserialize<'de> for Hand {}\n    \
+         pub struct Absolute;\n    \
+         impl ::serde::Serialize for Absolute {}\n    \
+         impl<'de> ::serde::Deserialize<'de> for Absolute {}\n    \
+         #[gdl_message::export]\n    pub type GlobVec = super::Carry<Vec<u8>>;\n    \
+         #[gdl_message::export]\n    pub type AbsoluteVec = super::Carry<::std::vec::Vec<u8>>;\n}\n\
+         pub mod shadow {\n    mod gdl {}\n    \
+         #[gdl::export]\n    pub type LocalGdl = super::Carry<u8>;\n}\n\
+         #[::gdl_message::export]\npub type AbsoluteMarker = Carry<u8>;\n\
+         #[gdl_message::macros::export]\npub type DeepMarker = Carry<u8>;\n\
+         #[mark]\npub type TwiceBound = Carry<u8>;\n\
+         #[gdl_message::export]\npub type AbsoluteSerde = Carry<globbed::Absolute>;\n\
+         #[gdl_message::export]\npub type GlobbedSerde = Carry<globbed::Hand>;\n\
+         #[gdl_message::export]\npub type EmptyDefault = Hidden<EmptyArgs>;\n\
+         #[gdl_message::export]\npub type RootedDefault = Hidden<Rooted>;\n\
+         #[gdl_message::export]\npub type Renamed = RenamedDerive<u8>;\n\
+         #[gdl_message::export]\npub type PreludeVec = Carry<Vec<u8>>;\n\
+         #[gdl_message::export]\npub type UsedQueue = Carry<Queue<u8>>;\n\
+         #[gdl_message::export]\npub type BareQueue = Carry<VecDeque<u8>>;\n\
+         #[derive(gdl::Node)]\npub struct Take;\n\
+         impl gdl::Sink for Take { type Req = Input<Words, Words>; type Item = Words; }\n",
+    )
+    .expect("source");
+    let workspace =
+        Workspace::load(&dir.join("Cargo.toml"), &Cargo::trusted()).expect("cargo metadata");
+    let extraction = workspace.extract("spelled").expect("the package");
+    clean(&extraction);
+    let offer = &extraction.offer;
+    let exports: Vec<(&str, bool)> = offer
+        .exports
+        .iter()
+        .map(|e| (e.path.as_str(), e.wire))
+        .collect();
+    assert_eq!(
+        exports,
+        [
+            ("spelled::AbsoluteMarker", true),
+            ("spelled::AbsoluteSerde", true),
+            ("spelled::globbed::AbsoluteVec", true),
+            ("spelled::EmptyDefault", false),
+            ("spelled::GlobbedSerde", false),
+            ("spelled::shadow::LocalGdl", true),
+            ("spelled::PreludeVec", true),
+            ("spelled::Renamed", false),
+            ("spelled::RootedDefault", true),
+            ("spelled::TwiceBound", true),
+            ("spelled::UsedQueue", true),
+        ]
+    );
+    let skipped: Vec<&str> = offer.skipped.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(skipped, ["BareQueue", "GlobVec"]);
+    assert_eq!(
+        node_lines(&extraction),
+        ["sink Take spelled::Take: Req=spelled::Words, Item=spelled::Words"]
+    );
+    let take = &offer.nodes[0];
+    let items: Vec<Option<&str>> = take
+        .ports
+        .iter()
+        .map(|p| p.item.as_ref().map(|o| o.path.as_str()))
+        .collect();
+    assert_eq!(items, [Some("spelled::Words"), None]);
+}

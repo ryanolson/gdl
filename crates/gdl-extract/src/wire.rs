@@ -9,10 +9,9 @@ use crate::attrs::{
 };
 use syn::ext::IdentExt as _;
 
-use crate::canon::{DEPTH, Env, Std, Ty, canonical};
-use crate::identity::{Known, derives_from, known_trait};
-use crate::impls::{ImplOf, Impls, TraitName, Traits, matching};
-use crate::markers::derives;
+use crate::canon::{DEPTH, Env, Ty, canonical};
+use crate::external::{Item, Known, Std, derives, derives_from, known_trait};
+use crate::impls::{ImplOf, Impls, Traits, matching};
 use crate::resolve::{Def, Resolver};
 
 /// Whether `ty` is a wire type: it has serde's traits in both directions,
@@ -109,8 +108,8 @@ pub(crate) fn plain_wire(resolver: &mut Resolver<'_>, impls: &mut Impls, def: De
         return true;
     }
     for found in impls.of(resolver, Traits::SerdeNamed, def) {
-        serialize |= found.name == TraitName::Serialize;
-        deserialize |= found.name == TraitName::Deserialize;
+        serialize |= found.item == Item::Trait(Known::Serialize);
+        deserialize |= found.item == Item::Trait(Known::Deserialize);
     }
     serialize && deserialize
 }
@@ -130,8 +129,8 @@ fn needs(
     let (krate, def) = (*krate, *def);
     let borrows = resolver.crates[krate].modules[*module].types[*index].borrows;
     let derived = match side {
-        Side::Serialize => derives_from(resolver, def, "Serialize"),
-        Side::Deserialize => derives_from(resolver, def, "Deserialize") && !borrows,
+        Side::Serialize => derives_from(resolver, def, Known::Serialize),
+        Side::Deserialize => derives_from(resolver, def, Known::Deserialize) && !borrows,
     };
     let definition = &resolver.crates[krate].modules[*module].types[*index];
     if derived {
@@ -190,12 +189,12 @@ fn needs(
         }));
         return Some(needs);
     }
-    let name = match side {
-        Side::Serialize => TraitName::Serialize,
-        Side::Deserialize => TraitName::Deserialize,
+    let item = match side {
+        Side::Serialize => Item::Trait(Known::Serialize),
+        Side::Deserialize => Item::Trait(Known::Deserialize),
     };
     let found: Vec<ImplOf> = impls.of(resolver, Traits::Serde, def).to_vec();
-    for of in found.into_iter().filter(|of| of.name == name) {
+    for of in found.into_iter().filter(|of| of.item == item) {
         if let Some(env) = matching(resolver, krate, of, ty) {
             let written = &resolver.crates[krate].modules[of.module].impls[of.index];
             if side == Side::Deserialize && !every_lifetime(written) {
@@ -360,7 +359,7 @@ fn defaults_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: u
     let Def::Type(c, m, i) = def else {
         unreachable!("a type");
     };
-    if derives_from(resolver, def, "Default") {
+    if derives_from(resolver, def, Known::Default) {
         let definition = &resolver.crates[c].modules[m].types[i];
         // Only a struct has fields of its own; `derive(Default)` refuses a
         // union, and an alias is followed before this.

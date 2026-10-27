@@ -7,11 +7,8 @@ use std::rc::Rc;
 
 use syn::ext::IdentExt as _;
 
-use gdl_model::Role;
-
 use crate::canon::{DEPTH, Env, Ty, canonical, unify};
-use crate::identity::{Known, known_trait};
-use crate::markers::imported_as;
+use crate::external::{Item, Known, known_trait, named};
 use crate::reads::Counted;
 use crate::resolve::{Def, Resolver, segments};
 
@@ -51,34 +48,28 @@ impl Impls {
 fn index(resolver: &mut Resolver<'_>, krate: usize, traits: Traits) -> ByType {
     let mut by_type = ByType::default();
     for module in 0..resolver.crates[krate].modules.len() {
-        let found: Vec<(usize, TraitName, syn::Path, syn::Type)> = resolver.crates[krate].modules
+        let found: Vec<(usize, Item, syn::Path, syn::Type)> = resolver.crates[krate].modules
             [module]
             .impls
             .iter()
             .enumerate()
             .filter_map(|(index, i)| {
                 let path = i.trait_path.as_ref()?;
-                let name = imported_as(resolver, krate, module, path)?;
-                Some((index, traits.name(&name)?, path.clone(), i.self_ty.clone()))
+                let item = named(resolver, krate, module, path)?;
+                traits
+                    .hold(item)
+                    .then(|| (index, item, path.clone(), i.self_ty.clone()))
             })
             .collect();
-        for (index, name, path, self_ty) in found {
+        for (index, item, path, self_ty) in found {
             // A trait of serde's name, or `Default`, that the reader cannot
             // follow to serde, or to the standard library, is another: the
             // reader judges only theirs.
-            let ours = match name {
+            let ours = match item {
                 // A message that is not generic is judged by name.
                 _ if traits == Traits::SerdeNamed => true,
-                TraitName::Serialize => {
-                    known_trait(resolver, krate, module, &path) == Some(Known::Serialize)
-                }
-                TraitName::Deserialize => {
-                    known_trait(resolver, krate, module, &path) == Some(Known::Deserialize)
-                }
-                TraitName::Default => {
-                    known_trait(resolver, krate, module, &path) == Some(Known::Default)
-                }
-                TraitName::Role(_) => true,
+                Item::Trait(known) => known_trait(resolver, krate, module, &path) == Some(known),
+                _ => true,
             };
             if !ours {
                 continue;
@@ -102,7 +93,7 @@ fn index(resolver: &mut Resolver<'_>, krate: usize, traits: Traits) -> ByType {
                 continue;
             };
             by_type.entry(target).or_default().push(ImplOf {
-                name,
+                item,
                 module,
                 index,
             });
@@ -234,47 +225,26 @@ pub(crate) enum Traits {
 }
 
 impl Traits {
-    /// The trait of this kind with this name, if there is one.
-    fn name(self, name: &str) -> Option<TraitName> {
-        match (self, name) {
-            (Self::Serde | Self::SerdeNamed, "Serialize") => Some(TraitName::Serialize),
-            (Self::Serde | Self::SerdeNamed, "Deserialize") => Some(TraitName::Deserialize),
-            (Self::Serde | Self::SerdeNamed, _) => None,
-            (Self::Role, name) => role_of(name).map(TraitName::Role),
-            (Self::Default, "Default") => Some(TraitName::Default),
-            (Self::Default, _) => None,
-        }
+    /// Whether an index of this kind holds impls of `item`.
+    fn hold(self, item: Item) -> bool {
+        matches!(
+            (self, item),
+            (
+                Self::Serde | Self::SerdeNamed,
+                Item::Trait(Known::Serialize | Known::Deserialize)
+            ) | (Self::Role, Item::Role(_))
+                | (Self::Default, Item::Trait(Known::Default))
+        )
     }
-}
-
-/// A trait an index holds.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TraitName {
-    Serialize,
-    Deserialize,
-    Role(Role),
-    Default,
 }
 
 /// An impl of a trait for a type: the trait, and the impl's module and its
 /// index among the module's impls.
 #[derive(Clone, Copy)]
 pub(crate) struct ImplOf {
-    pub(crate) name: TraitName,
+    pub(crate) item: Item,
     pub(crate) module: usize,
     pub(crate) index: usize,
-}
-
-/// The role whose trait has this name.
-fn role_of(name: &str) -> Option<Role> {
-    match name {
-        "Frontend" | "Service" => Some(Role::Source),
-        "Sink" => Some(Role::Sink),
-        "Forward" => Some(Role::Forward),
-        "Backward" => Some(Role::Backward),
-        "Operator" => Some(Role::Operator),
-        _ => None,
-    }
 }
 
 /// The parameters of impl `of`, in crate `krate`, bound so that its self

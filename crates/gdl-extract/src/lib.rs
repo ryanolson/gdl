@@ -34,7 +34,7 @@ mod attrs;
 mod canon;
 mod catalog;
 mod cfg;
-mod identity;
+mod external;
 mod impls;
 mod markers;
 mod metadata;

@@ -6,19 +6,19 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use quote::ToTokens as _;
+use syn::Meta;
 use syn::ext::IdentExt as _;
-use syn::punctuated::Punctuated;
-use syn::{Meta, Token};
 
 use gdl_model::Role;
 
 use crate::canon::{Env, Ty, canonical};
 use crate::cfg::Settings;
-use crate::impls::{ImplOf, Impls, TraitName, Traits, matching};
+use crate::external::{Item, derives, gdls, marks, named};
+use crate::impls::{ImplOf, Impls, Traits, matching};
 use crate::metadata::Graph;
 use crate::reads::Counted;
 use crate::resolve::{Def, Resolver, segments};
-use crate::tree::{Location, TypeDef, UsePath, Vis};
+use crate::tree::{Location, UsePath, Vis};
 use crate::wire::{plain_wire, ty_wire};
 use crate::{
     Argument, ExportEntry, Extraction, MessageEntry, NodeEntry, Offer, Origin, PortEntry, Skipped,
@@ -79,16 +79,9 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
             .uses
             .iter()
             .filter(|u| {
-                *decided.entry(Rc::as_ptr(&u.attrs)).or_insert_with(|| {
-                    marked(
-                        &u.attrs,
-                        "export",
-                        &["gdl_message", "gdl"],
-                        &resolver,
-                        krate,
-                        module,
-                    )
-                })
+                *decided
+                    .entry(Rc::as_ptr(&u.attrs))
+                    .or_insert_with(|| exported(&u.attrs, &resolver, krate, module))
             })
             .map(|u| {
                 let public = u.vis == Vis::Public && reachable;
@@ -151,16 +144,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
         // Aliases marked `#[export]`: an instantiation, under the alias's name.
         for index in 0..resolver.crates[krate].modules[module].types.len() {
             let ty = &resolver.crates[krate].modules[module].types[index];
-            if ty.alias.is_none()
-                || !marked(
-                    &ty.attrs,
-                    "export",
-                    &["gdl_message", "gdl"],
-                    &resolver,
-                    krate,
-                    module,
-                )
-            {
+            if ty.alias.is_none() || !exported(&ty.attrs, &resolver, krate, module) {
                 continue;
             }
             match alias(&mut resolver, &mut impls, krate, module, index, reachable) {
@@ -261,52 +245,12 @@ pub(crate) fn public_path(
     names.join("::")
 }
 
-/// Whether a type derives a trait of this last name. The derive is matched
-/// by name, not resolved: a derive macro's path leads into a proc-macro
-/// crate, which the reader does not follow.
-pub(crate) fn derives(ty: &TypeDef, name: &str) -> bool {
-    ty.attrs.iter().any(|meta| {
-        let Meta::List(list) = meta else {
-            return false;
-        };
-        list.path.is_ident("derive")
-            && list
-                .parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated)
-                .is_ok_and(|paths| {
-                    paths
-                        .iter()
-                        .any(|p| p.segments.last().is_some_and(|s| s.ident == name))
-                })
-    })
-}
-
-/// Whether `attrs` hold the marker `name`: written `<krate>::<name>` for
-/// one of `krates`, or a single name that a `use` of the module binds to
-/// `<krate>::<name>`, under that name or another.
-fn marked(
-    attrs: &[Meta],
-    name: &str,
-    krates: &[&str],
-    resolver: &Resolver<'_>,
-    krate: usize,
-    module: usize,
-) -> bool {
-    attrs.iter().any(|meta| {
-        let (path, _) = segments(meta.path());
-        match path.as_slice() {
-            [k, n] => n == name && krates.contains(&k.as_str()),
-            [n] => {
-                let m = &resolver.crates[krate].modules[module];
-                m.uses_named(n).iter().any(|&i| {
-                    matches!(
-                        m.uses[i].path.segments().as_slice(),
-                        [k, last] if krates.contains(k) && *last == name
-                    )
-                })
-            }
-            _ => false,
-        }
-    })
+/// Whether `attrs`, written in module `module` of crate `krate`, hold the
+/// export marker ([`marks`]).
+fn exported(attrs: &[Meta], resolver: &Resolver<'_>, krate: usize, module: usize) -> bool {
+    attrs
+        .iter()
+        .any(|meta| marks(resolver, krate, module, meta.path(), Item::Export))
 }
 
 /// A node's name, where its name is written, and the type the crate root
@@ -383,8 +327,8 @@ fn node(
     let candidates: Vec<(Role, ImplOf)> = impls
         .of(resolver, Traits::Role, def)
         .iter()
-        .filter_map(|found| match found.name {
-            TraitName::Role(role) => Some((role, *found)),
+        .filter_map(|found| match found.item {
+            Item::Role(role) => Some((role, *found)),
             _ => None,
         })
         .collect();
@@ -633,7 +577,7 @@ fn streamed<'t>(
     let syn::Type::Path(path) = ty else {
         return None;
     };
-    if imported_as(resolver, krate, module, &path.path)? != "Streamed" {
+    if named(resolver, krate, module, &path.path)? != Item::Streamed {
         return None;
     }
     let last = path.path.segments.last()?;
@@ -656,17 +600,11 @@ fn streamed<'t>(
 
 /// A streamed request's head and item, when `ty` is gdl's `Streamed`.
 fn streamed_ty(resolver: &Resolver<'_>, ty: &Ty) -> Option<(Ty, Ty)> {
-    let Ty::Def(Def::Type(c, m, i), args) = ty else {
+    let Ty::Def(def @ Def::Type(..), args) = ty else {
         return None;
     };
-    let package = &resolver.graph.packages[resolver.crates[*c].package];
     match args.as_slice() {
-        [head, item]
-            if package.name == "gdl"
-                && resolver.crates[*c].modules[*m].types[*i].name == "Streamed" =>
-        {
-            Some((head.clone(), item.clone()))
-        }
+        [head, item] if gdls(resolver, *def, Item::Streamed) => Some((head.clone(), item.clone())),
         _ => None,
     }
 }
@@ -839,31 +777,4 @@ fn alias(
         encoding: message.encoding,
         public: reachable,
     }))
-}
-
-/// The name a trait or type path ends in, through a rename: `Stage` after
-/// `use gdl::Forward as Stage` is `Forward`. It follows one `use` of a
-/// single-name path in its module, so a rename does not hide a name. Role
-/// traits, a port's `Streamed` whose path cannot be resolved, and the
-/// serde traits of a message that is not generic are matched by this name
-/// alone; serde's traits, `Default`, and `Sized` elsewhere start from it
-/// and are then resolved to their identity (`identity::known_trait`).
-pub(crate) fn imported_as(
-    resolver: &Resolver<'_>,
-    krate: usize,
-    module: usize,
-    path: &syn::Path,
-) -> Option<String> {
-    let (segments, absolute) = segments(path);
-    let last = segments.last()?.clone();
-    if segments.len() > 1 || absolute {
-        return Some(last);
-    }
-    let m = &resolver.crates[krate].modules[module];
-    let renamed = m
-        .uses_named(&last)
-        .first()
-        .and_then(|&i| m.uses[i].path.last())
-        .map(str::to_string);
-    Some(renamed.unwrap_or(last))
 }

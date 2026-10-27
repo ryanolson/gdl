@@ -7,7 +7,7 @@ use quote::ToTokens as _;
 use syn::Meta;
 use syn::ext::IdentExt as _;
 
-use crate::identity::Known;
+use crate::external::Known;
 use crate::tree::TypeDef;
 use crate::wire::need_of;
 

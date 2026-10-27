@@ -3,7 +3,8 @@
 
 use crate::canon::{Env, Ty, canonical};
 
-use crate::markers::{derives, offered};
+use crate::external::{Item, derives, gdls};
+use crate::markers::offered;
 use crate::metadata::Graph;
 use crate::resolve::{Def, Resolver, segments};
 use crate::{PolicyEntry, PolicyHead, Skipped};
@@ -35,9 +36,9 @@ pub(crate) fn policies(
             .collect();
         for (index, path) in paths {
             resolver.admit = gate.take();
-            let gdls = gdls(resolver, krate, module, &path);
+            let is_policy = is_cell_policy(resolver, krate, module, &path);
             gate = resolver.admit.take();
-            if !gdls {
+            if !is_policy {
                 continue;
             }
             match policy(resolver, krate, module, index) {
@@ -80,13 +81,17 @@ fn reaching_gdl(graph: &Graph) -> Vec<bool> {
 /// A trait of that name that the crate declares, or one that a local
 /// module named `gdl` holds, is not gdl's, and its impls would not
 /// register.
-fn gdls(resolver: &mut Resolver<'_>, krate: usize, module: usize, path: &syn::Path) -> bool {
+fn is_cell_policy(
+    resolver: &mut Resolver<'_>,
+    krate: usize,
+    module: usize,
+    path: &syn::Path,
+) -> bool {
     let (names, absolute) = segments(path);
-    let Some(Def::Trait(c, m, i)) = resolver.resolve(krate, module, &names, absolute) else {
+    let Some(def @ Def::Trait(..)) = resolver.resolve(krate, module, &names, absolute) else {
         return false;
     };
-    let package = &resolver.graph.packages[resolver.crates[c].package];
-    package.name == "gdl" && resolver.crates[c].modules[m].traits[i].name == "CellPolicy"
+    gdls(resolver, def, Item::CellPolicy)
 }
 
 /// The policy impl `index` of module `module` is for, or why no segment
