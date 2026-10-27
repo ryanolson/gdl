@@ -177,7 +177,7 @@ fn of(
             definition.params.len()
         ));
     }
-    match definition.alias.clone() {
+    match definition.kind.alias().cloned() {
         Some(target) => {
             let env: Env = definition.params.iter().cloned().zip(args).collect();
             of(resolver, c, m, &target, &env, depth + 1)

@@ -151,7 +151,7 @@ fn head(resolver: &mut Resolver<'_>, krate: usize, module: usize, path: &syn::Pa
         if alias.other_params || alias.params.len() != written.len() {
             return None;
         }
-        let Some(aliased) = alias.alias.clone() else {
+        let Some(aliased) = alias.kind.alias().cloned() else {
             return Some(def);
         };
         let syn::Type::Path(aliased @ syn::TypePath { qself: None, .. }) = aliased else {

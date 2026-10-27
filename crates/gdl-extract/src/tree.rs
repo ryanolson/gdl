@@ -61,7 +61,7 @@ pub(crate) struct TraitDef {
 /// A struct, an enum, a union, or a type alias.
 #[derive(Clone)]
 pub(crate) struct TypeDef {
-    pub(crate) fields: Option<syn::Fields>,
+    pub(crate) kind: Kind,
     /// Every field of a generic struct, or of a generic enum's variants,
     /// with `cfg` applied: what serde bounds its parameters by. Empty for a
     /// type without type parameters, which has none to bound.
@@ -75,8 +75,6 @@ pub(crate) struct TypeDef {
     pub(crate) params: Vec<String>,
     /// Whether it has a lifetime or const parameter.
     pub(crate) other_params: bool,
-    /// An alias's type; none for a struct, an enum, or a union.
-    pub(crate) alias: Option<syn::Type>,
     pub(crate) name: String,
     pub(crate) vis: Vis,
     pub(crate) attrs: Vec<Meta>,
@@ -87,6 +85,30 @@ pub(crate) struct TypeDef {
     /// `DeserializeOwned`, and the type has no codec.
     pub(crate) borrows: bool,
     pub(crate) at: Location,
+}
+
+/// Which of the four a [`TypeDef`] is.
+// Unboxed: it is smaller than the two options it replaced, and a box would
+// cost an allocation per alias.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
+pub(crate) enum Kind {
+    /// A struct, with its fields.
+    Struct(syn::Fields),
+    Enum,
+    Union,
+    /// A type alias, with the type it names.
+    Alias(syn::Type),
+}
+
+impl Kind {
+    /// The type an alias names; none for a struct, an enum, or a union.
+    pub(crate) fn alias(&self) -> Option<&syn::Type> {
+        match self {
+            Self::Alias(target) => Some(target),
+            Self::Struct(_) | Self::Enum | Self::Union => None,
+        }
+    }
 }
 
 /// A field of a struct, or of an enum's variant.
@@ -584,12 +606,11 @@ impl Reader<'_> {
                     let generic = !params.is_empty();
                     let borrows = self.fields(&s.fields, None, generic.then_some(&mut members));
                     krate.modules[module].add_type(TypeDef {
-                        fields: Some(s.fields.clone()),
+                        kind: Kind::Struct(s.fields.clone()),
                         members,
                         variants: Vec::new(),
                         params,
                         other_params: other_params(&s.generics),
-                        alias: None,
                         name: s.ident.unraw().to_string(),
                         vis: Vis::of(&s.vis),
                         serde: Serde::read(&attrs, Place::Container),
@@ -618,12 +639,11 @@ impl Reader<'_> {
                         }
                     }
                     krate.modules[module].add_type(TypeDef {
-                        fields: None,
+                        kind: Kind::Enum,
                         members,
                         variants,
                         params,
                         other_params: other_params(&e.generics),
-                        alias: None,
                         name: e.ident.unraw().to_string(),
                         vis: Vis::of(&e.vis),
                         serde: Serde::read(&attrs, Place::Container),
@@ -633,12 +653,11 @@ impl Reader<'_> {
                     })
                 }
                 Item::Union(u) => krate.modules[module].add_type(TypeDef {
-                    fields: None,
+                    kind: Kind::Union,
                     members: Vec::new(),
                     variants: Vec::new(),
                     params: params(&u.generics),
                     other_params: other_params(&u.generics),
-                    alias: None,
                     name: u.ident.unraw().to_string(),
                     vis: Vis::of(&u.vis),
                     serde: Serde::read(&attrs, Place::Container),
@@ -647,12 +666,11 @@ impl Reader<'_> {
                     at: at(u.ident.span()),
                 }),
                 Item::Type(t) => krate.modules[module].add_type(TypeDef {
-                    fields: None,
+                    kind: Kind::Alias((*t.ty).clone()),
                     members: Vec::new(),
                     variants: Vec::new(),
                     params: params(&t.generics),
                     other_params: other_params(&t.generics),
-                    alias: Some((*t.ty).clone()),
                     name: t.ident.unraw().to_string(),
                     vis: Vis::of(&t.vis),
                     serde: Serde::read(&attrs, Place::Container),

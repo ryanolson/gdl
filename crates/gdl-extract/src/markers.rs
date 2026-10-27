@@ -18,7 +18,7 @@ use crate::impls::{ImplOf, Impls, Traits, matching};
 use crate::metadata::Graph;
 use crate::reads::Counted;
 use crate::resolve::{Def, Resolver, segments};
-use crate::tree::{Location, UsePath, Vis};
+use crate::tree::{Kind, Location, UsePath, Vis};
 use crate::wire::{plain_wire, ty_wire};
 use crate::{
     Argument, ExportEntry, Extraction, MessageEntry, NodeEntry, Offer, Origin, PortEntry, Skipped,
@@ -144,7 +144,7 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
         // Aliases marked `#[export]`: an instantiation, under the alias's name.
         for index in 0..resolver.crates[krate].modules[module].types.len() {
             let ty = &resolver.crates[krate].modules[module].types[index];
-            if ty.alias.is_none() || !exported(&ty.attrs, &resolver, krate, module) {
+            if ty.kind.alias().is_none() || !exported(&ty.attrs, &resolver, krate, module) {
                 continue;
             }
             match alias(&mut resolver, &mut impls, krate, module, index, reachable) {
@@ -573,7 +573,7 @@ fn derived_struct(
     let definition = &resolver.crates[c].modules[m].types[i];
     // An alias carries no derives, so the derive check below would say
     // that a type which derives the trait does not.
-    if definition.alias.is_some() {
+    if definition.kind.alias().is_some() {
         return Err(format!(
             "{at}: {what} `{}` is a type alias, which the reader does not follow: name the type it aliases",
             ty.to_token_stream()
@@ -582,11 +582,10 @@ fn derived_struct(
     if !derives(definition, derive) {
         return Err(format!("{at}: {what} must derive {derive}"));
     }
-    let fields = definition
-        .fields
-        .clone()
-        .ok_or_else(|| format!("{at}: {what} must be a struct"))?;
-    Ok((def, fields))
+    let Kind::Struct(fields) = &definition.kind else {
+        return Err(format!("{at}: {what} must be a struct"));
+    };
+    Ok((def, fields.clone()))
 }
 
 /// A streamed request's head and item: `Streamed<H, T>`, in module
@@ -725,7 +724,7 @@ fn ty_of(resolver: &mut Resolver<'_>, def: Def) -> Result<Option<Ty>, String> {
     if !definition.params.is_empty() || definition.other_params {
         return Ok(None);
     }
-    match definition.alias.clone() {
+    match definition.kind.alias().cloned() {
         Some(target) => canonical(resolver, c, m, &target, &Env::new()).map(Some),
         None => Ok(Some(Ty::Def(def, Vec::new()))),
     }
@@ -765,7 +764,7 @@ fn names_a_node(
         if derives(ty, "Node") {
             return true;
         }
-        let Some(next) = ty.alias.clone() else {
+        let Some(next) = ty.kind.alias().cloned() else {
             return false;
         };
         (krate, module, target) = (c, m, next);
@@ -796,7 +795,7 @@ fn alias(
             "{at}: `{name}`: an export offers a public path: write `pub type`"
         ));
     }
-    let target = alias.alias.clone().expect("an alias names a type");
+    let target = alias.kind.alias().cloned().expect("an alias names a type");
     let ty = match canonical(resolver, krate, module, &target, &Env::new()) {
         Ok(ty) => ty,
         Err(problem) => {

@@ -11,6 +11,7 @@ use crate::canon::{DEPTH, Env, Ty, canonical};
 use crate::external::{Item, Known, Std, derives, derives_from, known_trait};
 use crate::impls::{ImplOf, Impls, Traits, matching};
 use crate::resolve::{Def, Resolver};
+use crate::tree::Kind;
 
 /// Whether `ty` is a wire type: it has serde's traits in both directions,
 /// and each type a direction bounds is a wire type, or `Default`, as that
@@ -361,8 +362,8 @@ fn defaults_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: u
         let definition = &resolver.crates[c].modules[m].types[i];
         // Only a struct has fields of its own; `derive(Default)` refuses a
         // union, and an alias is followed before this.
-        let enumeration = definition.fields.is_none();
-        return enumeration
+        let structure = matches!(definition.kind, Kind::Struct(_));
+        return !structure
             || args
                 .iter()
                 .all(|arg| defaults_at(resolver, impls, arg, depth + 1));
@@ -420,7 +421,12 @@ fn sized(resolver: &mut Resolver<'_>, ty: &Ty, depth: usize) -> bool {
     };
     let (c, m, i) = (*c, *m, *i);
     let definition = &resolver.crates[c].modules[m].types[i];
-    let Some(last) = definition.fields.as_ref().and_then(|f| f.iter().last()) else {
+    let last = match &definition.kind {
+        Kind::Struct(fields) => fields.iter().last(),
+        // An alias is followed before this.
+        Kind::Enum | Kind::Union | Kind::Alias(_) => None,
+    };
+    let Some(last) = last else {
         // An enum, a union, or a struct without fields.
         return true;
     };
