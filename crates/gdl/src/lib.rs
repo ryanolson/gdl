@@ -171,7 +171,7 @@ pub mod __private {
         label = "this crossing carries `{Self}`",
         note = "a message that crosses between segments must implement `serde::Serialize` and `serde::de::DeserializeOwned`: the source reader took it for one; check its serde impls with `cargo gdl extract --verify`, or place both ends of the crossing in one segment"
     )]
-    pub trait Crossing {}
+    pub trait Crossing: seal::Wire {}
 
     // Not recommended, so that a type that fails it is reported as not a
     // `Crossing`, with the message above, once, rather than as each serde
@@ -192,11 +192,27 @@ pub mod __private {
         label = "this hop's response carries `{Self}`",
         note = "the hop's ends share this segment, but its forward path leaves the segment and comes back, so its response returns through an anchor, which needs `serde::Serialize` and `serde::de::DeserializeOwned`: the source reader took it for one; check its serde impls with `cargo gdl extract --verify`, or place the whole hop in one segment"
     )]
-    pub trait Anchored {}
+    pub trait Anchored: seal::Wire {}
 
     // Not recommended, as for `Crossing`.
     #[diagnostic::do_not_recommend]
     impl<T: serde::Serialize + serde::de::DeserializeOwned> Anchored for T {}
+
+    /// The seal on [`Crossing`] and [`Anchored`]: a module that no other
+    /// crate can name, so that only their blanket impls implement them. A
+    /// hand impl for a type that is not a wire type would pass the check
+    /// that a segment's build makes, and fail at run time instead.
+    mod seal {
+        #[diagnostic::on_unimplemented(
+            message = "`{Self}` implements a crossing check by hand",
+            note = "`Crossing` and `Anchored` hold for each type that implements `serde::Serialize` and `serde::de::DeserializeOwned`, and for no other: implement those instead"
+        )]
+        pub trait Wire {}
+
+        // Not recommended, as for `Crossing`: one error per hand impl.
+        #[diagnostic::do_not_recommend]
+        impl<T: serde::Serialize + serde::de::DeserializeOwned> Wire for T {}
+    }
 
     /// Compiles only for an [`Anchored`]: what a segment's assertion calls.
     pub const fn anchors<T: Anchored>() {}

@@ -82,4 +82,4 @@ An entry written before messages carried an encoding does not load. The load err
 
 `--verify` runs third-party build scripts, so it is for a crate's own CI. The composer never runs it. An alias that the reader leaves out on purpose is no difference. `--verify` prints it on stderr with the reason. It compares an instantiation by its path, not by the packages of its arguments, which a build cannot name.
 
-Three checks stand behind the reader even without `--verify`. `derive(Node)` checks its type when the node crate compiles. Each segment build type-checks every binding. Each segment asserts that what crosses its cuts is a wire type. A wrong read fails a build, and never runs.
+Three checks stand behind the reader even without `--verify`. `derive(Node)` checks its type when the node crate compiles. Each segment build type-checks every binding. Each segment asserts that what crosses its cuts is a wire type. The traits that assertion uses are sealed: a crate cannot implement them by hand for a type that is not a wire type. A wrong read fails a build, and never runs.
