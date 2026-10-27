@@ -9,7 +9,8 @@ pub enum Encoding {
     /// MessagePack maps with field names, including in nested structs.
     #[default]
     Msgpack,
-    /// Positional MessagePack arrays. Fields must not be conditionally omitted.
+    /// Positional MessagePack arrays. No field may be omitted in one serde
+    /// direction only; `derive(Message)` refuses such a field.
     MsgpackArray,
     /// JSON, using the message's serde representation.
     Json,

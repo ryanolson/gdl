@@ -26,12 +26,53 @@ struct JsonMessage;
 #[gdl(codec = "msgpack_array")]
 struct ArrayMessage;
 
+/// A field both serde directions skip keeps every position, so
+/// `msgpack_array` takes it; the refused omissions are in
+/// `tests/ui/message-positional-omission.rs`.
+#[derive(Serialize, Deserialize, gdl_message::Message)]
+#[gdl(codec = "msgpack_array")]
+#[allow(dead_code)]
+struct ArraySkips {
+    id: u32,
+    #[serde(skip)]
+    cache: Option<u32>,
+    #[serde(skip_serializing, skip_deserializing)]
+    scratch: Option<u32>,
+    #[cfg_attr(any(), serde(skip_serializing_if = "Option::is_none"))]
+    hint: Option<u32>,
+}
+
+/// A named codec writes each field's name, so an omitted field shifts
+/// nothing.
+#[derive(Serialize, Deserialize, gdl_message::Message)]
+#[gdl(codec = "msgpack")]
+#[allow(dead_code)]
+struct NamedOmits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hint: Option<u32>,
+    #[serde(skip_serializing)]
+    secret: u32,
+}
+
+#[derive(Serialize, Deserialize, gdl_message::Message)]
+#[gdl(codec = "json")]
+#[allow(dead_code)]
+enum JsonOmits {
+    Token {
+        #[serde(skip_deserializing)]
+        logprob: f32,
+    },
+}
+
 #[test]
 fn a_messages_encoding_is_registered_without_requiring_serde() {
     let catalogue = Catalogue::linked();
     assert_eq!(JsonMessage::ENCODING, gdl_model::Encoding::Json);
     assert_eq!(ArrayMessage::ENCODING, gdl_model::Encoding::MsgpackArray);
     assert_eq!(Prompt::ENCODING, gdl_model::Encoding::Msgpack);
+    assert_eq!(ArraySkips::ENCODING, gdl_model::Encoding::MsgpackArray);
+    assert_eq!(NamedOmits::ENCODING, gdl_model::Encoding::Msgpack);
+    assert_eq!(JsonOmits::ENCODING, gdl_model::Encoding::Json);
     for (name, encoding) in [
         ("JsonMessage", JsonMessage::ENCODING),
         ("ArrayMessage", ArrayMessage::ENCODING),

@@ -707,3 +707,49 @@ fn alias_head_releases_repeated_targets() {
         "reusing an alias target multiplies peak memory by {ratio:.2}: once {once:?}; repeated {repeated:?}"
     );
 }
+
+#[test]
+fn ports_do_not_rebuild_their_messages_positional_refusal() {
+    let shape = |n: usize| {
+        let field = "x".repeat(256 * n);
+        let mut source = format!(
+            "#[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]\n\
+             #[gdl(codec = \"msgpack_array\")]\n\
+             pub struct Payload {{ #[serde(skip_serializing)] pub {field}: u32 }}\n"
+        );
+        for i in 0..n {
+            source.push_str(&format!(
+                "#[derive(gdl::Node)]\npub struct N{i};\n\
+                 impl gdl::Forward for N{i} {{ type In = Payload; type Out = Payload; }}\n"
+            ));
+        }
+        vec![("lib.rs".into(), source)]
+    };
+    let fixed = |n| {
+        shape(n)
+            .into_iter()
+            .map(|(path, source)| (path, source.replace("#[serde(skip_serializing)]", "")))
+            .collect::<Vec<_>>()
+    };
+    let (fixed_small, found) = extract_beside("fixed-small", &fixed(100), None);
+    assert!(found.problems.is_empty(), "{:?}", found.problems);
+    assert_eq!(found.offer.nodes.len(), 100);
+    let (fixed_large, found) = extract_beside("fixed-large", &fixed(200), None);
+    assert!(found.problems.is_empty(), "{:?}", found.problems);
+    assert_eq!(found.offer.nodes.len(), 200);
+    let fixed_ratio = fixed_large.allocated as f64 / fixed_small.allocated as f64;
+    eprintln!("fixed layout: n {fixed_small:?}; 2n {fixed_large:?}; allocated {fixed_ratio:.2}x");
+    assert!(fixed_ratio < 3.0, "the control grows by {fixed_ratio:.2}");
+    let (small, found) = extract_beside("refusal-small", &shape(100), None);
+    assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+    assert_eq!(found.offer.nodes.len(), 100);
+    let (large, found) = extract_beside("refusal-large", &shape(200), None);
+    assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+    assert_eq!(found.offer.nodes.len(), 200);
+    let ratio = large.allocated as f64 / small.allocated as f64;
+    eprintln!("positional refusal: n {small:?}; 2n {large:?}; allocated {ratio:.2}x");
+    assert!(
+        ratio < 3.0,
+        "doubling ports and the refused field's name multiplies allocated bytes by {ratio:.2}"
+    );
+}

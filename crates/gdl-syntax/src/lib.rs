@@ -15,7 +15,7 @@ mod parse;
 
 pub use config::{NodeTypes, graph_fields, node_types};
 pub use depth::MAX_DEPTH;
-pub use encoding::message_encoding;
+pub use encoding::{message_encoding, positional_omission, positional_refusal};
 pub use endpoint::{Endpoint, endpoints};
 pub use gdl_model::Role;
 pub use manifest::spelled;

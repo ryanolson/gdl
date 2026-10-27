@@ -135,9 +135,10 @@ These are the limits a user can run into today. Each entry says what happens, wh
 
 ## Graphs and types
 
-### Positional MessagePack cannot preserve conditional field omissions
-- **What:** a message with `#[gdl(codec = "msgpack_array")]` can fail to decode, or put values in the wrong fields, when serde omits a field.
-- **Why:** an array keeps values in order but does not say which field was omitted. The wire probe checks serde trait bounds, not the behavior of each value. See [Messages and encodings](../concepts/messages.md).
+### Positional MessagePack checks only the message's own fields for omissions
+- **What:** `derive(Message)` and the source reader refuse a `msgpack_array` message whose own field has `skip_serializing_if`, or only one of `skip_serializing` and `skip_deserializing`. They do not look inside a field's type. A nested struct with such a field, or a hand-written `Serialize` that leaves out a field, still makes the value fail to decode or decode into the wrong fields.
+- **Why:** an array keeps values in order but does not say which field is missing. The derive sees only the attributes of the type it derives, and the wire probe checks serde trait bounds, not the behavior of each value. See [Messages and encodings](../concepts/messages.md#encodings).
+- **Over-refusal:** the check also refuses a last field with `skip_serializing_if` and a serde default, which decodes, because the rule does not read field order or defaults. It refuses a field whose skip serde ignores because the container converts through another type (`#[serde(from = "..", into = "..")]`), too; remove the unused attribute there.
 - **Workaround:** use the default `msgpack` codec, which writes field names, or `json`.
 
 ### JSON cannot preserve every serde value

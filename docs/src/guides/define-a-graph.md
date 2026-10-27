@@ -34,7 +34,7 @@ A protocols crate depends on `gdl-message` and derives `Message` for each type t
 
 To offer a type that is defined in another module or crate, mark a `pub use` with `#[gdl_message::export]`. A message defined in a private module must be exported, because the generated contract names a public path.
 
-Choose the encoding per message. The default, named MessagePack, is right for most types. Write `#[gdl(codec = "json")]` for a message that other tools read, and `msgpack_array` only for a fixed layout whose fields are never skipped. [Messages and encodings](../concepts/messages.md#encodings) has the table and the cases each one cannot keep.
+Choose the encoding per message. The default, named MessagePack, is right for most types. Write `#[gdl(codec = "json")]` for a message that other tools read, and `msgpack_array` only for a fixed layout whose fields are never skipped. The derive and `cargo gdl check` refuse a `msgpack_array` message whose field serde can skip in one direction. [Messages and encodings](../concepts/messages.md#encodings) has the table and the cases each one cannot keep.
 
 A type you do not own can be wrapped in a local type with `#[serde(transparent)]`. For a generic type, export an alias of each instantiation the graph uses: [Generic messages and nodes](../concepts/messages.md#generic-messages-and-nodes).
 

@@ -445,3 +445,105 @@ fn a_spec_with_text_that_is_not_ascii_is_checked_whole() {
         ],
     );
 }
+
+/// A messages crate whose `msgpack_array` messages omit fields:
+/// `skip_serializing_if` on a struct's field, a one-sided skip through
+/// `cfg_attr` on an enum variant's, and a one-sided skip in a generic
+/// message that an alias exports. A `cfg_attr` that does not apply, and a field both directions
+/// skip, omit nothing.
+fn omitting(codec: &str) -> String {
+    format!(
+        r#"#[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
+#[gdl(codec = "{codec}")]
+pub struct Hinted {{
+    pub id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<u32>,
+    pub text: Option<String>,
+}}
+
+#[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
+#[gdl(codec = "{codec}")]
+pub enum Event {{
+    Done,
+    Token {{
+        id: u32,
+        #[cfg_attr(all(), serde(skip_deserializing))]
+        logprob: f32,
+    }},
+}}
+
+#[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
+#[gdl(codec = "{codec}")]
+pub struct Carried<P> {{
+    #[serde(skip_serializing)]
+    pub payload: P,
+}}
+
+#[gdl_message::export]
+pub type CarriedId = Carried<u32>;
+
+#[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]
+#[gdl(codec = "msgpack_array")]
+pub struct Fixed {{
+    #[cfg_attr(any(), serde(skip_serializing_if = "Option::is_none"))]
+    pub hint: Option<u32>,
+    #[serde(skip)]
+    pub cache: Option<u32>,
+}}
+"#
+    )
+}
+
+/// Positional MessagePack has no field names, so a field that one
+/// direction can omit and the other reads shifts every field after it:
+/// check refuses such a message and names the field and the attribute.
+/// With a named codec the same messages check clean.
+#[test]
+fn check_refuses_a_positional_message_that_omits_a_field() {
+    let files = Files::new("", FLEET);
+    let crate_dir = files.dir.path().join("omitting-protocols");
+    std::fs::create_dir_all(crate_dir.join("src")).expect("a crate");
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        "[package]\nname = \"omitting-protocols\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("a manifest");
+    let protocols = format!(
+        "{:?}",
+        root().join("examples/chat/protocols").display().to_string()
+    );
+    let spec = spec("").replacen(
+        &protocols,
+        &format!("{protocols}, {:?}", crate_dir.display().to_string()),
+        1,
+    );
+    std::fs::write(files.spec(), &spec).expect("the spec");
+    std::fs::write(crate_dir.join("src/lib.rs"), omitting("msgpack_array")).expect("a source");
+    let found = problems(&files.check());
+    // The fleet's children wait on a layout without problems.
+    let refused: Vec<&String> = found
+        .iter()
+        .filter(|line| !line.contains("the cells' children are not checked"))
+        .collect();
+    assert_eq!(refused.len(), 3, "{}", found.join("\n"));
+    for (message, field, key) in [
+        ("`Hinted`", "`hint`", "`skip_serializing_if`"),
+        ("`Event`", "`Token::logprob`", "`skip_deserializing`"),
+        ("`CarriedId`", "`payload`", "`skip_serializing`"),
+    ] {
+        assert!(
+            refused.iter().any(|line| line.contains(message)
+                && line.contains(field)
+                && line.contains(key)
+                && line.contains("msgpack_array")),
+            "{message} {field} {key} in:\n{}",
+            found.join("\n")
+        );
+    }
+    for codec in ["msgpack", "json"] {
+        std::fs::write(crate_dir.join("src/lib.rs"), omitting(codec)).expect("a source");
+        let output = files.check();
+        assert!(output.status.success(), "{codec}: {output:?}");
+    }
+}

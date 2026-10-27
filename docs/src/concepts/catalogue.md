@@ -44,7 +44,7 @@ Reading is linear in the source. One extraction reads at most 16 MiB of source i
 
 ## Wire capability from source
 
-A message is a wire type when it implements `Serialize` and `Deserialize`. Only a wire type can cross between segments. The reader decides this from source. It takes `derive(Serialize, Deserialize)`, or serde impls that it finds in the crate for the type. It also reads the encoding from `#[gdl(codec = ...)]`, which [Messages and encodings](messages.md) describes.
+A message is a wire type when it implements `Serialize` and `Deserialize`. Only a wire type can cross between segments. The reader decides this from source. It takes `derive(Serialize, Deserialize)`, or serde impls that it finds in the crate for the type. It also reads the encoding from `#[gdl(codec = ...)]`, which [Messages and encodings](messages.md) describes. It refuses a `msgpack_array` message, or an export of one, that the derive refuses for a field omitted in one serde direction, and names the field. A node's port that names such a message is not refused for it: the message's own crate reports it.
 
 For an instantiation of a generic message, the reader judges each direction of serde on its own. It reads the bounds that serde's derive infers, or the bounds of a hand-written impl. It takes the instantiation for a wire type only where it can show it. Anything it cannot judge makes the instantiation local. A wrong "local" refuses a crossing that would work. A wrong "wire" fails the segment's build, never a running graph: each generated segment asserts at compile time that every message it sends or receives across a cut is a wire type. The error reads `` `T` crosses between segments but is not a wire type ``.
 

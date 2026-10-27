@@ -39,12 +39,13 @@ A message selects its encoding with `#[gdl(codec = "...")]`. The default is `msg
 | Annotation | Encoding |
 |---|---|
 | none, or `codec = "msgpack"` | MessagePack maps with field names |
-| `codec = "msgpack_array"` | positional MessagePack arrays. Fields must not be conditionally omitted. |
+| `codec = "msgpack_array"` | positional MessagePack arrays. No field may be omitted in one direction only. |
 | `codec = "json"` | JSON |
 
 - The annotation applies to the complete value, nested fields included. A nested type's own annotation does not change how it serializes inside its parent.
 - A streamed request selects the head's and the item's codecs separately, because they are two messages.
 - Named fields keep an omitted optional field in nested structs. Positional arrays are smaller for a fixed layout, and break when a field is skipped. JSON writes a non-finite float as `null` and refuses a map key such as a tuple. Use `msgpack` for those values.
+- `msgpack_array` refuses a message with a field that serde can omit in one direction: `skip_serializing_if`, or `skip_serializing` or `skip_deserializing` alone. An array has no field names, so the fields after it would shift, and the value would fail to decode or decode into the wrong fields. `skip`, or both one-sided skips, omits the field in both directions and is accepted. So is the field of a newtype struct or a `transparent` struct, whose skips serde ignores; `skip_serializing_if` on a newtype variant's field, which serde also ignores; and a field of a variant that serde skips, which serde refuses before it reads the fields. `derive(Message)` refuses at compile time, and the source reader refuses the same message, so `cargo gdl check` reports it with the field's name before a build. The check runs once per message type, so encoding a value costs nothing more. It does not look inside a field's type: [Known limitations](../operations/limitations.md#positional-messagepack-checks-only-the-messages-own-fields-for-omissions).
 - A third-party type can be wrapped in a local type with `#[serde(transparent)]` and `derive(Message)`.
 - The envelope and control frames use their own encoding. The codec here is for application messages only. See [Crossing segments](crossings.md) for where the codec applies and for the rule that decides which edges need one.
 - A sender and a typed routing selector use the same dispatch. The edge picks monomorphized function pointers once. Each item calls them without a lookup or a boxed value.

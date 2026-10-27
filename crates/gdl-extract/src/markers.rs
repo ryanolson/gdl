@@ -18,7 +18,7 @@ use crate::impls::{ImplOf, Impls, Traits, matching};
 use crate::metadata::Graph;
 use crate::reads::Counted;
 use crate::resolve::{Def, Resolver, segments};
-use crate::tree::{Kind, Location, UsePath, Vis};
+use crate::tree::{Kind, Location, TypeDef, UsePath, Vis};
 use crate::wire::{plain_wire, ty_wire};
 use crate::{
     Argument, ExportEntry, Extraction, MessageEntry, NodeEntry, Offer, Origin, PortEntry, Skipped,
@@ -61,6 +61,10 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                         continue;
                     }
                 };
+                if let Some(refusal) = positional_refusal(ty) {
+                    problems.push(refusal);
+                    continue;
+                }
                 offer.messages.push(MessageEntry {
                     name: ty.name.clone(),
                     path: origin.path,
@@ -109,20 +113,23 @@ pub(crate) fn extract(graph: &Graph, settings: &Settings, package: usize) -> Ext
                 None => Ok(None),
             };
             match found {
-                Ok(Some((message, ty))) => offer.exports.push(ExportEntry {
-                    path: public_path(&resolver, krate, module, &name),
-                    name,
-                    origin: message.origin,
-                    wire: match &ty {
-                        Ty::Def(def, args) if args.is_empty() => {
-                            plain_wire(&mut resolver, &mut impls, *def)
-                        }
-                        _ => ty_wire(&mut resolver, &mut impls, &ty),
-                    },
-                    encoding: message.encoding,
-                    public,
-                    probed: None,
-                }),
+                Ok(Some((message, ty))) => match refused(&resolver, &message) {
+                    Some(refusal) => problems.push(format!("{at}: export `{name}`: {refusal}")),
+                    None => offer.exports.push(ExportEntry {
+                        path: public_path(&resolver, krate, module, &name),
+                        name,
+                        origin: message.origin,
+                        wire: match &ty {
+                            Ty::Def(def, args) if args.is_empty() => {
+                                plain_wire(&mut resolver, &mut impls, *def)
+                            }
+                            _ => ty_wire(&mut resolver, &mut impls, &ty),
+                        },
+                        encoding: message.encoding,
+                        public,
+                        probed: None,
+                    }),
+                },
                 Ok(None) => {
                     let generic = matches!(
                         resolver.resolve(krate, module, path.segments(), absolute),
@@ -652,6 +659,10 @@ fn message_type(
 pub(crate) struct Offered {
     pub(crate) origin: Origin,
     encoding: gdl_model::Encoding,
+    /// The type that derives `Message`: an export reads whether it is
+    /// refused ([`refused`]). A port names the message by identity alone,
+    /// and is not refused for it.
+    def: Def,
 }
 
 /// The message `ty` is, if it is one: a type that derives `Message`, or an
@@ -686,7 +697,32 @@ pub(crate) fn offered(resolver: &mut Resolver<'_>, ty: &Ty) -> Result<Option<Off
             arguments,
         }
     };
-    Ok(Some(Offered { origin, encoding }))
+    Ok(Some(Offered {
+        origin,
+        encoding,
+        def: *def,
+    }))
+}
+
+/// Why message `definition` is refused, when its codec is `msgpack_array`
+/// and one of its fields is omitted in one serde direction, as the derive
+/// refuses it.
+fn positional_refusal(definition: &TypeDef) -> Option<String> {
+    let (field, key) = definition.omits.as_ref()?;
+    Some(format!(
+        "{}: {}",
+        definition.at,
+        gdl_syntax::positional_refusal(&definition.name, field, key)
+    ))
+}
+
+/// Why an export may not offer `message` ([`positional_refusal`]),
+/// written only where an export asks.
+fn refused(resolver: &Resolver<'_>, message: &Offered) -> Option<String> {
+    let Def::Type(c, m, i) = message.def else {
+        return None;
+    };
+    positional_refusal(&resolver.crates[c].modules[m].types[i])
 }
 
 /// Push the package that defines `ty`, and each of its arguments, in the
@@ -833,6 +869,9 @@ fn alias(
     let message = offered(resolver, &ty)
         .map_err(|problem| format!("{at}: `{name}`: {problem}"))?
         .ok_or_else(none)?;
+    if let Some(refusal) = refused(resolver, &message) {
+        return Err(format!("{at}: `{name}`: {refusal}"));
+    }
     Ok(Aliased::Message(ExportEntry {
         path: public_path(resolver, krate, module, &name),
         name,

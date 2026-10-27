@@ -1,0 +1,23 @@
+error: message `Hinted`: `msgpack_array` cannot carry field `hint`: with `skip_serializing_if`, the writer and the reader can disagree on whether the field is there, and an array has no field names, so the fields after it would shift; use `codec = "msgpack"` or `codec = "json"`
+ --> tests/ui/message-positional-omission.rs:9:9
+  |
+9 |     pub hint: Option<u32>,
+  |         ^^^^
+
+error: message `Carried`: `msgpack_array` cannot carry field `payload`: with `skip_serializing`, the writer and the reader can disagree on whether the field is there, and an array has no field names, so the fields after it would shift; use `codec = "msgpack"` or `codec = "json"`
+  --> tests/ui/message-positional-omission.rs:17:9
+   |
+17 |     pub payload: P,
+   |         ^^^^^^^
+
+error: message `Event`: `msgpack_array` cannot carry field `Token::logprob`: with `skip_deserializing`, the writer and the reader can disagree on whether the field is there, and an array has no field names, so the fields after it would shift; use `codec = "msgpack"` or `codec = "json"`
+  --> tests/ui/message-positional-omission.rs:27:9
+   |
+27 |         logprob: f32,
+   |         ^^^^^^^
+
+error: message `Pair`: `msgpack_array` cannot carry field `1`: with `skip_serializing_if`, the writer and the reader can disagree on whether the field is there, and an array has no field names, so the fields after it would shift; use `codec = "msgpack"` or `codec = "json"`
+  --> tests/ui/message-positional-omission.rs:33:72
+   |
+33 | pub struct Pair(u32, #[serde(skip_serializing_if = "Option::is_none")] Option<u32>);
+   |                                                                        ^^^^^^^^^^^

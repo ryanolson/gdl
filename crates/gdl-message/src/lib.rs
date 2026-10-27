@@ -35,8 +35,10 @@ pub use shape::{Identity, Message, Shape};
 /// message where an [`export`]ed `pub type` names it.
 ///
 /// `#[gdl(codec = "msgpack")]` selects the default named-field MessagePack
-/// encoding. `msgpack_array` selects positional arrays, whose fields must
-/// not be conditionally omitted. `json` selects JSON. The encoding applies
+/// encoding. `msgpack_array` selects positional arrays: the derive refuses
+/// a field that serde omits in one direction only (`skip_serializing_if`,
+/// or `skip_serializing` or `skip_deserializing` alone), because the fields
+/// after it would shift. `json` selects JSON. The encoding applies
 /// to the complete value; nested messages do not select another codec.
 pub use gdl_macros::Message;
 

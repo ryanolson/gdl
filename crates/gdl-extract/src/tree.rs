@@ -89,6 +89,10 @@ pub(crate) struct TypeDef {
     /// `#[serde(borrow)]`. Derived `Deserialize` then is not
     /// `DeserializeOwned`, and the type has no codec.
     pub(crate) borrows: bool,
+    /// The first field `msgpack_array` cannot carry, by its label, and the
+    /// serde key that omits it ([`gdl_syntax::positional_omission`]); read
+    /// only for a type whose codec is `msgpack_array`.
+    pub(crate) omits: Option<(String, &'static str)>,
     pub(crate) at: Location,
 }
 
@@ -559,6 +563,42 @@ impl Reader<'_> {
         borrows
     }
 
+    /// The first of `fields`, of a type with attributes `container`, that
+    /// positional MessagePack cannot carry
+    /// ([`gdl_syntax::positional_omission`]), labelled under `variant`,
+    /// whose attributes are given, when it is some; with `cfg` and
+    /// `cfg_attr` applied, as the derive sees the fields.
+    fn omits(
+        &self,
+        container: &[Meta],
+        fields: &syn::Fields,
+        variant: Option<(&syn::Ident, &[Meta])>,
+    ) -> Option<(String, &'static str)> {
+        let (mut kept, mut attrs) = (Vec::new(), Vec::new());
+        for field in fields {
+            if let Some(field_attrs) = self.settings.attributes(&field.attrs, self.features) {
+                kept.push(field);
+                attrs.push(field_attrs);
+            }
+        }
+        let unnamed = matches!(fields, syn::Fields::Unnamed(_));
+        let (index, key) = gdl_syntax::positional_omission(
+            container,
+            &attrs,
+            unnamed,
+            variant.map(|(_, attrs)| attrs),
+        )?;
+        let own = kept[index]
+            .ident
+            .as_ref()
+            .map_or_else(|| index.to_string(), |ident| ident.unraw().to_string());
+        let label = match variant {
+            Some((variant, _)) => format!("{}::{own}", variant.unraw()),
+            None => own,
+        };
+        Some((label, key))
+    }
+
     /// Read `items` of module `module`, which is in `file`; its child
     /// modules' files are under `dir`, and a `#[path]` on one is relative
     /// to `base`: the file's directory at the top of a file, and `dir` in
@@ -609,6 +649,9 @@ impl Reader<'_> {
                     let generic = !params.is_empty();
                     let borrows = self.fields(&s.fields, None, generic.then_some(&mut members));
                     let projected = members.iter().any(|member| projects(&member.ty, &params));
+                    let omits = positional(&attrs)
+                        .then(|| self.omits(&attrs, &s.fields, None))
+                        .flatten();
                     krate.modules[module].add_type(TypeDef {
                         kind: Kind::Struct(s.fields.clone()),
                         members,
@@ -621,6 +664,7 @@ impl Reader<'_> {
                         attrs,
                         projected,
                         borrows,
+                        omits,
                         at: at(s.ident.span()),
                     })
                 }
@@ -629,17 +673,26 @@ impl Reader<'_> {
                     let generic = !params.is_empty();
                     let (mut members, mut variants) = (Vec::new(), Vec::new());
                     let mut borrows = false;
+                    let mut omits = None;
+                    let positional = positional(&attrs);
+                    let container = &attrs;
                     // A variant `cfg` removes has no fields.
                     for v in &e.variants {
                         let Some(attrs) = self.settings.attributes(&v.attrs, self.features) else {
                             continue;
                         };
+                        if positional && omits.is_none() {
+                            omits = self.omits(container, &v.fields, Some((&v.ident, &attrs)));
+                        }
                         if generic {
                             let index = Some(variants.len());
                             borrows |= self.fields(&v.fields, index, Some(&mut members));
                             variants.push(Serde::read(&attrs, Place::Variant));
-                        } else if self.fields(&v.fields, None, None) {
+                        } else if !borrows && self.fields(&v.fields, None, None) {
                             borrows = true;
+                        }
+                        // A later variant can still omit a field.
+                        if !generic && borrows && (!positional || omits.is_some()) {
                             break;
                         }
                     }
@@ -655,6 +708,7 @@ impl Reader<'_> {
                         attrs,
                         projected: false,
                         borrows,
+                        omits,
                         at: at(e.ident.span()),
                     })
                 }
@@ -670,6 +724,7 @@ impl Reader<'_> {
                     attrs,
                     projected: false,
                     borrows: self.fields(&u.fields.named, None, None),
+                    omits: None,
                     at: at(u.ident.span()),
                 }),
                 Item::Type(t) => krate.modules[module].add_type(TypeDef {
@@ -684,6 +739,7 @@ impl Reader<'_> {
                     attrs,
                     projected: false,
                     borrows: false,
+                    omits: None,
                     at: at(t.ident.span()),
                 }),
                 Item::Use(u) => {
@@ -821,6 +877,12 @@ impl Reader<'_> {
             }
         }
     }
+}
+
+/// Whether a type's attributes, `attrs`, select `msgpack_array`. A codec
+/// that does not read is reported where the message is offered.
+fn positional(attrs: &[Meta]) -> bool {
+    gdl_syntax::message_encoding(attrs).ok() == Some(gdl_model::Encoding::MsgpackArray)
 }
 
 fn item_attrs(item: &Item) -> &[syn::Attribute] {

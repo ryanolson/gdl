@@ -23,7 +23,10 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
         .collect::<Vec<_>>();
     let encoding = match gdl_syntax::message_encoding(&attrs)? {
         gdl_model::Encoding::Msgpack => quote!(#root::Encoding::Msgpack),
-        gdl_model::Encoding::MsgpackArray => quote!(#root::Encoding::MsgpackArray),
+        gdl_model::Encoding::MsgpackArray => {
+            positional(input, &attrs, &name)?;
+            quote!(#root::Encoding::MsgpackArray)
+        }
         gdl_model::Encoding::Json => quote!(#root::Encoding::Json),
     };
     if !input.generics.params.is_empty() {
@@ -83,6 +86,50 @@ pub(crate) fn expand(input: &DeriveInput, root: &TokenStream) -> syn::Result<Tok
             };
         };
     })
+}
+
+/// Refuse a `msgpack_array` message with a field that one serde direction
+/// omits: positions would shift, and the value would decode into the
+/// wrong fields or not at all. Checked here, once, so that encoding a
+/// value costs nothing more. A nested type's fields are not visible here.
+fn positional(input: &DeriveInput, container: &[syn::Meta], name: &str) -> syn::Result<()> {
+    let metas = |attrs: &[syn::Attribute]| attrs.iter().map(|a| a.meta.clone()).collect::<Vec<_>>();
+    let parts: Vec<(Option<&syn::Variant>, &syn::Fields)> = match &input.data {
+        syn::Data::Struct(data) => vec![(None, &data.fields)],
+        syn::Data::Enum(data) => data.variants.iter().map(|v| (Some(v), &v.fields)).collect(),
+        syn::Data::Union(_) => Vec::new(),
+    };
+    for (variant, fields) in parts {
+        let attrs: Vec<Vec<syn::Meta>> = fields.iter().map(|f| metas(&f.attrs)).collect();
+        let unnamed = matches!(fields, syn::Fields::Unnamed(_));
+        let variant_attrs = variant.map(|v| metas(&v.attrs));
+        let Some((index, key)) =
+            gdl_syntax::positional_omission(container, &attrs, unnamed, variant_attrs.as_deref())
+        else {
+            continue;
+        };
+        let field = fields
+            .iter()
+            .nth(index)
+            .expect("the omission is one of the fields");
+        let own = field
+            .ident
+            .as_ref()
+            .map_or_else(|| index.to_string(), |ident| ident.unraw().to_string());
+        let label = match variant {
+            Some(variant) => format!("{}::{own}", variant.ident.unraw()),
+            None => own,
+        };
+        let at: &dyn quote::ToTokens = match &field.ident {
+            Some(ident) => ident,
+            None => &field.ty,
+        };
+        return Err(syn::Error::new_spanned(
+            at,
+            gdl_syntax::positional_refusal(name, &label, key),
+        ));
+    }
+    Ok(())
 }
 
 /// The registration's `wire`: whether concrete type `ty` is a wire type,
