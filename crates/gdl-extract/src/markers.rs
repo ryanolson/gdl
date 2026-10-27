@@ -307,6 +307,17 @@ fn node(
         None => Vec::new(),
     };
     let metrics = match &types.metrics {
+        // `()` for the parameter the derive names is no metrics, as `type
+        // Metrics = ()` is for a node that names none: gdl implements
+        // `Metrics` for `()`.
+        Some(path)
+            if path
+                .get_ident()
+                .and_then(|ident| env.get(&ident.unraw().to_string()))
+                == Some(&Ty::Unit) =>
+        {
+            Vec::new()
+        }
         Some(path) => {
             let ty = path_type(path);
             let (_, fields) =

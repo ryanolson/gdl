@@ -267,8 +267,9 @@ fn unit_for_a_ports_parameter_is_no_message() {
 
 /// A generic node whose `config` and `metrics` are its parameters: each
 /// alias's instantiation has its arguments' fields, as the build
-/// registers them. A node that is not generic reads its settings' fields
-/// whatever their arguments, a default or one the reader does not name.
+/// registers them, and `()` for the metrics is none. A node that is not
+/// generic reads its settings' fields whatever their arguments, a default
+/// or one the reader does not name.
 #[test]
 fn a_nodes_config_and_metrics_may_be_its_parameters() {
     let configured = extracted("configured");
@@ -290,6 +291,7 @@ fn a_nodes_config_and_metrics_may_be_its_parameters() {
         [
             ("Echo", vec!["enabled"], vec![]),
             ("FastStage", vec!["batch"], vec!["batched_total"]),
+            ("QuietStage", vec!["batch"], vec![]),
             ("Shared", vec!["enabled"], vec![]),
             ("SlowStage", vec!["patient"], vec!["waited_total"]),
         ]

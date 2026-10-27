@@ -102,7 +102,7 @@ pub type MessagesSignals = ClaudeCodeSignals<InferenceRequestBuilder>;
 - The generic type takes type parameters only. Lifetime and const parameters are refused. A type cannot derive both `Message` and `Node`.
 - The alias takes no parameters of its own and writes every argument. It must be at the crate root. The reader refuses one that is not, though the alias's build does not check it.
 - The node's role and ports come from the role impl whose self type matches the instantiation, with the impl's parameters bound by the alias's arguments. An impl for one instantiation serves only that one.
-- The `config` and `metrics` the derive names must be the `Build` types of every instantiation an alias names. They may be the type's parameters, `#[gdl(config = C, metrics = M)]`, so that each instantiation has its own.
+- The `config` and `metrics` the derive names must be the `Build` types of every instantiation an alias names. They may be the type's parameters, `#[gdl(config = C, metrics = M)]`, so that each instantiation has its own. An alias that binds `M` to `()` has no metrics.
 - Use `gdl::export` for a node's alias. `gdl_message::export` offers messages only.
 
 [Messages and encodings](../concepts/messages.md) describes generic messages and how an instantiation is identified. `crates/gdl-gen/tests/generic.rs` generates and runs a graph of a generic carrier and a generic stage, each instantiated twice.

@@ -81,6 +81,10 @@ pub type FastStage = Stage<Fast, FastMetrics>;
 #[gdl::export]
 pub type SlowStage = Stage<Slow, SlowMetrics>;
 
+/// An instantiation without metrics.
+#[gdl::export]
+pub type QuietStage = Stage<Fast, ()>;
+
 /// Settings whose parameter has a default, as a node that is not generic
 /// names them: their fields are read whatever their arguments.
 #[derive(Deserialize, gdl::Config)]
