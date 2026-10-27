@@ -97,6 +97,7 @@ The system listener answers the live and health probes and serves `/metrics`. It
 | `heartbeat_ms` | 10000 (`HubTiming::DEFAULT_HEARTBEAT`) | how often the hub publishes the cell's record while its state does not change. At least 1. Not the `[hub] heartbeat_ms` of an instance's lease. An instance ignores it |
 | `lease_ms` | 30000 (`HubTiming::DEFAULT_LEASE`) | how long a reader keeps the record without seeing it published again. At least 1, longer than `heartbeat_ms`, and under the `relay` backend at least 300 (`HubTiming::MIN_RELAY_LEASE`). An instance ignores it |
 | `watch_buffer` | 1024 (`HubTiming::DEFAULT_WATCH_BUFFER`) | events a watcher of the cell, or of what its hub follows, may fall behind by before its watch ends. From 1 to 65536 (`MAX_WATCH_BUFFER`). An instance ignores it |
+| `lost_chooser_ms` | 30000 (`HubTiming::DEFAULT_LOST_CHOOSER`) | how long a chooser may have no watch of the hub's relay open before the hub stops waiting for its acknowledgements ([Closing a follow](../concepts/cell-routing.md#closing-a-follow)). At least 1. An instance ignores it |
 | `[cell.watch_caps]` | `cell` 2048, `relay` 2048, `follow` 16384 (`WatchCaps::DEFAULT_*`) | how many watches each of the hub's watch routes serves at once. Each at least 1. An instance ignores it |
 
 Every problem with `[cell]` names the file and key, or the variable, that set it.

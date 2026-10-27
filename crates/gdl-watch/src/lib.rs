@@ -116,8 +116,23 @@ pub struct Avoided {
     pub instance: InstanceId,
 }
 
-/// The relay's route, under the extension's.
+/// The relay's route, under the extension's. A chooser names itself in
+/// the query ([`RelayWatcher`]), so that its hub knows whether it still
+/// watches the relay; a watch that names no one is served the same.
 pub const FOLLOWS_ROUTE: &str = "/follows";
+
+/// The chooser that holds a watch of its hub's relay, as [`FOLLOWS_ROUTE`]'s
+/// query names it (`?instance=<id>`). The hub stops waiting for the
+/// acknowledgements ([`UNOFFERED_ROUTE`]) of a chooser that has had no
+/// watch open for `[cell] lost_chooser_ms`, and waits for it again once it
+/// watches again. The name is not authenticated: a watch in another's name
+/// can only keep the hub waiting for that chooser, as it would if the
+/// chooser watched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RelayWatcher {
+    /// The chooser instance.
+    pub instance: InstanceId,
+}
 
 /// The route of a watch of one follow of the relay, under the extension's:
 /// `GET` answers with the follow of the cell `cell` of `class` as a watch

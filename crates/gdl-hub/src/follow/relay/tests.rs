@@ -242,6 +242,7 @@ fn held() -> Relay {
         tokio::sync::watch::Sender::new(health()),
         choosers,
         tokio::sync::mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     let (id, epoch) = (
         InstanceId::new_v4(),
@@ -272,7 +273,7 @@ fn offering(generation: u64, revision: u64, offered: bool) -> FollowEvent {
 #[test]
 fn only_the_current_generation_writes() {
     let relay = held();
-    let mut watch = relay.watch();
+    let mut watch = relay.watch(None);
     assert_eq!(pending(&mut watch), [FollowEvent::Synced]);
     let (first, _) = relay.begin("model_x", "m");
     let instance = peer();
@@ -320,7 +321,7 @@ fn only_the_current_generation_writes() {
         [(("model_x".to_string(), "m".to_string()), third)].into()
     );
     // A watch begun now has the closing follows, earlier first.
-    let mut again = relay.watch();
+    let mut again = relay.watch(None);
     assert_eq!(
         pending(&mut again),
         [
@@ -350,8 +351,9 @@ fn with_no_chooser_a_follow_closes_as_it_is_not_offered() {
         tokio::sync::watch::Sender::new(health()),
         choosers,
         tokio::sync::mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
-    let mut watch = relay.watch();
+    let mut watch = relay.watch(None);
     assert_eq!(pending(&mut watch), [FollowEvent::Synced]);
     let (first, close) = relay.begin("model_x", "m");
     relay.install(first, installed_cell("m", CellState::Ready));
@@ -384,6 +386,7 @@ fn a_class_counts_its_installed_ready_cells() {
         health,
         super::Choosers::default(),
         tokio::sync::mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     let (m, n) = (relay.begin("model_x", "m").0, relay.begin("model_x", "n").0);
     relay.install(m, installed_cell("m", CellState::Ready));

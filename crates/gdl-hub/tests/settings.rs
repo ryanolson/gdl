@@ -116,6 +116,7 @@ fn a_cells_hub_timing_is_read_from_the_environment() {
         jail.set_env("GDL_CELL__HEARTBEAT_MS", "2000");
         jail.set_env("GDL_CELL__LEASE_MS", "9000");
         jail.set_env("GDL_CELL__WATCH_BUFFER", "64");
+        jail.set_env("GDL_CELL__LOST_CHOOSER_MS", "4000");
         jail.set_env("GDL_CELL__WATCH_CAPS__CELL", "3");
         jail.set_env("GDL_CELL__WATCH_CAPS__RELAY", "4");
         jail.set_env("GDL_CELL__WATCH_CAPS__FOLLOW", "5");
@@ -130,6 +131,7 @@ fn a_cells_hub_timing_is_read_from_the_environment() {
                 heartbeat: Duration::from_secs(2),
                 lease: Duration::from_secs(9),
                 watch_buffer: 64,
+                lost_chooser: Duration::from_secs(4),
                 watch_caps: WatchCaps {
                     cell: 3,
                     relay: 4,
@@ -157,6 +159,7 @@ fn with_no_timing_variable_a_cells_hub_keeps_its_pace() {
         assert_eq!(timing.heartbeat, Duration::from_secs(10));
         assert_eq!(timing.lease, Duration::from_secs(30));
         assert_eq!(timing.watch_buffer, 1024);
+        assert_eq!(timing.lost_chooser, Duration::from_secs(30));
         assert_eq!(
             timing.watch_caps,
             WatchCaps {
@@ -427,6 +430,25 @@ fn hub_builder_refuses_a_typed_lease_no_longer_than_its_heartbeat() {
     );
     let error = result.err().expect("the invalid lease is refused");
     assert!(error.to_string().contains("lease_ms"), "{error}");
+}
+
+/// A bound of zero on a lost chooser, built in code, is refused as the
+/// reader refuses it, naming its key: the hub would stop waiting for a
+/// chooser the moment its watch of the relay closed.
+#[test]
+fn hub_builder_refuses_a_typed_lost_chooser_bound_of_zero() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-timing-")
+        .tempdir()
+        .expect("a directory");
+    let mut cell = settings(DirectoryBackend::Dir {
+        path: dir.path().to_path_buf(),
+    });
+    cell.timing.lost_chooser = Duration::ZERO;
+    let error = hub_builder(config(), spec(), Some(cell))
+        .err()
+        .expect("a bound of zero is refused");
+    assert!(error.to_string().contains("lost_chooser_ms"), "{error}");
 }
 
 /// A watch buffer past its ceiling, built in code, is refused as the

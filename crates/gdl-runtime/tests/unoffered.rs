@@ -20,10 +20,11 @@ use common::boundary::{
 };
 use common::cells::{Resolving, cell_hub_of, followed, global_cell, global_hub, settings, until};
 use common::proxy::Mode;
+use common::proxy::Proxy;
 use common::{Chunk, Events, Plan, Prompt, WAIT, collect, expected, prompt, reference_graph};
 use futures::{Stream, StreamExt};
 use gdl::{Cx, Next, Selectors};
-use gdl_hub::CellReadiness;
+use gdl_hub::{CellReadiness, CellTiming};
 use gdl_runtime::{CellState, Cells, Deployment, DeploymentSpec, Register, RuntimeConfig};
 use gdl_watch::FollowEvent;
 use tokio::task::JoinHandle;
@@ -60,13 +61,18 @@ async fn chooser(
     spec: &DeploymentSpec,
     hub: &Hub,
 ) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
+    chooser_at(spec, hub.public_addr().port(), hub.control_addr().port()).await
+}
+
+/// A chooser that reaches its hub's public listener at `public` and its
+/// control listener at `control`.
+async fn chooser_at(
+    spec: &DeploymentSpec,
+    public: u16,
+    control: u16,
+) -> Running<impl Next<Prompt, Chunk> + Register + use<>> {
     let extra = format!("{}{RUNTIME}", global_cell());
-    let config = settings(
-        hub.public_addr().port(),
-        hub.control_addr().port(),
-        5_000,
-        &extra,
-    );
+    let config = settings(public, control, 5_000, &extra);
     let runtime = RuntimeConfig {
         selectors: Selectors::new(),
         ..config.runtime.clone()
@@ -325,15 +331,17 @@ async fn an_instance_without_a_cell_holds_no_follow_open() {
 /// A request offered to the cell before it drained holds the chooser's
 /// lease on the cell's follow: the chooser shows the cell not offered,
 /// with the lease, and does not acknowledge, so the follow stays open and
-/// the entry instance registered for longer than an instance's drain,
-/// until the response ends. The request is answered; then the follow
-/// closes, and the chooser lets go of the entry instance.
+/// the entry instance registered for longer than an instance's drain, and
+/// past the global hub's bound on a lost chooser ([`LOST`]), since this
+/// one still watches the relay, until the response ends. The request is
+/// answered; then the follow closes, and the chooser lets go of the entry
+/// instance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_held_offer_keeps_the_follow_open_until_its_response_ends() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let events = Events::new();
-    let (hub, global) = global_hub_of(&spec, &directory).await;
+    let (hub, global) = global_hub_lost(&spec, &directory).await;
     let chooser = chooser(&spec, &hub).await;
     let m1 = cell(&spec, &directory, &events).await;
     let cells = tables(&chooser);
@@ -348,9 +356,13 @@ async fn a_held_offer_keeps_the_follow_open_until_its_response_ends() {
     })
     .await;
     assert!(
-        relayed(&mut relay, DRAIN + Duration::from_secs(1), is_dropped)
-            .await
-            .is_none(),
+        relayed(
+            &mut relay,
+            (DRAIN + Duration::from_secs(1)).max(LOST * 2),
+            is_dropped
+        )
+        .await
+        .is_none(),
         "closed while an offer is held"
     );
     assert!(
@@ -738,6 +750,200 @@ async fn a_replaced_watch_is_not_a_lost_follower() {
         started.elapsed()
     );
     for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// How long the global's hub waits for a chooser whose watch of its relay
+/// is lost before it stops waiting for its acknowledgements, in the tests
+/// that lose one.
+const LOST: Duration = Duration::from_secs(1);
+
+/// The global cell's hub, waiting [`LOST`] for a chooser whose watch of
+/// its relay is lost, and its extension.
+async fn global_hub_lost(
+    spec: &DeploymentSpec,
+    directory: &Resolving,
+) -> (Hub, Arc<CellReadiness<Resolving>>) {
+    let timing = CellTiming {
+        lost_chooser: LOST,
+        ..common::cells::timing()
+    };
+    common::cells::cell_hub_timed(spec, global_hub(), directory, timing).await
+}
+
+/// Whether `instance` is still registered at `hub` as an instance of `a`.
+async fn member(hub: &Hub, instance: InstanceId) -> bool {
+    let client = velo_hub::client::HubClient::builder()
+        .host("127.0.0.1")
+        .public_port(hub.public_addr().port())
+        .control_port(hub.control_addr().port())
+        .build()
+        .expect("valid test fixture");
+    let loaded = gdl_model::segment_service("a", gdl_model::SegmentPhase::Loaded);
+    client
+        .services()
+        .get_instances(&loaded)
+        .await
+        .expect("the hub answers")
+        .contains(&instance)
+}
+
+/// Cut the chooser's watch of the global hub's relay, at a proxy in front
+/// of the hub's public listener, and wait until the hub has seen it close:
+/// the relay's watchers drop to `left`. The chooser stays a member: it
+/// registered on the control listener, which the proxy does not cut, and
+/// velo carries its heartbeats.
+async fn cut(proxy: &Proxy, global: &CellReadiness<Resolving>, left: usize) {
+    proxy.set(Mode::Refuse);
+    let mut watchers = global.follows_watchers();
+    tokio::time::timeout(WAIT, watchers.wait_for(|open| *open == left))
+        .await
+        .expect("the chooser's watch of the relay closed in time")
+        .expect("the extension runs");
+}
+
+/// Wait until the drained cell's hub has withdrawn its record and refuses
+/// a watch.
+async fn withdrawn(readiness: &CellReadiness<Resolving>) {
+    tokio::time::timeout(WAIT, async {
+        while readiness.watch().await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the drained cell withdrawn in time");
+}
+
+/// A chooser whose watch of its hub's relay is lost, at a proxy in front
+/// of the global hub's public listener, stays a member of the hub, but
+/// cannot learn that a draining cell is not offered, so it never says that
+/// it holds no offer to it. Once [`LOST`] has passed, the global's hub
+/// stops waiting for it: it closes the follow and lets go of the cell, so
+/// the cell's entry declines offers long before its own bound, the cell's
+/// instances drain and leave, and its record is withdrawn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chooser_whose_relay_watch_is_lost_is_not_waited_for_past_the_bound() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, global) = global_hub_lost(&spec, &directory).await;
+    let proxy = Proxy::new(hub.public_addr()).await;
+    let chooser = chooser_at(&spec, proxy.port, hub.control_addr().port()).await;
+    let m1 = common::boundary::model_summarized(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        LONG,
+        &|runtime| runtime,
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    let cells = tables(&chooser);
+    offered(&cells).await;
+    ask(&chooser.segment).await.expect("answered");
+    let mut relay = global.follows();
+    // The bound runs from the watch's close, which is after this.
+    let started = std::time::Instant::now();
+    cut(&proxy, &global, 1).await;
+
+    m1.readiness.drain().await.expect("the cell drains");
+    relayed(&mut relay, LOST + WAIT, is_dropped)
+        .await
+        .expect("closed once the lost chooser's bound passed");
+    assert!(
+        started.elapsed() >= LOST,
+        "closed {:?} after the watch was cut, within the bound",
+        started.elapsed()
+    );
+    assert!(
+        member(&hub, id(&chooser)).await,
+        "the chooser left the hub, which closes the follow without the bound"
+    );
+    let mut followers = m1.readiness.followers();
+    tokio::time::timeout(WAIT, followers.wait_for(|cells| cells.is_empty()))
+        .await
+        .expect("the model cell's hub saw its follower go in time")
+        .expect("the extension runs");
+    declining(&m1.entries[0], WAIT).await;
+    assert!(
+        started.elapsed() < LONG_BOUND / 2,
+        "declined only at the entry's bound, {:?} after the watch was cut",
+        started.elapsed()
+    );
+    let ModelCell {
+        hub: model_hub,
+        readiness,
+        entries,
+        sink,
+    } = m1;
+    for entry in entries {
+        entry.ended(WAIT).await.expect("the entry drained");
+    }
+    sink.ended(WAIT)
+        .await
+        .expect("the interior instance drained");
+    withdrawn(&readiness).await;
+    for hub in [hub, model_hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// A chooser whose watch of its hub's relay is lost while it holds a
+/// streamed response from the draining cell is counted out at [`LOST`] as
+/// any lost chooser is, and the global's hub lets go of the cell; but its
+/// velo link to the entry instance is up, so the entry, which declines new
+/// offers from then, finishes the response before it leaves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_chooser_counted_out_still_gets_its_response() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, global) = global_hub_lost(&spec, &directory).await;
+    let proxy = Proxy::new(hub.public_addr()).await;
+    let chooser = chooser_at(&spec, proxy.port, hub.control_addr().port()).await;
+    let m1 = common::boundary::model_summarized(
+        &spec,
+        &directory,
+        ready(M1, "m1-hub:1337"),
+        LONG,
+        &|runtime| runtime,
+        &|deployment| reference_graph(deployment, &events),
+    )
+    .await;
+    let cells = tables(&chooser);
+    offered(&cells).await;
+    let held = gated(&chooser, &events, "held").await;
+    let mut relay = global.follows();
+    cut(&proxy, &global, 1).await;
+
+    m1.readiness.drain().await.expect("the cell drains");
+    relayed(&mut relay, LOST + WAIT, is_dropped)
+        .await
+        .expect("closed once the lost chooser's bound passed");
+    declining(&m1.entries[0], WAIT).await;
+    assert!(!held.is_finished(), "the held response ended early");
+
+    release(&events, "held");
+    tokio::time::timeout(WAIT, held)
+        .await
+        .expect("the held request answered in time")
+        .expect("the request's task")
+        .expect("the held response was cut");
+    let ModelCell {
+        hub: model_hub,
+        readiness,
+        entries,
+        sink,
+    } = m1;
+    for entry in entries {
+        entry.ended(WAIT).await.expect("the entry drained");
+    }
+    sink.ended(WAIT)
+        .await
+        .expect("the interior instance drained");
+    withdrawn(&readiness).await;
+    for hub in [hub, model_hub] {
         hub.shutdown().await.expect("valid test fixture");
     }
 }

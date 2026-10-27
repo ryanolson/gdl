@@ -125,6 +125,7 @@ fn a_withheld_cell_is_unavailable_until_it_is_read_again() {
         health,
         super::Choosers::default(),
         tokio::sync::mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     let (m, n) = (relay.begin("model_x", "m").0, relay.begin("model_x", "n").0);
     let (kept, retiring, gone, joined, other) = (peer(), peer(), peer(), peer(), peer());
@@ -136,7 +137,7 @@ fn a_withheld_cell_is_unavailable_until_it_is_read_again() {
     relay.install(n, installed("n", CellState::Ready));
     relay.apply("model_x", "n", n, ready(&other));
     assert_eq!(met(), 2);
-    let mut watch = relay.watch();
+    let mut watch = relay.watch(None);
     let _ = pending(&mut watch);
 
     relay.withhold("model_x", "m", m);
@@ -175,7 +176,7 @@ fn a_withheld_cell_is_unavailable_until_it_is_read_again() {
         ],
         "watched alone, it is withheld and not offered, its instances hidden"
     );
-    let mut late = relay.watch();
+    let mut late = relay.watch(None);
     let snapshot = pending(&mut late);
     assert!(
         snapshot.contains(&follow("m", m, CellState::Unavailable)),
@@ -280,6 +281,7 @@ fn a_reading_ends_what_left_and_keeps_what_retired() {
         tokio::sync::watch::Sender::new(health()),
         super::Choosers::default(),
         tokio::sync::mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     let m = relay.begin("model_x", "m").0;
     let (left, kept) = (peer(), peer());
@@ -287,7 +289,7 @@ fn a_reading_ends_what_left_and_keeps_what_retired() {
     cell.apply(m, retired(left.instance_id()), |_| {});
     cell.apply(m, retired(kept.instance_id()), |_| {});
     relay.install(m, cell);
-    let mut watch = relay.watch();
+    let mut watch = relay.watch(None);
     let _ = pending(&mut watch);
     relay.withhold("model_x", "m", m);
     let _ = pending(&mut watch);
@@ -321,6 +323,7 @@ fn a_watch_of_one_follow_receives_its_changes_alone() {
             tokio::sync::watch::Sender::new(health()),
             super::Choosers::default(),
             tokio::sync::mpsc::unbounded_channel().0,
+            gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
         );
         let cells: Vec<String> = (0..n).map(|i| format!("m{i}")).collect();
         let mut watches = Vec::new();
@@ -365,6 +368,7 @@ fn a_closed_watch_of_one_follow_releases_its_channel() {
         tokio::sync::watch::Sender::new(health()),
         super::Choosers::default(),
         tokio::sync::mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     for i in 0..128 {
         let cell = format!("m{i}");
@@ -412,10 +416,11 @@ fn an_instance_a_reading_exposes_is_sent_its_left() {
         tokio::sync::watch::Sender::new(health()),
         super::Choosers::default(),
         tokio::sync::mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     let m = relay.begin("model_x", "m").0;
     relay.install(m, installed("m", CellState::Ready));
-    let mut watch = relay.watch();
+    let mut watch = relay.watch(None);
     let _ = pending(&mut watch);
     relay.withhold("model_x", "m", m);
     let joined = peer();
@@ -459,6 +464,7 @@ fn a_watch_of_one_follow_shows_its_closing_generations() {
             vec!["f".to_string()],
         )]),
         tokio::sync::mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     let earlier = relay.begin("model_x", "m").0;
     relay.install(earlier, installed("m", CellState::Ready));
@@ -477,7 +483,7 @@ fn a_watch_of_one_follow_shows_its_closing_generations() {
     relay.install(later, installed("m", CellState::Ready));
     let mut alone = relay.watch_of("model_x", "m");
     let seen = pending(&mut alone);
-    let mut whole = relay.watch();
+    let mut whole = relay.watch(None);
     let all: Vec<FollowEvent> = pending(&mut whole)
         .into_iter()
         .filter(|event| event.cell().is_none_or(|(_, cell)| cell == "m"))
@@ -506,12 +512,13 @@ fn a_snapshot_shows_offering_only_for_a_follow_not_offered() {
         tokio::sync::watch::Sender::new(health()),
         super::Choosers::default(),
         tokio::sync::mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     );
     let m = relay.begin("model_x", "m").0;
     relay.install(m, installed("m", CellState::Ready));
     relay.withhold("model_x", "m", m);
     relay.restore("model_x", "m", m, installed("m", CellState::Ready));
-    let mut late = relay.watch();
+    let mut late = relay.watch(None);
     let snapshot = pending(&mut late);
     assert!(
         !snapshot

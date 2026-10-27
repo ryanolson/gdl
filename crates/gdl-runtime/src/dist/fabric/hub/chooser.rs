@@ -37,6 +37,11 @@ impl HubSession {
 }
 
 impl ChooserHub {
+    /// The instance this tells the hub about.
+    pub(crate) fn instance(&self) -> InstanceId {
+        self.instance
+    }
+
     /// Say that this instance runs a follower of the hub's relay: whether
     /// the hub took it, or why not.
     pub(crate) async fn declare(&self) -> Result<(), String> {

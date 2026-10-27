@@ -55,6 +55,7 @@ fn relay() -> Arc<Relay> {
         tokio::sync::watch::Sender::new(health),
         super::super::Choosers::new([]),
         mpsc::unbounded_channel().0,
+        gdl_model::HubTiming::DEFAULT_LOST_CHOOSER,
     ))
 }
 

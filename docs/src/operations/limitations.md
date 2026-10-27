@@ -344,10 +344,17 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **Rewatch:** a chooser's new watch of its hub's relay ends every gone mark, since the snapshot carries no count of the changes it missed. Each gone cell is offered one more request, and refuses again.
 - **Lifts:** a refusal that a node decides per request before admission, a way for a segment that refused as gone to tell choosers that it takes work again without a change of its cell's state, and a change count in the relay's snapshot.
 
-### The wait for a chooser's acknowledgement has no bound
-- **What:** a hub closes a follow once every chooser of its class among the hub's members has said that it holds no offer to the cell. A chooser whose relay watch is refused, or that holds an offer whose response never ends, keeps the follow and the registrations of the cell's entry instances open for as long, at the cost of one watch.
-- **Why:** closing earlier could drop a cell that may still hold a chooser's work. A hub marks the follow not offered at once, so no new work goes there.
-- **Lifts:** a bound on that wait.
+### A chooser that holds an offer keeps a follow open for as long as its response runs
+- **What:** a hub closes a follow once every chooser of its class among the hub's members has said that it holds no offer to the cell. A chooser that watches the relay and holds an offer whose response never ends keeps the follow, and the registrations of the cell's entry instances, open for as long, at the cost of one watch. A chooser with no watch of the relay open for `[cell] lost_chooser_ms` (30 s by default) is not waited for.
+- **Why:** closing earlier would make the chooser unregister the cell's entry instances `drain_ms` later, which fails what is in flight to them. A hub marks the follow not offered at once, so no new work goes there.
+- **Lifts:** a timeout on a drain that may cut a live stream.
+
+### A chooser that the hub stopped waiting for can lose a long response when it watches again
+- **What:** once a chooser has had no watch of the relay open for `lost_chooser_ms`, a draining cell's follow can close without it. If the chooser then watches again while it still holds a response from the cell, its new snapshot does not show the cell. It unregisters the cell's entry instances `[runtime] drain_ms` later, which fails the response if it is still running.
+- **When:** the response runs on for more than `drain_ms` after the chooser watches again. By default `drain_ms` is the default deadline (600 s), so only a request with a longer deadline of its own, or a shorter `drain_ms`, is at risk.
+- **Silent loss:** the hub counts a watch as open until it sees the connection close. A connection that dies without a close is seen when a write to it fails, which can take as long as TCP's retransmission timeout. A chooser that loses its hub altogether is removed when its registration lease ends.
+- **Earlier builds:** a chooser of an earlier build names no one in its watch, so a hub of this build stops waiting for it `lost_chooser_ms` after it says that it runs a follower, even while it watches. It then sees `dropped` while it may hold an offer, as above. Upgrade a global's instances with its hub. A hub of an earlier build ignores the name.
+- **Lifts:** a chooser that keeps the instances of a dropped follow registered while it holds a lease on it.
 
 ### A retirement or drain across cells ends at its bound for followers that do not answer
 - **What:** an entry instance waits for the cells that follow its cell to avoid it. The wait is bounded by the setup timeout and twice `summary_ms` from the retirement. Past the bound it goes on, and an offer that reaches it afterwards is declined and offered to another cell. A following cell whose watch is lost without a release, a hub without the cell extension, a chooser whose view of the cell lags, and a global hub or chooser that never acknowledges (an earlier build) each leave a retiree to its bound. Upgrade a global's hubs and instances before its children's.
@@ -362,7 +369,7 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **Lifts:** model availability in the cell record and in events.
 
 ### The names a watch, a release, and an acknowledgement carry are not authenticated
-- **What:** nothing checks the class, cell, run, and generation a caller names. Anyone who can reach a cell's hub can hold a draining cell's early end off until the bound, or bring it forward by releasing a watch it did not open. It can also tell the hub that the cells following it avoid a retired entry instance when they do not. `POST /drain` on the control listener and `POST /release` and `POST /avoided` on the public listener need no credential. A chooser that still picks the instance after it stopped taking work is refused and offers the request to another cell.
+- **What:** nothing checks the class, cell, run, and generation a caller names, or the chooser that a watch of the relay names. Anyone who can reach a cell's hub can hold a draining cell's early end off until the bound, or bring it forward by releasing a watch it did not open. A watch of the relay in a chooser's name can only keep the hub waiting for that chooser, as it would if the chooser watched. It can also tell the hub that the cells following it avoid a retired entry instance when they do not. `POST /drain` on the control listener and `POST /release` and `POST /avoided` on the public listener need no credential. A chooser that still picks the instance after it stopped taking work is refused and offers the request to another cell.
 - **Lifts:** a credential across cells, which waits for the private CA. Hub listeners have no TLS. See [Cell hub routes and watch events](../appendix/hub-api.md).
 
 ### A follow can report `left` without `retired`

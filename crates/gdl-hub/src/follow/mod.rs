@@ -43,7 +43,7 @@ mod release;
 
 pub(crate) use offer::Choosers;
 pub use relay::FollowsWatch;
-pub(crate) use relay::{Relay, Retirement};
+pub(crate) use relay::{Relay, Retirement, expire};
 pub(crate) use release::{Release, run as release};
 
 /// The first wait before the directory is watched again after its watch

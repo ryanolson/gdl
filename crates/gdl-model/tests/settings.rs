@@ -488,7 +488,7 @@ fn a_cell_names_its_layout() {
 fn a_cells_hub_timing_is_read_from_its_table() {
     const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
     let cell = settings(&format!(
-        "{LEAST}hold_ms = 500\nheartbeat_ms = 2000\nlease_ms = 9000\nwatch_buffer = 64\n[watch_caps]\ncell = 3\nrelay = 4\nfollow = 5\n"
+        "{LEAST}hold_ms = 500\nheartbeat_ms = 2000\nlease_ms = 9000\nwatch_buffer = 64\nlost_chooser_ms = 4000\n[watch_caps]\ncell = 3\nrelay = 4\nfollow = 5\n"
     ));
     assert_eq!(
         cell.timing,
@@ -497,6 +497,7 @@ fn a_cells_hub_timing_is_read_from_its_table() {
             heartbeat: Duration::from_secs(2),
             lease: Duration::from_secs(9),
             watch_buffer: 64,
+            lost_chooser: Duration::from_secs(4),
             watch_caps: WatchCaps {
                 cell: 3,
                 relay: 4,
@@ -529,6 +530,7 @@ fn with_no_timing_set_a_cells_hub_keeps_its_defaults() {
     assert_eq!(cell.timing.heartbeat, Duration::from_secs(10));
     assert_eq!(cell.timing.lease, Duration::from_secs(30));
     assert_eq!(cell.timing.watch_buffer, 1024);
+    assert_eq!(cell.timing.lost_chooser, Duration::from_secs(30));
     assert_eq!(
         cell.timing.watch_caps,
         WatchCaps {
@@ -544,6 +546,7 @@ fn with_no_timing_set_a_cells_hub_keeps_its_defaults() {
         "heartbeat_ms",
         "lease_ms",
         "watch_buffer",
+        "lost_chooser_ms",
         "watch_caps",
     ] {
         assert!(!text.contains(key), "{key} in {text}");
@@ -554,7 +557,9 @@ fn with_no_timing_set_a_cells_hub_keeps_its_defaults() {
 /// its key: a lease no longer than the heartbeat, which readers would
 /// let lapse between two publishes, also when only one of the two is
 /// set; a heartbeat or a lease of zero; a watch buffer of zero or past
-/// its ceiling; a cap of zero, which would refuse every watch.
+/// its ceiling; a cap of zero, which would refuse every watch; a bound of
+/// zero on a lost chooser, which would stop waiting for a chooser the
+/// moment its watch of the relay closes, before it can watch again.
 #[test]
 fn a_hub_timing_the_hub_cannot_run_with_is_refused_by_key() {
     const LEAST: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
@@ -585,6 +590,7 @@ fn a_hub_timing_the_hub_cannot_run_with_is_refused_by_key() {
         ("lease_ms = 0\n", "lease_ms", "at least 1"),
         ("watch_buffer = 0\n", "watch_buffer", "at least 1"),
         ("watch_buffer = 65537\n", "watch_buffer", "at most 65536"),
+        ("lost_chooser_ms = 0\n", "lost_chooser_ms", "at least 1"),
         ("[watch_caps]\ncell = 0\n", "watch_caps.cell", "at least 1"),
         (
             "[watch_caps]\nrelay = 0\n",

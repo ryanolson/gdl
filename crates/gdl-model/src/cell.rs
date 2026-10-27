@@ -28,6 +28,7 @@ use crate::{Layout, Problem, Problems, check_layout_name};
 /// heartbeat_ms = 10000         # optional, the hub's alone: how often the record is published
 /// lease_ms = 30000             # optional, the hub's alone: how long readers keep it; longer than the heartbeat
 /// watch_buffer = 1024          # optional, the hub's alone: events a watcher may fall behind by
+/// lost_chooser_ms = 30000      # optional, the hub's alone: how long it waits for a chooser with no watch of its relay
 /// [watch_caps]                 # optional, the hub's alone: watches each route serves at once
 /// relay = 2048
 /// [ready]                      # optional: the quorum of each segment of the class
@@ -95,8 +96,9 @@ pub struct CellSettings {
 
 /// How a cell's hub paces its judgment, its record, and its watches, and
 /// how many of its watches it serves at once: the `[cell]` keys
-/// `hold_ms`, `heartbeat_ms`, `lease_ms`, `watch_buffer`, and
-/// `[watch_caps]`. Each key that is not set takes its default.
+/// `hold_ms`, `heartbeat_ms`, `lease_ms`, `watch_buffer`,
+/// `lost_chooser_ms`, and `[watch_caps]`. Each key that is not set takes
+/// its default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HubTiming {
     /// How long every segment's quorum must hold before the cell is
@@ -113,6 +115,13 @@ pub struct HubTiming {
     /// may fall behind by before its watch ends (`watch_buffer`): at least
     /// this many, rounded up to a power of two.
     pub watch_buffer: usize,
+    /// How long a chooser among the hub's members may have no watch of the
+    /// hub's relay open before the hub stops waiting for it to say that it
+    /// holds no offer to a followed cell (`lost_chooser_ms`): from when its
+    /// last watch closed, or from when it said it runs a follower, if it
+    /// has opened none since. A chooser that watches again is waited for
+    /// again.
+    pub lost_chooser: Duration,
     /// How many watches each of the hub's watch routes serves at once
     /// (`[watch_caps]`).
     pub watch_caps: WatchCaps,
@@ -133,6 +142,14 @@ impl HubTiming {
 
     /// The watch buffer when `watch_buffer` is not set: 1024 events.
     pub const DEFAULT_WATCH_BUFFER: usize = 1024;
+
+    /// How long a chooser may have no watch of the relay open when
+    /// `lost_chooser_ms` is not set: 30 s, velo-hub's default lease of a
+    /// registration. A chooser that loses its hub altogether is let go of
+    /// when its lease ends, and one that loses only its watch at about the
+    /// same time. A chooser that is up watches again within about a second
+    /// (its cap on waits between watches), so the bound is far from it.
+    pub const DEFAULT_LOST_CHOOSER: Duration = Duration::from_secs(30);
 
     /// The largest watch buffer, 65536 events: 64 times the default. The
     /// hub keeps a buffer for the cell and one for each cell it follows,
@@ -158,6 +175,7 @@ impl Default for HubTiming {
             heartbeat: Self::DEFAULT_HEARTBEAT,
             lease: Self::DEFAULT_LEASE,
             watch_buffer: Self::DEFAULT_WATCH_BUFFER,
+            lost_chooser: Self::DEFAULT_LOST_CHOOSER,
             watch_caps: WatchCaps::default(),
         }
     }
@@ -590,6 +608,8 @@ struct Table {
     lease_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     watch_buffer: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lost_chooser_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Caps::is_empty")]
     watch_caps: Caps,
 }
@@ -732,6 +752,7 @@ fn hub_timing(table: &Table) -> Result<HubTiming, Problems> {
         heartbeat: millis_or(table.heartbeat_ms, defaults.heartbeat),
         lease: millis_or(table.lease_ms, defaults.lease),
         watch_buffer: table.watch_buffer.unwrap_or(defaults.watch_buffer),
+        lost_chooser: millis_or(table.lost_chooser_ms, defaults.lost_chooser),
         watch_caps: WatchCaps {
             cell: caps.cell.unwrap_or(defaults.watch_caps.cell),
             relay: caps.relay.unwrap_or(defaults.watch_caps.relay),
@@ -762,7 +783,8 @@ fn hub_timing(table: &Table) -> Result<HubTiming, Problems> {
 /// Whether a cell's hub can run at `timing`: a heartbeat and a lease of at
 /// least 1 ms, a lease longer than the heartbeat, so that readers do not
 /// let the record lapse between two publishes, a watch buffer from 1 to
-/// [`HubTiming::MAX_WATCH_BUFFER`], and no watch cap of 0. The problem
+/// [`HubTiming::MAX_WATCH_BUFFER`], a bound on a lost chooser of at least
+/// 1 ms, and no watch cap of 0. The problem
 /// names its key in `[cell]`. Reading [`CellSettings`] applies it; a hub
 /// applies it again to settings made in code.
 pub fn check_hub_timing(timing: &HubTiming) -> Result<(), Problems> {
@@ -800,6 +822,9 @@ pub fn check_hub_timing(timing: &HubTiming) -> Result<(), Problems> {
                 HubTiming::MAX_WATCH_BUFFER
             ),
         );
+    }
+    if timing.lost_chooser < Duration::from_millis(1) {
+        return at("lost_chooser_ms", "is 0; it is at least 1".into());
     }
     let caps = &timing.watch_caps;
     for (key, cap) in [
@@ -844,6 +869,11 @@ impl From<CellSettings> for Table {
                 settings.timing.watch_buffer,
                 HubTiming::DEFAULT_WATCH_BUFFER,
             ),
+            lost_chooser_ms: set(
+                settings.timing.lost_chooser,
+                HubTiming::DEFAULT_LOST_CHOOSER,
+            )
+            .map(millis),
             watch_caps: Caps {
                 cell: set(settings.timing.watch_caps.cell, WatchCaps::DEFAULT_CELL),
                 relay: set(settings.timing.watch_caps.relay, WatchCaps::DEFAULT_RELAY),

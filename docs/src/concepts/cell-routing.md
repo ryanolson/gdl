@@ -62,16 +62,19 @@ Not offered is not a retirement. No instance is marked retired, and no instance'
 
 ## Closing a follow
 
-A follow closes only when no chooser can still hold an offer to it. The hub learns this by acknowledgement, not by a timer.
+A follow closes only when no chooser can still hold an offer to it. The hub learns this by acknowledgement, not by a timer. The one timer is for a chooser that cannot answer (step 6).
 
 1. A chooser says to its hub that it runs a follower of the relay (`POST /instances/{id}/chooser`). It does this before it first watches the relay. Only then does the hub wait for its acknowledgements. An instance without `[cell]` runs no follower, never offers to another cell, and is not waited for.
 2. Each offer to a cell takes a lease on the cell's follow. The lease is one count, held until the response stream ends or is dropped, as a selector's lease is.
 3. When a chooser applies a not-offered revision, it stops offering to that follow. A choice already in flight is checked again when it returns, so it cannot complete an offer to the follow.
 4. Once the chooser holds no lease on the follow, it acknowledges that revision (`POST /instances/{id}/unoffered`, a `gdl_watch::Unoffered`). It looks for such a follow every 50 ms, and sends an acknowledgement that its hub did not take again 500 ms later.
 5. The follow closes once every chooser of its class among the hub's members has acknowledged the current revision, or left, and that revision is still a not-offered one. An acknowledgement of any other revision counts for nothing.
-6. The hub sends `dropped` on the relay, ends the link, and releases the child's watch (`POST /release`).
+6. A chooser names itself in its watch of the relay (`GET /follows?instance=<id>`). The hub stops waiting for a chooser that has had no such watch open for `[cell] lost_chooser_ms`, 30 s by default. The time runs from when its last watch closed. For a chooser that never got a watch open, for example one refused at the relay's cap, it runs from step 1. A chooser that watches again is waited for again.
+7. The hub sends `dropped` on the relay, ends the link, and releases the child's watch (`POST /release`).
 
-A request can run for a long time. Its lease keeps the follow open for as long as it runs. That costs one watch.
+A request can run for a long time. Its lease keeps the follow open for as long as it runs, if its chooser still watches the relay. That costs one watch.
+
+A chooser that the hub stopped waiting for keeps its offers. It cannot see `dropped` either, so it keeps the child's instances registered with velo, and a draining entry instance finishes what it holds before it leaves. If the chooser watches again, its new snapshot no longer shows the follow, and it unregisters the child's instances `[runtime] drain_ms` later. The default 30 s matches velo-hub's default registration lease: a chooser that loses its hub altogether is removed at about the same time.
 
 If the link is lost, the follow is not offered from that moment. It closes by the same acknowledgements, so the chooser keeps the child's instances registered with velo until no lease is held. Unregistering a peer fails what is in flight to it. A live instance finishes what it holds. A dead one fails its streams through velo's own detection or through their deadlines.
 
@@ -238,7 +241,7 @@ Avoiding a retiree promises nothing about hand-offs sent to it before. The insta
 
 1. The cell is `draining` on its health endpoint, record, and watch. Each parent hub marks its follow not offered at the next revision.
 2. Each entry instance learns of the drain from its own cell's watch. It keeps taking new work, stays ready, and keeps reporting its load for a bound: the setup timeout plus twice `summary_ms`. This lets an offer from a chooser with a stale view land.
-3. The bound ends early when the cell's hub says that no other cell follows it: the cell's watch sends `state` again with `unfollowed: true`. A parent's hub releases the cell only once its follow has closed, so no offer from another cell is still on its way.
+3. The bound ends early when the cell's hub says that no other cell follows it: the cell's watch sends `state` again with `unfollowed: true`. A parent's hub releases the cell only once its follow has closed, so no offer from another cell is still on its way. A chooser that lost its watch of its own hub's relay holds the follow open for at most `lost_chooser_ms` ([Closing a follow](#closing-a-follow)). A response it still holds is finished in step 4.
 4. Then the entry instance declines offers from other cells as gone. A chooser whose view is stale offers the request to another cell, and offers this cell no more work until the relay changes its follow ([A cell that is gone](#a-cell-that-is-gone)). It finishes the requests it holds and announces that it has drained. It still takes hand-offs inside the cell until every entry instance has drained or left. Then it closes and leaves. It does not retire: the cell's state already keeps choosers away.
 5. An interior instance serves until every entry instance of the cell has drained or left, then drains as after a stop. While its cell drains, the entry instances are its drain sources, whatever stopped it. The sources outside the cell are not members of its hub, so it cannot see them.
 6. Once no instance of the cell's class is a member, the hub writes a last draining record, withdraws it, and ends the cell's watches. From then it refuses every registration with 409. To serve the cell again, start its hub again.

@@ -32,8 +32,10 @@
 //! not offered to its choosers either, and closes once each has
 //! acknowledged that it holds no offer to it
 //! (`POST /v1/ext/gdl-cell/instances/{id}/unoffered` on the control
-//! listener, a [`gdl_watch::Unoffered`]); a withheld follow does not close
-//! while its link reads it again. The watches' events and their client are
+//! listener, a [`gdl_watch::Unoffered`]), but for a chooser that has had no
+//! watch of the relay open for `[cell] lost_chooser_ms`, which a chooser's
+//! watch names it in (`?instance=<id>`, [`gdl_watch::RelayWatcher`]); a
+//! withheld follow does not close while its link reads it again. The watches' events and their client are
 //! `gdl-watch`'s, so that a segment instance reads the relay without
 //! linking the hub.
 mod cell;

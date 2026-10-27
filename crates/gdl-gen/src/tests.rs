@@ -934,6 +934,10 @@ fn defaults() -> Vec<(&'static str, String)> {
             HubTiming::DEFAULT_WATCH_BUFFER.to_string(),
         ),
         (
+            "HubTiming::DEFAULT_LOST_CHOOSER",
+            millis(HubTiming::DEFAULT_LOST_CHOOSER),
+        ),
+        (
             "WatchCaps::DEFAULT_CELL",
             WatchCaps::DEFAULT_CELL.to_string(),
         ),

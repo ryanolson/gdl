@@ -8,7 +8,7 @@ A cell's hub serves the `gdl-cell` extension's routes under `/v1/ext/gdl-cell`. 
 |---|---|---|---|---|
 | `GET /health` | public | none | none | 200 when the cell is healthy, 503 otherwise, both with a `CellHealth` body |
 | `GET /watch` | public | none | optional query `?class=&cell=&run=&generation=` (`gdl_watch::Follower`) | the cell's watch as server-sent events (`CellWatchEvent`) |
-| `GET /follows` | public | none | none | the relay as server-sent events (`FollowEvent`) |
+| `GET /follows` | public | none | optional query `?instance=` (`gdl_watch::RelayWatcher`), the chooser that watches | the relay as server-sent events (`FollowEvent`) |
 | `GET /follows/{class}/{cell}` | public | none | none | one cell's follows: its closing generations, then its current one, then `synced`, then each relay event that names the cell |
 | `POST /release` | public | none | `Follower` | 204; the watch no longer counts as a follower |
 | `POST /avoided` | public | none | `Avoided` | 204; counted only from a watch that counted when the instance retired |
@@ -20,7 +20,8 @@ A cell's hub serves the `gdl-cell` extension's routes under `/v1/ext/gdl-cell`. 
 | `POST /instances/{id}/avoids` | control | the instance's | `Avoids` | 204; 409 from an instance that is not a chooser |
 
 - Refusals on the credentialed routes are 409, not 401 or 404, because velo-hub's client drops its registration on those.
-- `release` and `avoided` are not authenticated. Nothing checks the names in a `Follower`.
+- `release` and `avoided` are not authenticated. Nothing checks the names in a `Follower`, or the chooser a relay watch names.
+- The hub waits for a chooser's acknowledgements while it has a relay watch open in its name, and for `[cell] lost_chooser_ms` after its last one closed or after it declared.
 - `report` carries no credential either. The parent writes only what it verifies: a record of the right shape whose `home` is the parent's cell, whose contract and placement hashes are the parent's, and that is newer than what it holds. A withdrawal is written only over a record the parent holds. Any other withdrawal is answered 200 and writes nothing.
 - A watch that names no follower counts for nothing in the drain and retirement waits. A watch that closes without a release still counts. Once the cell's lease has passed since it closed, it no longer shows as a follower, but it never counts as a release.
 - A watch that arrives before the hub first stores the cell's record waits up to 5 s, then gets 503. Every watch ends when the hub stops, or once a drained cell's record is withdrawn. A watch after that gets 503.
@@ -53,6 +54,7 @@ Every relay event except `synced` names its class, cell, and generation. A choos
 | Load summary period | 10 s by default, at least 1 s | `[cell] summary_ms` |
 | Drain answer wait | up to 5 s | the hub |
 | Chooser acknowledgement poll, resend | 50 ms, 500 ms | the runtime |
+| Wait for a chooser with no relay watch | 30 s by default | `[cell] lost_chooser_ms` |
 
 A watch whose snapshot is complete is never ended by the snapshot limits. Watches taken in process are not capped. `CellReadiness::refused_watches` counts each route's refusals.
 

@@ -29,6 +29,10 @@ pub struct CellTiming {
     pub refollow: Duration,
     /// What a followed cell's watch may cost before its link ends it.
     pub watch: gdl_watch::WatchLimits,
+    /// How long a chooser may have no watch of the relay open before the
+    /// hub stops waiting for its acknowledgements
+    /// ([`HubTiming::lost_chooser`]).
+    pub lost_chooser: Duration,
     /// How many watches each of the hub's watch routes serves at once.
     pub watch_caps: WatchCaps,
 }
@@ -51,6 +55,7 @@ impl CellTiming {
             watch_buffer: settings.watch_buffer,
             refollow: Duration::from_millis(250),
             watch: gdl_watch::WatchLimits::default(),
+            lost_chooser: settings.lost_chooser,
             watch_caps: settings.watch_caps,
         }
     }

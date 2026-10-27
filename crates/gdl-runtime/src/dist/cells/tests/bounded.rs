@@ -46,7 +46,7 @@ impl Served {
 impl Source for Served {
     async fn watch(&self) -> Result<BoxStream<'static, Relaying>, String> {
         self.watcher
-            .follows(&self.address)
+            .follows(&self.address, None)
             .await
             .map(relayed)
             .map_err(|e| e.to_string())

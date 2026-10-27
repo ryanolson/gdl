@@ -14,6 +14,8 @@ use common::{
     CELL, Instance, Records, Resolving, WAIT, global_default, health, meet_the_quorum, model,
     serve_cell, timing,
 };
+use std::time::{Duration, Instant};
+
 use futures::{FutureExt, Stream, StreamExt};
 use gdl_cells::CellState;
 use gdl_hub::{CellReadiness, FollowsWatch};
@@ -112,6 +114,11 @@ struct Followed {
 }
 
 async fn followed() -> Followed {
+    followed_paced(timing()).await
+}
+
+/// [`followed`], the global's hub paced by `global`.
+async fn followed_paced(global: gdl_hub::CellTiming) -> Followed {
     let directory = Resolving::new();
     let mut records = Records::new(&directory.inner);
     let (model_hub, model_cell) = serve_cell(
@@ -122,7 +129,7 @@ async fn followed() -> Followed {
     .await;
     let (instances, _) = meet_the_quorum(&model_hub).await;
     records.until(CellState::Ready).await;
-    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, global).await;
     let mut watch = global_cell.follows();
     let entry = instances[0].id();
     let installed = through(
@@ -381,7 +388,7 @@ fn global_hub_relay(hub: &Hub) -> impl Stream<Item = FollowEvent> + Unpin {
     let watcher = gdl_watch::CellWatcher::new().expect("a client");
     let address = format!("127.0.0.1:{}", hub.public_addr().port());
     futures::stream::once(async move {
-        tokio::time::timeout(WAIT, watcher.follows(&address))
+        tokio::time::timeout(WAIT, watcher.follows(&address, None))
             .await
             .expect("the hub answers in time")
             .expect("the hub serves the relay")
@@ -464,6 +471,176 @@ async fn a_member_that_runs_no_follower_holds_no_follow() {
     })
     .await;
     assert_eq!(marked.last(), Some(&offering(generation, 2, false)));
+    assert_eq!(next(&mut cells.watch).await, dropped(generation));
+    cells.stop().await;
+}
+
+/// How long the global's hub waits for a chooser with no watch of its
+/// relay open, in the tests of that bound.
+const LOST: Duration = Duration::from_millis(500);
+
+/// The global's pace in the tests of the bound: [`LOST`], with the relay's
+/// watches over HTTP capped at `relay`.
+fn lost(relay: usize) -> gdl_hub::CellTiming {
+    gdl_hub::CellTiming {
+        lost_chooser: LOST,
+        watch_caps: gdl_model::WatchCaps {
+            relay,
+            ..gdl_model::WatchCaps::default()
+        },
+        ..timing()
+    }
+}
+
+/// A watch of the relay at `hub` over HTTP that names `chooser`, as a
+/// chooser's follower opens it, or why the hub refused it.
+async fn named(hub: &Hub, chooser: &Instance) -> Result<impl Stream + use<>, String> {
+    let watcher = gdl_watch::CellWatcher::new().expect("a client");
+    let address = format!("127.0.0.1:{}", hub.public_addr().port());
+    let me = gdl_watch::RelayWatcher {
+        instance: chooser.id(),
+    };
+    tokio::time::timeout(WAIT, watcher.follows(&address, Some(&me)))
+        .await
+        .expect("the hub answers in time")
+        .map_err(|error| error.to_string())
+}
+
+/// Drop `watch`, and wait until the global's hub has seen it close: its
+/// relay's watches, the in-process one included, are down to `left`.
+async fn close(cells: &Followed, watch: impl Stream, left: usize) {
+    drop(watch);
+    let mut open = cells.global_cell.follows_watchers();
+    tokio::time::timeout(WAIT, open.wait_for(|open| *open == left))
+        .await
+        .expect("the hub saw the watch close in time")
+        .expect("the extension runs");
+}
+
+/// Drain the model cell, and return the revision that marks its follow
+/// not offered.
+async fn drain(cells: &mut Followed) -> u64 {
+    cells.model_cell.drain().await.expect("the cell drains");
+    let marked = through(&mut cells.watch, |event| {
+        matches!(event, FollowEvent::Offering { offered: false, .. })
+    })
+    .await;
+    match marked.last() {
+        Some(FollowEvent::Offering { revision, .. }) => *revision,
+        _ => unreachable!("an offering"),
+    }
+}
+
+/// A chooser whose watch of the relay is refused, the relay's cap met by
+/// another chooser's, cannot learn that a draining cell is not offered: it
+/// is waited for until the bound has passed since it said that it runs a
+/// follower, and no longer. The follow then closes on the acknowledgement
+/// of the chooser that watches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chooser_refused_a_watch_is_not_waited_for_past_the_bound() {
+    let mut cells = followed_paced(lost(1)).await;
+    let generation = cells.generation;
+    let watching = Instance::chooser(&cells.global_hub).await;
+    let _held = named(&cells.global_hub, &watching)
+        .await
+        .expect("the first watch takes the relay's place");
+    let before = Instant::now();
+    let refused = Instance::chooser(&cells.global_hub).await;
+    let refusal = named(&cells.global_hub, &refused)
+        .await
+        .err()
+        .expect("the relay's cap is met");
+    assert!(refusal.contains("503"), "{refusal}");
+
+    let revision = drain(&mut cells).await;
+    watching
+        .acknowledge(&unoffered(generation, revision))
+        .await
+        .expect("the hub takes the acknowledgement");
+    assert_eq!(
+        tokio::time::timeout(LOST + WAIT, next(&mut cells.watch))
+            .await
+            .expect("closed once the bound passed"),
+        dropped(generation)
+    );
+    assert!(
+        before.elapsed() >= LOST,
+        "closed {:?} after the refused chooser declared, within the bound",
+        before.elapsed()
+    );
+    assert!(refused.registered().await, "the refused chooser left");
+    cells.stop().await;
+}
+
+/// A chooser whose watch of the relay closes and opens again within the
+/// bound is waited for as before: past the bound, the follow of a
+/// draining cell stays open until it acknowledges too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chooser_that_watches_again_within_the_bound_is_waited_for() {
+    let mut cells = followed_paced(lost(16)).await;
+    let generation = cells.generation;
+    let (first, second) = (
+        Instance::chooser(&cells.global_hub).await,
+        Instance::chooser(&cells.global_hub).await,
+    );
+    let _first = named(&cells.global_hub, &first).await.expect("a watch");
+    let gone = named(&cells.global_hub, &second).await.expect("a watch");
+    let open = *cells.global_cell.follows_watchers().borrow();
+
+    let revision = drain(&mut cells).await;
+    close(&cells, gone, open - 1).await;
+    let _back = named(&cells.global_hub, &second)
+        .await
+        .expect("watched again");
+    first
+        .acknowledge(&unoffered(generation, revision))
+        .await
+        .expect("the hub takes the acknowledgement");
+    tokio::time::sleep(LOST * 2).await;
+    assert_eq!(
+        pending(&mut cells.watch),
+        [],
+        "closed without the chooser that came back"
+    );
+    second
+        .acknowledge(&unoffered(generation, revision))
+        .await
+        .expect("the hub takes the acknowledgement");
+    assert_eq!(next(&mut cells.watch).await, dropped(generation));
+    cells.stop().await;
+}
+
+/// A chooser that watches the relay and has not acknowledged, as one that
+/// holds a long response from the cell, keeps the follow of a draining
+/// cell open past the bound, however long: the bound is for choosers that
+/// cannot answer. Once it acknowledges, the follow closes. Its watch then
+/// closing changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watching_chooser_keeps_the_follow_open_past_the_bound() {
+    let mut cells = followed_paced(lost(16)).await;
+    let generation = cells.generation;
+    let (done, holding) = (
+        Instance::chooser(&cells.global_hub).await,
+        Instance::chooser(&cells.global_hub).await,
+    );
+    let _done = named(&cells.global_hub, &done).await.expect("a watch");
+    let _holding = named(&cells.global_hub, &holding).await.expect("a watch");
+
+    let revision = drain(&mut cells).await;
+    done.acknowledge(&unoffered(generation, revision))
+        .await
+        .expect("the hub takes the acknowledgement");
+    tokio::time::sleep(LOST * 3).await;
+    assert_eq!(
+        pending(&mut cells.watch),
+        [],
+        "closed on a chooser that watches and holds an offer"
+    );
+    assert!(cells.follows());
+    holding
+        .acknowledge(&unoffered(generation, revision))
+        .await
+        .expect("the hub takes the acknowledgement");
     assert_eq!(next(&mut cells.watch).await, dropped(generation));
     cells.stop().await;
 }

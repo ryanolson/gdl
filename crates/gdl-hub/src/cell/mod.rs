@@ -116,8 +116,12 @@ pub use timing::{CellTiming, RefusedWatches};
 /// none, as an instance without `[cell]`, never offers and never
 /// acknowledges; and it acknowledges with `POST instances/{instance_id}/unoffered` on
 /// the control listener, a [`gdl_watch::Unoffered`] with the chooser's own
-/// credential, refused with 409 from any other instance. Then the relay
-/// drops it and its link ends. A retirement of a followed cell's entry
+/// credential, refused with 409 from any other instance. A chooser names
+/// itself in its watch of the relay (`GET follows?instance=<id>`,
+/// [`gdl_watch::RelayWatcher`]): one that has had no such watch open for
+/// [`CellTiming::lost_chooser`], from when its last one closed or from when
+/// it declared, is not waited for until it watches again, since it cannot
+/// learn what to acknowledge. Then the relay drops it and its link ends. A retirement of a followed cell's entry
 /// instance waits, in the same way, for the choosers whose hops enter the
 /// instance's segment, as they are when the relay applies it: each says
 /// that it avoids the instance once its tables hold it retired
@@ -294,6 +298,9 @@ impl<D: CellDirectory> CellReadiness<D> {
             // A hub that refuses at once would be dialled in a loop.
             return Err(CellError::new("the cell's refollow delay is zero"));
         }
+        if timing.lost_chooser.is_zero() {
+            return Err(at("lost_chooser_ms", "is 0; it is at least 1".into()));
+        }
         // A cell of a class that nothing sends to has no parent to name.
         let entered = layout
             .boundaries()
@@ -355,6 +362,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             health.clone(),
             choosers(&layout, &cell.class),
             releases,
+            timing.lost_chooser,
         ));
         Ok(Self {
             directory: Arc::new(directory),
@@ -442,7 +450,7 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// serves, as typed events. It ends at once if the hub has stopped.
     /// Not capped, as the route is ([`gdl_model::WatchCaps`]).
     pub fn follows(&self) -> FollowsWatch {
-        self.relay.watch()
+        self.relay.watch(None)
     }
 
     /// Start the cell's drain, as `POST drain` on the control listener
@@ -614,6 +622,12 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                         ctx.cancellation().clone(),
                     )));
                 }
+                if !self.sends.is_empty() {
+                    tasks.push(tokio::spawn(crate::follow::expire(
+                        Arc::clone(&self.relay),
+                        ctx.cancellation().clone(),
+                    )));
+                }
                 for class in &self.sends {
                     let follower = Follower {
                         directory: Arc::clone(&self.directory),
@@ -748,8 +762,10 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 gdl_watch::FOLLOWS_ROUTE,
                 get({
                     let relay = Arc::clone(&relay);
-                    move || {
-                        let watch = relaying.take().map(|place| (relay.watch(), place));
+                    move |Query(query): Query<RelayQuery>| {
+                        let watch = relaying
+                            .take()
+                            .map(|place| (relay.watch(query.instance), place));
                         async move { serve_follows(watch) }
                     }
                 }),
@@ -917,6 +933,13 @@ struct WatchQuery {
     cell: Option<String>,
     run: Option<u64>,
     generation: Option<u64>,
+}
+
+/// The relay's query: the chooser that holds the watch, if it names one
+/// ([`gdl_watch::RelayWatcher`]).
+#[derive(Deserialize)]
+struct RelayQuery {
+    instance: Option<velo_hub::velo::InstanceId>,
 }
 
 /// The watch as server-sent events, each one JSON value, in `place`; a hub

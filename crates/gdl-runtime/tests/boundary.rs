@@ -592,7 +592,7 @@ async fn a_chooser_refused_its_relay_routes_once_there_is_room() {
     let (hub, relay) = cell_hub_timed(&spec, global_hub(), &directory, capped).await;
     let m1 = model(&spec, &directory, M1, "m1-hub:1337", 1, 1, &events).await;
     let watcher = CellWatcher::new().expect("a client");
-    let mut held = tokio::time::timeout(WAIT, watcher.follows(&address(&hub)))
+    let mut held = tokio::time::timeout(WAIT, watcher.follows(&address(&hub), None))
         .await
         .expect("the hub answers in time")
         .expect("the hub serves the relay's one watch");

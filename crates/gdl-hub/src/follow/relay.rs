@@ -15,8 +15,11 @@
 //! offered is the follow's next revision. One that is not offered closes
 //! once every chooser of its class among the hub's members has
 //! acknowledged its current revision ([`super::offer`]): the relay drops
-//! it, and ends its link. A follow whose link ends first, or that a newer
-//! epoch replaces, is not offered from then, and is kept beside the
+//! it, and ends its link. A chooser that has had no watch of the relay
+//! open for the hub's bound is not waited for until it watches again
+//! ([`expire`] settles what waited only for it). A follow whose link ends
+//! first, or that a newer epoch replaces, is not offered from then, and is
+//! kept beside the
 //! cell's later follows, its instances still relayed, until it closes the
 //! same way, since what the choosers offered to it may still be under
 //! way.
@@ -38,10 +41,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures::Stream;
 use futures::stream::BoxStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use velo_hub::protocol::RegistrationEpoch;
 use velo_hub::store::{Incarnation, Removal};
@@ -78,6 +83,9 @@ pub(crate) struct Relay {
     /// the generation of the follow under way or the last one, for whoever
     /// needs to see the follower's decisions.
     following: watch::Sender<BTreeMap<(String, String), u64>>,
+    /// Woken when a chooser may stop being waited for at a new time: its
+    /// last watch of the relay closed, or it declared.
+    expiry: Arc<Notify>,
 }
 
 impl Relay {
@@ -85,7 +93,8 @@ impl Relay {
     /// events behind, which shows how many ready cells of each class it
     /// follows in `health`, and whose follows that are not offered close
     /// once every member of `choosers` that chooses their class has
-    /// acknowledged them.
+    /// acknowledged them, but for those that have had no watch of the
+    /// relay open for `lost`.
     /// Each follow it closes is sent to `releases`, for the cell's hub to
     /// be told.
     pub(crate) fn new(
@@ -93,6 +102,7 @@ impl Relay {
         health: watch::Sender<CellHealth>,
         choosers: Choosers,
         releases: mpsc::UnboundedSender<Release>,
+        lost: Duration,
     ) -> Self {
         Self {
             shared: Arc::new(Mutex::new(Shared {
@@ -103,12 +113,15 @@ impl Relay {
                 ready: HashMap::new(),
                 health,
                 choosers,
+                lost,
+                swept: Instant::now(),
                 releases,
                 retirements: watch::Sender::new(HashSet::new()),
             })),
             watchers: Watchers::new(),
             one: Watchers::new(),
             following: watch::Sender::new(BTreeMap::new()),
+            expiry: Arc::new(Notify::new()),
         }
     }
 
@@ -443,7 +456,8 @@ impl Relay {
         chooser: InstanceId,
         epoch: RegistrationEpoch,
     ) -> Result<(), String> {
-        if self.lock().choosers.declare(chooser, epoch) {
+        if self.lock().choosers.declare(chooser, epoch, Instant::now()) {
+            self.expiry.notify_one();
             return Ok(());
         }
         Err(format!(
@@ -484,6 +498,7 @@ impl Relay {
                 class: class.to_string(),
                 cell: cell.to_string(),
             }),
+            chooser: None,
         }
     }
 
@@ -493,17 +508,42 @@ impl Relay {
         self.lock().changes.channels()
     }
 
-    /// A watch of the relay: its snapshot, then each change.
-    pub(crate) fn watch(&self) -> FollowsWatch {
+    /// A watch of the relay: its snapshot, then each change. One that
+    /// names a `chooser` keeps the relay waiting for it while it is open
+    /// ([`super::offer`]).
+    pub(crate) fn watch(&self, chooser: Option<InstanceId>) -> FollowsWatch {
         let counted = self.watchers.count();
         let (snapshot, events) = {
-            let shared = self.lock();
+            let mut shared = self.lock();
+            if let Some(chooser) = chooser {
+                shared.choosers.opened(chooser, Instant::now());
+            }
             (shared.snapshot(), shared.changes.subscribe_all())
         };
         FollowsWatch {
             events: self.watchers.stream(counted, snapshot, events),
             release: None,
+            chooser: chooser.map(|id| ChooserWatch {
+                shared: Arc::clone(&self.shared),
+                expiry: Arc::clone(&self.expiry),
+                id,
+            }),
         }
+    }
+
+    /// Settle every follow that is not offered, if a chooser stopped being
+    /// waited for since the last time, and return when the next one will.
+    fn sweep(&self) -> Option<Instant> {
+        let now = Instant::now();
+        let mut shared = self.lock();
+        let lost = shared.lost;
+        if shared.choosers.lost_since(shared.swept, now, lost) {
+            for (class, cell, generation) in shared.unoffered() {
+                shared.settle(&class, &cell, generation);
+            }
+        }
+        shared.swept = now;
+        shared.choosers.next_lost(now, lost)
     }
 
     /// How many watches of the relay are open, as it changes.
@@ -554,6 +594,12 @@ struct Shared {
     health: watch::Sender<CellHealth>,
     /// The members that must acknowledge a follow before it closes.
     choosers: Choosers,
+    /// How long a chooser may have no watch of the relay open before it is
+    /// not waited for.
+    lost: Duration,
+    /// When the follows were last settled for the choosers that stopped
+    /// being waited for ([`Relay::sweep`]).
+    swept: Instant,
     /// Where each follow the relay closes, and each retirement its
     /// choosers avoid, is sent, for its cell's hub.
     releases: mpsc::UnboundedSender<Release>,
@@ -650,7 +696,11 @@ impl Shared {
     /// is not offered and every chooser of the class acknowledged it:
     /// drop it from the relay, and end its link if it is the current one.
     fn settle(&mut self, class: &str, cell: &str, generation: u64) {
-        let choosers = self.choosers.count(class);
+        let waited: Vec<InstanceId> = self
+            .choosers
+            .waited(class, Instant::now(), self.lost)
+            .collect();
+        let closes = |offer: &Offer| offer.closes(waited.iter().copied());
         let dropped = || FollowEvent::Dropped {
             class: class.to_string(),
             cell: cell.to_string(),
@@ -666,7 +716,7 @@ impl Shared {
                         .installed
                         .as_ref()
                         .is_some_and(|installed| !installed.withheld)
-                    && follow.offer.closes(choosers)
+                    && closes(&follow.offer)
             })
         {
             let follow = cells.remove(cell).expect("the follow was just found");
@@ -693,7 +743,7 @@ impl Shared {
         };
         if generations
             .get(&generation)
-            .is_some_and(|closing| closing.offer.closes(choosers))
+            .is_some_and(|closing| closes(&closing.offer))
         {
             let closing = generations
                 .remove(&generation)
@@ -711,6 +761,25 @@ impl Shared {
             self.changes.send(dropped());
             self.release(&closing.installed, generation);
         }
+    }
+
+    /// Every follow that is not offered, current or closing, by class,
+    /// cell, and generation.
+    fn unoffered(&self) -> Vec<(String, String, u64)> {
+        let current = self.follows.iter().flat_map(|(class, cells)| {
+            cells
+                .iter()
+                .filter(|(_, follow)| follow.installed.is_some() && !follow.offer.offered())
+                .map(|(cell, follow)| (class.clone(), cell.clone(), follow.generation))
+        });
+        let closing = self.closing.iter().flat_map(|(class, cells)| {
+            cells.iter().flat_map(move |(cell, generations)| {
+                generations
+                    .keys()
+                    .map(move |generation| (class.clone(), cell.clone(), *generation))
+            })
+        });
+        current.chain(closing).collect()
     }
 
     /// Tell the hub of `installed`'s cell that its follow `generation`
@@ -913,6 +982,27 @@ pub struct FollowsWatch {
     /// as its last watch closes, not only at the cell's next change, which
     /// a cell that left never sends.
     release: Option<ChannelRelease>,
+    /// For a watch that names its chooser: the relay waits for the chooser
+    /// while it is open, and for the bound once it closes.
+    chooser: Option<ChooserWatch>,
+}
+
+/// Tells the relay that a chooser's watch closed.
+struct ChooserWatch {
+    shared: Arc<Mutex<Shared>>,
+    expiry: Arc<Notify>,
+    id: InstanceId,
+}
+
+impl Drop for ChooserWatch {
+    fn drop(&mut self) {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .choosers
+            .closed(self.id, Instant::now());
+        self.expiry.notify_one();
+    }
 }
 
 /// Releases a cell's channel as a watch of its follow closes.
@@ -934,11 +1024,11 @@ impl Drop for ChannelRelease {
 
 impl FollowsWatch {
     pub(crate) fn into_events(self) -> BoxStream<'static, FollowEvent> {
-        if self.release.is_none() {
+        if self.release.is_none() && self.chooser.is_none() {
             self.events
         } else {
             // Boxed whole, so that its release still drops after its
-            // events.
+            // events, and the chooser's watch closes with them.
             Box::pin(self)
         }
     }
@@ -949,6 +1039,28 @@ impl Stream for FollowsWatch {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.events.as_mut().poll_next(cx)
+    }
+}
+
+/// Stop waiting for each chooser of `relay` once it has had no watch of
+/// the relay open for the bound, and settle the follows that waited only
+/// for it, until `cancel`: one task per hub, which sleeps until the next
+/// chooser's bound, or until a watch closes or a chooser declares. Off the
+/// request path.
+pub(crate) async fn expire(relay: Arc<Relay>, cancel: CancellationToken) {
+    loop {
+        let next = relay.sweep();
+        let due = async {
+            match next {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            () = due => {}
+            () = relay.expiry.notified() => {}
+            () = cancel.cancelled() => return,
+        }
     }
 }
 

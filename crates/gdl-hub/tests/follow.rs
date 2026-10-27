@@ -27,7 +27,7 @@ use velo_hub::velo::{InstanceId, PeerInfo};
 async fn follows(hub: &Hub) -> BoxStream<'static, FollowEvent> {
     let watcher = CellWatcher::new().expect("a client");
     let address = format!("127.0.0.1:{}", hub.public_addr().port());
-    tokio::time::timeout(WAIT, watcher.follows(&address))
+    tokio::time::timeout(WAIT, watcher.follows(&address, None))
         .await
         .expect("the hub answers in time")
         .expect("the hub serves the relay")

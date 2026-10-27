@@ -170,8 +170,13 @@ struct Hub {
 
 impl Source for Hub {
     async fn watch(&self) -> std::result::Result<BoxStream<'static, Relaying>, String> {
+        // Named, so that the hub waits for this instance's acknowledgements
+        // only while it can still learn what to acknowledge.
+        let me = gdl_watch::RelayWatcher {
+            instance: self.chooser.instance(),
+        };
         self.watcher
-            .follows(&self.address)
+            .follows(&self.address, Some(&me))
             .await
             .map(relayed)
             .map_err(|e| e.to_string())

@@ -351,7 +351,7 @@ async fn a_real_hubs_snapshot_completes_well_inside_its_bounds() {
     assert!(bytes < WatchLimits::SNAPSHOT / 100, "{bytes} bytes");
 
     // The global's relay, once it shows them too.
-    let (bytes, took) = whole(|| watcher.follows(&relay), ENTRIES, WAIT).await;
+    let (bytes, took) = whole(|| watcher.follows(&relay, None), ENTRIES, WAIT).await;
     println!("a relay's snapshot of {ENTRIES} entry instances: {bytes} bytes in {took:?}");
     assert!(took < WatchLimits::SYNCED_WITHIN / 30, "{took:?}");
     assert!(bytes < WatchLimits::SNAPSHOT / 100, "{bytes} bytes");

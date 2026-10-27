@@ -94,7 +94,7 @@ impl Served {
                     .map(|w| w.map(|item| item.map(drop)).boxed()),
                 Route::Relay => self
                     .watcher
-                    .follows(&self.address)
+                    .follows(&self.address, None)
                     .await
                     .map(|w| w.map(|item| item.map(drop)).boxed()),
                 Route::Follow => (self.watcher.follows_of(&self.address, class, name).await)
@@ -295,6 +295,21 @@ fn a_cap_of_zero_is_refused() {
         };
         assert!(error.to_string().contains("cap"), "{error}");
     }
+}
+
+/// A bound of zero on a lost chooser, built in code, is refused as the
+/// settings reader refuses it, naming its key.
+#[test]
+fn a_lost_chooser_bound_of_zero_is_refused() {
+    let timing = CellTiming {
+        lost_chooser: Duration::ZERO,
+        ..CellTiming::default()
+    };
+    let result = CellReadiness::new(&spec(), settings(), MemoryDirectory::new(), timing);
+    let error = result
+        .err()
+        .expect("a lost chooser bound of zero is refused");
+    assert!(error.to_string().contains("lost_chooser"), "{error}");
 }
 
 /// `S => F { D }` in two classes: `global` runs `a` (S), and `model_x`

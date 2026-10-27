@@ -14,10 +14,11 @@ use futures::{Stream, StreamExt};
 use super::watched::Classify;
 use super::{
     AVOIDED_ROUTE, Avoided, CellWatchEvent, EXTENSION, FOLLOWS_ROUTE, FollowEvent, Follower,
-    RELEASE_ROUTE, REPORT_ROUTE, Report, ReportRefusal, ReportReply, UnknownEvent,
+    RELEASE_ROUTE, REPORT_ROUTE, RelayWatcher, Report, ReportRefusal, ReportReply, UnknownEvent,
     UnknownFollowEvent, WATCH_ROUTE, WatchFailure, WatchLimits, Watched,
 };
 use gdl_cells::DirectoryError;
+use serde::Serialize;
 
 /// One item of a watch: an event, or why the watch ended, its last item.
 pub type WatchItem<E, U> = Result<Watched<E, U>, WatchFailure>;
@@ -97,7 +98,7 @@ impl CellWatcher {
         &self,
         hub: &str,
     ) -> Result<WatchStream<CellWatchEvent, UnknownEvent>, CellWatchError> {
-        self.open(hub, WATCH_ROUTE, None).await
+        self.open(hub, WATCH_ROUTE, None::<&Follower>).await
     }
 
     /// [`CellWatcher::watch`], as `follower`: the cell's hub counts the
@@ -118,12 +119,15 @@ impl CellWatcher {
     /// not know that names no follow; one that names its follow is read as
     /// [`Watched::Unknown`], for the reader to fail closed for that cell
     /// alone until it has read it again ([`CellWatcher::follows_of`]). A
-    /// consumer whose watch ended watches again from a snapshot.
+    /// consumer whose watch ended watches again from a snapshot. A chooser
+    /// names itself, `chooser`, so that the hub knows it still watches
+    /// ([`RelayWatcher`]); anything else names no one.
     pub async fn follows(
         &self,
         hub: &str,
+        chooser: Option<&RelayWatcher>,
     ) -> Result<WatchStream<FollowEvent, UnknownFollowEvent>, CellWatchError> {
-        self.open(hub, FOLLOWS_ROUTE, None).await
+        self.open(hub, FOLLOWS_ROUTE, chooser).await
     }
     /// Let go, as `follower`, of the cell whose hub is at `hub`: its watch
     /// no longer counts among the cell's followers.
@@ -206,7 +210,7 @@ impl CellWatcher {
     ) -> Result<WatchStream<FollowEvent, UnknownFollowEvent>, CellWatchError> {
         gdl_model::check_class_name(class).map_err(CellWatchError)?;
         gdl_model::check_cell_name(cell).map_err(CellWatchError)?;
-        self.open(hub, &super::followed_path(class, cell), None)
+        self.open(hub, &super::followed_path(class, cell), None::<&Follower>)
             .await
     }
 
@@ -214,7 +218,7 @@ impl CellWatcher {
         &self,
         hub: &str,
         route: &str,
-        follower: Option<&Follower>,
+        query: Option<&(impl Serialize + ?Sized)>,
     ) -> Result<WatchStream<T, T::Unknown>, CellWatchError> {
         gdl_model::check_hub_address(hub).map_err(CellWatchError)?;
         // The snapshot's bound runs from here, so that a peer that answers
@@ -222,8 +226,8 @@ impl CellWatcher {
         let synced_by = tokio::time::Instant::now() + self.limits.synced_within;
         let url = format!("http://{hub}/v1/ext/{EXTENSION}{route}");
         let mut request = self.http.get(&url);
-        if let Some(follower) = follower {
-            request = request.query(follower);
+        if let Some(query) = query {
+            request = request.query(query);
         }
         let late = || {
             CellWatchError(format!(
