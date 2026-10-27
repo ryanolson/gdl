@@ -341,6 +341,9 @@ fn output_within(
         if overflowed.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
+            // The reader ends the group as it stops reading: wait for it, so
+            // that nothing of the group still runs once the run is refused.
+            let _ = stdout.join();
             return Err(too_much_metadata());
         }
         if started.elapsed() >= deadline {
