@@ -17,13 +17,6 @@ test-group = 'timing'
 retries = 2
 
 [[profile.default.overrides]]
-# With clocks off by 40 ms and a 50 ms allowance, the remote sink stops
-# before the source's 400 ms deadline: about 10 ms to spare.
-filter = 'binary_id(gdl-runtime::faults) & test(=remote_deadlines_never_run_late_with_clocks_off_either_way)'
-test-group = 'timing'
-retries = 2
-
-[[profile.default.overrides]]
 # The engine lets the request go after its own 900 ms deadline and before
 # the front's at 1500 ms.
 filter = 'binary_id(gdl-runtime::faults) & test(=a_producer_blocked_on_a_stalled_consumer_ends_at_the_deadline)'

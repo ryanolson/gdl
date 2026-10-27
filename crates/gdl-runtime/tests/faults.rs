@@ -85,32 +85,56 @@ async fn cancel_during_setup_reaches_the_remote_sink() {
     assert!(settles(&cluster).await);
 }
 
+/// Work at a remote forward stage ends at the request's deadline.
+///
+/// C starts only if the hand-off reaches the side segment more than the
+/// clock skew before the 200 ms deadline; a later one is refused. On a busy
+/// host the hand-off can be that late, so the test sends new requests until
+/// one starts C. Every attempt checks what holds either way: the call fails
+/// at the deadline, nothing reaches the sink, and everything is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_forward_work_ends_at_the_deadline() {
+    const ATTEMPTS: usize = 5;
     let nodes = nodes(2).await;
     let placement = Placement::new()
         .segment("front", ["A", "B", "D", "F", "E", "G"])
         .segment("side", ["C"]);
     let events = Events::new();
     let cluster = deploy(&nodes, &placement, &events, RuntimeConfig::default());
-    let plan = Plan {
-        tokens: 1,
-        forward_delay_ms: 60_000,
-        ..Plan::default()
-    };
-    // As in local composition, a failure before the sink has its stream is
-    // the call's error.
-    let result = cluster
-        .segment("front")
-        .call(Cx::new().with_timeout(ms(200)), prompt("w", plan))
-        .await;
-    assert_eq!(
-        result.err().map(|e| e.kind()),
-        Some(ErrorKind::DeadlineExceeded)
+    for attempt in 0..ATTEMPTS {
+        let text = format!("w{attempt}");
+        let plan = Plan {
+            tokens: 1,
+            forward_delay_ms: 60_000,
+            ..Plan::default()
+        };
+        // As in local composition, a failure before the sink has its stream
+        // is the call's error.
+        let result = cluster
+            .segment("front")
+            .call(Cx::new().with_timeout(ms(200)), prompt(&text, plan))
+            .await;
+        assert_eq!(
+            result.err().map(|e| e.kind()),
+            Some(ErrorKind::DeadlineExceeded)
+        );
+        // The deadline has passed, so a hand-off that has not started C by
+        // now never will.
+        let settled = settles(&cluster).await;
+        let started = events.has(&format!("C:{text}"));
+        if started {
+            events.wait_for(&format!("C:abandoned:{text}"), WAIT).await;
+        }
+        assert!(!events.has(&format!("D:start:c({text})#0")));
+        assert!(settled);
+        if started {
+            return;
+        }
+    }
+    panic!(
+        "C never started in {ATTEMPTS} attempts: {:?}",
+        events.snapshot()
     );
-    events.wait_for("C:abandoned:w", WAIT).await;
-    assert!(!events.has("D:start:c(w)#0"));
-    assert!(settles(&cluster).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -572,9 +596,12 @@ async fn producing_streams_are_bounded_by_the_egress_quota() {
 }
 
 /// With segment clocks within the configured skew, a remote stage never runs
-/// past the source's deadline, whichever way its clock is off. The remote
-/// sink must stop on its own deadline, before the source's: a stage that
-/// ran late would instead be stopped by the source's cancel.
+/// past the source's deadline, whichever way its clock is off: the deadline
+/// the remote sink gets falls at or before the source's.
+///
+/// The test compares the two deadlines, not the time at which it sees the
+/// sink end. At -40 ms the sink's deadline is only about 10 ms before the
+/// source's, and on a busy host the test wakes later than that.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_deadlines_never_run_late_with_clocks_off_either_way() {
     for offset_ms in [-40_i64, 40] {
@@ -603,13 +630,24 @@ async fn remote_deadlines_never_run_late_with_clocks_off_either_way() {
             .await
             .expect("call");
         let consumer = tokio::spawn(collect(out));
+        let ended_on_deadline = format!("D:deadline:c({text})#0");
         events
-            .wait_for(&format!("D:deadline:c({text})#0"), WAIT)
+            .wait_for_any(
+                &[&ended_on_deadline, &format!("D:cancelled:c({text})#0")],
+                WAIT,
+            )
             .await;
+        let sink_deadline = events
+            .cx_of(&format!("D:c({text})#0"))
+            .deadline()
+            .expect("the remote sink's deadline")
+            .instant();
         assert!(
-            tokio::time::Instant::now() <= source_deadline,
-            "offset {offset_ms} ms: the remote sink ran past the source's deadline"
+            sink_deadline <= source_deadline,
+            "offset {offset_ms} ms: the remote sink's deadline is {:?} after the source's",
+            sink_deadline - source_deadline
         );
+        assert!(events.has(&ended_on_deadline), "{:?}", events.snapshot());
         let all = consumer.await.expect("consumer");
         assert_eq!(last_kind(&all), Some(ErrorKind::DeadlineExceeded));
         assert!(settles(&cluster).await);
@@ -949,34 +987,72 @@ async fn a_stop_reaches_the_remote_sink_while_the_stream_is_held_unread() {
     events.wait_for("D:stopped:c(hs)#0", WAIT).await;
 }
 
+/// A caller holds its stream unread past the deadline: the next item it
+/// reads is the deadline's error, not output buffered before it.
+///
+/// The call returns only once the sink's stream exists, and on a busy host
+/// that can take longer than the 300 ms deadline. Such an attempt holds no
+/// stream, so the test sends a new request until one does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_held_stream_delivers_nothing_buffered_after_its_deadline() {
+    const ATTEMPTS: usize = 5;
     let nodes = nodes(2).await;
     let events = Events::new();
     let cluster = deploy(&nodes, &two_segments(), &events, RuntimeConfig::default());
-    // More than the boundary's check interval, all buffered by the time the
-    // deadline passes: unreleased, they would be delivered before the
-    // boundary noticed the deadline.
-    let plan = Plan {
-        tokens: 500,
-        ..Plan::default()
-    };
-    let mut out = cluster
-        .segment("front")
-        .call(Cx::new().with_timeout(ms(300)), prompt("hb", plan))
-        .await
-        .expect("call");
-    assert!(matches!(out.next().await, Some(Ok(_))));
-    tokio::time::sleep(ms(600)).await;
-    let next = out.next().await;
-    assert_eq!(
-        next.as_ref()
-            .map(|item| item.as_ref().map_err(|e| e.kind())),
-        Some(Err(ErrorKind::DeadlineExceeded)),
-        "{next:?}"
+    for attempt in 0..ATTEMPTS {
+        // More than the boundary's check interval, all buffered by the time
+        // the deadline passes: unreleased, they would be delivered before
+        // the boundary noticed the deadline.
+        let plan = Plan {
+            tokens: 500,
+            ..Plan::default()
+        };
+        let called = cluster
+            .segment("front")
+            .call(
+                Cx::new().with_timeout(ms(300)),
+                prompt(&format!("hb{attempt}"), plan),
+            )
+            .await;
+        let mut out = match called {
+            Ok(out) => out,
+            Err(error) => {
+                assert_eq!(error.kind(), ErrorKind::DeadlineExceeded, "{error:?}");
+                assert!(settles(&cluster).await);
+                continue;
+            }
+        };
+        match out.next().await {
+            Some(Ok(_)) => {}
+            first => {
+                assert_eq!(
+                    first
+                        .as_ref()
+                        .map(|item| item.as_ref().map_err(|e| e.kind())),
+                    Some(Err(ErrorKind::DeadlineExceeded)),
+                    "{first:?}"
+                );
+                drop(out);
+                assert!(settles(&cluster).await);
+                continue;
+            }
+        }
+        tokio::time::sleep(ms(600)).await;
+        let next = out.next().await;
+        assert_eq!(
+            next.as_ref()
+                .map(|item| item.as_ref().map_err(|e| e.kind())),
+            Some(Err(ErrorKind::DeadlineExceeded)),
+            "{next:?}"
+        );
+        drop(out);
+        assert!(settles(&cluster).await);
+        return;
+    }
+    panic!(
+        "no attempt in {ATTEMPTS} had its stream before the deadline: {:?}",
+        events.snapshot()
     );
-    drop(out);
-    assert!(settles(&cluster).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
