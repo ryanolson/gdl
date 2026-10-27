@@ -50,5 +50,9 @@ harness = false
 name = "mint"
 harness = false
 
+[[bench]]
+name = "choose"
+harness = false
+
 [lints]
 workspace = true

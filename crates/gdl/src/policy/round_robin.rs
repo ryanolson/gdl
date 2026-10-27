@@ -93,7 +93,9 @@ impl RoundRobin {
     }
 
     /// `cell`'s rank, `ready` before `degraded`, or `None` when it may not
-    /// be chosen for this request.
+    /// be chosen for this request. Inlined into the choice's passes: out
+    /// of line, a pick paid a call for each cell in each pass.
+    #[inline]
     fn rank(cell: &Cell, excluded: &[u64], damped: &Damped) -> Option<usize> {
         if cell.entries == 0 || excluded.contains(&cell.id) || damped.is_gone(cell) {
             return None;

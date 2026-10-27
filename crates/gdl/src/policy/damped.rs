@@ -122,7 +122,7 @@ impl Damped {
     /// branch while no cell is gone.
     #[inline]
     pub fn is_gone(&self, cell: &Cell) -> bool {
-        self.gone && self.mark(cell.id) == Some(Mark::Gone(Follow::of(cell)))
+        self.gone && self.gone_in(cell)
     }
 
     /// Whether `cell` has a mark as gone, in whatever follow.
@@ -207,6 +207,15 @@ impl Damped {
         let mut cells = self.cells.clone();
         cells.remove(at);
         Some(Self::of(cells))
+    }
+
+    /// [`is_gone`](Damped::is_gone) once some cell is gone: a search of the
+    /// list, out of line, so that a policy's pass over its cells inlines
+    /// only the branch.
+    #[cold]
+    #[inline(never)]
+    fn gone_in(&self, cell: &Cell) -> bool {
+        self.mark(cell.id) == Some(Mark::Gone(Follow::of(cell)))
     }
 
     #[inline]

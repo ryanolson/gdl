@@ -66,7 +66,7 @@ impl HomeFirst {
         cells: &[Cell],
         keep: impl Fn(&Cell) -> bool,
     ) -> Option<usize> {
-        HomeFirstAt::DEFAULT.choose_where(request, cells, keep)
+        self.choose_in(request, cells, keep)
     }
 }
 
@@ -81,8 +81,6 @@ impl CellPolicy for HomeFirst {
         request: CellRequest<'_, Encoded>,
         cells: &[Cell],
     ) -> Result<CellChoice, NoCell> {
-        // Through the inlined `choose_where`, so that the thresholds stay
-        // constants in the code rather than data the choice loads.
         self.choose_where(request, cells, |_| true)
             .map(CellChoice::new)
             .ok_or_else(NoCell::new)
@@ -90,9 +88,7 @@ impl CellPolicy for HomeFirst {
 
     /// Whether `cell` is in a tier at the default thresholds.
     fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
-        HomeFirstAt::DEFAULT
-            .tier(cell, region, &[], &Damped::EMPTY, now)
-            .is_some()
+        self.tier(cell, region, &[], &Damped::EMPTY, now).is_some()
     }
 }
 
@@ -126,42 +122,6 @@ impl HomeFirstAt {
         spill_percent: HomeFirst::SPILL_PERCENT,
     };
 
-    /// `cell`'s tier, lower first, with its summary, or `None` when it is
-    /// not eligible.
-    #[inline]
-    fn tier<'c>(
-        &self,
-        cell: &'c Cell,
-        region: &str,
-        excluded: &[u64],
-        damped: &Damped,
-        now: Instant,
-    ) -> Option<(u8, &'c LoadSummary)> {
-        if cell.entries == 0 || excluded.contains(&cell.id) || damped.is_gone(cell) {
-            return None;
-        }
-        let state = match cell.state {
-            CellState::Ready => 0,
-            CellState::Degraded => 3,
-            CellState::Draining | CellState::Unavailable => return None,
-        };
-        let load = cell.load.as_ref()?;
-        if !load.is_fresh(now) {
-            return None;
-        }
-        let load = load.summary();
-        let share = |percent: u64| u128::from(load.limit) * u128::from(percent);
-        let admitted = u128::from(load.admitted) * 100;
-        let saturated = load.refusals > 0 || admitted >= share(self.saturated_percent);
-        let tier = match (cell.region == region, saturated) {
-            (true, false) => 0,
-            (false, false) if admitted < share(self.spill_percent) => 1,
-            (true, true) => 2,
-            (false, _) => return None,
-        };
-        Some((state + tier, load))
-    }
-
     /// `home_first`'s choice among only the cells `keep` keeps, as if
     /// the others were not there: the index of the chosen cell in
     /// `cells`, or `None` when no kept cell is eligible. The tiers, the
@@ -184,6 +144,97 @@ impl HomeFirstAt {
     /// meanwhile, and a choice finds a cell whenever one is eligible.
     pub fn choose_where<H>(
         &self,
+        request: CellRequest<'_, H>,
+        cells: &[Cell],
+        keep: impl Fn(&Cell) -> bool,
+    ) -> Option<usize> {
+        // At the default thresholds, by `HomeFirst`'s code, in which they
+        // are constants: a chooser at its default settings pays one branch
+        // for them, not two 128-bit products per cell.
+        if *self == Self::DEFAULT {
+            HomeFirst.choose_in(request, cells, keep)
+        } else {
+            self.choose_in(request, cells, keep)
+        }
+    }
+}
+
+impl CellPolicy for HomeFirstAt {
+    /// It reads no request data.
+    type Head = Encoded;
+
+    /// [`choose_where`](HomeFirstAt::choose_where), keeping every cell,
+    /// with no lease.
+    fn choose(
+        &self,
+        request: CellRequest<'_, Encoded>,
+        cells: &[Cell],
+    ) -> Result<CellChoice, NoCell> {
+        self.choose_where(request, cells, |_| true)
+            .map(CellChoice::new)
+            .ok_or_else(NoCell::new)
+    }
+
+    /// Whether `cell` is in a tier: a damped or gone cell is still
+    /// eligible, since damping steers the next choices, not one already
+    /// made.
+    fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
+        self.tier(cell, region, &[], &Damped::EMPTY, now).is_some()
+    }
+}
+
+/// `home_first`'s choice at a policy's thresholds. [`HomeFirst`]'s are
+/// constants, so that its choice is built with them in the code, where a
+/// saturated home cell is one compare; [`HomeFirstAt`]'s are data. A
+/// generic over the two, rather than one function that takes the
+/// thresholds, since the compiler does not inline that function into
+/// every caller, and then reads the defaults as data too.
+trait Thresholds: Copy {
+    fn saturated_percent(self) -> u64;
+    fn spill_percent(self) -> u64;
+
+    /// `cell`'s tier, lower first, with its summary, or `None` when it is
+    /// not eligible. Out of line: inlined into a pass whose `keep` is a
+    /// call, it keeps more values live across that call, and a pick that
+    /// filters by model took 8 ns more
+    /// (`docs/src/operations/feature-costs.md`).
+    #[inline(never)]
+    fn tier<'c>(
+        self,
+        cell: &'c Cell,
+        region: &str,
+        excluded: &[u64],
+        damped: &Damped,
+        now: Instant,
+    ) -> Option<(u8, &'c LoadSummary)> {
+        if cell.entries == 0 || excluded.contains(&cell.id) || damped.is_gone(cell) {
+            return None;
+        }
+        let state = match cell.state {
+            CellState::Ready => 0,
+            CellState::Degraded => 3,
+            CellState::Draining | CellState::Unavailable => return None,
+        };
+        let load = cell.load.as_ref()?;
+        if !load.is_fresh(now) {
+            return None;
+        }
+        let load = load.summary();
+        let share = |percent: u64| u128::from(load.limit) * u128::from(percent);
+        let admitted = u128::from(load.admitted) * 100;
+        let saturated = load.refusals > 0 || admitted >= share(self.saturated_percent());
+        let tier = match (cell.region == region, saturated) {
+            (true, false) => 0,
+            (false, false) if admitted < share(self.spill_percent()) => 1,
+            (true, true) => 2,
+            (false, _) => return None,
+        };
+        Some((state + tier, load))
+    }
+
+    /// [`HomeFirstAt::choose_where`] at these thresholds.
+    fn choose_in<H>(
+        self,
         request: CellRequest<'_, H>,
         cells: &[Cell],
         keep: impl Fn(&Cell) -> bool,
@@ -234,9 +285,9 @@ impl HomeFirstAt {
             }
         }
         match drawn {
-            [Some((first, a)), Some((second, b))] => Some(if Self::lighter(b, a) {
+            [Some((first, a)), Some((second, b))] => Some(if lighter(b, a) {
                 second
-            } else if Self::lighter(a, b) {
+            } else if lighter(a, b) {
                 first
             } else if mix(draw, 0) & 1 == 0 {
                 // A tie goes to either alike, so that every cell of a
@@ -249,42 +300,42 @@ impl HomeFirstAt {
             [None, None] => None,
         }
     }
+}
 
-    /// Whether `a` has a lower ratio of admitted roots to limit than `b`;
-    /// a limit of zero is the highest.
-    fn lighter(a: &LoadSummary, b: &LoadSummary) -> bool {
-        match (a.limit, b.limit) {
-            (0, _) => false,
-            (_, 0) => true,
-            _ => {
-                u128::from(a.admitted) * u128::from(b.limit)
-                    < u128::from(b.admitted) * u128::from(a.limit)
-            }
-        }
+impl Thresholds for HomeFirst {
+    #[inline(always)]
+    fn saturated_percent(self) -> u64 {
+        Self::SATURATED_PERCENT
+    }
+
+    #[inline(always)]
+    fn spill_percent(self) -> u64 {
+        Self::SPILL_PERCENT
     }
 }
 
-impl CellPolicy for HomeFirstAt {
-    /// It reads no request data.
-    type Head = Encoded;
-
-    /// [`choose_where`](HomeFirstAt::choose_where), keeping every cell,
-    /// with no lease.
-    fn choose(
-        &self,
-        request: CellRequest<'_, Encoded>,
-        cells: &[Cell],
-    ) -> Result<CellChoice, NoCell> {
-        self.choose_where(request, cells, |_| true)
-            .map(CellChoice::new)
-            .ok_or_else(NoCell::new)
+impl Thresholds for HomeFirstAt {
+    #[inline(always)]
+    fn saturated_percent(self) -> u64 {
+        self.saturated_percent
     }
 
-    /// Whether `cell` is in a tier: a damped or gone cell is still
-    /// eligible, since damping steers the next choices, not one already
-    /// made.
-    fn eligible(&self, cell: &Cell, region: &str, now: Instant) -> bool {
-        self.tier(cell, region, &[], &Damped::EMPTY, now).is_some()
+    #[inline(always)]
+    fn spill_percent(self) -> u64 {
+        self.spill_percent
+    }
+}
+
+/// Whether `a` has a lower ratio of admitted roots to limit than `b`; a
+/// limit of zero is the highest.
+fn lighter(a: &LoadSummary, b: &LoadSummary) -> bool {
+    match (a.limit, b.limit) {
+        (0, _) => false,
+        (_, 0) => true,
+        _ => {
+            u128::from(a.admitted) * u128::from(b.limit)
+                < u128::from(b.admitted) * u128::from(a.limit)
+        }
     }
 }
 
@@ -832,6 +883,71 @@ mod tests {
                     assert_eq!(whole, alone, "mask {mask:06b}, turn {turn}");
                 }
             }
+        }
+    }
+
+    /// `HomeFirst`'s choice, with its thresholds as constants in the code,
+    /// is the choice at the same thresholds read as data, turn for turn:
+    /// for every subset of cells of mixed state, region, load, and
+    /// freshness, with cells excluded, damped, gone, and gone in a follow
+    /// since changed. `HomeFirstAt::DEFAULT` takes `HomeFirst`'s code, so
+    /// the data path is reached here only through `choose_in`.
+    #[test]
+    fn the_defaults_choose_alike_as_constants_and_as_data() {
+        let now = origin();
+        let cells = [
+            cell("home-1", HOME, CellState::Ready, 1, now),
+            busy("full", HOME, CellState::Ready, LIMIT, 0, now),
+            busy("refused", HOME, CellState::Ready, 10, 1, now),
+            busy("away", AWAY, CellState::Ready, 10, 0, now),
+            busy("away-full", AWAY, CellState::Ready, LIMIT * 8 / 10, 0, now),
+            busy("home-2", HOME, CellState::Ready, 40, 0, now),
+            cell("degraded", HOME, CellState::Degraded, 1, now),
+            cell_loaded(
+                "stale",
+                HOME,
+                CellState::Ready,
+                1,
+                load(0, 0, now - PERIOD * 4),
+            ),
+            cell("gone", HOME, CellState::Ready, 1, now),
+            cell("moved", AWAY, CellState::Ready, 1, now).with_follow(0, 2),
+        ];
+        let at = |name: &str| cells.iter().position(|cell| cell.name == name);
+        let damped = Damped::new([(id("home-2"), now + SECOND)])
+            .with_gone(&cells[at("gone").expect("gone")])
+            .with_gone(&cell("moved", AWAY, CellState::Ready, 1, now).with_follow(0, 1));
+        assert!(damped.is_gone(&cells[at("gone").expect("gone")]));
+        assert!(!damped.is_gone(&cells[at("moved").expect("moved")]));
+        let data = std::hint::black_box(HomeFirstAt::DEFAULT);
+        let cx = Cx::new();
+        for (excluded, damped) in [
+            (&[][..], &Damped::EMPTY),
+            (&[][..], &damped),
+            (&[id("home-1")][..], &damped),
+        ] {
+            for mask in (0u32..1 << cells.len()).step_by(7) {
+                let kept = |cell: &Cell| at(&cell.name).is_some_and(|at| mask & 1 << at != 0);
+                for turn in 0..16 {
+                    let request = CellRequest::new(&cx, &Encoded, HOME, now)
+                        .with_excluded(excluded)
+                        .with_damped(damped)
+                        .with_turn(turn);
+                    let constants = HomeFirst.choose_in(request, &cells, kept);
+                    assert_eq!(
+                        data.choose_in(request, &cells, kept),
+                        constants,
+                        "mask {mask:010b}, turn {turn}"
+                    );
+                    assert_eq!(data.choose_where(request, &cells, kept), constants);
+                }
+            }
+        }
+        for cell in &cells {
+            assert_eq!(
+                HomeFirst.eligible(cell, HOME, now),
+                data.eligible(cell, HOME, now)
+            );
         }
     }
 

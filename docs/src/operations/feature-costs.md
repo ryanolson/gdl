@@ -246,6 +246,74 @@ cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_c
 
 A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` and 1.0 ns more under `home_first`, the same in every run. This measurement does not split code placement from the rest. The offers vary from run to run, the roster's as much as the cells', so they show no change.
 
+### Thresholds as constants in a pick
+
+`home_first` reads two thresholds: the share of its limit at which a cell is saturated, and the spill bound for a cell in another region. `HomeFirst` has the defaults as constants, and `HomeFirstAt` has them as fields, set from a chooser's `[runtime]` settings. The pass over the cells is generic, and the compiler builds it once for each. In `HomeFirst`'s build, the saturated test is one compare of admitted roots with the limit. In `HomeFirstAt`'s build, it is two 128-bit products for each cell. `HomeFirstAt` at the default thresholds runs `HomeFirst`'s build, so a chooser at its default settings pays one branch per pick for them.
+
+The step that finds a cell's tier is a function out of line, as it was before the thresholds became settings. Two designs were rejected:
+
+- **One pass that takes the thresholds as data.** The compiler did not inline it, so `HomeFirst` read its constants as data too: 208 more instructions per pick over 12 cells.
+- **The tier step inlined into the pass.** It cut those instructions in a pick over every cell. But a pass whose filter is a call, as a set router's is, keeps more values live across that call. A pick that filters by model then ran 309 more instructions than with the step out of line, and took 8 ns more in gdl's bench and 10 ns more in the set router's.
+
+A cell that is gone is checked in each policy's pass by `Damped::is_gone` ([A cell that is gone](#a-cell-that-is-gone)). Its search of the damped list is a cold function out of line, so a pass inlines only the branch on whether any cell is gone. With the search inline, `round_robin`'s rank went out of line, and the pass called it twice for each cell.
+
+Measured with `crates/gdl/benches/choose.rs`: 12 cells of 4 models in 2 regions, all `ready`, fresh, and under their limits, none damped or gone. The table is the one in dynamo-http-endpoints' set router bench. "One model" is `home_first` through `choose_where` over the 3 cells that a filter keeps. "Own thresholds" is `HomeFirstAt` at 90 and 70 percent. On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 5, load average 2.1 to 3.9, three runs each, with the bench added to each commit:
+
+```bash
+cargo bench -p gdl --bench choose -- 'choose/' --warm-up-time 1 --measurement-time 3
+```
+
+| Commit | `home_first`, every cell | `home_first`, one model | `home_first`, own thresholds | `round_robin`, every cell |
+|---|---|---|---|---|
+| `523afc0` | 103.6 to 103.7 ns | 84.9 to 85.2 ns | | 30.8 ns |
+| `488d3e9`, gone cells | 107.6 to 107.7 ns | 89.1 to 89.8 ns | | 37.9 to 38.2 ns |
+| `3e56f5e`, thresholds as settings | 115.2 to 115.5 ns | 98.0 to 98.2 ns | | 38.7 to 38.9 ns |
+| `6d0a8509` | 115.2 to 115.9 ns | 98.1 to 98.3 ns | | 38.5 to 38.8 ns |
+| tier step inlined | 105.9 to 106.1 ns | 87.7 to 87.8 ns | 115.2 to 116.2 ns | 32.8 ns |
+| this design | 105.9 to 106.3 ns | 79.5 to 79.6 ns | 115.6 to 115.7 ns | 32.7 to 32.8 ns |
+
+One run at `3e56f5e` read 121.3 ns and 113.8 ns, and is left out. A pick at thresholds other than the defaults costs what every `home_first` pick cost before this design.
+
+What a pick runs, per pick, from `perf stat` over `crates/gdl/examples/picks.rs` at 10 and 20 million picks, on the same host and core:
+
+```bash
+cargo build --release -p gdl --example picks
+perf stat -x, -e instructions:u,branches:u,cycles:u target/release/examples/picks <policy> 10000000
+perf stat -x, -e instructions:u,branches:u,cycles:u target/release/examples/picks <policy> 20000000
+```
+
+| Commit | `home_first`: instructions, branches | one model: instructions, branches | `round_robin`: instructions, branches |
+|---|---|---|---|
+| `523afc0` | 1,531.9, 348.2 | 1,806.0, 403.0 | 569.5, 176.0 |
+| `488d3e9`, gone cells | 1,588.9, 361.2 | 1,822.0, 420.0 | 796.0, 190.0 |
+| `3e56f5e`, thresholds as settings | 1,796.9, 369.2 | 2,227.0, 393.0 | 796.0, 190.0 |
+| `6d0a8509` | 1,796.9, 369.2 | 2,227.0, 393.0 | 796.0, 190.0 |
+| tier step inlined | 1,620.9, 369.2 | 2,164.0, 393.0 | 621.0, 195.5 |
+| this design | 1,620.9, 369.2 | 1,855.0, 428.0 | 621.0, 195.5 |
+
+The rows come from one form of the program. As committed, its loop runs 2 more instructions per pick, with the same branches: 1,622.9, 1,857.0, and 623.0 instructions at this design. Each step in time comes with a step in instructions, so it is work, not where the code is placed. Over `523afc0`, this design runs 89 more instructions and 21 more branches per `home_first` pick, 49 more per pick of one model, and 52 more per `round_robin` pick. That is about 7 instructions and 2 branches for each cell, where the pass checks for a gone cell. It is the price of passing over gone cells, and in time it is 2.2 to 2.7 ns per `home_first` pick and 1.9 to 2.1 ns per `round_robin` pick. A pick of one model is 5.3 to 5.7 ns faster than at `523afc0`.
+
+On `fb363e8c`, whose `CellRequest` holds one more field, the committed program counts 5 more instructions per pick, with this design and without it. There, this design runs 1,627.9, 1,862.0, and 628.0 instructions per pick, against 1,803.9, 2,234.0, and 803.0 without it. In time, on the same host and core:
+
+| Pick | `fb363e8c` | `fb363e8c` with this design |
+|---|---|---|
+| `home_first`, every cell | 116.8 to 117.1 ns | 107.2 to 107.5 ns |
+| `home_first`, one model | 93.3 to 95.9 ns | 85.3 to 86.2 ns |
+| `round_robin`, every cell | 39.0 to 39.8 ns | 30.0 to 30.1 ns |
+
+The pick of one model took 6 ns more than before the merge for those 5 instructions. On this core, where its code is placed moves it by that much.
+
+A chooser's own pick, through the runtime, over four idle cells, on the same host and core, load average 3.5 to 4.0, three runs each. Base `6d0a8509`:
+
+```bash
+cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
+```
+
+| Measure | Base | Tier step inlined | This design |
+|---|---|---|---|
+| pick, `round_robin`, four idle cells | 122.7 ns | 120.3 ns | 120.6 to 120.7 ns |
+| pick, `home_first`, four idle cells | 163.4 to 163.5 ns | 159.0 to 159.2 ns | 159.1 to 159.2 ns |
+
 ## Reading the followed cells
 
 A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by and one of the chooser's damping, then, in the bench, one cell found by name among four and one withdrawal looked up. `followed/gone` also asks whether the cell is gone, as a gate does. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`).
