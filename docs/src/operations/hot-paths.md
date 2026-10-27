@@ -2,7 +2,7 @@
 
 This register lists the code paths that a profile shows to be hot, and the check that guards each one. A change to a path listed here runs the guard before and after, on the same host and build. A result outside the noise band needs its numbers and a reason in the change, and the owner's decision. Each entry point carries a `// hot path: <name>` comment, so a search finds the entry from the code.
 
-The profiled workload is one stream of 100,000 items of 16 B through the lean two-segment graph, both ends in one process, on the gb300 bench host, with gdl at main `0ff3a6b`, after the in-place encode. [Where an item's cycles go](crossing-performance.md#where-an-items-cycles-go) has the setup, the command, and the step split. Shares are of all sampled cycles: every thread, user and kernel.
+The profiled workload is one stream of 100,000 items of 16 B through the lean two-segment graph, both ends in one process, on the gb300 bench host, with gdl at main `0ff3a6b`, after the in-place encode. [Where an item's cycles go](crossing-performance.md#where-an-items-cycles-go) has the setup, the command, and the step split. Shares are of all sampled cycles: every thread, user and kernel. The local item boundary comes from an endpoint's profile, which its entry names.
 
 ## crossing-item-send
 
@@ -19,3 +19,11 @@ The profiled workload is one stream of 100,000 items of 16 B through the lean tw
 - **Profile:** the same run as above. 3.9% of 7,356 samples, callees included. The `poll_next` functions of `dist/fabric.rs` are 3.9% of it, and velo's `poll_next_bytes` 3.4%. At `d1fa15a` the entry held 4.1%.
 - **Guard:** the same instruction count and allocation test as `crossing-item-send`, which count both ends. For the codec steps alone: `cargo bench -p gdl-runtime --bench remote -- 'codec-' --warm-up-time 1 --measurement-time 3`. In place, the whole encode and decode was 47.6 ns at 16 B, 105.9 ns at 1 KiB, and 456.6 ns at 16 KiB ([Codec cost](crossing-performance.md#codec-cost) has the setup). velo direct, the same function in each run, measured 66.8 to 69.1 ns at 16 B and 133.2 to 144.1 ns at 1 KiB, so the band is about 3% at 16 B and 8% at 1 KiB.
 - **Sensitive to:** a copy of the payload out of velo's buffer, an owned `Vec` per item, a lock or an allocation per item.
+
+## local-item-boundary
+
+- **Entry point:** `crates/gdl/src/items.rs`, `Fuse::poll_next` (a node boundary) and `Bounded::poll_next` (an attempt boundary). Each item that leaves a local hop passes one of each.
+- **Why it is hot:** it runs once for every item at every local hop. An endpoint's streamed chunk crosses two hops.
+- **Profile:** dynamo-http-endpoints' `crates/http-endpoints/examples/loopback_profile.sh chat-stream` (`perf record -F 1999 -g`, frame pointers), with gdl at `523afc0`, 2026-10-27, gb300. On the 256-chunk streams of three APIs, `Fuse` held 12.7% to 13.8% and `Bounded` 1.8% to 3.1% of the server threads' samples, callees included. `__memcpy_sve` was the top leaf. With the copies cut in that gdl, `Bounded` held 0.8%, and `Fuse` 13.3%, most of it the endpoint's own stream below it ([Copies of an item](feature-costs.md#copies-of-an-item)).
+- **Guard:** `timeout 120 cargo nextest run -p gdl --test codegen` fails if either boundary's release code copies an item. `cargo bench -p gdl-runtime --bench hop -- 'chunks/' --warm-up-time 1 --measurement-time 3`: at `979d0916`, 2.28 µs for one request and 17.3 to 17.6 µs for 256 items, three runs on gb300 within 1.5%.
+- **Sensitive to:** a call while the poll is held, an item moved into a new poll, a lock, a clock read, or an allocation per item.

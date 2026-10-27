@@ -144,6 +144,24 @@ async fn the_future_of_a_hop_does_not_hold_the_hops_below_it() {
     assert_eq!(answer(&wide, "ab").await, ["a", "b"]);
 }
 
+/// A source's future is its hop's future. A future of its own around the
+/// hop's would be moved whole, with the hop's inside it, each time a caller
+/// awaits it.
+#[test]
+fn a_source_adds_nothing_to_its_hops_future() {
+    let hop = Hop::new(
+        (Arc::new(Upper), ()),
+        SinkStage::new(Arc::new(Spell)),
+        (Arc::new(Mark), ()),
+    );
+    let alone = std::mem::size_of_val(&hop.generate(Cx::new(), String::new()));
+    let source = Source::new(hop);
+    let called = std::mem::size_of_val(&source.call(Cx::new(), String::new()));
+    assert_eq!(called, alone, "Source::call");
+    let generated = std::mem::size_of_val(&Next::generate(&source, Cx::new(), String::new()));
+    assert_eq!(generated, alone, "Source::generate");
+}
+
 /// Waits once, then answers like `Spell`; counts how often it is polled.
 struct Once(Arc<std::sync::atomic::AtomicUsize>);
 

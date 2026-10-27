@@ -142,6 +142,7 @@ impl<T> Drop for Fuse<T> {
 impl<T> Stream for Fuse<T> {
     type Item = Result<T>;
 
+    // hot path: local-item-boundary
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.inner.is_none() {
             return Poll::Ready(None);
@@ -156,16 +157,20 @@ impl<T> Stream for Fuse<T> {
             return Poll::Ready(None);
         };
         let polled = inner.as_mut().poll_next(cx);
-        match &polled {
+        // Returned as it came, with no call while it is held: the compiler
+        // then writes the item once, where the consumer reads it. An ending
+        // takes the poll with it (docs/src/development/runtime-design.md).
+        match polled {
             Poll::Ready(Some(Ok(_))) => this.ready_run += 1,
-            Poll::Ready(Some(Err(_))) => end(&mut this.inner, &mut this.token),
-            Poll::Ready(None) => {
-                // Checked before ending: ending cancels the scope itself.
-                let interruption = interrupted(this.token.as_ref(), this.deadline_at);
-                end(&mut this.inner, &mut this.token);
-                return Poll::Ready(interruption.map(Err));
-            }
             Poll::Pending => this.ready_run = 0,
+            Poll::Ready(Some(Err(_)) | None) => {
+                // A clean end is checked before ending: ending cancels the
+                // scope itself.
+                let error =
+                    error_of(polled).or_else(|| interrupted(this.token.as_ref(), this.deadline_at));
+                end(&mut this.inner, &mut this.token);
+                return Poll::Ready(error.map(Err));
+            }
         }
         polled
     }
@@ -219,6 +224,7 @@ pub fn bound_measured<T: Send + 'static>(
 pub const CHECK_INTERVAL: u8 = 64;
 
 pin_project! {
+    #[project = BoundedProj]
     struct Bounded<T> {
         // `None` once the stream has ended; dropping the inner stream drops
         // the attempt's node streams.
@@ -257,6 +263,7 @@ pin_project! {
 impl<T> Stream for Bounded<T> {
     type Item = Result<T>;
 
+    // hot path: local-item-boundary
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         let Some(inner) = this.inner.as_mut() else {
@@ -278,68 +285,101 @@ impl<T> Stream for Bounded<T> {
             }
         }
 
-        match inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(item))) => {
+        let polled = inner.as_mut().poll_next(cx);
+        // As in `Fuse`: returned as it came, with no call while it is held.
+        match polled {
+            Poll::Ready(Some(Ok(_))) if !*this.first_pending => *this.ready_run += 1,
+            Poll::Ready(Some(Ok(_))) => {
+                let item = item_of(polled);
                 *this.ready_run += 1;
-                if *this.first_pending {
-                    *this.first_pending = false;
-                    if let Some(response) = this.response.as_ref() {
-                        response.visit().first_out();
-                    }
+                *this.first_pending = false;
+                if let Some(response) = this.response.as_ref() {
+                    response.visit().first_out();
                 }
-                return Poll::Ready(Some(Ok(item)));
+                return Poll::Ready(item.map(Ok));
             }
-            Poll::Ready(Some(Err(error))) => {
-                ended(this.response.as_ref(), Ending::Failed(&error));
-                end(this.inner, this.token);
-                return Poll::Ready(Some(Err(error)));
-            }
-            Poll::Ready(None) => {
+            Poll::Ready(Some(Err(_)) | None) => {
                 // A producer that honors its cancel or deadline often ends
-                // cleanly; the end must still be reported as the interruption
-                // it was, not as success. One check per stream, off the
-                // per-item path.
-                let interruption = interrupted(this.token.as_ref(), *this.deadline_at);
-                let ending = interruption
-                    .as_ref()
-                    .map_or(Ending::Finished, Ending::Failed);
+                // cleanly; the end must still be reported as the
+                // interruption it was, not as success. One check per
+                // stream, off the per-item path.
+                let error = error_of(polled)
+                    .or_else(|| interrupted(this.token.as_ref(), *this.deadline_at));
+                let ending = error.as_ref().map_or(Ending::Finished, Ending::Failed);
                 ended(this.response.as_ref(), ending);
                 end(this.inner, this.token);
-                return Poll::Ready(interruption.map(Err));
+                return Poll::Ready(error.map(Err));
             }
-            Poll::Pending => *this.ready_run = 0,
+            Poll::Pending => {
+                return match wait(this, cx, polled) {
+                    Some(error) => Poll::Ready(Some(Err(error))),
+                    None => Poll::Pending,
+                };
+            }
         }
+        polled
+    }
+}
 
-        // The deadline is polled first: when both have happened it is the
-        // cause worth reporting, as everywhere else (see `Cx::check`).
-        if let Some(deadline) = this.deadline.as_pin_mut()
-            && deadline.poll(cx).is_ready()
-        {
-            let error = Error::deadline_exceeded();
-            ended(this.response.as_ref(), Ending::Failed(&error));
-            end(this.inner, this.token);
-            return Poll::Ready(Some(Err(error)));
-        }
-        let mut cancelled = this.cancelled;
-        if cancelled.is_none()
-            && let Some(token) = this.token.as_ref()
-        {
-            cancelled.set(Some(token.clone().cancelled_owned()));
-        }
-        if let Some(cancelled) = cancelled.as_pin_mut()
-            && cancelled.poll(cx).is_ready()
-        {
-            // The deadline timer fires on a whole-millisecond tick, and an
-            // exhausted cooperative budget can hold it back; a deadline that
-            // has passed is the cause to report even if its timer has not
-            // fired yet.
-            let error = interrupted(this.token.as_ref(), *this.deadline_at)
-                .unwrap_or_else(Error::cancelled);
-            ended(this.response.as_ref(), Ending::Failed(&error));
-            end(this.inner, this.token);
-            return Poll::Ready(Some(Err(error)));
-        }
-        Poll::Pending
+/// The producer waits: wait on the deadline and the cancel too, and return
+/// the error to end with if either has come. It takes the pending poll, so
+/// that `Bounded::poll_next` holds none across these calls, and it returns
+/// no poll, so that the caller's own poll can be its result. Out of line:
+/// inlined, the poll would be held across its calls again.
+#[inline(never)]
+fn wait<T>(
+    this: BoundedProj<'_, T>,
+    cx: &mut Context<'_>,
+    _pending: Poll<Option<Result<T>>>,
+) -> Option<Error> {
+    *this.ready_run = 0;
+    // The deadline is polled first: when both have happened it is the
+    // cause worth reporting, as everywhere else (see `Cx::check`).
+    if let Some(deadline) = this.deadline.as_pin_mut()
+        && deadline.poll(cx).is_ready()
+    {
+        let error = Error::deadline_exceeded();
+        ended(this.response.as_ref(), Ending::Failed(&error));
+        end(this.inner, this.token);
+        return Some(error);
+    }
+    let mut cancelled = this.cancelled;
+    if cancelled.is_none()
+        && let Some(token) = this.token.as_ref()
+    {
+        cancelled.set(Some(token.clone().cancelled_owned()));
+    }
+    if let Some(cancelled) = cancelled.as_pin_mut()
+        && cancelled.poll(cx).is_ready()
+    {
+        // The deadline timer fires on a whole-millisecond tick, and an
+        // exhausted cooperative budget can hold it back; a deadline that
+        // has passed is the cause to report even if its timer has not
+        // fired yet.
+        let error =
+            interrupted(this.token.as_ref(), *this.deadline_at).unwrap_or_else(Error::cancelled);
+        ended(this.response.as_ref(), Ending::Failed(&error));
+        end(this.inner, this.token);
+        return Some(error);
+    }
+    None
+}
+
+/// The error a poll ends with, taking the whole poll: a part of it left
+/// behind would be dropped after the caller's next calls, and held until
+/// then.
+fn error_of<T>(polled: Poll<Option<Result<T>>>) -> Option<Error> {
+    match polled {
+        Poll::Ready(Some(Err(error))) => Some(error),
+        _ => None,
+    }
+}
+
+/// The item a poll holds, taking the whole poll, as `error_of` does.
+fn item_of<T>(polled: Poll<Option<Result<T>>>) -> Option<T> {
+    match polled {
+        Poll::Ready(Some(Ok(item))) => Some(item),
+        _ => None,
     }
 }
 

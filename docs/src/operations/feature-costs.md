@@ -319,3 +319,44 @@ cargo test --release -p gdl-runtime --lib cost_of -- --ignored --nocapture
 | accepted first offer over loopback, cells | 30.6 us, 29.0 us | 30.3 us, 30.9 us |
 
 No row got slower beyond its spread. `items/direct` runs no gdl code, and it moved by as much as `items/gdl` did between builds, so the items rows show no change.
+
+### Copies of an item
+
+A source returns its hop's future, and a node boundary hands each item on without copying it ([Node contexts](../development/runtime-design.md#node-contexts)). The `chunks` rows of the `hop` bench run an endpoint's shape: an operator over a hop with one forward node and a joined engine, no backward nodes, a 768 B request, and 736 B items. `chunks/request` answers with one item, `chunks/stream` with 256.
+
+On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 2.6 to 4.0, three runs each. Base `6f49729a`, change `979d0916`:
+
+```bash
+cargo bench -p gdl-runtime --bench hop -- --warm-up-time 1 --measurement-time 3
+cargo bench -p gdl-runtime --bench remote -- 'request/reference-local|request/reference-1-segment' --warm-up-time 1 --measurement-time 3
+```
+
+| Row | Base | Change |
+|---|---|---|
+| `chunks/request` | 2.61 to 2.62 µs | 2.28 µs |
+| `chunks/stream`, 256 items | 25.5 to 26.6 µs | 17.3 to 17.6 µs |
+| `items/gdl`, 10,000 `u64` items | 318 to 322 µs | 267 to 270 µs |
+| `items/gdl-streamed` | 356 to 364 µs | 309 to 311 µs |
+| `request/gdl` | 2.47 to 2.49 µs | 2.41 to 2.46 µs |
+| `request/gdl-streamed` | 2.48 µs | 2.47 to 2.48 µs |
+| `items/direct`, the control | 41.0 to 51.9 µs | 50.3 µs |
+| `request/reference-local` | 10.48 to 10.55 µs | 10.26 to 10.42 µs |
+| `request/reference-1-segment` | 12.06 to 12.19 µs | 11.96 to 12.15 µs |
+
+- **A streamed chunk costs 68 ns, against 101 ns.** Over 256 items, `chunks/stream` falls by a third. A request with one chunk takes 13% less.
+- **`u64` items gain too.** `items/gdl` takes 16% less, although a `u64` was moved in a register before. This measurement does not show why.
+- **The runtime's segment rows do not change** beyond their spread. `requests sizes 0` prints 11,504 B for the front's call future at both commits: a segment's call does not go through `Source::call`.
+
+**In an endpoint.** dynamo-http-endpoints' loopback harness, `crates/http-endpoints/examples/loopback_profile.sh chat-1 chat-stream`, on gb300 (cores 8 to 15, load 1.8 to 3.6), with gdl at `523afc0` and at `bcde42c`, which applies this change to it. Shares are of the server threads' samples. Server CPU is three runs of 100,000 requests without perf.
+
+| Measure | `523afc0` | With the change |
+|---|---|---|
+| `chat-1`: gdl's hop row, with `Translate` and `Build` | 29.8% | 27.7% |
+| `chat-1`: `__memcpy_sve` under that row | 8.0% | 5.7% |
+| `chat-1`: server CPU per request | 30.3 to 32.0 µs | 29.0 to 30.6 µs |
+| `chat-stream`: gdl's hop row | 19.9% | 17.9% |
+| `chat-stream`: `__memcpy_sve` under that row | 10.7% | 8.2% |
+| `chat-stream`: `Bounded`, callees included | 1.8% | 0.8% |
+| `chat-stream`: server CPU per request | 350.6 to 354.0 µs | 347.2 to 368.7 µs |
+
+The copies gdl made were part of the endpoint's `memcpy`, not most of it. On the stream, `Fuse` still holds 13.3% with its callees: the endpoint's own stream below it, the reply converter's `unfold`, moves its state on each chunk. Server CPU per stream does not change beyond its spread.

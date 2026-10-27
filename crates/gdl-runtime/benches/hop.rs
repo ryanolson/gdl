@@ -8,6 +8,12 @@
 //! The streamed graph has the same shape with a streamed request on both
 //! hops: the caller's ready items travel in as the request stream, and the
 //! sink answers each with one item.
+//!
+//! The chunks graph has an endpoint's shape and sizes: an operator over a
+//! hop with one forward node and a joined engine, no backward nodes, a
+//! request of 768 B, and items of 736 B, as large as a chat request and a
+//! chat chunk. A copy of one of these is a call to `memcpy`, where a copy of
+//! a `u64` is a register move.
 
 #![allow(missing_docs)] // criterion_group! generates an undocumented public fn.
 
@@ -17,7 +23,7 @@ use std::sync::Arc;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use futures::StreamExt;
 use gdl::{Backward, Cx, Forward, Items, Next, Operator, Result, Sink, Streamed, items};
-use gdl::{Hop, OperatorStage, SinkStage, Source};
+use gdl::{Hop, Join, OperatorStage, SinkStage, Source};
 
 struct Op;
 impl Operator for Op {
@@ -156,6 +162,96 @@ async fn through(graph: &Source<impl Next<u64, u64>>, n: u64) -> u64 {
         .expect(n)
 }
 
+/// A request as large as a chat request: its first word is how many
+/// chunks to answer with.
+struct Ask {
+    body: String,
+    words: [u64; 93],
+}
+
+/// An item as large as a chat chunk.
+struct Chunk {
+    text: String,
+    words: [u64; 89],
+}
+
+/// Turns each chunk into a reply of the same size, as an endpoint's
+/// operator does.
+struct Translate;
+impl Operator for Translate {
+    type UpReq = Ask;
+    type UpItem = Chunk;
+    type DownReq = Ask;
+    type DownItem = Chunk;
+    async fn generate<N: Next<Ask, Chunk>>(
+        &self,
+        cx: Cx,
+        req: Ask,
+        next: N,
+    ) -> Result<Items<Chunk>> {
+        Ok(items(next.generate(cx, req).await?.map(|r| {
+            r.map(|chunk| Chunk {
+                text: chunk.text,
+                words: chunk.words,
+            })
+        })))
+    }
+}
+
+struct Build;
+impl Forward for Build {
+    type In = Ask;
+    type Out = Ask;
+    async fn forward(&self, _cx: &Cx, req: Ask) -> Result<Ask> {
+        Ok(Ask {
+            body: req.body,
+            words: req.words,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct Engine;
+impl Next<Ask, Chunk> for Engine {
+    async fn generate(&self, _cx: Cx, req: Ask) -> Result<Items<Chunk>> {
+        Ok(items(futures::stream::iter((0..req.words[0]).map(|i| {
+            Ok(Chunk {
+                text: String::new(),
+                words: [i; 89],
+            })
+        }))))
+    }
+}
+
+fn chunks_graph() -> Source<impl Next<Ask, Chunk>> {
+    let inner = Source::new(Hop::new(
+        (Arc::new(Build), ()),
+        Join::<_, Chunk>::new(Engine),
+        (),
+    ));
+    Source::new(Hop::new(
+        (),
+        OperatorStage::new(Arc::new(Translate), inner),
+        (),
+    ))
+}
+
+async fn chunks(graph: &Source<impl Next<Ask, Chunk>>, n: u64) -> u64 {
+    let ask = Ask {
+        body: String::new(),
+        words: [n; 93],
+    };
+    graph
+        .call(Cx::new(), ask)
+        .await
+        .expect("call")
+        .fold(Checked::default(), |checked, item| {
+            checked.add(item.map(|chunk| chunk.words[88]))
+        })
+        .await
+        .expect(n)
+}
+
 /// The items a run produced. A failed or short run panics instead of being
 /// measured: an error or an early end would otherwise look like fast work.
 #[derive(Default)]
@@ -209,6 +305,18 @@ fn bench(c: &mut Criterion) {
             .iter(|| streamed(&streamed_graph, black_box(1)))
     });
     request.finish();
+
+    let chunks_graph = chunks_graph();
+    let mut group = c.benchmark_group("chunks");
+    group.bench_function("request", |b| {
+        b.to_async(&rt).iter(|| chunks(&chunks_graph, black_box(1)))
+    });
+    group.throughput(Throughput::Elements(256));
+    group.bench_function("stream", |b| {
+        b.to_async(&rt)
+            .iter(|| chunks(&chunks_graph, black_box(256)))
+    });
+    group.finish();
 }
 
 criterion_group!(benches, bench);

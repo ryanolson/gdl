@@ -270,11 +270,18 @@ impl<H> Source<H> {
 
     /// Send one request. The response stream is bound to a child of `cx`:
     /// cancelling `cx` or dropping the stream ends the request.
-    pub async fn call<Req, Item>(&self, cx: Cx, req: Req) -> Result<Items<Item>>
+    ///
+    /// The future is the hop's own: a future around it would be moved whole,
+    /// with the hop's inside it, each time it is awaited.
+    pub fn call<Req, Item>(
+        &self,
+        cx: Cx,
+        req: Req,
+    ) -> impl Future<Output = Result<Items<Item>>> + Send
     where
         H: Next<Req, Item>,
     {
-        self.0.generate(cx, req).await
+        self.0.generate(cx, req)
     }
 }
 
@@ -284,8 +291,8 @@ where
     Req: Send + 'static,
     Item: Send + 'static,
 {
-    async fn generate(&self, cx: Cx, req: Req) -> Result<Items<Item>> {
-        self.call(cx, req).await
+    fn generate(&self, cx: Cx, req: Req) -> impl Future<Output = Result<Items<Item>>> + Send {
+        self.call(cx, req)
     }
 }
 
