@@ -164,6 +164,18 @@ Two recent changes cut a cost by changing inlining or code layout. Each was meas
 - **Fat LTO nearly makes the change to `home_first` and `round_robin` over every cell.** Under E, the commit before runs 2 more instructions per `home_first` pick and 3.5 fewer per `round_robin` pick. Under thin LTO the change still saves 135 to 187 instructions.
 - **Under every LTO config, the change costs a pick of one model 607 to 693 instructions.** Under A it saves 372, the saving that keeping the tier step out of line was for. Under B to E, the commit before runs 1,258 to 1,281. Which part of the change costs the instructions under LTO is not measured.
 
+Instructions are not time, so the same two builds were also counted in cycles under A, B, and E: `perf stat -e instructions:u,cycles:u` over the same program at 10 and 20 million picks, 7 rounds on core 5 of the gb300 bench host, one job per config. The instruction counts repeat the table above exactly.
+
+| User cycles per pick, before and after | A | B | E |
+|---|---|---|---|
+| `home_first`, every cell | 383 / 353 | 387 / 358 | 349 / 332 |
+| `home_first`, one model | 325 / 280 | 163 / 269 | 170 / 252 |
+| `round_robin`, every cell | 125 / 101 | 130 / 103 | 65 / 76 |
+
+- **Under B and E, the commit before the change is 82 to 106 cycles faster on a pick of one model.** Under A the change saves 45 cycles.
+- **Under E, the change still saves 17 cycles on `home_first` over every cell**, although the two commits run within 2 instructions of each other. So fat LTO does not quite make this part of the change in time.
+- **Some cells are less firm.** Across the rounds, the `round_robin` cells after the change varied by 31% of the median under A and 19% under B. The one-model cells before the change varied by 9% under B and 11% under E, which is still much smaller than the 82 to 106 cycles between the commits. The other cells varied by 6% or less.
+
 **Inline accessors of a cell policy's inputs, `50aaf5d`.** Base `e55f188`. It marks small accessors of `gdl::Damped`, `Cell`, `Load`, and `CellRequest` `#[inline]`, because gdl-runtime calls them across the crate boundary. Both commits are on the `feat/cell-policy-head` branch, not on main. The test prints its own times, three runs of three rounds each, on core 5:
 
 ```bash
