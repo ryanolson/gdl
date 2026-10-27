@@ -157,13 +157,17 @@ async fn import_a_branch_and_subdirectory_over_http_pins_the_commit() {
         target: temp.path().join("target"),
         local_root: None,
         hosts: Vec::new(),
-        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        extractor: extractor(temp.path()),
         deploy: gdl_web::Deploy::default(),
         gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime")),
     })
     .expect("composer");
     let (status, body) = import(app, &url, "protocols").await;
     assert_eq!(status, 200, "{body}");
+    assert!(
+        temp.path().join("cargo-home/git/db").is_dir(),
+        "the import's cargo fetched into a home other than the test's own"
+    );
     let catalog = gdl_extract::Catalog::load(&temp.path().join("catalog")).expect("catalog");
     let entry = catalog.entries().next().expect("entry");
     assert_eq!(
@@ -212,12 +216,65 @@ async fn served(
         target: temp.join("target"),
         local_root: None,
         hosts: Vec::new(),
-        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        extractor: extractor(temp),
         deploy: gdl_web::Deploy::default(),
         gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime")),
     })
     .expect("composer");
     (url, server, app)
+}
+
+/// The composer's own executable, run with a cargo home in `temp`: every
+/// cargo that shares a home waits on its package cache lock, and with the
+/// host's an import waits behind other tests and builds, past the bounds
+/// here (`docs/src/development/testing.md`).
+fn extractor(temp: &Path) -> PathBuf {
+    let home = temp.join("cargo-home");
+    std::fs::create_dir_all(&home).expect("cargo home");
+    let wrapper = temp.join("extractor");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nCARGO_HOME={} exec {} \"$@\"\n",
+            quoted(&home),
+            quoted(Path::new(env!("CARGO_BIN_EXE_gdl-web")))
+        ),
+    )
+    .expect("extractor");
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &wrapper,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("executable");
+    wrapper
+}
+
+/// `path` as one literal shell word.
+fn quoted(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
+}
+
+/// A literal shell substitution in a directory name must not change cargo's home.
+#[tokio::test]
+async fn an_extractor_preserves_shell_characters_in_its_home() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-extractor-")
+        .tempdir()
+        .expect("temp");
+    let root = temp.path().join("literal$(printf expanded) 'quoted'");
+    std::fs::create_dir_all(&root).expect("root");
+    let (url, server, app) = served(&root, |work| {
+        package(&work.join("protocols"), "protocols", "Prompt", "");
+    })
+    .await;
+    let (status, body) = import(app, &url, "protocols").await;
+    server.abort();
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        root.join("cargo-home/git/db").is_dir(),
+        "the wrapper expanded the literal directory name in {root:?}"
+    );
 }
 
 /// One package directory with a `Message` named `message`.
@@ -492,7 +549,7 @@ async fn a_relative_target_directory_imports() {
         target: relative.clone(),
         local_root: None,
         hosts: Vec::new(),
-        extractor: PathBuf::from(env!("CARGO_BIN_EXE_gdl-web")),
+        extractor: extractor(temp.path()),
         deploy: gdl_web::Deploy::default(),
         gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime")),
     })
@@ -768,9 +825,53 @@ async fn an_abandoned_import_ends_its_child_and_cargo() {
 /// process group: the cargo and the git it leaves die with it, and the
 /// connections they held are closed. The child is run here as the server
 /// runs it, in a group of its own, with a short deadline.
+///
+/// The deadline counts from cargo's start, and the claim needs cargo's git
+/// to reach the silent host before it passes. On a busy host cargo can take
+/// longer than 2 s to get there; such an attempt proves nothing about the
+/// connection, so it is run again with twice the deadline, up to 16 s
+/// (about 30 s in all).
 #[tokio::test]
 async fn a_child_past_its_cargo_deadline_ends_its_group() {
     use std::io::Read;
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
+    for deadline in [2, 4, 8, 16] {
+        let attempt = temp.path().join(format!("attempt-{deadline}"));
+        let (output, streams) = past_its_cargo_deadline(&attempt, deadline).await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(stderr.contains("did not finish within"), "{stderr}");
+        if streams.is_empty() {
+            continue;
+        }
+        assert!(
+            attempt.join("cargo-home/git/db").is_dir(),
+            "the child's cargo fetched into a home other than the test's own"
+        );
+        for mut stream in streams {
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .expect("a read timeout");
+            let mut rest = Vec::new();
+            stream
+                .read_to_end(&mut rest)
+                .expect("a connection the child's git held is still open");
+        }
+        return;
+    }
+    panic!("cargo's git never reached the dependency within a 16 s deadline");
+}
+
+/// Run the server's child on a Git crate whose host accepts and never
+/// answers, with cargo's deadline `deadline` seconds and its home and target
+/// in `dir`; return the child's end and the connections the host accepted.
+async fn past_its_cargo_deadline(
+    dir: &Path,
+    deadline: u64,
+) -> (std::process::Output, Vec<std::net::TcpStream>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a silent port");
     let silent = format!(
         "http://{}/slow.git",
@@ -783,14 +884,10 @@ async fn a_child_past_its_cargo_deadline_ends_its_group() {
             accepted.lock().expect("held").push(stream);
         }
     });
-    let temp = tempfile::Builder::new()
-        .prefix("gdl-web-git-")
-        .tempdir()
-        .expect("temp");
     let request = json!({
         "krate": {"Git": {"name": "slow", "url": silent, "rev": "0123456789abcdef0123456789abcdef01234567", "path": ""}},
-        "target": temp.path().join("target"),
-        "cargo_deadline_secs": 2,
+        "target": dir.join("target"),
+        "cargo_deadline_secs": deadline,
     })
     .to_string();
     let mut command = std::process::Command::new("sh");
@@ -798,6 +895,7 @@ async fn a_child_past_its_cargo_deadline_ends_its_group() {
         .args(["-c", "exec \"$0\" extract-child \"$1\""])
         .arg(env!("CARGO_BIN_EXE_gdl-web"))
         .arg(request)
+        .env("CARGO_HOME", dir.join("cargo-home"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -805,6 +903,7 @@ async fn a_child_past_its_cargo_deadline_ends_its_group() {
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     // Bounded at ten times cargo's deadline: a child that outlives it is
     // the defect, and ends here with its group, not with the test runner.
+    let bound = std::time::Duration::from_secs(10 * deadline);
     let output = tokio::task::spawn_blocking(move || {
         let mut child = command.spawn().expect("the child");
         let pid = child.id();
@@ -813,7 +912,7 @@ async fn a_child_past_its_cargo_deadline_ends_its_group() {
             if child.try_wait().expect("its state").is_some() {
                 break child.wait_with_output().expect("its end");
             }
-            if started.elapsed() > std::time::Duration::from_secs(20) {
+            if started.elapsed() > bound {
                 gdl_extract::kill_process_group(pid);
                 let _ = child.kill();
                 panic!("the child outlived cargo's deadline");
@@ -823,21 +922,6 @@ async fn a_child_past_its_cargo_deadline_ends_its_group() {
     })
     .await
     .expect("waited");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success());
-    assert!(stderr.contains("did not finish within"), "{stderr}");
     let streams = std::mem::take(&mut *held.lock().expect("held"));
-    assert!(
-        !streams.is_empty(),
-        "cargo's git never reached the dependency"
-    );
-    for mut stream in streams {
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-            .expect("a read timeout");
-        let mut rest = Vec::new();
-        stream
-            .read_to_end(&mut rest)
-            .expect("a connection the child's git held is still open");
-    }
+    (output, streams)
 }
