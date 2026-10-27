@@ -5,7 +5,11 @@
 //! or `agent-docs/plan.md` dangles the day the plan moves, so the reason
 //! goes into the comment itself, a test's doc comment, or a book chapter
 //! under `docs/src/`.
+//!
+//! The book's lists of `error_type` values also name exactly the error
+//! kinds the code has, so that a new kind cannot leave them stale.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -87,6 +91,200 @@ fn the_check_sees_each_kind_of_reference() {
         "// pull/push both work",
     ] {
         assert!(cites(line).is_none(), "false positive: {line}");
+    }
+}
+
+/// The book's lists of `error_type` values, in the limitations chapter and
+/// the metrics appendix, name every `gdl::ErrorKind` but `Cancelled`, and
+/// nothing else. `Cancelled` has no value: the cancellation counters count
+/// it (`error_slot` in `crates/gdl/src/meter.rs`).
+#[test]
+fn the_book_lists_every_error_type() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |path: &str| {
+        fs::read_to_string(root.join(path)).unwrap_or_else(|error| panic!("{path}: {error}"))
+    };
+    let mut kinds = error_kinds(&read("crates/gdl/src/error.rs"))
+        .unwrap_or_else(|error| panic!("crates/gdl/src/error.rs: {error}"));
+    assert!(
+        kinds.remove("cancelled"),
+        "no `ErrorKind` variants read from crates/gdl/src/error.rs: {kinds:?}"
+    );
+
+    let mut wrong = Vec::new();
+    for (path, heading) in [
+        (
+            "docs/src/operations/limitations.md",
+            "### The runtime's `error_type` values are gdl's error kinds",
+        ),
+        ("docs/src/appendix/metrics.md", "## `error_type` values"),
+    ] {
+        let listed = listed_values(&read(path), heading).unwrap_or_else(|| {
+            panic!("{path}: no list of values this check can read under `{heading}`")
+        });
+        let missing: Vec<_> = kinds.difference(&listed).collect();
+        let extra: Vec<_> = listed.difference(&kinds).collect();
+        if !missing.is_empty() || !extra.is_empty() {
+            wrong.push(format!(
+                "{path}: kinds it does not list {missing:?}, values that are not kinds {extra:?}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the book's `error_type` values differ from `ErrorKind`:\n{}",
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn the_error_type_check_reads_variants_and_lists() {
+    let source = r#"
+/// What failed.
+#[derive(Debug)]
+pub enum ErrorKind {
+    /// Node code reported a failure.
+    Node,
+    DeadlineExceeded,
+    OutcomeUnknown,
+}
+pub enum Other {
+    Stray,
+}
+"#;
+    assert_eq!(
+        error_kinds(source),
+        Ok(set(&["node", "deadline_exceeded", "outcome_unknown"]))
+    );
+    let tuple = source.replace("    Node,", "    Node(u8),");
+    assert!(error_kinds(&tuple).is_err(), "{:?}", error_kinds(&tuple));
+
+    let chapter = r#"
+### Values
+- **What:** `errors_total{error_type}` counts by kind: `node`, `codec`, and `routing`. Others count by step (`generate`, `publish_response`).
+### Next
+The kinds: `stray`.
+"#;
+    assert_eq!(
+        listed_values(chapter, "### Values"),
+        Some(set(&["node", "codec", "routing"]))
+    );
+    assert_eq!(listed_values(chapter, "### Missing"), None);
+    assert_eq!(
+        listed_values(
+            "### Values\nNo list.\n### Next\nKinds: `stray`.\n",
+            "### Values"
+        ),
+        None
+    );
+    assert_eq!(
+        listed_values("### Values\nKinds: `node` then `codec`.\n", "### Values"),
+        None
+    );
+}
+
+#[test]
+fn an_added_error_kind_with_a_trailing_comment_is_detected() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = fs::read_to_string(root.join("crates/gdl/src/error.rs")).expect("error source");
+    let mutated = source.replacen(
+        "    OutcomeUnknown,\n",
+        "    OutcomeUnknown,\n    Unavailable, // Retry after capacity returns.\n",
+        1,
+    );
+    assert_ne!(mutated, source, "the fixture must add a variant");
+    assert_ne!(
+        error_kinds(&mutated),
+        error_kinds(&source),
+        "an added variant with a trailing comment must change the parsed set or fail closed"
+    );
+}
+
+#[test]
+fn a_documented_error_type_after_and_is_detected() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut missed = Vec::new();
+    for (path, heading) in [
+        (
+            "docs/src/operations/limitations.md",
+            "### The runtime's `error_type` values are gdl's error kinds",
+        ),
+        ("docs/src/appendix/metrics.md", "## `error_type` values"),
+    ] {
+        let text = fs::read_to_string(root.join(path)).expect("book chapter");
+        let listed = listed_values(&text, heading).expect("the real chapter has a list");
+        let mutated = text.replacen(
+            "`outcome_unknown`.",
+            "`outcome_unknown` and `unavailable`.",
+            1,
+        );
+        assert_ne!(mutated, text, "{path}: the fixture must append a value");
+        if listed_values(&mutated, heading) == Some(listed) {
+            missed.push(path);
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "an extra value joined with and must change the parsed set or fail closed: {missed:?}"
+    );
+}
+
+fn set(values: &[&str]) -> BTreeSet<String> {
+    values.iter().map(|value| value.to_string()).collect()
+}
+
+/// The variants of `pub enum ErrorKind` in `source`, in snake case, as the
+/// `error_type` label spells them. A line of the enum that is not a
+/// comment, an attribute, or a unit variant is an error, so that no
+/// variant goes unread.
+fn error_kinds(source: &str) -> Result<BTreeSet<String>, String> {
+    let (_, body) = source
+        .split_once("pub enum ErrorKind {")
+        .ok_or("no `pub enum ErrorKind`")?;
+    let mut kinds = BTreeSet::new();
+    for line in body.lines().map(str::trim).take_while(|line| *line != "}") {
+        let code = line.split_once("//").map_or(line, |(code, _)| code).trim();
+        if code.is_empty() || code.starts_with('#') {
+            continue;
+        }
+        let name = code
+            .strip_suffix(',')
+            .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()))
+            .ok_or_else(|| format!("a line of `ErrorKind` this check cannot read: {line}"))?;
+        let mut snake = String::new();
+        for (at, c) in name.char_indices() {
+            if c.is_ascii_uppercase() && at > 0 {
+                snake.push('_');
+            }
+            snake.push(c.to_ascii_lowercase());
+        }
+        kinds.insert(snake);
+    }
+    Ok(kinds)
+}
+
+/// The values of the first list in the section under `heading`: the run of
+/// code spans after the first `: `, joined by `, `, `, and `, or ` and `,
+/// that ends its sentence. A run that ends any other way is not read, so
+/// that a value joined some other way is not dropped unseen.
+fn listed_values(text: &str, heading: &str) -> Option<BTreeSet<String>> {
+    let (_, section) = text.split_once(&format!("{heading}\n"))?;
+    let section = section
+        .split("\n#")
+        .next()
+        .expect("split yields at least one part");
+    let (_, mut rest) = section.split_once(": `")?;
+    let mut values = BTreeSet::new();
+    loop {
+        let (value, after) = rest.split_once('`')?;
+        values.insert(value.to_string());
+        let next = [", and `", ", `", " and `"]
+            .iter()
+            .find_map(|join| after.strip_prefix(join));
+        match next {
+            Some(next) => rest = next,
+            None => return after.starts_with('.').then_some(values),
+        }
     }
 }
 
