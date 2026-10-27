@@ -93,6 +93,7 @@ fn record(cell: &str, epoch: u64, seq: u64) -> CellRecord {
         presence: gdl_cells::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
+        revoked: Vec::new(),
         name: cell.into(),
         class: MODEL.into(),
         region: "us-east-1".into(),
@@ -670,6 +671,7 @@ async fn a_record_keeps_its_presence_and_models_in_its_file() {
             since: 4,
         }],
         models_version: 4,
+        revoked: Vec::new(),
         ..record("m1", 1, 1)
     };
     writer.publish(published.clone()).await.expect("a record");

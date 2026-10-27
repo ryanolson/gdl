@@ -7,8 +7,13 @@
 //! changes what an instance says, never per request, and only after the
 //! hub has read its cell's last record, since a restarted hub keeps the
 //! history that record holds.
+//!
+//! An operator can revoke a model: it leaves the list at once, with its
+//! history, and what the instances say of it is not taken until the
+//! operator lifts the revocation. The record keeps the revocations, so a
+//! restarted hub keeps them too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gdl_cells::{CellRecord, ModelEntry, ModelState};
 use gdl_model::{InstanceModel, InstanceModelState, ModelKey};
@@ -25,6 +30,14 @@ pub(super) struct Models {
     /// The models the cell's settings declare, which every instance that
     /// reports no list of its own serves.
     declared: Vec<ModelKey>,
+    /// The models an operator revoked: never in `entries`.
+    revoked: BTreeSet<ModelKey>,
+    /// The revocations lifted before the last record was read, which
+    /// the record may still hold.
+    lifted: BTreeSet<ModelKey>,
+    /// The models revoked before the last record was read: their history
+    /// in it is dropped, even if the revocation was lifted since.
+    discarded: BTreeSet<ModelKey>,
     /// Whether the last record has been read: nothing is computed before.
     restored: bool,
     /// Whether an instance has reported in its current registration since
@@ -41,26 +54,42 @@ impl Models {
             version: 0,
             floor: 0,
             declared,
+            revoked: BTreeSet::new(),
+            lifted: BTreeSet::new(),
+            discarded: BTreeSet::new(),
             restored: false,
             heard: false,
         }
     }
 
-    /// Take the cell's last record's models, `held` with their version,
-    /// or none, and count each later change from at least `floor`. A
-    /// restart keeps each entry's history: `starting` and `drained` stay,
-    /// `draining` goes on, and `ready` and `unavailable` are `unavailable`
-    /// until an instance reports. A declared model the record lacks is
-    /// `starting`.
-    pub(super) fn restore(&mut self, held: Option<(&[ModelEntry], u64)>, floor: u64) {
+    /// Take the cell's last record's models, `held` with their version
+    /// and the revoked models, or none, and count each later change from
+    /// at least `floor`. A restart keeps each entry's history: `starting`
+    /// and `drained` stay, `draining` goes on, and `ready` and
+    /// `unavailable` are `unavailable` until an instance reports. A
+    /// declared model the record lacks is `starting`. A revoked model stays
+    /// revoked.
+    pub(super) fn restore(&mut self, held: Option<Held<'_>>, floor: u64) {
         // With no record read, the list counts from the floor, so that its
         // version is above any that a hub before this one published.
-        let (entries, version) = held.unwrap_or((&[], floor));
+        let (entries, version, revoked) = held.unwrap_or((&[], floor, &[]));
         self.version = version;
         self.floor = floor;
         self.restored = true;
-        let mut changed = false;
+        // A revocation or a lift taken before the record was read is
+        // applied over the record's own.
+        let read: BTreeSet<ModelKey> = revoked.iter().cloned().collect();
+        self.revoked.extend(read.iter().cloned());
+        for key in std::mem::take(&mut self.lifted) {
+            self.revoked.remove(&key);
+        }
+        let mut changed = self.revoked != read;
+        let discarded = std::mem::take(&mut self.discarded);
         for entry in entries {
+            if self.revoked.contains(&entry.key()) || discarded.contains(&entry.key()) {
+                changed = true;
+                continue;
+            }
             let state = match entry.state {
                 ModelState::Ready => {
                     changed = true;
@@ -76,7 +105,7 @@ impl Models {
             self.entries.insert(entry.key(), tracked);
         }
         for key in &self.declared {
-            if !self.entries.contains_key(key) {
+            if !self.entries.contains_key(key) && !self.revoked.contains(key) {
                 changed = true;
                 self.entries
                     .insert(key.clone(), Tracked::new(ModelState::Starting));
@@ -85,7 +114,10 @@ impl Models {
         if changed {
             let version = self.bump();
             for (key, tracked) in &mut self.entries {
-                let read = entries.iter().find(|entry| entry.key() == *key);
+                // A discarded entry was not kept, so its state is new.
+                let read = entries
+                    .iter()
+                    .find(|entry| entry.key() == *key && !discarded.contains(key));
                 if read.is_none_or(|entry| entry.state != tracked.state) {
                     tracked.since = version;
                 }
@@ -101,7 +133,11 @@ impl Models {
             return false;
         }
         let mut offered: BTreeMap<ModelKey, InstanceModelState> = BTreeMap::new();
+        let revoked = &self.revoked;
         let mut offer = |key: ModelKey, state: InstanceModelState| {
+            if revoked.contains(&key) {
+                return;
+            }
             let held = offered.entry(key).or_insert(state);
             *held = strongest(*held, state);
         };
@@ -177,6 +213,49 @@ impl Models {
         true
     }
 
+    /// Revoke `key`: it leaves the list at once, with its history, and
+    /// what the instances say of it is not taken until it is lifted.
+    /// Whether it was not revoked already.
+    pub(super) fn revoke(&mut self, key: ModelKey) -> bool {
+        self.entries.remove(&key);
+        self.lifted.remove(&key);
+        if !self.restored {
+            self.discarded.insert(key.clone());
+        }
+        if !self.revoked.insert(key) {
+            return false;
+        }
+        if self.restored {
+            self.bump();
+        }
+        true
+    }
+
+    /// Lift the revocation of `key`: the next [`Models::update`] lists it
+    /// as the instances say, starting afresh. Whether it was revoked; before
+    /// the last record is read, the lift is kept to apply over it.
+    pub(super) fn lift(&mut self, key: &ModelKey) -> bool {
+        if !self.restored {
+            self.revoked.remove(key);
+            self.lifted.insert(key.clone());
+            return true;
+        }
+        if !self.revoked.remove(key) {
+            return false;
+        }
+        let version = self.bump();
+        // A declared model is listed as on start: `starting` until an
+        // instance serves it.
+        if self.declared.contains(key) {
+            let tracked = Tracked {
+                since: version,
+                ..Tracked::new(ModelState::Starting)
+            };
+            self.entries.entry(key.clone()).or_insert(tracked);
+        }
+        true
+    }
+
     /// The entries, in the order of their keys, and the list's version.
     pub(super) fn list(&self) -> ModelList {
         let entries = self
@@ -192,6 +271,7 @@ impl Models {
         ModelList {
             entries,
             version: self.version,
+            revoked: self.revoked.iter().cloned().collect(),
         }
     }
 
@@ -243,13 +323,18 @@ pub(super) enum Offer<'a> {
     Earlier(Option<&'a [InstanceModel]>),
 }
 
-/// The cell's model entries, in the order of their keys, and the version
-/// of their list: what its record carries.
+/// The cell's model entries, in the order of their keys, the version of
+/// their list, and the revoked models: what its record carries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ModelList {
     pub(super) entries: Vec<ModelEntry>,
     pub(super) version: u64,
+    pub(super) revoked: Vec<ModelKey>,
 }
+
+/// What the cell's last record holds of its models: the entries, the
+/// list's version, and the revoked models.
+pub(super) type Held<'a> = (&'a [ModelEntry], u64, &'a [ModelKey]);
 
 /// One entry, with what its state alone does not hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

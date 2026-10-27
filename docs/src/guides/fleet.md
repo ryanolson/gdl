@@ -128,3 +128,26 @@ docker run --rm --network fleet_default curlimages/curl:8.10.1 -s -X POST http:/
 ```
 
 The hub answers 202 with the cell's health, showing `draining`. The parent stops offering to the cell, the cell's instances finish what they hold and leave, and the hub withdraws the cell's record ([Draining a cell](../concepts/cell-routing.md#draining-a-cell)). Then remove the cell's table from the fleet file, write the bundle again into a fresh directory, and from there run `docker compose -p fleet up -d --remove-orphans`, as in [Add a cell](#add-a-cell). A drain cannot be cancelled. A global cell's hub answers 409.
+
+## Remove a cell whose hub is gone
+
+A cell whose hub is gone cannot drain. Until something says otherwise, its parent holds it missing, not removed. Withdraw it on its parent's hub, here `global-us` for `model-x-02`:
+
+```bash
+docker run --rm --network fleet_default curlimages/curl:8.10.1 -s -X POST \
+  http://global-us:8337/v1/ext/gdl-cell/children/model_x/model-x-02/withdraw
+```
+
+The parent answers 204 once it has written the withdrawal, and its choosers hold the cell withdrawn. If the cell was scaled to 0 on purpose and will come back, say that instead, with `.../children/model_x/model-x-02/scale-to-zero`: the cell then reads as scaled to 0, not missing. A late record from the cell's old hub cannot undo either. A new hub of the cell writes past both ([A cell whose hub is gone](../concepts/cells.md#a-cell-whose-hub-is-gone)).
+
+## Revoke a model
+
+Revoke one model of a cell on the cell's own hub. The cell's other models serve on:
+
+```bash
+docker run --rm --network fleet_default curlimages/curl:8.10.1 -s -X POST \
+  -H 'content-type: application/json' -d '{"model": "acme-legal"}' \
+  http://model-x-02:8337/v1/ext/gdl-cell/models/revoke
+```
+
+The hub answers 204 once the cell's record leaves the model out. It stays out, whatever the cell's instances say and across a restart of the hub, until you lift it with `.../models/lift` and the same body ([Revoking a model](../concepts/cells.md#revoking-a-model)).

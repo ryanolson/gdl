@@ -104,7 +104,7 @@ For each segment of the cell's class, the hub counts the instances usable for fr
 
 ### The record
 
-The hub publishes the cell's record to the cell directory when the state, the presence, or the models change, and on each heartbeat, every 10 s by default (`heartbeat_ms`). Under the `relay` backend, it writes the record at the cadence its parent's hub answers with ([The relay backend](#the-relay-backend)). The record carries the cell's name, class, region, parent, contract and placement hashes, state, hub address, load summary, presence, models, an epoch, a sequence number, and a lease, 30 s by default (`lease_ms`). A hub refuses a lease that is not longer than its heartbeat, since readers would let the record lapse between two publishes.
+The hub publishes the cell's record to the cell directory when the state, the presence, or the models change, and on each heartbeat, every 10 s by default (`heartbeat_ms`). Under the `relay` backend, it writes the record at the cadence its parent's hub answers with ([The relay backend](#the-relay-backend)). The record carries the cell's name, class, region, parent, contract and placement hashes, state, hub address, load summary, presence, models, the models an operator revoked, an epoch, a sequence number, and a lease, 30 s by default (`lease_ms`). A hub refuses a lease that is not longer than its heartbeat, since readers would let the record lapse between two publishes.
 
 The epoch is the hub process's incarnation. A restarted hub takes a new epoch, which orders after every write of the one before. A write that is not newer than what the directory holds for the cell is refused.
 
@@ -124,7 +124,7 @@ There is no summary while no report counts, and none for a class that no hop ent
 
 `presence` says whether the cell is expected to answer. `serving` is the default: the hub sends a heartbeat, and a reader that sees none for the lease holds the cell missing. `scaled_to_zero` says that the cell was scaled to 0 on purpose: it sends no heartbeat, and its record never lapses. So a reader tells a cell scaled to 0 from a cell that is expected but silent. The relay directory and `CellView` apply the lease only to a `serving` record (`CellRecord::leased`). A cell scaled to 0 takes no work: a parent's hub does not follow it, and ends a follow of it, which closes once its choosers let go, as for a newer epoch.
 
-`POST /v1/ext/gdl-cell/presence` on the control listener, with `{"presence": "scaled_to_zero"}`, tells the hub that the cell is scaled to 0. The hub answers 204 once the directory has stored a record that says so, so the instances can stop after the answer. Only a record written after the request answers it, so an earlier record that says the same never does. It answers 503 if the directory has not stored it within 5 s, or if a later request for the other presence replaced it first. `{"presence": "serving"}` says that the cell serves again. A hub starts `serving`.
+`POST /v1/ext/gdl-cell/presence` on the control listener, with `{"presence": "scaled_to_zero"}`, tells the hub that the cell is scaled to 0. For a cell whose hub is gone, the operator says it on the parent's hub instead ([A cell whose hub is gone](#a-cell-whose-hub-is-gone)). The hub answers 204 once the directory has stored a record that says so, so the instances can stop after the answer. Only a record written after the request answers it, so an earlier record that says the same never does. It answers 503 if the directory has not stored it within 5 s, or if a later request for the other presence replaced it first. `{"presence": "serving"}` says that the cell serves again. A hub starts `serving`.
 
 ### Models
 
@@ -150,6 +150,16 @@ Silence never removes a model. An entry that no instance names stays as `startin
 
 A hub that restarts reads the cell's last record before its first write, and keeps each entry's history. A read that fails, or takes more than 2 s, is not a cell with no record: the hub reads again every 1 s and writes nothing meanwhile. With no record, the list's version counts from the epoch of the hub's writes in its high bits (epoch × 2^20), so it is above any version a hub before it published. Until the read is done, the hub refuses its instances' load reports with 409, and each instance sends its report again. The history it keeps: `starting` and `drained` stay, `draining` goes on until an instance reports, and `ready` and `unavailable` become `unavailable` until an instance reports. Under the `relay` backend it reads the record from its parent's hub ([The relay backend](#the-relay-backend)). Two rare restarts still lose part of the history ([Limitations](../operations/limitations.md#two-rare-restarts-lose-part-of-a-models-history)).
 
+#### Revoking a model
+
+An operator can revoke one model of a cell whose hub answers: `POST /v1/ext/gdl-cell/models/revoke` on the cell hub's control listener, with the model's key, `{"model": "acme-legal"}` (and `routing_key` when it has one). The model leaves the record's `models` at once, with its history, and the record lists it in `revoked`. The cell's other models, its state, and its presence do not change. So for a cell that serves llama-70b and acme-legal, a reader no longer finds acme-legal in the cell's record, and still finds llama-70b `ready`.
+
+- The hub answers 204 once the directory has stored a record that leaves the model out. It answers 400 for a malformed model, and 503 when no such record is stored within 5 s, or a later request lifted the revocation first.
+- What the instances say of a revoked model is not taken, and a model that `[cell] models` declares is held out too. The instances still have the model: revoking it changes the record, not the instances.
+- The record keeps the revocation, so a hub that restarts reads it with the rest of the cell's last record, and keeps it.
+- `POST /v1/ext/gdl-cell/models/lift`, with the same body, lifts the revocation. The record lists the model again as the instances say, starting afresh: its history went with the revocation.
+- Revoking and draining differ. A model that the instances drain stays listed, as `draining` and then `drained`, so a reader can answer 503 for it until it clears. A revoked model is not listed at all, so a reader that finds it in no other cell answers 404.
+
 ### The cell's watch
 
 The hub serves the cell's watch, `GET /v1/ext/gdl-cell/watch`, as server-sent events. Two kinds of reader use it: the parent's hub, which follows the cell, and the cell's own instances, which learn of its drain from it.
@@ -161,6 +171,21 @@ A hub that restarts ends every watch, so the epoch does not change within one. T
 ### The drain request
 
 `POST /v1/ext/gdl-cell/drain` on the control listener starts the cell's drain. The cell is `draining` on its health endpoint (503), its record, and its watch by the time the hub answers. The answer is 202 with the health body. It waits up to 5 s for the directory to store the draining record. A second drain is answered the same way. A cell whose class no hop enters, such as a global cell, is refused with 409. [Draining a cell](cell-routing.md#draining-a-cell) describes what the instances do.
+
+### A cell whose hub is gone
+
+A cell whose hub is gone cannot drain or say that it was scaled to 0, and silence never does either. An operator says it on the parent cell's hub, which reads its children's records:
+
+| Route, on the parent hub's control listener | Writes |
+|---|---|
+| `POST /v1/ext/gdl-cell/children/{class}/{cell}/withdraw` | the child's withdrawal: its record and its models leave the directory, and the parent's choosers hold it withdrawn |
+| `POST /v1/ext/gdl-cell/children/{class}/{cell}/scale-to-zero` | the child's last record again, scaled to 0: a reader shows it scaled to 0, not missing. Its state, models, and load stay as they were |
+
+Each write has an epoch past the child's last record: the time in milliseconds, or the epoch after the record's when that is later (`gdl_cells::CellCommand`). So a late write of the old epoch, such as a heartbeat that was on its way or a hub that was cut off and comes back, is refused as not newer, and cannot undo the command. A hub of the cell that starts again takes an epoch past the command's, as it does past any record it finds, and serves the cell again. So does a hub that still runs but none of whose writes was answered: it cannot tell the command from a record that was there before it started ([Limitations](../operations/limitations.md#an-operators-command-fences-a-hub-that-still-answers)).
+
+- The hub answers 204 once the directory has stored the write. It answers 404 when it holds no record of a child of that name and class: a cell of a class it does not send to, or whose record names another cell as its parent or has other hashes. It answers 409 when the directory refuses the write, and 503 when the directory cannot be read or written.
+- Under the `relay` backend, the parent's hub holds its children's records itself, and writes the command into its children's records as it writes a report. Under `dir`, or a backend given to `hub_builder_with`, it reads and writes the directory it watches. A top cell has no parent: a tool of the deployment gives the command through the backend with `CellCommand::give`.
+- The commands are for a cell whose hub is gone. A command for a cell whose hub still answers fences that hub's writes until it restarts ([Limitations](../operations/limitations.md#an-operators-command-fences-a-hub-that-still-answers)). For such a cell, use its own `/drain` or `/presence`.
 
 ### The keyed record service
 
@@ -214,6 +239,8 @@ The cell directory holds one record per cell, keyed by class and name. Each reco
 
 - `publish` stores a record if it is newer than what the directory holds.
 - `withdraw` removes a record and leaves a tombstone at its version, so a late publish cannot bring it back. A newer epoch can.
+
+An operator's commands for a cell whose hub is gone use the same two writes ([A cell whose hub is gone](#a-cell-whose-hub-is-gone)), so they work with every backend.
 - `watch` yields the class's current records, then `Synced` with a resume token, then each change with its token. A token the backend no longer serves, a token of another class, or a watcher that falls behind its buffer ends the watch with `Resnapshot`. The caller then watches again from the start.
 
 ### The contract

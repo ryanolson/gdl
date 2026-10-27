@@ -141,10 +141,11 @@ How a drained cell reads, from the chooser's view:
 | the cell drains | `Some`, `draining`, until every chooser has acknowledged and the follow is dropped | `false` |
 | the follow is dropped | `None` | `false` |
 | its instances have left, and its hub withdrew its record | `None` | `true` |
+| its hub is gone, and an operator withdrew it on this cell's hub | `None` | `true` |
 | the cell's hub stops without a drain, or its link fails, or its lease expires | `None` once dropped | `false` |
 | this chooser never saw the cell, or started after the withdrawal | `None` | `false` |
 
-Silence is never a decommission. Only the cell's own hub withdraws its record, and only after a drain. A cell that this chooser cannot see reads as not available, so a gate answers 503 for it, not 404. Two choosers can then answer differently for a while: one that saw the withdrawal reads it, and one that started after it does not. [Limitations](../operations/limitations.md) lists this.
+Silence is never a decommission. A cell's record is withdrawn only by its own hub after a drain, or by an operator on its parent's hub when its hub is gone ([A cell whose hub is gone](cells.md#a-cell-whose-hub-is-gone)). A cell that this chooser cannot see reads as not available, so a gate answers 503 for it, not 404. Two choosers can then answer differently for a while: one that saw the withdrawal reads it, and one that started after it does not. [Limitations](../operations/limitations.md) lists this.
 
 Each entry instance is registered with the chooser's velo node before a table holds it. It is unregistered `drain_ms` after no follow holds it, unless the chooser's own membership still routes to it or is still draining it. The membership, in turn, does not unregister a peer that a table holds. So a velo peer in both is unregistered by whichever lets go of it last.
 

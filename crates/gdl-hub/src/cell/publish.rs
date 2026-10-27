@@ -8,10 +8,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures::StreamExt;
 use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, LoadSummary, Presence,
-    Withdrawal,
+    CellDirectory, CellRecord, CellState, DirectoryError, LoadSummary, Presence, Withdrawal,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -94,7 +92,7 @@ impl<D: CellDirectory> Publisher<D> {
         let feed = &*self.feed;
         let held = held
             .as_ref()
-            .map(|held| (&held.models[..], held.models_version));
+            .map(|held| (&held.models[..], held.models_version, &held.revoked[..]));
         feed.restore(held, super::models::floor(writer.epoch));
         let mut written = sources.take();
         let mut state = written.state;
@@ -147,13 +145,14 @@ impl<D: CellDirectory> Publisher<D> {
     }
 }
 
-/// What the record last stored says of the cell's state and presence,
-/// and the latest request for a presence that it carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the record last stored says of the cell's state, presence, and
+/// models, and the latest request for a presence that it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Stored {
     pub(super) state: CellState,
     pub(super) presence: Presence,
     pub(super) request: u64,
+    pub(super) models: Arc<ModelList>,
 }
 
 /// The presence the hub was last told, and the number of that request:
@@ -250,7 +249,7 @@ impl Writer {
         let read = async {
             match parent {
                 Some(parent) => parent.held(&record.class, &record.name).await,
-                None => held_record(directory, record).await,
+                None => gdl_cells::last_record(directory, &record.class, &record.name).await,
             }
         };
         let held = tokio::time::timeout(SNAPSHOT, read)
@@ -294,6 +293,7 @@ impl Writer {
             presence: presence.presence,
             models: models.entries.clone(),
             models_version: models.version,
+            revoked: models.revoked.clone(),
             epoch: self.epoch,
             seq: self.seq,
             ..record.clone()
@@ -311,6 +311,7 @@ impl Writer {
                     state,
                     presence: presence.presence,
                     request: presence.request,
+                    models: Arc::clone(models),
                 }));
                 self.stored = true;
             }
@@ -370,32 +371,6 @@ impl Writer {
                 }
             }
             tokio::time::sleep(self.bound).await;
-        }
-    }
-}
-
-/// The record the directory holds for the cell, if any.
-/// A watch that ends or fails before its snapshot is complete reads
-/// nothing, which is never a cell with no record.
-async fn held_record(
-    directory: &impl CellDirectory,
-    record: &CellRecord,
-) -> Result<Option<CellRecord>, DirectoryError> {
-    let mut watch = std::pin::pin!(directory.watch(&record.class, None));
-    let mut held = None;
-    loop {
-        match watch.next().await {
-            Some(Ok(CellEvent::Current(current))) if current.name == record.name => {
-                held = Some(current)
-            }
-            Some(Ok(CellEvent::Current(_))) => {}
-            Some(Ok(CellEvent::Synced { .. })) => return Ok(held),
-            Some(Err(error)) => return Err(error),
-            Some(Ok(_)) | None => {
-                return Err(DirectoryError::Unavailable(
-                    "the directory's watch ended before its snapshot".into(),
-                ));
-            }
         }
     }
 }

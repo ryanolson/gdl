@@ -168,6 +168,24 @@ A record says whether its cell is `serving` or `scaled_to_zero`. A reader applie
 
 A parent's hub does not follow a cell scaled to 0, and ends a follow of one: the cell takes no work, its record never lapses, and its hub may be gone, so a follow would dial that hub without end.
 
+## An operator's command writes past the cell's epoch
+
+A cell whose hub is gone is withdrawn, or said to be scaled to 0, by an operator on its parent's hub. The command is a write of the cell's record at an epoch past its last record's, as a restarted hub's first write is. So the writes of the old epoch are all older, and a heartbeat that was on its way, or a hub that was cut off and comes back, cannot undo the command.
+
+**Rejected: the old epoch with the next sequence number.** A heartbeat of the old hub that lands later has a higher sequence number, and would bring a withdrawn cell back, or make a cell scaled to 0 serving again.
+
+**Rejected: fencing a hub whose write was not answered.** Such a write may have been stored, so the hub may be known by its epoch. But a hub that starts after a withdrawal whose epoch is above its clock gets the same refusal, and if its first write failed, it would stay fenced until it restarts again. A hub cannot tell the two cases apart from the version the directory refuses with. So a hub with no answered write moves past a newer epoch, and an operator who commands a hub that still runs can see it come back.
+
+**Rejected: a command only in the parent's memory.** A reader of the directory, such as a parent's restarted hub or another backend's watch, would never see it. A write through the directory is seen by every reader, under every backend, by the rules a publish already keeps.
+
+## A revocation is a list beside the models
+
+A revoked model leaves the record's models, and the record lists it in `revoked`. The cell's own hub writes it, at its own epoch, so the hub keeps serving the cell's other models.
+
+**Rejected: a `revoked` state of a model entry.** A new state is not additive ([A model's state keeps its history](#a-models-state-keeps-its-history)): a hub of an earlier build refuses the record. A new field is ignored by such a hub, and the model is still gone from the list it reads.
+
+**Rejected: a revocation written by the parent at a new epoch.** It would fence the cell's live hub, whose next write is then older, and the cell would stop publishing its other models.
+
 ## Unknown events fail closed for one cell
 
 An event of a kind a reader does not know may say something that would keep it from the cell, such as a retirement or an exclusion. Skipping it is unsafe. So the reader stops routing to that cell until it has read it again.

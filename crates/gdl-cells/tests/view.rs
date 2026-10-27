@@ -24,6 +24,7 @@ fn record(name: &str, epoch: u64, seq: u64) -> CellRecord {
         presence: Presence::Serving,
         models: Vec::new(),
         models_version: 0,
+        revoked: Vec::new(),
     }
 }
 

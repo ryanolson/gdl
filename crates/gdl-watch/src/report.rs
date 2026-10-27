@@ -37,6 +37,9 @@ pub fn held_path(class: &str, cell: &str) -> String {
 /// What a child cell's hub reports to its parent's hub: its record, on
 /// each change of state and on its heartbeat, or, once its drain has
 /// ended, its withdrawal.
+// A report is made once a heartbeat and sent at once: the record is not
+// boxed, so that the variant is written and matched as the wire reads.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Report {

@@ -144,6 +144,7 @@ fn the_version_rises_on_each_change_and_only_then() {
     let ModelList {
         entries: list,
         version,
+        ..
     } = models.list();
     assert_eq!(version, 101);
     assert_eq!(list, [entry("a", Ready, 101), entry("b", Starting, 101)]);
@@ -155,7 +156,8 @@ fn the_version_rises_on_each_change_and_only_then() {
         models.list(),
         ModelList {
             entries: vec![entry("a", Ready, 101), entry("b", Ready, 102)],
-            version: 102
+            version: 102,
+            revoked: Vec::new(),
         }
     );
 }
@@ -202,7 +204,7 @@ fn the_oldest_drained_entries_are_dropped_past_the_cap() {
 /// version 7, by a hub whose writes count from 50.
 fn restarted(state: ModelState) -> Models {
     let mut models = Models::new(Vec::new());
-    models.restore(Some((&[entry("m", state, 7)], 7)), 50);
+    models.restore(Some((&[entry("m", state, 7)], 7, &[])), 50);
     models
 }
 
@@ -227,7 +229,8 @@ fn a_restart_keeps_a_starting_entry_starting() {
         models.list(),
         ModelList {
             entries: vec![entry("m", Starting, 7)],
-            version: 7
+            version: 7,
+            revoked: Vec::new(),
         }
     );
 }
@@ -256,7 +259,8 @@ fn a_restart_goes_on_draining_a_draining_entry() {
         models.list(),
         ModelList {
             entries: vec![entry("m", Drained, 50)],
-            version: 50
+            version: 50,
+            revoked: Vec::new(),
         }
     );
 }
@@ -270,7 +274,8 @@ fn a_restart_makes_a_ready_entry_unavailable() {
         models.list(),
         ModelList {
             entries: vec![entry("m", Unavailable, 50)],
-            version: 50
+            version: 50,
+            revoked: Vec::new(),
         }
     );
     let loading = [says("m", SaysStarting)];
@@ -290,7 +295,8 @@ fn a_restart_keeps_an_unavailable_entry_unavailable() {
         models.list(),
         ModelList {
             entries: vec![entry("m", Unavailable, 7)],
-            version: 7
+            version: 7,
+            revoked: Vec::new(),
         }
     );
     let loading = [says("m", SaysStarting)];
@@ -306,12 +312,13 @@ fn a_restart_keeps_an_unavailable_entry_unavailable() {
 fn a_restart_that_changes_nothing_keeps_the_version() {
     let held = [entry("a", Starting, 3), entry("b", Drained, 4)];
     let mut models = Models::new(Vec::new());
-    models.restore(Some((&held, 4)), 50);
+    models.restore(Some((&held, 4, &[])), 50);
     assert_eq!(
         models.list(),
         ModelList {
             entries: held.to_vec(),
-            version: 4
+            version: 4,
+            revoked: Vec::new(),
         }
     );
     let ready = [says("a", SaysReady)];
@@ -325,7 +332,8 @@ fn a_restart_that_changes_nothing_keeps_the_version() {
         unread.list(),
         ModelList {
             entries: vec![entry("a", Ready, 71)],
-            version: 71
+            version: 71,
+            revoked: Vec::new(),
         }
     );
 }
@@ -344,7 +352,10 @@ fn a_restart_without_a_record_does_not_reuse_a_models_version() {
     assert_eq!(published.version, floor(1_000) + 2);
 
     let mut retained = Models::new(Vec::new());
-    retained.restore(Some((&published.entries, published.version)), floor(1_001));
+    retained.restore(
+        Some((&published.entries, published.version, &[])),
+        floor(1_001),
+    );
     retained.update([Offer::Listed(&ready)]);
     assert!(retained.list().version > published.version);
 
@@ -375,7 +386,8 @@ fn declared_models_are_served_by_every_instance_that_reports_none() {
         models.list(),
         ModelList {
             entries: vec![entry("x", Starting, 11), entry("y", Starting, 11)],
-            version: 11
+            version: 11,
+            revoked: Vec::new(),
         }
     );
     assert!(!models.update(std::iter::empty::<Offer<'_>>()));
@@ -417,7 +429,7 @@ fn a_restart_preserves_whether_a_draining_model_ever_served() {
     assert_eq!(state(&uninterrupted, "m"), Some(Starting));
 
     let mut restored = Models::new(Vec::new());
-    restored.restore(Some((&held.entries, held.version)), held.version + 100);
+    restored.restore(Some((&held.entries, held.version, &[])), held.version + 100);
     assert_eq!(state(&restored, "m"), Some(Draining));
     restored.update([Offer::Listed(&starting)]);
     assert_eq!(state(&restored, "m"), Some(Starting));
@@ -505,4 +517,170 @@ fn a_model_that_goes_away_leaves_the_others_as_they_are() {
     silent.update([Offer::Listed(&llama_only)]);
     assert_eq!(state(&silent, "acme-legal"), Some(Unavailable));
     assert_eq!(llama(&silent), Some(Ready));
+}
+
+fn key(model: &str) -> ModelKey {
+    ModelKey::new(model)
+}
+
+/// A revoked model leaves the list at once, and the version rises; the
+/// instances' reports, which still name it, never bring it back. The
+/// other models stay as they are.
+#[test]
+fn a_revoked_model_leaves_the_list_whatever_the_instances_say() {
+    let mut models = fresh();
+    let both = [says("acme-legal", SaysReady), says("llama-70b", SaysReady)];
+    assert!(models.update([Offer::Listed(&both)]));
+    let before = models.list().version;
+
+    assert!(models.revoke(key("acme-legal")));
+    let revoked = models.list();
+    assert_eq!(revoked.entries, [entry("llama-70b", Ready, before)]);
+    assert_eq!(revoked.revoked, [key("acme-legal")]);
+    assert!(revoked.version > before);
+
+    assert!(!models.update([Offer::Listed(&both)]), "nothing changed");
+    assert_eq!(models.list(), revoked);
+    assert!(!models.revoke(key("acme-legal")), "revoked already");
+    assert_eq!(models.list(), revoked);
+}
+
+/// A model the cell's settings declare is held out too, though every
+/// instance that reports no list serves it.
+#[test]
+fn a_revoked_declared_model_is_held_out() {
+    let mut models = Models::new(vec![key("acme-legal"), key("llama-70b")]);
+    models.restore(None, 10);
+    assert!(models.update([Offer::Silent]));
+    assert!(models.revoke(key("acme-legal")));
+    assert!(!models.update([Offer::Silent]));
+    assert_eq!(states(&models), [("llama-70b".to_string(), Ready)]);
+}
+
+/// A hub that restarts keeps its cell's revocations from the last record:
+/// what an instance reports of a revoked model is not taken, and a
+/// declared one is not listed.
+#[test]
+fn a_restart_keeps_the_revocations() {
+    let mut models = Models::new(vec![key("acme-legal")]);
+    models.restore(
+        Some((&[entry("llama-70b", Ready, 9)], 9, &[key("acme-legal")])),
+        50,
+    );
+    let restored = models.list();
+    assert_eq!(restored.revoked, [key("acme-legal")]);
+    assert_eq!(restored.entries, [entry("llama-70b", Unavailable, 50)]);
+    let both = [says("acme-legal", SaysReady), says("llama-70b", SaysReady)];
+    models.update([Offer::Listed(&both)]);
+    assert_eq!(states(&models), [("llama-70b".to_string(), Ready)]);
+}
+
+/// Once lifted, the model is listed again as the instances say, starting
+/// afresh: its history went with the revocation.
+#[test]
+fn a_lifted_model_is_listed_again_as_the_instances_say() {
+    let mut models = fresh();
+    let both = [says("acme-legal", SaysReady), says("llama-70b", SaysReady)];
+    models.update([Offer::Listed(&both)]);
+    models.revoke(key("acme-legal"));
+    let revoked = models.list().version;
+
+    assert!(models.lift(&key("acme-legal")));
+    assert!(models.list().revoked.is_empty());
+    assert!(models.update([Offer::Listed(&both)]));
+    let lifted = models.list();
+    assert!(lifted.version > revoked);
+    assert_eq!(
+        lifted.entries,
+        [
+            entry("acme-legal", Ready, lifted.version),
+            entry("llama-70b", Ready, 101)
+        ]
+    );
+    assert!(!models.lift(&key("acme-legal")), "lifted already");
+}
+
+/// A revocation or a lift taken before the last record is read applies
+/// over the record's own: the hub answers it once its first record is
+/// stored.
+#[test]
+fn a_revocation_or_lift_before_the_record_is_read_applies_over_it() {
+    let mut models = Models::new(Vec::new());
+    assert!(models.revoke(key("qwen-32b")));
+    assert!(models.lift(&key("acme-legal")));
+    models.restore(
+        Some((&[entry("llama-70b", Ready, 9)], 9, &[key("acme-legal")])),
+        50,
+    );
+    let restored = models.list();
+    assert_eq!(restored.revoked, [key("qwen-32b")]);
+    assert!(restored.version > 9, "the revocations changed");
+    let all = [
+        says("acme-legal", SaysReady),
+        says("llama-70b", SaysReady),
+        says("qwen-32b", SaysReady),
+    ];
+    models.update([Offer::Listed(&all)]);
+    assert_eq!(
+        states(&models),
+        [
+            ("acme-legal".to_string(), Ready),
+            ("llama-70b".to_string(), Ready)
+        ]
+    );
+}
+
+fn revoke_then_lift_history(before_read: bool) {
+    let held = [entry("acme-legal", Unavailable, 9)];
+    let loading = [says("acme-legal", SaysStarting)];
+    let mut models = Models::new(Vec::new());
+    if !before_read {
+        models.restore(Some((&held, 9, &[])), 50);
+    }
+    assert!(models.revoke(key("acme-legal")));
+    assert!(models.lift(&key("acme-legal")));
+    if before_read {
+        models.restore(Some((&held, 9, &[])), 50);
+    }
+    models.update([Offer::Listed(&loading)]);
+    assert_eq!(
+        state(&models, "acme-legal"),
+        Some(Starting),
+        "a lifted model starts afresh, including before the restart read: before_read={before_read}, list={:?}",
+        models.list()
+    );
+}
+
+#[test]
+fn a_revoke_then_lift_discards_history_after_the_record_is_read() {
+    revoke_then_lift_history(false);
+}
+
+/// A revoke followed by a lift discards the model's history, whether
+/// the hub has read its last record yet or still waits for it.
+#[test]
+fn a_startup_revoke_then_lift_discards_the_models_history() {
+    revoke_then_lift_history(true);
+}
+
+#[test]
+fn a_declared_model_recreated_at_startup_takes_the_new_version() {
+    let held = [entry("acme-legal", Starting, 9)];
+    let mut unchanged = Models::new(vec![key("acme-legal")]);
+    unchanged.restore(Some((&held, 9, &[])), 50);
+    assert_eq!(unchanged.list().entries, held);
+    assert_eq!(unchanged.list().version, 9);
+
+    let mut models = Models::new(vec![key("acme-legal")]);
+    assert!(models.revoke(key("acme-legal")));
+    assert!(models.lift(&key("acme-legal")));
+    models.restore(Some((&held, 9, &[])), 50);
+    let recreated = models.list();
+    assert!(recreated.revoked.is_empty());
+    assert!(recreated.version > 9);
+    assert_eq!(
+        recreated.entries,
+        [entry("acme-legal", Starting, recreated.version)],
+        "a recreated model takes the version of its fresh state"
+    );
 }

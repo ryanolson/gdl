@@ -212,6 +212,9 @@ impl CellDirectory for RelayDirectory {
 }
 
 /// A write of one cell.
+// Made once a child's report and taken at once: boxing the record would
+// add an allocation to each write for nothing.
+#[allow(clippy::large_enum_variant)]
 enum Write {
     Record(CellRecord),
     Withdrawal(Withdrawal),

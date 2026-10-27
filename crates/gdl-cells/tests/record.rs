@@ -45,6 +45,7 @@ fn record() -> CellRecord {
             },
         ],
         models_version: 3,
+        revoked: Vec::new(),
     }
 }
 
@@ -298,6 +299,43 @@ fn a_record_carries_its_presence_and_models() {
     }
 }
 
+/// The models an operator revoked go on the wire beside the models, and
+/// a record with none leaves the field out. A record of a build from
+/// before revocation reads as revoking none.
+#[test]
+fn a_record_carries_the_models_an_operator_revoked() {
+    let revoked = CellRecord {
+        revoked: vec![
+            gdl_model::ModelKey::new("acme-legal"),
+            gdl_model::ModelKey {
+                model: "llama-70b".into(),
+                routing_key: Some("b".into()),
+            },
+        ],
+        ..record()
+    };
+    let text = serde_json::to_string(&revoked).expect("json");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(
+        value["revoked"],
+        serde_json::json!([
+            {"model": "acme-legal"},
+            {"model": "llama-70b", "routing_key": "b"},
+        ]),
+        "{text}"
+    );
+    assert_eq!(
+        serde_json::from_str::<CellRecord>(&text).expect("a record"),
+        revoked
+    );
+    let text = serde_json::to_string(&record()).expect("json");
+    assert!(!text.contains("revoked"), "{text}");
+    assert_eq!(
+        serde_json::from_str::<CellRecord>(&text).expect("a record"),
+        record()
+    );
+}
+
 /// A record as a build from before presence and models writes it reads
 /// as a serving cell with no models.
 #[test]
@@ -346,6 +384,7 @@ struct EarlierRecord {
 fn an_earlier_reader_reads_a_record_with_presence_and_models() {
     let published = CellRecord {
         presence: Presence::ScaledToZero,
+        revoked: vec![gdl_model::ModelKey::new("acme-legal")],
         ..record()
     };
     let text = serde_json::to_string(&published).expect("json");

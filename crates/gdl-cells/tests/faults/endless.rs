@@ -33,6 +33,7 @@ impl CellDirectory for Endless {
             presence: gdl_cells::Presence::Serving,
             models: Vec::new(),
             models_version: 0,
+            revoked: Vec::new(),
             name: "m1".into(),
             class: class.into(),
             region: "us-east-1".into(),

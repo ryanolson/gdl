@@ -337,6 +337,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             presence: gdl_cells::Presence::Serving,
             models: Vec::new(),
             models_version: 0,
+            revoked: Vec::new(),
             name: cell.name.clone(),
             class: cell.class.clone(),
             region: cell.region.clone(),
@@ -535,7 +536,11 @@ impl<D: CellDirectory> CellReadiness<D> {
                 .wait_for(|health| health.state == CellState::Draining)
                 .await;
             let _ = stored
-                .wait_for(|stored| stored.is_some_and(|stored| stored.state == CellState::Draining))
+                .wait_for(|stored| {
+                    stored
+                        .as_ref()
+                        .is_some_and(|stored| stored.state == CellState::Draining)
+                })
                 .await;
         })
         .await;
@@ -562,9 +567,19 @@ impl<D: CellDirectory> CellReadiness<D> {
         // it: one stored before it may say the same, while a write of
         // another presence has landed and waits for its answer.
         let mut stored = self.stored.subscribe();
-        let wait = stored.wait_for(|stored| stored.is_some_and(|stored| stored.request >= request));
+        let wait = stored.wait_for(|stored| {
+            stored
+                .as_ref()
+                .is_some_and(|stored| stored.request >= request)
+        });
         match tokio::time::timeout(SETTLE, wait).await {
-            Ok(Ok(stored)) if stored.is_some_and(|stored| stored.presence == presence) => Ok(()),
+            Ok(Ok(stored))
+                if stored
+                    .as_ref()
+                    .is_some_and(|stored| stored.presence == presence) =>
+            {
+                Ok(())
+            }
             Ok(Ok(_)) => Err(CellError::new(format!(
                 "a later request replaced presence {presence:?} before it was stored"
             ))),
@@ -572,6 +587,113 @@ impl<D: CellDirectory> CellReadiness<D> {
                 "the directory has not stored the cell's record with presence {presence:?} in time"
             ))),
         }
+    }
+
+    /// Revoke the cell's model `key`, or lift its revocation when
+    /// `revoked` is false, as `POST models/revoke` and `POST models/lift`
+    /// on the control listener do, and return once the directory has
+    /// stored a record that says so. A revoked model leaves the record's
+    /// models at once, whatever the instances say, until it is lifted; the
+    /// record keeps the revocation, so a restarted hub keeps it too. A
+    /// lifted model is listed again as the instances say, starting afresh.
+    /// Refused for a malformed model, and when the directory has not stored
+    /// such a record within 5 s, or a later request replaced it, or the hub
+    /// has stopped: the revocation holds all the same, and the next write
+    /// carries it.
+    pub async fn revoke(&self, key: gdl_model::ModelKey, revoked: bool) -> Result<(), CellError> {
+        key.check().map_err(CellError::new)?;
+        let mut stored = self.stored.subscribe();
+        // Taken at once: before the cell's last record is read, the table
+        // keeps it to apply over the record's own revocations.
+        let version = self.feed.revoke(key.clone(), revoked);
+        let answered = tokio::time::timeout(SETTLE, async {
+            stored
+                .wait_for(|stored| {
+                    stored
+                        .as_ref()
+                        .is_some_and(|stored| stored.models.version >= version)
+                })
+                .await
+                .map(|stored| {
+                    stored
+                        .as_ref()
+                        .is_some_and(|stored| stored.models.revoked.contains(&key) == revoked)
+                })
+                .map_err(drop)
+        })
+        .await;
+        let doing = if revoked { "revoking" } else { "lifting" };
+        match answered {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(CellError::new(format!(
+                "a later request replaced {doing} model `{}` before it was stored",
+                key.model
+            ))),
+            _ => Err(CellError::new(format!(
+                "the directory has not stored the cell's record {doing} model `{}` in time",
+                key.model
+            ))),
+        }
+    }
+
+    /// Give an operator's `command` for the child `cell` of `class` whose
+    /// hub is gone, as `POST children/{class}/{cell}/withdraw` and
+    /// `POST children/{class}/{cell}/scale-to-zero` on the control listener
+    /// do: read the child's last record, and write the command at an epoch
+    /// past it ([`gdl_cells::CellCommand`]). The version written, or
+    /// `None` when the hub's directory holds no record of a child of this
+    /// cell by that name, of a class this cell sends to.
+    ///
+    /// Under the `relay` backend the hub holds its children's records
+    /// itself, and writes the command into them as
+    /// it writes a child's report; under any other backend it reads and
+    /// writes the directory it watches. The directory refuses the write as
+    /// it refuses any other, and an error is the directory's.
+    pub async fn command_child(
+        &self,
+        class: &str,
+        cell: &str,
+        command: gdl_cells::CellCommand,
+    ) -> Result<Option<gdl_cells::Version>, gdl_cells::DirectoryError> {
+        if !self.sends.iter().any(|sent| sent == class) {
+            return Ok(None);
+        }
+        let last = match &self.reports {
+            Some(reports) => reports.held(class, cell),
+            None => {
+                let read = gdl_cells::last_record(&*self.directory, class, cell);
+                tokio::time::timeout(SETTLE, read)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(gdl_cells::DirectoryError::Unavailable(format!(
+                            "the cell's records were not read within {SETTLE:?}"
+                        )))
+                    })?
+            }
+        };
+        let child = |last: &CellRecord| {
+            last.home.as_deref() == Some(self.record.name.as_str())
+                && (last.contract, last.placement) == (self.record.contract, self.record.placement)
+        };
+        let Some(last) = last.filter(child) else {
+            return Ok(None);
+        };
+        let write = command.write(&last, std::time::SystemTime::now());
+        let version = write.version();
+        match (&self.reports, write) {
+            (Some(reports), gdl_cells::CommandWrite::Record(record)) => {
+                Arc::clone(reports)
+                    .take(gdl_watch::Report::Record(*record))
+                    .await?;
+            }
+            (Some(reports), gdl_cells::CommandWrite::Withdrawal(withdrawal)) => {
+                Arc::clone(reports)
+                    .take(gdl_watch::Report::Withdrawal(withdrawal))
+                    .await?;
+            }
+            (None, write) => write.to(&*self.directory).await?,
+        }
+        Ok(Some(version))
     }
 
     /// How many watches of what the hub follows are open, as it changes.
@@ -891,6 +1013,10 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
     fn control_routes(self: Arc<Self>) -> Router {
         let draining = Arc::clone(&self);
         let scaling = Arc::clone(&self);
+        let revoking = Arc::clone(&self);
+        let lifting = Arc::clone(&self);
+        let withdrawing = Arc::clone(&self);
+        let zeroing = Arc::clone(&self);
         let relay = Arc::clone(&self.relay);
         let declared = Arc::clone(&self.relay);
         let avoiding = Arc::clone(&self.relay);
@@ -949,6 +1075,36 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                             (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()
                         }
                     }
+                }),
+            )
+            .route(
+                gdl_watch::CHILD_WITHDRAW_ROUTE,
+                post(
+                    move |Path((class, cell)): Path<(String, String)>| async move {
+                        let command = gdl_cells::CellCommand::Withdraw;
+                        command_child(&withdrawing, &class, &cell, command).await
+                    },
+                ),
+            )
+            .route(
+                gdl_watch::CHILD_SCALE_TO_ZERO_ROUTE,
+                post(
+                    move |Path((class, cell)): Path<(String, String)>| async move {
+                        let command = gdl_cells::CellCommand::ScaleToZero;
+                        command_child(&zeroing, &class, &cell, command).await
+                    },
+                ),
+            )
+            .route(
+                gdl_watch::REVOKE_ROUTE,
+                post(move |Json(key): Json<gdl_model::ModelKey>| async move {
+                    revoke(&revoking, key, true).await
+                }),
+            )
+            .route(
+                gdl_watch::LIFT_ROUTE,
+                post(move |Json(key): Json<gdl_model::ModelKey>| async move {
+                    revoke(&lifting, key, false).await
                 }),
             )
             .route(
@@ -1061,6 +1217,47 @@ struct WatchQuery {
 #[derive(Deserialize)]
 struct RelayQuery {
     instance: Option<velo_hub::velo::InstanceId>,
+}
+
+/// Give `command` for the child `name` of `class` on `cell`'s hub, and
+/// answer: a child the hub holds no record of is not found (404), a write
+/// the directory refused conflicts (409), and a directory that cannot be
+/// read or written is unavailable (503).
+async fn command_child<D: CellDirectory>(
+    cell: &CellReadiness<D>,
+    class: &str,
+    name: &str,
+    command: gdl_cells::CellCommand,
+) -> Response {
+    match cell.command_child(class, name, command).await {
+        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            format!("this cell holds no record of a child cell `{name}` of class `{class}`"),
+        )
+            .into_response(),
+        Err(error @ gdl_cells::DirectoryError::Unavailable(_)) => {
+            (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()
+        }
+        Err(error) => (StatusCode::CONFLICT, error.to_string()).into_response(),
+    }
+}
+
+/// Revoke `key` on `cell`, or lift its revocation, and answer: a
+/// malformed model is the caller's (400), and anything else is the
+/// directory's (503).
+async fn revoke<D: CellDirectory>(
+    cell: &CellReadiness<D>,
+    key: gdl_model::ModelKey,
+    revoked: bool,
+) -> Response {
+    if let Err(why) = key.check() {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
+    match cell.revoke(key, revoked).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }
 
 /// The watch as server-sent events, each one JSON value, in `place`; a hub

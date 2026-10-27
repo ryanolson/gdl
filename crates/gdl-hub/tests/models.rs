@@ -523,3 +523,263 @@ async fn one_model_going_away_leaves_the_other_and_the_cell_serving() {
     assert_eq!(record.presence, Presence::Serving);
     hub.shutdown().await.expect("the hub stops");
 }
+
+/// Ask the hub to revoke `model`, or to lift its revocation: the status.
+async fn revoke(hub: &Hub, model: &str, revoked: bool) -> u16 {
+    let route = if revoked {
+        gdl_watch::REVOKE_ROUTE
+    } else {
+        gdl_watch::LIFT_ROUTE
+    };
+    let url = format!(
+        "http://127.0.0.1:{}/v1/ext/gdl-cell{route}",
+        hub.control_addr().port()
+    );
+    let body = ModelKey::new(model);
+    let response = tokio::time::timeout(WAIT, reqwest::Client::new().post(&url).json(&body).send())
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub answers");
+    response.status().as_u16()
+}
+
+fn key(model: &str) -> ModelKey {
+    ModelKey::new(model)
+}
+
+/// A set serving llama-70b and acme-legal: revoking acme-legal takes it
+/// out of the record by the time the hub answers, while llama-70b stays
+/// `ready` and the cell stays as it was. The instance's own reports, which
+/// still name acme-legal, never bring it back, until the operator lifts
+/// the revocation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoked_model_leaves_the_record_while_the_others_serve() {
+    let directory = MemoryDirectory::new();
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    let [a] = entries(&hub, &readiness).await;
+    let both = vec![
+        says("llama-70b", InstanceModelState::Ready),
+        says("acme-legal", InstanceModelState::Ready),
+    ];
+    send(&a, report(Some(both.clone()))).await;
+    let serving = until(
+        &mut records,
+        &[
+            ("acme-legal", ModelState::Ready),
+            ("llama-70b", ModelState::Ready),
+        ],
+    )
+    .await;
+
+    assert_eq!(revoke(&hub, "acme-legal", true).await, 204);
+    let revoked = held_newer(&directory, &serving).await;
+    assert_eq!(states(&revoked), [("llama-70b", ModelState::Ready)]);
+    assert_eq!(revoked.revoked, [key("acme-legal")]);
+    assert!(revoked.models_version > serving.models_version);
+    assert_eq!(
+        (revoked.state, revoked.presence),
+        (serving.state, serving.presence),
+        "the cell serves its other models as before"
+    );
+
+    // The instance still has acme-legal, and says so with a change of its
+    // own: the record takes the change and leaves acme-legal out.
+    let more = [both, vec![says("qwen-32b", InstanceModelState::Starting)]].concat();
+    send(&a, report(Some(more.clone()))).await;
+    let reported = until(
+        &mut records,
+        &[
+            ("llama-70b", ModelState::Ready),
+            ("qwen-32b", ModelState::Starting),
+        ],
+    )
+    .await;
+    assert_eq!(reported.revoked, [key("acme-legal")]);
+
+    assert_eq!(revoke(&hub, "acme-legal", false).await, 204);
+    let lifted = held_newer(&directory, &reported).await;
+    assert_eq!(
+        states(&lifted),
+        [
+            ("acme-legal", ModelState::Ready),
+            ("llama-70b", ModelState::Ready),
+            ("qwen-32b", ModelState::Starting),
+        ],
+        "listed again as the instance says"
+    );
+    assert!(lifted.revoked.is_empty());
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// A revocation holds across a restart of the hub: the restarted hub reads
+/// it from the cell's last record, and leaves the model out though the
+/// instance reports it `ready`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_survives_a_hub_restart() {
+    let directory = MemoryDirectory::new();
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let [a] = entries(&hub, &readiness).await;
+    let both = vec![
+        says("llama-70b", InstanceModelState::Ready),
+        says("acme-legal", InstanceModelState::Ready),
+    ];
+    send(&a, report(Some(both.clone()))).await;
+    assert_eq!(revoke(&hub, "acme-legal", true).await, 204);
+    let before = held(&directory).await;
+    assert_eq!(before.revoked, [key("acme-legal")]);
+    hub.shutdown().await.expect("the hub stops");
+
+    let mut records = Records::new(&directory);
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let [a] = entries(&hub, &readiness).await;
+    send(&a, report(Some(both))).await;
+    let after = loop {
+        let record = records.next().await;
+        if record.epoch > before.epoch && states(&record) == [("llama-70b", ModelState::Ready)] {
+            break record;
+        }
+    };
+    assert_eq!(after.revoked, [key("acme-legal")]);
+    hub.shutdown().await.expect("the restarted hub stops");
+}
+
+/// Draining a model is not revoking it: a model its instance drains stays
+/// in the record as `draining`, then `drained`, where a reader answers 503
+/// until it clears, while a revoked model leaves the record at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_draining_model_stays_listed_where_a_revoked_one_leaves() {
+    let directory = MemoryDirectory::new();
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    let [a] = entries(&hub, &readiness).await;
+    let three = vec![
+        says("llama-70b", InstanceModelState::Ready),
+        says("acme-legal", InstanceModelState::Draining),
+        says("qwen-32b", InstanceModelState::Ready),
+    ];
+    send(&a, report(Some(three))).await;
+    until(
+        &mut records,
+        &[
+            ("acme-legal", ModelState::Draining),
+            ("llama-70b", ModelState::Ready),
+            ("qwen-32b", ModelState::Ready),
+        ],
+    )
+    .await;
+    assert_eq!(revoke(&hub, "qwen-32b", true).await, 204);
+    until(
+        &mut records,
+        &[
+            ("acme-legal", ModelState::Draining),
+            ("llama-70b", ModelState::Ready),
+        ],
+    )
+    .await;
+    let rest = vec![
+        says("llama-70b", InstanceModelState::Ready),
+        says("qwen-32b", InstanceModelState::Ready),
+    ];
+    send(&a, report(Some(rest))).await;
+    until(
+        &mut records,
+        &[
+            ("acme-legal", ModelState::Drained),
+            ("llama-70b", ModelState::Ready),
+        ],
+    )
+    .await;
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// A model name that is not one is refused, and revokes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_model_is_not_revoked() {
+    let directory = MemoryDirectory::new();
+    let (hub, _cell) = hub_of(cell(), directory.clone(), quiet()).await;
+    held(&directory).await;
+    assert_eq!(revoke(&hub, "", true).await, 400);
+    assert!(held(&directory).await.revoked.is_empty());
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// A revoke that times out must still reach the next write, as the
+/// public method promises. This waits for its documented 5 s timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoke_before_the_first_store_is_kept_after_its_timeout() {
+    let directory = common::Gated::new();
+    directory.close();
+    let settings = CellSettings {
+        models: vec![key("acme-legal")],
+        ..cell()
+    };
+    let (hub, readiness) = hub_of(settings, directory.clone(), quiet()).await;
+    directory.holding().await;
+    let answer = tokio::time::timeout(
+        WAIT + Duration::from_secs(1),
+        readiness.revoke(key("acme-legal"), true),
+    )
+    .await
+    .expect("the revoke answers within its documented bound");
+    assert!(answer.is_err(), "the directory has stored no record yet");
+
+    // The write held at the gate was made before the revoke; the next one
+    // carries it.
+    let mut records = Records::new(&directory.inner);
+    directory.open();
+    let recovered = loop {
+        let record = records.next().await;
+        if !record.revoked.is_empty() {
+            break record;
+        }
+    };
+    hub.shutdown().await.expect("the hub stops");
+    assert_eq!(
+        recovered.revoked,
+        [key("acme-legal")],
+        "the timed-out revoke must hold when the directory recovers: {recovered:?}"
+    );
+    assert!(
+        recovered
+            .models
+            .iter()
+            .all(|entry| entry.model != "acme-legal")
+    );
+}
+
+/// A declared model needs no usable instance to stay listed as starting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lifted_declared_model_is_listed_without_instances() {
+    let directory = MemoryDirectory::new();
+    let settings = CellSettings {
+        models: vec![key("acme-legal"), key("llama-70b")],
+        ..cell()
+    };
+    let (hub, _cell) = hub_of(settings, directory.clone(), quiet()).await;
+    let before = held(&directory).await;
+    assert_eq!(
+        states(&before),
+        [
+            ("acme-legal", ModelState::Starting),
+            ("llama-70b", ModelState::Starting),
+        ],
+        "both declared models start without instances"
+    );
+
+    assert_eq!(revoke(&hub, "acme-legal", true).await, 204);
+    let revoked = held_newer(&directory, &before).await;
+    assert_eq!(revoked.revoked, [key("acme-legal")]);
+    assert_eq!(states(&revoked), [("llama-70b", ModelState::Starting)]);
+
+    assert_eq!(revoke(&hub, "acme-legal", false).await, 204);
+    let lifted = held_newer(&directory, &revoked).await;
+    hub.shutdown().await.expect("the hub stops");
+    assert!(lifted.revoked.is_empty());
+    assert!(lifted.models_version > revoked.models_version);
+    assert_eq!(
+        states(&lifted),
+        states(&before),
+        "lifting a declared model restores its starting entry without an instance report"
+    );
+}

@@ -94,6 +94,7 @@ async fn the_cell_publishes_its_record_and_each_change_of_state() {
             // With no record before it, the list counts from the epoch,
             // in the high bits.
             models_version: first.epoch << 20,
+            revoked: Vec::new(),
             name: CELL.into(),
             class: "model_x".into(),
             region: "us-east-1".into(),

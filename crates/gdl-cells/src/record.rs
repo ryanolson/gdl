@@ -65,6 +65,12 @@ pub struct CellRecord {
     /// bits: a reader that holds this version holds this list.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub models_version: u64,
+    /// The models an operator revoked on this cell: none of them is in
+    /// `models`, whatever the cell's instances say, until the operator
+    /// lifts the revocation. Kept in the record, so that a hub that
+    /// restarts keeps them, and counted in `models_version`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<gdl_model::ModelKey>,
 }
 
 impl CellRecord {

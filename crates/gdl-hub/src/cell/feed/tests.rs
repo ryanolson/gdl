@@ -548,7 +548,7 @@ fn a_drain_reported_before_the_restart_snapshot_is_kept() {
         feed.report(id, lease, draining.clone(), now).is_err(),
         "taken before the last record was read"
     );
-    feed.restore(Some((&snapshot, 7)), 100);
+    feed.restore(Some((&snapshot, 7, &[])), 100);
     feed.report(id, lease, draining, now)
         .expect("the hub takes the drain");
     feed.report(id, lease, empty, now)

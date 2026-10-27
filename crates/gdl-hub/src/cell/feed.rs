@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use futures::Stream;
 use futures::stream::BoxStream;
-use gdl_cells::{CellState, LoadSummary, ModelEntry};
+use gdl_cells::{CellState, LoadSummary};
 use gdl_model::{InstanceModel, ModelKey};
 use gdl_watch::LoadReport;
 use tokio::sync::{broadcast, watch};
@@ -128,14 +128,36 @@ impl Feed {
     }
 
     /// Take the model entries of the cell's last record, `held` with their
-    /// version, or none, and count later versions from at least `floor`:
-    /// from then on, what the instances say of their models makes the
-    /// entries.
-    pub(super) fn restore(&self, held: Option<(&[ModelEntry], u64)>, floor: u64) {
+    /// version and the revoked models, or none, and count later versions
+    /// from at least `floor`: from then on, what the instances say of
+    /// their models makes the entries.
+    pub(super) fn restore(&self, held: Option<super::models::Held<'_>>, floor: u64) {
         let mut shared = self.lock();
         shared.models.restore(held, floor);
         shared.update_models();
         self.models.send_replace(Arc::new(shared.models.list()));
+    }
+
+    /// Revoke the model `key`, or lift its revocation when `revoked` is
+    /// false: the list's version once it says so, which a record must
+    /// carry to say it.
+    pub(super) fn revoke(&self, key: ModelKey, revoked: bool) -> u64 {
+        let mut shared = self.lock();
+        let changed = if revoked {
+            shared.models.revoke(key)
+        } else {
+            // A lifted model is listed at once as the instances say.
+            shared.models.lift(&key) && {
+                shared.update_models();
+                true
+            }
+        };
+        // Before the last record is read the table only keeps it: the list
+        // is sent once the record is read.
+        if changed && shared.models.restored() {
+            self.models.send_replace(Arc::new(shared.models.list()));
+        }
+        shared.models.list().version
     }
 
     fn lock(&self) -> MutexGuard<'_, Shared> {

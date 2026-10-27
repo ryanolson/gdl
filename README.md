@@ -35,7 +35,7 @@ gdl is two layers. A crate that implements nodes depends on `gdl`: the node role
 | `gdl-extract` | Tools | The source reader and the working catalogue |
 | `gdl-gen` | Users | The `cargo-gdl` binary: `extract`, `catalog`, `resolve`, `generate`, `check`, `diagram`, `compose`, `export` |
 | `gdl-web` | Users | The composer: a page and its server |
-| `gdl-cells` | `gdl`, hub, and runtime | The cell plane's shared types: the cell record, a cell's state, load summary, presence, and models, and the `CellDirectory` backends. No velo |
+| `gdl-cells` | `gdl`, hub, and runtime | The cell plane's shared types: the cell record, a cell's state, load summary, presence, and models, the `CellDirectory` backends, and an operator's commands for a cell whose hub is gone. No velo |
 | `gdl-watch` | Hub and runtime | The watches a cell's hub serves, as typed events, and their client |
 | `gdl-hub` | Deployments | The discovery hub, and a cell's quorum, health, record, follows, and keyed records |
 

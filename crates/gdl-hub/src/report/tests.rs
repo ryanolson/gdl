@@ -45,6 +45,7 @@ fn a_withdrawal_overtaking_a_report_waiting_for_storage_stays_withdrawn() {
                 presence: Default::default(),
                 models: Vec::new(),
                 models_version: 0,
+                revoked: Vec::new(),
             };
             let record = CellRecord {
                 name: "model-x-01".into(),

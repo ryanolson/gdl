@@ -42,6 +42,7 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
             since: epoch * (1 << 20) + 1,
         }],
         models_version: epoch * (1 << 20) + 1,
+        revoked: Vec::new(),
     };
 
     for readable in [true, false] {

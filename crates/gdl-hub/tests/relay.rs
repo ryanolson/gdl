@@ -313,6 +313,7 @@ fn child_record(cell: &str, hub: &str, (epoch, seq): (u64, u64), lease: Duration
         presence: gdl_cells::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
+        revoked: Vec::new(),
         name: cell.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
@@ -472,6 +473,7 @@ async fn a_child_reads_back_its_record_after_its_parent_restarts() {
             },
         ],
         models_version: 3,
+        revoked: Vec::new(),
         ..child_record("model-x-01", &nowhere(), (4, 9), Duration::from_secs(30))
     };
     let watcher = CellWatcher::new().expect("a client");

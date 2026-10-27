@@ -37,6 +37,7 @@ use velo::{InstanceId, PeerInfo};
 
 mod backoff;
 mod client;
+mod command;
 mod follows;
 mod keyed;
 mod limits;
@@ -45,6 +46,10 @@ mod watched;
 
 pub use backoff::{Backoff, WatchEnd};
 pub use client::{CellWatchError, CellWatcher, WatchItem, WatchStream};
+pub use command::{
+    CHILD_SCALE_TO_ZERO_ROUTE, CHILD_WITHDRAW_ROUTE, LIFT_ROUTE, REVOKE_ROUTE,
+    child_scale_to_zero_path, child_withdraw_path,
+};
 pub use follows::FollowEvent;
 pub use keyed::{
     Expected, KEYED_EXTENSION, KEYED_ROUTE, KeyedAnswer, KeyedAsk, KeyedOp, KeyedRecord,

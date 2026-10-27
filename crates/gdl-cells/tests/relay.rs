@@ -104,6 +104,7 @@ fn record(cell: &str, seq: u64, lease: Duration) -> CellRecord {
         presence: Presence::Serving,
         models: Vec::new(),
         models_version: 0,
+        revoked: Vec::new(),
     }
 }
 

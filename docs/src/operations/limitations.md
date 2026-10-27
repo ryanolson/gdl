@@ -338,6 +338,7 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 
 ### Nothing reads a cell's models yet
 - **What:** a cell's hub publishes its presence and its models in its record. A parent's hub reads only the presence: it does not follow a cell scaled to 0, and ends a follow of one. No hub, chooser, or node reads the models.
+- **Revoked models:** a revoked model is not in the record's models, so a model index will not find it there. A gate that reads `FollowedCells` today answers 404 only for a cell that withdrew, by its drain or an operator's command.
 - **Why:** the record is the writer's side. The model index that choosers and a model gate read is not built.
 - **Lifts:** a model index built from directory records, in the chooser's table.
 
@@ -354,9 +355,22 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **Workaround:** report the models from a node with `gdl::InstanceModels`, which can drain one.
 
 ### A cell is told it is scaled to 0 by hand, and a hub starts serving
-- **What:** nothing in gdl calls `POST /v1/ext/gdl-cell/presence`: an operator, or the tool that scales the cell, calls it before the cell's instances stop. A hub that restarts starts `serving`, whatever its last record said, and its heartbeat makes it read as missing if it then stops.
-- **Why:** no autoscaler or operator hook is built, and a hub that came up is taken to serve.
-- **Lifts:** an operator command that writes the record when the hub is already gone, and a hook in the tool that scales cells.
+- **What:** nothing in gdl calls `POST /v1/ext/gdl-cell/presence`: an operator, or the tool that scales the cell, calls it before the cell's instances stop. When the hub is already gone, the operator says it on the parent's hub ([A cell whose hub is gone](../concepts/cells.md#a-cell-whose-hub-is-gone)). A hub that restarts starts `serving`, whatever its last record said, and its heartbeat makes it read as missing if it then stops.
+- **Why:** no autoscaler hook is built, and a hub that came up is taken to serve.
+- **Lifts:** a hook in the tool that scales cells.
+
+### An operator's command fences a hub that still answers
+- **What:** the commands on a parent's hub that withdraw a child, or say that it was scaled to 0, write at an epoch past the child's last record. A child whose hub still answers is then fenced: the directory refuses each of its hub's later writes as not newer, and its hub logs an error for each. The parent's follow of the child does not end on a withdrawal, as for any withdrawal. The child serves again from a restart of its hub.
+- **Not checked:** the parent does not ask whether the child's hub still answers.
+- **Under `dir`:** a write of that hub already under way when the command lands can replace the command. The backend checks that a write is newer, then renames the cell's file, and two processes are not arbitrated between the two steps ([The `dir` cell directory](#the-dir-cell-directory-is-polled-and-its-resume-tokens-stay-in-one-process)). A hub that is gone has no write under way.
+- **Exception:** a hub that still runs but none of whose writes was answered, for example one whose first answer was lost, moves past the command at its next write, as a restarted hub does. It cannot tell the command from a record written before it started. `a_hub_none_of_whose_writes_was_answered_moves_past_a_command` in `crates/gdl-hub/tests/operator.rs` holds this.
+- **No parent:** a top cell, such as a global cell, has no parent's hub to take the command. A tool of the deployment gives it through the backend with `gdl_cells::CellCommand::give`. Under `relay`, nothing holds a top cell's record, so there is nothing to command.
+- **Workaround:** for a cell whose hub answers, use its own `/drain` or `/presence`.
+
+### A revoked model loses its history, and a parent of an earlier build drops the revocation
+- **What:** a revoked model leaves the record with its history. Once lifted, it starts afresh, as `starting` until an instance reports it. Under the `relay` backend, a parent's hub of an earlier build keeps the record without its `revoked` list, so a child's hub that restarts under it reads no revocation, and lists the model again as its instances say.
+- **Why:** the record's fields are optional on the wire, so a reader of an earlier build ignores the list.
+- **Workaround:** revoke the model again after the restart, or roll the parents' hubs first.
 
 ### A cell's settings without a fleet file are not checked against the other cells
 - **What:** a fleet file refuses a cell of a class that is sent to without a `home`, a `home` that names no cell or a cell of a class that does not send to this one, a `home` on a cell of a class nothing sends to, and a parent without a child of each class its class sends to. It cannot judge a parent's children in a layout whose classes it does not know, and says so. Cell settings given without a fleet file are not checked: a cell of a class that is sent to with no `home`, or with a `home` that names no cell, is followed by no hub and never chosen. A hub publishes no `home` for a cell of a class nothing sends to.  A hub follows its children only. Region plays no part in following, and no round trip is measured.

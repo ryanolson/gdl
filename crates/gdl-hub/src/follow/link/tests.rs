@@ -64,6 +64,7 @@ fn record(hub: String) -> CellRecord {
         presence: gdl_cells::Presence::Serving,
         models: Vec::new(),
         models_version: 0,
+        revoked: Vec::new(),
         name: "m".into(),
         class: "model_x".into(),
         region: "r".into(),
