@@ -850,9 +850,12 @@ impl Launch {
     /// under a hub, one whose segment a hop from another class enters,
     /// waits also, before the setup timeout, until its hub says that the
     /// cells that follow its cell avoid it, or for at most the setup
-    /// timeout and twice the cell's `summary_ms` after it retired; and, as
-    /// sources of another class reach it whose drain its hub does not see,
-    /// never takes them for drained. A source's instance
+    /// timeout and twice the cell's `summary_ms` after it retired. An
+    /// instance of a cell that sources of another class reach, entry or
+    /// interior, never takes them for drained outside its cell's drain,
+    /// since its hub does not see their drain. An interior instance that
+    /// learns of the drain while it waits goes on by the drain's rule. A
+    /// source's instance
     /// announces that it has drained before it waits, so source segments
     /// that route to each other never wait for each other. Then it refuses
     /// what arrives, waits until it holds no request (a stream holds its
@@ -1090,8 +1093,10 @@ impl Launch {
     /// arrived; or (B) every instance of the source segments that can reach
     /// this one has drained or left. A retired entry instance of a cell
     /// counts (A) only once the cells that follow its cell avoid it too, or
-    /// its bound has passed, and outside its cell's drain never counts (B)
-    /// while a source of another class reaches it. Then it closes its
+    /// its bound has passed. Any instance of a cell, outside its cell's
+    /// drain, never counts (B) while a source of another class reaches it;
+    /// an interior one that learns of the drain while it waits then counts
+    /// it once no more work can reach it. Then it closes its
     /// entries and waits until it holds no request; a stream
     /// holds its share until velo has handed its output on. Each wait ends at `deadline`.
     /// While its cell drains, an entry instance first waits out its bound,
@@ -1190,13 +1195,14 @@ impl Launch {
                             break;
                         }
                         let ask = async {
-                            let drained = !blind
-                                && (reaching.is_empty()
-                                    || session.all_drained(&reaching).await?
-                                    || match &self.cell_drain {
-                                        Some(cell) => cell.unreached(session).await?,
-                                        None => false,
-                                    });
+                            // A blind instance asks too, for a drain of its
+                            // cell that it learns of while it waits.
+                            let drained = (!blind
+                                && (reaching.is_empty() || session.all_drained(&reaching).await?))
+                                || match &self.cell_drain {
+                                    Some(cell) => cell.unreached(session).await?,
+                                    None => false,
+                                };
                             let avoiding = avoided.is_some()
                                 || (parent() && session.all_avoid(me, &senders).await?);
                             Ok::<_, Error>((drained, avoiding))

@@ -13,7 +13,9 @@
 //! request that will call it. An instance that will send no more work
 //! into the cell says that it detached; an interior instance whose
 //! senders in the cell have all detached drains then, without waiting for
-//! the entry instances to drain.
+//! the entry instances to drain. Outside a drain, the same blindness holds
+//! for a stop: an instance that a source of another class reaches never
+//! counts that source as drained, and waits for its senders to avoid it.
 
 use std::time::Duration;
 
@@ -260,14 +262,13 @@ impl CellDrain {
     }
 
     /// Whether the drain of the sources' requests (B) cannot be seen from
-    /// here: an entry instance, outside its cell's drain, that a source
-    /// segment of another class reaches, whose instances are members of
-    /// another hub. Their drain is never seen here, and (B) over the
-    /// members this hub has would hold at once.
+    /// here: an instance, outside its cell's drain, that a source segment
+    /// of another class reaches, whose instances are members of another
+    /// hub. Their drain is never seen here, and (B) over the members this
+    /// hub has would hold at once: an interior instance would then close
+    /// while an entry instance still holds a request bound for it.
     pub(crate) fn blind(&self) -> bool {
-        matches!(self.role, Role::Entry { .. })
-            && self.foreign
-            && self.learned.borrow().drain.is_none()
+        self.foreign && self.learned.borrow().drain.is_none()
     }
 
     /// Resolves when the cell's drain begins this instance's stop: an entry

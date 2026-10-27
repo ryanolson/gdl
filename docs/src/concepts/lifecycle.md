@@ -139,7 +139,7 @@ Under a hub, a lost lease stops the instance as a stop does. It skips (A) and (B
 
 ### Cells
 
-Under a hub, an instance in a cell also stops when its cell drains, once no more work can reach it. An entry instance of a cell also waits until the cells that follow its cell avoid it, before its `setup_timeout`. [Following and choosing cells](cell-routing.md) describes both.
+Under a hub, an instance in a cell also stops when its cell drains, once no more work can reach it. An entry instance of a cell also waits until the cells that follow its cell avoid it, before its `setup_timeout`. Outside its cell's drain, an instance that a source of another class reaches never counts (B), because that source's instances are members of another hub. So the last interior instance of a segment, stopped alone, waits for its drain's bound. [Following and choosing cells](cell-routing.md) describes all three.
 
 ## Limits
 

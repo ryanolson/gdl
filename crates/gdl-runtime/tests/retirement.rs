@@ -551,20 +551,277 @@ async fn a_retiree_no_cell_follows_waits_out_the_setup_timeout_alone() {
     assert!(took < BOUND, "took {took:?} to leave");
 }
 
-/// An interior instance of a model cell retires inside its cell, as
-/// before: it waits for no cell outside it.
+/// An interior instance of a model cell retires inside its cell: it cannot
+/// see the drain of its source in the global cell, so it waits for the
+/// entry instances of its cell to avoid it or leave, then the setup
+/// timeout, and for no cell outside it. Stopped together, the entry leaves
+/// first, and the interior instance leaves well inside its drain's bound.
+/// It takes the entry's setup timeout and then its own, so 2 to 3 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_interior_instance_retires_as_before() {
+async fn an_interior_instance_waits_for_its_entry_to_leave() {
     let spec = spec_of(placement());
     let directory = Resolving::new();
     let quiet = Events::quiet();
     let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
     let first = chooser(&spec, &hub, hub.public_addr().port()).await;
-    let m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &quiet).await;
+    let mut m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &quiet).await;
     following(&tables(&first), M1, 1).await;
     let (began, ended) = stop(m1.sink);
-    let took = ended.await.expect("the interior instance's task") - began;
-    assert!(took < SETUP, "took {took:?} to leave");
+    let (_, entry) = stop(m1.entries.remove(0));
+    let entry_left = entry.await.expect("the entry instance's task");
+    let left = ended.await.expect("the interior instance's task");
+    assert!(
+        left >= entry_left,
+        "the interior instance left {:?} before its entry",
+        entry_left - left
+    );
+    // `drain_ms` in `RUNTIME`.
+    let took = left - began;
+    assert!(took < Duration::from_secs(10), "took {took:?} to leave");
+}
+
+/// A request held at the entry survives an interior instance's stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_interior_preserves_an_admitted_request() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+    let m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &events).await;
+    following(&tables(&first), M1, 1).await;
+    ask(&first.segment)
+        .await
+        .expect("the control request answered");
+
+    let request = gated(&first, &events, "interior-stop").await;
+    assert!(m1.entries[0].segment.admitted() > 0);
+    assert_eq!(m1.sink.segment.admitted(), 0);
+    m1.sink.process.stop();
+    let closed_before_release = tokio::time::timeout(SETUP / 2, async {
+        while !m1.sink.segment.is_closed() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    events.record("test:release:interior-stop");
+    let answered = tokio::time::timeout(WAIT, request)
+        .await
+        .expect("the request ended within the wait")
+        .expect("the request's task");
+    assert!(
+        answered.is_ok(),
+        "F1: interior closed before release: {closed_before_release}; an admitted request failed: {answered:?}"
+    );
+
+    let ((), (), ended) = tokio::join!(
+        first.stop(),
+        async {
+            for entry in m1.entries {
+                entry.stop().await;
+            }
+        },
+        m1.sink.ended(WAIT * 2),
+    );
+    ended.expect("the interior drained");
+}
+
+/// A later cell drain lets an empty interior leave while its entry keeps a response.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_waiting_interior_observes_a_later_cell_drain() {
+    use gdl_model::segment_service;
+    use velo::discovery::ServiceDiscovery;
+    use velo_hub::client::HubClient;
+
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let events = Events::new();
+    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+    let (m1, proxy) = model_fronted(
+        &spec,
+        &directory,
+        cell(M1, "m1-hub:1337", 1),
+        "[runtime]\nsetup_timeout_ms = 1000\ndrain_ms = 30000\n",
+        &|deployment| reference_graph(deployment, &events),
+    )
+    .await;
+    following(&tables(&first), M1, 1).await;
+    let front = Arc::clone(&first.segment);
+    let pending = tokio::spawn(async move {
+        let mut cx = Cx::new();
+        cx.insert_meta("E", "hold:later-drain");
+        let out = front
+            .call(
+                cx,
+                prompt(
+                    "later-drain",
+                    Plan {
+                        tokens: 3,
+                        ..Plan::default()
+                    },
+                ),
+            )
+            .await
+            .expect("the request admitted");
+        tokio::time::timeout(WAIT * 5, out.collect::<Vec<_>>())
+            .await
+            .expect("the response ended in time")
+    });
+    events.wait_for("D:done:c(later-drain)#0", WAIT).await;
+
+    // The held membership question proves that the stop entered its drain loop.
+    proxy.hold(b"/v1/ext/gdl/members");
+    m1.sink.process.stop();
+    tokio::time::timeout(WAIT, proxy.holding())
+        .await
+        .expect("the stopped interior asked about its senders");
+    assert!(!m1.sink.segment.is_closed());
+    m1.readiness.drain().await.expect("the cell drains");
+    proxy.release();
+
+    let client = HubClient::builder()
+        .host("127.0.0.1")
+        .public_port(m1.hub.public_addr().port())
+        .control_port(m1.hub.control_addr().port())
+        .build()
+        .expect("the model hub's client");
+    tokio::time::timeout(BOUND + WAIT, async {
+        loop {
+            let detached = client
+                .services()
+                .get_instances(&segment_service("f", SegmentPhase::Detached))
+                .await
+                .expect("the hub answers");
+            if detached.contains(&m1.entries[0].node.instance_id()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the entry detached while holding only its response");
+    assert_eq!(m1.entries[0].segment.admitted(), 1);
+    assert_eq!(m1.sink.segment.admitted(), 0);
+    let closed = tokio::time::timeout(WAIT, async {
+        while !m1.sink.segment.is_closed() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+
+    common::let_go("later-drain");
+    assert_eq!(pending.await.expect("the response task"), expected(0..3));
+    for entry in m1.entries {
+        entry.ended(WAIT).await.expect("the entry drained");
+    }
+    m1.sink.ended(WAIT).await.expect("the interior drained");
+    first.stop().await;
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("the hub stopped");
+    }
+    assert!(
+        closed,
+        "F1: the empty interior ignored its cell's drain after its entry detached"
+    );
+}
+
+/// [`placement`], with a forward path that leaves the entry's segment
+/// for `d` and comes back: `B` and `D` in `f`, `C` in `d`.
+fn returning() -> gdl_runtime::Placement {
+    gdl_runtime::Placement::new()
+        .segment("a", ["A", "G"])
+        .segment("f", ["B", "D", "E", "F"])
+        .segment("d", ["C"])
+        .class("global", ["a"])
+        .class("model_x", ["f", "d"])
+}
+
+/// A returning forward path drains without peers waiting for each other to leave.
+/// A failure waits out both ten-second bounds so their duration can be reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "F2: a known limitation: the last instances of a returning path, stopped outside their cell's drain, each wait for the other to leave until their drain bounds"]
+async fn a_deployment_stop_breaks_an_empty_cells_returning_path() {
+    let spec = spec_of(returning());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+    let mut m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &quiet).await;
+    following(&tables(&first), M1, 1).await;
+    ask(&first.segment).await.expect("the returning path works");
+    tokio::time::timeout(WAIT, async {
+        while first.segment.admitted() != 0
+            || m1.entries[0].segment.admitted() != 0
+            || m1.sink.segment.admitted() != 0
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the control request released every admission");
+
+    let entry = m1.entries.remove(0);
+    let entry_segment = Arc::clone(&entry.segment);
+    let interior_segment = Arc::clone(&m1.sink.segment);
+    let (entry_id, interior_id) = (entry.node.instance_id(), m1.sink.node.instance_id());
+    let (_, source_end) = stop(first);
+    let (began, entry_end) = stop(entry);
+    let (_, interior_end) = stop(m1.sink);
+    // Both senders are the last instances of their segments, so neither avoids the other.
+    withdrawn(&m1.hub, entry_id).await;
+    withdrawn(&m1.hub, interior_id).await;
+    source_end.await.expect("the source stopped");
+    let closed = tokio::time::timeout(WAIT, async {
+        while !entry_segment.is_closed() || !interior_segment.is_closed() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let (entry_left, interior_left) = tokio::join!(entry_end, interior_end);
+    let entry_took = entry_left.expect("the entry's task") - began;
+    let interior_took = interior_left.expect("the interior's task") - began;
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("the hub stopped");
+    }
+    assert!(
+        closed,
+        "F2: empty peers waited for each other until their drain bounds: entry {entry_took:?}, interior {interior_took:?}"
+    );
+}
+
+/// The control for the case above: a drain of the cell, rather than a stop
+/// of each instance, takes the same empty returning path down well inside
+/// its drain's bound, since the cell's entry instances are then the drain
+/// sources. It waits out the entry's bound (3 s here), so it takes 3 to 4 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cell_drain_takes_down_an_empty_returning_path() {
+    let spec = spec_of(returning());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let (hub, _) = cell_hub_of(&spec, global_hub(), &directory).await;
+    let first = chooser(&spec, &hub, hub.public_addr().port()).await;
+    let mut m1 = model(&spec, &directory, cell(M1, "m1-hub:1337", 1), &quiet).await;
+    following(&tables(&first), M1, 1).await;
+    ask(&first.segment).await.expect("the returning path works");
+
+    let began = Instant::now();
+    m1.readiness.drain().await.expect("the cell drains");
+    let entry = m1.entries.remove(0);
+    let (entry_left, interior_left) =
+        tokio::join!(entry.ended(BOUND + WAIT), m1.sink.ended(BOUND + WAIT));
+    entry_left.expect("the entry drained");
+    interior_left.expect("the interior drained");
+    // `drain_ms` in `RUNTIME`.
+    let took = began.elapsed();
+    assert!(took < Duration::from_secs(10), "took {took:?} to drain");
+    first.stop().await;
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("the hub stopped");
+    }
 }
 
 /// The next event of `watch` about `instance`'s retirement that has come

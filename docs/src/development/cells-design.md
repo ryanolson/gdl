@@ -124,6 +124,8 @@ An entry instance waits for each following cell to say that it avoids the instan
 
 During a cell's drain, the entry instances are the cell's drain sources. Without this rule, an interior instance would see no source that reaches it, because the sources in the parent cell are not members of its hub. It would count as drained and close at once, while an entry instance still holds a request that will call it.
 
+The same holds for a stop outside a drain. An instance that a source of another class reaches never counts that source as drained, entry or interior. It waits for its senders to avoid it, or for its bound. The cost: the last interior instance of a segment, stopped alone, waits for its drain's bound while its entry instances serve. `crates/gdl-runtime/tests/retirement.rs` holds the case of a request that an entry instance holds while the interior instance stops.
+
 **Rejected: draining a cell only by its deadline.** It would hold every interior instance for the full bound, even when the entry instances are already empty.
 
 Each segment leaves when its own part is done. An instance says that it detached once it takes no more work and no request it holds can send work to another segment. An interior instance drains once every entry instance, and every instance of the segments of its class that send to it, has detached. So the rule follows the sends inside the cell, and a segment that only passes requests on, or a sink whose responses ended, leaves before the entry.

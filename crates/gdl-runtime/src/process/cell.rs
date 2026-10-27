@@ -32,10 +32,10 @@ impl Launch {
     /// The segments whose instances are this one's drain sources: while
     /// its cell drains, the cell's entry segments, for an entry instance
     /// too; otherwise those hosting a source that can reach it. `None` when
-    /// their drain cannot be seen from here, for an entry instance that a
-    /// source of another class reaches: the drain of the sources' requests
-    /// (B) then never holds, and the instance waits for its senders and its
-    /// parent (A).
+    /// their drain cannot be seen from here, for an instance that a source
+    /// of another class reaches: the drain of the sources' requests (B)
+    /// then never holds, and the instance waits for its senders, and an
+    /// entry instance for its parent too (A).
     pub(super) fn drain_sources(&self) -> Option<Vec<String>> {
         #[cfg(feature = "hub")]
         if let Some(cell) = &self.cell_drain {

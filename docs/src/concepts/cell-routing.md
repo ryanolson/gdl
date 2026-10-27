@@ -313,6 +313,12 @@ The retiree waits for that, or for at most the setup timeout plus twice `summary
 
 Avoiding a retiree promises nothing about hand-offs sent to it before. The instance's setup timeout covers those. A chooser that still picks it after it stops taking work gets `Overloaded` and offers the request to another cell.
 
+### An interior instance's stop
+
+An interior instance is an instance of a segment of the cell's class that no hop from another class enters. Its sources are in another class, so they are not members of its hub, and it cannot see them drain. When it is stopped outside its cell's drain, it never counts them as drained. It waits until every instance of the segments of its class that send to it has promised to avoid it or has left, and then for the setup timeout ([Segment lifecycle](lifecycle.md)). So a request that an entry instance holds still reaches it. It waits for no cell outside its own. If it learns of its cell's drain while it waits, it also stops waiting once no more work can reach it, as in step 5 of [Draining a cell](#draining-a-cell).
+
+A peer avoids a retired instance only while the segment has another instance. So the last interior instance of a segment waits until its senders leave, or for its drain's bound (`drain_ms`). In the chat graph, with `front` the entry of a cell's class, an operator who stops the only `engine` instance while `front` keeps serving sees `engine` take requests until `drain_ms` passes.
+
 ## Draining a cell
 
 `POST /v1/ext/gdl-cell/drain` on the hub's control listener drains a whole cell. It is for a cell of a class that another class sends to. [Classes and cells](cells.md#the-drain-request) describes the request and the record. Across cells:
