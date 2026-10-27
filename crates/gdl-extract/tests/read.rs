@@ -1800,3 +1800,69 @@ fn deeply_nested_aliases_read_without_overflowing_the_stack() {
         skipped.problem
     );
 }
+
+/// Where the wire check stops for depth: a hand-written impl bounds its
+/// parameter by `Sized`, and whether a struct is sized follows its last
+/// field: through 63 structs it holds (`H<S2>`), and through 64 it is
+/// past the check's depth (`H<S1>`). An argument nested 64 deep is
+/// judged; 65 is past what the reader names. Pinned so that a change to how the checks share
+/// their depth guard shows here.
+#[test]
+fn the_wire_check_stops_at_its_depth() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-wire-depth-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"depth\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    let mut source = String::from(
+        "use serde::{Deserialize, Serialize};\n\
+         #[derive(Serialize, Deserialize, gdl_message::Message)]\n\
+         pub struct Carry<T> {\n    pub value: T,\n}\n\
+         #[derive(gdl_message::Message)]\npub struct H<T>(pub T);\n\
+         impl<T> Serialize for H<T> {}\n\
+         impl<'de, T> Deserialize<'de> for H<T> {}\n",
+    );
+    for at in 0..64 {
+        source.push_str(&format!(
+            "pub struct S{at} {{\n    pub last: S{},\n}}\n",
+            at + 1
+        ));
+    }
+    source.push_str("pub struct S64 {\n    pub last: u8,\n}\n");
+    for at in [1, 2] {
+        source.push_str(&format!(
+            "#[gdl_message::export]\npub type H{at} = H<S{at}>;\n"
+        ));
+    }
+    for n in [64, 65] {
+        let nested = format!("{}u8{}", "Carry<".repeat(n), ">".repeat(n));
+        source.push_str(&format!(
+            "#[gdl_message::export]\npub type C{n} = {nested};\n"
+        ));
+    }
+    std::fs::write(dir.join("src/lib.rs"), source).expect("source");
+    let workspace =
+        Workspace::load(&dir.join("Cargo.toml"), &Cargo::trusted()).expect("cargo metadata");
+    let extraction = workspace.extract("depth").expect("the package");
+    let wire: Vec<(&str, bool)> = extraction
+        .offer
+        .exports
+        .iter()
+        .map(|e| (e.name.as_str(), e.wire))
+        .collect();
+    let skipped: Vec<&str> = extraction
+        .offer
+        .skipped
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(extraction.problems.is_empty(), "{:?}", extraction.problems);
+    assert_eq!(wire, [("C64", true), ("H1", false), ("H2", true)]);
+    assert_eq!(skipped, ["C65"]);
+}

@@ -22,16 +22,32 @@ use crate::tree::Kind;
 /// `Deserialize` of a type that borrows is not `DeserializeOwned`, so it
 /// gives no codec.
 pub(crate) fn ty_wire(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty) -> bool {
-    wire_at(resolver, impls, ty, 0)
+    holds(resolver, impls, ty, Bounded::WIRE, 0)
 }
 
-/// [`ty_wire`], `depth` checks deep: what each check needs is a part of
-/// the type it checks, so the check ends, but a defect that broke that
-/// would recurse without end; past `canon::DEPTH` the answer is local.
-fn wire_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usize) -> bool {
+/// Whether `ty` is what `need` bounds it by: a wire type ([`ty_wire`]),
+/// `Default` ([`defaults`]), and sized ([`sized`]), each checked only if
+/// needed, in that order. `depth` checks deep: what each check needs is a
+/// part of the type it checks, so the check ends, but a defect that broke
+/// that would recurse without end; past `canon::DEPTH` nothing holds, and
+/// the answer is local, but a type nothing is needed of.
+fn holds(
+    resolver: &mut Resolver<'_>,
+    impls: &mut Impls,
+    ty: &Ty,
+    need: Bounded,
+    depth: usize,
+) -> bool {
     if depth > DEPTH {
-        return false;
+        return !(need.wire || need.default || need.sized);
     }
+    (!need.wire || wire(resolver, impls, ty, depth))
+        && (!need.default || defaults(resolver, impls, ty, depth))
+        && (!need.sized || sized(resolver, impls, ty, depth))
+}
+
+/// Whether `ty` is a wire type, `depth` checks deep ([`holds`]).
+fn wire(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usize) -> bool {
     match ty {
         // Each primitive, and `()`, is a wire type.
         Ty::Prim(_) | Ty::Unit => return true,
@@ -41,7 +57,7 @@ fn wire_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usize
                 Std::String => true,
                 // Serde's impls bound only the element.
                 Std::Vec | Std::VecDeque | Std::Option | Std::Box => {
-                    wire_at(resolver, impls, &args[0], depth + 1)
+                    holds(resolver, impls, &args[0], Bounded::WIRE, depth + 1)
                 }
                 // Deserializing one bounds the key by `Eq` and `Hash`, or
                 // by `Ord`, which the reader judges only for a key it
@@ -53,7 +69,7 @@ fn wire_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usize
                         Ty::Prim(name) => !name.starts_with('f'),
                         _ => false,
                     };
-                    key && wire_at(resolver, impls, &args[1], depth + 1)
+                    key && holds(resolver, impls, &args[1], Bounded::WIRE, depth + 1)
                 }
             };
         }
@@ -78,11 +94,9 @@ fn wire_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usize
             }
         }
     }
-    merged.into_iter().all(|(arg, need)| {
-        (!need.wire || wire_at(resolver, impls, &arg, depth + 1))
-            && (!need.default || defaults_at(resolver, impls, &arg, depth + 1))
-            && (!need.sized || sized(resolver, &arg, depth + 1))
-    })
+    merged
+        .into_iter()
+        .all(|(arg, need)| holds(resolver, impls, &arg, need, depth + 1))
 }
 
 /// Whether a message with no type parameters, offered as itself, is a wire
@@ -340,18 +354,17 @@ pub(crate) fn need_of<'b>(
 /// enum, whose default is a unit variant; or one its crate implements it
 /// for, by an impl whose self type is `ty` and each of whose bounds is on
 /// `Default` and met. A bound on any other trait, serde's included, the
-/// reader does not take for met. `depth` bounds it as in [`wire_at`].
-fn defaults_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usize) -> bool {
-    if depth > DEPTH {
-        return false;
-    }
+/// reader does not take for met. `depth` checks deep ([`holds`]).
+fn defaults(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usize) -> bool {
     let (krate, def, args) = match ty {
         // Each primitive, and `()`, is `Default`.
         Ty::Prim(_) | Ty::Unit => return true,
         Ty::Param(_) | Ty::Def(Def::Module(..) | Def::Trait(..) | Def::Opaque, _) => return false,
         // Each is `Default` whatever it holds, but a box: it holds a
         // default value.
-        Ty::Std(Std::Box, args) => return defaults_at(resolver, impls, &args[0], depth + 1),
+        Ty::Std(Std::Box, args) => {
+            return holds(resolver, impls, &args[0], Bounded::DEFAULT, depth + 1);
+        }
         Ty::Std(..) => return true,
         Ty::Def(def @ Def::Type(c, ..), args) => (*c, *def, args),
     };
@@ -366,7 +379,7 @@ fn defaults_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: u
         return !structure
             || args
                 .iter()
-                .all(|arg| defaults_at(resolver, impls, arg, depth + 1));
+                .all(|arg| holds(resolver, impls, arg, Bounded::DEFAULT, depth + 1));
     }
     let found: Vec<ImplOf> = impls.of(resolver, Traits::Default, def).to_vec();
     for of in found {
@@ -375,11 +388,9 @@ fn defaults_at(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: u
         else {
             continue;
         };
-        return needs.into_iter().all(|(arg, need)| {
-            !need.wire
-                && (!need.default || defaults_at(resolver, impls, &arg, depth + 1))
-                && (!need.sized || sized(resolver, &arg, depth + 1))
-        });
+        return needs
+            .into_iter()
+            .all(|(arg, need)| !need.wire && holds(resolver, impls, &arg, need, depth + 1));
     }
     false
 }
@@ -410,11 +421,8 @@ fn relaxed(generics: &syn::Generics, param: &syn::Ident) -> bool {
 /// a type the reader cannot name, from the standard library, say, is by
 /// its name: `str`, `Path`, `OsStr`, and `CStr` are not, and any other
 /// is, as every other type there whose name it can write is. `depth`
-/// bounds it as in [`wire_at`].
-fn sized(resolver: &mut Resolver<'_>, ty: &Ty, depth: usize) -> bool {
-    if depth > DEPTH {
-        return false;
-    }
+/// checks deep ([`holds`]).
+fn sized(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usize) -> bool {
     let Ty::Def(Def::Type(c, m, i), args) = ty else {
         // Each the reader knows of the standard library's is sized.
         return matches!(ty, Ty::Prim(_) | Ty::Unit | Ty::Std(..));
@@ -440,7 +448,7 @@ fn sized(resolver: &mut Resolver<'_>, ty: &Ty, depth: usize) -> bool {
     match &last {
         syn::Type::Slice(_) | syn::Type::TraitObject(_) => false,
         syn::Type::Path(p) if p.qself.is_none() => match canonical(resolver, c, m, &last, &env) {
-            Ok(ty) => sized(resolver, &ty, depth + 1),
+            Ok(ty) => holds(resolver, impls, &ty, Bounded::SIZED, depth + 1),
             Err(_) => !p.path.segments.last().is_some_and(|s| {
                 matches!(
                     s.ident.to_string().as_str(),
@@ -463,4 +471,22 @@ pub(crate) struct Bounded {
     /// `Sized`, which a hand-written impl's parameter is unless it says
     /// `?Sized`.
     pub(crate) sized: bool,
+}
+
+impl Bounded {
+    const WIRE: Self = Self {
+        wire: true,
+        default: false,
+        sized: false,
+    };
+    const DEFAULT: Self = Self {
+        wire: false,
+        default: true,
+        sized: false,
+    };
+    const SIZED: Self = Self {
+        wire: false,
+        default: false,
+        sized: true,
+    };
 }
