@@ -1,5 +1,7 @@
 //! The workloads both remote benches run: the lean graph against direct
-//! velo, and the reference graph. Each bench uses part of it.
+//! velo, and the reference graph. Each bench uses part of it. Each one also
+//! builds the velo nodes, with `node()` at its crate root: the counting test
+//! needs nodes whose timers stay out of its counts.
 
 #![allow(dead_code)]
 
@@ -80,7 +82,7 @@ pub async fn lean_front_with<D>(sink: D) -> LeanCaller
 where
     D: gdl::Sink<Req = Ask, Item = Blob>,
 {
-    let nodes = [velo_node().await, velo_node().await];
+    let nodes = [super::node().await, super::node().await];
     let placement = Placement::new()
         .segment("front", ["S"])
         .segment("engine", ["D"]);
@@ -136,8 +138,8 @@ pub async fn direct_pair() -> (velo::Velo, velo::InstanceId) {
 /// [`direct_pair`], whose server sends each blob only on a [`PERMIT`] when
 /// `paced`.
 pub async fn direct_pair_with(paced: bool) -> (velo::Velo, velo::InstanceId) {
-    let client = velo_node().await;
-    let server = velo_node().await;
+    let client = super::node().await;
+    let server = super::node().await;
     client.register_peer(server.peer_info()).expect("peer");
     server.register_peer(client.peer_info()).expect("peer");
     let weak = server.downgrade();
@@ -355,7 +357,7 @@ pub type UploadCaller = Box<
 >;
 
 pub async fn upload_front() -> UploadCaller {
-    let nodes = [velo_node().await, velo_node().await];
+    let nodes = [super::node().await, super::node().await];
     let placement = Placement::new()
         .segment("front", ["S"])
         .segment("engine", ["D"]);
@@ -408,8 +410,8 @@ pub struct DirectInput {
 }
 
 pub async fn direct_upload_pair() -> (velo::Velo, velo::InstanceId) {
-    let client = velo_node().await;
-    let server = velo_node().await;
+    let client = super::node().await;
+    let server = super::node().await;
     client.register_peer(server.peer_info()).expect("peer");
     server.register_peer(client.peer_info()).expect("peer");
     let weak = server.downgrade();
@@ -531,7 +533,7 @@ pub async fn reference_front(
 ) -> Caller {
     let mut velo_nodes = Vec::new();
     for _ in 0..nodes {
-        velo_nodes.push(velo_node().await);
+        velo_nodes.push(super::node().await);
     }
     let instances: Vec<(String, velo::Velo)> = placement
         .segments()

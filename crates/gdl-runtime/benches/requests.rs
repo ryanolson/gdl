@@ -41,6 +41,11 @@ use setup::*;
 #[inline(always)]
 fn produced() {}
 
+/// `setup` builds its velo nodes as a segment does.
+async fn node() -> velo::Velo {
+    velo_node().await
+}
+
 fn main() {
     let mut args = std::env::args().skip(1).filter(|a| a != "--bench");
     let usage = "usage: requests <local | one | two | three>[-metrics] <count> | two-<random | least_loaded | affinity> <count> | <lean | direct>-<size> <count> | sizes 0";

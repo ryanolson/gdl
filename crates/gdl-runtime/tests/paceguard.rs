@@ -11,6 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 fn produced() {}
 
+/// `setup` builds its velo nodes as a segment does.
+async fn node() -> velo::Velo {
+    common::velo_node().await
+}
+
 struct Counting;
 static SIZES: [AtomicU64; 4096] = [const { AtomicU64::new(0) }; 4096];
 #[allow(unsafe_code)]

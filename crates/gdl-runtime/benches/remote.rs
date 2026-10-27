@@ -46,6 +46,11 @@ use setup::*;
 #[inline(always)]
 fn produced() {}
 
+/// `setup` builds its velo nodes as a segment does.
+async fn node() -> velo::Velo {
+    common::velo_node().await
+}
+
 /// How `rmp_serde` encodes every `velo::StreamFrame::Item`: a one-entry map
 /// keyed by the fixstr `"Item"`. velo's own copy is crate-private.
 const ITEM_PREFIX: &[u8] = &[0x81, 0xa4, b'I', b't', b'e', b'm'];

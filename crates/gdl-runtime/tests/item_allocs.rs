@@ -21,12 +21,22 @@
 //!
 //! This runs without the test harness, so no test thread runs beside it.
 //! The counts include both ends and velo: that is the cost being guarded.
+//! They are counts of the whole process, so they measure items only if
+//! nothing allocates while no request runs. velo's credit sweep does: on
+//! each node it ticks every 200 ms and allocates once per shard of two
+//! maps, which is about two allocations per item, on 20 CPUs, in any round
+//! a tick falls in. The nodes here put the sweep off past the run. Before
+//! the rounds, the test checks that half a second with no request makes no
+//! allocation, which a timer that fires more often cannot pass. A slower
+//! timer can still add to a round: gdl's reservation renewals walk their
+//! maps every 30 s, 512 allocations a tick here on 20 CPUs. That reaches
+//! one round in many, and the fewest per path leaves it out.
+//!
 //! Both paths are counted in the same run, in alternating rounds, and each
-//! is judged by its fewest allocations per item over the rounds. Some
-//! rounds cost about one allocation per item more on either path,
-//! depending on how the two ends are scheduled, and a path can stay that
-//! way for several rounds. So a median moves by a whole allocation between
-//! runs, and the fewest does not.
+//! is judged by its fewest allocations per item over the rounds. On an idle
+//! host every round is within a few hundredths of the fewest. On a busy one
+//! about half the rounds are, and the rest cost up to about one allocation
+//! per item more.
 
 #![allow(unsafe_code)]
 
@@ -36,7 +46,9 @@ mod common;
 mod setup;
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 use setup::item_len;
@@ -78,6 +90,35 @@ static GLOBAL: Counting = Counting;
 /// `setup` counts the blobs it builds in the footprint bench; not here.
 fn produced() {}
 
+/// A velo node as `gdl_runtime::bind_node` builds one, but with velo's
+/// credit sweep put off past the run. On every node the sweep ticks every
+/// 200 ms and walks two maps, allocating once per shard of each: four
+/// shards per CPU, rounded up to a power of two. That is 2,048 allocations a
+/// tick over the eight nodes here on 20 CPUs, about two per item in
+/// whichever round the tick falls in. The cost is one of time, not of
+/// items, so it is left out on both paths. Keep the rest of this in step
+/// with `bind_node` in `src/dist/fabric.rs`.
+async fn node() -> velo::Velo {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+    let tcp = velo::transports::tcp::TcpTransportBuilder::new()
+        .from_listener(listener)
+        .expect("tcp")
+        .build()
+        .expect("tcp");
+    let mux = velo::streaming::MuxConfig {
+        credit_sweep_interval: Duration::from_secs(3600),
+        ..velo::streaming::MuxConfig::default()
+    };
+    velo::Velo::builder()
+        .add_transport(Arc::new(tcp))
+        .messenger_mux(mux)
+        .expect("mux")
+        .mux_only()
+        .build()
+        .await
+        .expect("velo node")
+}
+
 /// Items per request: enough that a request's own setup is a small part of
 /// each item's count.
 const ITEMS: u32 = 1_000;
@@ -93,6 +134,15 @@ const SMALL_BYTES: f64 = 128.0;
 /// How much more, as a share of velo's, the crossing may allocate per item
 /// at 1 KiB and 16 KiB, and per item of the mixed workload.
 const LARGE_SHARE: f64 = 0.02;
+/// One idle window of the check, before the rounds, that nothing allocates
+/// without a request: longer than two periods of velo's 200 ms credit
+/// sweep, so a timer on that scale allocates in every window. The window
+/// waits for no event; it is what is counted.
+const IDLE: Duration = Duration::from_millis(500);
+/// How many idle windows the check counts before it fails. Starting the
+/// nodes leaves work queued, such as each sweep's first tick, and a host
+/// that stalls the process can push that work into the second window.
+const IDLE_WINDOWS: usize = 4;
 
 fn main() {
     // cargo-nextest first lists each binary's tests the way libtest does,
@@ -105,10 +155,22 @@ fn main() {
         }
         return;
     }
-    // One thread: each path's count per round is then within a few
-    // hundredths of its floor, or about one allocation above it.
+    // One thread: on an idle host each path's count per round is then
+    // within a few hundredths of its floor.
+    let stall = Arc::new(AtomicBool::new(false));
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
+        .on_thread_park({
+            let stall = Arc::clone(&stall);
+            move || {
+                // A busy host stalls the process at times. The idle checks
+                // below arm this to stall it once, past an idle window, so
+                // they always run in that case.
+                if stall.swap(false, Ordering::Relaxed) {
+                    std::thread::sleep(IDLE + Duration::from_millis(100));
+                }
+            }
+        })
         .build()
         .expect("runtime");
     let lean = rt.block_on(lean_front());
@@ -116,6 +178,42 @@ fn main() {
     let paced_lean = rt.block_on(lean_front_with(PacedEmit));
     let (paced_client, paced_target) = rt.block_on(direct_pair_with(true));
     let (lean, paced_lean, client, paced_client) = (&lean, &paced_lean, &client, &paced_client);
+    // A timer that comes due while the host stalls the process wakes in
+    // the same timer turn as the window's sleep. Check that the window
+    // still counts it: run one beside a stalled window.
+    let timer = rt.spawn(async {
+        let period = IDLE / 4;
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        loop {
+            ticks.tick().await;
+            TICKS.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    stall.store(true, Ordering::Relaxed);
+    rt.block_on(idle_window());
+    let ticked = TICKS.load(Ordering::Relaxed);
+    timer.abort();
+    assert!(
+        ticked > 0,
+        "a timer that came due in a stalled idle window ran after the window was counted"
+    );
+    // Each count is of the whole process, so it is of items only if nothing
+    // allocates while no request runs: a timer's allocations land in
+    // whichever round it fires in. Passes at the first window with no
+    // allocation: a timer that fires in every window never gives one.
+    stall.store(true, Ordering::Relaxed);
+    let idle = rt.block_on(async {
+        let mut idle = Vec::with_capacity(IDLE_WINDOWS);
+        while idle.len() < IDLE_WINDOWS && idle.last() != Some(&0) {
+            idle.push(idle_window().await);
+        }
+        idle
+    });
+    assert_eq!(
+        idle.last(),
+        Some(&0),
+        "the process allocates with no request running: {idle:?} allocations in windows of {IDLE:?}"
+    );
     let mut failed = Vec::new();
     for size in SIZES.into_iter().chain([MIXED]) {
         let ask = Ask { items: ITEMS, size };
@@ -205,6 +303,21 @@ fn main() {
         failed.is_empty(),
         "a crossed item allocates more than velo carrying it: {failed:?}"
     );
+}
+
+/// Ticks of the timer that checks the idle window.
+static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Allocations in one window of `IDLE` with no request running. Run the
+/// windows inside one `block_on`: the first yield in each allocates once.
+async fn idle_window() -> u64 {
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    tokio::time::sleep(IDLE).await;
+    // After a stall, the sleep wakes in the same timer turn as every timer
+    // that came due, and `block_on` polls its own future first. The yield
+    // lets those timers' tasks run inside the window.
+    tokio::task::yield_now().await;
+    ALLOCATIONS.load(Ordering::Relaxed) - before
 }
 
 /// One request of `ITEMS` items on each path.

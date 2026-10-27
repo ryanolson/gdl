@@ -70,6 +70,11 @@ fn produced() {
     PRODUCED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// `setup` builds its velo nodes as a segment does.
+async fn node() -> velo::Velo {
+    common::velo_node().await
+}
+
 // ----- the report -----
 
 #[cfg(tokio_unstable)]
