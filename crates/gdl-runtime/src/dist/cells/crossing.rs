@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 use futures::future::BoxFuture;
 use gdl::__runtime::{ChoiceHeld, Erased, ErasedPolicy, Picked};
 use gdl::{
-    CellPolicies, CellRequest, Cx, Error, ErrorKind, HomeFirstAt, Instances, NoCell, Result,
+    CellPolicies, CellRequest, Cx, Damped, Error, ErrorKind, HomeFirstAt, Instances, NoCell, Result,
 };
 use gdl_model::{Encoding, Layout};
 use velo::InstanceId;
@@ -221,6 +221,36 @@ impl Crossing {
         }
     }
 
+    /// The cell policy's [`NoCell`] for a request whose every cell in
+    /// `offered` the chooser holds gone, when the policy chooses no other
+    /// cell for it: what the requests after it meet, since no choice
+    /// takes a gone cell. `None` when a cell in `offered` is not gone or
+    /// the policy chooses a cell. The marks and the choice read one load
+    /// of the table and one of the damping, so that they are of one
+    /// moment. Read only once a request can be offered no more cells.
+    /// Fails when the cell policy cannot read the head.
+    pub(crate) fn gone_only(
+        &self,
+        cx: &Cx,
+        head: &[u8],
+        offered: &[u64],
+    ) -> Result<Option<NoCell>> {
+        let table = self.target.table.load();
+        let damped = self.target.damping.view();
+        let gone = offered.iter().all(|id| {
+            table
+                .cells
+                .iter()
+                .zip(&table.views)
+                .find(|(shown, _)| shown.id == *id)
+                .is_some_and(|(_, view)| damped.is_gone(view))
+        });
+        if !gone {
+            return Ok(None);
+        }
+        Ok(self.cell_by(&table, &damped, cx, head, offered)?.err())
+    }
+
     /// The cell `cell` accepted an offer: its damping, as the chooser has
     /// it now, ends, whatever it was when the offer was chosen: another
     /// request's decline may have damped it since, or another acceptance
@@ -340,13 +370,24 @@ impl Crossing {
         head: &[u8],
         excluded: &[u64],
     ) -> Result<Result<Celled<'t>, NoCell>> {
+        self.cell_by(table, &self.target.damping.view(), cx, head, excluded)
+    }
+
+    /// [`Crossing::cell`], with the chooser's damping as `damped` holds it.
+    fn cell_by<'t>(
+        &self,
+        table: &'t EntryTable,
+        damped: &Damped,
+        cx: &Cx,
+        head: &[u8],
+        excluded: &[u64],
+    ) -> Result<Result<Celled<'t>, NoCell>> {
         let target = &self.target;
         let turn = self.draws.fetch_add(1, Ordering::Relaxed) as u64;
-        let damped = target.damping.view();
         let request = CellRequest::new(cx, &(), &target.region, tokio::time::Instant::now())
             .with_bytes(head)
             .with_excluded(excluded)
-            .with_damped(&damped)
+            .with_damped(damped)
             .with_turn(turn)
             .with_random(&self.random);
         let (at, choice) = match target.policy.choose(request, self.encoding, &table.views)? {

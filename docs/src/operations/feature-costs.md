@@ -248,17 +248,23 @@ A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` 
 
 ## Reading the followed cells
 
-A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by, then, in the bench, one cell found by name among four and one withdrawal looked up. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`).
+A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by and one of the chooser's damping, then, in the bench, one cell found by name among four and one withdrawal looked up. `followed/gone` also asks whether the cell is gone, as a gate does. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`).
 
 ```bash
-cargo bench -p gdl --bench followed -- 'followed/read' --warm-up-time 1 --measurement-time 3
+cargo bench -p gdl --bench followed -- 'followed/' --warm-up-time 1 --measurement-time 3
 ```
 
-On a quiet host, gb300 (Neoverse-V2, 72 cores), pinned to core 9, load average 3.7, rustc 1.93.1, at `d133902`:
+On a quiet host, gb300 (Neoverse-V2, 72 cores), pinned to core 9, load average 1.8 to 2.0, rustc 1.93.1, two runs each. The base is `6d0a850`, before the read loaded the damping. The change is `eb18b65`:
 
-| Read | Time |
-|---|---|
-| bound, a cell and a withdrawal looked up | 48.4 ns, 47.7 ns |
+| Read | Base | Change |
+|---|---|---|
+| bound, a cell and a withdrawal looked up (`followed/read`) | 47.6 ns, 47.2 ns | 69.9 ns, 68.5 ns |
+| the same, and whether the cell is gone (`followed/gone`) | | 76.2 ns, 75.1 ns |
+| not bound | 0.83 ns | 0.84 ns, 0.83 ns |
+
+The load of the damping costs about 21 ns per read. It is what lets a gone mark show in the next read with no table rebuilt for it. Asking whether a cell is gone costs about 7 ns more.
+
+At `d133902`, on the same host at load average 3.7, `followed/read` took 48.4 ns and 47.7 ns.
 
 On the shared aarch64 host above (Cortex-X925 and Cortex-A725), at load averages from 10 to 24, without the filter, at `03be278` with the change:
 

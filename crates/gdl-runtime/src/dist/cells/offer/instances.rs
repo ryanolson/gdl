@@ -19,6 +19,115 @@ use crate::dist::offers::{Decline, refusal};
 use crate::dist::roster::{Policy, Roster, selector_id};
 use crate::dist::runtime::{Router, Runtime, RuntimeConfig, Within};
 
+/// Full refusals stay Overloaded while at least one offered cell is not
+/// gone. Concurrent acceptances and gone refusals can move the mark between
+/// cells, but the marks here never coexist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gone_marks_from_different_moments_do_not_turn_full_refusals_into_routing() {
+    let fleet = Fleet::new(
+        &[
+            ("m1", &[Serves::None(Decline::Full)]),
+            ("m2", &[Serves::None(Decline::Full)]),
+        ],
+        RuntimeConfig::default(),
+    )
+    .await;
+    let router = fleet.router(
+        "round_robin",
+        &gdl::CellPolicies::new(),
+        Within::Policy(Policy::RoundRobin),
+    );
+    let control = fleet
+        .send(&router, "model")
+        .await
+        .expect_err("both entries refuse");
+    assert_eq!(
+        control.kind(),
+        ErrorKind::Overloaded,
+        "the control: {control}"
+    );
+    assert_eq!(fleet.taken(), [vec![1], vec![1]]);
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let changing = fleet.cells.clone();
+    let stopped = Arc::clone(&done);
+    let changes = std::thread::spawn(move || {
+        let table = changing.table("d").expect("followed");
+        let a = &table.views[0];
+        let b = &table.views[1];
+        while !stopped.load(Ordering::Acquire) {
+            changing.damping().accept(a.id());
+            changing.damping().gone(b);
+            changing.damping().accept(b.id());
+            changing.damping().gone(a);
+        }
+    });
+    // Repeated offers let the reads straddle mark changes. Marks read at
+    // separate moments meet such an interleaving within about 2,000
+    // requests; 4,000 take about 2 s.
+    let mut routing = None;
+    for turn in 0..4_000 {
+        let error = fleet
+            .send(&router, "model")
+            .await
+            .expect_err("both entries refuse");
+        let offered = fleet.taken();
+        if error.kind() == ErrorKind::Routing && offered.iter().all(|cell| cell == &[1]) {
+            routing = Some((turn, offered, error));
+            break;
+        }
+    }
+    done.store(true, Ordering::Release);
+    changes.join().expect("mark changes completed");
+    assert!(
+        routing.is_none(),
+        "Routing while at most one cell was ever gone: {routing:?}"
+    );
+}
+
+/// With no failover, a request whose one cell declines as gone fails with
+/// `Routing` when no other cell may take it, as the next request does, and
+/// with the refusal when another cell may.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_no_failover_a_lone_gone_cell_fails_with_routing() {
+    let config = || RuntimeConfig {
+        cell_failovers: 0,
+        ..RuntimeConfig::default()
+    };
+    let fleet = Fleet::new(&[("m1", &[Serves::None(Decline::Gone)])], config()).await;
+    let router = fleet.router(
+        "round_robin",
+        &gdl::CellPolicies::new(),
+        Within::Policy(Policy::RoundRobin),
+    );
+    let first = fleet.send(&router, "model").await.expect_err("gone");
+    let next = fleet.send(&router, "model").await.expect_err("no cell");
+    assert_eq!(fleet.taken(), [vec![1]], "a gone cell was offered again");
+    assert_eq!(next.kind(), ErrorKind::Routing, "the control: {next}");
+    assert_eq!(first.kind(), ErrorKind::Routing, "{first}");
+
+    let fleet = Fleet::new(
+        &[
+            ("m1", &[Serves::None(Decline::Gone)]),
+            ("m2", &[Serves::All]),
+        ],
+        config(),
+    )
+    .await;
+    let router = fleet.router(
+        "round_robin",
+        &gdl::CellPolicies::new(),
+        Within::Policy(Policy::RoundRobin),
+    );
+    let error = fleet.send(&router, "model").await.expect_err("gone");
+    assert_eq!(fleet.taken(), [vec![1], vec![0]]);
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Overloaded,
+        "another cell may take it: {error}"
+    );
+    fleet.send(&router, "model").await.expect("m2 took it");
+}
+
 /// What an entry instance answers an offer.
 #[derive(Clone, Copy)]
 enum Serves {

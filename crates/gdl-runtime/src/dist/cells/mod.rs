@@ -306,7 +306,12 @@ impl Cells {
 }
 
 /// What a node reads of the tables: the table an entry segment's cell
-/// policy chooses from, with the class's withdrawn cells, in one load.
+/// policy chooses from, with the class's withdrawn cells, in one load, and
+/// the cells the chooser holds gone, in one more. No table is made for a
+/// gone mark: the next read sees the damping the chooser's choices read.
+/// The two loads are not one moment, but a mark holds the follow it was
+/// made in, so a table newer than the mark reads the cell as not gone, as
+/// a choice from that table would.
 impl gdl::__runtime::CellSource for Cells {
     fn read(&self, class: &str, entry: Option<&str>, read: &mut dyn FnMut(gdl::ClassCells<'_>)) {
         let Some(tables) = self.shared.classes.get(class) else {
@@ -321,7 +326,8 @@ impl gdl::__runtime::CellSource for Cells {
             },
         };
         let table = slot.load();
-        read(gdl::ClassCells::new(&table.views, &table.withdrawn));
+        let damped = self.shared.damping.view();
+        read(gdl::ClassCells::new(&table.views, &table.withdrawn).with_damped(&damped));
     }
 }
 
@@ -366,7 +372,8 @@ pub struct FollowedCell {
     /// Whether the cell declined this chooser's offer as gone, as a
     /// draining cell does, in the follow shown here: it is passed over
     /// until the relay shows a new generation, state, or offered state, or
-    /// it accepts an offer.
+    /// it accepts an offer. A node reads the same mark with
+    /// [`gdl::ClassCells::is_gone`].
     pub gone: bool,
     /// The entry instances of the segment that may be routed to, by id:
     /// none while the state is `draining` or `unavailable`, or the cell is

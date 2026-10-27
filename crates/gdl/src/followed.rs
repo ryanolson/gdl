@@ -1,15 +1,16 @@
 //! What a node reads of the cells its segment's choosers follow: the same
-//! table a cell policy chooses from, and the cells whose records were
-//! withdrawn after a drain. A node in a segment that sends into another
-//! class (a model gate in front of a set router, say) reads it to tell a
-//! class that has no cell taking work (503) from one whose cells were all
-//! drained on purpose (404), from the snapshot the chooser routes by.
+//! table a cell policy chooses from, the cells the chooser holds gone, and
+//! the cells whose records were withdrawn after a drain. A node in a
+//! segment that sends into another class (a model gate in front of a set
+//! router, say) reads it to tell a class that has no cell taking work
+//! (503) from one whose cells were all drained on purpose (404), from the
+//! state the chooser routes by.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use crate::policy::Cell;
+use crate::policy::{Cell, Damped};
 
 tokio::task_local! {
     /// The handle of the segment whose nodes are being built.
@@ -47,7 +48,8 @@ impl FollowedCells {
     /// A handle bound to fixed tables, for a node's tests: `cells`, by
     /// their class, and the cells named by class and name in `withdrawn`.
     /// A class named by neither is not followed. Each class has one table,
-    /// which [`FollowedCells::read_entry`] gives for any entry.
+    /// which [`FollowedCells::read_entry`] gives for any entry. No cell is
+    /// gone ([`FollowedCells::fixed_with_gone`]).
     pub fn fixed<C, N>(
         cells: impl IntoIterator<Item = Cell>,
         withdrawn: impl IntoIterator<Item = (C, N)>,
@@ -55,6 +57,25 @@ impl FollowedCells {
     where
         C: Into<String>,
         N: Into<String>,
+    {
+        Self::fixed_with_gone(cells, withdrawn, std::iter::empty::<(String, String)>())
+    }
+
+    /// [`FollowedCells::fixed`], with the cells named by class and name in
+    /// `gone` held gone ([`ClassCells::is_gone`]), as a chooser holds a
+    /// cell that declined its offer as gone. A name in `gone` that is not
+    /// among `cells` is not gone: a chooser holds only followed cells
+    /// gone.
+    pub fn fixed_with_gone<C, N, G, M>(
+        cells: impl IntoIterator<Item = Cell>,
+        withdrawn: impl IntoIterator<Item = (C, N)>,
+        gone: impl IntoIterator<Item = (G, M)>,
+    ) -> Self
+    where
+        C: Into<String>,
+        N: Into<String>,
+        G: Into<String>,
+        M: Into<String>,
     {
         let mut classes: BTreeMap<String, (Vec<Cell>, Vec<Box<str>>)> = BTreeMap::new();
         for cell in cells {
@@ -72,6 +93,10 @@ impl FollowedCells {
                 .1
                 .push(name.into_boxed_str());
         }
+        let gone: Vec<(String, String)> = gone
+            .into_iter()
+            .map(|(class, name)| (class.into(), name.into()))
+            .collect();
         let fixed = Fixed(
             classes
                 .into_iter()
@@ -79,7 +104,11 @@ impl FollowedCells {
                     cells.sort_by(|a, b| a.name().cmp(b.name()));
                     withdrawn.sort();
                     withdrawn.dedup();
-                    (class, (cells.into(), withdrawn.into()))
+                    let damped = cells
+                        .iter()
+                        .filter(|cell| gone.iter().any(|(c, n)| *c == class && n == cell.name()))
+                        .fold(Damped::EMPTY, |damped, cell| damped.with_gone(cell));
+                    (class, (cells.into(), withdrawn.into(), damped))
                 })
                 .collect(),
         );
@@ -97,9 +126,10 @@ impl FollowedCells {
     /// `read`: `None` when the handle is not bound, the segment sends into
     /// no class `class`, or it enters `class` at more than one entry
     /// segment, whose tables can differ ([`FollowedCells::read_entry`]).
-    /// One load of the table the chooser routes by, with no lock and no
-    /// allocation. `read` runs while the table is held, so keep it short:
-    /// copy out what outlives it.
+    /// One load of the table the chooser routes by and one of the cells it
+    /// holds gone, with no lock and no allocation: a mark the chooser
+    /// writes shows in the next read. `read` runs while both are held, so
+    /// keep it short: copy out what outlives it.
     pub fn read<R>(&self, class: &str, read: impl FnOnce(ClassCells<'_>) -> R) -> Option<R> {
         self.load(class, None, read)
     }
@@ -174,13 +204,29 @@ pub trait CellSource: Send + Sync + 'static {
 pub struct ClassCells<'a> {
     cells: &'a [Cell],
     withdrawn: &'a [Box<str>],
+    damped: &'a Damped,
 }
 
+/// What a view holds gone when its source says nothing of it.
+static NONE_GONE: Damped = Damped::EMPTY;
+
 impl<'a> ClassCells<'a> {
-    /// The view of `cells`, sorted by name, and `withdrawn`, sorted.
+    /// The view of `cells`, sorted by name, and `withdrawn`, sorted, with
+    /// no cell gone.
     #[doc(hidden)]
     pub fn new(cells: &'a [Cell], withdrawn: &'a [Box<str>]) -> Self {
-        Self { cells, withdrawn }
+        Self {
+            cells,
+            withdrawn,
+            damped: &NONE_GONE,
+        }
+    }
+
+    /// The view with the cells `damped` holds gone: the chooser's damping
+    /// as its cell policy reads it.
+    #[doc(hidden)]
+    pub fn with_damped(self, damped: &'a Damped) -> Self {
+        Self { damped, ..self }
     }
 
     /// The followed cells, by name: what the class's cell policy chooses
@@ -213,17 +259,30 @@ impl<'a> ClassCells<'a> {
     pub fn withdrawn(&self) -> impl Iterator<Item = &'a str> + 'a {
         self.withdrawn.iter().map(|name| &**name)
     }
+
+    /// Whether the chooser holds the followed cell named `name` gone: the
+    /// cell declined its offer as gone, as a draining cell or a segment
+    /// that declines by its own policy does, and the relay has changed
+    /// nothing of its follow since, nor has it accepted an offer. The
+    /// chooser's cell policies pass such a cell over, whatever its state
+    /// and entries say ([`Damped::is_gone`]). A cell that is not followed
+    /// is not gone.
+    pub fn is_gone(&self, name: &str) -> bool {
+        self.cell(name)
+            .is_some_and(|cell| self.damped.is_gone(cell))
+    }
 }
 
-/// Fixed tables: per class, its cells by name and its withdrawn cells.
-type Tables = BTreeMap<String, (Box<[Cell]>, Box<[Box<str>]>)>;
+/// Fixed tables: per class, its cells by name, its withdrawn cells, and
+/// its gone cells.
+type Tables = BTreeMap<String, (Box<[Cell]>, Box<[Box<str>]>, Damped)>;
 
 struct Fixed(Tables);
 
 impl CellSource for Fixed {
     fn read(&self, class: &str, _entry: Option<&str>, read: &mut dyn FnMut(ClassCells<'_>)) {
-        if let Some((cells, withdrawn)) = self.0.get(class) {
-            read(ClassCells::new(cells, withdrawn));
+        if let Some((cells, withdrawn, damped)) = self.0.get(class) {
+            read(ClassCells::new(cells, withdrawn).with_damped(damped));
         }
     }
 }
@@ -283,6 +342,43 @@ mod tests {
         assert_eq!(
             followed.read_entry("model_x", "any", |cells| cells.cells().len()),
             Some(2)
+        );
+        assert_eq!(
+            followed.read("model_x", |cells| cells.is_gone("m1")),
+            Some(false),
+            "fixed tables hold no cell gone"
+        );
+    }
+
+    /// Fixed tables hold gone the followed cells named so, as a chooser
+    /// does: whatever their state and entries say, and in their class
+    /// alone. A gone name that is not followed is not gone.
+    #[test]
+    fn fixed_tables_hold_the_named_cells_gone() {
+        let followed = FollowedCells::fixed_with_gone(
+            [
+                Cell::new("model_x", "m1", "r", CellState::Ready).with_entries(1),
+                Cell::new("model_x", "m2", "r", CellState::Ready).with_entries(1),
+                Cell::new("model_y", "m1", "r", CellState::Ready).with_entries(1),
+            ],
+            [("model_x", "m3")],
+            [("model_x", "m1"), ("model_x", "m3")],
+        );
+        let x = followed
+            .read("model_x", |cells| {
+                (
+                    cells.cell("m1").is_some_and(Cell::takes_work),
+                    cells.is_gone("m1"),
+                    cells.is_gone("m2"),
+                    cells.is_gone("m3"),
+                )
+            })
+            .expect("model_x");
+        assert_eq!(x, (true, true, false, false));
+        assert_eq!(
+            followed.read("model_y", |cells| cells.is_gone("m1")),
+            Some(false),
+            "another class's cell of the same name"
         );
     }
 }

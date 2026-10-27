@@ -100,7 +100,10 @@ impl Runtime {
     /// Any other miss leaves the cell at once. When no cell may take it
     /// any more, or no failover is left, the request fails with the last
     /// refusal, or, when no cell refused it, with the last hand-off that
-    /// never left. Each choice starts from the request's own context,
+    /// never left. When the chooser holds every cell it left gone and its
+    /// cell policy chooses no other, it fails with `Routing`, as the
+    /// requests after it do, which find those cells gone before any
+    /// offer ([`Crossing::gone_only`]). Each choice starts from the request's own context,
     /// `cx`, which `envelope`'s was made from, so a declined selector's
     /// meta is not sent to the next instance; a declined choice's leases,
     /// its selector's and its cell's, end before the next choice. It
@@ -122,7 +125,7 @@ impl Runtime {
             mut choice,
             mut missed,
         } = declined;
-        let mut own = is_own(&missed);
+        let mut last = reason(&missed);
         let mut offered = Vec::new();
         let mut walk: Option<Walk> = None;
         loop {
@@ -130,7 +133,7 @@ impl Runtime {
                 envelope.cx = WireCx::of(cx);
             }
             let mut next = None;
-            if own {
+            if last == Some(Decline::Instance) {
                 if walk.is_none() {
                     walk = crossing.walk(cell, instance);
                 }
@@ -151,9 +154,6 @@ impl Runtime {
                     if offered.len() > self.config.cell_failovers {
                         break;
                     }
-                    // A policy's reason for no cell is dropped here: the
-                    // last refusal says more about this request than the
-                    // policy can.
                     let Ok(chosen) = self.choose_cell(crossing, cx, envelope, &offered).await?
                     else {
                         break;
@@ -178,13 +178,20 @@ impl Runtime {
                 }
                 Answer::Failed(error) => return Err(error),
                 Answer::Missed(then) => {
-                    own = is_own(&then);
+                    last = reason(&then);
                     choice = held.take_choice();
                     drop(held);
                     (cell, instance) = (at, to);
                     missed = missed.then(then);
                 }
             }
+        }
+        // A refusal by a cell that may take work again says more about
+        // this request than the policy's reason for no cell. When every
+        // cell it left is gone, the requests after it meet the policy's
+        // `Routing`, and so does this one.
+        if let Some(no) = crossing.gone_only(cx, &envelope.payload, &offered)? {
+            return Err(crossing.no_cell(no));
         }
         Err(missed.into_error())
     }
@@ -229,9 +236,13 @@ pub(crate) struct Declined {
     pub(crate) missed: Missed,
 }
 
-/// Whether `missed` is an entry instance's decline as its own.
-fn is_own(missed: &Missed) -> bool {
-    matches!(missed, Missed::Declined(_, Decline::Instance))
+/// Why `missed`'s entry declined, or `None` for a hand-off that never
+/// left: [`Decline::Instance`] leaves the request in its cell.
+fn reason(missed: &Missed) -> Option<Decline> {
+    match missed {
+        Missed::Declined(_, decline) => Some(*decline),
+        Missed::Unsent(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -1333,6 +1344,66 @@ mod tests {
             shown.gone && pick().is_err(),
             "a full reply revived a gone cell without a follow change: {shown:?}"
         );
+    }
+
+    /// A node that reads the chooser's tables holds a cell gone exactly
+    /// while the chooser's choice passes it over: from its gone decline,
+    /// across a new load summary, until the relay changes its follow or it
+    /// accepts an offer. A full decline, the control, damps the cell and
+    /// is not gone.
+    #[tokio::test(start_paused = true)]
+    async fn a_node_reads_a_cell_gone_while_the_choice_passes_it_over() {
+        let cx = Cx::new();
+        let random = std::hash::RandomState::new();
+        let (crossing, cells) = followed_over(&["m1", "m2"]);
+        let node = gdl::FollowedCells::new();
+        assert!(node.bind(Arc::new(cells.clone())));
+        let m1 = cell_id("model_x", "m1");
+        let pick = || {
+            crossing
+                .pick(&cx, &[], Policy::RoundRobin, &random, &[])
+                .expect("a pick")
+                .expect("a cell")
+        };
+        let offer = || loop {
+            let (_, cell, lease) = pick();
+            if cell == m1 {
+                return lease;
+            }
+        };
+        let chosen = || (0..12).any(|_| pick().1 == m1);
+        let read = || {
+            node.read("model_x", |cells| {
+                (cells.is_gone("m1"), cells.is_gone("m2"))
+            })
+            .expect("the chooser sends to model_x")
+        };
+        assert_eq!(read(), (false, false));
+
+        let lease = offer();
+        crossing.declined(m1, Decline::Full, Some(&lease));
+        drop(lease);
+        assert_eq!(read(), (false, false), "a full cell read gone");
+        crossing.accepted(m1);
+
+        let lease = offer();
+        crossing.declined(m1, Decline::Gone, Some(&lease));
+        drop(lease);
+        assert!(!chosen());
+        assert_eq!(read(), (true, false), "the chooser passes m1 over");
+        changed(&cells, "m1", |cell| cell.load = super::super::tests::idle());
+        assert!(!chosen());
+        assert_eq!(read(), (true, false), "a new load summary ended it");
+        changed(&cells, "m1", |cell| cell.changes += 1);
+        assert!(chosen());
+        assert_eq!(read(), (false, false), "the follow changed");
+
+        let lease = offer();
+        crossing.declined(m1, Decline::Gone, Some(&lease));
+        drop(lease);
+        assert_eq!(read(), (true, false));
+        crossing.accepted(m1);
+        assert_eq!(read(), (false, false), "m1 accepted an offer");
     }
 
     /// A pick whose cell accepts allocates nothing and, while the cell is

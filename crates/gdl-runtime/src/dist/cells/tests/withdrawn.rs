@@ -168,7 +168,7 @@ fn a_class_not_sent_to_reads_as_none() {
     assert!(FollowedCells::new().read("model_x", |_| ()).is_none());
 }
 
-/// Reading the cells allocates nothing.
+/// Reading the cells allocates nothing, with a cell held gone.
 #[test]
 fn reading_allocates_nothing() {
     let (mut follows, cells, _, _) = follower();
@@ -177,20 +177,29 @@ fn reading_allocates_nothing() {
     follows.apply(follow(M1, 1, CellState::Ready), now);
     follows.apply(follow(M2, 1, CellState::Draining), now);
     follows.apply(withdrawn(M2, 1), now);
+    let table = cells.table("f").expect("a table");
+    let m1 = table
+        .views
+        .iter()
+        .find(|view| view.name() == M1)
+        .expect("followed");
+    cells.damping().gone(m1);
     // Once, uncounted: the first load of a thread may take arc-swap's
     // per-thread slot.
     let _ = read(&node, M1);
     counting(true);
     let before = counted();
-    let mut seen = (0, 0);
+    let mut seen = (0, 0, 0);
     for _ in 0..100 {
         let (followed, withdrawn) = read(&node, M2);
         seen.0 += usize::from(followed.is_some());
         seen.1 += usize::from(withdrawn);
+        let gone = node.read("model_x", |cells| cells.is_gone(M1));
+        seen.2 += usize::from(gone == Some(true));
     }
     let allocations = counted() - before;
     counting(false);
-    assert_eq!(seen, (100, 100));
+    assert_eq!(seen, (100, 100, 100));
     assert_eq!(allocations, 0, "a read allocated");
 }
 

@@ -689,6 +689,162 @@ async fn an_entry_declines_by_its_own_policy_as_gone_or_full() {
     }
 }
 
+/// A request whose only cells are gone fails with `Routing`, also the one
+/// that hears the last gone decline, as every request after it does. A
+/// request that a cell declined as full, the control, fails with
+/// `Overloaded`, also when the cell it was offered next declined as gone:
+/// the full cell takes the next request once it has room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_request_that_hears_the_last_gone_decline_fails_with_routing() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let cells = tables(&chooser);
+    following(&cells, &[(M1, CellState::Ready), (M2, CellState::Degraded)]).await;
+
+    m1.entries[0].segment.decline_offers_as(Decline::Full);
+    m2.entries[0].segment.decline_offers_as(Decline::Gone);
+    let full = ask(&chooser.segment)
+        .await
+        .expect_err("no cell took the request");
+    assert_eq!((offers(&m1), offers(&m2)), (1, 1));
+    let shown = (
+        followed(&cells, "f", M1).expect("followed"),
+        followed(&cells, "f", M2).expect("followed"),
+    );
+    assert!(shown.0.damped.is_some() && shown.1.gone, "{shown:?}");
+    m1.entries[0].segment.take_offers();
+    ask(&chooser.segment)
+        .await
+        .expect("the lone full cell answered");
+
+    m1.entries[0].segment.decline_offers_as(Decline::Gone);
+    let first = ask(&chooser.segment)
+        .await
+        .expect_err("the last cell declined as gone");
+    assert_eq!((offers(&m1), offers(&m2)), (3, 1));
+    assert!(followed(&cells, "f", M1).expect("followed").gone);
+    let next = ask(&chooser.segment).await.expect_err("every cell is gone");
+    assert_eq!(
+        (offers(&m1), offers(&m2)),
+        (3, 1),
+        "a gone cell was offered"
+    );
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+
+    assert_eq!(full.kind(), ErrorKind::Overloaded, "the control: {full}");
+    assert_eq!(next.kind(), ErrorKind::Routing, "the control: {next}");
+    assert_eq!(
+        first.kind(),
+        ErrorKind::Routing,
+        "the request that heard the last gone decline: {first}"
+    );
+    assert_eq!(first.to_string(), next.to_string());
+}
+
+/// The last gone refusal must also produce Routing when it uses the
+/// final permitted failover: the next request already sees every cell gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_last_gone_decline_at_the_failover_limit_is_routing() {
+    const M3: &str = "model-x-03-us-east-1";
+    assert_eq!(RuntimeConfig::default().cell_failovers, 2);
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let m2 = cell(&spec, &directory, ready(M2, "m2-hub:1337"), &quiet).await;
+    let m3 = cell(&spec, &directory, ready(M3, "m3-hub:1337"), &quiet).await;
+    let cells = tables(&chooser);
+    following(
+        &cells,
+        &[
+            (M1, CellState::Ready),
+            (M2, CellState::Ready),
+            (M3, CellState::Ready),
+        ],
+    )
+    .await;
+    for model in [&m1, &m2, &m3] {
+        model.entries[0].segment.decline_offers_as(Decline::Gone);
+    }
+    let first = ask(&chooser.segment)
+        .await
+        .expect_err("all three cells declined as gone");
+    assert_eq!(offered(&[&m1, &m2, &m3]), [1, 1, 1]);
+    for name in [M1, M2, M3] {
+        assert!(followed(&cells, "f", name).expect("followed").gone);
+    }
+    let next = ask(&chooser.segment)
+        .await
+        .expect_err("the next request has no cell");
+    assert_eq!(next.kind(), ErrorKind::Routing, "the control: {next}");
+    assert_eq!(offered(&[&m1, &m2, &m3]), [1, 1, 1]);
+    for hub in [hub, m1.hub, m2.hub, m3.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+    assert_eq!(
+        first.kind(),
+        ErrorKind::Routing,
+        "the request that heard the final permitted gone refusal: {first}"
+    );
+}
+
+/// A node in the global cell reads a cell its chooser holds gone as gone,
+/// while its state is `ready`, its entry instance is eligible, and fresh
+/// load summaries arrive: the chooser passes it over, so a gate in front
+/// of it answers it as not ready. A cell the chooser does not hold gone
+/// reads as not gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_reads_a_cell_gone_by_its_own_policy_as_gone() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let node = FollowedCells::new();
+    let chooser = reading_chooser(&spec, &hub, &node).await;
+    let m1 = cell(&spec, &directory, ready(M1, "m1-hub:1337"), &quiet).await;
+    let cells = tables(&chooser);
+    following(&cells, &[(M1, CellState::Ready)]).await;
+    let gone = || {
+        node.read("model_x", |cells| cells.is_gone(M1))
+            .expect("the chooser sends to model_x")
+    };
+    ask(&chooser.segment).await.expect("answered");
+    assert!(!gone(), "a cell that takes work read gone");
+
+    m1.entries[0].segment.decline_offers_as(Decline::Gone);
+    ask(&chooser.segment)
+        .await
+        .expect_err("the only cell declined as gone");
+    let marked = Instant::now();
+    until(&cells, "a load summary made after the mark", |cells| {
+        followed(cells, "f", M1)
+            .and_then(|m| m.load_age)
+            .is_some_and(|age| age < marked.elapsed())
+    })
+    .await;
+    let m = followed(&cells, "f", M1).expect("followed");
+    assert!(
+        m.gone && m.state == CellState::Ready && m.eligible.len() == 1,
+        "{m:?}"
+    );
+    assert!(
+        gone(),
+        "the node reads a cell the chooser passes over as not gone"
+    );
+    for hub in [hub, m1.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
 /// An entry instance declines offers as its own, by its segment's own
 /// policy: each request it is offered goes to the other entry instance of
 /// its cell, which takes it, and never to the other cell. Its cell is
