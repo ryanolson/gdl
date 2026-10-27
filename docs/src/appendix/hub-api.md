@@ -20,7 +20,7 @@ A cell's hub serves the `gdl-cell` extension's routes under `/v1/ext/gdl-cell`. 
 | `POST /models/lift` | control | none | a model's key | 204 once the directory has stored a record that no longer revokes the model; 400 and 503 as for `revoke` |
 | `POST /children/{class}/{cell}/withdraw` | control | none | none | 204 once the directory has stored the child's withdrawal, at an epoch past its last record; 404 when the hub holds no record of a child of that name and class; 409 when the directory refuses it; 503 when the directory cannot be read or written |
 | `POST /children/{class}/{cell}/scale-to-zero` | control | none | none | as `withdraw`, for the child's last record written again with `scaled_to_zero` |
-| `POST /instances/{id}/load` | control | the instance's | `LoadReport`, with the instance's `models` when its nodes set them | 204; 409 unless the instance is a usable entry instance, and before the hub has read its cell's last record |
+| `POST /instances/{id}/load` | control | the instance's | `LoadReport`, with the instance's `models` when its nodes set them | 204; 409 unless the instance is a usable entry instance, and before the hub has read its cell's last record. A report that carries a `draining` model is answered once a record that carries it is stored, or 503 after half a summary period |
 | `POST /instances/{id}/chooser` | control | the instance's | none | 204; 409 unless the instance is of a segment that chooses cells |
 | `POST /instances/{id}/unoffered` | control | the instance's | `Unoffered` | 204, whether or not it answers the current revision; 409 from an instance that is not a chooser |
 | `POST /instances/{id}/avoids` | control | the instance's | `Avoids` | 204; 409 from an instance that is not a chooser |

@@ -151,7 +151,9 @@ pub use timing::{CellTiming, RefusedWatches};
 /// report from anything else, a member of another segment, an entry
 /// instance that is not ready, has retired, or has left, or one fenced off
 /// by a later registration of the instance, is refused with 409, which
-/// costs the reporter nothing of its registration. Once a period the hub
+/// costs the reporter nothing of its registration. A report that carries a
+/// model its instance drains is answered once a record that carries the
+/// drain is stored, or with 503 after half a summary period. Once a period the hub
 /// sums the latest report of each usable entry instance, dropping those
 /// older than three periods, into the cell's [`LoadSummary`]: the roots
 /// admitted and the admission limits summed, the usable entry instances
@@ -731,6 +733,54 @@ impl<D: CellDirectory> CellReadiness<D> {
     pub fn following(&self) -> watch::Receiver<BTreeMap<(String, String), u64>> {
         self.relay.following()
     }
+
+    /// Take an entry instance's load report, as `POST
+    /// instances/{instance_id}/load` does. A report that carries a model the
+    /// instance drains is answered only once a record that carries what it
+    /// said is stored: the instance forgets the drain on the answer, and a
+    /// hub that restarted before the write would read a record without it.
+    /// Unanswered within half a summary period, so that the instance hears
+    /// it before its own bound of a period, it is refused with 503, and the
+    /// instance sends the drain again with its next report.
+    async fn take_load(
+        &self,
+        authorized: Authorized,
+        load: LoadReport,
+    ) -> Result<StatusCode, HubError> {
+        let mut stored = self.stored.subscribe();
+        let taken = self
+            .feed
+            .report(
+                authorized.owner,
+                authorized.lease,
+                load,
+                std::time::Instant::now(),
+            )
+            // Not 401 or 404: velo-hub's client drops its registration on
+            // those.
+            .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))?;
+        let feed::Taken::Draining { version, load } = taken else {
+            return Ok(StatusCode::NO_CONTENT);
+        };
+        let bound = self.summary.map_or(SETTLE, |period| period / 2);
+        let wait = stored.wait_for(|stored| {
+            stored
+                .as_ref()
+                .is_some_and(|stored| stored.models.version >= version)
+        });
+        match tokio::time::timeout(bound, wait).await {
+            Ok(Ok(_)) => {
+                let now = std::time::Instant::now();
+                self.feed
+                    .count(authorized.owner, authorized.lease, load, now);
+                Ok(StatusCode::NO_CONTENT)
+            }
+            _ => Err(HubError::new(
+                ErrorCode::Unavailable,
+                "the cell's record that carries this drain is not stored yet",
+            )),
+        }
+    }
 }
 
 impl<D: CellDirectory> Extension for CellReadiness<D> {
@@ -1114,17 +1164,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 gdl_watch::LOAD_ROUTE,
                 post(
                     move |authorized: Authorized, HubJson(load): HubJson<LoadReport>| async move {
-                        self.feed
-                            .report(
-                                authorized.owner,
-                                authorized.lease,
-                                load,
-                                std::time::Instant::now(),
-                            )
-                            .map(|()| StatusCode::NO_CONTENT)
-                            // Not 401 or 404: velo-hub's client drops its
-                            // registration on those.
-                            .map_err(|refused| HubError::new(ErrorCode::Conflict, refused))
+                        self.take_load(authorized, load).await
                     },
                 ),
             )

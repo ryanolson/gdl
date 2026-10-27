@@ -285,6 +285,23 @@ impl Models {
         raised
     }
 
+    /// The least version of the list whose record says what the table
+    /// says now of each model in `keys`: the latest version at which one
+    /// of their entries changed. A record of an earlier version may say
+    /// otherwise; a later change of another model needs no record of its
+    /// own for these. A model with no entry, as one revoked, takes the
+    /// list's version: when it left the list is not kept.
+    pub(super) fn settled<'a>(&self, keys: impl IntoIterator<Item = &'a ModelKey>) -> u64 {
+        keys.into_iter()
+            .map(|key| {
+                self.entries
+                    .get(key)
+                    .map_or(self.version, |tracked| tracked.since)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Whether the last record has been read, so that what instances say
     /// can be taken.
     pub(super) fn restored(&self) -> bool {

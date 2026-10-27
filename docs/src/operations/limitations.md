@@ -355,12 +355,16 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 - **Workaround:** restart the hub, whose new watch's snapshot no longer holds the record.
 - **Lifts:** a directory that keeps each withdrawal in its snapshot.
 
-### Two rare restarts lose part of a model's history
-- **What:** a hub that took the report that ends a drain, and restarted before it stored a record that says `drained`, reads the earlier record: the model is `unavailable`, not `drained`, until the cell withdraws. And under a parent of an earlier build, which answers no read of a child's record, a restarted hub whose epoch equals its predecessor's to the millisecond can publish a lower `models_version` than its predecessor did.
-- **Impact:** both fail safe. The model stays listed, and nothing is removed.
-- **Why:** the hub answers a report once it has taken it, not once a record that carries it is stored, and the instance then forgets the drain. Two writers of one epoch are told apart only by their sequence numbers.
+### A drain not stored while its instance stops can be lost
+- **What:** an instance that stops waits while it drains, before it retires, until its hub has stored each drain it reported: for at most two summary periods, and never past its drain bound. If the hub's writes take longer than that, and the hub restarts before it stores the drain, the restarted hub reads the record from before the drain: the model is `unavailable`, not `drained`, until the cell withdraws. An instance that loses its lease does not wait.
+- **Impact:** it fails safe. The model stays listed, and nothing is removed.
+- **Why:** an instance that retired cannot report, and until it retires, peers still route work to it.
 - **Workaround:** withdraw the cell, or drain the model again.
-- **Lifts:** a hub that answers a report only once a record that carries it is stored, or an instance that reports a drained model for a while after.
+
+### A revoked model's drain report waits for the cell's latest write
+- **What:** an instance that still reports a revoked model as `draining` is answered only once the record of the list's latest version is stored. While other models change and each write takes more than half a summary period, its reports are refused with 503, and their refusals count only once one is answered.
+- **Why:** the hub does not keep the version at which it revoked a model.
+- **Workaround:** none needed: the report is answered once the writes keep up, and the instance's admission counts meanwhile.
 
 ### A declared model cannot be drained
 - **What:** a model from `[cell] models` is `ready` while the cell has a usable entry instance that reports no list of its own, and `unavailable` while it has none. Removing it from the settings leaves it `unavailable` in the record, never `drained`, until the cell withdraws.

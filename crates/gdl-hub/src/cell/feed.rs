@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 use futures::Stream;
 use futures::stream::BoxStream;
 use gdl_cells::{CellState, LoadSummary};
-use gdl_model::{InstanceModel, ModelKey};
+use gdl_model::{InstanceModel, InstanceModelState, ModelKey};
 use gdl_watch::LoadReport;
 use tokio::sync::{broadcast, watch};
 use velo_hub::Lease;
@@ -394,13 +394,18 @@ impl Feed {
     /// with no name is left out. Refused before the cell's last record is
     /// read, since what it says could not be kept: the instance sends it
     /// again. The reason, when refused.
+    ///
+    /// A report that carries a model the instance drains is
+    /// [`Taken::Draining`]: its models and its admission are taken at once,
+    /// but its refusals are counted only once it is answered
+    /// ([`Feed::count`]).
     pub(super) fn report(
         &self,
         owner: InstanceId,
         lease: Lease,
         mut load: LoadReport,
         now: Instant,
-    ) -> Result<(), String> {
+    ) -> Result<Taken, String> {
         let mut shared = self.lock();
         if !shared.models.restored() {
             return Err("the cell's hub has not read its cell's last record yet".into());
@@ -417,13 +422,32 @@ impl Feed {
                     }
                     None => Said::Silent(lease.epoch),
                 };
+                let draining: Vec<ModelKey> = match &said {
+                    Said::Listed(models, _) => models
+                        .iter()
+                        .filter(|model| model.state == InstanceModelState::Draining)
+                        .map(InstanceModel::key)
+                        .collect(),
+                    Said::Silent(_) | Said::Unknown => Vec::new(),
+                };
                 let changed = entry.said != said;
                 entry.said = said;
-                shared.loads.put(owner, lease.epoch, load, now);
                 if changed && shared.update_models() {
                     self.models_changed(&shared);
                 }
-                Ok(())
+                if !draining.is_empty() {
+                    // Its admission replaces the last report's, so it counts
+                    // at once; its refusals only once it is answered.
+                    let admission = LoadReport {
+                        refusals: 0,
+                        ..load.clone()
+                    };
+                    shared.loads.put(owner, lease.epoch, admission, now);
+                    let version = shared.models.settled(&draining);
+                    return Ok(Taken::Draining { version, load });
+                }
+                shared.loads.put(owner, lease.epoch, load, now);
+                Ok(Taken::Counted)
             }
             Some(_) => Err(format!(
                 "instance {owner} is not usable: it is not ready, it retired, or it left"
@@ -431,6 +455,21 @@ impl Feed {
             None => Err(format!(
                 "instance {owner} is not an entry instance of the cell"
             )),
+        }
+    }
+
+    /// Count the refusals of a report that [`Feed::report`] took as
+    /// [`Taken::Draining`], once it is answered, with its admission again:
+    /// only while `owner` is still a usable entry instance in the
+    /// registration `lease` is of.
+    pub(super) fn count(&self, owner: InstanceId, lease: Lease, load: LoadReport, now: Instant) {
+        let mut shared = self.lock();
+        if shared
+            .entries
+            .get(&owner)
+            .is_some_and(|entry| entry.epoch == lease.epoch && entry.usable())
+        {
+            shared.loads.put(owner, lease.epoch, load, now);
         }
     }
 
@@ -571,6 +610,21 @@ impl Held {
     fn none(self) -> bool {
         !self.ready && !self.retired
     }
+}
+
+/// What [`Feed::report`] did with a report it took.
+#[derive(Debug)]
+pub(super) enum Taken {
+    /// Its load is counted: it is answered at once.
+    Counted,
+    /// It carries a model its instance drains. The instance forgets a
+    /// drain once a report that carries it is answered, so the answer
+    /// waits for a stored record whose models' version is at least
+    /// `version`, the version at which those models' entries last changed,
+    /// which a restarted hub reads back. The refusals of `load`
+    /// are counted only then, since a report not answered is sent again
+    /// with them.
+    Draining { version: u64, load: LoadReport },
 }
 
 impl Shared {

@@ -17,7 +17,7 @@ use common::{
 use futures::{Stream, StreamExt};
 use gdl_cells::{LoadSummary, MemoryDirectory};
 use gdl_hub::{CellTiming, CellWatch};
-use gdl_model::{CellSettings, SegmentPhase};
+use gdl_model::{CellSettings, InstanceModel, InstanceModelState, SegmentPhase};
 use gdl_watch::{CellWatchEvent, FollowEvent, LoadReport};
 use velo_hub::client::ClientError;
 use velo_hub::protocol::ErrorCode;
@@ -286,6 +286,164 @@ async fn a_report_from_anything_but_a_usable_entry_instance_is_refused() {
         .expect("the hub takes it");
     load(&mut watch, summary(1, 4, 1, 0), WAIT).await;
     hub.shutdown().await.expect("the hub stops");
+}
+
+/// A report that carries a drain is answered only once a record that
+/// carries it is stored, within half a period, and until then counts none
+/// of its refusals: the instance sends them again with its next report,
+/// and they count once. Its admission and its models are taken at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unanswered_drain_report_counts_none_of_its_refusals() {
+    let directory = common::Gated::new();
+    let (hub, readiness) = hub_of(
+        cell(common::CELL, "model-x-01-hub:1337"),
+        directory.clone(),
+        timing(),
+    )
+    .await;
+    let mut watch = watch(&readiness).await;
+    let (a, b) = (join_ready(&hub, "f").await, join_ready(&hub, "f").await);
+    ready(&mut watch, 2).await;
+    let draining = LoadReport {
+        models: Some(vec![InstanceModel {
+            model: "m".into(),
+            routing_key: None,
+            state: InstanceModelState::Draining,
+        }]),
+        ..report(1, 8, 3)
+    };
+
+    directory.close();
+    let refused = a.report(draining.clone()).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ClientError::Hub {
+                code: ErrorCode::Unavailable,
+                ..
+            })
+        ),
+        "not answered before the drain is stored: {refused:?}"
+    );
+    directory.holding().await;
+    // The summary that counts both admissions counts none of a's
+    // refusals, nor does any before it.
+    b.report(report(2, 8, 0)).await.expect("the hub takes it");
+    let both = tokio::time::timeout(WAIT, async {
+        loop {
+            if let CellWatchEvent::Load { load: Some(load) } =
+                watch.next().await.expect("the watch goes on")
+            {
+                assert_eq!(load.refusals, 0, "the unanswered report's refusals counted");
+                if load.admitted == 3 {
+                    return load;
+                }
+            }
+        }
+    })
+    .await
+    .expect("a summary of both in time");
+    assert_eq!(Some(both), summary(3, 16, 2, 0));
+
+    directory.open();
+    a.report(draining)
+        .await
+        .expect("answered once the drain is stored");
+    load(&mut watch, summary(3, 16, 2, 3), WAIT).await;
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// Unrelated model writes must not keep dropping an instance's load once
+/// a record already stores its drain. Each held write completes before
+/// the next summary, so the directory keeps making progress.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_drain_keeps_reporting_load_while_another_models_record_changes() {
+    let directory = common::Gated::new();
+    let (hub, readiness) = hub_of(
+        cell(common::CELL, "model-x-01-hub:1337"),
+        directory.clone(),
+        timing(),
+    )
+    .await;
+    let mut watch = watch(&readiness).await;
+    let mut records = Records::new(&directory.inner);
+    let (a, b) = (join_ready(&hub, "f").await, join_ready(&hub, "f").await);
+    ready(&mut watch, 2).await;
+    let listed = |name: &str, state, admitted| LoadReport {
+        models: Some(vec![InstanceModel {
+            model: name.into(),
+            routing_key: None,
+            state,
+        }]),
+        ..report(admitted, 8, 0)
+    };
+    let draining = listed("m", InstanceModelState::Draining, 3);
+    a.report(draining.clone())
+        .await
+        .expect("the drain is already stored and answered");
+    b.report(listed("other", InstanceModelState::Starting, 2))
+        .await
+        .expect("the other instance reports");
+    load(&mut watch, summary(5, 16, 2, 0), WAIT).await;
+
+    let mut answers = Vec::new();
+    let mut summaries = Vec::new();
+    for n in 0..4 {
+        let (said, stored) = if n % 2 == 0 {
+            (InstanceModelState::Ready, gdl_cells::ModelState::Ready)
+        } else {
+            (
+                InstanceModelState::Starting,
+                gdl_cells::ModelState::Unavailable,
+            )
+        };
+        directory.close();
+        b.report(listed("other", said, 2))
+            .await
+            .expect("an unrelated model changes");
+        directory.holding().await;
+        answers.push(a.report(draining.clone()).await.is_ok());
+        directory.open();
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let record = records.next().await;
+                if record
+                    .models
+                    .iter()
+                    .any(|entry| entry.model == "other" && entry.state == stored)
+                {
+                    assert!(record.models.iter().any(|entry| {
+                        entry.model == "m" && entry.state == gdl_cells::ModelState::Draining
+                    }));
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the unrelated write is stored before the next report");
+        let counted = tokio::time::timeout(WAIT, async {
+            loop {
+                if let CellWatchEvent::Load { load } =
+                    watch.next().await.expect("the watch goes on")
+                {
+                    return load;
+                }
+            }
+        })
+        .await
+        .expect("the next summary paces the next reports");
+        summaries.push(counted);
+    }
+    hub.shutdown().await.expect("the hub stops");
+    assert_eq!(
+        answers, [true; 4],
+        "a drain already stored waited for unrelated writes"
+    );
+    assert_eq!(
+        summaries.last().copied().flatten(),
+        summary(5, 16, 2, 0),
+        "the stored drain's fresh reports lost its admission and limit: answers={answers:?}, summaries={summaries:?}"
+    );
 }
 
 /// A class that no hop enters has no entry instance, so its cell has no

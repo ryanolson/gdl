@@ -968,7 +968,7 @@ impl Launch {
                         let read = move || segment.load();
                         let me = self.node.instance_id();
                         let models = self.models.clone();
-                        Some(Abort(session.report_load(me, period, read, models)))
+                        Some(session.report_load(me, period, read, models))
                     }
                     _ => None,
                 };
@@ -993,8 +993,6 @@ impl Launch {
                         (None, Ok(()), self.cell_drain_retires(), true)
                     }
                 };
-                #[cfg(feature = "hub")]
-                drop(reporter);
                 let deadline = tokio::time::Instant::now() + self.drain;
                 let mut cutoff = Box::pin(self.cell_cutoff(deadline, by_cell).fuse());
                 process.health.set(Phase::Draining);
@@ -1019,8 +1017,19 @@ impl Launch {
                 // its bound, however long the body takes to finish.
                 let closing = self.cell_drain_declines(segment.as_ref(), deadline);
                 // Peers hear of the retirement while the body finishes; a
-                // lost lease took the hub that would hear it.
+                // lost lease took the hub that would hear it. First, a drain
+                // the hub has not answered is reported until it is: the hub
+                // takes no report once the instance retires. For at most two
+                // report periods, one refused report and its next, since
+                // the instance admits what peers route here until then.
+                #[cfg(feature = "hub")]
+                let reported = reporter.zip(self.reports).filter(|_| stop.is_ok());
                 let retiring = async {
+                    #[cfg(feature = "hub")]
+                    if let Some((reporter, period)) = reported {
+                        let bound = tokio::time::Instant::now() + period * 2;
+                        reporter.finish(bound.min(deadline)).await;
+                    }
                     if stop.is_ok() && retires {
                         self.retire(deadline).await;
                     }

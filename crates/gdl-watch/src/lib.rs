@@ -165,7 +165,9 @@ pub fn followed_path(class: &str, cell: &str) -> String {
 /// The load report's route, under the extension's, on the hub's control
 /// listener: `POST` with a [`LoadReport`], carrying the credential of the
 /// instance the path names, which must be a usable entry instance of the
-/// cell.
+/// cell. A report that carries a `draining` model is answered once a
+/// record that carries the drain is stored, or with 503 after half a
+/// summary period; the instance forgets the drain only on the answer.
 pub const LOAD_ROUTE: &str = "/instances/{instance_id}/load";
 
 /// The drain's route, under the extension's, on the hub's control

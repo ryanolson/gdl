@@ -56,9 +56,9 @@ fn report(models: Option<Vec<InstanceModel>>) -> LoadReport {
 
 /// Entry instances (of `f`), joined and ready, once the cell's watch
 /// shows them ready: from then the hub takes their reports.
-async fn entries<const N: usize>(
+async fn entries<const N: usize, D: gdl_cells::CellDirectory>(
     hub: &Hub,
-    cell: &gdl_hub::CellReadiness<MemoryDirectory>,
+    cell: &gdl_hub::CellReadiness<D>,
 ) -> [Instance; N] {
     let mut watch = tokio::time::timeout(WAIT, cell.watch())
         .await
@@ -781,5 +781,169 @@ async fn a_lifted_declared_model_is_listed_without_instances() {
         states(&lifted),
         states(&before),
         "lifting a declared model restores its starting entry without an instance report"
+    );
+}
+
+/// An instance forgets a drain once its hub answers a report that
+/// carries it, as `gdl::InstanceModels` does, and then drops the model
+/// from its reports. So the hub answers such a report only once a record
+/// that carries the drain is stored: a hub that restarts before the write
+/// reads the record from before the drain, and an instance that had
+/// forgotten the drain could never end it, leaving the model
+/// `unavailable`. With the write held, the report is not answered, the
+/// instance still says the model drains to the restarted hub, and the
+/// model ends `drained`. A write that is not held is the control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_acknowledged_drain_survives_a_restart_before_its_record_is_stored() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    #[derive(Clone)]
+    struct PendingDrain {
+        records: MemoryDirectory,
+        blocked: bool,
+        arrived: Arc<Notify>,
+    }
+
+    impl gdl_cells::CellDirectory for PendingDrain {
+        type Watch = gdl_cells::MemoryWatch;
+
+        async fn publish(&self, record: CellRecord) -> Result<(), gdl_cells::DirectoryError> {
+            if self.blocked
+                && record
+                    .models
+                    .iter()
+                    .any(|entry| matches!(entry.state, ModelState::Draining | ModelState::Drained))
+            {
+                self.arrived.notify_one();
+                tokio::time::timeout(WAIT, std::future::pending::<()>())
+                    .await
+                    .expect("the hub stops before the pending drain write times out");
+            }
+            self.records.publish(record).await
+        }
+
+        async fn withdraw(
+            &self,
+            withdrawal: gdl_cells::Withdrawal,
+        ) -> Result<(), gdl_cells::DirectoryError> {
+            self.records.withdraw(withdrawal).await
+        }
+
+        fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> Self::Watch {
+            self.records.watch(class, from)
+        }
+    }
+
+    for block in [false, true] {
+        let directory = PendingDrain {
+            records: MemoryDirectory::new(),
+            blocked: block,
+            arrived: Arc::new(Notify::new()),
+        };
+        let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+        let mut records = Records::new(&directory.records);
+        let [a] = entries(&hub, &readiness).await;
+        send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
+        until(&mut records, &[("m", ModelState::Ready)]).await;
+
+        let draining = report(Some(vec![says("m", InstanceModelState::Draining)]));
+        let answered = a.report(draining.clone()).await.is_ok();
+        if block {
+            tokio::time::timeout(WAIT, directory.arrived.notified())
+                .await
+                .expect("the drain's record write is pending");
+            assert_eq!(
+                states(&held(&directory.records).await),
+                [("m", ModelState::Ready)],
+                "the record has not stored the drain"
+            );
+            assert!(
+                !answered,
+                "the hub answered the drain before a record that carries it was stored"
+            );
+        } else {
+            assert!(answered, "the hub answers once the drain is stored");
+            until(&mut records, &[("m", ModelState::Draining)]).await;
+        }
+        // The node drops the model: a drain no answer acknowledged stays in
+        // the instance's reports.
+        let dropped = if answered {
+            report(Some(vec![]))
+        } else {
+            draining.clone()
+        };
+        let _ = a.report(dropped.clone()).await;
+        hub.shutdown().await.expect("the reporting hub stops");
+        drop(a);
+
+        let (hub, readiness) = hub_of(cell(), directory.records.clone(), quiet()).await;
+        let [a] = entries(&hub, &readiness).await;
+        send(&a, dropped).await;
+        send(&a, report(Some(vec![]))).await;
+        readiness
+            .set_presence(Presence::ScaledToZero)
+            .await
+            .expect("the current model list is stored");
+        let after = held(&directory.records).await;
+        hub.shutdown().await.expect("the restarted hub stops");
+        assert_eq!(
+            states(&after),
+            [("m", ModelState::Drained)],
+            "the drain survives the restart (block={block})"
+        );
+    }
+}
+
+/// A revocation in memory cannot stand in for a stored drain: the hub
+/// can restart before the record that carries either reaches the directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_during_an_unstored_revocation_survives_a_restart() {
+    let directory = common::Gated::new();
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory.inner);
+    let [a] = entries(&hub, &readiness).await;
+    send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
+    until(&mut records, &[("m", ModelState::Ready)]).await;
+
+    directory.close();
+    let revoking = readiness.revoke(
+        ModelKey {
+            model: "m".into(),
+            routing_key: None,
+        },
+        true,
+    );
+    tokio::pin!(revoking);
+    assert!(futures::poll!(&mut revoking).is_pending());
+    directory.holding().await;
+    let draining = report(Some(vec![says("m", InstanceModelState::Draining)]));
+    let answered = a.report(draining.clone()).await.is_ok();
+    let last = held(&directory.inner).await;
+    assert_eq!(states(&last), [("m", ModelState::Ready)]);
+    assert!(last.revoked.is_empty(), "neither change is stored");
+    let dropped = if answered {
+        report(Some(vec![]))
+    } else {
+        draining
+    };
+    let _ = a.report(dropped.clone()).await;
+    hub.shutdown().await.expect("the reporting hub stops");
+    drop(a);
+
+    let (hub, readiness) = hub_of(cell(), directory.inner.clone(), quiet()).await;
+    let [a] = entries(&hub, &readiness).await;
+    send(&a, dropped).await;
+    send(&a, report(Some(vec![]))).await;
+    readiness
+        .set_presence(Presence::ScaledToZero)
+        .await
+        .expect("the current model list is stored");
+    let after = held(&directory.inner).await;
+    hub.shutdown().await.expect("the restarted hub stops");
+    assert_eq!(
+        states(&after),
+        [("m", ModelState::Drained)],
+        "the drain was answered={answered} before the revocation was stored"
     );
 }

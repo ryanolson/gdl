@@ -317,13 +317,17 @@ impl Writer {
             }
             Err(DirectoryError::NotNewer { held, offered, .. }) => {
                 tracing::warn!(%held, %offered, "the directory refused the cell's record as not newer");
-                if held.epoch == self.epoch {
+                if held.epoch == self.epoch && self.stored {
                     self.seq = held.seq;
-                } else if held.epoch > self.epoch && !self.stored {
+                } else if held.epoch >= self.epoch && !self.stored {
                     // Nothing has been stored under this epoch, so no reader
                     // knows it: it can still move past the one held. The
                     // models' versions follow it, so they stay above the
-                    // ones published under the epoch held.
+                    // ones published under the epoch held. An equal epoch
+                    // is a predecessor's that started in the same
+                    // millisecond, whose models' versions count from the
+                    // same floor: catching up its sequence alone would
+                    // publish a lower version than it did.
                     self.epoch = held.epoch.saturating_add(1);
                     self.seq = 0;
                     feed.raise_floor(super::models::floor(self.epoch));

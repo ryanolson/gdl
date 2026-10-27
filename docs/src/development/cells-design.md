@@ -150,6 +150,10 @@ A cell's record lists its models, and each entry's state comes from what the cel
 
 A drain ends only once every usable entry instance has reported in its current registration, and none has the model. An instance not heard from may still be draining it. A drain read from the last record after a restart ends only once an instance reports.
 
+An instance forgets a drain once the hub answers a report that carries it. So the hub answers only once a stored record holds the version at which the drained models' entries last changed. A later change of another model does not hold the answer back. A record that holds the drain is what a restarted hub reads back. The report's refusals are counted only when it is answered, since the instance sends a report again, refusals included, until one is answered. Its admission replaces the one before, so it counts at once.
+
+**Rejected: an instance that reports a drained model for a while after the answer.** No fixed time covers a hub whose writes are slow, and the model would stay `draining` in the record for that time after every drain.
+
 A new state is not additive. A hub of an earlier build refuses a record, or a load report, whose model state it does not know, and a refused load report drops that instance's load from the summary too. So a build that adds a state must reach every reader first.
 
 A model loaded again while it drains starts afresh, as it does after `drained`, so a state alone is the whole history the record has to keep.
@@ -159,6 +163,8 @@ A model loaded again while it drains starts afresh, as it does after `drained`, 
 The list's version counts from the epoch of the hub's writes, in its high bits (epoch × 2^20). A hub that reads no record, as from a relay parent that restarted, still publishes versions above any its predecessor did, unless that one made more than 2^20 changes for each millisecond it ran. So a reader that holds a version holds the list of that version.
 
 **Rejected: the epoch itself as the floor.** Several changes can fall in one millisecond, so a later hub could reuse a version for another list.
+
+A hub that has stored no write and is refused by a record of its own epoch moves to the next epoch, as it does for a later one. Such a record is a predecessor's that started in the same millisecond, and its versions count from the same floor. Catching up its sequence number alone would publish a lower version than the predecessor did.
 
 ## A cell scaled to 0 has no lease
 

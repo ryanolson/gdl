@@ -27,25 +27,51 @@ impl HubSession {
     /// instance's: it is logged once, until a report is taken again. `read`
     /// gives `None` when there is nothing to report. Each report carries
     /// the list `models` holds, if a node set one, and a change of it is
-    /// reported at once; once the hub takes a report, `models` hears what
-    /// it carried, so that a drain it carried can leave the list.
+    /// reported at once; once the hub answers a report, which it does for
+    /// one that carries a drain once a record that carries the drain is
+    /// stored, `models` hears what it carried, so that a drain it carried
+    /// can leave the list.
     pub(crate) fn report_load(
         &self,
         instance: InstanceId,
         period: Duration,
         read: impl Fn() -> Option<SegmentLoad> + Send + 'static,
         models: InstanceModels,
-    ) -> JoinHandle<()> {
+    ) -> Reporter {
         let ext = self.client.ext(gdl_watch::EXTENSION);
         let path = gdl_watch::load_path(instance);
-        tokio::spawn(report(period, read, models, move |report| {
+        let task = tokio::spawn(report(period, read, models.clone(), move |report| {
             let (ext, path) = (ext.clone(), path.clone());
             async move {
                 ext.control_post::<_, ()>(&path, &report)
                     .await
                     .map_err(|error: ClientError| error.to_string())
             }
-        }))
+        }));
+        Reporter { task, models }
+    }
+}
+
+/// An entry instance's load reports, which end when it is dropped.
+pub(crate) struct Reporter {
+    task: JoinHandle<()>,
+    models: InstanceModels,
+}
+
+impl Reporter {
+    /// Report until every drain the instance's list carried has been in a
+    /// report its hub answered, or until `deadline`, then stop. An instance
+    /// that stops waits for it, while it drains, before it retires, since
+    /// its hub takes no report from it after: a drain its hub took but had
+    /// not stored would be lost if the hub restarted.
+    pub(crate) async fn finish(self, deadline: tokio::time::Instant) {
+        let _ = tokio::time::timeout_at(deadline, self.models.reported()).await;
+    }
+}
+
+impl Drop for Reporter {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
@@ -210,8 +236,10 @@ mod tests {
 
 #[cfg(test)]
 mod models {
-    use super::{LoadReport, SegmentLoad, report};
+    use super::{LoadReport, Reporter, SegmentLoad, report};
     use gdl::{InstanceModel, InstanceModelState, InstanceModels};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -266,5 +294,84 @@ mod models {
         let (later, _) = next().await;
         assert_eq!(later.models, Some(vec![ready("m")]));
         task.abort();
+    }
+
+    /// An instance that stops while its hub has not answered a report that
+    /// carries a drain goes on reporting the drain until a report is
+    /// answered, then stops; one whose hub answers none stops at its
+    /// deadline; and one with no drain to report stops at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_stopping_instance_reports_its_drain_until_answered() {
+        let load = SegmentLoad {
+            admitted: 0,
+            limit: 4,
+            declined: 0,
+        };
+        let deadline = PERIOD * 10;
+        // The hub refuses the first `refused` reports, then answers: how
+        // long the stop waited, and whether each report up to the answered
+        // one carried the drain.
+        let stop = async |models: &InstanceModels, refused: usize| {
+            let sent = Arc::new(AtomicUsize::new(0));
+            let (carried, mut carries) = mpsc::unbounded_channel();
+            let counted = Arc::clone(&sent);
+            let task = tokio::spawn(report(
+                PERIOD,
+                move || Some(load),
+                models.clone(),
+                move |report: LoadReport| {
+                    let n = counted.fetch_add(1, Ordering::SeqCst);
+                    let draining = report.models.is_some_and(|models| {
+                        models
+                            .iter()
+                            .any(|model| model.state == InstanceModelState::Draining)
+                    });
+                    if n <= refused {
+                        let _ = carried.send(draining);
+                    }
+                    async move {
+                        if n < refused {
+                            Err("not stored yet".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    }
+                },
+            ));
+            let reporter = Reporter {
+                task,
+                models: models.clone(),
+            };
+            let start = tokio::time::Instant::now();
+            reporter.finish(start + deadline).await;
+            let waited = start.elapsed();
+            let mut all = Vec::new();
+            while let Ok(draining) = carries.try_recv() {
+                all.push(draining);
+            }
+            (waited, all)
+        };
+        let draining = InstanceModel {
+            state: InstanceModelState::Draining,
+            ..ready("m")
+        };
+
+        let models = InstanceModels::new();
+        models.set([draining.clone()]).expect("a list");
+        models.set([]).expect("the node drops the model");
+        assert_eq!(
+            stop(&models, 2).await,
+            (PERIOD * 3, vec![true; 3]),
+            "answered at the third"
+        );
+
+        let models = InstanceModels::new();
+        models.set([draining]).expect("a list");
+        let (waited, _) = stop(&models, usize::MAX).await;
+        assert_eq!(waited, deadline, "never answered: held to the deadline");
+
+        let models = InstanceModels::new();
+        models.set([ready("m")]).expect("a list");
+        assert_eq!(stop(&models, usize::MAX).await, (Duration::ZERO, vec![]));
     }
 }

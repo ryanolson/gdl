@@ -145,3 +145,112 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
         );
     }
 }
+
+/// When a parent has no restart read route, its retained epoch can equal
+/// the new writer's millisecond clock value. Catching up its sequence
+/// must not lower the model version. A greater retained epoch is a control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repeated_writer_epoch_keeps_model_versions_increasing() {
+    for equal in [false, true] {
+        let held = Arc::new(std::sync::Mutex::new(None::<CellRecord>));
+        let (sent, mut accepted) = mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/v1/ext/gdl-cell/report",
+            post(move |Json(report): Json<Report>| {
+                let held = Arc::clone(&held);
+                let sent = sent.clone();
+                async move {
+                    let Report::Record(record) = report else {
+                        panic!("the child publishes its record");
+                    };
+                    let mut held = held.lock().expect("the retained record");
+                    let previous = held.get_or_insert_with(|| {
+                        // Inject the predecessor at the first offer so the
+                        // equal-epoch case needs no wall-clock race.
+                        let epoch = record.epoch + if equal { 0 } else { 60_000 };
+                        let version = epoch * (1 << 20) + 1;
+                        CellRecord {
+                            epoch,
+                            seq: 10,
+                            models: vec![ModelEntry {
+                                model: "m".into(),
+                                routing_key: None,
+                                state: ModelState::Ready,
+                                since: version,
+                            }],
+                            models_version: version,
+                            ..record.clone()
+                        }
+                    });
+                    if record.version() <= previous.version() {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(ReportRefusal::NotNewer {
+                                held: (previous.epoch, previous.seq),
+                                offered: (record.epoch, record.seq),
+                            }),
+                        )
+                            .into_response();
+                    }
+                    sent.send((previous.clone(), record))
+                        .expect("the test receives the accepted record");
+                    Json(ReportReply { interval_ms: 100 }).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a parent port");
+        let parent = listener
+            .local_addr()
+            .expect("the parent address")
+            .to_string();
+        let server = tokio::spawn(async move { velo_hub::axum::serve(listener, app).await });
+        let directory = HubDirectory::new(Some(parent.clone()), None).expect("a relay directory");
+        let cell = Arc::new(
+            CellReadiness::new(
+                &spec(),
+                CellSettings {
+                    directory: DirectoryBackend::Relay {
+                        parent_hub: Some(parent),
+                        state_dir: None,
+                    },
+                    ..common::settings()
+                },
+                directory.clone(),
+                CellTiming {
+                    heartbeat: Duration::from_millis(100),
+                    ..CellTiming::default()
+                },
+            )
+            .expect("valid cell settings")
+            .with_reports(&directory)
+            .expect("a relay cell"),
+        );
+        let hub = Hub::builder(config())
+            .extension(GraphAdmission::new(spec()))
+            .extension(cell)
+            .serve()
+            .await
+            .expect("the child serves");
+        let (previous, record) = tokio::time::timeout(WAIT, accepted.recv())
+            .await
+            .expect("the parent accepts a record in time")
+            .expect("the accepted record arrives");
+        hub.shutdown().await.expect("the child stops");
+        server.abort();
+
+        assert!(record.version() > previous.version(), "the record is newer");
+        assert_ne!(record.models, previous.models, "the lists differ");
+        assert!(
+            record.models_version > previous.models_version,
+            "sequence recovery lowered models_version (equal={equal}): before=({}, {}, {}), after=({}, {}, {})",
+            previous.epoch,
+            previous.seq,
+            previous.models_version,
+            record.epoch,
+            record.seq,
+            record.models_version,
+        );
+    }
+}

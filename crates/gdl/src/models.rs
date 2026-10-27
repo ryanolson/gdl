@@ -37,6 +37,8 @@ tokio::task_local! {
 pub struct InstanceModels {
     said: Arc<watch::Sender<Option<Arc<[InstanceModel]>>>>,
     drains: Arc<Mutex<Drains>>,
+    /// Whether a drain awaits a report that carries it being taken.
+    unreported: Arc<watch::Sender<bool>>,
 }
 
 /// The drains a report has yet to carry.
@@ -66,6 +68,7 @@ impl InstanceModels {
         Self {
             said: Arc::new(watch::Sender::new(None)),
             drains: Arc::default(),
+            unreported: Arc::new(watch::Sender::new(false)),
         }
     }
 
@@ -128,8 +131,10 @@ impl InstanceModels {
         Ok(())
     }
 
-    /// The hub took a report that carried `reported`: the drains in it are
-    /// reported, and the models that left meanwhile leave the list.
+    /// The hub answered a report that carried `reported`, which it does
+    /// once a record that carries the report's drains is stored: the
+    /// drains in it are reported, and the models that left meanwhile leave
+    /// the list.
     #[doc(hidden)]
     pub fn taken(&self, reported: &[InstanceModel]) {
         let mut drains = self.drains.lock().unwrap_or_else(PoisonError::into_inner);
@@ -143,16 +148,37 @@ impl InstanceModels {
         }
         if changed {
             self.publish(&drains);
+        } else {
+            self.note(&drains);
         }
     }
 
+    /// Resolves once every drain the list carried has been in a report
+    /// the hub took: the runtime waits for it, within its drain bound,
+    /// before an instance that stops stops reporting, so that a hub that
+    /// restarts keeps the drain.
+    #[doc(hidden)]
+    pub async fn reported(&self) {
+        let mut unreported = self.unreported.subscribe();
+        // The sender lives as long as `self`.
+        let _ = unreported.wait_for(|unreported| !*unreported).await;
+    }
+
     fn publish(&self, drains: &Drains) {
+        self.note(drains);
         let list = drains.list();
         self.said.send_if_modified(|said| {
             let changed = *said != list;
             *said = list;
             changed
         });
+    }
+
+    /// Note whether a drain awaits a report that carries it being taken.
+    fn note(&self, drains: &Drains) {
+        let now = !drains.unreported.is_empty();
+        self.unreported
+            .send_if_modified(|unreported| std::mem::replace(unreported, now) != now);
     }
 
     /// The list as it changes: `None` until a node sets one.
@@ -279,6 +305,44 @@ mod tests {
         assert_eq!(list(), Some(vec![model("o", InstanceModelState::Starting)]));
         models.set([]).expect("a list");
         assert_eq!(list(), Some(vec![]), "loaded again, it is not draining");
+    }
+
+    /// `reported` waits while a drain no taken report carried is in the
+    /// list, whether the node still lists the model or dropped it, and
+    /// resolves once one carried it; a list with no drain does not wait.
+    #[tokio::test(start_paused = true)]
+    async fn reported_waits_for_each_drain_to_be_taken() {
+        let models = InstanceModels::new();
+        let waits = |models: &InstanceModels| {
+            let models = models.clone();
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(1), models.reported())
+                    .await
+                    .is_err()
+            }
+        };
+        models
+            .set([model("m", InstanceModelState::Ready)])
+            .expect("a list");
+        assert!(!waits(&models).await, "no drain");
+        models
+            .set([model("m", InstanceModelState::Draining)])
+            .expect("a list");
+        assert!(waits(&models).await, "the drain is not reported");
+        models.set([]).expect("a list");
+        assert!(
+            waits(&models).await,
+            "dropped, the drain is still not reported"
+        );
+        models.taken(&[model("m", InstanceModelState::Draining)]);
+        assert!(!waits(&models).await, "reported");
+
+        models
+            .set([model("n", InstanceModelState::Draining)])
+            .expect("a list");
+        assert!(waits(&models).await);
+        models.taken(&[model("n", InstanceModelState::Draining)]);
+        assert!(!waits(&models).await, "taken while still listed");
     }
 
     /// Setting the list it holds changes nothing, so the runtime sends no
