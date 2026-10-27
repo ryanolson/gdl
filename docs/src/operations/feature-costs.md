@@ -97,7 +97,7 @@ cargo test --release -p gdl-runtime --lib the_cost_of_a_boundary_pick -- --ignor
 | accepted first offer over loopback, cells | 36.8 us, 37.1 us | 33.1 us, 36.8 us |
 | accepted first offer over loopback, roster | 30.3 us, 33.2 us | 37.9 us, 32.6 us |
 
-The picks are unchanged, and the offers are within their spread. Without `#[inline]` on the small accessors of `gdl::Damped`, `Cell`, `Load`, and `CellRequest`, pick and acceptance took 126 ns in every round: the runtime calls them across the crate boundary, and the workspace builds without LTO. A pick allocates nothing under either policy (`a_pick_allocates_nothing_under_either_policy`).
+The picks are unchanged, and the offers are within their spread. Without `#[inline]` on the small accessors of `gdl::Damped`, `Cell`, `Load`, and `CellRequest`, pick and acceptance took 126 ns in every round: the runtime calls them across the crate boundary, and the workspace builds without LTO. Under LTO the attribute makes no measurable difference ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)). A pick allocates nothing under either policy (`a_pick_allocates_nothing_under_either_policy`).
 
 What a policy pays to read the head of a 100 KB request (100 messages of 1,000 characters, the hint after them), by the runtime's path, from `crates/gdl/benches/projection.rs`:
 
@@ -302,6 +302,8 @@ On `fb363e8c`, whose `CellRequest` holds one more field, the committed program c
 | `round_robin`, every cell | 39.0 to 39.8 ns | 30.0 to 30.1 ns |
 
 The pick of one model took 6 ns more than before the merge for those 5 instructions. On this core, where its code is placed moves it by that much.
+
+These counts are for Cargo's default profile. Under fat LTO the commit before this design runs within 3.5 instructions of it per `home_first` and `round_robin` pick, and under any LTO the commit before runs fewer instructions per pick of one model ([Hand changes the compiler makes](benchmarking.md#hand-changes-the-compiler-makes)).
 
 A chooser's own pick, through the runtime, over four idle cells, on the same host and core, load average 3.5 to 4.0, three runs each. Base `6d0a8509`:
 
