@@ -82,8 +82,11 @@ impl Node {
 
 impl Graph {
     /// Parse a graph body and check its structure: the macro's input, or a
-    /// graph file's text as tokens.
+    /// graph file's text as tokens. Text that nests deeper than
+    /// [`MAX_DEPTH`](crate::MAX_DEPTH) is refused before it is parsed, so
+    /// no text can overflow the caller's stack.
     pub fn parse(tokens: proc_macro2::TokenStream) -> syn::Result<Self> {
+        crate::depth::check(&tokens)?;
         Self::check(syn::parse2::<GraphInput>(tokens)?)
     }
 
@@ -341,7 +344,7 @@ pub fn identifier(word: &str) -> String {
 /// keywords of every edition (`crate`, `self`, `super`, and `Self` cannot be
 /// raw, and are rejected above). Escaping a word that is a keyword only in a
 /// later edition costs nothing.
-fn is_keyword(word: &str) -> bool {
+pub(crate) fn is_keyword(word: &str) -> bool {
     matches!(
         word,
         "abstract"

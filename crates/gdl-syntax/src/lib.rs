@@ -5,6 +5,7 @@
 //! serves both, so the two cannot accept different graphs.
 
 mod config;
+mod depth;
 mod encoding;
 mod endpoint;
 mod manifest;
@@ -13,6 +14,7 @@ mod model;
 mod parse;
 
 pub use config::{NodeTypes, graph_fields, node_types};
+pub use depth::MAX_DEPTH;
 pub use encoding::message_encoding;
 pub use endpoint::{Endpoint, endpoints};
 pub use gdl_model::Role;

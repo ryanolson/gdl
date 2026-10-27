@@ -250,6 +250,40 @@ async fn a_check_refuses_what_generation_refuses() {
     );
 }
 
+/// A draft's hop names reach its graph file as written, after the last
+/// node, so a draft cannot put a type where the parser reads one; it can
+/// nest an operator's hop, or brackets, deep enough to overflow the stack
+/// of the blocking thread that checks it, and abort the server. The
+/// generator refuses the text before it parses it, and the server answers.
+#[tokio::test]
+async fn a_draft_with_deeply_nested_hops_is_refused_without_aborting() {
+    let temp = scratch("deep");
+    let dir = temp.path();
+    let router = router(dir, fixture_catalog());
+    let mut deep = draft(
+        "regproto::Words",
+        "Engine",
+        json!({ "all": ["A", "Engine"] }),
+    );
+    deep["hop"]["inner"] = json!(format!(
+        "Engine{}{}",
+        " { Engine".repeat(5_000),
+        " }".repeat(5_000)
+    ));
+    let (_, body) = json_call(&router, "POST", "/api/check", Some(deep.clone())).await;
+    assert_eq!(body["ok"], false, "{body:#}");
+    let problems = body["problems"].to_string();
+    assert!(problems.contains("more than 16 levels deep"), "{body:#}");
+    let (status, body) = json_call(&router, "POST", "/api/export", Some(deep)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        body["problems"]
+            .to_string()
+            .contains("more than 16 levels deep"),
+        "{body:#}"
+    );
+}
+
 /// A draft that checks exports: the archive `cargo gdl export` writes,
 /// from the catalogue's offers, with nothing fetched or built.
 #[tokio::test]
