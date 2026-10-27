@@ -56,6 +56,27 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Why:** earlier builds refuse an error kind they do not know. Later builds read an unknown kind as `Transport` and keep its name (`Error::unknown_kind`, in `crates/gdl/src/error.rs`).
 - **Lifts:** nothing, for the earlier builds. A kind added later needs no such step.
 
+### A ready producer can overrun a cancel or a deadline by 64 items
+- **What:** after a cancel or a deadline, a producer whose stream is always ready can yield up to 64 more items before its attempt ends. A pending producer is interrupted at once.
+- **Why:** an attempt boundary polls the cancel and deadline futures only while its producer is pending. For a ready producer, it checks the cancel flag and the clock every 64 items (`CHECK_INTERVAL`, in `crates/gdl/src/items.rs`). See [Requests, attempts, and deadlines](../concepts/requests.md#where-cancel-and-deadline-are-checked).
+
+### A caller that holds a stream unread keeps its local scopes past the deadline
+- **What:** a local scope ends at the deadline only when its caller reads the stream or drops it. This includes a local hop that encloses a remote attempt. A caller that holds the stream unread keeps its own process's scopes until then. A remote attempt ends at its deadline whether or not anyone reads it.
+- **Why:** a local scope checks its deadline at its boundaries, when its stream is read. Nothing runs for it between the caller's reads. See [Requests, attempts, and deadlines](../concepts/requests.md#where-cancel-and-deadline-are-checked).
+- **Workaround:** read the stream, or drop it, once the deadline passes.
+- **Metrics:** [After a cancel, the source can count a request until its caller reads the stream](#after-a-cancel-the-source-can-count-a-request-until-its-caller-reads-the-stream) is the same limit, as `inflight_requests` shows it.
+
+### A deadlock across the two directions of a streamed request ends only at the deadline
+- **What:** an application can deadlock a streamed request across its two directions. A sink waits for its output to be read. Its caller waits for input credit before it reads. The request then ends at its deadline.
+- **Why:** the two anchors of one call have separate credit, and velo detects no deadlock between them. Each input pump runs on its own task, and reading the response never drives it, so the runtime adds no coupling of its own. See [Streamed requests](../concepts/streamed-requests.md#admission-egress-and-deadlock).
+- **Workaround:** in the caller, send the input and read the response on separate tasks.
+
+### An outer end at the egress limit can be refused by its own inner end
+- **What:** at `egress_limit`, an outer end that holds an input pump's permit while its local inner end waits for another permit is refused with `Overloaded`. The wait is bounded by `admission_wait`, so the request is refused, never hung.
+- **When:** a streamed request whose inner end runs in the outer end's segment, on an instance whose egress permits are all taken.
+- **Why:** the input pump and the local inner end are both producers, and each takes its own permit. See [Admission and egress](../concepts/admission.md#egress).
+- **Test:** `egress_hold_and_wait_at_the_limit_is_refused_not_hung` in `crates/gdl-runtime/tests/inputs.rs`.
+
 ## Bring-up, shutdown, and membership
 
 ### Only a hub lets an instance join
@@ -179,6 +200,29 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** add `gdl` as a dependency from the same path or revision as `gdl-runtime`, so both resolve to one crate.
 - **Lifts:** reading the caller's manifest at expansion time (`proc-macro-crate`), which adds a TOML parser to every node crate's build.
 
+### A forward path that leaves the outer end's segment and comes back encodes the response
+- **What:** when a hop's forward path leaves the outer end's segment and comes back, each response item is encoded once, as it enters the outer end's anchor. This holds even when no response edge crosses segments. The type that enters the anchor needs a codec. The placement check reports one without a codec as `NotWire` with reason `AnchorCarried`.
+- **When:** for example, in the placement `{A,B,D,F,E,G} {C}`, the forward path leaves at C and comes back for D. D's output then returns to B through an anchor.
+- **Why:** the response returns through the anchor that the outer end minted, and an anchor carries encoded items. See [Crossing segments](../concepts/crossings.md#the-codec-rule).
+- **Workaround:** keep the whole hop in the outer end's segment. A cut whose forward path does not come back still sends the response across segments, which needs the codec and the encode too. `crates/gdl-model/tests/workaround.rs` shows both.
+
+### Nothing detects a wire change in another owner's protocols crate
+- **What:** a new version of a protocols crate can change a message's serde form without a change to the contract hash. Segments built against the two versions are then admitted together, and fail to decode at run time, or decode a value with a field missing.
+- **Why:** the graph's author owns `schema`, and the owner of an external protocols crate can change a wire form without that author knowing. The contract hash covers each message's path, encoding, and the encoding's wire revision, not its fields or its package version. Rust type names cannot fingerprint a serde form. See [Generation design](../development/generation-design.md#a-graph-file-with-one-parser) and [Messages and encodings](../concepts/messages.md#encodings).
+- **Workaround:** bump `schema` each time the graph moves to another version of a protocols crate.
+- **Lifts:** a fingerprint of each message's serde shape, folded into the contract hash, so that segments built against different shapes are refused at admission.
+
+### Semver-compatible versions of one protocols crate do not connect
+- **What:** two node crates that depend on semver-compatible versions of one protocols crate, such as 1.2 and 1.4, offer two different messages, and their ports do not connect. A build would unify the two versions into one crate, so this rule is stricter than the build.
+- **Why:** a message's identity is its origin, which includes the defining package's version, and ports connect on equal origin. See [Catalogue design](../development/catalogue-design.md#origin-identity).
+- **Workaround:** move the node crates to one version of the protocols crate.
+- **Lifts:** connecting ports across semver-compatible versions of one message.
+
+### The nodes of a service spec's entry arms run in the frontend's segment
+- **What:** in a service spec, the `forward` and `backward` nodes of each `[entry.<field>]` arm run in the frontend's segment. A placement cannot move them to another segment. See [Hosted frontends and service entries](../guides/frontends.md#host-several-contracts-with-service).
+- **Workaround:** draw the graph in the composer. It lowers each enabled endpoint to its own root, followed by its adapters as ordinary graph nodes. A placement can put those in any segment. See [Several roots and shared sinks](../guides/frontends.md#several-roots-and-shared-sinks).
+- **Lifts:** placing entry adapters on their own in a service spec.
+
 ## Logs
 
 ### A segment binary does not show records of the `log` crate
@@ -248,6 +292,24 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **What:** resolution repeats, for each query, the chain of `use` path segments or globs it follows. N resolutions through a K-segment path, or past K globs, cost N times K.
 - **When:** this matters only for adversarial source. An import runs in a child process with memory (`ulimit -v`) and CPU limits. macOS rejects the memory limit, so on a Mac only the child's deadline (360 s) bounds a hostile import. The server is meant for Linux. See [Source reader cost](reader-cost.md) and `crates/gdl-web/src/imports.rs`.
 
+### `cargo gdl` has no help for each command
+- **What:** `cargo gdl --help`, and `--help` after a command, print the usage of every command and exit with code 1. No command has help of its own. [Split, generate, and draw](../guides/split-and-generate.md#the-commands) describes each command.
+- **Lifts:** help for each command.
+
+### A crate listed by version must name its library for its package
+- **What:** a crate listed by version must have a library named for its package, with `-` replaced by `_`. Such a crate is `name@version` in `[messages] crates` or `[nodes] crates`, or `version` in `[cell_policy.<name>]`. A crate whose `[lib] name` differs is refused when it is read: "its library is `<lib>`, not `<name>`".
+- **Why:** a version entry has no key for the library, and generated code names the crate by its library.
+- **Workaround:** list the crate from Git with `lib`, or by path, whose library is read from its manifest. See [Spec and fleet reference](../appendix/spec-reference.md#graph-source).
+
+### The composer's Deploy tab writes bundles without cells only
+- **What:** the Deploy tab refuses a spec with classes or several layouts, and the composer's page places a graph in one layout only. Only `cargo gdl compose --fleet` writes a fleet's bundle. See [Compose in the browser](../guides/composer.md#deploy-with-docker-compose).
+- **Workaround:** write the fleet's bundle with `cargo gdl compose --fleet <fleet.toml>`. See [Deploy a fleet of cells](../guides/fleet.md).
+- **Lifts:** layouts and fleets in the composer.
+
+### A Git import holds cargo's package cache lock while it fetches
+- **What:** the composer's server runs cargo for an import with the operator's `CARGO_HOME`. So the import holds cargo's package cache lock for that home while it fetches. An import whose Git dependency's host stalls makes every other import, and the operator's own cargo, wait. The wait lasts up to the import's cargo deadline, 300 s (`CARGO_DEADLINE_SECS`, in `crates/gdl-web/src/imports.rs`).
+- **Why:** imports share the operator's cargo home, which holds the operator's mirror and `net.offline` settings. See [Compose in the browser](../guides/composer.md#import-crates) for imports, and [Testing](../development/testing.md#tests-with-a-time-bound) for the wait on the shared lock.
+
 ## Deployment
 
 ### The API example's deployment pins gdl at a mirror commit
@@ -305,6 +367,16 @@ These are the limits a user can run into today. Each entry says what happens, wh
 - **Workaround:** keep each layout you export or draw in a spec of its own as well. A spec of one layout has the same placement hash as the layout in the spec of several.
 - **Lifts:** `--layout <name>` for `export` and `diagram`, and layouts in the composer.
 
+### An export writes no `Cargo.lock`
+- **What:** `cargo gdl export` writes no `Cargo.lock` into its archive. Each crate in the archive is its own workspace, so `build-all.sh` and the image builds resolve dependencies when they run. Two builds of one archive at different times can resolve different dependency versions.
+- **Why:** export renders what `generate` writes, and `generate` leaves a crate's `Cargo.lock` to whoever builds the crate. See [Code generation](../concepts/generation.md#export-and-images).
+- **Lifts:** writing each crate's resolved `Cargo.lock` into the archive.
+
+### An exported image has no CA certificates, and no test builds one
+- **What:** the `Dockerfile` that `cargo gdl export` writes for each segment runs the binary in `debian:bookworm-slim`, with nothing else installed. That image has no CA certificates, so a node that reads the system's certificate store to verify a TLS server finds none. No test builds an exported image: the tests check the text of the `Dockerfile` and `build-images.sh` only.
+- **Workaround:** install `ca-certificates` in the runtime stage of the `Dockerfile`, or deploy with `cargo gdl compose`, whose default runtime image is `gcr.io/distroless/cc-debian12:nonroot`.
+- **Lifts:** building one exported image end to end, and adding what its first run shows it needs.
+
 ## Cells
 
 These entries concern the cell plane. See [Classes and cells](../concepts/cells.md), [Following and choosing cells](../concepts/cell-routing.md), and [Deploy a fleet of cells](../guides/fleet.md).
@@ -317,10 +389,14 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 
 ### A fleet's bundle is one Compose project, whose hubs reach each other by service name
 - **What:** `cargo gdl compose --fleet fleet.toml` writes one Compose bundle: per cell, one hub and the cell's segments, configured through `GDL_CELL__*` variables. Each hub publishes under the `relay` backend, and a child's hub reports to its parent's hub at the parent's service name (`GDL_CELL__PARENT_HUB=<parent>:1337`). The hubs share no volume: each parent cell's hub mounts its own, `<cell>-state`, for its state directory. A hub container is named, so Compose refuses to scale it, and a host runs one copy of a fleet's bundle at a time. A segment that names a fixed, nonzero host port (`HOST:CONTAINER`) can run in one cell only. A fleet that runs it in several is refused. Docker-chosen host ports (`CONTAINER`, `0:CONTAINER`, `IP::CONTAINER`) work in several.
-- **Not generated:** Kubernetes or other targets, a network across hosts, and TLS. The composer's Deploy tab writes bundles without cells only.
+- **Not generated:** Kubernetes or other targets, a network across hosts, and TLS. The composer's Deploy tab does not write a fleet's bundle: see [The composer's Deploy tab writes bundles without cells only](#the-composers-deploy-tab-writes-bundles-without-cells-only).
 - **Why:** Compose runs one project on one host, and a hub's name resolves on the project's network.
 - **Workaround:** to run cells on several hosts, deploy them by hand, give each child's hub `GDL_CELL__PARENT_HUB` with an address at which it reaches its parent's hub, and give each parent's hub `GDL_CELL__STATE_DIR` on a disk of its own host.
-- **Lifts:** a network across hosts with TLS, other generators, and a fleet in the composer.
+- **Lifts:** a network across hosts with TLS, and other generators.
+
+### Reading a fleet hub's health or sending a drain needs a helper container
+- **What:** a fleet's bundle publishes no hub port, and the default hub image, `gcr.io/distroless/cc-debian12:nonroot`, has no `curl`. To read a cell's health or send a drain, run a container on the bundle's network, such as `curlimages/curl`. See [Run it](../guides/fleet.md#4-run-it) and [Drain a cell](../guides/fleet.md#drain-a-cell) in Deploy a fleet of cells.
+- **Lifts:** a way to reach a cell's health and drain without a helper container.
 
 ### The relay directory has no mesh
 - **What:** under the `relay` backend, a child cell's hub reports its record to its parent's hub, and to no other. So a parent sees only its own children, and no hub sees another parent's children. A parent's hub that is down hides its children from it until it returns.
