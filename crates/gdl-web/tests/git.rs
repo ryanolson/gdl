@@ -761,6 +761,191 @@ async fn a_crate_the_reader_cannot_survive_is_refused_not_fatal() {
     server.abort();
 }
 
+/// A child that dies before it answers, as a memory or CPU limit kills it,
+/// or that answers more than an import may hold, is refused, and the
+/// server goes on: the next import, read by the real reader, is added.
+/// The stub stands in for the child for the packages it names, since no
+/// crate makes the real reader crash or flood on cue, and a real limit
+/// takes minutes to reach.
+#[tokio::test]
+async fn a_child_that_crashes_or_floods_is_refused_and_the_server_goes_on() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
+    let names = ["killed", "said", "flooded", "full", "fine"];
+    let (url, server, _) = served(temp.path(), |work| {
+        for name in names {
+            package(&work.join(name), name, "Prompt", "");
+        }
+    })
+    .await;
+    let limit = gdl_extract::OUTPUT_LIMIT;
+    let extractor = stubbed(
+        temp.path(),
+        &[
+            ("killed", "kill -KILL $$".to_string()),
+            (
+                "said",
+                "echo 'the reader gave out' >&2; kill -KILL $$".to_string(),
+            ),
+            (
+                "flooded",
+                format!("head -c {} /dev/zero; exit 0", limit + 1),
+            ),
+            ("full", format!("head -c {limit} /dev/zero; exit 0")),
+        ],
+    );
+    let app = gdl_web::router(gdl_web::Config {
+        catalog: temp.path().join("catalog"),
+        target: temp.path().join("target"),
+        local_root: None,
+        hosts: Vec::new(),
+        extractor,
+        deploy: gdl_web::Deploy::default(),
+        gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime")),
+    })
+    .expect("composer");
+    let refused = |body: &str| -> String {
+        let body: serde_json::Value = serde_json::from_str(body).expect("problems");
+        body["problems"][0].as_str().expect("a problem").to_string()
+    };
+    // Killed with nothing said: the server names the limits.
+    let (status, body) = import(app.clone(), &url, "killed").await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        refused(&body).contains("needs more memory or time"),
+        "{body}"
+    );
+    // Killed after a message: the message is the problem.
+    let (status, body) = import(app.clone(), &url, "said").await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(refused(&body), "the reader gave out");
+    // One byte past the limit is refused as too large, never cut and read.
+    let (status, body) = import(app.clone(), &url, "flooded").await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        refused(&body).contains("more than an import may hold (2 MiB)"),
+        "{body}"
+    );
+    // Exactly the limit is held, and read as the answer it is not.
+    let (status, body) = import(app.clone(), &url, "full").await;
+    assert_eq!(status, 422, "{body}");
+    assert!(refused(&body).contains("did not parse"), "{body}");
+    // The server is still here, and the real reader adds the next crate.
+    let (status, body) = import(app, &url, "fine").await;
+    assert_eq!(status, 200, "{body}");
+    let catalog = gdl_extract::Catalog::load(&temp.path().join("catalog")).expect("catalog");
+    let added: Vec<_> = catalog.entries().map(|e| e.key()).collect();
+    assert_eq!(added.len(), 1, "{added:?}");
+    server.abort();
+}
+
+/// The extractor of `extractor(temp)`, but for each package named in
+/// `stubs`, whose child runs that shell body instead. The child's request
+/// is its second argument.
+fn stubbed(temp: &Path, stubs: &[(&str, String)]) -> PathBuf {
+    let mut script = "#!/bin/sh\ncase \"$2\" in\n".to_string();
+    for (name, body) in stubs {
+        script += &format!("*'\"name\":\"{name}\"'*) {body} ;;\n");
+    }
+    script += &format!("esac\nexec {} \"$@\"\n", quoted(&extractor(temp)));
+    let stub = temp.join("stub");
+    std::fs::write(&stub, script).expect("stub");
+    #[cfg(unix)]
+    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("executable");
+    stub
+}
+
+/// A child killed while its cargo runs, as a limit kills it, takes that
+/// cargo with it: cargo has pipes of its own, so the server hears the
+/// child end while cargo still holds its connections and its lock. The
+/// server ends the child's group, and the next import gets the lock.
+#[tokio::test]
+async fn a_killed_reader_ends_the_cargo_it_started() {
+    use tokio::io::AsyncReadExt;
+
+    /// Ends what the test left running if it fails before the server does.
+    struct Cleanup(u32);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            gdl_extract::kill_process_group(self.0);
+        }
+    }
+
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-web-git-")
+        .tempdir()
+        .expect("temp");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a silent port");
+    let silent = format!(
+        "http://{}/slow.git",
+        listener.local_addr().expect("address")
+    );
+    let dependency = format!("[dependencies]\nslow = {{ git = {silent:?} }}\n");
+    let (url, server, _) = served(temp.path(), |work| {
+        package(&work.join("dependent"), "dependent", "Prompt", &dependency);
+        package(&work.join("fine"), "fine", "Prompt", "");
+    })
+    .await;
+    // The stub records the child's pid, then runs the real reader in it.
+    let pid_file = temp.path().join("reader-pid");
+    let extractor = stubbed(
+        temp.path(),
+        &[("dependent", format!("echo $$ > {}", quoted(&pid_file)))],
+    );
+    let app = gdl_web::router(gdl_web::Config {
+        catalog: temp.path().join("catalog"),
+        target: temp.path().join("target"),
+        local_root: None,
+        hosts: Vec::new(),
+        extractor,
+        deploy: gdl_web::Deploy::default(),
+        gdl: gdl_web::Gdl::Path(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdl-runtime")),
+    })
+    .expect("composer");
+    // The child is killed once its cargo holds the dependency's connection:
+    // killed earlier, there is no cargo to end. The bound is long because a
+    // busy host can take seconds to get cargo's git there.
+    let mut pending = Box::pin(import(app.clone(), &url, "dependent"));
+    let (mut stream, _) = tokio::select! {
+        connected = tokio::time::timeout(std::time::Duration::from_secs(60), listener.accept()) => {
+            connected.expect("cargo's git never reached the dependency").expect("connected")
+        }
+        answer = &mut pending => panic!("a silent dependency answered: {answer:?}"),
+    };
+    let pid: u32 = std::fs::read_to_string(pid_file)
+        .expect("the child's pid")
+        .trim()
+        .parse()
+        .expect("pid");
+    let cleanup = Cleanup(pid);
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .expect("kill")
+            .success()
+    );
+    let (status, body) = pending.await;
+    assert_eq!(status, 422, "{body}");
+    let mut rest = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_to_end(&mut rest),
+    )
+    .await
+    .expect("the killed child's cargo still holds the dependency's connection")
+    .expect("the connection closed");
+    let (status, body) = import(app, &url, "fine").await;
+    assert_eq!(status, 200, "{body}");
+    drop(cleanup);
+    server.abort();
+}
+
 /// An import abandoned by its client ends the child that reads it, and
 /// with the child the cargo and git it started: the connections a silent
 /// dependency host held are closed, rather than kept by orphans holding
