@@ -511,6 +511,10 @@ pub(crate) struct Runtime {
     random: RandomState,
     /// Set once a retiring instance stops taking hand-offs and openings.
     closed: AtomicBool,
+    /// When it first closed, for the tests that order the close after
+    /// the senders' promises.
+    #[cfg(feature = "fault-injection")]
+    closed_at: std::sync::OnceLock<tokio::time::Instant>,
     /// Why the instance declines offers, the hand-offs from another
     /// class, if it does: [`DRAINED`] once an entry instance of a
     /// draining cell stops taking them, which nothing undoes, and the
@@ -619,6 +623,8 @@ impl Runtime {
             crossings,
             random: RandomState::new(),
             closed: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            closed_at: std::sync::OnceLock::new(),
             declining: AtomicU8::new(0),
             offers,
             names: Names {
@@ -641,7 +647,14 @@ impl Runtime {
     /// share is in the ledger, both `SeqCst`: an entry is either in the
     /// ledger the drain waits for, or refused.
     pub(crate) fn close(&self) {
+        #[cfg(feature = "fault-injection")]
+        self.closed_at.get_or_init(tokio::time::Instant::now);
         self.closed.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn closed_at(&self) -> Option<tokio::time::Instant> {
+        self.closed_at.get().copied()
     }
 
     /// The requests this instance holds that may still send work onward:

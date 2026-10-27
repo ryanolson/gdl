@@ -186,6 +186,19 @@ impl Live {
         self.change(Members::take_acknowledgements)
     }
 
+    /// When this instance promised never to route to `id` again, if it
+    /// has: the instant it marked the promise, before sending it.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub(crate) fn promised(&self, id: InstanceId) -> Option<tokio::time::Instant> {
+        let members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
+        members
+            .segments
+            .values()
+            .flatten()
+            .find(|m| m.id == id)
+            .and_then(|m| m.acknowledged)
+    }
+
     /// The instances of `segment` added to routing that have not left, in
     /// the order they were added.
     #[cfg_attr(
@@ -372,8 +385,9 @@ struct Member {
     /// retirement or a departure named is known, not routed to.
     routable: bool,
     retired: bool,
-    /// This instance has promised never to route to it again.
-    acknowledged: bool,
+    /// When this instance promised never to route to it again: marked
+    /// before the promise is sent, so that no peer can see it earlier.
+    acknowledged: Option<tokio::time::Instant>,
     left: bool,
 }
 
@@ -397,7 +411,7 @@ impl Members {
                     id,
                     routable: false,
                     retired: false,
-                    acknowledged: false,
+                    acknowledged: None,
                     left: false,
                 });
                 known.len() - 1
@@ -407,16 +421,17 @@ impl Members {
     }
 
     fn take_acknowledgements(&mut self) -> Vec<InstanceId> {
+        let now = tokio::time::Instant::now();
         let mut due = Vec::new();
         for known in self.segments.values_mut() {
             let eligible = eligible(known);
             for member in known.iter_mut() {
                 if member.retired
-                    && !member.acknowledged
+                    && member.acknowledged.is_none()
                     && !member.left
                     && !eligible.contains(&member.id)
                 {
-                    member.acknowledged = true;
+                    member.acknowledged = Some(now);
                     due.push(member.id);
                 }
             }
@@ -455,7 +470,7 @@ fn eligible(known: &[Member]) -> Vec<InstanceId> {
         return serving;
     }
     routable()
-        .filter(|m| !m.acknowledged)
+        .filter(|m| m.acknowledged.is_none())
         .map(|m| m.id)
         .collect()
 }
@@ -849,6 +864,78 @@ mod tests {
             );
             drop(lease);
             assert_eq!(waiting.leases.load(Ordering::SeqCst), 0);
+        }
+
+        /// The first call waits at a gate before it reads its instances;
+        /// every call records when it read them and whether `target` was
+        /// among them, and takes `target` when it is.
+        struct Late {
+            target: InstanceId,
+            calls: AtomicUsize,
+            arrived: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+            read: Mutex<Vec<(tokio::time::Instant, bool)>>,
+        }
+
+        impl Selector for Late {
+            type Head = Encoded;
+
+            async fn select<'a>(
+                &'a self,
+                _: Request<'a, Encoded>,
+                instances: Instances<'a>,
+            ) -> Result<Choice<'a>> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.arrived.notify_one();
+                    self.release.notified().await;
+                }
+                let target = instances
+                    .iter()
+                    .find(|i| i.id().as_u128() == self.target.as_u128());
+                let at = tokio::time::Instant::now();
+                self.read.lock().expect("lock").push((at, target.is_some()));
+                Ok(Choice::new(
+                    target.unwrap_or_else(|| instances.get(0).expect("one")),
+                ))
+            }
+        }
+
+        /// The promise covers what is routed, not what a selector reads. A
+        /// selector reads the table loaded when it was asked, so one asked
+        /// before the promise and slow to read (a waiting selector, or a
+        /// thread descheduled on a loaded host) is offered the retiree after
+        /// the promise. Its choice is checked against the table when it
+        /// returns, and the request is asked again from the new one.
+        #[tokio::test]
+        async fn a_selector_asked_before_the_promise_reads_the_retiree_after_it_but_never_routes_there()
+         {
+            let ids = ids(2);
+            let live = Arc::new(live(&ids));
+            let late = Arc::new(Late {
+                target: ids[0],
+                calls: AtomicUsize::new(0),
+                arrived: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                read: Mutex::new(Vec::new()),
+            });
+            let choosing = tokio::spawn({
+                let (live, late) = (Arc::clone(&live), Arc::clone(&late));
+                async move { choose(&live, &Typed(late)).await }
+            });
+            late.arrived.notified().await;
+            live.retire("worker", ids[0]);
+            assert_eq!(live.take_acknowledgements(), [ids[0]]);
+            let promised = live.promised(ids[0]).expect("promised");
+            late.release.notify_one();
+            let chosen = choosing.await.expect("joined").expect("a choice");
+            assert_eq!(chosen, ids[1], "routed to an instance it promised to avoid");
+            let read = late.read.lock().expect("lock").clone();
+            assert_eq!(read.len(), 2, "asked again from the new table");
+            assert!(
+                read[0].0 >= promised && read[0].1,
+                "the first call read an older table after the promise: {read:?}"
+            );
+            assert!(!read[1].1, "the second call read the new table");
         }
 
         /// Retires its own choice, and brings in another instance, every

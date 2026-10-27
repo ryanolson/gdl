@@ -264,6 +264,22 @@ impl<H> Segment<H> {
         self.rt.is_closed()
     }
 
+    /// When the instance first closed its entries, if it has. Available
+    /// only with the `fault-injection` feature.
+    #[cfg(feature = "fault-injection")]
+    pub fn closed_at(&self) -> Option<tokio::time::Instant> {
+        self.rt.closed_at()
+    }
+
+    /// When this instance promised never to route to `peer` again, if it
+    /// has: taken before the promise is sent, so a peer that waits for
+    /// the promise sees it no earlier. Available only with the
+    /// `fault-injection` feature.
+    #[cfg(feature = "fault-injection")]
+    pub fn promised_to_avoid(&self, peer: velo::InstanceId) -> Option<tokio::time::Instant> {
+        self.rt.routes().promised(peer)
+    }
+
     /// Refuse every offer that arrives from now on, the forward hand-offs
     /// from another class, and take the rest: an entry instance of a
     /// draining cell stops taking new work, and still takes the hand-offs

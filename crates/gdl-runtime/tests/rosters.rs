@@ -27,6 +27,10 @@ use velo::discovery::ServiceDiscovery;
 /// The longest a test waits for something it expects.
 const WAIT: Duration = Duration::from_secs(10);
 
+/// The grace a retired instance gives hand-offs sent before its senders
+/// promised to avoid it: each process's `[runtime] setup_timeout_ms`.
+const GRACE: Duration = Duration::from_millis(300);
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Nothing {}
@@ -62,9 +66,10 @@ async fn hub(placement: &Placement) -> velo_hub::Hub {
 /// One deployment's settings: its hub, the drain's bound, and `extra`.
 fn settings(hub: &velo_hub::Hub, drain_ms: u64, extra: &str) -> ProcessConfig<Nothing> {
     let text = format!(
-        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n{extra}\n[runtime]\ndrain_ms = {drain_ms}\nsetup_timeout_ms = 300\n",
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n{extra}\n[runtime]\ndrain_ms = {drain_ms}\nsetup_timeout_ms = {}\n",
         hub.public_addr().port(),
         hub.control_addr().port(),
+        GRACE.as_millis(),
     );
     ProcessConfig::from_figment(figment::Figment::from(Toml::string(&text))).expect("settings")
 }
@@ -254,13 +259,39 @@ impl Traffic {
     }
 }
 
-/// A short setup timeout: the grace a retired instance gives hand-offs
-/// sent before its peers stopped routing to it.
-fn quick() -> RuntimeConfig {
+/// A segment's runtime settings. Its setup timeout bounds each setup step
+/// of a request: the wait for its roster's release, admission, egress, a
+/// hand-off's acknowledgement, a run's opening, and an attach. No test
+/// here is about those bounds, and on a loaded host a step can take longer
+/// than [`GRACE`], so it is only a guard against a hang. The drain's grace
+/// is the process's setting, not this one.
+fn patient() -> RuntimeConfig {
     RuntimeConfig {
-        setup_timeout: Duration::from_millis(300),
+        setup_timeout: Duration::from_secs(5),
         ..RuntimeConfig::default()
     }
+}
+
+/// Check that `engine`, which has left, closed no sooner than its grace
+/// after `front` promised to avoid it. Both instants are the runtime's:
+/// the front takes its own before it sends the promise, so an engine that
+/// waits to see the promise and then its grace closes after it, however
+/// late a poll would have seen either. An engine that does not wait for
+/// the promise closes about when it is made.
+fn closed_after_the_promise<N>(
+    engine: &gdl_runtime::Segment<N>,
+    retired: InstanceId,
+    front: &gdl_runtime::Segment<N>,
+) {
+    let promised = front
+        .promised_to_avoid(retired)
+        .expect("the front never promised to avoid it");
+    let closed = engine.closed_at().expect("it left without closing");
+    assert!(
+        closed >= promised + GRACE,
+        "it closed {:?} after the front promised to avoid it, within its {GRACE:?} grace",
+        closed.saturating_duration_since(promised)
+    );
 }
 
 /// One of two engine instances is stopped while requests flow: the front
@@ -283,17 +314,17 @@ async fn one_of_two_engines_retires_while_requests_flow() {
         launch(&probed, "engine", &placement),
         launch(&config, "engine", &placement),
     );
-    let (front_id, first_id) = (front.node().instance_id(), first.node().instance_id());
+    let first_id = first.node().instance_id();
     let spec = DeploymentSpec::new(reference_manifest(|_| true), placement.clone())
         .expect("valid test fixture");
     let registry = first_process.registry(&spec, "engine").expect("registry");
     let metered = RuntimeConfig {
         metrics: Some(registry.clone()),
-        ..quick()
+        ..patient()
     };
-    let front_segment = start(&front, "front", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
     let first_segment = start(&first, "engine", &placement, &events, metered);
-    let second_segment = start(&second, "engine", &placement, &events, quick());
+    let second_segment = start(&second, "engine", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (first_rx, first_served) = serve(first, first_segment);
     let (second_rx, second_served) = serve(second, second_segment);
@@ -320,12 +351,8 @@ async fn one_of_two_engines_retires_while_requests_flow() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
     assert!(body.contains("\"phase\":\"draining\""), "{body}");
-    let promised = avoided(&hub, first_id, &[front_id]).await;
     let exited = left(first_served).await;
-    assert!(
-        exited >= promised,
-        "it left before the front stopped routing to it"
-    );
+    closed_after_the_promise(&first_segment, first_id, &front_segment);
     assert!(
         exited - stopped < Duration::from_secs(5),
         "a lone retirement waited {:?}, near its 20 s bound",
@@ -349,11 +376,20 @@ async fn one_of_two_engines_retires_while_requests_flow() {
     left(second_served).await;
 }
 
-/// Prefers one instance whenever it is offered, and records, for each
-/// call, when it began and whether that instance was offered.
+/// Prefers one instance whenever it is offered, and records each call.
 struct Preferring {
     preferred: u128,
-    calls: std::sync::Mutex<Vec<(Instant, bool)>>,
+    calls: std::sync::Mutex<Vec<Call>>,
+}
+
+/// One call of a selector: when it read its instances, whether the
+/// preferred one was among them, and the head's bytes, which name the
+/// request.
+#[derive(Clone)]
+struct Call {
+    at: Instant,
+    offered: bool,
+    request: Vec<u8>,
 }
 
 impl gdl::Selector for Preferring {
@@ -361,26 +397,30 @@ impl gdl::Selector for Preferring {
 
     async fn select<'a>(
         &'a self,
-        _: gdl::Request<'a, gdl::Encoded>,
+        request: gdl::Request<'a, gdl::Encoded>,
         instances: gdl::Instances<'a>,
     ) -> gdl::Result<gdl::Choice<'a>> {
         let preferred = instances
             .iter()
             .find(|instance| instance.id().as_u128() == self.preferred);
-        self.calls
-            .lock()
-            .expect("lock")
-            .push((Instant::now(), preferred.is_some()));
+        self.calls.lock().expect("lock").push(Call {
+            at: Instant::now(),
+            offered: preferred.is_some(),
+            request: request.bytes().to_vec(),
+        });
         let chosen = preferred.unwrap_or_else(|| instances.get(0).expect("never empty"));
         Ok(gdl::Choice::new(chosen))
     }
 }
 
 /// A selector chooses from the same table `pick` does: once the front has
-/// promised to avoid a retired engine, the selector is never offered it,
-/// though it would choose it every time, and no request fails.
+/// promised to avoid a retired engine, no request is routed to it, though
+/// the selector would choose it every time, and no request fails. A call
+/// asked just before the promise may read the retiree just after it, on a
+/// loaded host: its choice is checked against the new table, and the
+/// selector is asked again (`dist/roster.rs` proves it in one process).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_selector_is_never_offered_an_instance_its_sender_avoids() {
+async fn a_selector_never_routes_to_an_instance_its_sender_avoids() {
     let placement = two().route(
         "C",
         gdl_runtime::RequestRouter::Selector("preferring".into()),
@@ -393,19 +433,19 @@ async fn a_selector_is_never_offered_an_instance_its_sender_avoids() {
         launch(&config, "engine", &placement),
         launch(&config, "engine", &placement),
     );
-    let (front_id, first_id) = (front.node().instance_id(), first.node().instance_id());
+    let first_id = first.node().instance_id();
     let preferring = Arc::new(Preferring {
         preferred: first_id.as_u128(),
         calls: std::sync::Mutex::new(Vec::new()),
     });
-    let mut routed = quick();
+    let mut routed = patient();
     routed
         .selectors
         .add("preferring", Shared(Arc::clone(&preferring)))
         .expect("a selector");
     let front_segment = start(&front, "front", &placement, &events, routed);
-    let first_segment = start(&first, "engine", &placement, &events, quick());
-    let second_segment = start(&second, "engine", &placement, &events, quick());
+    let first_segment = start(&first, "engine", &placement, &events, patient());
+    let second_segment = start(&second, "engine", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (first_rx, first_served) = serve(first, first_segment);
     let (second_rx, second_served) = serve(second, second_segment);
@@ -419,21 +459,30 @@ async fn a_selector_is_never_offered_an_instance_its_sender_avoids() {
         "the preferred engine took nothing"
     );
     first_process.stop();
-    let promised = avoided(&hub, first_id, &[front_id]).await;
-    traffic.more(20).await;
-    assert_eq!(traffic.stop().await, 0, "a request failed");
     left(first_served).await;
+    let promised = front_segment
+        .promised_to_avoid(first_id)
+        .expect("the front never promised to avoid it");
+    traffic.more(20).await;
+    let failed = traffic.stop().await;
     let calls = preferring.calls.lock().expect("lock").clone();
-    let after: Vec<bool> = calls
-        .iter()
-        .filter(|(at, _)| *at > promised)
-        .map(|(_, offered)| *offered)
-        .collect();
-    assert!(after.len() >= 20, "{} calls after the promise", after.len());
+    // Each request's last call is its choice: an earlier one was asked
+    // again.
+    let mut last: std::collections::HashMap<&[u8], &Call> = std::collections::HashMap::new();
+    for call in calls.iter().filter(|call| call.at >= promised) {
+        last.insert(&call.request, call);
+    }
     assert!(
-        !after.contains(&true),
-        "the selector was offered the instance its sender promised to avoid"
+        last.len() >= 20,
+        "{} requests after the promise",
+        last.len()
     );
+    let routed = last.values().filter(|call| call.offered).count();
+    assert_eq!(
+        routed, 0,
+        "requests chosen after the promise were routed to the instance it avoids"
+    );
+    assert_eq!(failed, 0, "a request failed");
 
     front_process.stop();
     second_process.stop();
@@ -494,30 +543,30 @@ async fn two_of_three_engines_retire_one_after_the_other() {
         launch(&config, "engine", &placement),
         launch(&config, "engine", &placement),
     );
-    let front_id = front.node().instance_id();
     let (a_id, b_id) = (a.node().instance_id(), b.node().instance_id());
-    let front_segment = start(&front, "front", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
     let (a_segment, b_segment, c_segment) = (
-        start(&a, "engine", &placement, &events, quick()),
-        start(&b, "engine", &placement, &events, quick()),
-        start(&c, "engine", &placement, &events, quick()),
+        start(&a, "engine", &placement, &events, patient()),
+        start(&b, "engine", &placement, &events, patient()),
+        start(&c, "engine", &placement, &events, patient()),
     );
     let (front_rx, front_served) = serve(front, front_segment);
     let (a_rx, a_served) = serve(a, a_segment);
     let (b_rx, b_served) = serve(b, b_segment);
     let (c_rx, c_served) = serve(c, c_segment);
     let front_segment = ready(front_rx).await;
-    let (_, _, c_segment) = (ready(a_rx).await, ready(b_rx).await, ready(c_rx).await);
+    let (a_segment, b_segment, c_segment) =
+        (ready(a_rx).await, ready(b_rx).await, ready(c_rx).await);
 
     let traffic = Traffic::start(&front_segment, 4);
     traffic.more(20).await;
     a_process.stop();
-    let promised = avoided(&hub, a_id, &[front_id]).await;
-    assert!(left(a_served).await >= promised);
+    left(a_served).await;
+    closed_after_the_promise(&a_segment, a_id, &front_segment);
     traffic.more(20).await;
     b_process.stop();
-    let promised = avoided(&hub, b_id, &[front_id]).await;
-    assert!(left(b_served).await >= promised);
+    left(b_served).await;
+    closed_after_the_promise(&b_segment, b_id, &front_segment);
     // The third counts a hand-off when it takes it, so a request it took
     // before `before` can finish after it: finished requests are not new
     // hand-offs. With the other two gone, every new hand-off is the third's.
@@ -548,8 +597,8 @@ async fn the_last_instance_serves_until_its_bound() {
         launch(&config, "front", &placement),
         launch(&config, "engine", &placement),
     );
-    let front_segment = start(&front, "front", &placement, &events, quick());
-    let engine_segment = start(&engine, "engine", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let engine_segment = start(&engine, "engine", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (engine_rx, engine_served) = serve(engine, engine_segment);
     let front_segment = ready(front_rx).await;
@@ -606,9 +655,9 @@ async fn a_retired_instance_stays_until_its_answer_is_handed_on() {
         launch(&config, "engine", &placement),
     );
     let (front_id, a_id) = (front.node().instance_id(), a.node().instance_id());
-    let front_segment = start(&front, "front", &placement, &events, quick());
-    let a_segment = start(&a, "engine", &placement, &events, quick());
-    let b_segment = start(&b, "engine", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let a_segment = start(&a, "engine", &placement, &events, patient());
+    let b_segment = start(&b, "engine", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (a_rx, a_served) = serve(a, a_segment);
     let (b_rx, b_served) = serve(b, b_segment);
@@ -640,7 +689,7 @@ async fn a_retired_instance_stays_until_its_answer_is_handed_on() {
     let out = held.expect("the first engine took one");
     a_process.stop();
     avoided(&hub, a_id, &[front_id]).await;
-    // Its grace is 300 ms; it may not leave while the answer is unsent.
+    // Its grace is `GRACE`; it may not leave while the answer is unsent.
     // Absence is shown by a bounded wait: nothing marks it.
     let mut a_served = a_served;
     let early = tokio::time::timeout(Duration::from_secs(1), &mut a_served).await;
@@ -664,9 +713,10 @@ async fn a_joiner_ends_a_lone_instances_retirement() {
     let config = settings(&hub, 20_000, "");
     let control = common::proxy::Proxy::new(hub.control_addr()).await;
     let front_config = ProcessConfig::from_figment(figment::Figment::from(Toml::string(&format!(
-        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n[runtime]\ndrain_ms = 20000\nsetup_timeout_ms = 300\n",
+        "listen = \"127.0.0.1:0\"\nhub = {{ host = \"127.0.0.1\", public_port = {}, control_port = {}, heartbeat_ms = 200 }}\nrendezvous_ms = 5000\n[runtime]\ndrain_ms = 20000\nsetup_timeout_ms = {}\n",
         hub.public_addr().port(),
         control.port,
+        GRACE.as_millis(),
     ))))
     .expect("front settings");
     let events = Events::quiet();
@@ -674,8 +724,8 @@ async fn a_joiner_ends_a_lone_instances_retirement() {
         launch(&front_config, "front", &placement),
         launch(&config, "engine", &placement),
     );
-    let front_segment = start(&front, "front", &placement, &events, quick());
-    let old_segment = start(&old, "engine", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let old_segment = start(&old, "engine", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (old_rx, old_served) = serve(old, old_segment);
     let front_segment = ready(front_rx).await;
@@ -689,7 +739,7 @@ async fn a_joiner_ends_a_lone_instances_retirement() {
     old_process.stop();
     traffic.more(10).await;
     let (new_process, new) = launch(&config, "engine", &placement).await;
-    let new_segment = start(&new, "engine", &placement, &events, quick());
+    let new_segment = start(&new, "engine", &placement, &events, patient());
     let (new_rx, new_served) = serve(new, new_segment);
     let new_segment = ready(new_rx).await;
     tokio::time::timeout(WAIT, control.holding())
@@ -742,9 +792,9 @@ async fn a_joiner_is_routed_to_once_it_is_ready_and_not_before() {
         launch(&config, "mid", &placement),
         launch(&config, "tail", &placement),
     );
-    let front_segment = start(&front, "front", &placement, &events, quick());
-    let mid_segment = start(&mid, "mid", &placement, &events, quick());
-    let tail_segment = start(&tail, "tail", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let mid_segment = start(&mid, "mid", &placement, &events, patient());
+    let tail_segment = start(&tail, "tail", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (mid_rx, mid_served) = serve(mid, mid_segment);
     let (tail_rx, tail_served) = serve(tail, tail_segment);
@@ -754,11 +804,11 @@ async fn a_joiner_is_routed_to_once_it_is_ready_and_not_before() {
     // A second tail, loaded and started, not yet serving; then a second
     // middle, whose roster holds it.
     let (late_tail_process, late_tail) = launch(&config, "tail", &placement).await;
-    let late_tail_segment = start(&late_tail, "tail", &placement, &events, quick());
+    let late_tail_segment = start(&late_tail, "tail", &placement, &events, patient());
     let (joiner_process, joiner) = launch(&config, "mid", &placement).await;
     // The joiner's own log: what its forward node sees.
     let seen = Events::new();
-    let joiner_segment = start(&joiner, "mid", &placement, &seen, quick());
+    let joiner_segment = start(&joiner, "mid", &placement, &seen, patient());
     let (joiner_rx, joiner_served) = serve(joiner, joiner_segment);
     // The joiner announces `serving`, then waits at its barrier.
     let services = client(&hub).services();
@@ -840,9 +890,9 @@ async fn a_request_waits_at_a_joiners_held_roster() {
         launch(&config, "mid", &placement),
         launch(&config, "tail", &placement),
     );
-    let front_segment = start(&front, "front", &placement, &events, quick());
-    let mid_segment = start(&mid, "mid", &placement, &events, quick());
-    let tail_segment = start(&tail, "tail", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let mid_segment = start(&mid, "mid", &placement, &events, patient());
+    let tail_segment = start(&tail, "tail", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (mid_rx, mid_served) = serve(mid, mid_segment);
     let (tail_rx, tail_served) = serve(tail, tail_segment);
@@ -853,23 +903,19 @@ async fn a_request_waits_at_a_joiners_held_roster() {
     );
 
     let (late_tail_process, late_tail) = launch(&config, "tail", &placement).await;
-    let late_tail_segment = start(&late_tail, "tail", &placement, &events, quick());
+    let late_tail_segment = start(&late_tail, "tail", &placement, &events, patient());
     let (joiner_process, joiner) = launch(&config, "mid", &placement).await;
     let seen = Events::new();
     // Long enough to hold a request while the test looks.
-    let patient = RuntimeConfig {
-        setup_timeout: Duration::from_secs(5),
-        ..RuntimeConfig::default()
-    };
-    let joiner_segment = start(&joiner, "mid", &placement, &seen, patient);
+    let joiner_segment = start(&joiner, "mid", &placement, &seen, patient());
     let (joiner_rx, joiner_served) = serve(joiner, joiner_segment);
     let (new_front_process, new_front) = launch(&config, "front", &placement).await;
-    let new_front_segment = start(&new_front, "front", &placement, &events, quick());
+    let new_front_segment = start(&new_front, "front", &placement, &events, patient());
     let (new_front_rx, new_front_served) = serve(new_front, new_front_segment);
     let new_front_segment = ready(new_front_rx).await;
 
     // Two requests: round robin sends one to each middle.
-    let asked: Vec<JoinHandle<gdl::Result<()>>> = (0..2)
+    let mut asked: Vec<JoinHandle<gdl::Result<()>>> = (0..2)
         .map(|n| {
             let front = Arc::clone(&new_front_segment);
             tokio::spawn(async move { ask(&front, &format!("held{n}")).await })
@@ -889,10 +935,10 @@ async fn a_request_waits_at_a_joiners_held_roster() {
     let held = (0..2)
         .find(|n| reached.contains(&format!("C:held{n}")))
         .unwrap_or_else(|| panic!("neither request reached the joiner: {reached:?}"));
-    assert!(
-        !asked[held].is_finished(),
-        "the request the joiner took did not wait at its held roster"
-    );
+    if asked[held].is_finished() {
+        let outcome = asked.swap_remove(held).await;
+        panic!("the request the joiner took did not wait at its held roster: {outcome:?}");
+    }
     let (late_tail_rx, late_tail_served) = serve(late_tail, late_tail_segment);
     let _ = (ready(late_tail_rx).await, ready(joiner_rx).await);
     for request in asked {
@@ -942,9 +988,9 @@ async fn a_joining_source_serves() {
         launch(&config, "engine", &placement),
         launch(&config, "post", &placement),
     );
-    let front_segment = start(&front, "front", &placement, &events, quick());
-    let engine_segment = start(&engine, "engine", &placement, &events, quick());
-    let post_segment = start(&post, "post", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let engine_segment = start(&engine, "engine", &placement, &events, patient());
+    let post_segment = start(&post, "post", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (engine_rx, engine_served) = serve(engine, engine_segment);
     let (post_rx, post_served) = serve(post, post_segment);
@@ -955,7 +1001,7 @@ async fn a_joining_source_serves() {
     );
 
     let (joiner_process, joiner) = launch(&config, "front", &placement).await;
-    let joiner_segment = start(&joiner, "front", &placement, &events, quick());
+    let joiner_segment = start(&joiner, "front", &placement, &events, patient());
     let (joiner_rx, joiner_served) = serve(joiner, joiner_segment);
     let joiner_segment = ready(joiner_rx).await;
     for n in 0..10 {
@@ -996,9 +1042,9 @@ async fn a_joining_backward_segment_is_opened_and_attached_to() {
         launch(&config, "engine", &placement),
         launch(&config, "post", &placement),
     );
-    let front_segment = start(&front, "front", &placement, &events, quick());
-    let engine_segment = start(&engine, "engine", &placement, &events, quick());
-    let post_segment = start(&post, "post", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let engine_segment = start(&engine, "engine", &placement, &events, patient());
+    let post_segment = start(&post, "post", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (engine_rx, engine_served) = serve(engine, engine_segment);
     let (post_rx, post_served) = serve(post, post_segment);
@@ -1006,7 +1052,7 @@ async fn a_joining_backward_segment_is_opened_and_attached_to() {
     let _ = (ready(engine_rx).await, ready(post_rx).await);
 
     let (joiner_process, joiner) = launch(&config, "post", &placement).await;
-    let joiner_segment = start(&joiner, "post", &placement, &events, quick());
+    let joiner_segment = start(&joiner, "post", &placement, &events, patient());
     let (joiner_rx, joiner_served) = serve(joiner, joiner_segment);
     let joiner_segment = ready(joiner_rx).await;
     let deadline = Instant::now() + WAIT;
@@ -1053,9 +1099,9 @@ async fn a_sender_held_at_its_rendezvous_still_avoids_a_retired_instance() {
         launch(&config, "engine", &placement),
     );
     let (front_id, a_id) = (front.node().instance_id(), a.node().instance_id());
-    let front_segment = start(&front, "front", &placement, &events, quick());
-    let a_segment = start(&a, "engine", &placement, &events, quick());
-    let b_segment = start(&b, "engine", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let a_segment = start(&a, "engine", &placement, &events, patient());
+    let b_segment = start(&b, "engine", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (a_rx, a_served) = serve(a, a_segment);
     let (b_rx, b_served) = serve(b, b_segment);
@@ -1125,21 +1171,17 @@ async fn a_hand_off_arriving_after_the_close_is_offered_again() {
     let (front_id, a_id) = (front.node().instance_id(), a.node().instance_id());
     // The front waits as long as a hand-off may take; the engine's grace
     // is short, so the close comes while the hand-off is held.
-    let patient = RuntimeConfig {
-        setup_timeout: Duration::from_secs(5),
-        ..RuntimeConfig::default()
-    };
     let gate = Arc::new(gdl_runtime::Gate::default());
     let gated = RuntimeConfig {
         faults: gdl_runtime::Faults {
             forward_gate: Some(Arc::clone(&gate)),
             ..gdl_runtime::Faults::default()
         },
-        ..quick()
+        ..patient()
     };
-    let front_segment = start(&front, "front", &placement, &Events::quiet(), patient);
+    let front_segment = start(&front, "front", &placement, &Events::quiet(), patient());
     let a_segment = start(&a, "engine", &placement, &a_events, gated);
-    let b_segment = start(&b, "engine", &placement, &b_events, quick());
+    let b_segment = start(&b, "engine", &placement, &b_events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (a_rx, a_served) = serve(a, a_segment);
     let (b_rx, b_served) = serve(b, b_segment);
@@ -1264,8 +1306,9 @@ async fn over_a_roster_directory_one_of_two_engines_retires() {
         .tempdir()
         .expect("roster directory");
     let text = format!(
-        "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 5000\n[instances]\nfront = 1\nengine = 2\n[runtime]\ndrain_ms = 20000\nsetup_timeout_ms = 300\n",
-        dir.path().display()
+        "listen = \"127.0.0.1:0\"\nroster = {:?}\nrendezvous_ms = 5000\n[instances]\nfront = 1\nengine = 2\n[runtime]\ndrain_ms = 20000\nsetup_timeout_ms = {}\n",
+        dir.path().display(),
+        GRACE.as_millis(),
     );
     let config: ProcessConfig<Nothing> =
         ProcessConfig::from_figment(figment::Figment::from(Toml::string(&text))).expect("settings");
@@ -1276,9 +1319,9 @@ async fn over_a_roster_directory_one_of_two_engines_retires() {
         launch(&config, "engine", &placement),
     );
     let (front_id, a_id) = (front.node().instance_id(), a.node().instance_id());
-    let front_segment = start(&front, "front", &placement, &events, quick());
-    let a_segment = start(&a, "engine", &placement, &events, quick());
-    let b_segment = start(&b, "engine", &placement, &events, quick());
+    let front_segment = start(&front, "front", &placement, &events, patient());
+    let a_segment = start(&a, "engine", &placement, &events, patient());
+    let b_segment = start(&b, "engine", &placement, &events, patient());
     let (front_rx, front_served) = serve(front, front_segment);
     let (a_rx, a_served) = serve(a, a_segment);
     let (b_rx, b_served) = serve(b, b_segment);
