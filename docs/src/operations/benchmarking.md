@@ -29,7 +29,7 @@ A shared-machine run gates nothing smaller than 5%. It can block a change that i
 - **Resident memory is wrong for held memory.** The system allocator keeps freed pages resident, so resident memory grows only for whichever path runs first. Use live heap bytes from a counting allocator.
 - **A bench can allocate for itself.** Extra velo nodes that a bench starts allocate in the background while it counts. A rise of 1.5 allocations per request came from the bench, not from gdl.
 - **Loopback latency for one request varies widely.** Across runs the lean graph measured 204 to 257 us and direct velo 202 to 216 us. Treat a gap under about 50 us as noise.
-- **A future that grows is a cost.** A larger future is moved whole on every request. `requests sizes 0` prints the size of the front's call future for one, two, and three segments. One pump change added 592 bytes to the future and about 650 bytes to every request. The footprint bench showed it as bytes allocated per request.
+- **A future that grows is a cost.** A larger future is moved whole on every request. `requests sizes 0` prints the size of the front's call future for one, two, and three segments. One pump change added 592 bytes to the future and about 650 bytes to every request. The footprint bench showed it as bytes allocated per request. The test `the_front_call_future_stays_under_its_ceiling` (`crates/gdl-runtime/tests/dist.rs`) fails when the future grows more than 256 bytes past its measured size.
 
 ## Gates
 

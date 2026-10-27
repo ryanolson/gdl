@@ -205,3 +205,32 @@ async fn random_routing_keeps_request_items_on_one_replica() {
     );
     assert!(settles(&cluster).await);
 }
+
+/// The front's call future, in bytes, with a small margin: 11,520 in both
+/// a test build and a release build on aarch64 with the pinned toolchain. The margin, 256 bytes, takes an added field or two but not a
+/// buffer held across an await, nor the 592 bytes one pump change once
+/// added. The future is moved whole on every request, so a raise of this
+/// bound is a cost to measure first (docs/src/operations/benchmarking.md).
+const FRONT_CALL_FUTURE_CEILING: usize = 11_776;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_front_call_future_stays_under_its_ceiling() {
+    // The future's type does not depend on the placement, so one segment
+    // on one node measures the same future that three would.
+    let nodes = [velo_node().await];
+    let placement = Placement::new().segment("front", ["A", "B", "C", "D", "F", "E", "G"]);
+    let cluster = deploy(
+        &nodes,
+        &placement,
+        &Events::quiet(),
+        RuntimeConfig::default(),
+    );
+    let call = cluster
+        .segment("front")
+        .call(Cx::new(), prompt("size", Plan::default()));
+    let size = std::mem::size_of_val(&call);
+    assert!(
+        size <= FRONT_CALL_FUTURE_CEILING,
+        "the front's call future is {size} bytes, over its ceiling of {FRONT_CALL_FUTURE_CEILING}"
+    );
+}
