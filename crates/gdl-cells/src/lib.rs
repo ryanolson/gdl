@@ -8,7 +8,8 @@
 //! by every hub in a process, for tests that run several cells in one
 //! process; [`DirDirectory`], one file per cell under a directory that
 //! every hub on one host shares, for Compose; and [`RelayDirectory`], the
-//! records a parent cell's hub holds for the children that report to it.
+//! records a parent cell's hub holds for the children that report to it,
+//! and keeps in a state directory of its own.
 //! Behind the `conformance` feature, [`conformance`] is the suite that
 //! holds a backend to the trait's rules; a backend crate enables the
 //! feature in its dev-dependencies and runs [`conformance::run`] from a
@@ -34,5 +35,5 @@ pub use memory::{MemoryDirectory, MemoryLimits, MemoryWatch};
 pub use record::{
     CellRecord, CellState, LoadSummary, ModelEntry, ModelState, Presence, Version, Withdrawal,
 };
-pub use relay::{RelayDirectory, RelayWatch};
+pub use relay::RelayDirectory;
 pub use view::CellView;

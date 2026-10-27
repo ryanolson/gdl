@@ -2,10 +2,12 @@
 //! and a service for each segment of the cell's class in the cell's
 //! layout, each configured as that cell. Each image is built once per
 //! layout and segment, and every cell of that layout and class runs it.
+//! Each parent cell's hub mounts a volume of its own, where it keeps its
+//! children's records.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gdl_model::{CellSettings, DirectoryBackend, Fleet, HUB_PUBLIC_PORT, Manifest};
+use gdl_model::{CellSettings, DirectoryBackend, Fleet, HUB_PUBLIC_PORT, Layout, Manifest};
 use serde_json::{Map, Value, json};
 
 use super::variables::{cell_variables, string};
@@ -63,6 +65,8 @@ pub(super) fn bundle(
     // The services whose source reads requests on stdin.
     let mut sources = BTreeSet::new();
     let mut secrets = Secrets::new();
+    // Each parent cell's hub's own volume.
+    let mut volumes = Map::new();
     for laid in spec.layouts() {
         let ours: Vec<&CellSettings> = cells
             .iter()
@@ -85,7 +89,7 @@ pub(super) fn bundle(
             serde_json::to_string_pretty(&spec_of).map_err(io)?,
         );
         let hub_dockerfile = dir.join("hub/Dockerfile");
-        let text = bundle.hub_dockerfile(&deployment);
+        let text = bundle.hub_dockerfile(&deployment, Some(STATE_DIR));
         bundle.files.insert(hub_dockerfile.clone(), text);
         let hub = Image {
             name: match laid.among_several() {
@@ -122,7 +126,8 @@ pub(super) fn bundle(
         }
         let mut built = BTreeSet::new();
         for cell in ours {
-            let variables = variables(cell)?;
+            let parent = parent(layout, cell);
+            let variables = variables(cell, parent)?;
             let mut service = json!({
                 "image": hub.name,
                 // Compose refuses to scale a service whose container is
@@ -131,6 +136,11 @@ pub(super) fn bundle(
                 "environment": variables,
                 "healthcheck": hub_healthcheck(),
             });
+            if parent {
+                let volume = format!("{}-state", cell.name);
+                service["volumes"] = json!([format!("{volume}:{STATE_DIR}")]);
+                volumes.insert(volume, json!({}));
+            }
             hub.build(&mut service, &mut built);
             services.insert(cell.name.clone(), service);
             for (segment, (image, grace, reads)) in &images {
@@ -176,6 +186,9 @@ pub(super) fn bundle(
         }
     }
     let mut compose = json!({"services": services});
+    if !volumes.is_empty() {
+        compose["volumes"] = Value::Object(volumes);
+    }
     if !secrets.is_empty() {
         compose["secrets"] = bundle.declare_secrets(&secrets);
     }
@@ -213,18 +226,33 @@ impl Image {
     }
 }
 
+/// Where a parent cell's hub keeps its children's records in its
+/// container: its own volume's mount.
+const STATE_DIR: &str = "/var/lib/gdl-hub";
+
+/// Whether `cell` is a parent in `layout`: its class sends to another, so
+/// its hub holds the records of its children.
+fn parent(layout: &Layout, cell: &CellSettings) -> bool {
+    layout
+        .boundaries()
+        .iter()
+        .any(|boundary| boundary.from == cell.class)
+}
+
 /// The `GDL_CELL__*` variables of `cell`'s hub and segments: its settings
 /// as its fleet gives them, with its hub where other cells' hubs reach it,
 /// at the service named for the cell, and under the `relay` backend, a
-/// child's parent hub, at the service named for its parent. So the bundle
-/// shares no volume, and its cells may run on several hosts.
-fn variables(cell: &CellSettings) -> Result<Map<String, Value>, Error> {
+/// child's parent hub, at the service named for its parent, and for a
+/// `parent`, the state directory its hub keeps its children's records in.
+/// So no two hubs share a volume, and the cells may run on several hosts.
+fn variables(cell: &CellSettings, parent: bool) -> Result<Map<String, Value>, Error> {
     let mut cell = cell.clone();
     cell.directory = DirectoryBackend::Relay {
         parent_hub: cell
             .home
             .as_ref()
             .map(|home| format!("{home}:{HUB_PUBLIC_PORT}")),
+        state_dir: parent.then(|| STATE_DIR.into()),
     };
     cell.hub = Some(format!("{}:{HUB_PUBLIC_PORT}", cell.name));
     let toml::Value::Table(table) = toml::Value::try_from(&cell).map_err(io)? else {
@@ -252,7 +280,7 @@ const README: &str = "# Docker Compose deployment of a fleet\n\n\
 Run `docker compose up --build` from this directory, on one host. Each cell of the fleet has one hub, the service named for the cell, and a service for each segment of its class in its layout, named `<cell>_<segment>`. A cell's hub and segments take the cell's settings from `GDL_CELL__*` variables, and a segment finds its own cell's hub through `GDL_HUB__HOST`.\n\n\
 A segment starts once its own cell's hub is healthy, and waits for nothing else. A hub's health check is its own liveness. Nothing waits for a cell's health, or for another cell: a parent cell's health answers 503 until its children are ready, so a wait on it would deadlock a fleet that starts together.\n\n\
 A cell's hub must never run as two at once: a cell's record has one writer, its hub. Each hub's service names its container, so Compose refuses to scale it. Container names are global on the Docker host, so a host runs one copy of this bundle at a time. Compose's default recreate stops the old container before it starts the new one, so `docker compose up` after a change replaces a hub without two running at once.\n\n\
-Each cell's hub publishes its record under the `relay` directory backend: a child cell's hub reports it to its parent cell's hub (`GDL_CELL__PARENT_HUB`), and the parent's hub holds its children's records. The hubs share no volume, so the cells can run on several hosts, if each hub reaches its parent's hub by the name the bundle gives it. A parent's hub holds no records when it starts: a parent that restarts finds each child again at the child's next report.\n\n\
+Each cell's hub publishes its record under the `relay` directory backend: a child cell's hub reports it to its parent cell's hub (`GDL_CELL__PARENT_HUB`), and the parent's hub holds its children's records. The hubs share no volume, so the cells can run on several hosts, if each hub reaches its parent's hub by the name the bundle gives it. Each parent cell's hub keeps its children's records in a volume of its own, `<cell>-state`, mounted at `/var/lib/gdl-hub` (`GDL_CELL__STATE_DIR`), so it still holds them after it restarts, a silent child's included, until the child withdraws. `docker compose down --volumes` removes them. A parent's hub on another host needs that volume, or a directory of its own, on its host.\n\n\
 Each image is built once, from one Dockerfile per layout and segment, and every cell of that layout and class runs it. A segment's image is named for its package (`<graph>-<segment>`, or `<graph>-<layout>-<segment>` for a spec of several layouts), and a hub's is `<graph>-hub`, tagged with its layout for a spec of several.\n\n\
 Each segment takes its roster from its cell's hub when it starts: the loaded instances of every segment of its class, at least `min_replicas` of each (one by default). An instance that starts later joins, so `docker compose up --scale <cell>_<segment>=N` adds instances of a segment that publishes no host port. A segment that publishes a host port it names (`HOST:CONTAINER`) runs in one cell; one whose host ports Docker chooses (`CONTAINER`, or host port 0) runs in several. An instance that is stopped retires: the others stop routing to it, and it leaves once it has drained. Kubernetes and srt-slurm are not generated.\n";
 
@@ -270,7 +298,7 @@ mod tests {
         )
         .expect("a fleet");
         let cell = fleet.cell("model-x-01").expect("a cell");
-        let variables = variables(&cell).expect("variables");
+        let variables = variables(&cell, false).expect("variables");
         let expected = [
             ("GDL_CELL__CLASS", "model_x"),
             ("GDL_CELL__DIRECTORY", "relay"),
@@ -287,6 +315,16 @@ mod tests {
             .map(|(name, value)| (name.as_str(), value.as_str().expect("a string")))
             .collect();
         assert_eq!(found, expected);
+
+        // A parent's hub keeps its children's records in its volume.
+        let parent =
+            Fleet::from_toml("[cell.global-us]\nclass = \"global\"\nregion = \"us-east-1\"\n")
+                .expect("a fleet")
+                .cell("global-us")
+                .expect("a cell");
+        let kept = super::variables(&parent, true).expect("variables");
+        assert_eq!(kept["GDL_CELL__STATE_DIR"], STATE_DIR);
+        assert!(kept.get("GDL_CELL__PARENT_HUB").is_none(), "{kept:?}");
     }
 
     /// A port binds a host port only where it names one; a form that is

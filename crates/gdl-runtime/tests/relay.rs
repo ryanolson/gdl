@@ -60,20 +60,24 @@ impl CellDirectory for Named {
     }
 }
 
-/// The hub of `cell` under `relay`, reporting to `parent_hub` if given.
+/// The hub of `cell` under `relay`, reporting to `parent_hub` if given,
+/// and keeping its children's records in `state_dir` if given.
 async fn relay_hub(
     spec: &DeploymentSpec,
     cell: CellSettings,
     parent_hub: Option<String>,
+    state_dir: Option<&std::path::Path>,
     timing: CellTiming,
 ) -> (Hub, Arc<CellReadiness<Named>>, HubDirectory) {
+    let state_dir = state_dir.map(std::path::Path::to_owned);
     let cell = CellSettings {
         directory: gdl_model::DirectoryBackend::Relay {
             parent_hub: parent_hub.clone(),
+            state_dir: state_dir.clone(),
         },
         ..cell
     };
-    let directory = HubDirectory::new(parent_hub).expect("a relay directory");
+    let directory = HubDirectory::new(parent_hub, state_dir).expect("a relay directory");
     let named = Named {
         inner: directory.clone(),
         names: Arc::new(watch::Sender::new(HashMap::new())),
@@ -132,7 +136,12 @@ async fn a_child_reports_to_its_parent_which_routes_to_it_until_it_withdraws() {
         "name = '{GLOBAL}'\nclass = 'global'\nregion = '{REGION}'\nhub = 'global-hub:1337'\n"
     ))
     .expect("valid test fixture");
-    let (parent, _global, children) = relay_hub(&spec, global, None, timing()).await;
+    let state = tempfile::Builder::new()
+        .prefix("gdl-runtime-relay-state-")
+        .tempdir()
+        .expect("a temporary directory");
+    let (parent, _global, children) =
+        relay_hub(&spec, global, None, Some(state.path()), timing()).await;
 
     let followed_cells = FollowedCells::new();
     let mut config = settings(
@@ -159,6 +168,7 @@ async fn a_child_reports_to_its_parent_which_routes_to_it_until_it_withdraws() {
         &spec,
         model,
         Some(address(&parent)),
+        None,
         CellTiming {
             heartbeat: SUMMARY,
             ..timing()

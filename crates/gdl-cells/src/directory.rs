@@ -53,7 +53,7 @@ use crate::{CellRecord, Version, Withdrawal};
 /// |---|---|---|---|---|
 /// | [`crate::DirDirectory`] | yes | yes | yes | yes |
 /// | [`crate::MemoryDirectory`] | no: it lives as long as its process | yes | yes | yes |
-/// | relay: [`crate::RelayDirectory`], in a parent cell's hub | no: in the hub's memory, and a record whose lease passed is left out of a new watch | no: a hub holds only its own children's records | yes | yes |
+/// | relay: [`crate::RelayDirectory`], in a parent cell's hub | yes, opened over a state directory ([`crate::RelayDirectory::open`]); without one, it lives as long as its process | no: a hub holds only its own children's records | yes | yes |
 ///
 /// Expiry is the reader's: every reader applies a record's lease on its
 /// own clock ([`crate::CellView`]), so the rule is one rule, whatever the

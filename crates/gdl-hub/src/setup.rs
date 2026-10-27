@@ -70,6 +70,7 @@ pub fn cell_from_vars(
 /// keyed record service ([`KeyedRecords`], of `[cell] keyed_capacity`
 /// records) and its [`CellReadiness`] publishing to the directory its settings name, at the
 /// pace its settings give ([`CellTiming::from_settings`]): `relay`, reporting to its parent's hub
+/// and keeping its children's records in its state directory
 /// ([`HubDirectory`]), or `dir`. `memory` is one directory inside one
 /// process, which no other hub could read, so a hub process refuses it.
 /// Settings made in code are checked as reading them checks them
@@ -85,8 +86,11 @@ pub fn hub_builder(
         return Ok(Hub::builder(config).extension(GraphAdmission::new(spec)));
     };
     match &cell.directory {
-        DirectoryBackend::Relay { parent_hub } => {
-            let directory = HubDirectory::new(parent_hub.clone())?;
+        DirectoryBackend::Relay {
+            parent_hub,
+            state_dir,
+        } => {
+            let directory = HubDirectory::new(parent_hub.clone(), state_dir.clone())?;
             let (builder, timing) = cell_hub(config, &spec, &cell)?;
             let readiness = CellReadiness::new(&spec, cell, directory.clone(), timing)?
                 .with_reports(&directory)?;
@@ -117,7 +121,7 @@ pub fn hub_builder(
 /// extension to the builder this returns.
 ///
 /// `cell` names no directory of its own: settings whose `directory`,
-/// `parent_hub`, or `dir` key is set are refused, so that nothing they say
+/// `parent_hub`, `state_dir`, or `dir` key is set are refused, so that nothing they say
 /// is left unread. The rest is checked as [`hub_builder`] checks it.
 /// [`cell_from_env`] reads the settings of the `gdl-hub` binary, whose
 /// default backend is `relay`, so it asks a child cell for `parent_hub`:

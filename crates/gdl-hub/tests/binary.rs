@@ -84,6 +84,49 @@ fn the_binary_refuses_a_backend_it_cannot_publish_to() {
     }
 }
 
+/// A parent cell's hub keeps its children's records in its state
+/// directory: the binary refuses to start without one, or with one it
+/// cannot read, rather than start without the records it kept.
+#[test]
+fn the_binary_refuses_a_parent_hub_with_nowhere_to_keep_its_childrens_records() {
+    let dir = tempfile::Builder::new()
+        .prefix("gdl-hub-binary-")
+        .tempdir()
+        .expect("a directory");
+    let deployment = dir.path().join("deployment.json");
+    std::fs::write(
+        &deployment,
+        serde_json::to_vec(&spec()).expect("valid test fixture"),
+    )
+    .expect("written");
+    let file = dir.path().join("a-file");
+    std::fs::write(&file, b"not a directory").expect("written");
+    for (state_dir, expected) in [
+        (None, "GDL_CELL__STATE_DIR: missing"),
+        (
+            Some(&file),
+            "[cell] state_dir: the directory is unavailable",
+        ),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_gdl-hub"));
+        command
+            .arg(&deployment)
+            .env("GDL_CELL__NAME", "global-us")
+            .env("GDL_CELL__CLASS", "global")
+            .env("GDL_CELL__REGION", "us-east-1")
+            .env("GDL_CELL__HUB", "global-us:1337")
+            .env("GDL_HUB__PUBLIC_PORT", "0")
+            .env("GDL_HUB__CONTROL_PORT", "0");
+        if let Some(state_dir) = state_dir {
+            command.env("GDL_CELL__STATE_DIR", state_dir);
+        }
+        let output = command.output().expect("the binary runs");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "started with {state_dir:?}");
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
 /// A hub process, killed when the test ends however it ends, and each
 /// line of its stderr, in order.
 struct Serving {

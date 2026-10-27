@@ -88,6 +88,7 @@ The system listener answers the live and health probes and serves `/metrics`. It
 | `home` | none | the parent cell |
 | `directory` | `relay` | `relay`, `memory`, or `dir`. A hub process runs `relay` or `dir` |
 | `parent_hub` | none | the parent cell's hub, `host:port`, where the cell's hub reports its record. With `directory = "relay"`, a hub of a class that another class sends to needs it. Refused for a class that nothing sends to, and with another backend |
+| `state_dir` | none | where the cell's hub keeps the records its children report, so that it still holds them after it restarts. With `directory = "relay"`, a hub of a class that sends to another class needs it. Refused for a class that sends to none, and with another backend. An instance ignores it |
 | `dir` | none | the shared directory. Required with `directory = "dir"`, refused otherwise |
 | `hub` | none | `host:port` where other cells' hubs reach this cell's hub. An instance ignores it |
 | `summary_ms` | 10000 (`CellSettings::DEFAULT_SUMMARY`) | the load summary's period. At least 1000 |

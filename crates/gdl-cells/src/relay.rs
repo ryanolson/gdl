@@ -1,66 +1,135 @@
 use std::{
-    collections::HashMap,
-    pin::Pin,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
-    task::{Context, Poll},
-    time::Duration,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, PoisonError},
 };
 
-use futures::Stream;
-use tokio::time::Instant;
-
 use crate::{
-    CellDirectory, CellEvent, CellRecord, DirectoryError, MemoryDirectory, MemoryLimits,
-    MemoryWatch, ResumeToken, Version, Withdrawal,
+    CellDirectory, CellRecord, DirectoryError, MemoryDirectory, MemoryLimits, MemoryWatch,
+    ResumeToken, Version, Withdrawal,
+    dir::file::{self, Files, Held},
 };
 
 /// The directory of the `relay` backend: the records a parent cell's hub
-/// holds for its children, which its children's hubs report to it, in
-/// the hub's process. The hub's follow watches it as it would watch any
-/// other directory.
+/// holds for its children, which its children's hubs report to it. The
+/// hub's follow watches it as it would watch any other directory.
 ///
-/// It is a [`MemoryDirectory`] whose leases run on its own clock: a record
-/// that no newer write has renewed for its lease is left out of a watch
-/// that begins after that, its snapshot or the changes it resumes from, as
-/// a reader that had watched all along would have dropped it
-/// ([`crate::CellView`]). A record scaled to 0 has no lease, and never
-/// expires ([`CellRecord::leased`]). Nothing is sent when a record expires, since
-/// silence is not a withdrawal, and its version stays held, so an older
-/// write is still refused.
+/// Its watches are a [`MemoryDirectory`]'s, in the hub's process. Opened
+/// over a state directory ([`RelayDirectory::open`]), it also keeps each
+/// record and withdrawal there, one file per cell,
+/// `<root>/<class>/<cell>.json`, as the `dir` backend does, and reads them
+/// back when it opens: so it keeps the contract's first rule
+/// ([`CellDirectory`]) across the hub's restart. A write is stored before
+/// any watcher sees it, and a write that cannot be stored is refused with
+/// [`DirectoryError::Unavailable`] and holds nothing, so the state never
+/// lags what a watcher has seen. Without a state directory
+/// ([`RelayDirectory::new`]) it keeps nothing across a restart.
 ///
-/// So it does not keep the contract's first rule ([`CellDirectory`]): a
-/// record whose lease has passed is gone from a new watch, and every
-/// record is gone when the hub restarts.
+/// A record whose lease has passed stays: silence is not a withdrawal, and
+/// every reader applies the lease on its own clock ([`crate::CellView`]).
+/// A reader that starts after a record's last write, as a restarted hub's
+/// follow does, takes it as fresh for one lease from when it reads it.
 ///
 /// Its writes are not checked beyond the trait's rules: the hub writes to
 /// it only what its children's reports carry once it has verified them.
 #[derive(Debug, Clone, Default)]
 pub struct RelayDirectory {
     records: MemoryDirectory,
-    writes: Arc<Mutex<HashMap<(String, String), Written>>>,
+    store: Option<Arc<Store>>,
 }
 
-/// The latest write the directory took for one cell, and when.
-#[derive(Debug, Clone, Copy)]
-struct Written {
-    version: Version,
-    /// The record's lease, or `None` for a withdrawal.
-    lease: Option<Duration>,
-    at: Instant,
+/// Where a [`RelayDirectory`] keeps what it holds.
+#[derive(Debug)]
+struct Store {
+    root: PathBuf,
+    /// Held from a write's check of what is held to its arrival in
+    /// [`RelayDirectory::records`], so that two writes of one cell reach
+    /// the files and the watchers in one order. Writes come from the
+    /// children's reports, at their heartbeat, never from the request
+    /// path, so one lock for every cell costs nothing that matters.
+    writes: Mutex<()>,
 }
 
 impl RelayDirectory {
-    /// An empty directory with the default limits.
+    /// An empty directory with the default limits, which keeps nothing
+    /// across a restart.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// An empty directory with `limits`, as [`MemoryDirectory::with_limits`].
+    /// An empty directory with `limits`, as [`MemoryDirectory::with_limits`],
+    /// which keeps nothing across a restart.
     pub fn with_limits(limits: MemoryLimits) -> Self {
         Self {
             records: MemoryDirectory::with_limits(limits),
-            writes: Arc::default(),
+            store: None,
         }
+    }
+
+    /// The directory kept in `root`, with `limits`: what an earlier
+    /// directory kept there, and each write from now on. `root` is made if
+    /// it is missing.
+    ///
+    /// # Errors
+    ///
+    /// [`DirectoryError::Unavailable`] when `root` cannot be made or read,
+    /// or a cell's file in it cannot be read: a directory that opened
+    /// without a record it holds would read a silent cell as gone. A file
+    /// that does not hold its cell's record or tombstone is passed over, as
+    /// the `dir` backend passes it over, and the cell's next write
+    /// replaces it.
+    pub fn open(root: impl Into<PathBuf>, limits: MemoryLimits) -> Result<Self, DirectoryError> {
+        let root = root.into();
+        let unavailable = |what: &str, path: &Path, error: std::io::Error| {
+            DirectoryError::Unavailable(format!("{what} {}: {error}", path.display()))
+        };
+        std::fs::create_dir_all(&root).map_err(|error| unavailable("making", &root, error))?;
+        // Positions of their own, so that a token of a directory opened
+        // before over the same state is answered with `Resnapshot`.
+        let records = MemoryDirectory::with_base(limits, crate::dir::base());
+        let classes =
+            std::fs::read_dir(&root).map_err(|error| unavailable("reading", &root, error))?;
+        for class in classes {
+            let class = class.map_err(|error| unavailable("reading", &root, error))?;
+            let path = class.path();
+            // Only what a write makes: a directory named for a class.
+            let Some(name) = class
+                .file_name()
+                .to_str()
+                .filter(|name| gdl_model::check_class_name(name).is_ok())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            match class.file_type() {
+                Ok(kind) if kind.is_dir() => {}
+                Ok(_) => continue,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(unavailable("reading", &path, error)),
+            }
+            let cells = file::scan(&path, &name, &Files::new())
+                .map_err(|error| unavailable("reading", &path, error))?;
+            for entry in cells.into_values().filter_map(|seen| seen.entry) {
+                match (entry.record(), entry.withdrawal(&name)) {
+                    (Some(record), _) => records.put(record.clone())?,
+                    (None, Some(withdrawal)) => records.remove(withdrawal)?,
+                    (None, None) => {}
+                }
+            }
+        }
+        Ok(Self {
+            records,
+            store: Some(Arc::new(Store {
+                root,
+                writes: Mutex::default(),
+            })),
+        })
+    }
+
+    /// The state directory the directory keeps what it holds in, if it
+    /// keeps it anywhere.
+    pub fn root(&self) -> Option<&Path> {
+        self.store.as_deref().map(|store| store.root.as_path())
     }
 
     /// How many watches of `class` are open.
@@ -71,9 +140,7 @@ impl RelayDirectory {
     /// The version of the latest write the directory took for `cell` of
     /// `class`, a record or a withdrawal, expired or not.
     pub fn held(&self, class: &str, cell: &str) -> Option<Version> {
-        self.lock()
-            .get(&(class.to_owned(), cell.to_owned()))
-            .map(|written| written.version)
+        self.records.held(class, cell).map(|(version, _)| version)
     }
 
     /// The record the directory holds for `cell` of `class`, expired or
@@ -85,111 +152,99 @@ impl RelayDirectory {
     /// Whether the latest write the directory took for `cell` of `class`
     /// is a record, expired or not, rather than a withdrawal.
     pub fn holds_record(&self, class: &str, cell: &str) -> bool {
-        self.lock()
-            .get(&(class.to_owned(), cell.to_owned()))
-            .is_some_and(|written| written.lease.is_some())
+        self.records
+            .held(class, cell)
+            .is_some_and(|(_, record)| record)
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<(String, String), Written>> {
-        // Each write replaces one entry in one step.
-        self.writes.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Take the next write of `cell` of `class`, at `version`, if it is
-    /// newer than the last: before the write reaches a watcher, so that
-    /// what [`RelayDirectory::held`] says is never behind what a watcher
-    /// has seen. The directory refuses only a write that is not newer, so
-    /// once this takes one, the directory holds it or a later write.
-    fn take(
-        &self,
-        class: &str,
-        cell: &str,
-        version: Version,
-        lease: Option<Duration>,
-    ) -> Result<(), DirectoryError> {
-        let mut writes = self.lock();
-        let key = (class.to_owned(), cell.to_owned());
-        if let Some(held) = writes.get(&key)
-            && version <= held.version
-        {
-            return Err(DirectoryError::NotNewer {
-                class: class.to_owned(),
-                cell: cell.to_owned(),
-                held: held.version,
-                offered: version,
-            });
-        }
-        let at = Instant::now();
-        writes.insert(key, Written { version, lease, at });
-        Ok(())
-    }
-
-    /// Whether the latest write of `cell` of `class` is a record that no
-    /// newer write has renewed for its lease, at `now`.
-    fn expired(&self, record: &CellRecord, now: Instant) -> bool {
-        self.lock()
-            .get(&(record.class.clone(), record.name.clone()))
-            .and_then(|written| written.lease.map(|lease| (written.at, lease)))
-            .is_some_and(|(at, lease)| now.saturating_duration_since(at) > lease)
+    /// Take `write` of `cell` of `class`: store it, if the directory
+    /// keeps what it holds, and then hand it to the watchers, unless it is
+    /// not newer than what the directory holds. It runs on a blocking
+    /// thread, whole, so a caller that stops waiting cannot leave a write
+    /// stored and not taken.
+    async fn write(&self, write: Write) -> Result<(), DirectoryError> {
+        let Some(store) = self.store.clone() else {
+            return write.apply(&self.records);
+        };
+        let records = self.records.clone();
+        tokio::task::spawn_blocking(move || {
+            let _writes = store.writes.lock().unwrap_or_else(PoisonError::into_inner);
+            let (class, cell) = write.cell();
+            let offered = write.version();
+            if let Some((held, _)) = records.held(class, cell)
+                && offered <= held
+            {
+                return Err(DirectoryError::NotNewer {
+                    class: class.to_owned(),
+                    cell: cell.to_owned(),
+                    held,
+                    offered,
+                });
+            }
+            file::write(&store.root.join(class), class, cell, write.held())?;
+            write.apply(&records)
+        })
+        .await
+        .map_err(|error| DirectoryError::Unavailable(error.to_string()))?
     }
 }
 
 impl CellDirectory for RelayDirectory {
-    type Watch = RelayWatch;
+    type Watch = MemoryWatch;
 
     async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
+        // Before any path is made of its names.
         record.check()?;
-        // A record with no lease is held as one whose lease never ends.
-        let lease = if record.leased() {
-            record.lease
-        } else {
-            Duration::MAX
-        };
-        self.take(&record.class, &record.name, record.version(), Some(lease))?;
-        self.records.publish(record).await
+        self.write(Write::Record(record)).await
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
         withdrawal.check()?;
-        self.take(
-            &withdrawal.class,
-            &withdrawal.cell,
-            withdrawal.version(),
-            None,
-        )?;
-        self.records.withdraw(withdrawal).await
+        self.write(Write::Withdrawal(withdrawal)).await
     }
 
-    fn watch(&self, class: &str, from: Option<ResumeToken>) -> RelayWatch {
-        RelayWatch {
-            watch: self.records.watch(class, from),
-            directory: self.clone(),
+    /// A resume token is a place in this directory's watches: a directory
+    /// opened again over the same state answers an earlier one's token
+    /// with [`crate::CellEvent::Resnapshot`].
+    fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
+        self.records.watch(class, from)
+    }
+}
+
+/// A write of one cell.
+enum Write {
+    Record(CellRecord),
+    Withdrawal(Withdrawal),
+}
+
+impl Write {
+    fn cell(&self) -> (&str, &str) {
+        match self {
+            Write::Record(record) => (&record.class, &record.name),
+            Write::Withdrawal(withdrawal) => (&withdrawal.class, &withdrawal.cell),
         }
     }
-}
 
-/// A watch of one class of a [`RelayDirectory`]: a [`MemoryWatch`] that
-/// leaves out the records whose lease has passed.
-#[derive(Debug)]
-pub struct RelayWatch {
-    watch: MemoryWatch,
-    directory: RelayDirectory,
-}
+    fn version(&self) -> Version {
+        match self {
+            Write::Record(record) => record.version(),
+            Write::Withdrawal(withdrawal) => withdrawal.version(),
+        }
+    }
 
-impl Stream for RelayWatch {
-    type Item = Result<CellEvent, DirectoryError>;
+    /// What the cell's file holds once the write is stored.
+    fn held(&self) -> Held {
+        match self {
+            Write::Record(record) => Held::Record(Box::new(record.clone())),
+            Write::Withdrawal(withdrawal) => Held::tombstone(withdrawal.clone()),
+        }
+    }
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        // A change as it happens is fresh: only a snapshot, or the changes
-        // a watch resumes from, can hold an expired record.
-        loop {
-            let event = std::task::ready!(Pin::new(&mut this.watch).poll_next(cx));
-            match &event {
-                Some(Ok(CellEvent::Current(record) | CellEvent::Put { record, .. }))
-                    if this.directory.expired(record, Instant::now()) => {}
-                _ => return Poll::Ready(event),
-            }
+    /// Take the write into `records`, which hands it to their watchers.
+    fn apply(self, records: &MemoryDirectory) -> Result<(), DirectoryError> {
+        match self {
+            Write::Record(record) => records.put(record),
+            Write::Withdrawal(withdrawal) => records.remove(withdrawal),
         }
     }
 }

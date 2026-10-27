@@ -385,19 +385,44 @@ impl Bundle {
     }
 
     /// The Dockerfile of a hub that admits the deployment in
-    /// `deployment`, a path in the bundle.
-    fn hub_dockerfile(&self, deployment: &Path) -> String {
+    /// `deployment`, a path in the bundle, with an empty directory at
+    /// `state_dir` that any user can write, if it names one.
+    fn hub_dockerfile(&self, deployment: &Path, state_dir: Option<&str>) -> String {
         let settings = &self.settings;
-        dockerfile(
-            &format!(
-                "cargo install {} --locked --root /build-tools gdl-hub",
-                self.hub_install
-            ),
+        let install = format!(
+            "cargo install {} --locked --root /build-tools gdl-hub",
+            self.hub_install
+        );
+        let Some(state_dir) = state_dir else {
+            return dockerfile(
+                &install,
+                "/build-tools/bin/gdl-hub",
+                &self.in_build(deployment),
+                &settings.build_image,
+                settings.hub_image.as_ref().unwrap_or(&settings.base_image),
+            );
+        };
+        // A new named volume takes the owner and mode of the directory it
+        // is mounted on. The runtime image's user is not known here, and
+        // the default one is not root, so the directory is writable by
+        // all, as `/tmp` is. COPY keeps the mode of a directory only
+        // inside what it copies, so the directory is copied with its
+        // parent's contents.
+        let (parent, name) = state_dir
+            .rsplit_once('/')
+            .expect("the state directory is an absolute path");
+        let staged = format!("/build-tools/state/{name}");
+        let mut text = dockerfile(
+            &format!("{install} && mkdir -p {staged} && chmod 1777 {staged}"),
             "/build-tools/bin/gdl-hub",
             &self.in_build(deployment),
             &settings.build_image,
             settings.hub_image.as_ref().unwrap_or(&settings.base_image),
-        )
+        );
+        text.push_str(&format!(
+            "COPY --from=build /build-tools/state/ {parent}/\n"
+        ));
+        text
     }
 
     /// Segment `segment`'s image, from its crate in `dir`, which builds
@@ -600,7 +625,7 @@ fn single(spec: &Spec, mut bundle: Bundle, target: &Path) -> Result<Files, Error
         "hub".into(),
         json!({"build":build,"healthcheck":hub_healthcheck()}),
     );
-    let hub = bundle.hub_dockerfile(Path::new("deployment.json"));
+    let hub = bundle.hub_dockerfile(Path::new("deployment.json"), None);
     bundle.files.insert("hub/Dockerfile".into(), hub);
     let source = placement
         .segments()

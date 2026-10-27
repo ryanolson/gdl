@@ -116,6 +116,7 @@ fn a_given_directory_refuses_settings_that_name_another() {
         },
         DirectoryBackend::Relay {
             parent_hub: Some("global-hub:1337".into()),
+            state_dir: None,
         },
     ];
     for directory in named {

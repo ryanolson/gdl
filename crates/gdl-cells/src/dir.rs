@@ -17,7 +17,7 @@ use tokio::{
 
 use crate::{CellDirectory, CellEvent, CellRecord, DirectoryError, ResumeToken, Withdrawal};
 
-mod file;
+pub(crate) mod file;
 mod watch;
 
 use file::{Files, Held};
@@ -529,13 +529,13 @@ fn after(
 }
 
 /// The position before every class's first change in one directory
-/// handle and its clones. It is random, so that a token another process
+/// handle and its clones, of this backend or of a stored `relay` one. It is random, so that a token another process
 /// made, or this one before a restart, falls outside the positions this
 /// one serves, but for a chance of one in 2^24 that the two bases match.
 /// The base's low 40 bits are clear, and its top 24 bits are never all
 /// set, so that 2^40 changes fit above it and `u64::MAX` is never a
 /// position.
-fn base() -> u64 {
+pub(crate) fn base() -> u64 {
     const BASES: u64 = (1 << 24) - 1;
     let random = RandomState::new().hash_one((std::process::id(), SystemTime::now()));
     (random % BASES) << 40

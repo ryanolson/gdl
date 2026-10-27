@@ -231,6 +231,7 @@ fn a_cells_requirements_are_read_from_the_environment() {
         jail.set_env("GDL_CELL__NAME", "global-us-east-1");
         jail.set_env("GDL_CELL__CLASS", "global");
         jail.set_env("GDL_CELL__REGION", "us-east-1");
+        jail.set_env("GDL_CELL__STATE_DIR", "/var/lib/gdl-hub");
         jail.set_env("GDL_CELL__REQUIRES__MODEL_X", "2");
         let cell = cell_from_env(&spec()).map_err(|e| e.to_string())?;
         assert_eq!(
@@ -613,6 +614,7 @@ async fn a_cell_with_the_relay_backend_needs_its_parents_hub() {
         .expect("the hub serves");
     let relay = DirectoryBackend::Relay {
         parent_hub: Some(format!("127.0.0.1:{}", parent.public_addr().port())),
+        state_dir: None,
     };
     let hub = hub_builder(config(), spec(), Some(settings(relay)))
         .expect("a relay cell")

@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 pub use cell::{
     CellSettings, DirectoryBackend, HubTiming, WatchCaps, cell_variable, check_cell_name,
     check_hub_address, check_hub_timing, check_region_name, check_relay_lease, check_summary,
-    missing_parent_hub,
+    missing_parent_hub, missing_state_dir,
 };
 pub use config::{ConfigField, ConfigSchema, ConfigValue, GraphConfig, resolve_config};
 pub use deployment::{

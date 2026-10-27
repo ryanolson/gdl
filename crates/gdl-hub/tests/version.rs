@@ -89,10 +89,11 @@ async fn a_recovered_writer_epoch_raises_the_models_version() {
             .expect("the parent address")
             .to_string();
         let server = tokio::spawn(async move { velo_hub::axum::serve(listener, app).await });
-        let directory = HubDirectory::new(Some(parent.clone())).expect("a relay directory");
+        let directory = HubDirectory::new(Some(parent.clone()), None).expect("a relay directory");
         let settings = CellSettings {
             directory: DirectoryBackend::Relay {
                 parent_hub: Some(parent),
+                state_dir: None,
             },
             ..common::settings()
         };

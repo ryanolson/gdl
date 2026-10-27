@@ -50,6 +50,10 @@ impl Default for MemoryLimits {
 #[derive(Debug, Default)]
 struct Shared {
     limits: MemoryLimits,
+    // The position before each class's first change: 0, or for a
+    // directory that stands for a restarted one, a base of its own, so
+    // that a token of the one before falls outside what it serves.
+    base: u64,
     state: Mutex<State>,
 }
 
@@ -93,9 +97,16 @@ impl MemoryDirectory {
 
     /// An empty directory with `limits`. A buffer of 0 is taken as 1.
     pub fn with_limits(limits: MemoryLimits) -> Self {
+        Self::with_base(limits, 0)
+    }
+
+    /// An empty directory with `limits` whose classes' positions start at
+    /// `base`.
+    pub(crate) fn with_base(limits: MemoryLimits, base: u64) -> Self {
         Self {
             shared: Arc::new(Shared {
                 limits,
+                base,
                 state: Mutex::default(),
             }),
         }
@@ -119,6 +130,38 @@ impl MemoryDirectory {
             .map_or(0, |class| class.watchers.len())
     }
 
+    /// [`CellDirectory::publish`], which never waits: so that a caller on
+    /// a blocking thread can write.
+    pub(crate) fn put(&self, record: CellRecord) -> Result<(), DirectoryError> {
+        record.check()?;
+        let (class, cell) = (record.class.clone(), record.name.clone());
+        self.write(
+            &class,
+            &cell,
+            Held::Record(Box::new(record.clone())),
+            |token| CellEvent::Put { record, token },
+        )
+    }
+
+    /// [`CellDirectory::withdraw`], which never waits.
+    pub(crate) fn remove(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
+        withdrawal.check()?;
+        let (class, cell) = (withdrawal.class.clone(), withdrawal.cell.clone());
+        let held = Held::Withdrawn(withdrawal.version());
+        self.write(&class, &cell, held, |token| CellEvent::Withdrawn {
+            withdrawal,
+            token,
+        })
+    }
+
+    /// The version of the latest write the directory took for `cell` of
+    /// `class`, and whether it is a record rather than a withdrawal.
+    pub(crate) fn held(&self, class: &str, cell: &str) -> Option<(Version, bool)> {
+        let state = self.shared.lock();
+        let held = state.classes.get(class)?.cells.get(cell)?;
+        Some((held.version(), matches!(held, Held::Record(_))))
+    }
+
     fn write(
         &self,
         class: &str,
@@ -128,8 +171,9 @@ impl MemoryDirectory {
     ) -> Result<(), DirectoryError> {
         let offered = held.version();
         let history = self.shared.limits.history;
+        let base = self.shared.base;
         let mut state = self.shared.lock();
-        let entry = state.classes.entry(class.to_owned()).or_default();
+        let entry = state.class(class, base);
         if let Some(current) = entry.cells.get(cell)
             && offered <= current.version()
         {
@@ -158,24 +202,11 @@ impl CellDirectory for MemoryDirectory {
     type Watch = MemoryWatch;
 
     async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
-        record.check()?;
-        let (class, cell) = (record.class.clone(), record.name.clone());
-        self.write(
-            &class,
-            &cell,
-            Held::Record(Box::new(record.clone())),
-            |token| CellEvent::Put { record, token },
-        )
+        self.put(record)
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
-        withdrawal.check()?;
-        let (class, cell) = (withdrawal.class.clone(), withdrawal.cell.clone());
-        let held = Held::Withdrawn(withdrawal.version());
-        self.write(&class, &cell, held, |token| CellEvent::Withdrawn {
-            withdrawal,
-            token,
-        })
+        self.remove(withdrawal)
     }
 
     fn watch(&self, class: &str, from: Option<ResumeToken>) -> MemoryWatch {
@@ -186,7 +217,7 @@ impl CellDirectory for MemoryDirectory {
         // duplicate between them.
         let pending: VecDeque<CellEvent> = match from {
             None => {
-                let entry = state.classes.entry(class.to_owned()).or_default();
+                let entry = state.class(class, self.shared.base);
                 let mut records: Vec<&CellRecord> = entry
                     .cells
                     .values()
@@ -254,6 +285,18 @@ impl Shared {
         // A panic while the lock was held leaves the directory as the last
         // complete write left it: every write changes it in one step.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl State {
+    /// `class`, made with its positions starting at `base` if it is new.
+    fn class(&mut self, class: &str, base: u64) -> &mut Class {
+        self.classes
+            .entry(class.to_owned())
+            .or_insert_with(|| Class {
+                head: base,
+                ..Class::default()
+            })
     }
 }
 

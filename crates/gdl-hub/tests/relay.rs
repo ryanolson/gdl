@@ -36,14 +36,35 @@ struct RelayCell {
     hub: Hub,
     readiness: Arc<CellReadiness<Named<HubDirectory>>>,
     directory: HubDirectory,
+    /// The state directory made for a parent whose settings name none.
+    _state: Option<tempfile::TempDir>,
 }
 
-/// The hub of `cell` of `spec`, its own name resolved once it serves.
+/// The hub of `cell` of `spec`, its own name resolved once it serves. A
+/// parent whose settings name no state directory gets a temporary one.
 async fn relay_cell(spec: &DeploymentSpec, cell: CellSettings, timing: CellTiming) -> RelayCell {
-    let DirectoryBackend::Relay { parent_hub } = cell.directory.clone() else {
+    let DirectoryBackend::Relay {
+        parent_hub,
+        state_dir,
+    } = cell.directory.clone()
+    else {
         panic!("a relay cell: {:?}", cell.directory);
     };
-    let directory = HubDirectory::new(parent_hub).expect("a relay directory");
+    let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
+    let parent = layout
+        .boundaries()
+        .iter()
+        .any(|boundary| boundary.from == cell.class);
+    let made = (parent && state_dir.is_none()).then(state);
+    let state_dir = state_dir.or_else(|| made.as_ref().map(|made| made.path().to_owned()));
+    let cell = CellSettings {
+        directory: DirectoryBackend::Relay {
+            parent_hub: parent_hub.clone(),
+            state_dir: state_dir.clone(),
+        },
+        ..cell
+    };
+    let directory = HubDirectory::new(parent_hub, state_dir).expect("a relay directory");
     let named = Named::new(directory.clone());
     let name = cell.hub.clone().expect("a hub name");
     let readiness = Arc::new(
@@ -63,6 +84,7 @@ async fn relay_cell(spec: &DeploymentSpec, cell: CellSettings, timing: CellTimin
         hub,
         readiness,
         directory,
+        _state: made,
     }
 }
 
@@ -72,6 +94,26 @@ fn global() -> CellSettings {
         "name = '{GLOBAL}'\nclass = 'global'\nregion = 'us-east-1'\nhub = 'global-hub:1337'\n"
     ))
     .expect("valid test fixture")
+}
+
+/// The global cell's settings under `relay`, keeping its children's
+/// records in `state`.
+fn global_keeping(state: &std::path::Path) -> CellSettings {
+    CellSettings {
+        directory: DirectoryBackend::Relay {
+            parent_hub: None,
+            state_dir: Some(state.to_owned()),
+        },
+        ..global()
+    }
+}
+
+/// A temporary state directory for a parent's hub.
+fn state() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("gdl-hub-relay-state-")
+        .tempdir()
+        .expect("a temporary directory")
 }
 
 /// A model cell `name`, a child of [`GLOBAL`], reporting to `parent`:
@@ -295,8 +337,9 @@ fn nowhere() -> String {
 }
 
 /// A child that stops reporting is dropped once its record's own lease
-/// has passed on the parent's clock: its parent follows it no more, and
-/// no longer holds it, though it never withdrew.
+/// has passed on the parent's clock: its parent follows it no more. Its
+/// record stays held, since it never withdrew: silence is not a
+/// withdrawal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_child_that_stops_reporting_is_dropped_once_its_lease_passes() {
     let parent = relay_cell(&spec(), global(), quiet_timing()).await;
@@ -323,7 +366,190 @@ async fn a_child_that_stops_reporting_is_dropped_once_its_lease_passes() {
         "dropped {:?} after its report, inside its lease of {lease:?}",
         sent.elapsed()
     );
+    assert_eq!(
+        held(&parent.directory, "model_x")
+            .await
+            .keys()
+            .collect::<Vec<_>>(),
+        ["model-x-09"]
+    );
+}
+
+/// A parent's hub that restarts still holds the record of a child that
+/// went silent before it: read back from its state directory before the
+/// hub serves, at the version the child reported. The restarted parent
+/// reads it on its own clock: it follows the child for at most one lease,
+/// then drops it as expired, and still holds the record, until the child
+/// withdraws.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_parent_still_holds_a_silent_childs_record() {
+    let state = state();
+    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let lease = Duration::from_millis(800);
+    let record = child_record("model-x-09", &nowhere(), (1, 1), lease);
+    let watcher = CellWatcher::new().expect("a client");
+    watcher
+        .report(&address(&parent.hub), &Report::Record(record.clone()))
+        .await
+        .expect("the parent takes the report");
+    parent.hub.shutdown().await.expect("the parent stops");
+
+    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    assert_eq!(
+        held(&parent.directory, "model_x").await,
+        BTreeMap::from([("model-x-09".to_string(), record.clone())]),
+        "the restarted parent holds the silent child's record"
+    );
+    let restarted = Instant::now();
+    following(&parent.readiness, "the child is followed", |cells| {
+        cells.contains_key(&key("model_x", "model-x-09"))
+    })
+    .await;
+    following(&parent.readiness, "the child is dropped", |cells| {
+        !cells.contains_key(&key("model_x", "model-x-09"))
+    })
+    .await;
+    assert!(
+        restarted.elapsed() >= lease,
+        "dropped {:?} after the restart, inside its lease of {lease:?}",
+        restarted.elapsed()
+    );
+    assert_eq!(
+        held(&parent.directory, "model_x").await,
+        BTreeMap::from([("model-x-09".to_string(), record.clone())]),
+        "expired, and still held"
+    );
+    // Its version is held too: a late copy is refused.
+    match watcher
+        .report(&address(&parent.hub), &Report::Record(record))
+        .await
+    {
+        Err(DirectoryError::NotNewer { .. }) => {}
+        other => panic!("a late copy after the restart: {other:?}"),
+    }
+    parent.hub.shutdown().await.expect("the parent stops");
+}
+
+/// A parent cell's hub under `relay` keeps its children's records: one
+/// whose directory has no state directory is refused, as a child's with
+/// no parent's hub is, rather than run with its children's records only
+/// in memory.
+#[test]
+fn a_parent_whose_directory_keeps_nothing_is_refused() {
+    let directory = HubDirectory::new(None, None).expect("a relay directory");
+    let Err(error) = CellReadiness::new(&spec(), global(), directory.clone(), quiet_timing())
+        .expect("valid test fixture")
+        .with_reports(&directory)
+    else {
+        panic!("a parent with nowhere to keep its children's records");
+    };
+    assert!(
+        error.to_string().starts_with("[cell] state_dir: missing"),
+        "{error}"
+    );
+}
+
+/// A child's hub that restarts reads its last record from its parent's
+/// hub, with its models' history. The parent keeps that record across its
+/// own restart, so the read still finds it after both hubs restarted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_reads_back_its_record_after_its_parent_restarts() {
+    let state = state();
+    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let record = CellRecord {
+        models: vec![
+            gdl_cells::ModelEntry {
+                model: "llama-70b".into(),
+                routing_key: None,
+                state: gdl_cells::ModelState::Ready,
+                since: 2,
+            },
+            gdl_cells::ModelEntry {
+                model: "qwen-32b".into(),
+                routing_key: None,
+                state: gdl_cells::ModelState::Drained,
+                since: 3,
+            },
+        ],
+        models_version: 3,
+        ..child_record("model-x-01", &nowhere(), (4, 9), Duration::from_secs(30))
+    };
+    let watcher = CellWatcher::new().expect("a client");
+    watcher
+        .report(&address(&parent.hub), &Report::Record(record.clone()))
+        .await
+        .expect("the parent takes the report");
+    parent.hub.shutdown().await.expect("the parent stops");
+
+    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let read = watcher
+        .held(&address(&parent.hub), "model_x", "model-x-01")
+        .await
+        .expect("the restarted parent answers");
+    assert_eq!(read, Some(record), "the child's last record, whole");
+    parent.hub.shutdown().await.expect("the parent stops");
+}
+
+/// A child's withdrawal removes its record from a parent that keeps its
+/// state, and it stays removed when the parent restarts: its version is
+/// held, so a late report of the withdrawn record is refused, and only a
+/// newer epoch, a restarted child, brings the cell back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawal_stays_withdrawn_across_a_parent_restart() {
+    let state = state();
+    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let hub = nowhere();
+    let lease = Duration::from_secs(30);
+    let watcher = CellWatcher::new().expect("a client");
+    let at = address(&parent.hub);
+    watcher
+        .report(
+            &at,
+            &Report::Record(child_record("model-x-01", &hub, (5, 1), lease)),
+        )
+        .await
+        .expect("a child's record");
+    watcher
+        .report(
+            &at,
+            &Report::Withdrawal(Withdrawal {
+                class: "model_x".into(),
+                cell: "model-x-01".into(),
+                epoch: 5,
+                seq: 2,
+            }),
+        )
+        .await
+        .expect("its withdrawal");
     assert!(held(&parent.directory, "model_x").await.is_empty());
+    parent.hub.shutdown().await.expect("the parent stops");
+
+    let parent = relay_cell(&spec(), global_keeping(state.path()), quiet_timing()).await;
+    let at = address(&parent.hub);
+    assert!(
+        held(&parent.directory, "model_x").await.is_empty(),
+        "the withdrawn child came back"
+    );
+    match watcher
+        .report(
+            &at,
+            &Report::Record(child_record("model-x-01", &hub, (5, 2), lease)),
+        )
+        .await
+    {
+        Err(DirectoryError::NotNewer { held, .. }) if (held.epoch, held.seq) == (5, 2) => {}
+        other => panic!("a late record at the withdrawal's version: {other:?}"),
+    }
+    let restarted = child_record("model-x-01", &hub, (6, 1), lease);
+    watcher
+        .report(&at, &Report::Record(restarted.clone()))
+        .await
+        .expect("a newer epoch");
+    assert_eq!(
+        held(&parent.directory, "model_x").await,
+        BTreeMap::from([("model-x-01".to_string(), restarted)])
+    );
+    parent.hub.shutdown().await.expect("the parent stops");
 }
 
 /// The parent answers each report with the interval at which it expects
@@ -827,7 +1053,7 @@ async fn an_accepted_relay_timing_can_renew_inside_its_lease() {
         ("model-x-02", Duration::from_millis(30)),
     ] {
         let settings = model(name, &address(&parent.hub));
-        let directory = HubDirectory::new(Some(address(&parent.hub))).expect("a directory");
+        let directory = HubDirectory::new(Some(address(&parent.hub)), None).expect("a directory");
         let named = Named::new(directory.clone());
         let hub_name = settings.hub.clone().expect("a hub name");
         let timing = CellTiming {

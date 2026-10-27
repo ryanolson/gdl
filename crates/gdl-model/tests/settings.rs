@@ -215,7 +215,7 @@ fn a_cells_hub_checks_its_settings_against_the_class() {
         ),
         (
             classed(),
-            "name = 'g'\nclass = 'global'\nregion = 'r'\nmodels = [{ model = 'x' }]\n",
+            "name = 'g'\nclass = 'global'\nregion = 'r'\nstate_dir = '/s'\nmodels = [{ model = 'x' }]\n",
             "[cell] models: no class sends to class `global`, so its cell serves no models to another",
         ),
     ];
@@ -239,7 +239,8 @@ fn the_relay_backend_takes_the_parent_hub_where_a_class_is_sent_to() {
     assert_eq!(
         cell.directory,
         DirectoryBackend::Relay {
-            parent_hub: Some("global-hub:1337".into())
+            parent_hub: Some("global-hub:1337".into()),
+            state_dir: None,
         }
     );
     let text = toml::to_string(&cell).expect("toml");
@@ -286,7 +287,9 @@ fn the_relay_backend_takes_the_parent_hub_where_a_class_is_sent_to() {
         .expect("a hub with a given directory reads no parent hub");
 
     // A cell of a class that nothing sends to reports nowhere.
-    let top = settings("name = 'g'\nclass = 'global'\nregion = 'r'\nparent_hub = 'other:1337'\n");
+    let top = settings(
+        "name = 'g'\nclass = 'global'\nregion = 'r'\nparent_hub = 'other:1337'\nstate_dir = '/s'\n",
+    );
     for error in [
         top.check_hub(&classed())
             .expect_err("a parent hub for a top cell"),
@@ -298,9 +301,82 @@ fn the_relay_backend_takes_the_parent_hub_where_a_class_is_sent_to() {
             "[cell] parent_hub: no class sends to class `global`, so its cell has no parent to report to"
         );
     }
-    settings("name = 'g'\nclass = 'global'\nregion = 'r'\n")
+    settings("name = 'g'\nclass = 'global'\nregion = 'r'\nstate_dir = '/var/lib/gdl-hub'\n")
         .check_hub(&classed())
         .expect("a top cell reports nowhere");
+}
+
+/// The `relay` backend's state directory is the `state_dir` key: where a
+/// parent cell's hub keeps its children's records across its restart. A
+/// cell's hub needs it when its class sends to another class, and it is
+/// refused for a class that sends to none, whose cell has no children, and
+/// with any other backend, so that it never sits unread.
+#[test]
+fn the_relay_backend_takes_the_state_dir_where_a_class_sends() {
+    const TOP: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+    let cell = settings(&format!("{TOP}state_dir = '/var/lib/gdl-hub'\n"));
+    assert_eq!(
+        cell.directory,
+        DirectoryBackend::Relay {
+            parent_hub: None,
+            state_dir: Some("/var/lib/gdl-hub".into()),
+        }
+    );
+    let text = toml::to_string(&cell).expect("toml");
+    assert_eq!(settings(&text), cell, "{text}");
+    cell.check_hub(&classed()).expect("a parent with its state");
+    cell.check(&classed(), "a")
+        .expect("an instance of the parent");
+
+    for (bad, why) in [
+        ("state_dir = ''\n", "[cell] state_dir: is empty"),
+        (
+            "directory = 'memory'\nstate_dir = '/s'\n",
+            "[cell] state_dir: \"/s\" is read only by the `relay` backend, not by directory = \"memory\"",
+        ),
+        (
+            "directory = 'dir'\ndir = '/srv/cells'\nstate_dir = '/s'\n",
+            "[cell] state_dir: \"/s\" is read only by the `relay` backend, not by directory = \"dir\"",
+        ),
+    ] {
+        let Err(error) = toml::from_str::<CellSettings>(&format!("{TOP}{bad}")) else {
+            panic!("{bad}: accepted");
+        };
+        assert!(error.to_string().contains(why), "{bad}: {error}");
+    }
+
+    // A parent's hub needs it; an instance, which holds no records, does
+    // not.
+    let forgetful = settings(TOP);
+    forgetful
+        .check(&classed(), "a")
+        .expect("an instance reads no state directory");
+    let Err(error) = forgetful.check_hub(&classed()) else {
+        panic!("a parent's hub without its state");
+    };
+    assert_eq!(
+        error.to_string(),
+        "[cell] state_dir: missing: class `global` sends to class `model_x`, so with directory = \"relay\" the cell's hub holds its children's records, and keeps them in this directory across its restart"
+    );
+    forgetful
+        .check_hub_given_directory(&classed())
+        .expect("a hub with a given directory keeps no records of its own");
+
+    // A cell of a class that sends to none has no children.
+    let leaf = settings(
+        "name = 'm'\nclass = 'model_x'\nregion = 'r'\nhome = 'g'\nparent_hub = 'g:1337'\nstate_dir = '/s'\n",
+    );
+    for error in [
+        leaf.check_hub(&classed())
+            .expect_err("a state directory for a leaf cell"),
+        leaf.check(&classed(), "d")
+            .expect_err("a state directory for a leaf cell"),
+    ] {
+        assert_eq!(
+            error.to_string(),
+            "[cell] state_dir: class `model_x` sends to no class, so its cell has no children whose records its hub keeps"
+        );
+    }
 }
 
 /// A segment the settings give no quorum needs one usable instance.
@@ -383,7 +459,7 @@ fn a_segment_outside_the_placement_is_not_in_the_cells_class() {
     );
 }
 
-const GLOBAL: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+const GLOBAL: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\nstate_dir = '/var/lib/gdl-hub'\n";
 
 /// A cell's health needs this many ready cells of each class it sends to:
 /// `[requires]`, read whole and kept through TOML.

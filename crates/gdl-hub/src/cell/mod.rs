@@ -443,11 +443,18 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// [`gdl_model::HubTiming::MIN_RELAY_CADENCE`], so a shorter lease
     /// lapses at the parent between reports. Refuses a `directory` with no
     /// parent's hub for a cell of a class that another sends to, which
-    /// would have nowhere to report its record.
+    /// would have nowhere to report its record, and one with no state
+    /// directory for a cell of a class that sends to another, which would
+    /// lose its children's records when it restarts.
     pub fn with_reports(mut self, directory: &HubDirectory) -> Result<Self, CellError> {
         if let (Some(sender), false) = (&self.sender, directory.reports_up()) {
             return Err(CellError::new(
                 gdl_model::missing_parent_hub(sender, &self.record.class).to_string(),
+            ));
+        }
+        if let (Some(child), None) = (self.sends.first(), directory.children().root()) {
+            return Err(CellError::new(
+                gdl_model::missing_state_dir(&self.record.class, child).to_string(),
             ));
         }
         gdl_model::check_relay_lease(self.timing.lease).map_err(|why| {
@@ -774,7 +781,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 .route(
                     gdl_watch::REPORT_ROUTE,
                     post(move |Json(report): Json<gdl_watch::Report>| async move {
-                        match reports.take(report).await {
+                        match Arc::clone(&reports).take(report).await {
                             Ok(reply) => Json(reply).into_response(),
                             Err(refused) => {
                                 let status = match refused {

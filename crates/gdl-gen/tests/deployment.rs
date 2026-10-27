@@ -1,5 +1,9 @@
 //! Container deployment output contains an ordered hub and one image per segment.
 use std::path::Path;
+
+#[path = "deployment/relay.rs"]
+mod relay;
+
 #[test]
 fn compose_starts_segments_only_after_hub_health() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -591,14 +595,59 @@ fn running<'a>(compose: &'a serde_json::Value, image: &str) -> (Vec<&'a str>, Ve
 }
 
 /// A fleet's bundle shares no volume: each child cell's hub reports its
-/// record to its parent's hub, so its cells may run on several hosts.
+/// record to its parent's hub, so its cells may run on several hosts. Each
+/// parent cell's hub, and only a parent's, mounts a volume of its own,
+/// where it keeps its children's records across its restart.
 #[test]
-fn a_fleets_bundle_shares_no_volume() {
-    let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
-    let (_, compose) = fleet_bundle(&placed(SPLIT), &fleet);
-    assert!(compose.get("volumes").is_none(), "{compose}");
-    for (name, service) in compose["services"].as_object().expect("services") {
-        assert!(service.get("volumes").is_none(), "{name}: {service}");
+fn each_parent_hub_keeps_its_childrens_records_in_a_volume_of_its_own() {
+    for (spec, fleet, parents) in [
+        (placed(SPLIT), ONE_FLEET, &["global-us"][..]),
+        // `global-eu` runs layout `whole`, in which no class sends to
+        // another, so it has no children.
+        (two_layouts(), TWO_FLEET, &["global-us"][..]),
+    ] {
+        let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
+        let (files, compose) = fleet_bundle(&spec, &fleet);
+        // The hub's image has the directory, writable by any user, so
+        // that a new volume mounted on it is too
+        // (`relay::a_parent_can_store_a_record_in_its_new_volume`).
+        for (path, text) in &files {
+            if path.ends_with("hub/Dockerfile") {
+                assert!(
+                    text.contains(
+                        "mkdir -p /build-tools/state/gdl-hub && chmod 1777 /build-tools/state/gdl-hub"
+                    ) && text.ends_with("COPY --from=build /build-tools/state/ /var/lib/\n"),
+                    "{}: {text}",
+                    path.display()
+                );
+            }
+        }
+        let volumes: Vec<String> = parents.iter().map(|cell| format!("{cell}-state")).collect();
+        let declared: Vec<&String> = compose["volumes"]
+            .as_object()
+            .expect("the volumes")
+            .keys()
+            .collect();
+        assert_eq!(declared, volumes.iter().collect::<Vec<_>>(), "{compose}");
+        for (name, service) in compose["services"].as_object().expect("services") {
+            let state = &service["environment"]["GDL_CELL__STATE_DIR"];
+            if parents.contains(&name.as_str()) {
+                assert_eq!(
+                    service["volumes"],
+                    serde_json::json!([format!("{name}-state:/var/lib/gdl-hub")]),
+                    "{name}"
+                );
+                assert_eq!(state, "/var/lib/gdl-hub", "{name}");
+            } else {
+                assert!(service.get("volumes").is_none(), "{name}: {service}");
+                // A parent's segments read the hub's `[cell]`, and nothing
+                // else names a state directory.
+                let parents_segment = parents
+                    .iter()
+                    .any(|parent| name.starts_with(&format!("{parent}_")));
+                assert_eq!(state.is_string(), parents_segment, "{name}: {service}");
+            }
+        }
     }
 }
 
@@ -819,7 +868,7 @@ fn no_hub_can_be_scaled() {
             "stops the old container before it starts the new one",
             "share no volume",
             "`relay`",
-            "finds each child again at the child's next report",
+            "still holds them after it restarts",
         ] {
             assert!(readme.contains(needle), "{needle}\nin:\n{readme}");
         }
@@ -882,16 +931,21 @@ fn assert_each_hub_reads_its_cell(spec: &gdl_gen::Spec, fleet: &str) {
         let read = gdl_hub::cell_from_vars(&deployment, vars)
             .unwrap_or_else(|error| panic!("{}: {error}", cell.name))
             .expect("a cell");
+        let layout =
+            gdl_model::layout(&deployment.graph, &deployment.placement).expect("the layout");
+        let parent = layout
+            .boundaries()
+            .iter()
+            .any(|boundary| boundary.from == cell.class);
         let mut expected = cell.clone();
         expected.directory = gdl_model::DirectoryBackend::Relay {
             parent_hub: cell.home.as_ref().map(|home| format!("{home}:1337")),
+            state_dir: parent.then(|| "/var/lib/gdl-hub".into()),
         };
         expected.hub = Some(format!("{}:1337", cell.name));
         assert_eq!(read, expected);
         // Each of its segments reads the same `[cell]`, which fits an
         // instance of the segment, as the instance checks at its launch.
-        let layout =
-            gdl_model::layout(&deployment.graph, &deployment.placement).expect("the layout");
         let services = compose["services"].as_object().expect("services");
         let mut segments = 0;
         for (name, service) in services {
@@ -1208,7 +1262,7 @@ fn a_segment_mounts_the_secrets_it_names() {
 }
 
 /// In a fleet's bundle, each cell's service of a segment mounts the
-/// segment's secrets, and the bundle declares them beside its volume.
+/// segment's secrets, and the bundle declares them beside its volumes.
 #[test]
 fn each_cells_segment_mounts_its_secrets() {
     let keys = tempfile::Builder::new()
@@ -1242,7 +1296,12 @@ fn each_cells_segment_mounts_its_secrets() {
         compose["secrets"]["fingerprint"]["file"],
         keys.path().join("fingerprint").to_str().expect("UTF-8")
     );
-    assert!(compose.get("volumes").is_none(), "{compose}");
+    // A secret is no volume: the only one is the parent's state.
+    assert_eq!(
+        compose["volumes"],
+        serde_json::json!({"global-us-state": {}}),
+        "{compose}"
+    );
 }
 
 /// A secret is refused, before anything is written, when Compose cannot

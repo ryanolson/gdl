@@ -70,7 +70,7 @@ GDL_CELL__DIRECTORY=relay          GDL_CELL__PARENT_HUB=global-us:1337
 GDL_CELL__HUB=model-x-02:1337
 ```
 
-`GDL_CELL__PARENT_HUB` is the parent's hub, named for its service. The global cell's hub has none: it reports nowhere. A segment gets the same variables, plus `GDL_HUB__HOST` naming its cell's hub.
+`GDL_CELL__PARENT_HUB` is the parent's hub, named for its service. The global cell's hub has none: it reports nowhere. Instead it gets `GDL_CELL__STATE_DIR=/var/lib/gdl-hub`, where it keeps its children's records, and mounts its own volume there, `global-us-state`. No other service mounts a volume. A segment gets the same variables as its hub, plus `GDL_HUB__HOST` naming its cell's hub.
 
 ## 4. Run it
 
@@ -85,7 +85,7 @@ The bundle publishes no hub port. To read a cell's health, ask from a container 
 docker run --rm --network fleet_default curlimages/curl:8.10.1 -s http://global-us:1337/v1/ext/gdl-cell/health
 ```
 
-The global cell answers 200 once its own quorum holds and a model cell is `ready` and followed. `docker compose down` stops the fleet. A parent's hub keeps its children's records in memory, so each deployment starts with none.
+The global cell answers 200 once its own quorum holds and a model cell is `ready` and followed. `docker compose down` stops the fleet. The global cell's hub keeps its children's records in its volume, so after `docker compose up` again it still holds them, a model cell that does not come back included, until that cell withdraws. `docker compose down --volumes` removes them.
 
 ## Run local sources
 

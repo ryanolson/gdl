@@ -1,5 +1,6 @@
 //! A class's directory on disk: one file per cell, `<cell>.json`, each
-//! replaced whole by a rename, and the scan that reads them.
+//! replaced whole by a rename, and the scan that reads them. The `relay`
+//! backend keeps its state in the same files.
 
 use std::{
     collections::HashMap,
@@ -18,22 +19,22 @@ use serde::{Deserialize, Serialize};
 use crate::{CellEvent, CellRecord, DirectoryError, ResumeToken, Version, Withdrawal};
 
 /// What a scan found in a class's directory, by cell.
-pub(super) type Files = HashMap<String, Seen>;
+pub(crate) type Files = HashMap<String, Seen>;
 
 /// A cell's file as a scan last found it.
 #[derive(Debug, Clone)]
-pub(super) struct Seen {
+pub(crate) struct Seen {
     stamp: Stamp,
     // When the file was read, on this host's clock; see `Seen::unchanged`.
     read: SystemTime,
     // None for a file that does not hold its cell's record or tombstone.
-    pub(super) entry: Option<Arc<Entry>>,
+    pub(crate) entry: Option<Arc<Entry>>,
 }
 
 /// A cell's file: its record or its withdrawal's tombstone, and where the
 /// write falls among the writes of the process that made it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Entry {
+pub(crate) struct Entry {
     // A scan finds several changes at once and has no other way to order
     // them: modification times share the file system's tick. Wall-clock
     // nanoseconds, raised past the process's last, so one process's writes
@@ -46,7 +47,7 @@ pub(super) struct Entry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Held {
+pub(crate) enum Held {
     Record(Box<CellRecord>),
     Withdrawn(Tombstone),
 }
@@ -54,17 +55,31 @@ pub(super) enum Held {
 /// What a withdrawal leaves in its cell's file, so that a late write
 /// cannot bring the record back, from this process or another.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Tombstone {
+pub(crate) struct Tombstone {
     cell: String,
     epoch: u64,
     seq: u64,
 }
 
 impl Entry {
-    pub(super) fn record(&self) -> Option<&CellRecord> {
+    pub(crate) fn record(&self) -> Option<&CellRecord> {
         match &self.held {
             Held::Record(record) => Some(record),
             Held::Withdrawn(_) => None,
+        }
+    }
+
+    /// The withdrawal of `class` this entry's tombstone stands for, if it
+    /// is one.
+    pub(crate) fn withdrawal(&self, class: &str) -> Option<Withdrawal> {
+        match &self.held {
+            Held::Record(_) => None,
+            Held::Withdrawn(tombstone) => Some(Withdrawal {
+                class: class.to_owned(),
+                cell: tombstone.cell.clone(),
+                epoch: tombstone.epoch,
+                seq: tombstone.seq,
+            }),
         }
     }
 
@@ -90,7 +105,7 @@ impl Entry {
     }
 
     /// The change this entry makes, as a watch reports it at `token`.
-    pub(super) fn event(&self, class: &str, token: ResumeToken) -> CellEvent {
+    pub(crate) fn event(&self, class: &str, token: ResumeToken) -> CellEvent {
         match &self.held {
             Held::Record(record) => CellEvent::Put {
                 record: CellRecord::clone(record),
@@ -109,13 +124,13 @@ impl Entry {
     }
 
     /// Where the entry falls among the changes one scan finds.
-    pub(super) fn order(&self) -> u64 {
+    pub(crate) fn order(&self) -> u64 {
         self.order
     }
 }
 
 impl Held {
-    pub(super) fn tombstone(withdrawal: Withdrawal) -> Self {
+    pub(crate) fn tombstone(withdrawal: Withdrawal) -> Self {
         Held::Withdrawn(Tombstone {
             cell: withdrawal.cell,
             epoch: withdrawal.epoch,
@@ -183,7 +198,7 @@ impl Seen {
 /// kept without one, and one that is not a cell's (a writer's temporary
 /// file, say) is passed over; a cell's file that cannot be read is an
 /// error, which a writer meets too.
-pub(super) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<Files> {
+pub(crate) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<Files> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Files::new()),
@@ -231,7 +246,7 @@ pub(super) fn scan(dir: &Path, class: &str, previous: &Files) -> io::Result<File
 ///
 /// The read and the rename are not one step: two processes writing one
 /// cell is a misconfiguration this does not arbitrate.
-pub(super) fn write(dir: &Path, class: &str, cell: &str, held: Held) -> Result<(), DirectoryError> {
+pub(crate) fn write(dir: &Path, class: &str, cell: &str, held: Held) -> Result<(), DirectoryError> {
     let path = dir.join(format!("{cell}.json"));
     let unavailable = |what: &str, error: io::Error| {
         DirectoryError::Unavailable(format!("{what} {}: {error}", path.display()))

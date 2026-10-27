@@ -1,57 +1,72 @@
 //! The `relay` backend's directory, the records a parent cell's hub holds
 //! for its children, passes the directory conformance suite, and keeps
-//! every rule but [`Rule::Kept`]. A child's lease runs on the parent's
-//! clock, so a record that has not been renewed for its lease is left out
-//! of a new watch's snapshot, as a reader that had watched all along would
-//! have dropped it; and the records live in the hub's memory, so a
-//! restart loses them. As a store it keeps [`Rule::EveryRecord`]; the
-//! relay backend as a whole does not, since a parent's hub takes only its
-//! own children's reports (`crates/gdl-hub/tests/relay.rs`).
+//! [`Rule::Kept`] when it is given a state directory: it writes each
+//! record and withdrawal there before it takes it, and reads them back
+//! when it opens. A record whose lease has passed stays in a new watch's
+//! snapshot, since expiry is the reader's. As a store it keeps
+//! [`Rule::EveryRecord`]; the relay backend as a whole does not, since a
+//! parent's hub takes only its own children's reports
+//! (`crates/gdl-hub/tests/relay.rs`).
 
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 
 use futures::StreamExt;
 use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryLimits, Presence,
-    RelayDirectory, Version, Withdrawal,
-    conformance::{self, Backend, Rule},
+    CellDirectory, CellEvent, CellRecord, CellState, CellView, DirectoryError, MemoryLimits,
+    Presence, RelayDirectory, Version, Withdrawal,
+    conformance::{self, Backend},
 };
+use tempfile::TempDir;
 
-struct Relay(MemoryLimits);
+/// Fresh directories, each keeping its state in a temporary directory
+/// held until the case that made it is over.
+struct Relay {
+    limits: MemoryLimits,
+    held: Mutex<Vec<TempDir>>,
+}
+
+impl Relay {
+    fn new(limits: MemoryLimits) -> Self {
+        Self {
+            limits,
+            held: Mutex::default(),
+        }
+    }
+}
 
 impl Backend for Relay {
     type Directory = RelayDirectory;
 
     async fn fresh<const N: usize>(&self) -> [RelayDirectory; N] {
-        let directory = RelayDirectory::with_limits(self.0);
+        let temp = temp();
+        let directory = RelayDirectory::open(temp.path(), self.limits).expect("a state directory");
+        self.held.lock().expect("the held directories").push(temp);
         std::array::from_fn(|_| directory.clone())
     }
 
     fn buffer(&self) -> usize {
-        self.0.buffer
+        self.limits.buffer
     }
 
     fn history(&self) -> usize {
-        self.0.history
+        self.limits.history
     }
 
     fn watchers(&self, directory: &RelayDirectory, class: &str) -> usize {
         directory.watchers(class)
     }
 
-    // The parent's hub holds its children's records in memory.
-    async fn restart(&self, _: RelayDirectory) -> RelayDirectory {
-        RelayDirectory::with_limits(self.0)
-    }
-
-    fn keeps(&self, rule: Rule) -> bool {
-        rule != Rule::Kept
+    // A new hub process over the same state directory.
+    async fn restart(&self, directory: RelayDirectory) -> RelayDirectory {
+        let root = directory.root().expect("a stored directory").to_owned();
+        drop(directory);
+        RelayDirectory::open(&root, self.limits).expect("the state directory again")
     }
 }
 
 #[tokio::test]
 async fn the_relay_directory_conforms_with_small_bounds() {
-    conformance::run(&Relay(MemoryLimits {
+    conformance::run(&Relay::new(MemoryLimits {
         buffer: 8,
         history: 5,
     }))
@@ -60,10 +75,17 @@ async fn the_relay_directory_conforms_with_small_bounds() {
 
 #[tokio::test]
 async fn the_relay_directory_conforms_with_its_defaults() {
-    conformance::run(&Relay(MemoryLimits::default())).await;
+    conformance::run(&Relay::new(MemoryLimits::default())).await;
 }
 
 const WAIT: Duration = Duration::from_secs(5);
+
+fn temp() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("gdl-cells-relay-")
+        .tempdir()
+        .expect("a temporary directory")
+}
 
 fn record(cell: &str, seq: u64, lease: Duration) -> CellRecord {
     CellRecord {
@@ -82,6 +104,15 @@ fn record(cell: &str, seq: u64, lease: Duration) -> CellRecord {
         presence: Presence::Serving,
         models: Vec::new(),
         models_version: 0,
+    }
+}
+
+fn withdrawal(cell: &str, seq: u64) -> Withdrawal {
+    Withdrawal {
+        class: "model_x".into(),
+        cell: cell.into(),
+        epoch: 7,
+        seq,
     }
 }
 
@@ -106,140 +137,188 @@ async fn snapshot(directory: &RelayDirectory) -> Vec<(String, Version)> {
     cells
 }
 
-/// A record whose lease has passed on the directory's clock since its
-/// last newer write is left out of a new watch's snapshot, and nothing is
-/// sent for it: silence is not a withdrawal. Its version stays held, so
-/// an older write is still refused, and a newer one brings it back.
+/// A record that has not been renewed for its lease stays in a new
+/// watch's snapshot: silence is not a withdrawal, and the lease is the
+/// reader's to apply. Its version stays held, so an older write is still
+/// refused, and only a withdrawal removes it.
 #[tokio::test(start_paused = true)]
-async fn a_record_not_renewed_for_its_lease_leaves_the_snapshot() {
+async fn a_record_not_renewed_for_its_lease_stays_until_withdrawn() {
     let directory = RelayDirectory::new();
     let lease = Duration::from_millis(300);
-    let mut live = Box::pin(directory.watch("model_x", None));
-    while !matches!(live.next().await, Some(Ok(CellEvent::Synced { .. }))) {}
-
     directory
         .publish(record("m1", 1, lease))
         .await
         .expect("a record");
-    directory
-        .publish(record("m2", 1, Duration::from_secs(30)))
-        .await
-        .expect("a record");
     let v = |seq| Version { epoch: 7, seq };
-    assert_eq!(
-        snapshot(&directory).await,
-        [("m1".into(), v(1)), ("m2".into(), v(1))]
-    );
+
+    tokio::time::advance(lease * 10).await;
+    assert_eq!(snapshot(&directory).await, [("m1".into(), v(1))]);
     assert_eq!(directory.held("model_x", "m1"), Some(v(1)));
     assert!(directory.holds_record("model_x", "m1"));
+    assert!(matches!(
+        directory.publish(record("m1", 1, lease)).await,
+        Err(DirectoryError::NotNewer { .. })
+    ));
 
-    // A copy of the same version renews nothing.
-    tokio::time::advance(Duration::from_millis(200)).await;
-    assert!(matches!(
-        directory.publish(record("m1", 1, lease)).await,
-        Err(DirectoryError::NotNewer { .. })
-    ));
-    tokio::time::advance(Duration::from_millis(101)).await;
-    assert_eq!(snapshot(&directory).await, [("m2".into(), v(1))]);
-    // Held, and refused at its version, all the same.
-    assert_eq!(directory.held("model_x", "m1"), Some(v(1)));
-    assert!(matches!(
-        directory.publish(record("m1", 1, lease)).await,
-        Err(DirectoryError::NotNewer { .. })
-    ));
+    directory
+        .withdraw(withdrawal("m1", 2))
+        .await
+        .expect("a withdrawal");
+    assert!(snapshot(&directory).await.is_empty());
+    assert_eq!(directory.held("model_x", "m1"), Some(v(2)));
+    assert!(!directory.holds_record("model_x", "m1"));
+}
+
+/// A reader that has let a record's lease pass does not take it as fresh
+/// when a later watch of the same directory yields it again, at the same
+/// version: the reader keeps its view across the watches, as a hub's
+/// follow does, and only a newer write renews the record.
+#[tokio::test]
+async fn a_reader_does_not_renew_an_expired_record_on_a_new_watch() {
+    let directory = RelayDirectory::new();
+    let lease = Duration::from_millis(300);
+    directory
+        .publish(record("m1", 1, lease))
+        .await
+        .expect("a record");
+
+    let start = std::time::Instant::now();
+    let mut view = CellView::new();
+    let read = async |view: &mut CellView, at: std::time::Instant| {
+        let mut watch = std::pin::pin!(directory.watch("model_x", None));
+        loop {
+            let event = tokio::time::timeout(WAIT, watch.next())
+                .await
+                .expect("an event in time")
+                .expect("the watch goes on")
+                .expect("an event");
+            let synced = matches!(event, CellEvent::Synced { .. });
+            view.apply(event, at);
+            if synced {
+                return;
+            }
+        }
+    };
+    read(&mut view, start).await;
+    assert!(view.get("m1", start).is_some(), "fresh when first seen");
+
+    // The watch ended, and the reader watches again once the lease has
+    // passed on its clock.
+    let later = start + lease * 2;
+    view.apply(CellEvent::Resnapshot, later);
+    read(&mut view, later).await;
+    assert!(
+        view.get("m1", later).is_none(),
+        "the same version, seen again, renewed the record"
+    );
 
     directory
         .publish(record("m1", 2, lease))
         .await
         .expect("a newer write");
-    assert_eq!(
-        snapshot(&directory).await,
-        [("m1".into(), v(2)), ("m2".into(), v(1))]
-    );
-
-    // A withdrawal leaves no record behind.
-    directory
-        .withdraw(Withdrawal {
-            class: "model_x".into(),
-            cell: "m1".into(),
-            epoch: 7,
-            seq: 3,
-        })
-        .await
-        .expect("a withdrawal");
-    assert_eq!(directory.held("model_x", "m1"), Some(v(3)));
-    assert!(!directory.holds_record("model_x", "m1"));
-
-    // The live watch saw every write, and no event of the expiry.
-    let mut seen = Vec::new();
-    for _ in 0..4 {
-        match live.next().await {
-            Some(Ok(CellEvent::Put { record, .. })) => seen.push(("put", record.name, record.seq)),
-            Some(Ok(CellEvent::Withdrawn { withdrawal, .. })) => {
-                seen.push(("withdrawn", withdrawal.cell, withdrawal.seq))
-            }
-            other => panic!("the live watch: {other:?}"),
-        }
-    }
-    assert_eq!(
-        seen,
-        [
-            ("put", "m1".into(), 1),
-            ("put", "m2".into(), 1),
-            ("put", "m1".into(), 2),
-            ("withdrawn", "m1".into(), 3),
-        ]
-    );
+    read(&mut view, later).await;
+    assert!(view.get("m1", later).is_some(), "a newer write renews it");
 }
 
-/// Resuming after a lease has expired must not make the same record
-/// usable when a fresh snapshot already leaves it out.
-#[tokio::test(start_paused = true)]
-
-async fn a_resumed_watch_does_not_revive_an_expired_record() {
-    use gdl_cells::CellView;
-
-    let directory = RelayDirectory::new();
-    let token = {
-        let mut watch = Box::pin(directory.watch("model_x", None));
-        match watch.next().await {
-            Some(Ok(CellEvent::Synced { token, .. })) => token,
-            other => panic!("the empty directory: {other:?}"),
-        }
+/// What a stored directory holds outlives it: a record, every field of
+/// it, and a withdrawal at its own version, read back by the next
+/// directory opened over the same state.
+#[tokio::test]
+async fn a_stored_directory_reads_back_what_it_held() {
+    let temp = temp();
+    let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");
+    let m1 = CellRecord {
+        state: CellState::Degraded,
+        ..record("m1", 3, Duration::from_millis(300))
     };
-    let lease = Duration::from_millis(300);
+    directory.publish(m1.clone()).await.expect("a record");
     directory
-        .publish(record("m1", 1, lease))
+        .publish(record("m2", 1, CellRecord::DEFAULT_LEASE))
         .await
         .expect("a record");
-    assert_eq!(snapshot(&directory).await.len(), 1);
-    tokio::time::advance(lease + Duration::from_millis(1)).await;
-    assert!(
-        snapshot(&directory).await.is_empty(),
-        "expired on the parent's clock"
-    );
+    directory
+        .withdraw(withdrawal("m2", 2))
+        .await
+        .expect("a withdrawal");
+    drop(directory);
 
-    let mut resumed = Box::pin(directory.watch("model_x", Some(token)));
-    let mut view = CellView::new();
-    let read = tokio::time::timeout(Duration::from_millis(1), async {
-        while let Some(Ok(event)) = resumed.next().await {
-            view.apply(event, std::time::Instant::now());
-        }
-    });
-    let _ = read.await;
-    let offered: Vec<_> = view
-        .records(std::time::Instant::now())
-        .map(|record| record.name.as_str())
-        .collect();
+    let again = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("reopens");
+    let mut watch = std::pin::pin!(again.watch("model_x", None));
+    assert_eq!(
+        tokio::time::timeout(WAIT, watch.next())
+            .await
+            .expect("in time"),
+        Some(Ok(CellEvent::Current(m1)))
+    );
+    assert!(matches!(
+        tokio::time::timeout(WAIT, watch.next())
+            .await
+            .expect("in time"),
+        Some(Ok(CellEvent::Synced { snapshot: true, .. }))
+    ));
+    assert_eq!(
+        again.held("model_x", "m2"),
+        Some(Version { epoch: 7, seq: 2 })
+    );
+    assert!(!again.holds_record("model_x", "m2"));
+    assert!(matches!(
+        again
+            .publish(record("m2", 2, CellRecord::DEFAULT_LEASE))
+            .await,
+        Err(DirectoryError::NotNewer { .. })
+    ));
+}
+
+/// A write that cannot be stored is refused as unavailable, and reaches
+/// no watcher, and holds no version: the same write is taken once the
+/// state directory can be written again.
+#[tokio::test]
+async fn a_write_that_cannot_be_stored_is_refused_and_holds_nothing() {
+    let temp = temp();
+    let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");
+    // A file where the class's directory would be.
+    let blocker = temp.path().join("model_x");
+    std::fs::write(&blocker, b"not a directory").expect("a file");
+
+    let refused = directory
+        .publish(record("m1", 1, CellRecord::DEFAULT_LEASE))
+        .await;
     assert!(
-        offered.is_empty(),
-        "resuming revived records whose parent-clock lease expired: {offered:?}"
+        matches!(refused, Err(DirectoryError::Unavailable(_))),
+        "{refused:?}"
+    );
+    assert_eq!(directory.held("model_x", "m1"), None);
+    assert!(snapshot(&directory).await.is_empty());
+
+    std::fs::remove_file(&blocker).expect("the file goes");
+    directory
+        .publish(record("m1", 1, CellRecord::DEFAULT_LEASE))
+        .await
+        .expect("the same write, once it can be stored");
+    assert_eq!(
+        snapshot(&directory).await,
+        [("m1".into(), Version { epoch: 7, seq: 1 })]
     );
 }
 
-/// A child scaled to 0 on purpose sends no heartbeat, so its record stays
-/// in a new watch's snapshot past its lease: its parent tells it from a
-/// child that is missing.
+/// A state directory that cannot be read is refused when it opens, rather
+/// than opened empty: a parent's hub that started without its children's
+/// records would read a silent child as gone.
+#[test]
+fn a_state_directory_that_cannot_be_read_is_refused() {
+    let temp = temp();
+    let file = temp.path().join("state");
+    std::fs::write(&file, b"not a directory").expect("a file");
+    let refused = RelayDirectory::open(&file, MemoryLimits::default());
+    assert!(
+        matches!(refused, Err(DirectoryError::Unavailable(_))),
+        "{refused:?}"
+    );
+}
+
+/// A child scaled to 0 on purpose sends no heartbeat, and its record stays
+/// in a new watch's snapshot past its lease, as a missing child's does:
+/// the reader tells them apart by their presence.
 #[tokio::test(start_paused = true)]
 async fn a_record_scaled_to_zero_stays_past_its_lease() {
     let directory = RelayDirectory::new();
@@ -255,5 +334,69 @@ async fn a_record_scaled_to_zero_stays_past_its_lease() {
         .expect("a record");
     tokio::time::advance(lease * 10).await;
     let v = |seq| Version { epoch: 7, seq };
-    assert_eq!(snapshot(&directory).await, [("m1".into(), v(1))]);
+    assert_eq!(
+        snapshot(&directory).await,
+        [("m1".into(), v(1)), ("m2".into(), v(1))]
+    );
+}
+
+/// A resumed reader must see writes before a restart, or be told to resnapshot.
+#[tokio::test]
+async fn a_reopened_directory_does_not_silently_skip_a_write_on_resume() {
+    let temp = temp();
+    let directory = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("opens");
+    let first = record("m1", 1, CellRecord::DEFAULT_LEASE);
+    directory.publish(first.clone()).await.expect("a record");
+    let mut watch = directory.watch("model_x", None);
+    assert_eq!(
+        watch.next().await,
+        Some(Ok(CellEvent::Current(first.clone())))
+    );
+    let Some(Ok(CellEvent::Synced { token, .. })) = watch.next().await else {
+        panic!("the snapshot's token");
+    };
+    drop(watch);
+    let mut view = CellView::new();
+    view.apply(CellEvent::Current(first), std::time::Instant::now());
+    directory
+        .publish(record("m1", 2, CellRecord::DEFAULT_LEASE))
+        .await
+        .expect("a write while the reader is disconnected");
+    drop(directory);
+
+    let again = RelayDirectory::open(temp.path(), MemoryLimits::default()).expect("reopens");
+    let mut resumed = again.watch("model_x", Some(token));
+    // This later write bounds the replay without a sleep or a pending read.
+    again
+        .publish(record("m2", 1, CellRecord::DEFAULT_LEASE))
+        .await
+        .expect("a later write");
+    loop {
+        let event = tokio::time::timeout(WAIT, resumed.next())
+            .await
+            .expect("an event in time")
+            .expect("the watch continues")
+            .expect("an event");
+        if matches!(event, CellEvent::Resnapshot) {
+            assert_eq!(
+                snapshot(&again).await,
+                [
+                    ("m1".into(), Version { epoch: 7, seq: 2 }),
+                    ("m2".into(), Version { epoch: 7, seq: 1 }),
+                ]
+            );
+            return;
+        }
+        let later = matches!(&event, CellEvent::Put { record, .. } if record.name == "m2");
+        view.apply(event, std::time::Instant::now());
+        if later {
+            break;
+        }
+    }
+    assert_eq!(
+        view.get("m1", std::time::Instant::now())
+            .map(CellRecord::version),
+        Some(Version { epoch: 7, seq: 2 }),
+        "the resumed reader missed a stored write before the restart"
+    );
 }

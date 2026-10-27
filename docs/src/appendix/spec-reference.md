@@ -124,6 +124,7 @@ The fleet file fills in each cell's `[cell]` table in its segments' settings. Th
 | `home` | the parent cell | none |
 | `directory` | where cell records are published: `relay`, `memory` (one directory per process, for tests), or `dir` | `relay` |
 | `parent_hub` | the parent cell's hub, `host:port`, where the cell's hub reports its record. With `relay`, a hub of a class that another class sends to needs it. Refused for a class that nothing sends to, and with the other backends. A fleet bundle sets it to `<home>:1337`. | none |
+| `state_dir` | where the cell's hub keeps the records its children report, across its restart. With `relay`, a hub of a class that sends to another class needs it. Refused for a class that sends to none, and with the other backends. Only the hub reads it. A fleet bundle sets it to `/var/lib/gdl-hub`, on a volume of the hub's own. | none |
 | `dir` | the shared directory. Required with `directory = "dir"` and refused with the others. | none |
 | `hub` | the address, `host:port`, at which other cells' hubs reach this cell's hub. Only the hub reads it. | none |
 | `summary_ms` | the load summary's period. Least 1000. | 10000 |

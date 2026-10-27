@@ -71,7 +71,7 @@ pub struct CellSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
     /// Where the cell's record is published and the other cells are found:
-    /// the `directory` key, with the `parent_hub` key for
+    /// the `directory` key, with the `parent_hub` and `state_dir` keys for
     /// [`DirectoryBackend::Relay`] and the `dir` key for
     /// [`DirectoryBackend::Dir`]; [`DirectoryBackend::DEFAULT`] when it is
     /// not set.
@@ -268,6 +268,12 @@ pub enum DirectoryBackend {
         /// its record. A cell's hub needs it when another class sends to
         /// the cell's class, and it is refused for any other class.
         parent_hub: Option<String>,
+        /// The directory where the cell's hub keeps the records its
+        /// children report, so that it still holds them after it restarts,
+        /// as given: a relative path is the process's working directory's.
+        /// A cell's hub needs it when the cell's class sends to another
+        /// class, and it is refused for any other class.
+        state_dir: Option<PathBuf>,
     },
     /// One directory in the process, shared by every hub in it: for tests
     /// that run several cells in one process.
@@ -284,7 +290,10 @@ pub enum DirectoryBackend {
 impl DirectoryBackend {
     /// The backend when `directory` is not set: the relay, with no parent's
     /// hub.
-    pub const DEFAULT: Self = Self::Relay { parent_hub: None };
+    pub const DEFAULT: Self = Self::Relay {
+        parent_hub: None,
+        state_dir: None,
+    };
 }
 
 impl Default for DirectoryBackend {
@@ -355,14 +364,22 @@ impl CellSettings {
     ///
     /// A hub also needs `parent_hub` with the `relay` backend when another
     /// class sends to its cell's class, since it reports there
-    /// ([`missing_parent_hub`]).
+    /// ([`missing_parent_hub`]), and `state_dir` when its cell's class
+    /// sends to another class, since it keeps its children's records there
+    /// ([`missing_state_dir`]).
     pub fn check_hub(&self, layout: &Layout) -> Result<(), Problems> {
         let mut problems = self.problems(layout, None);
-        let entered = sent_to(layout, &self.class);
-        if let (DirectoryBackend::Relay { parent_hub: None }, Some(parent)) =
-            (&self.directory, entered)
+        if let DirectoryBackend::Relay {
+            parent_hub,
+            state_dir,
+        } = &self.directory
         {
-            problems.push(missing_parent_hub(parent, &self.class));
+            if let (None, Some(parent)) = (parent_hub, sent_to(layout, &self.class)) {
+                problems.push(missing_parent_hub(parent, &self.class));
+            }
+            if let (None, Some(child)) = (state_dir, sent(layout, &self.class).first()) {
+                problems.push(missing_state_dir(&self.class, child));
+            }
         }
         refuse(problems)
     }
@@ -445,19 +462,29 @@ impl CellSettings {
                     None
                 }
             });
-            let reports = match (&self.directory, sent_to(layout, class)) {
-                (
-                    DirectoryBackend::Relay {
-                        parent_hub: Some(_),
-                    },
-                    None,
-                ) => Some(at(
-                    "parent_hub".into(),
-                    format!(
-                        "no class sends to class `{class}`, so its cell has no parent to report to"
-                    ),
-                )),
-                _ => None,
+            let (reports, keeps) = match &self.directory {
+                DirectoryBackend::Relay {
+                    parent_hub,
+                    state_dir,
+                } => (
+                    (parent_hub.is_some() && sent_to(layout, class).is_none()).then(|| {
+                        at(
+                            "parent_hub".into(),
+                            format!(
+                                "no class sends to class `{class}`, so its cell has no parent to report to"
+                            ),
+                        )
+                    }),
+                    (state_dir.is_some() && sent.is_empty()).then(|| {
+                        at(
+                            "state_dir".into(),
+                            format!(
+                                "class `{class}` sends to no class, so its cell has no children whose records its hub keeps"
+                            ),
+                        )
+                    }),
+                ),
+                _ => (None, None),
             };
             let models = (!self.models.is_empty() && sent_to(layout, class).is_none()).then(|| {
                 at(
@@ -471,6 +498,7 @@ impl CellSettings {
                 .chain(strays)
                 .chain(requires)
                 .chain(reports)
+                .chain(keeps)
                 .chain(models)
                 .collect()
         }
@@ -486,6 +514,19 @@ pub fn missing_parent_hub(parent: &str, class: &str) -> Problem {
         Some("parent_hub".into()),
         format!(
             "missing: class `{parent}` sends to class `{class}`, so with directory = \"relay\" the cell's hub reports its record to its parent's hub, at this address"
+        ),
+    )
+}
+
+/// The problem of a cell's hub under the `relay` backend that has nowhere
+/// to keep the records its children report, though its class, `class`,
+/// sends to class `child`.
+pub fn missing_state_dir(class: &str, child: &str) -> Problem {
+    Problem::at(
+        Some("cell".into()),
+        Some("state_dir".into()),
+        format!(
+            "missing: class `{class}` sends to class `{child}`, so with directory = \"relay\" the cell's hub holds its children's records, and keeps them in this directory across its restart"
         ),
     )
 }
@@ -618,8 +659,8 @@ fn check_label(kind: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The `[cell]` table as written. `directory`, `parent_hub`, and `dir` are
-/// keys of one choice, so that the settings read flat (`GDL_CELL__DIR`),
+/// The `[cell]` table as written. `directory`, `parent_hub`, `state_dir`,
+/// and `dir` are keys of one choice, so that the settings read flat (`GDL_CELL__DIR`),
 /// and they are joined here, where a key given to a backend that reads
 /// none can be refused rather than left unread.
 #[derive(Serialize, Deserialize)]
@@ -636,6 +677,8 @@ struct Table {
     directory: Backend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_hub: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -735,10 +778,28 @@ impl TryFrom<Table> for CellSettings {
             }
             check_hub_address(parent_hub).map_err(|why| at("parent_hub", why))?;
         }
+        if let Some(state_dir) = &table.state_dir {
+            if !matches!(table.directory, Backend::Relay) {
+                return Err(at(
+                    "state_dir",
+                    format!(
+                        "{state_dir:?} is read only by the `relay` backend, not by directory = \"{}\"",
+                        table.directory.name()
+                    ),
+                ));
+            }
+            if state_dir.as_os_str().is_empty() {
+                return Err(at(
+                    "state_dir",
+                    "is empty; it is the path of the directory the hub keeps its children's records in".into(),
+                ));
+            }
+        }
         let timing = hub_timing(&table)?;
         let directory = match (table.directory, table.dir) {
             (Backend::Relay, None) => DirectoryBackend::Relay {
                 parent_hub: table.parent_hub,
+                state_dir: table.state_dir,
             },
             (Backend::Memory, None) => DirectoryBackend::Memory,
             (Backend::Dir, Some(path)) if !path.as_os_str().is_empty() => {
@@ -912,10 +973,13 @@ pub fn check_hub_timing(timing: &HubTiming) -> Result<(), Problems> {
 
 impl From<CellSettings> for Table {
     fn from(settings: CellSettings) -> Self {
-        let (directory, parent_hub, dir) = match settings.directory {
-            DirectoryBackend::Relay { parent_hub } => (Backend::Relay, parent_hub, None),
-            DirectoryBackend::Memory => (Backend::Memory, None, None),
-            DirectoryBackend::Dir { path } => (Backend::Dir, None, Some(path)),
+        let (directory, parent_hub, state_dir, dir) = match settings.directory {
+            DirectoryBackend::Relay {
+                parent_hub,
+                state_dir,
+            } => (Backend::Relay, parent_hub, state_dir, None),
+            DirectoryBackend::Memory => (Backend::Memory, None, None, None),
+            DirectoryBackend::Dir { path } => (Backend::Dir, None, None, Some(path)),
         };
         Self {
             name: settings.name,
@@ -925,6 +989,7 @@ impl From<CellSettings> for Table {
             home: settings.home,
             directory,
             parent_hub,
+            state_dir,
             dir,
             ready: settings.ready,
             requires: settings.requires,

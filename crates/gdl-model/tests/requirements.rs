@@ -52,7 +52,7 @@ fn settings(text: &str) -> CellSettings {
     toml::from_str(text).expect("a cell's settings")
 }
 
-const GLOBAL: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\n";
+const GLOBAL: &str = "name = 'g'\nclass = 'global'\nregion = 'r'\nstate_dir = '/var/lib/gdl-hub'\n";
 
 fn counts(pairs: &[(&str, u32)]) -> BTreeMap<String, u32> {
     pairs.iter().map(|(c, n)| (c.to_string(), *n)).collect()
