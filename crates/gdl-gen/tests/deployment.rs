@@ -875,6 +875,38 @@ fn no_hub_can_be_scaled() {
     }
 }
 
+/// The fleet guide reads a cell's health and drains it from a helper
+/// container on the bundle's network (`docs/src/guides/fleet.md`). That
+/// works only while no hub publishes a host port, and while every service
+/// is on Compose's default network, which Compose names `<project>_default`
+/// with the project named for the bundle's directory: no top-level `name`,
+/// no network of the bundle's own, and no service on another.
+#[test]
+fn a_fleets_hubs_publish_no_host_port_and_share_the_default_network() {
+    for (spec, fleet) in [(placed(SPLIT), ONE_FLEET), (two_layouts(), TWO_FLEET)] {
+        let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
+        let (_, compose) = fleet_bundle(&spec, &fleet);
+        // Only these change the project's name or its network; other
+        // top-level keys, such as a local bundle's `x-gdl-local-sources`,
+        // do not.
+        for key in ["name", "networks"] {
+            assert!(compose.get(key).is_none(), "{key}: {compose}");
+        }
+        let services = compose["services"].as_object().expect("services");
+        let mut hubs = 0;
+        for (name, service) in services {
+            for key in ["networks", "network_mode"] {
+                assert!(service.get(key).is_none(), "{name}: {service}");
+            }
+            if fleet.cell(name).is_some() {
+                hubs += 1;
+                assert!(service.get("ports").is_none(), "{name}: {service}");
+            }
+        }
+        assert_eq!(hubs, fleet.cells().count());
+    }
+}
+
 /// Each hub's `GDL_CELL__*` variables, read as the hub reads them against
 /// its layout's deployment, are its cell's settings as the fleet gives
 /// them, with the address other hubs reach it at and, for a child, its
