@@ -206,33 +206,40 @@ impl Extracted {
 /// reason, for the caller to report.
 pub fn verify(extracted: &Extracted, target: &Path) -> Result<Vec<String>, Error> {
     let located = &extracted.located;
-    let message = extracted.workspace.locate("gdl-message").map_err(|_| {
-        Error::new(format!(
-            "{} does not depend on gdl-message, so it registers nothing to verify",
-            located.name
-        ))
-    })?;
-    let dependency = |key: &str, at: &Located| {
-        if at.path {
-            format!(
-                "{key} = {{ package = {}, path = {} }}\n",
-                crate::dump::toml_string(&at.name),
-                crate::dump::toml_string(&at.dir.to_string_lossy())
-            )
-        } else {
-            format!(
-                "{key} = {{ package = {}, version = {} }}\n",
-                crate::dump::toml_string(&at.name),
-                crate::dump::toml_string(&format!("={}", at.version))
-            )
+    // The crate's own `gdl-message`, the nearest one: a workspace may hold
+    // another, and a dependency for another platform may reach another.
+    let message = match extracted
+        .workspace
+        .nearest_dependencies(&located.dir, "gdl-message")
+        .as_slice()
+    {
+        [one] => one.clone(),
+        [] => {
+            return Err(Error::new(format!(
+                "{} does not depend on gdl-message, so it registers nothing to verify",
+                located.name
+            )));
+        }
+        several => {
+            return Err(Error::new(format!(
+                "{} reaches {} packages gdl-message in as many steps ({}), so `--verify` cannot tell which one it builds with",
+                located.name,
+                several.len(),
+                several
+                    .iter()
+                    .map(|m| format!("{} from {}", m.version, m.source))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
         }
     };
     // The crate under an alias of the program's own: its library's name
     // may be a keyword, or `gdl_message`.
     let dependencies = format!(
-        "{}{}",
-        dependency("gdl-message", &message),
-        dependency("gdl_verified", located)
+        "{}{}{}",
+        dependency("gdl-message", &message)?,
+        dependency("gdl_verified", located)?,
+        patches(extracted.workspace.root())
     );
     let main = "use gdl_verified as _;\n\n\
                 fn main() {\n    print!(\"{}\", gdl_message::Catalogue::linked().to_toml());\n}\n";
@@ -263,6 +270,84 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<Vec<String>, Error
     } else {
         Err(Error::all(problems))
     }
+}
+
+/// The `[dependencies]` line that takes the package `at` under `key` from
+/// the source the reader's lock resolved it from: a path, a Git repository,
+/// or a registry version.
+///
+/// A Git package keeps the reference its source names (a branch, a tag, a
+/// revision, or none), never the commit: the seeded lock pins the commit,
+/// and any other reference is another source to Cargo, so the program
+/// would link a second copy of the package beside the crate's own. Two
+/// copies of `gdl-message` declare one linker section twice, and the
+/// program stops before it prints anything.
+fn dependency(key: &str, at: &Located) -> Result<String, Error> {
+    let package = crate::dump::toml_string(&at.name);
+    if at.path {
+        return Ok(format!(
+            "{key} = {{ package = {package}, path = {} }}\n",
+            crate::dump::toml_string(&at.dir.to_string_lossy())
+        ));
+    }
+    let Some(git) = at.source.strip_prefix("git+") else {
+        return Ok(format!(
+            "{key} = {{ package = {package}, version = {} }}\n",
+            crate::dump::toml_string(&format!("={}", at.version))
+        ));
+    };
+    // `cargo metadata` names a Git source `<url>[?<kind>=<name>]#<commit>`,
+    // with the name as written in the manifest, not percent-encoded.
+    let git = git.rsplit_once('#').map_or(git, |(git, _commit)| git);
+    let (url, reference) = match git.split_once('?') {
+        None => (git, String::new()),
+        Some((url, query)) => match query.split_once('=') {
+            Some((kind @ ("branch" | "tag" | "rev"), name)) => (
+                url,
+                format!(", {kind} = {}", crate::dump::toml_string(name)),
+            ),
+            _ => {
+                return Err(Error::new(format!(
+                    "{} {}: cannot read the reference of its Git source `{}`",
+                    at.name, at.version, at.source
+                )));
+            }
+        },
+    };
+    Ok(format!(
+        "{key} = {{ package = {package}, git = {}{reference} }}\n",
+        crate::dump::toml_string(url)
+    ))
+}
+
+/// The `[patch]` tables of the workspace manifest in `root`, with each
+/// relative path made absolute, for the program's manifest. The lock
+/// names what a patch resolved to, but Cargo applies a patch only from the
+/// manifest: without it, the crate's own dependency on a patched package
+/// asks the original source again.
+fn patches(root: &Path) -> String {
+    let Some(mut patch) = std::fs::read_to_string(root.join("Cargo.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|mut manifest| manifest.remove("patch"))
+    else {
+        return String::new();
+    };
+    let specs = patch
+        .as_table_mut()
+        .into_iter()
+        .flat_map(|sources| sources.iter_mut())
+        .filter_map(|(_, packages)| packages.as_table_mut())
+        .flat_map(|packages| packages.iter_mut())
+        .filter_map(|(_, spec)| spec.as_table_mut());
+    for spec in specs {
+        if let Some(toml::Value::String(path)) = spec.get_mut("path") {
+            *path = root.join(&*path).to_string_lossy().into_owned();
+        }
+    }
+    let mut table = toml::Table::new();
+    table.insert("patch".into(), patch);
+    format!("\n{table}")
 }
 
 /// Each difference between what a build registered for the crate whose
@@ -796,5 +881,95 @@ mod tests {
         let problems = differences(&registered(true, true), &facade, &read());
         assert_eq!(problems.len(), 2, "{problems:#?}");
         assert!(problems[0].contains(", nested"), "{}", problems[0]);
+    }
+
+    /// The program takes the workspace's patches, with each path made
+    /// absolute, since the program's manifest is in another directory.
+    #[test]
+    fn the_program_takes_the_workspaces_patches() {
+        let temp = tempfile::Builder::new()
+            .prefix("gdl-patches-")
+            .tempdir()
+            .expect("dir");
+        let root = temp.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\n\n[patch.crates-io]\n\
+             gdl-message = { path = \"vendor/gdl-message\" }\n\n\
+             [patch.\"https://example.com/gdl\"]\n\
+             gdl-model = { git = \"https://example.com/fork\", branch = \"main\" }\n",
+        )
+        .expect("manifest");
+        let text = patches(root);
+        let table: toml::Table = text.parse().expect("TOML");
+        let patch = &table["patch"];
+        assert_eq!(
+            patch["crates-io"]["gdl-message"]["path"].as_str(),
+            Some(&*root.join("vendor/gdl-message").to_string_lossy()),
+            "{text}"
+        );
+        assert_eq!(
+            patch["https://example.com/gdl"]["gdl-model"]["branch"].as_str(),
+            Some("main"),
+            "{text}"
+        );
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("manifest");
+        assert_eq!(patches(root), "");
+    }
+
+    /// The program takes each package from the source the lock names: a
+    /// Git package under its own reference, as written, so that Cargo sees
+    /// one source and links one copy.
+    #[test]
+    fn a_dependency_keeps_its_source() {
+        let at = |path: bool, source: &str| Located {
+            name: "gdl-message".into(),
+            version: "0.1.0".into(),
+            dir: PathBuf::from("/work/gdl-message"),
+            path,
+            source: source.into(),
+            checksum: None,
+            lib: Some("gdl_message".into()),
+        };
+        let line = |path: bool, source: &str| {
+            dependency("m", &at(path, source)).map_err(|e| e.to_string())
+        };
+        for (path, source, expected) in [
+            (
+                true,
+                "path+file:///work/gdl-message",
+                r#"m = { package = "gdl-message", path = "/work/gdl-message" }"#,
+            ),
+            (
+                false,
+                "registry+https://github.com/rust-lang/crates.io-index",
+                r#"m = { package = "gdl-message", version = "=0.1.0" }"#,
+            ),
+            (
+                false,
+                "git+https://example.com/gdl#0123abcd",
+                r#"m = { package = "gdl-message", git = "https://example.com/gdl" }"#,
+            ),
+            (
+                false,
+                "git+file:///work/repo?branch=feat/x+y%z#0123abcd",
+                r#"m = { package = "gdl-message", git = "file:///work/repo", branch = "feat/x+y%z" }"#,
+            ),
+            (
+                false,
+                "git+https://example.com/gdl?tag=v0.1.0#0123abcd",
+                r#"m = { package = "gdl-message", git = "https://example.com/gdl", tag = "v0.1.0" }"#,
+            ),
+            (
+                false,
+                "git+ssh://git@github.com/NVIDIA-dev/dynamo-gdl.git?rev=88ca8d3a#88ca8d3a1b2c",
+                r#"m = { package = "gdl-message", git = "ssh://git@github.com/NVIDIA-dev/dynamo-gdl.git", rev = "88ca8d3a" }"#,
+            ),
+        ] {
+            assert_eq!(line(path, source), Ok(format!("{expected}\n")), "{source}");
+        }
+        let error = line(false, "git+https://example.com/gdl?head=main#0123abcd")
+            .expect_err("an unknown reference");
+        assert!(error.contains("?head=main"), "{error}");
     }
 }

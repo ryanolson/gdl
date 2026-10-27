@@ -303,6 +303,42 @@ impl Workspace {
         Some(self.located(self.graph.package_in(dir)?))
     }
 
+    /// The packages named `name` nearest to the package whose manifest is
+    /// in `dir`, in steps along normal dependencies: the package itself,
+    /// else its direct dependencies of that name, else theirs. Another
+    /// package of that name elsewhere in the workspace is not one, and
+    /// neither is a farther one, which may be a dependency for another
+    /// platform, since `cargo metadata` lists those too. Empty when none
+    /// is reached, or this workspace did not resolve `dir`.
+    pub fn nearest_dependencies(&self, dir: &Path, name: &str) -> Vec<Located> {
+        let Some(start) = self.graph.package_in(dir) else {
+            return Vec::new();
+        };
+        let mut seen = vec![false; self.graph.packages.len()];
+        seen[start] = true;
+        let mut level = vec![start];
+        while !level.is_empty() {
+            let found: Vec<Located> = level
+                .iter()
+                .filter(|&&at| self.graph.packages[at].name == name)
+                .map(|&at| self.located(at))
+                .collect();
+            if !found.is_empty() {
+                return found;
+            }
+            let mut next = Vec::new();
+            for &at in &level {
+                for &(_, dep) in &self.graph.packages[at].deps {
+                    if !std::mem::replace(&mut seen[dep], true) {
+                        next.push(dep);
+                    }
+                }
+            }
+            level = next;
+        }
+        Vec::new()
+    }
+
     /// The workspace's root directory, where `cargo metadata` wrote the
     /// lock file of this resolve.
     pub fn root(&self) -> &Path {

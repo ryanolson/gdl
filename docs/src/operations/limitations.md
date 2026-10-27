@@ -281,7 +281,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 ### `--verify` and the reader differ in a few cases
 - **Packages:** `cargo gdl extract --verify` compares an instantiation by its `type_name` path, not by the packages that define its arguments, which the reader and generation use. Nothing in the build names the package of an arbitrary type.
 - **Features:** the reader takes `cargo metadata`, which unifies a package's features across dependency kinds, so a feature that only a build dependency enables counts as enabled for the library. Separating them would copy Cargo's feature resolver. `--verify` reports any difference.
-- **`gdl-message` from git:** `--verify` takes `gdl-message` by version from crates.io unless the crate takes it by path, so a crate that takes it from git fails with "no matching package named `gdl-message` found".
+- **Two `gdl-message` packages:** `--verify` builds with the `gdl-message` nearest to the crate in its dependencies, since `cargo metadata` lists dependencies for every platform. A crate that reaches two in as many steps is refused, and one whose nearest is for another platform builds with that one. Depend on `gdl-message` directly.
 - **Earlier `gdl-message` pin:** for a crate that exports a message and pins a `gdl-message` whose export entries lack `wire` and `encoding`, `--verify` stops at "reading the crate's registrations" with a missing field `wire`. The program `--verify` builds links the crate's own `gdl-message`, and a default for either field would show as a difference, not a match. Run `--verify` with a `cargo-gdl` of the same revision as the crate's `gdl-message`, or move the pin.
 
 ### The reader takes each crate's features from its own workspace

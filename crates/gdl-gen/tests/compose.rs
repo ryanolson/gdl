@@ -467,6 +467,581 @@ fn verify_of_a_fetched_crate_without_gdl_message_says_so() {
     );
 }
 
+/// A Git crate can build without having a release in the registry.
+#[test]
+fn verify_keeps_a_git_crates_source() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-git-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let write = |path: &str, text: &str| {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(path, text).expect("file");
+    };
+    write(
+        ".cargo/config.toml",
+        &format!(
+            "[net]\noffline = false\n\n[source.crates-io]\nreplace-with = \"fixture\"\n\n[source.fixture]\ndirectory = {}\n",
+            toml_string(&dir.join("vendor"))
+        ),
+    );
+    // Only dependency resolution matters here, so the catalogue is empty.
+    write(
+        "vendor/gdl-message/Cargo.toml",
+        "[package]\nname = \"gdl-message\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(
+        "vendor/gdl-message/src/lib.rs",
+        "pub struct Catalogue;\n\
+         impl Catalogue {\n\
+         pub fn linked() -> Self { Self }\n\
+         pub fn to_toml(&self) -> &'static str { \"\" }\n\
+         }\n",
+    );
+    write(
+        "vendor/gdl-message/.cargo-checksum.json",
+        &format!(r#"{{"files":{{}},"package":"{}"}}"#, "a".repeat(64)),
+    );
+    write(
+        "repo/Cargo.toml",
+        "[package]\nname = \"verify-input\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\ngdl-message = \"=0.1.0\"\n",
+    );
+    write("repo/src/lib.rs", "pub fn ready() -> bool { true }\n");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(dir.join("repo"))
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("text")
+            .trim()
+            .to_string()
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "fixture"]);
+    let rev = git(&["rev-parse", "HEAD"]);
+    let url = format!("file://{}", dir.join("repo").display());
+    write(
+        "probe/Cargo.toml",
+        &format!(
+            "[package]\nname = \"verify-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\ngdl-message = \"=0.1.0\"\nverify_input = {{ package = \"verify-input\", git = {url:?}, rev = {rev:?} }}\n"
+        ),
+    );
+    write(
+        "probe/src/main.rs",
+        "fn main() {\nassert!(verify_input::ready());\nprint!(\"{}\", gdl_message::Catalogue::linked().to_toml());\n}\n",
+    );
+    let target = dir.join("target");
+    let probe = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "run",
+            "--quiet",
+            "--manifest-path",
+        ])
+        .arg(dir.join("probe/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target)
+        .current_dir(dir.join("probe"))
+        .output()
+        .expect("probe");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    gdl_message::Catalogue::from_toml(&String::from_utf8_lossy(&probe.stdout))
+        .expect("the compiled probe prints a catalogue");
+    let extracted = gdl_gen::extract(
+        &gdl_gen::Crate::Git {
+            name: "verify-input".into(),
+            url,
+            rev,
+            path: PathBuf::new(),
+        },
+        &target,
+        &gdl_extract::Cargo::trusted(),
+    )
+    .expect("Git extraction");
+    gdl_gen::verify(&extracted, &target).expect("verification keeps the Git source");
+}
+
+/// A crate that takes `gdl-message` from Git verifies: the program
+/// `--verify` builds takes it from the same Git source, under the same
+/// reference, as the crate's lock does. From the registry, the program
+/// finds no `gdl-message`; under any other reference, it links a second
+/// one, and the two stop it at start-up.
+///
+/// The repository holds the workspace's own `gdl-message` and the crates it
+/// needs, and the crate takes its default branch. Cargo's HTTP goes to a
+/// dead proxy, so the run reads no registry: the workspace lock pins every
+/// registry crate, and Git reads the repository from the file system.
+#[test]
+fn verify_takes_gdl_message_from_the_crates_git_source() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-git-message-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = dir.join("repo");
+    let members = ["gdl-message", "gdl-model", "gdl-macros", "gdl-syntax"];
+    for member in members {
+        copy_dir(
+            &root.join("crates").join(member),
+            &repo.join("crates").join(member),
+        );
+    }
+    let mut manifest: toml::Table = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("the workspace manifest")
+        .parse()
+        .expect("TOML");
+    let workspace = manifest["workspace"].as_table_mut().expect("a workspace");
+    workspace.remove("exclude");
+    workspace.insert(
+        "members".into(),
+        members.map(|m| format!("crates/{m}")).to_vec().into(),
+    );
+    std::fs::write(repo.join("Cargo.toml"), manifest.to_string()).expect("manifest");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(&repo)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "fixture"]);
+    let url = format!("file://{}", repo.display());
+
+    let app = dir.join("app");
+    std::fs::create_dir_all(app.join("src")).expect("dir");
+    std::fs::write(
+        app.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"verify-git-message\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [workspace]\n[dependencies]\ngdl-message = {{ git = {url:?} }}\n"
+        ),
+    )
+    .expect("manifest");
+    std::fs::write(
+        app.join("src/lib.rs"),
+        "#[derive(gdl_message::Message)]\npub struct Words;\n",
+    )
+    .expect("source");
+    std::fs::copy(root.join("Cargo.lock"), app.join("Cargo.lock")).expect("the workspace lock");
+
+    let output = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "gdl",
+            "extract",
+        ])
+        .arg(&app)
+        .arg("--verify")
+        .arg("--target-dir")
+        .arg(target())
+        .env("CARGO_HTTP_PROXY", "127.0.0.1:9")
+        .env("CARGO_NET_RETRY", "0")
+        .output()
+        .expect("cargo gdl");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let lock = std::fs::read_to_string(app.join("Cargo.lock")).expect("the crate's lock");
+    assert!(
+        lock.contains(&format!("source = \"git+{url}#")),
+        "the crate's lock takes gdl-message from the repository:\n{lock}"
+    );
+    let offer =
+        gdl_gen::Offer::from_toml(&String::from_utf8_lossy(&output.stdout)).expect("an offer");
+    let messages: Vec<&str> = offer.messages.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(messages, ["Words"]);
+}
+
+/// Copy the directory `from` to `to`, with every file below it.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("dir");
+    for entry in std::fs::read_dir(from).expect("a directory") {
+        let entry = entry.expect("an entry");
+        let path = entry.path();
+        if entry.file_type().expect("a type").is_dir() {
+            copy_dir(&path, &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(&path, to.join(entry.file_name())).expect("a file");
+        }
+    }
+}
+
+/// A workspace's Git patch supplies the same package to its build and verification.
+#[test]
+fn verify_keeps_the_crates_git_patch() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-git-patch-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let write = |path: &str, text: &str| {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(path, text).expect("file");
+    };
+    std::fs::create_dir_all(dir.join("vendor")).expect("vendor");
+    write(
+        ".cargo/config.toml",
+        &format!(
+            "[net]\noffline = false\n\n[source.crates-io]\nreplace-with = \"fixture\"\n\n[source.fixture]\ndirectory = {}\n",
+            toml_string(&dir.join("vendor"))
+        ),
+    );
+    write(
+        "repo/Cargo.toml",
+        "[package]\nname = \"gdl-message\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(
+        "repo/src/lib.rs",
+        "pub struct Catalogue;\nimpl Catalogue {\n\
+         pub fn linked() -> Self { Self }\n\
+         pub fn to_toml(&self) -> &'static str { \"\" }\n}\n",
+    );
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["add", "."],
+        vec!["commit", "--quiet", "-m", "fixture"],
+    ] {
+        let output = Command::new("git")
+            .current_dir(dir.join("repo"))
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let url = format!("file://{}", dir.join("repo").display());
+    write(
+        "app/Cargo.toml",
+        &format!(
+            "[package]\nname = \"verify-patched-input\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [workspace]\n[dependencies]\ngdl-message = \"=0.1.0\"\n\
+             [patch.crates-io]\ngdl-message = {{ git = {url:?} }}\n"
+        ),
+    );
+    write(
+        "app/src/lib.rs",
+        "pub fn ready() -> bool { let _ = gdl_message::Catalogue::linked(); true }\n",
+    );
+    let target = dir.join("target");
+    let control = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "build",
+            "--quiet",
+            "--manifest-path",
+        ])
+        .arg(dir.join("app/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target)
+        .current_dir(dir.join("app"))
+        .output()
+        .expect("the crate's own build");
+    assert!(
+        control.status.success(),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let lock = std::fs::read_to_string(dir.join("app/Cargo.lock")).expect("lock");
+    assert!(lock.contains(&format!("source = \"git+{url}#")), "{lock}");
+    let extracted = gdl_gen::extract(
+        &gdl_gen::Crate::Path(dir.join("app")),
+        &target,
+        &gdl_extract::Cargo::trusted(),
+    )
+    .expect("the patched crate extracts");
+    gdl_gen::verify(&extracted, &target).expect("verification keeps the crate's Git patch");
+}
+
+/// A workspace member uses its own Git dependency even when the workspace contains another copy.
+/// This compiles both copies of gdl-message, so its first run takes several seconds.
+#[test]
+fn verify_uses_the_members_gdl_message_dependency() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-member-message-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let members = ["gdl-message", "gdl-model", "gdl-macros", "gdl-syntax"];
+    let repo = dir.join("repo");
+    let workspace = dir.join("workspace");
+    let mut manifest: toml::Table = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("the workspace manifest")
+        .parse()
+        .expect("TOML");
+    let table = manifest["workspace"].as_table_mut().expect("workspace");
+    table.remove("exclude");
+    table.insert(
+        "members".into(),
+        members.map(|m| format!("crates/{m}")).to_vec().into(),
+    );
+    for to in [&repo, &workspace] {
+        for member in members {
+            copy_dir(
+                &root.join("crates").join(member),
+                &to.join("crates").join(member),
+            );
+        }
+        std::fs::write(to.join("Cargo.toml"), manifest.to_string()).expect("manifest");
+    }
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["add", "."],
+        vec!["commit", "--quiet", "-m", "fixture"],
+    ] {
+        let output = Command::new("git")
+            .current_dir(&repo)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    manifest["workspace"]["members"]
+        .as_array_mut()
+        .expect("members")
+        .push("app".into());
+    std::fs::write(workspace.join("Cargo.toml"), manifest.to_string()).expect("manifest");
+    std::fs::copy(root.join("Cargo.lock"), workspace.join("Cargo.lock")).expect("lock");
+    let url = format!("file://{}", repo.display());
+    let app = workspace.join("app");
+    std::fs::create_dir_all(app.join("src")).expect("dir");
+    std::fs::write(
+        app.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"verify-workspace-input\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [dependencies]\ngdl-message = {{ git = {url:?} }}\n"
+        ),
+    )
+    .expect("manifest");
+    std::fs::write(
+        app.join("src/lib.rs"),
+        "#[derive(gdl_message::Message)]\npub struct Words;\n",
+    )
+    .expect("source");
+    std::fs::write(
+        app.join("src/main.rs"),
+        "use verify_workspace_input as _;\n\
+         fn main() { print!(\"{}\", gdl_message::Catalogue::linked().to_toml()); }\n",
+    )
+    .expect("source");
+    let control = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "run",
+            "--quiet",
+            "--manifest-path",
+        ])
+        .arg(app.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target())
+        .env("CARGO_HTTP_PROXY", "127.0.0.1:9")
+        .env("CARGO_NET_RETRY", "0")
+        .output()
+        .expect("the member's own build");
+    assert!(
+        control.status.success(),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let linked = gdl_message::Catalogue::from_toml(&String::from_utf8_lossy(&control.stdout))
+        .expect("a catalogue");
+    assert_eq!(linked.messages.len(), 1, "{linked:?}");
+    assert_eq!(linked.messages[0].name, "Words");
+    let output = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "gdl",
+            "extract",
+        ])
+        .arg(&app)
+        .arg("--verify")
+        .arg("--target-dir")
+        .arg(target())
+        .env("CARGO_HTTP_PROXY", "127.0.0.1:9")
+        .env("CARGO_NET_RETRY", "0")
+        .output()
+        .expect("cargo gdl");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A dependency for another target does not add a linker section to the host program.
+/// The control compiles the copied workspace, so its first run takes several seconds.
+#[test]
+#[cfg(unix)]
+fn verify_ignores_gdl_message_for_another_target() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-verify-target-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workspace = dir.join("workspace");
+    let members = ["gdl-message", "gdl-model", "gdl-macros", "gdl-syntax"];
+    for member in members {
+        copy_dir(
+            &root.join("crates").join(member),
+            &workspace.join("crates").join(member),
+        );
+    }
+    let mut manifest: toml::Table = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("manifest")
+        .parse()
+        .expect("TOML");
+    let table = manifest["workspace"].as_table_mut().expect("workspace");
+    table.remove("exclude");
+    let mut paths = members.map(|m| format!("crates/{m}")).to_vec();
+    paths.push("app".into());
+    table.insert("members".into(), paths.into());
+    std::fs::write(workspace.join("Cargo.toml"), manifest.to_string()).expect("manifest");
+    let write = |path: &str, text: &str| {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(path, text).expect("file");
+    };
+    write(
+        "message/Cargo.toml",
+        "[package]\nname = \"gdl-message\"\nversion = \"0.2.0\"\nedition = \"2024\"\n",
+    );
+    write("message/src/lib.rs", "");
+    write(
+        "windows/Cargo.toml",
+        "[package]\nname = \"windows-protocols\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+         [dependencies]\ngdl-message = { path = \"../message\" }\n",
+    );
+    write(
+        "windows/src/lib.rs",
+        "compile_error!(\"the host must not build the Windows dependency\");\n",
+    );
+    write(
+        "workspace/app/Cargo.toml",
+        "[package]\nname = \"verify-target-input\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+         [dependencies]\ngdl-message = { path = \"../crates/gdl-message\" }\n\
+         [target.'cfg(windows)'.dependencies]\nwindows-protocols = { path = \"../../windows\" }\n",
+    );
+    write(
+        "workspace/app/src/lib.rs",
+        "#[derive(gdl_message::Message)]\npub struct Words;\n",
+    );
+    write(
+        "workspace/app/src/main.rs",
+        "use verify_target_input as _;\n\
+         fn main() { print!(\"{}\", gdl_message::Catalogue::linked().to_toml()); }\n",
+    );
+    std::fs::copy(root.join("Cargo.lock"), workspace.join("Cargo.lock")).expect("lock");
+    let control = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "run",
+            "--offline",
+            "--quiet",
+            "--manifest-path",
+        ])
+        .arg(workspace.join("app/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target())
+        .output()
+        .expect("the crate's own build");
+    assert!(
+        control.status.success(),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let linked = gdl_message::Catalogue::from_toml(&String::from_utf8_lossy(&control.stdout))
+        .expect("one linked catalogue");
+    assert_eq!(linked.messages.len(), 1, "{linked:?}");
+    assert_eq!(linked.messages[0].name, "Words");
+    let output = Command::new("timeout")
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "gdl",
+            "extract",
+        ])
+        .arg(workspace.join("app"))
+        .arg("--verify")
+        .arg("--target-dir")
+        .arg(target())
+        .env("CARGO_NET_OFFLINE", "true")
+        .output()
+        .expect("cargo gdl");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// `--verify` compares only the verified crate's registrations, though the
 /// program it builds links its dependencies' too. The build tells them
 /// apart by the directory each was built from (`CARGO_MANIFEST_DIR`), not
