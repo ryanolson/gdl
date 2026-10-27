@@ -9,6 +9,7 @@ use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::{Item, Meta, UseTree};
 
+use crate::attrs::{Place, Serde};
 use crate::cfg::Settings;
 use crate::reads::Counted;
 
@@ -65,10 +66,10 @@ pub(crate) struct TypeDef {
     /// with `cfg` applied: what serde bounds its parameters by. Empty for a
     /// type without type parameters, which has none to bound.
     pub(crate) members: Vec<Member>,
-    /// The attributes of each of a generic enum's variants that `cfg`
-    /// keeps, with `cfg_attr` applied: a variant's serde bound and skip
-    /// hold for its fields.
-    pub(crate) variants: Vec<Vec<Meta>>,
+    /// The serde attributes of each of a generic enum's variants that
+    /// `cfg` keeps, with `cfg_attr` applied: a variant's serde bound and
+    /// skip hold for its fields.
+    pub(crate) variants: Vec<Serde>,
     /// Its type parameters, by name; a lifetime or const parameter is
     /// none of them.
     pub(crate) params: Vec<String>,
@@ -79,6 +80,8 @@ pub(crate) struct TypeDef {
     pub(crate) name: String,
     pub(crate) vis: Vis,
     pub(crate) attrs: Vec<Meta>,
+    /// Its own serde attributes, among `attrs`.
+    pub(crate) serde: Serde,
     /// Whether a field borrows: a reference in its type, or
     /// `#[serde(borrow)]`. Derived `Deserialize` then is not
     /// `DeserializeOwned`, and the type has no codec.
@@ -89,7 +92,9 @@ pub(crate) struct TypeDef {
 /// A field of a struct, or of an enum's variant.
 #[derive(Clone)]
 pub(crate) struct Member {
-    pub(crate) field: syn::Field,
+    pub(crate) ty: syn::Type,
+    /// Its serde attributes, with `cfg_attr` applied.
+    pub(crate) serde: Serde,
     /// Its variant's index in [`TypeDef::variants`]; none in a struct.
     pub(crate) variant: Option<usize>,
 }
@@ -498,44 +503,35 @@ impl Reader<'_> {
         }
     }
 
-    /// Whether a field borrows when deserialized: a reference anywhere in
-    /// its type, or `#[serde(borrow)]`, unless serde skips deserializing it
-    /// or `cfg` removes it. `cfg_attr` applies first.
-    fn borrows(&self, field: &syn::Field) -> bool {
-        let Some(attrs) = self.settings.attributes(&field.attrs, self.features) else {
-            return false;
-        };
-        let serde = |word: &str| {
-            attrs.iter().any(|meta| match meta {
-                Meta::List(list) if list.path.is_ident("serde") => list
-                    .tokens
-                    .clone()
-                    .into_iter()
-                    .any(|t| matches!(t, proc_macro2::TokenTree::Ident(i) if i == word)),
-                _ => false,
-            })
-        };
-        if serde("skip") || serde("skip_deserializing") {
-            return false;
+    /// Read the fields `cfg` keeps, of variant `variant` or of a struct,
+    /// each one's serde attributes once, with `cfg_attr` applied: add each
+    /// to `members` when it is some, as a generic type keeps them, and
+    /// return whether one borrows when deserialized ([`Serde::borrows`]).
+    fn fields<'f>(
+        &self,
+        fields: impl IntoIterator<Item = &'f syn::Field>,
+        variant: Option<usize>,
+        mut members: Option<&mut Vec<Member>>,
+    ) -> bool {
+        let mut borrows = false;
+        for field in fields {
+            let Some(attrs) = self.settings.attributes(&field.attrs, self.features) else {
+                continue;
+            };
+            let serde = Serde::read(&attrs, Place::Field);
+            borrows |= serde.borrows(&field.ty);
+            match members.as_deref_mut() {
+                Some(members) => members.push(Member {
+                    ty: field.ty.clone(),
+                    serde,
+                    variant,
+                }),
+                // Nothing to keep: the first that borrows answers.
+                None if borrows => break,
+                None => {}
+            }
         }
-        serde("borrow") || reference(&field.ty)
-    }
-
-    /// The fields `cfg` keeps, with `cfg_attr` applied to their attributes,
-    /// of variant `variant`, or of a struct.
-    fn members(&self, fields: &syn::Fields, variant: Option<usize>) -> Vec<Member> {
-        fields
-            .iter()
-            .filter_map(|f| {
-                let attrs = self.settings.attributes(&f.attrs, self.features)?;
-                let mut field = f.clone();
-                field.attrs = attrs
-                    .into_iter()
-                    .map(|meta| syn::parse_quote!(#[#meta]))
-                    .collect();
-                Some(Member { field, variant })
-            })
-            .collect()
+        borrows
     }
 
     /// Read `items` of module `module`, which is in `file`; its child
@@ -584,11 +580,9 @@ impl Reader<'_> {
             match item {
                 Item::Struct(s) => {
                     let params = params(&s.generics);
-                    let members = if params.is_empty() {
-                        Vec::new()
-                    } else {
-                        self.members(&s.fields, None)
-                    };
+                    let mut members = Vec::new();
+                    let generic = !params.is_empty();
+                    let borrows = self.fields(&s.fields, None, generic.then_some(&mut members));
                     krate.modules[module].add_type(TypeDef {
                         fields: Some(s.fields.clone()),
                         members,
@@ -598,38 +592,31 @@ impl Reader<'_> {
                         alias: None,
                         name: s.ident.unraw().to_string(),
                         vis: Vis::of(&s.vis),
+                        serde: Serde::read(&attrs, Place::Container),
                         attrs,
-                        borrows: s.fields.iter().any(|f| self.borrows(f)),
+                        borrows,
                         at: at(s.ident.span()),
                     })
                 }
                 Item::Enum(e) => {
-                    let kept: Vec<(Vec<Meta>, &syn::Fields)> = e
-                        .variants
-                        .iter()
-                        .filter_map(|v| {
-                            Some((
-                                self.settings.attributes(&v.attrs, self.features)?,
-                                &v.fields,
-                            ))
-                        })
-                        .collect();
-                    // A variant `cfg` removes has no fields.
-                    let borrows = kept
-                        .iter()
-                        .flat_map(|(_, fields)| fields.iter())
-                        .any(|f| self.borrows(f));
                     let params = params(&e.generics);
-                    let (members, variants) = if params.is_empty() {
-                        (Vec::new(), Vec::new())
-                    } else {
-                        let members = kept
-                            .iter()
-                            .enumerate()
-                            .flat_map(|(index, (_, fields))| self.members(fields, Some(index)))
-                            .collect();
-                        (members, kept.into_iter().map(|(attrs, _)| attrs).collect())
-                    };
+                    let generic = !params.is_empty();
+                    let (mut members, mut variants) = (Vec::new(), Vec::new());
+                    let mut borrows = false;
+                    // A variant `cfg` removes has no fields.
+                    for v in &e.variants {
+                        let Some(attrs) = self.settings.attributes(&v.attrs, self.features) else {
+                            continue;
+                        };
+                        if generic {
+                            let index = Some(variants.len());
+                            borrows |= self.fields(&v.fields, index, Some(&mut members));
+                            variants.push(Serde::read(&attrs, Place::Variant));
+                        } else if self.fields(&v.fields, None, None) {
+                            borrows = true;
+                            break;
+                        }
+                    }
                     krate.modules[module].add_type(TypeDef {
                         fields: None,
                         members,
@@ -639,6 +626,7 @@ impl Reader<'_> {
                         alias: None,
                         name: e.ident.unraw().to_string(),
                         vis: Vis::of(&e.vis),
+                        serde: Serde::read(&attrs, Place::Container),
                         attrs,
                         borrows,
                         at: at(e.ident.span()),
@@ -653,8 +641,9 @@ impl Reader<'_> {
                     alias: None,
                     name: u.ident.unraw().to_string(),
                     vis: Vis::of(&u.vis),
+                    serde: Serde::read(&attrs, Place::Container),
                     attrs,
-                    borrows: u.fields.named.iter().any(|f| self.borrows(f)),
+                    borrows: self.fields(&u.fields.named, None, None),
                     at: at(u.ident.span()),
                 }),
                 Item::Type(t) => krate.modules[module].add_type(TypeDef {
@@ -666,6 +655,7 @@ impl Reader<'_> {
                     alias: Some((*t.ty).clone()),
                     name: t.ident.unraw().to_string(),
                     vis: Vis::of(&t.vis),
+                    serde: Serde::read(&attrs, Place::Container),
                     attrs,
                     borrows: false,
                     at: at(t.ident.span()),
@@ -874,7 +864,7 @@ fn flatten(tree: &UseTree, prefix: &UsePath, out: &mut Vec<(Option<String>, UseP
     }
 }
 
-fn reference(ty: &syn::Type) -> bool {
+pub(crate) fn reference(ty: &syn::Type) -> bool {
     match ty {
         syn::Type::Reference(_) => true,
         syn::Type::Array(a) => reference(&a.elem),

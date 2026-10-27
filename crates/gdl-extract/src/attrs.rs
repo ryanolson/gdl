@@ -1,24 +1,27 @@
 //! What serde's attributes say of what its derive bounds: its bounds, its
-//! skips, its defaults, and the attributes the reader reads at all.
+//! skips, its defaults, and the attributes the reader reads at all. Each
+//! item's `#[serde(..)]` attributes are read once, into a [`Serde`], when
+//! the reader reads the item; the wire check reads that.
 
 use std::collections::HashSet;
 
+use proc_macro2::TokenTree;
 use quote::ToTokens as _;
 use syn::Meta;
 use syn::ext::IdentExt as _;
 
 use crate::external::Known;
-use crate::tree::TypeDef;
+use crate::tree::{Member, TypeDef, reference};
 use crate::wire::need_of;
 
 /// The serde attributes the reader reads for what serde bounds, of a
 /// container, a variant, and a field. Any other, such as `from`, `into`,
 /// or `remote`, may change what serde bounds, so a type with one is local;
-/// a type with no arguments only for `remote` ([`remote`]).
+/// a type with no arguments only for `remote` ([`Serde::remote`]).
 /// `with` and its kin are among them: serde bounds nothing for such a
 /// field, and the reader bounds what its type names, which refuses at
 /// worst a crossing that would work.
-pub(crate) const CONTAINER: &[&str] = &[
+const CONTAINER: &[&str] = &[
     "rename",
     "rename_all",
     "rename_all_fields",
@@ -63,58 +66,185 @@ const FIELD: &[&str] = &[
     "bound",
 ];
 
+/// Where serde attributes stand, which sets the keys the reader reads.
+#[derive(Clone, Copy)]
+pub(crate) enum Place {
+    Container,
+    Variant,
+    Field,
+}
+
+impl Place {
+    fn keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Container => CONTAINER,
+            Self::Variant => VARIANT,
+            Self::Field => FIELD,
+        }
+    }
+}
+
+/// What the `#[serde(..)]` attributes of one container, variant, or field
+/// say, read once. A key is the name that starts an entry, raw or not as
+/// written. A word, such as `skip`, counts anywhere at the top of a list,
+/// and so do `default` and `bound`, with what follows them. Inside a
+/// group, only a direction's bound counts. Only a list named `serde` is
+/// read. A word that does not start an entry is not a key only in code
+/// that serde's derive rejects.
+#[derive(Clone, Default)]
+pub(crate) struct Serde {
+    /// Whether a key is not one the reader reads in its place.
+    pub(crate) unread: bool,
+    /// Whether a key is `remote`, which makes no trait for the type
+    /// itself.
+    pub(crate) remote: bool,
+    /// What `default` fills a value with; the last one written wins.
+    pub(crate) default: Option<Fill>,
+    skip: bool,
+    skip_serializing: bool,
+    skip_deserializing: bool,
+    borrow: bool,
+    /// The where-clauses for each direction that `bound = ".."`, for both,
+    /// or `bound(serialize = "..", deserialize = "..")`, for each, write;
+    /// none when no `bound` is there for the direction. A bound that is
+    /// not a string is `None` in the list: the reader cannot say what it
+    /// bounds.
+    serialize: Option<Vec<Option<String>>>,
+    deserialize: Option<Vec<Option<String>>>,
+}
+
+impl Serde {
+    /// Read the serde attributes among `metas`, which stand at `place`.
+    pub(crate) fn read<'m>(metas: impl IntoIterator<Item = &'m Meta>, place: Place) -> Self {
+        let mut serde = Self::default();
+        for meta in metas {
+            let Meta::List(list) = meta else {
+                continue;
+            };
+            if !list.path.is_ident("serde") {
+                continue;
+            }
+            let tokens: Vec<TokenTree> = list.tokens.clone().into_iter().collect();
+            let mut start = true;
+            for (at, token) in tokens.iter().enumerate() {
+                match token {
+                    TokenTree::Punct(p) if p.as_char() == ',' => {
+                        start = true;
+                        continue;
+                    }
+                    TokenTree::Ident(ident) => {
+                        if start {
+                            serde.unread |= !place.keys().iter().any(|key| ident == key);
+                            serde.remote |= ident == "remote";
+                        }
+                        serde.word(ident, &tokens[at + 1..]);
+                    }
+                    _ => {}
+                }
+                start = false;
+            }
+        }
+        serde
+    }
+
+    /// Read word `ident`, at the top of a list, where `after` follows it.
+    fn word(&mut self, ident: &proc_macro2::Ident, after: &[TokenTree]) {
+        let equals = |token: Option<&TokenTree>| matches!(token, Some(TokenTree::Punct(p)) if p.as_char() == '=');
+        if ident == "skip" {
+            self.skip = true;
+        } else if ident == "skip_serializing" {
+            self.skip_serializing = true;
+        } else if ident == "skip_deserializing" {
+            self.skip_deserializing = true;
+        } else if ident == "borrow" {
+            self.borrow = true;
+        } else if ident == "default" {
+            self.default = Some(if equals(after.first()) {
+                Fill::Path
+            } else {
+                Fill::Default
+            });
+        } else if ident == "bound" {
+            match after.first() {
+                Some(TokenTree::Group(group)) => {
+                    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                    for (at, token) in inner.iter().enumerate() {
+                        let TokenTree::Ident(side) = token else {
+                            continue;
+                        };
+                        if !equals(inner.get(at + 1)) {
+                            continue;
+                        }
+                        let bounds = if side == "serialize" {
+                            &mut self.serialize
+                        } else if side == "deserialize" {
+                            &mut self.deserialize
+                        } else {
+                            continue;
+                        };
+                        bounds
+                            .get_or_insert_with(Vec::new)
+                            .push(string(inner.get(at + 2)));
+                    }
+                }
+                first => {
+                    let bound = if equals(first) {
+                        string(after.get(1))
+                    } else {
+                        None
+                    };
+                    for bounds in [&mut self.serialize, &mut self.deserialize] {
+                        bounds.get_or_insert_with(Vec::new).push(bound.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// The where-clauses for `side`, as [`Serde`] keeps them.
+    pub(crate) fn bounds(&self, side: Side) -> Option<&[Option<String>]> {
+        match side {
+            Side::Serialize => self.serialize.as_deref(),
+            Side::Deserialize => self.deserialize.as_deref(),
+        }
+    }
+
+    /// Whether a field's or a variant's attributes skip `side`: `skip`, or
+    /// the word for it alone.
+    pub(crate) fn skips(&self, side: Side) -> bool {
+        self.skip
+            || match side {
+                Side::Serialize => self.skip_serializing,
+                Side::Deserialize => self.skip_deserializing,
+            }
+    }
+
+    /// Whether a field of type `ty` with these attributes borrows when
+    /// deserialized: a reference anywhere in its type, or `borrow`, unless
+    /// serde skips deserializing it.
+    pub(crate) fn borrows(&self, ty: &syn::Type) -> bool {
+        !self.skips(Side::Deserialize) && (self.borrow || reference(ty))
+    }
+}
+
+/// The string literal `token` is, if it is one.
+fn string(token: Option<&TokenTree>) -> Option<String> {
+    match token {
+        Some(TokenTree::Literal(literal)) => {
+            syn::parse2::<syn::LitStr>(TokenTree::Literal(literal.clone()).into())
+                .ok()
+                .map(|s| s.value())
+        }
+        _ => None,
+    }
+}
+
 /// Whether every serde attribute of `definition`, of its variants, and of
 /// its fields is one the reader reads.
 pub(crate) fn judged(definition: &TypeDef) -> bool {
-    only(definition.attrs.iter(), CONTAINER)
-        && definition
-            .variants
-            .iter()
-            .all(|variant| only(variant.iter(), VARIANT))
-        && definition
-            .members
-            .iter()
-            .all(|member| only(metas(&member.field), FIELD))
-}
-
-/// Whether each key of each serde attribute among `metas` is `allowed`.
-pub(crate) fn only<'m>(mut metas: impl Iterator<Item = &'m Meta>, allowed: &[&str]) -> bool {
-    metas.all(|meta| {
-        serde_keys(meta)
-            .iter()
-            .all(|key| allowed.contains(&key.as_str()))
-    })
-}
-
-/// Whether a serde attribute among `metas` is `remote`, which makes no
-/// trait for the type itself.
-pub(crate) fn remote<'m>(mut metas: impl Iterator<Item = &'m Meta>) -> bool {
-    metas.any(|meta| serde_keys(meta).iter().any(|key| key == "remote"))
-}
-
-/// The keys of `#[serde(..)]`: each name that starts an entry.
-fn serde_keys(meta: &Meta) -> Vec<String> {
-    use proc_macro2::TokenTree;
-    let Meta::List(list) = meta else {
-        return Vec::new();
-    };
-    if !list.path.is_ident("serde") {
-        return Vec::new();
-    }
-    let mut keys = Vec::new();
-    let mut start = true;
-    for token in list.tokens.clone() {
-        match &token {
-            TokenTree::Ident(ident) if start => keys.push(ident.to_string()),
-            TokenTree::Punct(p) if p.as_char() == ',' => {
-                start = true;
-                continue;
-            }
-            _ => {}
-        }
-        start = false;
-    }
-    keys
+    !definition.serde.unread
+        && definition.variants.iter().all(|variant| !variant.unread)
+        && definition.members.iter().all(|member| !member.serde.unread)
 }
 
 /// A direction of serde's derive, which builds its where-clause on its
@@ -123,18 +253,6 @@ fn serde_keys(meta: &Meta) -> Vec<String> {
 pub(crate) enum Side {
     Serialize,
     Deserialize,
-}
-
-impl Side {
-    /// Whether `metas`, a field's or a variant's, skip this direction:
-    /// `skip`, or the word for it alone.
-    fn skips<'m>(self, mut metas: impl Iterator<Item = &'m Meta>) -> bool {
-        let alone = match self {
-            Self::Serialize => "skip_serializing",
-            Self::Deserialize => "skip_deserializing",
-        };
-        metas.any(|meta| serde_word(meta, "skip") || serde_word(meta, alone))
-    }
 }
 
 /// Add the parameters that serde's derive for `side` bounds, as it builds
@@ -156,144 +274,52 @@ pub(crate) fn bounded_on(
 ) -> Option<()> {
     let params = &definition.params;
     for member in &definition.members {
-        if let Some(bounds) = serde_bounds(metas(&member.field), side) {
-            named_by_bounds(&bounds, params, wire, default, known)?;
+        if let Some(bounds) = member.serde.bounds(side) {
+            named_by_bounds(bounds, params, wire, default, known)?;
         }
     }
     for variant in &definition.variants {
-        if let Some(bounds) = serde_bounds(variant.iter(), side) {
-            named_by_bounds(&bounds, params, wire, default, known)?;
+        if let Some(bounds) = variant.bounds(side) {
+            named_by_bounds(bounds, params, wire, default, known)?;
         }
     }
-    if let Some(bounds) = serde_bounds(definition.attrs.iter(), side) {
-        return named_by_bounds(&bounds, params, wire, default, known);
+    if let Some(bounds) = definition.serde.bounds(side) {
+        return named_by_bounds(bounds, params, wire, default, known);
     }
     for member in &definition.members {
-        let field = &member.field;
         let variant = member.variant.map(|v| &definition.variants[v]);
-        if side == Side::Deserialize && fills_by_default(field) {
-            named_by_type(&field.ty, params, default)?;
+        if side == Side::Deserialize && fills_by_default(member) {
+            named_by_type(&member.ty, params, default)?;
         }
-        if side.skips(metas(field))
-            || serde_bounds(metas(field), side).is_some()
-            || variant.is_some_and(|attrs| {
-                side.skips(attrs.iter()) || serde_bounds(attrs.iter(), side).is_some()
-            })
+        if member.serde.skips(side)
+            || member.serde.bounds(side).is_some()
+            || variant.is_some_and(|serde| serde.skips(side) || serde.bounds(side).is_some())
         {
             continue;
         }
-        named_by_type(&field.ty, params, wire)?;
+        named_by_type(&member.ty, params, wire)?;
     }
     Some(())
 }
 
-/// Whether serde fills `field` with `Default::default()` when it
+/// Whether serde fills `member` with `Default::default()` when it
 /// deserializes: `#[serde(default)]`, or a field it does not deserialize,
 /// without a `default = ".."` of its own.
-fn fills_by_default(field: &syn::Field) -> bool {
-    match serde_default(metas(field)) {
+fn fills_by_default(member: &Member) -> bool {
+    match member.serde.default {
         Some(Fill::Default) => true,
         Some(Fill::Path) => false,
-        None => Side::Deserialize.skips(metas(field)),
+        None => member.serde.skips(Side::Deserialize),
     }
 }
 
-/// What `#[serde(default)]` among `metas` fills a value with.
+/// What `#[serde(default)]` fills a value with.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fill {
     /// `Default::default()`: the word alone.
     Default,
     /// A function of its own: `default = ".."`.
     Path,
-}
-
-/// The `default` that `metas` write, if any.
-pub(crate) fn serde_default<'m>(metas: impl Iterator<Item = &'m Meta>) -> Option<Fill> {
-    use proc_macro2::TokenTree;
-    let mut fill = None;
-    for meta in metas {
-        let Meta::List(list) = meta else {
-            continue;
-        };
-        if !list.path.is_ident("serde") {
-            continue;
-        }
-        let tokens: Vec<TokenTree> = list.tokens.clone().into_iter().collect();
-        for (at, token) in tokens.iter().enumerate() {
-            if matches!(token, TokenTree::Ident(i) if i == "default") {
-                fill = Some(match tokens.get(at + 1) {
-                    Some(TokenTree::Punct(p)) if p.as_char() == '=' => Fill::Path,
-                    _ => Fill::Default,
-                });
-            }
-        }
-    }
-    fill
-}
-
-/// A field's attributes.
-fn metas(field: &syn::Field) -> impl Iterator<Item = &Meta> {
-    field.attrs.iter().map(|a| &a.meta)
-}
-
-/// The where-clauses for `side` that `#[serde(bound = "..")]`, for both
-/// directions, or `#[serde(bound(serialize = "..", deserialize = ".."))]`,
-/// for each, write among `metas`; none when no `bound` is there for
-/// `side`. A bound that is not a string is `None` in the list: the reader
-/// cannot say what it bounds.
-pub(crate) fn serde_bounds<'m>(
-    metas: impl Iterator<Item = &'m Meta>,
-    side: Side,
-) -> Option<Vec<Option<String>>> {
-    use proc_macro2::TokenTree;
-    let string = |token: Option<&TokenTree>| match token {
-        Some(TokenTree::Literal(literal)) => {
-            syn::parse2::<syn::LitStr>(TokenTree::Literal(literal.clone()).into())
-                .ok()
-                .map(|s| s.value())
-        }
-        _ => None,
-    };
-    let named = match side {
-        Side::Serialize => "serialize",
-        Side::Deserialize => "deserialize",
-    };
-    let mut bounds = None;
-    for meta in metas {
-        let Meta::List(list) = meta else {
-            continue;
-        };
-        if !list.path.is_ident("serde") {
-            continue;
-        }
-        let tokens: Vec<TokenTree> = list.tokens.clone().into_iter().collect();
-        for (at, token) in tokens.iter().enumerate() {
-            if !matches!(token, TokenTree::Ident(i) if i == "bound") {
-                continue;
-            }
-            match tokens.get(at + 1) {
-                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {
-                    bounds
-                        .get_or_insert_with(Vec::new)
-                        .push(string(tokens.get(at + 2)));
-                }
-                Some(TokenTree::Group(group)) => {
-                    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
-                    for (at, token) in inner.iter().enumerate() {
-                        if matches!(token, TokenTree::Ident(i) if i == named)
-                            && matches!(inner.get(at + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=')
-                        {
-                            bounds
-                                .get_or_insert_with(Vec::new)
-                                .push(string(inner.get(at + 2)));
-                        }
-                    }
-                }
-                _ => bounds.get_or_insert_with(Vec::new).push(None),
-            }
-        }
-    }
-    bounds
 }
 
 /// Add the parameters that `bounds`, where-clauses, bound, to `wire` for
@@ -448,18 +474,6 @@ fn named_by_path(path: &syn::Path, params: &[String], found: &mut HashSet<String
     Some(())
 }
 
-/// Whether `meta` is `#[serde(..)]` with the word `word` in it.
-fn serde_word(meta: &Meta, word: &str) -> bool {
-    match meta {
-        Meta::List(list) if list.path.is_ident("serde") => list
-            .tokens
-            .clone()
-            .into_iter()
-            .any(|t| matches!(t, proc_macro2::TokenTree::Ident(i) if i == word)),
-        _ => false,
-    }
-}
-
 /// Whether `tokens` hold the identifier `name`.
 fn names(tokens: proc_macro2::TokenStream, name: &str) -> bool {
     tokens.into_iter().any(|t| match t {
@@ -491,7 +505,8 @@ mod tests {
     fn by_attribute(attribute: &str, side: Side) -> Option<Option<Vec<String>>> {
         let params: Vec<String> = PARAMS.iter().map(|p| p.to_string()).collect();
         let meta: Meta = syn::parse_str(attribute).expect("an attribute");
-        let bounds = serde_bounds(std::iter::once(&meta), side)?;
+        let serde = Serde::read([&meta], Place::Field);
+        let bounds = serde.bounds(side)?;
         let (mut wire, mut default) = (HashSet::new(), HashSet::new());
         // The trait by its name alone: what a path leads to, these
         // tests do not read.
@@ -501,7 +516,7 @@ mod tests {
             "Default" => Some(Known::Default),
             _ => None,
         };
-        if named_by_bounds(&bounds, &params, &mut wire, &mut default, &mut known).is_none() {
+        if named_by_bounds(bounds, &params, &mut wire, &mut default, &mut known).is_none() {
             return Some(None);
         }
         let mut found: Vec<String> = wire
@@ -568,5 +583,129 @@ mod tests {
         let serialize = r#"serde(bound(serialize = ""))"#;
         assert_eq!(by_attribute(serialize, Ser), named(&[]));
         assert_eq!(by_attribute(serialize, De), None);
+    }
+
+    /// What the reader reads of these attributes, one item's: the places
+    /// whose keys all are ones it reads (`C`ontainer, `V`ariant, `F`ield),
+    /// then `remote`, the `default`, each direction's bounds, its skips,
+    /// and `borrow`.
+    fn summary(attributes: &[&str]) -> String {
+        let metas: Vec<Meta> = attributes
+            .iter()
+            .map(|a| syn::parse_str(a).expect("an attribute"))
+            .collect();
+        let mut out = String::from("read=");
+        for (name, place) in [
+            ("C", Place::Container),
+            ("V", Place::Variant),
+            ("F", Place::Field),
+        ] {
+            if !Serde::read(&metas, place).unread {
+                out.push_str(name);
+            }
+        }
+        let serde = Serde::read(&metas, Place::Field);
+        if serde.remote {
+            out.push_str(" remote");
+        }
+        match serde.default {
+            Some(Fill::Default) => out.push_str(" default"),
+            Some(Fill::Path) => out.push_str(" default=path"),
+            None => {}
+        }
+        for (name, side) in [("ser", Side::Serialize), ("de", Side::Deserialize)] {
+            if let Some(bounds) = serde.bounds(side) {
+                out.push_str(&format!(" {name}={bounds:?}"));
+            }
+        }
+        for (name, side) in [("ser", Side::Serialize), ("de", Side::Deserialize)] {
+            if serde.skips(side) {
+                out.push_str(&format!(" skip-{name}"));
+            }
+        }
+        if serde.borrow {
+            out.push_str(" borrow");
+        }
+        out
+    }
+
+    /// What the reader reads of `#[serde(..)]`, token by token: a key is
+    /// the name that starts an entry, raw or not as written; a word such
+    /// as `skip` counts anywhere at the top of the list, and `default` and
+    /// `bound` too, by what follows them; nothing inside a group counts
+    /// but a direction's bound; and only a list named `serde` is read.
+    #[test]
+    fn serde_attributes_read_as_they_always_have() {
+        for (attributes, read) in [
+            (&[r#"serde(rename = "x")"#][..], "read=CVF"),
+            (
+                &[r#"serde(rename_all = "camelCase", deny_unknown_fields)"#],
+                "read=C",
+            ),
+            (&[r#"serde(r#rename = "x")"#], "read="),
+            (
+                &[r#"serde(rename(serialize = "a", deserialize = "b"))"#],
+                "read=CVF",
+            ),
+            (&[r#"serde(rename(skip))"#], "read=CVF"),
+            (&["serde(rename = skip)"], "read=CVF skip-ser skip-de"),
+            (&["serde(rename = borrow)"], "read=CVF borrow"),
+            (&["serde(rename = default)"], "read=CVF default"),
+            (&[r#"serde(, rename = "x",, ::x)"#], "read=CVF"),
+            (&[r#"serde(remote = "Other")"#], "read= remote"),
+            (
+                &[r#"serde(rename = "x", remote = "Other")"#],
+                "read= remote",
+            ),
+            (&[r#"serde(from = "Other")"#], "read="),
+            (&["serde(transparent)"], "read=C"),
+            (&["serde(flatten)"], "read=F"),
+            (&["serde(other)"], "read=V"),
+            (
+                &[r#"serde(skip_serializing_if = "Option::is_none")"#],
+                "read=F",
+            ),
+            (&["serde(skip)"], "read=VF skip-ser skip-de"),
+            (&["serde(skip_serializing)"], "read=VF skip-ser"),
+            (&["serde(skip_deserializing)"], "read=VF skip-de"),
+            (&[r#"serde(with = "m", borrow)"#], "read=VF borrow"),
+            (&[r#"serde(borrow = "'a")"#], "read=VF borrow"),
+            (&["serde(default)"], "read=CF default"),
+            (&[r#"serde(default = "f")"#], "read=CF default=path"),
+            (
+                &[r#"serde(default, default = "f")"#],
+                "read=CF default=path",
+            ),
+            (&[r#"serde(default = "f", default)"#], "read=CF default"),
+            (
+                &[r#"serde(default = "f")"#, "serde(skip_deserializing)"],
+                "read=F default=path skip-de",
+            ),
+            (&["serde(bound)"], "read=CVF ser=[None] de=[None]"),
+            (&["serde(bound())"], "read=CVF"),
+            (&["serde(bound = 3)"], "read=CVF ser=[None] de=[None]"),
+            (
+                &[r#"serde(bound = r"T: Clone")"#],
+                r#"read=CVF ser=[Some("T: Clone")] de=[Some("T: Clone")]"#,
+            ),
+            (
+                &[r#"serde(bound(serialize = "A: S"), bound(deserialize = "B: D"))"#],
+                r#"read=CVF ser=[Some("A: S")] de=[Some("B: D")]"#,
+            ),
+            (
+                &[
+                    r#"serde(bound = "A: S")"#,
+                    r#"serde(bound[deserialize = 3])"#,
+                ],
+                r#"read=CVF ser=[Some("A: S")] de=[Some("A: S"), None]"#,
+            ),
+            (&["serde(bound(serialize))"], "read=CVF"),
+            (&["other(skip, borrow, default, bound)"], "read=CVF"),
+            (&["serde"], "read=CVF"),
+            (&[r#"serde = "skip""#], "read=CVF"),
+            (&["serde::x(skip)"], "read=CVF"),
+        ] {
+            assert_eq!(summary(attributes), read, "{attributes:?}");
+        }
     }
 }

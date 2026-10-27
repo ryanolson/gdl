@@ -4,9 +4,7 @@
 
 use std::collections::HashSet;
 
-use crate::attrs::{
-    CONTAINER, Fill, Side, bounded_on, judged, only, remote, serde_bounds, serde_default,
-};
+use crate::attrs::{Fill, Side, bounded_on, judged};
 use syn::ext::IdentExt as _;
 
 use crate::canon::{DEPTH, Env, Ty, canonical};
@@ -142,9 +140,9 @@ fn needs(
         // build fails unless it is one; with arguments, what they bound is
         // not read.
         let unread = if args.is_empty() {
-            remote(definition.attrs.iter())
+            definition.serde.remote
         } else {
-            !only(definition.attrs.iter(), CONTAINER)
+            definition.serde.unread
         };
         if unread {
             return None;
@@ -154,8 +152,8 @@ fn needs(
         // unless the container's bound replaces serde's.
         let mut needs = Vec::new();
         if side == Side::Deserialize
-            && serde_bounds(definition.attrs.iter(), side).is_none()
-            && serde_default(definition.attrs.iter()) == Some(Fill::Default)
+            && definition.serde.bounds(side).is_none()
+            && definition.serde.default == Some(Fill::Default)
         {
             needs.push((
                 ty.clone(),
