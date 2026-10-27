@@ -48,6 +48,7 @@ Most tests wait for events, so a busy host makes them slower but does not fail t
 - nextest cannot stop load from other processes. On a host far over its core count, a timing test can still fail.
 - Add a test to the group only when its bound is what it proves and a busy host breaks it. Many tests prove a bound with seconds to spare, and load does not break those. A bound that only stands in for an event becomes a wait on that event.
 - A runtime bound that a test shortens only to run faster, such as `setup_timeout_ms`, is not what the test proves. Keep it far above what the step takes: a busy host can leave a process unscheduled for a second or more. `one_of_two_engines_stopped_mid_answer_retires_alone` (`crates/gdl-gen/tests/lifecycle.rs`) failed at 500 ms and uses 5 s.
+- A nested `cargo` takes Cargo's package cache lock, which every cargo on the host shares. On a busy host, most of its time is a wait for other builds: a compose that takes 3 s alone took over 30 s. Give it a limit that only catches a hang (`CARGO_LIMIT` in `crates/gdl-gen/tests/local.rs`, 300 s). Run it offline (`CARGO_NET_OFFLINE=true`) with the workspace's lock, so that it never reaches crates.io.
 
 ## Velo in one process
 

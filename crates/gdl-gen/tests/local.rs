@@ -14,6 +14,13 @@ use std::time::{Duration, Instant};
 
 use common::{root, target};
 
+/// The limit, in seconds, on a nested `cargo` or `cargo gdl compose`. It
+/// guards against a hang and claims nothing about speed: each run takes
+/// Cargo's package cache lock, which every cargo on the host shares, so on
+/// a busy host most of its time is a wait for other builds. A compose that
+/// takes 3 s alone took over 30 s so.
+const CARGO_LIMIT: &str = "300";
+
 fn spec(path: &str) -> gdl_gen::Spec {
     gdl_gen::Spec::load(&root().join(path)).expect("a spec")
 }
@@ -1062,6 +1069,15 @@ fn http_from_git(holder: &Path, deps: &str, extra: &str) -> gdl_gen::Spec {
     gdl_gen::Spec::from_text(&text, &graph, &dir).expect("a spec")
 }
 
+/// Gives the node crate in `holder/http` the workspace's lock, so that
+/// Cargo can resolve it offline: building gdl fetched every crate the lock
+/// pins. Without a lock, an offline resolve picks from whatever the cache
+/// holds, and refuses a version that has since been yanked.
+fn offline_lock(holder: &Path) {
+    std::fs::copy(root().join("Cargo.lock"), holder.join("http/Cargo.lock"))
+        .expect("the workspace lock");
+}
+
 /// The `[[package]]` entry of `name` in the lock file `lock`.
 fn locked<'l>(lock: &'l str, name: &str) -> Vec<&'l str> {
     lock.split("[[package]]")
@@ -1264,7 +1280,7 @@ fn a_local_bundle_does_not_require_a_transitive_crates_dev_dependencies() {
         .expect("the workspace lock");
     let control = Command::new("timeout")
         .args([
-            "30",
+            CARGO_LIMIT,
             env!("CARGO"),
             "metadata",
             "--offline",
@@ -1328,7 +1344,12 @@ exec "$REVIEW_CARGO" "$@"
         .expect("an executable");
 
     let composed = Command::new("timeout")
-        .args(["30", env!("CARGO_BIN_EXE_cargo-gdl"), "compose", "--local"])
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "compose",
+            "--local",
+        ])
         .arg("--spec")
         .arg(root().join("examples/http/gdl.toml"))
         .arg("--out")
@@ -1395,7 +1416,12 @@ fn a_host_lock_can_be_built_by_the_configured_image_compiler() {
     let spec_dir = holder.path().join("http");
     let out = holder.path().join("bundle");
     let composed = Command::new("timeout")
-        .args(["30", env!("CARGO_BIN_EXE_cargo-gdl"), "compose", "--local"])
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "compose",
+            "--local",
+        ])
         .arg("--spec")
         .arg(spec_dir.join("gdl.toml"))
         .arg("--out")
@@ -1420,7 +1446,13 @@ fn a_host_lock_can_be_built_by_the_configured_image_compiler() {
     // The image's previous resolve has a usable release in the same range.
     std::fs::copy(root().join("Cargo.lock"), &lock).expect("the workspace lock");
     let control = Command::new("timeout")
-        .args(["30", &image_cargo, "metadata", "--format-version", "1"])
+        .args([
+            CARGO_LIMIT,
+            &image_cargo,
+            "metadata",
+            "--format-version",
+            "1",
+        ])
         .arg("--manifest-path")
         .arg(out.join("main/Cargo.toml"))
         .env("RUSTC", &image_rustc)
@@ -1452,7 +1484,7 @@ fn a_host_lock_can_be_built_by_the_configured_image_compiler() {
     );
     if !host_version[0].contains("version = \"1.2.14\"") {
         let build = Command::new("timeout")
-            .args(["30", &image_cargo, "check", "--locked", "--offline"])
+            .args([CARGO_LIMIT, &image_cargo, "check", "--locked", "--offline"])
             .arg("--manifest-path")
             .arg(out.join("main/Cargo.toml"))
             .env("RUSTC", image_rustc)
@@ -1470,6 +1502,11 @@ fn a_host_lock_can_be_built_by_the_configured_image_compiler() {
 
 /// A named registry at crates.io's sparse URL is a source of its own, not
 /// crates.io, which Cargo names by its Git index: the patch names it so.
+///
+/// Every cargo here runs offline. The node crate patches gdl in its own
+/// manifest, so that reading its nodes takes nothing from the registry,
+/// where crates.io's `gdl` is another project's crate. Cargo ignores the
+/// patches of a dependency, so the segment still needs compose's patch.
 #[test]
 fn a_sparse_registry_alias_is_patched_as_its_own_source() {
     const INDEX: &str = "sparse+https://index.crates.io/";
@@ -1482,6 +1519,14 @@ fn a_sparse_registry_alias_is_patched_as_its_own_source() {
         "gdl = { version = \"=0.1.0\", registry = \"review\" }\n",
         "",
     );
+    let node = holder.path().join("http/Cargo.toml");
+    let manifest = std::fs::read_to_string(&node).expect("the node crate's manifest");
+    std::fs::write(
+        &node,
+        format!("{manifest}[patch.\"{INDEX}\"]\ngdl = {{ path = \"../../crates/gdl\" }}\n"),
+    )
+    .expect("the node crate's own patch");
+    offline_lock(holder.path());
     let control = holder.path().join("control");
     std::fs::create_dir_all(control.join("src")).expect("a control crate");
     std::fs::write(control.join("src/lib.rs"), "").expect("a library");
@@ -1497,10 +1542,17 @@ fn a_sparse_registry_alias_is_patched_as_its_own_source() {
     std::fs::copy(root().join("Cargo.lock"), control.join("Cargo.lock"))
         .expect("the workspace lock");
     let resolved = Command::new("timeout")
-        .args(["30", env!("CARGO"), "metadata", "--format-version", "1"])
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO"),
+            "metadata",
+            "--format-version",
+            "1",
+        ])
         .arg("--manifest-path")
         .arg(control.join("Cargo.toml"))
         .env("CARGO_REGISTRIES_REVIEW_INDEX", INDEX)
+        .env("CARGO_NET_OFFLINE", "true")
         .output()
         .expect("the sparse source's patch");
     assert!(
@@ -1531,7 +1583,12 @@ fn a_sparse_registry_alias_is_patched_as_its_own_source() {
 
     let out = holder.path().join("bundle");
     let composed = Command::new("timeout")
-        .args(["30", env!("CARGO_BIN_EXE_cargo-gdl"), "compose", "--local"])
+        .args([
+            CARGO_LIMIT,
+            env!("CARGO_BIN_EXE_cargo-gdl"),
+            "compose",
+            "--local",
+        ])
         .arg("--spec")
         .arg(holder.path().join("http/gdl.toml"))
         .arg("--out")
@@ -1539,6 +1596,7 @@ fn a_sparse_registry_alias_is_patched_as_its_own_source() {
         .arg("--target-dir")
         .arg(target("gdl-gen-tests"))
         .env("CARGO_REGISTRIES_REVIEW_INDEX", INDEX)
+        .env("CARGO_NET_OFFLINE", "true")
         .output()
         .expect("compose with a sparse registry alias");
     assert!(
@@ -1550,7 +1608,7 @@ fn a_sparse_registry_alias_is_patched_as_its_own_source() {
 
 /// Compose reads the Cargo configuration of the build context, as the image
 /// build does, wherever it runs from. It copies gdl's sources and resolves
-/// two bundles, which takes several seconds.
+/// two bundles, which takes several seconds. Compose runs offline.
 #[test]
 fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
     let holder = tempfile::Builder::new()
@@ -1599,6 +1657,7 @@ fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
         )
         .expect("the copied gdl workspace");
     }
+    offline_lock(holder.path());
     std::fs::create_dir(holder.path().join(".cargo")).expect("a configuration directory");
     std::fs::write(
         holder.path().join(".cargo/config.toml"),
@@ -1608,7 +1667,12 @@ fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
     .expect("the context's registry configuration");
     let compose = |cwd: &Path, out: &Path| {
         Command::new("timeout")
-            .args(["30", env!("CARGO_BIN_EXE_cargo-gdl"), "compose", "--local"])
+            .args([
+                CARGO_LIMIT,
+                env!("CARGO_BIN_EXE_cargo-gdl"),
+                "compose",
+                "--local",
+            ])
             .arg("--spec")
             .arg(holder.path().join("http/gdl.toml"))
             .arg("--out")
@@ -1616,6 +1680,7 @@ fn composing_from_elsewhere_reads_the_bundles_registry_configuration() {
             .arg("--target-dir")
             .arg(target("gdl-gen-tests"))
             .env_remove("CARGO_REGISTRIES_REVIEW_CONFIG_INDEX")
+            .env("CARGO_NET_OFFLINE", "true")
             .current_dir(cwd)
             .output()
             .expect("compose")
