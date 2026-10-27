@@ -70,6 +70,76 @@ impl gdl::Build for Subtract {
     }
 }
 
+/// A node that only defines its metrics, `M`, under `M`'s node name.
+/// Pairs of them define one metric's name differently.
+struct Metered<M> {
+    _metrics: M,
+}
+
+impl<M: Named> gdl::Build for Metered<M> {
+    type Config = toml::Table;
+    type Metrics = M;
+    async fn build(_config: toml::Table, metrics: M) -> gdl::Result<Self> {
+        Ok(Self { _metrics: metrics })
+    }
+}
+
+/// The metrics of a [`Metered`] node, and the node's name.
+trait Named: gdl::Metrics + Send + Sync + 'static {
+    const NODE: &'static str;
+}
+
+/// `wait_seconds` as a gauge.
+#[derive(gdl::Metrics)]
+#[expect(dead_code, reason = "defined to clash, never counted")]
+struct GaugedWait {
+    /// Time spent waiting.
+    wait_seconds: gdl::prometheus::Gauge,
+}
+
+impl Named for GaugedWait {
+    const NODE: &'static str = "Gauged";
+}
+
+/// `wait_seconds` as a histogram, with the help of [`GaugedWait`]'s.
+#[derive(gdl::Metrics)]
+#[expect(dead_code, reason = "defined to clash, never counted")]
+struct TimedWait {
+    /// Time spent waiting.
+    #[gdl(buckets = [0.01, 0.1, 1.0])]
+    wait_seconds: gdl::prometheus::Histogram,
+}
+
+impl Named for TimedWait {
+    const NODE: &'static str = "Timed";
+}
+
+/// [`TimedWait`]'s histogram with one more bucket.
+#[derive(gdl::Metrics)]
+#[expect(dead_code, reason = "defined to clash, never counted")]
+struct RebucketedWait {
+    /// Time spent waiting.
+    #[gdl(buckets = [0.01, 0.1, 1.0, 10.0])]
+    wait_seconds: gdl::prometheus::Histogram,
+}
+
+impl Named for RebucketedWait {
+    const NODE: &'static str = "Rebucketed";
+}
+
+/// [`GaugedWait`]'s gauge with a label.
+#[derive(gdl::Metrics)]
+#[expect(dead_code, reason = "defined to clash, never counted")]
+struct LabelledWait {
+    /// Time spent waiting.
+    #[gdl(labels = ["queue"])]
+    wait_seconds: gdl::prometheus::GaugeVec,
+}
+
+impl Named for LabelledWait {
+    const NODE: &'static str = "Labelled";
+}
+
 #[derive(Deserialize)]
 struct AddConfig {
     amount: u32,
@@ -268,6 +338,39 @@ impl gdl_runtime::SegmentBinary for Conflicting {
     }
 }
 
+/// A segment binary that builds `Add`, then a [`Metered`] node of `First`
+/// and one of `Second`, whose metric of one name disagree.
+struct Clashing<First, Second>(std::marker::PhantomData<fn() -> (First, Second)>);
+
+impl<First: Named, Second: Named> gdl_runtime::SegmentBinary for Clashing<First, Second> {
+    const PACKAGE: &'static str = "adder-clashing";
+    const SEGMENT: &'static str = "only";
+    const SEGMENTS: &'static [&'static str] = &["only"];
+    const GRAPH_CONFIG: &'static str = GRAPH_CONFIG;
+    type Settings = Settings;
+    type Hosts = Add;
+
+    async fn build(settings: Settings, builder: &Builder) -> Result<Add, Failure> {
+        let add = builder.build::<Add>("Add", settings.node.add).await?;
+        builder.build::<Metered<First>>(First::NODE, None).await?;
+        builder.build::<Metered<Second>>(Second::NODE, None).await?;
+        Ok(add)
+    }
+
+    fn deployment() -> gdl::Result<DeploymentSpec> {
+        deployment()
+    }
+
+    fn start(
+        _add: Add,
+        _node: gdl_runtime::velo::Velo,
+        _roster: &Roster,
+        _runtime: RuntimeConfig,
+    ) -> gdl::Result<Serving> {
+        unreachable!("a failed build starts nothing")
+    }
+}
+
 /// A directory with a roster directory in it and `settings.toml`, which
 /// names it, then `extra`.
 fn settings(extra: &str) -> (tempfile::TempDir, OsString) {
@@ -303,6 +406,9 @@ async fn a_segment_binary_runs_its_lifecycle() {
     a_health_check_reads_the_settings_after_its_flag().await;
     a_conflicting_table_fails_before_the_instance_meets_its_peers().await;
     nodes_that_define_one_metric_differently_fail_to_build().await;
+    a_gauge_and_a_histogram_of_one_name_fail_to_build().await;
+    histograms_of_one_name_with_other_buckets_fail_to_build().await;
+    gauges_of_one_name_with_other_labels_fail_to_build().await;
     a_built_segment_serves_and_drains().await;
     gdls_own_selector_is_built_from_its_table().await;
     a_selector_table_nothing_registers_is_refused().await;
@@ -365,6 +471,44 @@ async fn nodes_that_define_one_metric_differently_fail_to_build() {
     assert_eq!(
         error,
         "building Subtract: its metric `added_total` differs from node Add's: metrics of one name in a segment share their kind, help, labels, and buckets"
+    );
+}
+
+/// Prometheus would register a second kind under the name without a
+/// word, and the scrape would then break; the build refuses it first. A
+/// gauge and a histogram also differ in buckets, since only a histogram
+/// has them, and no two derived metrics of one name differ in kind alone.
+async fn a_gauge_and_a_histogram_of_one_name_fail_to_build() {
+    let (_dir, file) = settings("[node.Add]\namount = 5\n");
+    let error = run::<Clashing<GaugedWait, TimedWait>>(&[file])
+        .await
+        .expect_err("a conflict");
+    assert_eq!(
+        error,
+        "building Timed: its metric `wait_seconds` differs from node Gauged's: metrics of one name in a segment share their kind, help, labels, and buckets"
+    );
+}
+
+async fn histograms_of_one_name_with_other_buckets_fail_to_build() {
+    let (_dir, file) = settings("[node.Add]\namount = 5\n");
+    let error = run::<Clashing<TimedWait, RebucketedWait>>(&[file])
+        .await
+        .expect_err("a conflict");
+    assert_eq!(
+        error,
+        "building Rebucketed: its metric `wait_seconds` differs from node Timed's: metrics of one name in a segment share their kind, help, labels, and buckets"
+    );
+}
+
+/// Prometheus refuses a second label set itself, but names neither node.
+async fn gauges_of_one_name_with_other_labels_fail_to_build() {
+    let (_dir, file) = settings("[node.Add]\namount = 5\n");
+    let error = run::<Clashing<GaugedWait, LabelledWait>>(&[file])
+        .await
+        .expect_err("a conflict");
+    assert_eq!(
+        error,
+        "building Labelled: its metric `wait_seconds` differs from node Gauged's: metrics of one name in a segment share their kind, help, labels, and buckets"
     );
 }
 
