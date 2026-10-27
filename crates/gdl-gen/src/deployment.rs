@@ -299,25 +299,31 @@ impl Bundle {
                 local.join(", ")
             )));
         }
-        let deps = match sources {
-            Sources::Fetched => emit::Deps::Exported,
-            Sources::Local => emit::Deps::Local,
-        };
-        let (files, graph) = crate::render_with(&spec, out, target, deps, Offers::Read)?;
-        let context = match (sources, &spec.gdl) {
-            // The manifests name their crates from `out` resolved, so the
-            // context must be found from it too.
-            (Sources::Local, GdlDep::Path(runtime)) => Some(context::Context::find(
-                &crate::dump::absolute(out)?,
-                &files,
-                runtime,
-            )?),
+        // Refused before the render, which fetches the spec's crates: the
+        // refusal needs only the spec, and a fetch can fail first and hide it.
+        let runtime = match (sources, &spec.gdl) {
+            (Sources::Local, GdlDep::Path(runtime)) => Some(runtime),
             (Sources::Local, _) => {
                 return Err(Error::new(
                     "`--local` builds gdl and its hub from the sources [gdl] path names; this spec names gdl by Git or version, so build it without `--local`",
                 ));
             }
             (Sources::Fetched, _) => None,
+        };
+        let deps = match sources {
+            Sources::Fetched => emit::Deps::Exported,
+            Sources::Local => emit::Deps::Local,
+        };
+        let (files, graph) = crate::render_with(&spec, out, target, deps, Offers::Read)?;
+        // The manifests name their crates from `out` resolved, so the
+        // context must be found from it too.
+        let context = match runtime {
+            Some(runtime) => Some(context::Context::find(
+                &crate::dump::absolute(out)?,
+                &files,
+                runtime,
+            )?),
+            None => None,
         };
         let hub_install = match (&spec.gdl, &context) {
             (_, Some(context)) => format!("--path {}", quote(&format!("/app/{}", context.hub()))),

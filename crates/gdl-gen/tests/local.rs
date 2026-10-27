@@ -245,6 +245,29 @@ fn local_needs_a_gdl_path_and_a_graph_spec() {
     assert!(error.contains("graph definition"), "{error}");
 }
 
+/// `--local` refuses a spec that names gdl by Git before it reads the
+/// spec's crates: the refusal needs only the spec, and a fetch would fail
+/// with no network, or hide the reason behind a fetch error. The api
+/// example's crates come here from a Git repository that does not exist.
+#[test]
+fn a_spec_that_names_gdl_by_git_is_refused_before_its_crates_are_fetched() {
+    let missing = tempfile::Builder::new()
+        .prefix("gdl-local-missing-")
+        .tempdir()
+        .expect("a directory");
+    let url = format!("file://{}", missing.path().join("gdl").display());
+    let dir = root().join("examples/api");
+    let text = std::fs::read_to_string(dir.join("deploy.toml"))
+        .expect("the spec")
+        .replace("https://github.com/ryanolson/gdl", &url);
+    let graph = std::fs::read_to_string(dir.join("api.gdl")).expect("the graph");
+    let spec = gdl_gen::Spec::from_text(&text, &graph, &dir).expect("a spec");
+    let error = local(&spec, &missing.path().join("bundle"))
+        .expect_err("gdl from Git")
+        .to_string();
+    assert!(error.contains("names gdl by Git or version"), "{error}");
+}
+
 /// A relative output directory gives the same build as the absolute one:
 /// the context is found from the directory resolved, as the manifests are
 /// written from it.
@@ -1070,9 +1093,12 @@ fn http_from_git(holder: &Path, deps: &str, extra: &str) -> gdl_gen::Spec {
 }
 
 /// Gives the node crate in `holder/http` the workspace's lock, so that
-/// Cargo can resolve it offline: building gdl fetched every crate the lock
-/// pins. Without a lock, an offline resolve picks from whatever the cache
-/// holds, and refuses a version that has since been yanked.
+/// Cargo resolves it without the network: building gdl fetched every crate
+/// the lock pins. Without a lock, Cargo reads crates.io's index, and an
+/// offline resolve picks from whatever the cache holds, and refuses a
+/// version that has since been yanked. A test whose node crate takes a
+/// crate from a `file://` Git repository runs online with the lock alone:
+/// Cargo does not read even a local Git repository offline.
 fn offline_lock(holder: &Path) {
     std::fs::copy(root().join("Cargo.lock"), holder.join("http/Cargo.lock"))
         .expect("the workspace lock");
@@ -1101,6 +1127,7 @@ fn a_local_bundle_patches_the_gdl_that_its_node_crates_take_from_git() {
         .tempdir_in(root())
         .expect("a directory in the context");
     let spec = http_from_git(holder.path(), &gdl_from_git(&url, &rev), "");
+    offline_lock(holder.path());
     let out = holder.path().join("bundle");
     gdl_gen::compose(
         &spec,
@@ -1194,6 +1221,7 @@ fn a_local_bundle_that_reaches_gdl_from_git_only_through_git_is_refused() {
         ),
         "",
     );
+    offline_lock(holder.path());
 
     let out = holder.path().join("bundle");
     let error = gdl_gen::compose(
@@ -1259,6 +1287,7 @@ fn a_local_bundle_does_not_require_a_transitive_crates_dev_dependencies() {
         "gdl = { path = \"../../crates/gdl\" }\nhelper = { path = \"../helper\" }\n",
         "",
     );
+    offline_lock(holder.path());
     let helper = holder.path().join("helper");
     std::fs::create_dir_all(helper.join("src")).expect("a path dependency");
     std::fs::write(helper.join("src/lib.rs"), "").expect("a library");
