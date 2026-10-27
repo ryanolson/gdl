@@ -376,6 +376,12 @@ fn defaults(resolver: &mut Resolver<'_>, impls: &mut Impls, ty: &Ty, depth: usiz
         // Only a struct has fields of its own; `derive(Default)` refuses a
         // union, and an alias is followed before this.
         let structure = matches!(definition.kind, Kind::Struct(_));
+        // The derive also bounds each projection of a parameter that a
+        // field names, `T::Out: Default`, which the reader does not read:
+        // it fails closed.
+        if definition.projected {
+            return false;
+        }
         return !structure
             || args
                 .iter()

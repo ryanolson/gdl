@@ -328,6 +328,82 @@ fn a_port_does_not_read_its_messages_fields() {
     );
 }
 
+#[test]
+fn repeated_default_checks_scale_with_source_size() {
+    grows_linearly(
+        "default-fields",
+        |n| {
+            let mut source = String::from(
+                "use std::marker::PhantomData;\n\
+                 #[derive(Default)]\npub struct State<T> {\n\
+                 pub marker: PhantomData<T>,\n",
+            );
+            for i in 0..n {
+                source.push_str(&format!("pub f{i}: u8,\n"));
+            }
+            source.push_str(
+                "}\n\
+                 #[derive(serde::Serialize, serde::Deserialize, gdl_message::Message)]\n\
+                 pub struct Hidden<T> { #[serde(skip)] pub value: T }\n",
+            );
+            for i in 0..n {
+                source.push_str(&format!(
+                    "#[gdl_message::export]\npub type Hidden{i} = Hidden<State<u8>>;\n"
+                ));
+            }
+            vec![("lib.rs".into(), source)]
+        },
+        300,
+    );
+}
+
+#[test]
+fn a_qualified_self_type_is_read_once_for_all_parameters() {
+    grows_linearly(
+        "qualified-self",
+        |n| {
+            let params = (0..n)
+                .map(|i| format!("P{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let concrete = vec!["u8"; n].join(",");
+            let source = format!(
+                "use std::marker::PhantomData;\n\
+                 pub trait Has {{ type Out; }}\n\
+                 impl<T> Has for T {{ type Out = (); }}\n\
+                 pub struct State<{params}> {{\n\
+                     pub marker: PhantomData<({params},)>,\n\
+                     pub value: PhantomData<<({concrete},) as Has>::Out>,\n\
+                 }}\n"
+            );
+            vec![("lib.rs".into(), source)]
+        },
+        256,
+    );
+}
+
+#[test]
+fn nested_qualified_self_types_are_read_once() {
+    grows_linearly(
+        "nested-self",
+        |n| {
+            let projected = format!("{}u8{}", "<".repeat(n), " as Has>::Out".repeat(n));
+            let source = format!(
+                "#![recursion_limit = \"4096\"]\n\
+                 use std::marker::PhantomData;\n\
+                 pub trait Has {{ type Out; }}\n\
+                 impl<T> Has for T {{ type Out = T; }}\n\
+                 pub struct State<T> {{\n\
+                     pub marker: PhantomData<T>,\n\
+                     pub value: PhantomData<{projected}>,\n\
+                 }}\n"
+            );
+            vec![("lib.rs".into(), source)]
+        },
+        256,
+    );
+}
+
 /// A serde impl for an alias of a type whose argument a dependency
 /// defines, beside a message whose wire check builds the crate's index of
 /// serde impls: indexing the impl read the alias whole, and so read the

@@ -28,6 +28,200 @@ fn extracted(name: &str) -> gdl_gen::Extracted {
     .expect("extracted")
 }
 
+fn default_capabilities(source: &str) -> Vec<(String, bool, bool)> {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-default-projection-")
+        .tempdir()
+        .expect("scratch");
+    std::fs::create_dir(temp.path().join("src")).expect("source directory");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"default-projection\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
+             [workspace]\n[dependencies]\n\
+             gdl-message = {{ path = {:?} }}\n\
+             serde = {{ version = \"1\", features = [\"derive\"] }}\n",
+            root().join("crates/gdl-message")
+        ),
+    )
+    .expect("manifest");
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        format!(
+            "use std::marker::PhantomData;\n\
+             use serde::{{Serialize, Deserialize}};\n\
+             #[derive(Serialize, Deserialize, gdl_message::Message)]\n\
+             pub struct Hidden<T> {{ #[serde(skip)] pub value: T }}\n{source}"
+        ),
+    )
+    .expect("source");
+    let target = target("gdl-gen-tests");
+    let mut read = gdl_gen::extract(
+        &gdl_gen::Crate::Path(temp.path().to_path_buf()),
+        &target,
+        &gdl_extract::Cargo::trusted(),
+    )
+    .expect("extracted");
+    let notes = gdl_gen::probe(&mut read, &target).expect("the fixture builds");
+    assert!(notes.is_empty(), "{notes:?}");
+    read.offer
+        .exports
+        .into_iter()
+        .map(|export| {
+            (
+                export.name,
+                export.wire,
+                export.probed.expect("the build probes the instantiation"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn named_function_parameters_preserve_default_projection_bounds() {
+    let capabilities = default_capabilities(
+        r#"
+pub trait Has { type Out; }
+pub struct Bare;
+#[derive(Default)]
+pub struct Key;
+impl Has for Key { type Out = Bare; }
+
+#[derive(Default)]
+pub struct Named<T: Has> { pub value: PhantomData<fn(value: T::Out)> }
+#[derive(Default)]
+pub struct Unnamed<T: Has> { pub value: PhantomData<fn(T::Out)> }
+#[derive(Default)]
+pub struct Concrete<T> {
+    pub marker: PhantomData<T>,
+    pub value: PhantomData<fn(T: u8)>,
+}
+
+#[gdl_message::export]
+pub type HiddenNamed = Hidden<Named<Key>>;
+#[gdl_message::export]
+pub type HiddenUnnamed = Hidden<Unnamed<Key>>;
+#[gdl_message::export]
+pub type HiddenConcrete = Hidden<Concrete<u8>>;
+"#,
+    );
+    assert_eq!(
+        capabilities,
+        [
+            ("HiddenConcrete".into(), true, true),
+            ("HiddenNamed".into(), false, false),
+            ("HiddenUnnamed".into(), false, false),
+        ],
+        "(export, reader wire capability, build wire capability)"
+    );
+}
+
+#[test]
+fn a_const_inequality_is_not_a_type_macro() {
+    let capabilities = default_capabilities(
+        r#"
+const SIZE: usize = 4;
+
+#[derive(Default)]
+pub struct Compared<T> {
+    pub marker: PhantomData<T>,
+    pub bytes: [u8; (SIZE != 0) as usize],
+}
+#[derive(Default)]
+pub struct Equal<T> {
+    pub marker: PhantomData<T>,
+    pub bytes: [u8; (SIZE == 0) as usize],
+}
+
+#[gdl_message::export]
+pub type HiddenCompared = Hidden<Compared<u8>>;
+#[gdl_message::export]
+pub type HiddenEqual = Hidden<Equal<u8>>;
+"#,
+    );
+    assert_eq!(
+        capabilities,
+        [
+            ("HiddenCompared".into(), true, true),
+            ("HiddenEqual".into(), true, true),
+        ],
+        "(export, reader wire capability, build wire capability)"
+    );
+}
+
+#[test]
+fn a_concrete_qualified_self_type_does_not_project_a_parameter() {
+    let capabilities = default_capabilities(
+        r#"
+pub trait Has { type Out; }
+pub mod model { pub struct Value; }
+impl Has for model::Value { type Out = u8; }
+
+#[derive(Default)]
+pub struct Qualified<Value> {
+    pub marker: PhantomData<Value>,
+    pub value: PhantomData<<model::Value as Has>::Out>,
+}
+#[derive(Default)]
+pub struct Plain<Value> {
+    pub marker: PhantomData<Value>,
+    pub value: PhantomData<u8>,
+}
+
+#[gdl_message::export]
+pub type HiddenQualified = Hidden<Qualified<u8>>;
+#[gdl_message::export]
+pub type HiddenPlain = Hidden<Plain<u8>>;
+"#,
+    );
+    assert_eq!(
+        capabilities,
+        [
+            ("HiddenPlain".into(), true, true),
+            ("HiddenQualified".into(), true, true),
+        ],
+        "(export, reader wire capability, build wire capability)"
+    );
+}
+
+#[test]
+fn an_associated_binding_argument_preserves_default_projection_bounds() {
+    let capabilities = default_capabilities(
+        r#"
+pub trait Has { type Out; }
+pub struct Bare;
+#[derive(Default)]
+pub struct Key;
+impl Has for Key { type Out = Bare; }
+pub trait Gat { type Item<A> where Self: Sized; }
+
+#[derive(Default)]
+pub struct Projected<T: Has> {
+    pub marker: PhantomData<T>,
+    pub value: PhantomData<dyn Gat<Item<T::Out> = u8> + Send>,
+}
+#[derive(Default)]
+pub struct Concrete<T> {
+    pub marker: PhantomData<T>,
+    pub value: PhantomData<dyn Gat<Item<u8> = u8> + Send>,
+}
+
+#[gdl_message::export]
+pub type HiddenProjected = Hidden<Projected<Key>>;
+#[gdl_message::export]
+pub type HiddenConcrete = Hidden<Concrete<Key>>;
+"#,
+    );
+    assert_eq!(
+        capabilities,
+        [
+            ("HiddenConcrete".into(), true, true),
+            ("HiddenProjected".into(), false, false),
+        ],
+        "(export, reader wire capability, build wire capability)"
+    );
+}
+
 /// What the reader finds agrees with what each crate's build registers,
 /// and each alias offers its instantiation: the two stamps carry the two
 /// carriers, by type, and the concrete sink's port, written as the alias,
@@ -143,6 +337,7 @@ fn an_instantiation_is_a_wire_type_as_serde_bounds_it() {
             ("HiddenBare", false),
             ("HiddenBoxed", false),
             ("HiddenByte", true),
+            ("HiddenDefaultProjected", false),
             ("HiddenFallbackByte", true),
             ("HiddenFallbackOpaque", false),
             ("HiddenMaybe", true),

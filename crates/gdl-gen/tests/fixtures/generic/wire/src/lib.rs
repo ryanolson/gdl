@@ -524,6 +524,27 @@ pub struct Projected<T: Has> {
 #[gdl_message::export]
 pub type ProjectedOpaque = Projected<Opaque>;
 
+/// `Default`, though what it has is not: `Bare`.
+#[derive(Default)]
+pub struct Keyed;
+
+impl Has for Keyed {
+    type Out = Bare;
+}
+
+/// `derive(Default)` bounds a field's projection of a parameter,
+/// `T::Out: Default`, as well as the parameter.
+#[derive(Default)]
+pub struct DefaultProjected<T: Has> {
+    /// What its parameter has.
+    pub out: T::Out,
+}
+
+/// Not one: `DefaultProjected<Keyed>` is not `Default`, since `Bare` is
+/// not, though `Keyed` is.
+#[gdl_message::export]
+pub type HiddenDefaultProjected = Hidden<DefaultProjected<Keyed>>;
+
 /// A type of another crate's, as serde's remote derive would mirror it.
 pub struct Foreign {
     /// Its value.

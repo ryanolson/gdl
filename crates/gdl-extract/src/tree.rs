@@ -9,7 +9,7 @@ use syn::ext::IdentExt as _;
 use syn::spanned::Spanned as _;
 use syn::{Item, Meta, UseTree};
 
-use crate::attrs::{Place, Serde};
+use crate::attrs::{Place, Serde, projects};
 use crate::cfg::Settings;
 use crate::reads::Counted;
 
@@ -80,6 +80,11 @@ pub(crate) struct TypeDef {
     pub(crate) attrs: Vec<Meta>,
     /// Its own serde attributes, among `attrs`.
     pub(crate) serde: Serde,
+    /// Whether a field of a generic struct names a projection of a
+    /// parameter, or a type macro ([`crate::attrs::projects`]):
+    /// `derive(Default)` bounds each by `Default`, which the reader does
+    /// not read. Read once here, not at each check of the type.
+    pub(crate) projected: bool,
     /// Whether a field borrows: a reference in its type, or
     /// `#[serde(borrow)]`. Derived `Deserialize` then is not
     /// `DeserializeOwned`, and the type has no codec.
@@ -603,6 +608,7 @@ impl Reader<'_> {
                     let mut members = Vec::new();
                     let generic = !params.is_empty();
                     let borrows = self.fields(&s.fields, None, generic.then_some(&mut members));
+                    let projected = members.iter().any(|member| projects(&member.ty, &params));
                     krate.modules[module].add_type(TypeDef {
                         kind: Kind::Struct(s.fields.clone()),
                         members,
@@ -613,6 +619,7 @@ impl Reader<'_> {
                         vis: Vis::of(&s.vis),
                         serde: Serde::read(&attrs, Place::Container),
                         attrs,
+                        projected,
                         borrows,
                         at: at(s.ident.span()),
                     })
@@ -646,6 +653,7 @@ impl Reader<'_> {
                         vis: Vis::of(&e.vis),
                         serde: Serde::read(&attrs, Place::Container),
                         attrs,
+                        projected: false,
                         borrows,
                         at: at(e.ident.span()),
                     })
@@ -660,6 +668,7 @@ impl Reader<'_> {
                     vis: Vis::of(&u.vis),
                     serde: Serde::read(&attrs, Place::Container),
                     attrs,
+                    projected: false,
                     borrows: self.fields(&u.fields.named, None, None),
                     at: at(u.ident.span()),
                 }),
@@ -673,6 +682,7 @@ impl Reader<'_> {
                     vis: Vis::of(&t.vis),
                     serde: Serde::read(&attrs, Place::Container),
                     attrs,
+                    projected: false,
                     borrows: false,
                     at: at(t.ident.span()),
                 }),

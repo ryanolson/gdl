@@ -9,6 +9,7 @@ use proc_macro2::TokenTree;
 use quote::ToTokens as _;
 use syn::Meta;
 use syn::ext::IdentExt as _;
+use syn::punctuated::{Pair, Punctuated};
 
 use crate::external::Known;
 use crate::tree::{Member, TypeDef, reference};
@@ -474,6 +475,196 @@ fn named_by_path(path: &syn::Path, params: &[String], found: &mut HashSet<String
     Some(())
 }
 
+/// Whether `ty`, a field's type, names a projection of one of `params`
+/// (`T::Out`, `<T as Has>::Out`, `<Vec<T> as Has>::Out`), at any depth,
+/// `PhantomData` and an associated type binding's own arguments included;
+/// or a type macro, which the reader cannot expand. `derive(Default)`
+/// bounds each projection by `Default`, besides the parameters.
+/// Expressions, such as an array's length, and a function pointer's
+/// argument names are not types, and are not read.
+pub(crate) fn projects(ty: &syn::Type, params: &[String]) -> bool {
+    Scan::of(ty, params, false).projects
+}
+
+/// What one pass over a type finds: whether it names a projection of a
+/// parameter, and, where asked, whether it names a parameter at all, as a
+/// path's first segment (`T`, `Vec<T>`, `T::Out`, not `model::T`). One
+/// pass finds both, so that a qualified self type inside another is read
+/// once, not once per level around it.
+#[derive(Clone, Copy, Default)]
+struct Scan {
+    projects: bool,
+    names: bool,
+}
+
+impl Scan {
+    const PROJECTS: Self = Self {
+        projects: true,
+        names: false,
+    };
+
+    fn or(self, other: Self) -> Self {
+        Self {
+            projects: self.projects || other.projects,
+            names: self.names || other.names,
+        }
+    }
+
+    /// Read `ty`; `names` asks whether it names a parameter too, which
+    /// only a qualified self type needs.
+    fn of(ty: &syn::Type, params: &[String], names: bool) -> Self {
+        match ty {
+            syn::Type::Path(p) => {
+                let qself = p
+                    .qself
+                    .as_ref()
+                    .map_or(Self::default(), |qself| Self::of(&qself.ty, params, true));
+                if qself.projects {
+                    return Self::PROJECTS;
+                }
+                let path = &p.path;
+                let starts = (names || path.segments.len() > 1)
+                    && path.leading_colon.is_none()
+                    && params.contains(&path.segments[0].ident.unraw().to_string());
+                if (p.qself.is_some() && qself.names) || (path.segments.len() > 1 && starts) {
+                    return Self::PROJECTS;
+                }
+                let own = Self {
+                    projects: false,
+                    names: names && (starts || qself.names),
+                };
+                own.or(Self::path(path, params, names))
+            }
+            syn::Type::Macro(_) => Self::PROJECTS,
+            syn::Type::Array(t) => Self::of(&t.elem, params, names),
+            syn::Type::Slice(t) => Self::of(&t.elem, params, names),
+            syn::Type::Ptr(t) => Self::of(&t.elem, params, names),
+            syn::Type::Reference(t) => Self::of(&t.elem, params, names),
+            syn::Type::Paren(t) => Self::of(&t.elem, params, names),
+            syn::Type::Group(t) => Self::of(&t.elem, params, names),
+            syn::Type::Tuple(t) => Self::all(each(&t.elems), params, names),
+            syn::Type::BareFn(f) => {
+                let inputs = Self::all(each(&f.inputs).map(|input| &input.ty), params, names);
+                match &f.output {
+                    syn::ReturnType::Type(_, t) if !inputs.projects => {
+                        inputs.or(Self::of(t, params, names))
+                    }
+                    _ => inputs,
+                }
+            }
+            syn::Type::TraitObject(t) => Self::bounds(&t.bounds, params, names),
+            syn::Type::ImplTrait(t) => Self::bounds(&t.bounds, params, names),
+            _ => Self::default(),
+        }
+    }
+
+    /// Read each of `types`, stopping at the first projection.
+    fn all<'t>(types: impl Iterator<Item = &'t syn::Type>, params: &[String], names: bool) -> Self {
+        let mut found = Self::default();
+        for ty in types {
+            found = found.or(Self::of(ty, params, names));
+            if found.projects {
+                break;
+            }
+        }
+        found
+    }
+
+    fn bounds(
+        bounds: &Punctuated<syn::TypeParamBound, syn::Token![+]>,
+        params: &[String],
+        names: bool,
+    ) -> Self {
+        let mut found = Self::default();
+        for bound in each(bounds) {
+            if let syn::TypeParamBound::Trait(t) = bound {
+                let path = &t.path;
+                if path.segments.len() > 1
+                    && path.leading_colon.is_none()
+                    && params.contains(&path.segments[0].ident.unraw().to_string())
+                {
+                    return Self::PROJECTS;
+                }
+                found = found.or(Self::path(path, params, names));
+                if found.projects {
+                    break;
+                }
+            }
+        }
+        found
+    }
+
+    /// Read what a path's arguments name.
+    fn path(path: &syn::Path, params: &[String], names: bool) -> Self {
+        let mut found = Self::default();
+        for segment in each(&path.segments) {
+            found = found.or(match &segment.arguments {
+                syn::PathArguments::AngleBracketed(args) => Self::arguments(args, params, names),
+                syn::PathArguments::Parenthesized(args) => {
+                    let inputs = Self::all(each(&args.inputs), params, names);
+                    match &args.output {
+                        syn::ReturnType::Type(_, t) if !inputs.projects => {
+                            inputs.or(Self::of(t, params, names))
+                        }
+                        _ => inputs,
+                    }
+                }
+                syn::PathArguments::None => Self::default(),
+            });
+            if found.projects {
+                break;
+            }
+        }
+        found
+    }
+
+    fn arguments(
+        args: &syn::AngleBracketedGenericArguments,
+        params: &[String],
+        names: bool,
+    ) -> Self {
+        let mut found = Self::default();
+        for arg in each(&args.args) {
+            found = found.or(match arg {
+                syn::GenericArgument::Type(t) => Self::of(t, params, names),
+                syn::GenericArgument::AssocType(a) => {
+                    let generics = a
+                        .generics
+                        .as_ref()
+                        .map_or(Self::default(), |g| Self::arguments(g, params, names));
+                    if generics.projects {
+                        generics
+                    } else {
+                        generics.or(Self::of(&a.ty, params, names))
+                    }
+                }
+                syn::GenericArgument::Constraint(c) => {
+                    let generics = c
+                        .generics
+                        .as_ref()
+                        .map_or(Self::default(), |g| Self::arguments(g, params, names));
+                    if generics.projects {
+                        generics
+                    } else {
+                        generics.or(Self::bounds(&c.bounds, params, names))
+                    }
+                }
+                _ => Self::default(),
+            });
+            if found.projects {
+                break;
+            }
+        }
+        found
+    }
+}
+
+/// The items of `punctuated`, without the box its `iter` allocates: the
+/// walk runs over every field of every generic struct a crate holds.
+fn each<T, P>(punctuated: &Punctuated<T, P>) -> impl Iterator<Item = &T> {
+    punctuated.pairs().map(Pair::into_value)
+}
+
 /// Whether `tokens` hold the identifier `name`.
 fn names(tokens: proc_macro2::TokenStream, name: &str) -> bool {
     tokens.into_iter().any(|t| match t {
@@ -706,6 +897,47 @@ mod tests {
             (&["serde::x(skip)"], "read=CVF"),
         ] {
             assert_eq!(summary(attributes), read, "{attributes:?}");
+        }
+    }
+
+    /// A projection of a parameter, written any way and at any depth, or a
+    /// type macro; not a parameter alone, another type's path, a path in
+    /// which the parameter's name is a later segment, a function pointer's
+    /// argument name, or an expression.
+    #[test]
+    fn a_field_projects_a_parameter_as_derive_default_bounds_it() {
+        let params: Vec<String> = PARAMS.iter().map(|p| p.to_string()).collect();
+        for (ty, projected) in [
+            ("P::Out", true),
+            ("<P as Has>::Out", true),
+            ("<P>::Out", true),
+            ("<Vec<P> as Has>::Out", true),
+            ("PhantomData<P::Out>", true),
+            ("Vec<(u8, [B::Item; 2])>", true),
+            ("Box<dyn Fn(P::Out)>", true),
+            ("Box<dyn Iterator<Item = P::Out>>", true),
+            ("PhantomData<fn(value: P::Out)>", true),
+            ("&'static P::Out", true),
+            ("*const P::Out", true),
+            ("holder!(u8)", true),
+            ("r#P::Out", true),
+            ("PhantomData<dyn Gat<Item<P::Out> = u8> + Send>", true),
+            ("<(u8, Vec<B>) as Has>::Out", true),
+            ("P", false),
+            ("Vec<P>", false),
+            ("Option<(P, B)>", false),
+            ("crate::P::Out", false),
+            ("<Foo as Has>::Out", false),
+            ("<model::P as Has>::Out", false),
+            ("<(u8, model::B) as Has>::Out", false),
+            ("V::Out", false),
+            ("fn(P: u8) -> u8", false),
+            ("fn() -> !", false),
+            ("[u8; (SIZE != 0) as usize]", false),
+            ("[P; 3]", false),
+        ] {
+            let parsed: syn::Type = syn::parse_str(ty).expect("a type");
+            assert_eq!(projects(&parsed, &params), projected, "{ty}");
         }
     }
 }
