@@ -51,7 +51,7 @@ pub use keyed::{
     KeyedReply, keyed_path,
 };
 pub use limits::{WatchFailure, WatchLimits};
-pub use report::{REPORT_ROUTE, Report, ReportRefusal, ReportReply};
+pub use report::{HELD_ROUTE, REPORT_ROUTE, Report, ReportRefusal, ReportReply, held_path};
 pub use watched::{UnknownEvent, UnknownFollowEvent, Watched};
 
 /// The name the cell's extension mounts its routes under, at
@@ -172,6 +172,23 @@ pub const LOAD_ROUTE: &str = "/instances/{instance_id}/load";
 /// whose class no hop enters is refused with `409 Conflict`.
 pub const DRAIN_ROUTE: &str = "/drain";
 
+/// The presence route, under the extension's, on the hub's control
+/// listener: `POST` with a [`SetPresence`] tells the cell's hub whether the
+/// cell serves or is scaled to 0 on purpose, and is answered
+/// `204 No Content` once the directory has stored a record written after
+/// the request that says so, or `503 Service Unavailable` when it has not
+/// within 5 s, or a later request replaced it. A cell is told
+/// `scaled_to_zero` before its instances stop, and `serving` as it scales
+/// up again.
+pub const PRESENCE_ROUTE: &str = "/presence";
+
+/// The body of [`PRESENCE_ROUTE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPresence {
+    /// What the cell's record is to say.
+    pub presence: gdl_cells::Presence,
+}
+
 /// [`LOAD_ROUTE`]'s path for `instance`.
 pub fn load_path(instance: InstanceId) -> String {
     format!("/instances/{instance}/load")
@@ -258,8 +275,10 @@ pub struct Unoffered {
 }
 
 /// What an entry instance reports of its admission to its cell's hub,
-/// once a load summary period.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// once a load summary period, and of its models, which it also reports
+/// as soon as they change. A field a later build adds is ignored, so the
+/// instances and their hub roll one at a time.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LoadReport {
     /// The roots the instance holds admitted now.
     pub admitted: u64,
@@ -268,6 +287,13 @@ pub struct LoadReport {
     /// The hand-offs it declined (no room, or retired) since the last
     /// report its hub took.
     pub refusals: u64,
+    /// The models the instance has, each with whether it can serve it
+    /// now: `None` when its nodes report none, so that it serves the
+    /// models its cell's settings declare. An instance of a build from
+    /// before models sends none, which a hub never reads as an instance
+    /// that serves nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<gdl_model::InstanceModel>>,
 }
 
 /// One event of a cell's watch, `GET /v1/ext/gdl-cell/watch` on the cell

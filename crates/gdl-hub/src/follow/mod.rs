@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, CellView};
+use gdl_cells::{CellDirectory, CellEvent, CellRecord, CellState, CellView, Presence};
 use tokio::task::{AbortHandle, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -136,12 +136,16 @@ impl<D: CellDirectory> Follower<D> {
     }
 
     /// Whether `record` is a child that takes work: it names this cell as
-    /// its parent, is of this deployment, and is `ready` or `degraded`.
+    /// its parent, is of this deployment, is `ready` or `degraded`, and is
+    /// serving. A cell scaled to 0 takes no work, and its record never
+    /// lapses though its hub may be gone, so following it would dial that
+    /// hub without end.
     fn child(&self, record: &CellRecord) -> bool {
         record.home.as_deref() == Some(self.me.cell.as_str())
             && record.contract == self.contract
             && record.placement == self.placement
             && matches!(record.state, CellState::Ready | CellState::Degraded)
+            && record.presence == Presence::Serving
     }
 }
 
@@ -210,8 +214,8 @@ impl<D: CellDirectory> Follows<'_, D> {
     /// Follow `cell` if its record makes it a child that takes work
     /// and it is not followed yet, unless the relay closed its last follow
     /// and the record is no later than it was then; end its follow if the
-    /// record has a newer epoch than the one it began from, and follow it
-    /// anew if it can. A follow begun after a link that ended keeps that
+    /// record has a newer epoch than the one it began from, or says the
+    /// cell is scaled to 0, and follow it anew if it can. A follow begun after a link that ended keeps that
     /// link's `backoff`, so that a cell whose links keep failing is
     /// followed again less and less often; any other begins one afresh.
     fn decide(&mut self, cell: &str, now: Instant, backoff: Option<Backoff>) {
@@ -220,7 +224,13 @@ impl<D: CellDirectory> Follows<'_, D> {
             let newer = record
                 .as_ref()
                 .is_some_and(|record| record.epoch > following.epoch);
-            if !newer && !following.closed.is_cancelled() {
+            // A cell scaled to 0 takes no work, so its follow ends as for a
+            // newer epoch, kept until its choosers let go of it.
+            let scaled = record
+                .as_ref()
+                .is_some_and(|record| record.presence != Presence::Serving);
+            let ends = newer || scaled;
+            if !ends && !following.closed.is_cancelled() {
                 if let Some(record) = record.as_ref().filter(|r| r.epoch == following.epoch) {
                     following.seq = following.seq.max(record.seq);
                 }
@@ -231,7 +241,7 @@ impl<D: CellDirectory> Follows<'_, D> {
                 .remove(cell)
                 .expect("the follow was just found");
             following.link.abort();
-            if newer {
+            if ends {
                 self.follower
                     .relay
                     .end(&self.follower.class, cell, following.generation);

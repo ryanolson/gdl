@@ -101,6 +101,15 @@ impl MemoryDirectory {
         }
     }
 
+    /// The record the directory holds for `cell` of `class`, if any: not
+    /// a tombstone.
+    pub fn record(&self, class: &str, cell: &str) -> Option<CellRecord> {
+        match self.shared.lock().classes.get(class)?.cells.get(cell)? {
+            Held::Record(record) => Some(CellRecord::clone(record)),
+            Held::Withdrawn(_) => None,
+        }
+    }
+
     /// How many watches of `class` are open.
     pub fn watchers(&self, class: &str) -> usize {
         self.shared

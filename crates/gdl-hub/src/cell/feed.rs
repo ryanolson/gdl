@@ -23,7 +23,10 @@
 //! The feed also keeps the entry instances' load reports
 //! ([`super::load`]), under the same lock, so that a report is taken only
 //! from an instance that is usable when it arrives, and the summary made
-//! of them is sent to the watchers in order with the rest.
+//! of them is sent to the watchers in order with the rest. So too what
+//! each instance says of its models, and the cell's model entries made of
+//! what the usable ones say ([`super::models`]): those go to the record,
+//! not to the watch.
 //!
 //! The `ready` and `retired` watches are two streams that velo-hub does
 //! not order with each other, and its removal hook names no services, so
@@ -41,7 +44,8 @@ use std::time::{Duration, Instant};
 
 use futures::Stream;
 use futures::stream::BoxStream;
-use gdl_cells::{CellState, LoadSummary};
+use gdl_cells::{CellState, LoadSummary, ModelEntry};
+use gdl_model::{InstanceModel, ModelKey};
 use gdl_watch::LoadReport;
 use tokio::sync::{broadcast, watch};
 use velo_hub::Lease;
@@ -53,6 +57,7 @@ use velo_hub::velo::{InstanceId, PeerInfo};
 use super::count::Watched;
 use super::followers::{Followers, Following, Key, WatchKey};
 use super::load::Reports;
+use super::models::{ModelList, Models, Offer};
 use super::retiring::Retiring;
 use crate::fanout::Watchers;
 use gdl_watch::{CellWatchError, CellWatchEvent};
@@ -64,6 +69,8 @@ pub(super) struct Feed {
     shared: Mutex<Shared>,
     /// The record's epoch, once a write is stored under it.
     epoch: watch::Sender<Option<u64>>,
+    /// The cell's model entries, as they change.
+    models: watch::Sender<Arc<ModelList>>,
     watchers: Watchers,
 }
 
@@ -72,7 +79,8 @@ impl Feed {
     /// in its order, each with whether it is an entry segment, and whose
     /// load summary period is `period`. A watcher that falls more than
     /// `buffer` events behind is ended. A follower's watch closed without
-    /// a release counts for `lease` after it closes.
+    /// a release counts for `lease` after it closes. Its instances that
+    /// report no models of their own serve `declared`.
     pub(super) fn new(
         name: String,
         class: String,
@@ -80,6 +88,7 @@ impl Feed {
         period: Duration,
         buffer: usize,
         lease: Duration,
+        declared: Vec<ModelKey>,
     ) -> Self {
         Self {
             name,
@@ -90,6 +99,7 @@ impl Feed {
                 entries: HashMap::new(),
                 unresolved: HashMap::new(),
                 loads: Reports::new(period),
+                models: Models::new(declared),
                 followers: Followers::new(lease),
                 retiring: Retiring::default(),
                 events: broadcast::channel(buffer).0,
@@ -97,8 +107,35 @@ impl Feed {
                 work: Default::default(),
             }),
             epoch: watch::Sender::new(None),
+            models: watch::Sender::new(Arc::default()),
             watchers: Watchers::new(),
         }
+    }
+
+    /// The cell's model entries, as they change: none until the cell's
+    /// last record has been read ([`Feed::restore`]).
+    pub(super) fn models(&self) -> watch::Receiver<Arc<ModelList>> {
+        self.models.subscribe()
+    }
+
+    /// The writer moved to a later epoch, whose versions count from
+    /// `floor`: the list's version rises to it if it is below.
+    pub(super) fn raise_floor(&self, floor: u64) {
+        let mut shared = self.lock();
+        if shared.models.raise_floor(floor) {
+            self.models.send_replace(Arc::new(shared.models.list()));
+        }
+    }
+
+    /// Take the model entries of the cell's last record, `held` with their
+    /// version, or none, and count later versions from at least `floor`:
+    /// from then on, what the instances say of their models makes the
+    /// entries.
+    pub(super) fn restore(&self, held: Option<(&[ModelEntry], u64)>, floor: u64) {
+        let mut shared = self.lock();
+        shared.models.restore(held, floor);
+        shared.update_models();
+        self.models.send_replace(Arc::new(shared.models.list()));
     }
 
     fn lock(&self) -> MutexGuard<'_, Shared> {
@@ -286,6 +323,7 @@ impl Feed {
                         acknowledged: false,
                         held,
                         departed: false,
+                        said: Said::Unknown,
                     },
                 );
             }
@@ -318,21 +356,40 @@ impl Feed {
     /// `owner`, holding `lease`, reported `load` at `now`: taken only from
     /// a usable entry instance in the registration the lease is of, since
     /// a report of an earlier one, or of an instance that retired, would
-    /// count work the cell no longer offers. The reason, when refused.
+    /// count work the cell no longer offers. What it says of its models
+    /// stands until it says otherwise, or is no longer usable; a model
+    /// with no name is left out. Refused before the cell's last record is
+    /// read, since what it says could not be kept: the instance sends it
+    /// again. The reason, when refused.
     pub(super) fn report(
         &self,
         owner: InstanceId,
         lease: Lease,
-        load: LoadReport,
+        mut load: LoadReport,
         now: Instant,
     ) -> Result<(), String> {
         let mut shared = self.lock();
-        match shared.entries.get(&owner) {
+        if !shared.models.restored() {
+            return Err("the cell's hub has not read its cell's last record yet".into());
+        }
+        match shared.entries.get_mut(&owner) {
             Some(entry) if entry.epoch != lease.epoch => Err(format!(
                 "instance {owner}'s registration is not the one the report's credential is of"
             )),
             Some(entry) if entry.usable() => {
+                let said = match load.models.take() {
+                    Some(mut models) => {
+                        models.retain(|model| model.key().check().is_ok());
+                        Said::Listed(models, lease.epoch)
+                    }
+                    None => Said::Silent(lease.epoch),
+                };
+                let changed = entry.said != said;
+                entry.said = said;
                 shared.loads.put(owner, lease.epoch, load, now);
+                if changed && shared.update_models() {
+                    self.models.send_replace(Arc::new(shared.models.list()));
+                }
                 Ok(())
             }
             Some(_) => Err(format!(
@@ -362,6 +419,11 @@ impl Feed {
         let load = shared.loads.summary();
         if changed || load.is_some() {
             shared.send(CellWatchEvent::Load { load });
+        }
+        // An instance that is no longer usable no longer serves its
+        // models: seen here, once a period, as its report is dropped.
+        if shared.update_models() {
+            self.models.send_replace(Arc::new(shared.models.list()));
         }
         // The summary's period paces the followers' leases too, so a watch
         // is marked lost up to a period after its lease; that is never a
@@ -406,6 +468,9 @@ struct Shared {
     unresolved: HashMap<InstanceId, (usize, Held)>,
     /// The entry instances' load reports.
     loads: Reports,
+    /// The cell's model entries, made of what its usable entry instances
+    /// say.
+    models: Models,
     events: broadcast::Sender<CellWatchEvent>,
     #[cfg(test)]
     work: crate::fanout::Work,
@@ -429,6 +494,21 @@ struct Entry {
     held: Held,
     /// Whether the hub removed it.
     departed: bool,
+    /// What it last said of its models, in the registration it said it
+    /// in: a renewal keeps it, but no drain ends on it until the instance
+    /// reports in its new registration.
+    said: Said,
+}
+
+/// What an entry instance last said of its models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Said {
+    /// Nothing yet.
+    Unknown,
+    /// A report without models, in a registration.
+    Silent(RegistrationEpoch),
+    /// Its list, in a registration.
+    Listed(Vec<InstanceModel>, RegistrationEpoch),
 }
 
 impl Entry {
@@ -461,6 +541,25 @@ impl Held {
 }
 
 impl Shared {
+    /// Make the model entries from what the usable entry instances say.
+    /// Whether they changed.
+    fn update_models(&mut self) -> bool {
+        let Self {
+            entries, models, ..
+        } = self;
+        let offers = entries
+            .values()
+            .filter(|entry| entry.usable())
+            .map(|entry| match &entry.said {
+                Said::Unknown => Offer::Unknown,
+                Said::Silent(epoch) if *epoch == entry.epoch => Offer::Silent,
+                Said::Listed(models, epoch) if *epoch == entry.epoch => Offer::Listed(models),
+                Said::Silent(_) => Offer::Earlier(None),
+                Said::Listed(models, _) => Offer::Earlier(Some(models)),
+            });
+        models.update(offers)
+    }
+
     fn entry_index(&self, segment: &str) -> Option<usize> {
         self.segments
             .iter()

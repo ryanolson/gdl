@@ -79,6 +79,9 @@ async fn a_cell_only_an_interrupted_snapshot_named_is_not_kept() {
     let nowhere = refused.local_addr().expect("an address").to_string();
     drop(refused);
     let cell = CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "model-x-07-us-east-1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
@@ -205,6 +208,9 @@ fn record() -> CellRecord {
     let nowhere = refused.local_addr().expect("an address").to_string();
     drop(refused);
     CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "model-x-07-us-east-1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
@@ -266,6 +272,9 @@ async fn a_child_whose_hub_closes_every_watch_is_asked_a_bounded_number_of_times
     let directory = MemoryDirectory::new();
     directory
         .publish(CellRecord {
+            presence: gdl_cells::Presence::Serving,
+            models: Vec::new(),
+            models_version: 0,
             name: "model-x-07-us-east-1".into(),
             class: "model_x".into(),
             region: "us-east-1".into(),

@@ -1,0 +1,525 @@
+//! A cell's models and presence in its record: each usable entry instance
+//! says what it has of its models in its load reports, and the hub makes
+//! each model's state from what they say, with its history, and writes it
+//! on each change, not only at the heartbeat. A hub that restarts keeps
+//! the history of its cell's last record. A cell whose instances report no
+//! models serves the ones its settings declare. A cell told it is scaled to
+//! 0 says so in its record before the call returns. Every hub runs in
+//! process on OS-assigned ports; every wait is for something observed.
+
+mod common;
+
+use std::time::Duration;
+
+use common::{Instance, Records, WAIT, hub_of, model, timing};
+use futures::StreamExt;
+use gdl_cells::{CellRecord, MemoryDirectory, ModelEntry, ModelState, Presence};
+use gdl_hub::CellTiming;
+use gdl_model::{CellSettings, InstanceModel, InstanceModelState, ModelKey, SegmentPhase};
+use gdl_watch::{CellWatchEvent, LoadReport};
+use velo_hub::Hub;
+
+/// The summary period, at which the hub sees an instance that is no
+/// longer usable stop serving its models.
+const PERIOD: Duration = Duration::from_secs(1);
+
+/// The model cell with the shortest summary period.
+fn cell() -> CellSettings {
+    CellSettings {
+        summary: PERIOD,
+        ..model(common::CELL, "us-east-1", "model-x-01-hub:1337")
+    }
+}
+
+/// No heartbeat within a test: a record written after the first says
+/// something changed.
+fn quiet() -> CellTiming {
+    timing()
+}
+
+fn says(model: &str, state: InstanceModelState) -> InstanceModel {
+    InstanceModel {
+        model: model.into(),
+        routing_key: None,
+        state,
+    }
+}
+
+fn report(models: Option<Vec<InstanceModel>>) -> LoadReport {
+    LoadReport {
+        admitted: 0,
+        limit: 8,
+        refusals: 0,
+        models,
+    }
+}
+
+/// Entry instances (of `f`), joined and ready, once the cell's watch
+/// shows them ready: from then the hub takes their reports.
+async fn entries<const N: usize>(
+    hub: &Hub,
+    cell: &gdl_hub::CellReadiness<MemoryDirectory>,
+) -> [Instance; N] {
+    let mut watch = tokio::time::timeout(WAIT, cell.watch())
+        .await
+        .expect("the watch begins in time")
+        .expect("the hub runs");
+    let mut instances = Vec::new();
+    for _ in 0..N {
+        let mut instance = Instance::join(hub, "f").await;
+        instance.announce(SegmentPhase::Ready).await;
+        instances.push(instance);
+    }
+    let mut ready = 0;
+    let seen = tokio::time::timeout(WAIT, async {
+        while ready < N {
+            let event = watch.next().await.expect("the watch goes on");
+            if let CellWatchEvent::Ready { .. } = event {
+                ready += 1;
+            }
+        }
+    })
+    .await;
+    assert!(seen.is_ok(), "{ready} of {N} instances ready in time");
+    instances.try_into().unwrap_or_else(|_| unreachable!())
+}
+
+/// Report `load` from `instance`, which the hub holds usable.
+async fn send(instance: &Instance, load: LoadReport) {
+    instance.report(load).await.expect("the hub takes it");
+}
+
+/// Each model's state in `record`, by model.
+fn states(record: &CellRecord) -> Vec<(&str, ModelState)> {
+    record
+        .models
+        .iter()
+        .map(|entry| (entry.model.as_str(), entry.state))
+        .collect()
+}
+
+/// The next record whose models are in `expected` states.
+async fn until(records: &mut Records, expected: &[(&str, ModelState)]) -> CellRecord {
+    loop {
+        let record = records.next().await;
+        if states(&record) == expected {
+            return record;
+        }
+    }
+}
+
+/// A model that served once is `unavailable` when the instance that
+/// served it leaves, though another instance still loads it: never
+/// `starting` again. The record says so at once, without a heartbeat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_that_served_is_unavailable_once_its_server_leaves() {
+    let directory = MemoryDirectory::new();
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    let [a, b] = entries(&hub, &readiness).await;
+    send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
+    send(
+        &b,
+        report(Some(vec![says("m", InstanceModelState::Starting)])),
+    )
+    .await;
+    let ready = until(&mut records, &[("m", ModelState::Ready)]).await;
+
+    a.leave().await;
+    let unavailable = until(&mut records, &[("m", ModelState::Unavailable)]).await;
+    assert!(unavailable.models_version > ready.models_version);
+    assert_eq!(unavailable.models[0].since, unavailable.models_version);
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// A model an instance drains leaves the `draining` state for `drained`
+/// once no usable instance has it, and stays in the record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drained_model_stays_in_the_record() {
+    let directory = MemoryDirectory::new();
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    let [a] = entries(&hub, &readiness).await;
+    let both = vec![
+        says("kept", InstanceModelState::Ready),
+        says("gone", InstanceModelState::Ready),
+    ];
+    send(&a, report(Some(both))).await;
+    until(
+        &mut records,
+        &[("gone", ModelState::Ready), ("kept", ModelState::Ready)],
+    )
+    .await;
+    let draining = vec![
+        says("kept", InstanceModelState::Ready),
+        says("gone", InstanceModelState::Draining),
+    ];
+    send(&a, report(Some(draining))).await;
+    until(
+        &mut records,
+        &[("gone", ModelState::Draining), ("kept", ModelState::Ready)],
+    )
+    .await;
+    send(
+        &a,
+        report(Some(vec![says("kept", InstanceModelState::Ready)])),
+    )
+    .await;
+    until(
+        &mut records,
+        &[("gone", ModelState::Drained), ("kept", ModelState::Ready)],
+    )
+    .await;
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// A hub that restarts reads its cell's last record before its first
+/// write: a model that was `ready` is `unavailable` until an instance
+/// reports, one being drained is still `draining`, and the version goes on
+/// rising.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_hub_keeps_its_models_history() {
+    let directory = MemoryDirectory::new();
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    let [a] = entries(&hub, &readiness).await;
+    let models = vec![
+        says("served", InstanceModelState::Ready),
+        says("leaving", InstanceModelState::Draining),
+    ];
+    send(&a, report(Some(models))).await;
+    let before = until(
+        &mut records,
+        &[
+            ("leaving", ModelState::Draining),
+            ("served", ModelState::Ready),
+        ],
+    )
+    .await;
+    hub.shutdown().await.expect("the hub stops");
+
+    let (hub, _cell) = hub_of(cell(), directory.clone(), quiet()).await;
+    let after = loop {
+        let record = records.next().await;
+        if record.epoch > before.epoch {
+            break record;
+        }
+    };
+    assert_eq!(
+        states(&after),
+        [
+            ("leaving", ModelState::Draining),
+            ("served", ModelState::Unavailable)
+        ],
+        "the first write after the restart: {after:?}"
+    );
+    assert!(after.models_version > before.models_version);
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// A cell whose instances report no models of their own serves the models
+/// its settings declare: `starting` until an entry instance is usable,
+/// then `ready`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cell_publishes_the_models_its_settings_declare() {
+    let directory = MemoryDirectory::new();
+    let settings = CellSettings {
+        models: vec![ModelKey {
+            model: "llama-70b".into(),
+            routing_key: Some("a".into()),
+        }],
+        ..cell()
+    };
+    let (hub, readiness) = hub_of(settings, directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    let first = until(&mut records, &[("llama-70b", ModelState::Starting)]).await;
+    assert_eq!(
+        first.models,
+        [ModelEntry {
+            model: "llama-70b".into(),
+            routing_key: Some("a".into()),
+            state: ModelState::Starting,
+            since: first.models_version,
+        }]
+    );
+    let [a] = entries(&hub, &readiness).await;
+    send(&a, report(None)).await;
+    until(&mut records, &[("llama-70b", ModelState::Ready)]).await;
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// Ask the hub to set its cell's presence: the status.
+async fn set_presence(hub: &Hub, presence: Presence) -> u16 {
+    let url = format!(
+        "http://127.0.0.1:{}/v1/ext/gdl-cell/presence",
+        hub.control_addr().port()
+    );
+    let body = gdl_watch::SetPresence { presence };
+    let response = tokio::time::timeout(WAIT, reqwest::Client::new().post(&url).json(&body).send())
+        .await
+        .expect("the hub answers in time")
+        .expect("the hub answers");
+    response.status().as_u16()
+}
+
+/// A cell told it is scaled to 0 has a record that says so by the time
+/// the hub answers, so that its instances can stop at once; told it
+/// serves, its record says so again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cell_scaled_to_zero_says_so_before_the_hub_answers() {
+    let directory = MemoryDirectory::new();
+    let (hub, _cell) = hub_of(cell(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    assert_eq!(records.next().await.presence, Presence::Serving);
+
+    assert_eq!(set_presence(&hub, Presence::ScaledToZero).await, 204);
+    let held = held(&directory).await;
+    assert_eq!(held.presence, Presence::ScaledToZero);
+    assert_eq!(set_presence(&hub, Presence::Serving).await, 204);
+    assert_eq!(
+        held_newer(&directory, &held).await.presence,
+        Presence::Serving
+    );
+    hub.shutdown().await.expect("the hub stops");
+}
+
+/// The record the directory holds for the cell now, from a new watch's
+/// snapshot.
+async fn held(directory: &MemoryDirectory) -> CellRecord {
+    Records::new(directory).next().await
+}
+
+/// The record the directory holds for the cell now, which must be newer
+/// than `than`.
+async fn held_newer(directory: &MemoryDirectory, than: &CellRecord) -> CellRecord {
+    let now = held(directory).await;
+    assert!(now.version() > than.version(), "{now:?} after {than:?}");
+    now
+}
+
+/// A restarted hub whose first read of its cell's last record fails does
+/// not take that for a cell with no record: it reads again before its
+/// first write, so the models keep their history and the version goes on
+/// rising. Waits out one re-read, 1 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_keeps_the_models_version_when_its_snapshot_fails() {
+    /// A directory whose first watch fails.
+    struct SnapshotUnavailable(MemoryDirectory, std::sync::atomic::AtomicBool);
+
+    impl gdl_cells::CellDirectory for SnapshotUnavailable {
+        type Watch = futures::stream::BoxStream<
+            'static,
+            Result<gdl_cells::CellEvent, gdl_cells::DirectoryError>,
+        >;
+
+        async fn publish(&self, record: CellRecord) -> Result<(), gdl_cells::DirectoryError> {
+            self.0.publish(record).await
+        }
+
+        async fn withdraw(
+            &self,
+            withdrawal: gdl_cells::Withdrawal,
+        ) -> Result<(), gdl_cells::DirectoryError> {
+            self.0.withdraw(withdrawal).await
+        }
+
+        fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> Self::Watch {
+            if self.1.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return self.0.watch(class, from).boxed();
+            }
+            futures::stream::once(async {
+                Err(gdl_cells::DirectoryError::Unavailable(
+                    "the restart snapshot is unavailable".into(),
+                ))
+            })
+            .boxed()
+        }
+    }
+
+    let directory = MemoryDirectory::new();
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    let [a] = entries(&hub, &readiness).await;
+    send(&a, report(Some(vec![says("m", InstanceModelState::Ready)]))).await;
+    let before = until(&mut records, &[("m", ModelState::Ready)]).await;
+    assert!(before.models_version > 0);
+    hub.shutdown().await.expect("the hub stops");
+
+    // Keep the writer's clock ahead, so clock skew cannot cause the regression.
+    tokio::time::timeout(WAIT, async {
+        while common::millis_now() <= before.epoch {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the clock passes the first epoch");
+    let failing = SnapshotUnavailable(directory.clone(), std::sync::atomic::AtomicBool::new(false));
+    let (hub, _cell) = hub_of(cell(), failing, quiet()).await;
+    let after = loop {
+        let record = records.next().await;
+        if record.epoch > before.epoch {
+            break record;
+        }
+    };
+    hub.shutdown().await.expect("the restarted hub stops");
+    assert_eq!(
+        states(&after),
+        [("m", ModelState::Unavailable)],
+        "{after:?}"
+    );
+    assert!(
+        after.models_version > before.models_version,
+        "a changed list went from version {} to {} in a newer epoch",
+        before.models_version,
+        after.models_version
+    );
+}
+
+/// A presence answer must describe the stored record even when an
+/// opposite write has reached the directory but its answer is pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_presence_answer_waits_for_the_write_after_an_opposite_write() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    #[derive(Clone)]
+    struct DelayedAnswer {
+        records: MemoryDirectory,
+        armed: Arc<AtomicBool>,
+        arrived: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl gdl_cells::CellDirectory for DelayedAnswer {
+        type Watch = gdl_cells::MemoryWatch;
+
+        async fn publish(&self, record: CellRecord) -> Result<(), gdl_cells::DirectoryError> {
+            let delay =
+                record.presence == Presence::Serving && self.armed.swap(false, Ordering::SeqCst);
+            self.records.publish(record).await?;
+            if delay {
+                self.arrived.notify_one();
+                tokio::time::timeout(WAIT, self.release.notified())
+                    .await
+                    .expect("the stored write's answer is released");
+            }
+            Ok(())
+        }
+
+        async fn withdraw(
+            &self,
+            withdrawal: gdl_cells::Withdrawal,
+        ) -> Result<(), gdl_cells::DirectoryError> {
+            self.records.withdraw(withdrawal).await
+        }
+
+        fn watch(&self, class: &str, from: Option<gdl_cells::ResumeToken>) -> Self::Watch {
+            self.records.watch(class, from)
+        }
+    }
+
+    let directory = DelayedAnswer {
+        records: MemoryDirectory::new(),
+        armed: Arc::new(AtomicBool::new(false)),
+        arrived: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    };
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    readiness
+        .set_presence(Presence::ScaledToZero)
+        .await
+        .expect("the first scale to zero is stored");
+    assert_eq!(
+        held(&directory.records).await.presence,
+        Presence::ScaledToZero
+    );
+
+    directory.armed.store(true, Ordering::SeqCst);
+    let scaling = Arc::clone(&readiness);
+    let serving = tokio::spawn(async move { scaling.set_presence(Presence::Serving).await });
+    tokio::time::timeout(WAIT, directory.arrived.notified())
+        .await
+        .expect("the serving record is stored with its answer pending");
+    assert_eq!(held(&directory.records).await.presence, Presence::Serving);
+
+    let scaling = readiness.set_presence(Presence::ScaledToZero);
+    tokio::pin!(scaling);
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut scaling).await;
+    let at_answer = if early.is_ok() {
+        Some(held(&directory.records).await)
+    } else {
+        None
+    };
+    directory.release.notify_one();
+    match early {
+        Ok(answer) => answer.expect("the hub acknowledged the scale to zero"),
+        Err(_) => tokio::time::timeout(WAIT, &mut scaling)
+            .await
+            .expect("the scale to zero finishes after the pending write")
+            .expect("the hub stores the scale to zero"),
+    }
+    serving.abort();
+    hub.shutdown().await.expect("the hub stops");
+
+    if let Some(record) = at_answer {
+        assert_eq!(
+            record.presence,
+            Presence::ScaledToZero,
+            "the hub acknowledged scale to zero while the directory held {record:?}"
+        );
+    }
+}
+
+/// A cell declares that it serves each model on its own: when acme-legal
+/// drains and goes, llama-70b stays `ready` in the record and the cell
+/// stays `serving`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_model_going_away_leaves_the_other_and_the_cell_serving() {
+    let directory = MemoryDirectory::new();
+    let (hub, readiness) = hub_of(cell(), directory.clone(), quiet()).await;
+    let mut records = Records::new(&directory);
+    let [a] = entries(&hub, &readiness).await;
+    let both = vec![
+        says("llama-70b", InstanceModelState::Ready),
+        says("acme-legal", InstanceModelState::Ready),
+    ];
+    send(&a, report(Some(both))).await;
+    until(
+        &mut records,
+        &[
+            ("acme-legal", ModelState::Ready),
+            ("llama-70b", ModelState::Ready),
+        ],
+    )
+    .await;
+    let draining = vec![
+        says("llama-70b", InstanceModelState::Ready),
+        says("acme-legal", InstanceModelState::Draining),
+    ];
+    send(&a, report(Some(draining))).await;
+    let record = until(
+        &mut records,
+        &[
+            ("acme-legal", ModelState::Draining),
+            ("llama-70b", ModelState::Ready),
+        ],
+    )
+    .await;
+    assert_eq!(record.presence, Presence::Serving);
+    send(
+        &a,
+        report(Some(vec![says("llama-70b", InstanceModelState::Ready)])),
+    )
+    .await;
+    let record = until(
+        &mut records,
+        &[
+            ("acme-legal", ModelState::Drained),
+            ("llama-70b", ModelState::Ready),
+        ],
+    )
+    .await;
+    assert_eq!(record.presence, Presence::Serving);
+    hub.shutdown().await.expect("the hub stops");
+}

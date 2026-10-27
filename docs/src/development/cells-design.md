@@ -136,6 +136,36 @@ The entry instances are always asked, because the hub cannot tell a sender that 
 
 An entry of an earlier build never says that it detached. An interior instance also drains once every entry instance has drained or left, so such a cell drains as before.
 
+## A model's state keeps its history
+
+A cell's record lists its models, and each entry's state comes from what the cell's usable entry instances say and from the state before it. A model that was `ready` and that no instance can serve now is `unavailable`, never `starting`. An entry leaves the record only once `drained`. So a reader can tell a model that served from one that never did, and a crash from a removal.
+
+**Rejected: a state taken from the current union of reports.** When the last instance that served a model fails, and another still loads it, the union says `starting`. A reader would then answer 404 for a model that served a moment ago, where 503 is right.
+
+**Rejected: a model that leaves every list counts as removed.** A crash, or a hub that restarts and has no reports yet, would look like a removal. Only a drain removes a model.
+
+**Rejected: models only in the load summary's payload, on the follow link.** The payload has no history, and only a hub that follows the cell would see it.
+
+A drain ends only once every usable entry instance has reported in its current registration, and none has the model. An instance not heard from may still be draining it. A drain read from the last record after a restart ends only once an instance reports.
+
+A new state is not additive. A hub of an earlier build refuses a record, or a load report, whose model state it does not know, and a refused load report drops that instance's load from the summary too. So a build that adds a state must reach every reader first.
+
+A model loaded again while it drains starts afresh, as it does after `drained`, so a state alone is the whole history the record has to keep.
+
+**Rejected: a record written before the last one is read.** A read that failed would look like a cell with no record, and the write would drop the models no instance has reported yet.
+
+The list's version counts from the epoch of the hub's writes, in its high bits (epoch × 2^20). A hub that reads no record, as from a relay parent that restarted, still publishes versions above any its predecessor did, unless that one made more than 2^20 changes for each millisecond it ran. So a reader that holds a version holds the list of that version.
+
+**Rejected: the epoch itself as the floor.** Several changes can fall in one millisecond, so a later hub could reuse a version for another list.
+
+## A cell scaled to 0 has no lease
+
+A record says whether its cell is `serving` or `scaled_to_zero`. A reader applies the lease only to a `serving` record. So a cell scaled to 0 on purpose never reads as missing, and a cell that is expected but silent does.
+
+**Rejected: an expired record as the sign of a cell scaled to 0.** A cell that lost power and a cell scaled to 0 would look the same.
+
+A parent's hub does not follow a cell scaled to 0, and ends a follow of one: the cell takes no work, its record never lapses, and its hub may be gone, so a follow would dial that hub without end.
+
 ## Unknown events fail closed for one cell
 
 An event of a kind a reader does not know may say something that would keep it from the cell, such as a retirement or an exclusion. Skipping it is unsafe. So the reader stops routing to that cell until it has read it again.

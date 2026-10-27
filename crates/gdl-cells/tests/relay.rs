@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gdl_cells::{
-    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryLimits, RelayDirectory,
-    Version, Withdrawal,
+    CellDirectory, CellEvent, CellRecord, CellState, DirectoryError, MemoryLimits, Presence,
+    RelayDirectory, Version, Withdrawal,
     conformance::{self, Backend, Rule},
 };
 
@@ -79,6 +79,9 @@ fn record(cell: &str, seq: u64, lease: Duration) -> CellRecord {
         hub: format!("{cell}:1337"),
         lease,
         load: None,
+        presence: Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
     }
 }
 
@@ -232,4 +235,25 @@ async fn a_resumed_watch_does_not_revive_an_expired_record() {
         offered.is_empty(),
         "resuming revived records whose parent-clock lease expired: {offered:?}"
     );
+}
+
+/// A child scaled to 0 on purpose sends no heartbeat, so its record stays
+/// in a new watch's snapshot past its lease: its parent tells it from a
+/// child that is missing.
+#[tokio::test(start_paused = true)]
+async fn a_record_scaled_to_zero_stays_past_its_lease() {
+    let directory = RelayDirectory::new();
+    let lease = Duration::from_millis(300);
+    let scaled = CellRecord {
+        presence: Presence::ScaledToZero,
+        ..record("m1", 1, lease)
+    };
+    directory.publish(scaled).await.expect("a record");
+    directory
+        .publish(record("m2", 1, lease))
+        .await
+        .expect("a record");
+    tokio::time::advance(lease * 10).await;
+    let v = |seq| Version { epoch: 7, seq };
+    assert_eq!(snapshot(&directory).await, [("m1".into(), v(1))]);
 }

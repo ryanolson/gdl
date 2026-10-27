@@ -280,6 +280,9 @@ async fn a_backend_that_joins_a_change_with_the_latest_part_fails() {
         Some(Ok(CellEvent::Synced { snapshot: true, .. }))
     ));
     let record = |seq| CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "m1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
@@ -330,6 +333,9 @@ async fn a_backend_that_joins_a_replayed_change_with_the_latest_part_fails() {
         panic!("the empty snapshot ends");
     };
     let record = |seq| CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "m1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
@@ -405,6 +411,9 @@ async fn a_backend_that_keeps_a_rule_it_disowns_fails() {
 async fn a_backend_that_loses_a_record_part_on_restart_fails() {
     let [directory] = Fault::RestartPart.fresh().await;
     let published = CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "m1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
@@ -440,6 +449,9 @@ async fn a_backend_that_loses_a_record_part_on_restart_fails() {
 async fn a_backend_that_loses_its_load_on_restart_fails() {
     let [directory] = Fault::RestartLoad.fresh().await;
     let published = CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "m1".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),

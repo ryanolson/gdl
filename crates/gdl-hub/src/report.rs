@@ -80,6 +80,22 @@ impl HubDirectory {
         &self.children
     }
 
+    /// The record the parent's hub holds for the cell `cell` of `class`,
+    /// for a restarted hub to keep its cell's history: `None` for a cell
+    /// that reports nowhere, or when the parent holds none, as a parent of
+    /// a build that does not answer the route says too. A parent that
+    /// cannot be reached is an error, never a cell with no record.
+    pub(crate) async fn held(
+        &self,
+        class: &str,
+        cell: &str,
+    ) -> Result<Option<CellRecord>, DirectoryError> {
+        let Some(parent) = &self.parent else {
+            return Ok(None);
+        };
+        parent.watcher.held(&parent.hub, class, cell).await
+    }
+
     /// Report `report` to the parent: the interval of its answer.
     async fn report(&self, report: Report) -> Result<Option<Duration>, DirectoryError> {
         let Some(parent) = &self.parent else {
@@ -146,6 +162,11 @@ impl Reports {
             placement: record.placement,
             heartbeat,
         }
+    }
+
+    /// The record held for the child `cell` of `class`, expired or not.
+    pub(crate) fn held(&self, class: &str, cell: &str) -> Option<CellRecord> {
+        self.children.record(class, cell)
     }
 
     /// Verify `report`, write it, and answer with the interval at which

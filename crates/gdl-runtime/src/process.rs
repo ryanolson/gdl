@@ -605,6 +605,8 @@ impl<H> ProcessConfig<H> {
             #[cfg(feature = "hub")]
             reports,
             #[cfg(feature = "hub")]
+            models: self.runtime.models.clone(),
+            #[cfg(feature = "hub")]
             cell_drain,
             #[cfg(feature = "hub")]
             detached: false,
@@ -678,6 +680,10 @@ pub struct Launch {
     /// admission to its hub.
     #[cfg(feature = "hub")]
     reports: Option<Duration>,
+    /// What the segment's nodes say of the instance's models, which its
+    /// load reports carry.
+    #[cfg(feature = "hub")]
+    models: gdl::InstanceModels,
     /// For an instance in a cell under a hub, its part in its cell's
     /// drain.
     #[cfg(feature = "hub")]
@@ -961,7 +967,8 @@ impl Launch {
                         let segment = Arc::clone(&segment);
                         let read = move || segment.load();
                         let me = self.node.instance_id();
-                        Some(Abort(session.report_load(me, period, read)))
+                        let models = self.models.clone();
+                        Some(Abort(session.report_load(me, period, read, models)))
                     }
                     _ => None,
                 };

@@ -89,6 +89,11 @@ async fn the_cell_publishes_its_record_and_each_change_of_state() {
     assert_eq!(
         first,
         CellRecord {
+            presence: gdl_cells::Presence::Serving,
+            models: Vec::new(),
+            // With no record before it, the list counts from the epoch,
+            // in the high bits.
+            models_version: first.epoch << 20,
             name: CELL.into(),
             class: "model_x".into(),
             region: "us-east-1".into(),

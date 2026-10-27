@@ -44,6 +44,7 @@ fn beating() -> CellTiming {
 
 fn report(admitted: u64, limit: u64, refusals: u64) -> LoadReport {
     LoadReport {
+        models: None,
         admitted,
         limit,
         refusals,

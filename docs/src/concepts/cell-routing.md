@@ -4,7 +4,7 @@ A parent cell sends work to its child cells. This chapter covers how the parent'
 
 ## Who follows whom
 
-A hub follows only its children. A child is a cell whose record names the hub's own cell as its `home`, has the same contract and placement hashes, and is `ready` or `degraded`. Region plays no part in following. A child in another region is followed. A cell in the hub's region whose parent is another cell is not followed.
+A hub follows only its children. A child is a cell whose record names the hub's own cell as its `home`, has the same contract and placement hashes, is `ready` or `degraded`, and is `serving`, not scaled to 0 ([Presence](cells.md#presence)). A record that says a followed cell is scaled to 0 ends its follow. Region plays no part in following. A child in another region is followed. A cell in the hub's region whose parent is another cell is not followed.
 
 Cells of layouts that place nodes differently have different placement hashes, so they never follow or offer to each other. A cell with other hashes is ignored, not an error. A hub follows children only for the classes its own class sends to. A cell of a class that sends to no class follows nothing.
 

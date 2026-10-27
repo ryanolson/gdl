@@ -47,7 +47,7 @@ pub(super) struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Held {
-    Record(CellRecord),
+    Record(Box<CellRecord>),
     Withdrawn(Tombstone),
 }
 
@@ -93,7 +93,7 @@ impl Entry {
     pub(super) fn event(&self, class: &str, token: ResumeToken) -> CellEvent {
         match &self.held {
             Held::Record(record) => CellEvent::Put {
-                record: record.clone(),
+                record: CellRecord::clone(record),
                 token,
             },
             Held::Withdrawn(tombstone) => CellEvent::Withdrawn {

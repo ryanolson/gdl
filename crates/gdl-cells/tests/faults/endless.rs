@@ -30,6 +30,9 @@ impl CellDirectory for Endless {
 
     fn watch(&self, class: &str, _: Option<ResumeToken>) -> Events {
         let record = CellRecord {
+            presence: gdl_cells::Presence::Serving,
+            models: Vec::new(),
+            models_version: 0,
             name: "m1".into(),
             class: class.into(),
             region: "us-east-1".into(),

@@ -19,6 +19,7 @@ mod fleet;
 mod hash;
 mod manifest;
 mod metrics;
+mod models;
 mod placement;
 mod problem;
 
@@ -43,6 +44,7 @@ pub use metrics::{
     COMPONENT_LABEL, ENDPOINT_LABEL, MetricField, MetricKind, NAMESPACE_LABEL, RUNTIME_LABELS,
     RUNTIME_METRICS, WORKER_LABEL,
 };
+pub use models::{InstanceModel, InstanceModelState, ModelKey};
 pub use placement::{
     CellPolicy, ClassBoundary, CrossingReport, HopLayout, Layout, Leg, Placement, PlacementError,
     PlacementErrors, Placements, RequestRouter, Run, SELECTORS, SelectorInfo, WireEdge, WireReason,

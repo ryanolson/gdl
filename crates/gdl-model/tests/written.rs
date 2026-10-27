@@ -70,6 +70,7 @@ fn a_fleet_reads_back_what_it_writes() {
 #[test]
 fn a_cells_settings_read_back_what_they_write() {
     let every = CellSettings {
+        models: Vec::new(),
         name: "model-x-01-us-east-1".into(),
         layout: Some("regional".into()),
         class: "model_x".into(),

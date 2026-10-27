@@ -167,6 +167,7 @@ mod tests {
                 Duration::from_secs(1),
                 16,
                 Duration::from_secs(30),
+                Vec::new(),
             )),
             draining: drained,
         };

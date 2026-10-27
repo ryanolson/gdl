@@ -119,6 +119,9 @@ impl Backend for Store {
 
 fn record(seq: u64) -> CellRecord {
     CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "m2".into(),
         class: "model_x".into(),
         region: "us-east-1".into(),

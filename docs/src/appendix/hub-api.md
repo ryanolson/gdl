@@ -13,8 +13,10 @@ A cell's hub serves the `gdl-cell` extension's routes under `/v1/ext/gdl-cell`. 
 | `POST /release` | public | none | `Follower` | 204; the watch no longer counts as a follower |
 | `POST /avoided` | public | none | `Avoided` | 204; counted only from a watch that counted when the instance retired |
 | `POST /report` | public | none | `Report`: a child's record or withdrawal | 200 with a `ReportReply` (`interval_ms`, when the parent expects the next report); 400 with a `ReportRefusal` for a malformed one; 409 with a `ReportRefusal` for one the parent refuses. Served only by a hub under the `relay` backend, whether or not its cell is healthy |
+| `GET /report/{class}/{cell}` | public | none | none | 200 with the `CellRecord` the parent holds for that child, expired or not; 404 when it holds none. Served only by a hub under the `relay` backend. A restarted child's hub reads it before its first report |
 | `POST /drain` | control | none | none | 202 with the health body; 409 for a cell whose class no hop enters |
-| `POST /instances/{id}/load` | control | the instance's | `LoadReport` | 204; 409 unless the instance is a usable entry instance |
+| `POST /presence` | control | none | `SetPresence`: `{"presence": "serving"}` or `{"presence": "scaled_to_zero"}` | 204 once the directory has stored a record written after the request with that presence; 503 when it has not within 5 s, or a later request replaced it |
+| `POST /instances/{id}/load` | control | the instance's | `LoadReport`, with the instance's `models` when its nodes set them | 204; 409 unless the instance is a usable entry instance, and before the hub has read its cell's last record |
 | `POST /instances/{id}/chooser` | control | the instance's | none | 204; 409 unless the instance is of a segment that chooses cells |
 | `POST /instances/{id}/unoffered` | control | the instance's | `Unoffered` | 204, whether or not it answers the current revision; 409 from an instance that is not a chooser |
 | `POST /instances/{id}/avoids` | control | the instance's | `Avoids` | 204; 409 from an instance that is not a chooser |

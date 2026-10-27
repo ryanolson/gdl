@@ -170,6 +170,7 @@ fn a_cells_settings_have_its_quorum_resolved() {
     assert_eq!(
         larger,
         CellSettings {
+            models: Vec::new(),
             name: "model-x-02-us-east-1".into(),
             layout: None,
             class: "model_x".into(),

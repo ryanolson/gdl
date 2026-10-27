@@ -104,19 +104,51 @@ For each segment of the cell's class, the hub counts the instances usable for fr
 
 ### The record
 
-The hub publishes the cell's record to the cell directory when the state changes and on each heartbeat, every 10 s by default (`heartbeat_ms`). Under the `relay` backend, it writes the record at the cadence its parent's hub answers with ([The relay backend](#the-relay-backend)). The record carries the cell's name, class, region, parent, contract and placement hashes, state, hub address, load summary, an epoch, a sequence number, and a lease, 30 s by default (`lease_ms`). A hub refuses a lease that is not longer than its heartbeat, since readers would let the record lapse between two publishes.
+The hub publishes the cell's record to the cell directory when the state, the presence, or the models change, and on each heartbeat, every 10 s by default (`heartbeat_ms`). Under the `relay` backend, it writes the record at the cadence its parent's hub answers with ([The relay backend](#the-relay-backend)). The record carries the cell's name, class, region, parent, contract and placement hashes, state, hub address, load summary, presence, models, an epoch, a sequence number, and a lease, 30 s by default (`lease_ms`). A hub refuses a lease that is not longer than its heartbeat, since readers would let the record lapse between two publishes.
 
 The epoch is the hub process's incarnation. A restarted hub takes a new epoch, which orders after every write of the one before. A write that is not newer than what the directory holds for the cell is refused.
 
-The lease is a duration, not an instant. Each reader measures a record's age on its own clock, from the last change of sequence number it saw (`gdl_cells::CellView`). So clock skew between hosts does not matter. Expiry affects discovery only, not a live follow.
+The lease is a duration, not an instant. Each reader measures a record's age on its own clock, from the last change of sequence number it saw (`gdl_cells::CellView`). So clock skew between hosts does not matter. Expiry affects discovery only, not a live follow. Only a `serving` record has a lease ([Presence](#presence)).
+
+Each field that a build adds to the record is optional on the wire, and a reader ignores a field it does not know. So a hub of an earlier build reads a record with presence and models as the record it was, and a record of an earlier build reads as `serving` with no models (`crates/gdl-cells/tests/record.rs`).
 
 ### Load reports and the load summary
 
-Each usable entry instance reports its admission to its hub once a summary period: the roots it holds admitted, its admission limit, and the hand-offs it declined since its last report, except those it declined as its own ([An instance that cannot serve the request](cell-routing.md#an-instance-that-cannot-serve-the-request)) (`POST /v1/ext/gdl-cell/instances/{id}/load`, with its own credential). A report from any other instance is refused with 409. The period is `summary_ms`: 10 s by default, at least 1 s. The hub and its instances read the same setting.
+Each usable entry instance reports its admission to its hub once a summary period: the roots it holds admitted, its admission limit, and the hand-offs it declined since its last report, except those it declined as its own ([An instance that cannot serve the request](cell-routing.md#an-instance-that-cannot-serve-the-request)), and its models when its nodes set them ([Models](#models)) (`POST /v1/ext/gdl-cell/instances/{id}/load`, with its own credential). A report from any other instance is refused with 409. The period is `summary_ms`: 10 s by default, at least 1 s. The hub and its instances read the same setting.
 
 Once a period, the hub sums the latest report of each usable entry instance into the cell's load summary, and drops a report older than three periods. `admitted`, `limit`, and `refusals` are summed over the counted reports. `instances` is the number of usable entry instances. `period_ms` is the summary period, so that a reader can tell when the summary is stale.
 
 There is no summary while no report counts, and none for a class that no hop enters.
+
+### Presence
+
+`presence` says whether the cell is expected to answer. `serving` is the default: the hub sends a heartbeat, and a reader that sees none for the lease holds the cell missing. `scaled_to_zero` says that the cell was scaled to 0 on purpose: it sends no heartbeat, and its record never lapses. So a reader tells a cell scaled to 0 from a cell that is expected but silent. The relay directory and `CellView` apply the lease only to a `serving` record (`CellRecord::leased`). A cell scaled to 0 takes no work: a parent's hub does not follow it, and ends a follow of it, which closes once its choosers let go, as for a newer epoch.
+
+`POST /v1/ext/gdl-cell/presence` on the control listener, with `{"presence": "scaled_to_zero"}`, tells the hub that the cell is scaled to 0. The hub answers 204 once the directory has stored a record that says so, so the instances can stop after the answer. Only a record written after the request answers it, so an earlier record that says the same never does. It answers 503 if the directory has not stored it within 5 s, or if a later request for the other presence replaced it first. `{"presence": "serving"}` says that the cell serves again. A hub starts `serving`.
+
+### Models
+
+The record lists the models the cell serves. Each entry has a `model`, the name a client sends, an optional `routing_key`, a serving partition, a `state`, and `since`, the version of the list at which the entry took its state. `models_version` rises on every change of the list and never goes down, also across a restart of the hub.
+
+A node in an entry segment says which models its instance has, with `gdl::InstanceModels`: it takes the handle in its build with `InstanceModels::current()`, and calls `set` with each model and whether it can serve it now (`starting`, `ready`, or `draining`). The instance sends the list with each load report, and at once when the list changes. A cell whose instances report no list declares its models in its settings (`[cell] models`), and every usable entry instance that reports no list serves them.
+
+The hub takes the union over its usable entry instances: a model is `ready` if one instance can serve it, else `draining` if one is removing it, else `starting` if one is loading it. The state keeps the model's history:
+
+| State | When |
+|---|---|
+| `starting` | registered, and never `ready` in this cell |
+| `ready` | a usable entry instance can serve it now |
+| `unavailable` | it was `ready`, and no usable entry instance can serve it now. It never goes back to `starting` |
+| `draining` | being removed on purpose: no new work |
+| `drained` | removed on purpose, once every usable entry instance has reported in its current registration and none has it. Kept until the cell withdraws, at most 1,000 per record (`CellRecord::MAX_DRAINED`), the oldest dropped first |
+
+A model loaded again while or after it drains starts afresh, as `starting`. A node that drops a model before its instance has reported the drain loses nothing: `InstanceModels` keeps the model in the list as `draining` until a report that carries it is taken.
+
+Each entry's state is its own: a model that drains, goes, or becomes `unavailable` changes no other model's state, and not the cell's presence.
+
+Silence never removes a model. An entry that no instance names stays as `starting` or `unavailable`, since a crash would otherwise look like a removal. Only `drained` entries over the cap leave the record. The hub sees that an instance is no longer usable once a summary period, and computes the states then and on each report that changes what an instance says. None of it is on a request's path.
+
+A hub that restarts reads the cell's last record before its first write, and keeps each entry's history. A read that fails, or takes more than 2 s, is not a cell with no record: the hub reads again every 1 s and writes nothing meanwhile. With no record, the list's version counts from the epoch of the hub's writes in its high bits (epoch × 2^20), so it is above any version a hub before it published. Until the read is done, the hub refuses its instances' load reports with 409, and each instance sends its report again. The history it keeps: `starting` and `drained` stay, `draining` goes on until an instance reports, and `ready` and `unavailable` become `unavailable` until an instance reports. Under the `relay` backend it reads the record from its parent's hub ([The relay backend](#the-relay-backend)). Two rare restarts still lose part of the history ([Limitations](../operations/limitations.md#two-rare-restarts-lose-part-of-a-models-history)).
 
 ### The cell's watch
 
@@ -237,7 +269,7 @@ Under the `relay` backend, the cell's hub also reports its record to its parent'
 
 Under `relay`, the default, a child cell's hub reports its record to its parent cell's hub, at `[cell] parent_hub` (`GDL_CELL__PARENT_HUB`). A hub of a class that another class sends to needs `parent_hub`. A hub of a class that nothing sends to refuses it, and reports nowhere. The report is `POST /v1/ext/gdl-cell/report` on the parent's public listener. It carries the record, on each change of state and each heartbeat, or the withdrawal once the cell's drain has ended.
 
-The parent's hub keeps its children's records in a directory in its own memory, and its follow watches that directory as it watches any other. A cell in the middle of a chain of classes does both: it reports to its parent, and holds its own children's records. A record goes one hop, to the parent, and no further.
+The parent's hub keeps its children's records in a directory in its own memory, and its follow watches that directory as it watches any other. `GET /v1/ext/gdl-cell/report/{class}/{cell}` answers the record it holds for a child, expired or not, or 404. A child's hub that restarts reads its last record there, since its own directory holds its children's records, not its own. Only a 404 means that the parent holds no record. Until a read succeeds, the child reads again every 1 s and reports nothing, since a report could not land either. A cell in the middle of a chain of classes does both: it reports to its parent, and holds its own children's records. A record goes one hop, to the parent, and no further.
 
 The parent writes a report only once it has checked it (`gdl_hub::VerifiedReport`, which nothing else can make):
 
@@ -250,4 +282,4 @@ A withdrawal is written only over a record the parent holds. Any other withdrawa
 
 Two leases stay apart. The record's own lease drops a child that stops reporting: once no newer report has come for the length of the lease, on the parent's clock, the parent's follow drops the cell, and a new watch of the parent's directory leaves it out. The parent's answer to each report gives the interval at which it expects the next one: its own heartbeat, but at most a third of the record's lease, so that a child that reports at that cadence is not dropped. A child takes no cadence shorter than 100 ms, so a hub under the `relay` backend refuses a lease under 300 ms (`HubTiming::MIN_RELAY_LEASE`), from its settings or from its timing made in code. The child writes its record at that cadence from the first answer on, and changes it when the answer changes.
 
-No credential crosses cells. The report route trusts the private network, as an instance's registration and velo's traffic do. [Limitations](../operations/limitations.md#a-childs-report-to-its-parents-hub-carries-no-credential) lists what that allows, and what else the relay does not do yet.
+No credential crosses cells. The report route, and the read of a child's record, trust the private network, as an instance's registration and velo's traffic do. [Limitations](../operations/limitations.md#a-childs-report-to-its-parents-hub-carries-no-credential) lists what that allows, and what else the relay does not do yet.

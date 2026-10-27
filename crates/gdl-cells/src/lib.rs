@@ -31,6 +31,8 @@ mod view;
 pub use dir::{DirDirectory, DirLimits, DirWatch};
 pub use directory::{CellDirectory, CellEvent, DirectoryError, ResumeToken};
 pub use memory::{MemoryDirectory, MemoryLimits, MemoryWatch};
-pub use record::{CellRecord, CellState, LoadSummary, Version, Withdrawal};
+pub use record::{
+    CellRecord, CellState, LoadSummary, ModelEntry, ModelState, Presence, Version, Withdrawal,
+};
 pub use relay::{RelayDirectory, RelayWatch};
 pub use view::CellView;

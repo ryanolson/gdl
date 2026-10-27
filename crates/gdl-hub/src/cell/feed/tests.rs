@@ -21,6 +21,7 @@ fn feed() -> Feed {
         Duration::from_secs(1),
         16,
         Duration::from_secs(30),
+        Vec::new(),
     );
     feed.settle(1);
     feed
@@ -374,6 +375,7 @@ async fn a_segment_no_other_class_reaches_is_not_watched() {
 #[tokio::test]
 async fn a_report_does_not_outlive_its_registration() {
     let load = LoadReport {
+        models: None,
         admitted: 3,
         limit: 8,
         refusals: 0,
@@ -381,6 +383,8 @@ async fn a_report_does_not_outlive_its_registration() {
     let now = Instant::now();
     for complete in [true, false] {
         let feed = feed();
+        // The hub takes reports once it has read its cell's last record.
+        feed.restore(None, 0);
         let member = peer();
         let id = member.instance_id();
         let first = RegistrationEpoch::new();
@@ -390,7 +394,7 @@ async fn a_report_does_not_outlive_its_registration() {
             incarnation: Incarnation::from_u64(1),
             epoch: first,
         };
-        feed.report(id, lease, load, now).expect("taken");
+        feed.report(id, lease, load.clone(), now).expect("taken");
         feed.removed(removal(id, 1));
         if complete {
             feed.observe(0, Watched::Ready, &ServiceEvent::Removed(id));
@@ -421,6 +425,7 @@ async fn a_watch_waits_for_the_epoch() {
         Duration::from_secs(1),
         16,
         Duration::from_secs(30),
+        Vec::new(),
     );
     let mut early = Box::pin(feed.watch());
     assert!(futures::poll!(early.as_mut()).is_pending());
@@ -438,8 +443,116 @@ async fn a_watch_waits_for_the_epoch() {
         Duration::from_secs(1),
         16,
         Duration::from_secs(30),
+        Vec::new(),
     );
     let refused = stopping.watch();
     stopping.close();
     assert!(refused.await.is_err());
+}
+
+/// An instance that renews its registration still serves what it said,
+/// but no drain ends on its silence until it reports in the new
+/// registration.
+#[test]
+fn a_model_drain_waits_for_a_report_from_a_renewed_registration() {
+    use gdl_cells::ModelState;
+    use gdl_model::{InstanceModel, InstanceModelState};
+
+    let feed = feed();
+    feed.restore(None, 100);
+    let (a, b) = (peer(), peer());
+    let (a_id, b_id) = (a.instance_id(), b.instance_id());
+    let a_epoch = RegistrationEpoch::new();
+    let b_epoch = RegistrationEpoch::new();
+    let incarnation = Incarnation::from_u64(1);
+    feed.joined("f", incarnation, a_epoch, a);
+    feed.joined("f", incarnation, b_epoch, b.clone());
+    feed.observe(0, Watched::Ready, &ServiceEvent::Added(a_id));
+    feed.observe(0, Watched::Ready, &ServiceEvent::Added(b_id));
+    let a_lease = Lease {
+        incarnation,
+        epoch: a_epoch,
+    };
+    let b_lease = Lease {
+        incarnation,
+        epoch: b_epoch,
+    };
+    let empty = LoadReport {
+        models: Some(Vec::new()),
+        ..LoadReport::default()
+    };
+    let draining = LoadReport {
+        models: Some(vec![InstanceModel {
+            model: "m".into(),
+            routing_key: None,
+            state: InstanceModelState::Draining,
+        }]),
+        ..LoadReport::default()
+    };
+    let now = Instant::now();
+    feed.report(a_id, a_lease, draining, now)
+        .expect("the first instance reports its drain");
+    feed.report(b_id, b_lease, empty.clone(), now)
+        .expect("the second instance reports an empty list");
+    assert_eq!(
+        feed.models().borrow().entries[0].state,
+        ModelState::Draining
+    );
+
+    feed.joined("f", Incarnation::from_u64(2), RegistrationEpoch::new(), b);
+    feed.report(a_id, a_lease, empty, now)
+        .expect("the first instance finishes its drain");
+    assert_eq!(
+        feed.models().borrow().entries[0].state,
+        ModelState::Draining
+    );
+}
+
+/// The hub takes no report before it has read its cell's last record,
+/// so no drain it acknowledged is lost behind the read: the instance
+/// keeps the drain until a report that carries it is taken, and the same
+/// reports sent after the read end it.
+#[test]
+fn a_drain_reported_before_the_restart_snapshot_is_kept() {
+    use gdl_cells::{ModelEntry, ModelState};
+    use gdl_model::{InstanceModel, InstanceModelState};
+
+    let snapshot = [ModelEntry {
+        model: "m".into(),
+        routing_key: None,
+        state: ModelState::Ready,
+        since: 7,
+    }];
+    let feed = feed();
+    let member = peer();
+    let id = member.instance_id();
+    let epoch = RegistrationEpoch::new();
+    let incarnation = Incarnation::from_u64(1);
+    feed.joined("f", incarnation, epoch, member);
+    feed.observe(0, Watched::Ready, &ServiceEvent::Added(id));
+    let lease = Lease { incarnation, epoch };
+    let now = Instant::now();
+    let draining = LoadReport {
+        models: Some(vec![InstanceModel {
+            model: "m".into(),
+            routing_key: None,
+            state: InstanceModelState::Draining,
+        }]),
+        ..LoadReport::default()
+    };
+    let empty = LoadReport {
+        models: Some(Vec::new()),
+        ..LoadReport::default()
+    };
+    assert!(
+        feed.report(id, lease, draining.clone(), now).is_err(),
+        "taken before the last record was read"
+    );
+    feed.restore(Some((&snapshot, 7)), 100);
+    feed.report(id, lease, draining, now)
+        .expect("the hub takes the drain");
+    feed.report(id, lease, empty, now)
+        .expect("the hub takes the empty list after the drain");
+    feed.summarize(now);
+    assert_eq!(feed.models().borrow().entries[0].state, ModelState::Drained);
 }

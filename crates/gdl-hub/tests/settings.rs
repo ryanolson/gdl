@@ -86,6 +86,7 @@ fn a_cells_settings_are_read_from_the_environment() {
         assert_eq!(
             cell_from_env(&spec()).map_err(|e| e.to_string())?,
             Some(CellSettings {
+                models: Vec::new(),
                 name: "model-x-01-us-east-1".into(),
                 layout: None,
                 class: "model_x".into(),
@@ -404,6 +405,7 @@ async fn status(hub: &Hub, path: &str) -> u16 {
 
 fn settings(directory: DirectoryBackend) -> CellSettings {
     CellSettings {
+        models: Vec::new(),
         name: "model-x-01-us-east-1".into(),
         layout: None,
         class: "model_x".into(),
@@ -620,4 +622,35 @@ async fn a_cell_with_the_relay_backend_needs_its_parents_hub() {
     assert_eq!(status(&hub, "/v1/ext/gdl-cell/health").await, 503);
     hub.shutdown().await.expect("the hub stops");
     parent.shutdown().await.expect("the hub stops");
+}
+
+/// A hub reads its cell's declared models from one variable, a list of
+/// tables, `GDL_CELL__MODELS`; one it cannot read names the variable.
+#[test]
+fn a_cells_declared_models_are_read_from_the_environment() {
+    Jail::expect_with(|jail| {
+        model_cell(jail, "/srv/cells");
+        jail.set_env(
+            "GDL_CELL__MODELS",
+            r#"[{model = "llama-70b"}, {model = "qwen-32b", routing_key = "a"}]"#,
+        );
+        let cell = cell_from_env(&spec()).map_err(|e| e.to_string())?;
+        assert_eq!(
+            cell.map(|cell| cell.models),
+            Some(vec![
+                gdl_model::ModelKey::new("llama-70b"),
+                gdl_model::ModelKey {
+                    model: "qwen-32b".into(),
+                    routing_key: Some("a".into()),
+                },
+            ])
+        );
+        jail.set_env("GDL_CELL__MODELS", r#"[{model = ""}]"#);
+        let refused = cell_from_env(&spec()).expect_err("a model with no name");
+        assert!(
+            refused.to_string().contains("GDL_CELL__MODELS"),
+            "{refused}"
+        );
+        Ok(())
+    });
 }

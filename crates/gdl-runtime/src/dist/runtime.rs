@@ -19,7 +19,7 @@ use super::roster::{Live, Picker, Policy, Roster};
 use gdl::__runtime::Meters;
 use gdl::__runtime::{Erased, Lease};
 use gdl::Cx;
-use gdl::{CellPolicies, FollowedCells, HomeFirstAt, HubRecords, Selectors};
+use gdl::{CellPolicies, FollowedCells, HomeFirstAt, HubRecords, InstanceModels, Selectors};
 use gdl::{Error, ErrorKind, Result};
 use gdl_model::{Layout, RequestRouter};
 
@@ -120,6 +120,11 @@ pub struct RuntimeConfig {
     /// instance has registered there. Without both, it is not bound. Give
     /// each instance its own.
     pub records: HubRecords,
+    /// The handle through which the segment's nodes say which models the
+    /// instance has. Not a setting: a segment binary's `Builder` gives it
+    /// to the nodes it builds, and an entry instance in a cell reports what
+    /// they set with its load reports.
+    pub models: InstanceModels,
     /// Test-only delays and drops.
     #[cfg(feature = "fault-injection")]
     pub faults: Faults,
@@ -210,6 +215,7 @@ impl Default for RuntimeConfig {
             cell_policies: CellPolicies::new(),
             followed: FollowedCells::new(),
             records: HubRecords::new(),
+            models: InstanceModels::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         }
@@ -297,6 +303,7 @@ impl TryFrom<Settings> for RuntimeConfig {
             cell_policies: CellPolicies::new(),
             followed: FollowedCells::new(),
             records: HubRecords::new(),
+            models: InstanceModels::new(),
             #[cfg(feature = "fault-injection")]
             faults: Faults::default(),
         };

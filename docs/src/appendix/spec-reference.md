@@ -136,6 +136,7 @@ The fleet file fills in each cell's `[cell]` table in its segments' settings. Th
 | `lost_chooser_ms` | how long a chooser may have no watch of the hub's relay open before the hub stops waiting for its acknowledgements. At least 1. Only the hub reads it. | 30000 |
 | `watch_caps.cell`, `watch_caps.relay`, `watch_caps.follow` | how many watches of the cell, of the relay, and of one follow the hub serves at once. At least 1. Only the hub reads them. | 2048, 2048, 16384 |
 | `keyed_capacity` | how many records the hub's keyed record table holds. At least 1. Only the hub reads it. | 1000000 |
+| `models` | the models the cell serves when its entry instances report none of their own: a list of `{ model = "<name>", routing_key = "<key>" }`, `routing_key` optional. A model needs a name, a routing key is not empty, and no model is named twice. Refused for a class that nothing sends to. Only the hub reads it. As a variable: `GDL_CELL__MODELS='[{model = "llama-70b"}]'`. | none |
 
 An instance refuses to start when its `[cell]` does not fit its deployment: the placement has no classes, the class is not one of them, the instance's segment is not in it, a `ready` key is not a segment of it, or a `requires` key is not a class it sends to or is 0. An instance and a hub both refuse a hub timing out of its bounds, though only the hub runs with it. Each problem names where the key was set, the file and key or the variable.
 

@@ -401,3 +401,154 @@ async fn a_summary_keeps_its_age_when_the_chooser_watches_the_relay_again() {
     drop(chooser);
     shut([global_hub, m1.hub]).await;
 }
+
+/// What an entry instance's nodes say of its models reaches its cell's
+/// record with its load reports: a model it can serve is `ready` there,
+/// and one it says it is removing is `draining` as soon as it says so,
+/// without waiting for the next period.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_entry_instances_models_reach_the_cells_record() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let models = gdl::InstanceModels::new();
+    let said = |state| gdl::InstanceModel {
+        model: "llama-70b".into(),
+        routing_key: None,
+        state,
+    };
+    models
+        .set([said(gdl::InstanceModelState::Ready)])
+        .expect("a list");
+    let mut records = directory.watch("model_x", None);
+    let cell = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 1,
+        entries: 1,
+    };
+    let quiet = Events::quiet();
+    let given = models.clone();
+    let reporting = move |runtime: RuntimeConfig| RuntimeConfig {
+        models: given.clone(),
+        ..limited(runtime)
+    };
+    let m1 = model_summarized(
+        &spec,
+        &directory,
+        cell,
+        RUNTIME,
+        &reporting,
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    let mut until_state = async |state: gdl_cells::ModelState| {
+        let recorded = tokio::time::timeout(WAIT, async {
+            loop {
+                match records.next().await {
+                    Some(Ok(CellEvent::Current(record) | CellEvent::Put { record, .. }))
+                        if record.name == M1
+                            && record.models.iter().map(|m| m.state).eq([state]) =>
+                    {
+                        return;
+                    }
+                    Some(Ok(_)) => {}
+                    other => panic!("the directory's watch ended: {other:?}"),
+                }
+            }
+        })
+        .await;
+        assert!(
+            recorded.is_ok(),
+            "no record had the model {state:?} in time"
+        );
+    };
+    until_state(gdl_cells::ModelState::Ready).await;
+    models
+        .set([said(gdl::InstanceModelState::Draining)])
+        .expect("a list");
+    let asked = tokio::time::Instant::now();
+    until_state(gdl_cells::ModelState::Draining).await;
+    assert!(
+        asked.elapsed() < SUMMARY,
+        "the change waited for the next period"
+    );
+    shut([m1.hub]).await;
+}
+
+/// A node that drains a model and drops it before its instance reports
+/// does not lose the drain: the instance reports the model `draining`,
+/// then drops it, and the record shows it `draining`, then `drained`, not
+/// `unavailable`.
+#[tokio::test]
+async fn a_model_removed_without_yielding_finishes_its_drain() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let models = gdl::InstanceModels::new();
+    let said = |state| gdl::InstanceModel {
+        model: "m".into(),
+        routing_key: None,
+        state,
+    };
+    models
+        .set([said(gdl::InstanceModelState::Ready)])
+        .expect("a list");
+    let mut records = directory.watch("model_x", None);
+    let cell = Model {
+        name: M1,
+        hub: "m1-hub:1337",
+        quorum: 1,
+        entries: 1,
+    };
+    let quiet = Events::quiet();
+    let given = models.clone();
+    let reporting = move |runtime: RuntimeConfig| RuntimeConfig {
+        models: given.clone(),
+        ..limited(runtime)
+    };
+    let m1 = model_summarized(
+        &spec,
+        &directory,
+        cell,
+        RUNTIME,
+        &reporting,
+        &|deployment| reference_graph(deployment, &quiet),
+    )
+    .await;
+    let mut next_state = async |after: Option<gdl_cells::ModelState>| {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                match records.next().await {
+                    Some(Ok(CellEvent::Current(record) | CellEvent::Put { record, .. }))
+                        if record.name == M1 && record.models.len() == 1 =>
+                    {
+                        let state = record.models[0].state;
+                        if after != Some(state) {
+                            return state;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    other => panic!("the directory's watch ended: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("a changed model state in time")
+    };
+    assert_eq!(next_state(None).await, gdl_cells::ModelState::Ready);
+
+    // An idle model can finish unloading without yielding to the reporter.
+    models
+        .set([said(gdl::InstanceModelState::Draining)])
+        .expect("a list");
+    models.set([]).expect("an empty list");
+    let draining = next_state(Some(gdl_cells::ModelState::Ready)).await;
+    let after = next_state(Some(draining)).await;
+    shut([m1.hub]).await;
+    assert_eq!(
+        (draining, after),
+        (
+            gdl_cells::ModelState::Draining,
+            gdl_cells::ModelState::Drained
+        )
+    );
+}

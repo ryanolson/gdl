@@ -42,6 +42,9 @@ impl Backend for ShortHistory {
 
 fn record(seq: u64) -> CellRecord {
     CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "model-a".into(),
         class: "model".into(),
         region: "us-east-1".into(),

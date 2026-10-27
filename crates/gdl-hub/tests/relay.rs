@@ -268,6 +268,9 @@ fn child_record(cell: &str, hub: &str, (epoch, seq): (u64, u64), lease: Duration
     let spec = spec();
     let layout = gdl_model::layout(&spec.graph, &spec.placement).expect("a layout");
     CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: cell.into(),
         class: "model_x".into(),
         region: "us-east-1".into(),
@@ -877,4 +880,172 @@ async fn an_accepted_relay_timing_can_renew_inside_its_lease() {
         );
     }
     parent.hub.shutdown().await.expect("the parent stops");
+}
+
+/// A child's hub that restarts reads its cell's last record from its
+/// parent's hub before its first report, so its models keep their
+/// history: a model that was `ready` is `unavailable` until an instance
+/// reports, never `starting`. The parent answers what it holds for a
+/// child, and nothing for a cell it holds no record of.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_child_reads_its_last_record_from_its_parent() {
+    let spec = spec();
+    let parent = relay_cell(&spec, global(), quiet_timing()).await;
+    let watcher = CellWatcher::new().expect("a client");
+    let at = address(&parent.hub);
+    assert_eq!(
+        watcher.held(&at, "model_x", "model-x-01").await,
+        Ok(None),
+        "a cell the parent holds no record of"
+    );
+    let settings = CellSettings {
+        summary: Duration::from_secs(1),
+        ..model("model-x-01", &at)
+    };
+    let child = relay_cell(&spec, settings.clone(), quiet_timing()).await;
+    let mut watch = child.readiness.watch().await.expect("the watch begins");
+    let entry = ready(&child.hub, &spec, &["f"]).await;
+    let usable = tokio::time::timeout(WAIT, async {
+        while !matches!(
+            watch.next().await,
+            Some(gdl_watch::CellWatchEvent::Ready { .. })
+        ) {}
+    })
+    .await;
+    assert!(usable.is_ok(), "the entry instance ready in time");
+    let report = gdl_watch::LoadReport {
+        admitted: 0,
+        limit: 4,
+        refusals: 0,
+        models: Some(vec![gdl_model::InstanceModel {
+            model: "m".into(),
+            routing_key: None,
+            state: gdl_model::InstanceModelState::Ready,
+        }]),
+    };
+    entry[0].report(report).await.expect("the hub takes it");
+    let state = |records: &BTreeMap<String, CellRecord>| {
+        records.get("model-x-01").map(|record| {
+            (
+                record.epoch,
+                record.models.iter().map(|m| m.state).collect::<Vec<_>>(),
+            )
+        })
+    };
+    let before = holds(&parent.directory, "model_x", "the model ready", |records| {
+        state(records).is_some_and(|(_, states)| states == [gdl_cells::ModelState::Ready])
+    })
+    .await;
+    let (epoch, _) = state(&before).expect("held");
+    let read = watcher
+        .held(&at, "model_x", "model-x-01")
+        .await
+        .expect("the parent answers")
+        .expect("it holds the child's record");
+    assert_eq!(read, before["model-x-01"]);
+    drop(watch);
+    drop(entry);
+    child.hub.shutdown().await.expect("the child's hub stops");
+
+    let child = relay_cell(&spec, settings, quiet_timing()).await;
+    let after = holds(
+        &parent.directory,
+        "model_x",
+        "the restarted child",
+        |records| state(records).is_some_and(|(later, _)| later > epoch),
+    )
+    .await;
+    assert_eq!(
+        state(&after).map(|(_, states)| states),
+        Some(vec![gdl_cells::ModelState::Unavailable])
+    );
+    assert!(after["model-x-01"].models_version > before["model-x-01"].models_version);
+    child.hub.shutdown().await.expect("the child's hub stops");
+    parent.hub.shutdown().await.expect("the parent's hub stops");
+}
+
+/// A child's hub that cannot read its last record from its parent, which
+/// answers 503 the first time, does not take that for a cell with no
+/// record: it reads again before it reports, and its first report keeps
+/// the models' history. A model that was `ready` is `unavailable`, not
+/// gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_reads_its_last_record_again_when_its_parent_does_not_answer() {
+    let mut held = child_record(
+        "model-x-01",
+        "model-x-01-hub:1337",
+        (5, 9),
+        Duration::from_secs(30),
+    );
+    held.models = vec![gdl_cells::ModelEntry {
+        model: "m".into(),
+        routing_key: None,
+        state: gdl_cells::ModelState::Ready,
+        since: 3,
+    }];
+    held.models_version = 3;
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (arrivals, mut arrived) = watch::channel(Vec::<CellRecord>::new());
+    let arrivals = Arc::new(Mutex::new(arrivals));
+    let counted = Arc::clone(&reads);
+    let app = Router::new()
+        .route(
+            &format!("/v1/ext/{}{}", gdl_watch::EXTENSION, gdl_watch::HELD_ROUTE),
+            velo_hub::axum::routing::get(move || {
+                let first = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                let held = held.clone();
+                async move {
+                    use velo_hub::axum::response::IntoResponse;
+                    if first {
+                        velo_hub::axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
+                    } else {
+                        Json(held).into_response()
+                    }
+                }
+            }),
+        )
+        .route(
+            &format!(
+                "/v1/ext/{}{}",
+                gdl_watch::EXTENSION,
+                gdl_watch::REPORT_ROUTE
+            ),
+            post(move |Json(report): Json<Report>| {
+                if let Report::Record(record) = report {
+                    arrivals
+                        .lock()
+                        .expect("the arrivals")
+                        .send_modify(|arrived| arrived.push(record));
+                }
+                async {
+                    Json(ReportReply {
+                        interval_ms: 10_000,
+                    })
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let address = listener.local_addr().expect("an address").to_string();
+    tokio::spawn(async move { velo_hub::axum::serve(listener, app).await });
+
+    let child = relay_cell(&spec(), model("model-x-01", &address), quiet_timing()).await;
+    let first = tokio::time::timeout(WAIT, arrived.wait_for(|arrived| !arrived.is_empty()))
+        .await
+        .expect("a report in time")
+        .expect("the parent runs")[0]
+        .clone();
+    assert!(reads.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    assert!(first.epoch > 5, "{first:?}");
+    assert_eq!(
+        first
+            .models
+            .iter()
+            .map(|m| (m.model.as_str(), m.state))
+            .collect::<Vec<_>>(),
+        [("m", gdl_cells::ModelState::Unavailable)]
+    );
+    assert!(first.models_version > 3);
+    child.hub.shutdown().await.expect("the child's hub stops");
 }

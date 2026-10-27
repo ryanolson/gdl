@@ -15,7 +15,9 @@ use crate::{CellEvent, CellRecord, Version, Withdrawal};
 ///   cannot bring the record back, also across a [`CellEvent::Resnapshot`].
 /// - A record is expired once the reader's clock shows its `seq`
 ///   unchanged for longer than its lease, measured from when this view saw
-///   the `seq` change, never from a time in the record. An expired record
+///   the `seq` change, never from a time in the record. Only a record
+///   that is `serving` has a lease ([`CellRecord::leased`]): one scaled to
+///   0 sends no heartbeat, and never expires. An expired record
 ///   is not offered, and a late copy of the same version does not make it
 ///   fresh again; a newer one does.
 /// - A completed snapshot drops the cells it did not hold, keeping the
@@ -147,6 +149,6 @@ impl CellView {
 
 impl Seen {
     fn fresh(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.changed) <= self.record.lease
+        !self.record.leased() || now.saturating_duration_since(self.changed) <= self.record.lease
     }
 }

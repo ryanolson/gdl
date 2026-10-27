@@ -324,16 +324,39 @@ These entries concern the cell plane. See [Classes and cells](../concepts/cells.
 
 ### The relay directory has no mesh, and a parent's hub keeps its children's records in memory
 - **What:** under the `relay` backend, a child cell's hub reports its record to its parent's hub, and to no other. So a parent sees only its own children, and no hub sees another parent's children. A parent's hub that is down hides its children from it until it returns. A parent's hub that restarts starts with an empty directory, and has no children until each one's next report, which comes within the parent's heartbeat (10 s) or a third of the child's lease, whichever is shorter.
-- **Child's start:** a child's hub settles its epoch, and serves its cell's watch, only once its parent's hub has taken a report. While its parent's hub cannot be reached from the child's start, the child's instances cannot watch their own cell, so they do not learn of a drain. The child reports again on each change of state and at its own heartbeat.
+- **Child's start:** a child's hub first reads its cell's last record from its parent's hub, every 1 s until it can. It settles its epoch, and serves its cell's watch, only once its parent's hub has taken a report. While its parent's hub cannot be reached from the child's start, the child's instances cannot watch their own cell, so they do not learn of a drain. The child reports again on each change of state and at its own heartbeat.
 - **Contract:** so `relay` does not keep two of the directory's rules ([The contract](../concepts/cells.md#the-contract)). A record is not kept until its cell withdraws it: a parent's hub that restarts loses it, and one whose lease has passed is left out of a new watch of the parent's directory. And a watch does not give every record of the class, only the hub's own children. `crates/gdl-cells/tests/relay.rs` holds the first; `the_middle_of_a_chain_reports_up_and_holds_its_childrens_records` and `the_parent_refuses_what_it_cannot_verify` in `crates/gdl-hub/tests/relay.rs` hold the second.
 - **Why:** the mesh among parent hubs, from seeds, is not built, and a hub keeps its state in memory, as it keeps its registrations.
 - **Workaround:** a backend that keeps every rule, such as `dir` on one host, or one of another crate given to `gdl_hub::hub_builder_with`.
+- **Models:** a child's hub that restarts reads its cell's last record from its parent's hub, which keeps the history of the cell's models. If the parent's hub restarted too, it holds nothing, and the child's models start with no history: a model that was `ready` is published as `starting` until an instance reports it.
 - **Lifts:** the relay mesh among parent hubs, and a hub that keeps its state across a restart.
 
 ### A child's report to its parent's hub carries no credential
-- **What:** `POST /v1/ext/gdl-cell/report` on a parent hub's public listener takes a child's record or withdrawal from anyone who can reach it. The parent refuses a record whose `home` is another cell, whose contract or placement hash is not its own, or that is not newer than what it holds. Nothing else checks who wrote it. So anyone who can reach the parent's hub can report a record that names a hub of their choice, and the parent's choosers then offer that hub work.
-- **Why:** the report route trusts the private network, as an instance's registration and velo's traffic do. No credential crosses cells until the private CA exists.
+- **What:** `POST /v1/ext/gdl-cell/report` on a parent hub's public listener takes a child's record or withdrawal from anyone who can reach it, and `GET /v1/ext/gdl-cell/report/{class}/{cell}` answers a child's record to anyone who asks. The parent refuses a record whose `home` is another cell, whose contract or placement hash is not its own, or that is not newer than what it holds. Nothing else checks who wrote it. So anyone who can reach the parent's hub can report a record that names a hub of their choice, and the parent's choosers then offer that hub work.
+- **Why:** the report route and the read of a child's record trust the private network, as an instance's registration and velo's traffic do. No credential crosses cells until the private CA exists.
 - **Lifts:** hub TLS with client certificates and authenticated names, from the private CA.
+
+### Nothing reads a cell's models yet
+- **What:** a cell's hub publishes its presence and its models in its record. A parent's hub reads only the presence: it does not follow a cell scaled to 0, and ends a follow of one. No hub, chooser, or node reads the models.
+- **Why:** the record is the writer's side. The model index that choosers and a model gate read is not built.
+- **Lifts:** a model index built from directory records, in the chooser's table.
+
+### Two rare restarts lose part of a model's history
+- **What:** a hub that took the report that ends a drain, and restarted before it stored a record that says `drained`, reads the earlier record: the model is `unavailable`, not `drained`, until the cell withdraws. And under a parent of an earlier build, which answers no read of a child's record, a restarted hub whose epoch equals its predecessor's to the millisecond can publish a lower `models_version` than its predecessor did.
+- **Impact:** both fail safe. The model stays listed, and nothing is removed.
+- **Why:** the hub answers a report once it has taken it, not once a record that carries it is stored, and the instance then forgets the drain. Two writers of one epoch are told apart only by their sequence numbers.
+- **Workaround:** withdraw the cell, or drain the model again.
+- **Lifts:** a hub that answers a report only once a record that carries it is stored, or an instance that reports a drained model for a while after.
+
+### A declared model cannot be drained
+- **What:** a model from `[cell] models` is `ready` while the cell has a usable entry instance that reports no list of its own, and `unavailable` while it has none. Removing it from the settings leaves it `unavailable` in the record, never `drained`, until the cell withdraws.
+- **Why:** a declared model has no instance that says it removes it.
+- **Workaround:** report the models from a node with `gdl::InstanceModels`, which can drain one.
+
+### A cell is told it is scaled to 0 by hand, and a hub starts serving
+- **What:** nothing in gdl calls `POST /v1/ext/gdl-cell/presence`: an operator, or the tool that scales the cell, calls it before the cell's instances stop. A hub that restarts starts `serving`, whatever its last record said, and its heartbeat makes it read as missing if it then stops.
+- **Why:** no autoscaler or operator hook is built, and a hub that came up is taken to serve.
+- **Lifts:** an operator command that writes the record when the hub is already gone, and a hook in the tool that scales cells.
 
 ### A cell's settings without a fleet file are not checked against the other cells
 - **What:** a fleet file refuses a cell of a class that is sent to without a `home`, a `home` that names no cell or a cell of a class that does not send to this one, a `home` on a cell of a class nothing sends to, and a parent without a child of each class its class sends to. It cannot judge a parent's children in a layout whose classes it does not know, and says so. Cell settings given without a fleet file are not checked: a cell of a class that is sent to with no `home`, or with a `home` that names no cell, is followed by no hub and never chosen. A hub publishes no `home` for a cell of a class nothing sends to.  A hub follows its children only. Region plays no part in following, and no round trip is measured.

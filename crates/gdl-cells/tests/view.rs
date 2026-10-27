@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use gdl_cells::{CellEvent, CellRecord, CellState, CellView, ResumeToken, Withdrawal};
+use gdl_cells::{CellEvent, CellRecord, CellState, CellView, Presence, ResumeToken, Withdrawal};
 
 const LEASE: Duration = Duration::from_secs(30);
 
@@ -21,6 +21,9 @@ fn record(name: &str, epoch: u64, seq: u64) -> CellRecord {
         hub: format!("{name}:1337"),
         lease: LEASE,
         load: None,
+        presence: Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
     }
 }
 
@@ -200,4 +203,31 @@ fn a_cell_a_snapshot_drops_is_not_brought_back_by_a_late_copy() {
     assert_eq!(seen(&view, "m1", now), None);
     view.apply(put("m1", 1, 6), now);
     assert_eq!(seen(&view, "m1", now), Some((1, 6)));
+}
+
+/// A cell scaled to 0 on purpose sends no heartbeat, so its record never
+/// lapses: the reader tells it from a cell that is missing. Once it serves
+/// again, its lease counts from the record that says so.
+#[test]
+fn a_record_scaled_to_zero_does_not_expire() {
+    let now = Instant::now();
+    let mut view = CellView::new();
+    let scaled = CellRecord {
+        presence: Presence::ScaledToZero,
+        ..record("m1", 1, 1)
+    };
+    view.apply(
+        CellEvent::Put {
+            record: scaled,
+            token: ResumeToken::new("model_x", 1),
+        },
+        now,
+    );
+    view.apply(put("m2", 1, 1), now);
+    let later = now + LEASE * 1_000;
+    assert_eq!(seen(&view, "m1", later), Some((1, 1)));
+    assert_eq!(names(&view, later), ["m1"]);
+    view.apply(put("m1", 1, 2), later);
+    assert_eq!(seen(&view, "m1", later + LEASE), Some((1, 2)));
+    assert_eq!(seen(&view, "m1", later + LEASE * 2), None);
 }

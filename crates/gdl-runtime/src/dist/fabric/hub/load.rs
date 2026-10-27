@@ -1,11 +1,13 @@
 //! An entry instance's load reports to its own cell's hub: once a summary
 //! period, what its admission holds, through velo-hub's extension client
-//! with the instance's own credential. A report reads counters the
+//! with the instance's own credential, with the models its nodes say it
+//! has; and at once when those change. A report reads counters the
 //! admission and the forward entries already keep, so a request's path
 //! gains nothing.
 
 use std::time::Duration;
 
+use gdl::InstanceModels;
 use gdl_watch::LoadReport;
 use tokio::task::JoinHandle;
 use velo::InstanceId;
@@ -23,16 +25,20 @@ impl HubSession {
     /// instance started for the first report, so a report it refused, or
     /// that went unanswered, loses none. A refusal is no failure of the
     /// instance's: it is logged once, until a report is taken again. `read`
-    /// gives `None` when there is nothing to report.
+    /// gives `None` when there is nothing to report. Each report carries
+    /// the list `models` holds, if a node set one, and a change of it is
+    /// reported at once; once the hub takes a report, `models` hears what
+    /// it carried, so that a drain it carried can leave the list.
     pub(crate) fn report_load(
         &self,
         instance: InstanceId,
         period: Duration,
         read: impl Fn() -> Option<SegmentLoad> + Send + 'static,
+        models: InstanceModels,
     ) -> JoinHandle<()> {
         let ext = self.client.ext(gdl_watch::EXTENSION);
         let path = gdl_watch::load_path(instance);
-        tokio::spawn(report(period, read, move |report| {
+        tokio::spawn(report(period, read, models, move |report| {
             let (ext, path) = (ext.clone(), path.clone());
             async move {
                 ext.control_post::<_, ()>(&path, &report)
@@ -45,8 +51,12 @@ impl HubSession {
 
 /// [`HubSession::report_load`]'s reports, each given to `send`, whose
 /// answer says whether the hub took it.
-async fn report<F, Fut>(period: Duration, read: impl Fn() -> Option<SegmentLoad>, mut send: F)
-where
+async fn report<F, Fut>(
+    period: Duration,
+    read: impl Fn() -> Option<SegmentLoad>,
+    models: InstanceModels,
+    mut send: F,
+) where
     F: FnMut(LoadReport) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
@@ -57,12 +67,18 @@ where
     // started is the first report's.
     let mut taken = 0;
     let mut refused: Option<String> = None;
+    let mut said = models.watch();
     loop {
-        ticks.tick().await;
+        tokio::select! {
+            _ = ticks.tick() => {}
+            Ok(()) = said.changed() => {}
+        }
         let Some(load) = read() else {
             continue;
         };
+        let carried = said.borrow_and_update().clone();
         let report = LoadReport {
+            models: carried.as_deref().map(<[_]>::to_vec),
             admitted: wide(load.admitted),
             limit: wide(load.limit),
             refusals: wide(load.declined.saturating_sub(taken)),
@@ -76,6 +92,9 @@ where
         match answer {
             Ok(()) => {
                 taken = load.declined;
+                if let Some(carried) = &carried {
+                    models.taken(carried);
+                }
                 if refused.take().is_some() {
                     tracing::info!("the cell's hub takes this instance's load reports again");
                 }
@@ -97,6 +116,7 @@ fn wide(count: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{LoadReport, SegmentLoad, report};
+    use gdl::InstanceModels;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -111,10 +131,23 @@ mod tests {
         mpsc::UnboundedReceiver<LoadReport>,
         tokio::task::JoinHandle<()>,
     ) {
+        reporting_models(load, taken, &InstanceModels::new())
+    }
+
+    /// [`reporting`], with the models the instance's nodes set on `models`.
+    fn reporting_models(
+        load: SegmentLoad,
+        taken: bool,
+        models: &InstanceModels,
+    ) -> (
+        mpsc::UnboundedReceiver<LoadReport>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (sent, reports) = mpsc::unbounded_channel();
         let task = tokio::spawn(report(
             PERIOD,
             move || Some(load),
+            models.clone(),
             move |report| {
                 let _ = sent.send(report);
                 async move {
@@ -149,6 +182,7 @@ mod tests {
         assert_eq!(
             next(&mut reports).await,
             LoadReport {
+                models: None,
                 admitted: 1,
                 limit: 4,
                 refusals: 3,
@@ -170,6 +204,67 @@ mod tests {
         let (mut reports, task) = reporting(load, false);
         assert_eq!(next(&mut reports).await.refusals, 2);
         assert_eq!(next(&mut reports).await.refusals, 2);
+        task.abort();
+    }
+}
+
+#[cfg(test)]
+mod models {
+    use super::{LoadReport, SegmentLoad, report};
+    use gdl::{InstanceModel, InstanceModelState, InstanceModels};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    const PERIOD: Duration = Duration::from_secs(10);
+
+    fn ready(name: &str) -> InstanceModel {
+        InstanceModel {
+            model: name.into(),
+            routing_key: None,
+            state: InstanceModelState::Ready,
+        }
+    }
+
+    /// A change of the instance's models is reported at once, not at the
+    /// next period, and every report after it carries the list, so that a
+    /// hub that lost it, by a restart or a refused report, has it again
+    /// within a period. With no list set, a report carries none.
+    #[tokio::test(start_paused = true)]
+    async fn a_change_of_models_is_reported_at_once_and_every_period() {
+        let models = InstanceModels::new();
+        let (sent, mut reports) = mpsc::unbounded_channel::<(LoadReport, tokio::time::Instant)>();
+        let load = SegmentLoad {
+            admitted: 0,
+            limit: 4,
+            declined: 0,
+        };
+        let start = tokio::time::Instant::now();
+        let task = tokio::spawn(report(
+            PERIOD,
+            move || Some(load),
+            models.clone(),
+            move |report| {
+                let _ = sent.send((report, tokio::time::Instant::now()));
+                async { Ok(()) }
+            },
+        ));
+        let mut next = async || {
+            tokio::time::timeout(PERIOD * 2, reports.recv())
+                .await
+                .expect("a report in time")
+                .expect("the reports go on")
+        };
+        let (first, at) = next().await;
+        assert_eq!(first.models, None);
+        assert_eq!(at - start, PERIOD);
+
+        tokio::time::advance(PERIOD / 2).await;
+        models.set([ready("m")]).expect("a list");
+        let (changed, at) = next().await;
+        assert_eq!(changed.models, Some(vec![ready("m")]));
+        assert_eq!(at - start, PERIOD + PERIOD / 2, "at once");
+        let (later, _) = next().await;
+        assert_eq!(later.models, Some(vec![ready("m")]));
         task.abort();
     }
 }

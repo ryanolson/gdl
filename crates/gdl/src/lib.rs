@@ -30,6 +30,7 @@ mod items;
 #[doc(hidden)]
 mod meter;
 mod metrics;
+mod models;
 mod policy;
 mod records;
 mod role;
@@ -44,10 +45,14 @@ pub use cx::{Cx, Deadline, RequestId};
 pub use error::{Error, ErrorKind, Result};
 pub use followed::{ClassCells, FollowedCells};
 pub use gdl_macros::{Config, Endpoints, Metrics};
-pub use gdl_model::{ConfigField, ConfigSchema, ConfigValue, Encoding, MetricField, MetricKind};
+pub use gdl_model::{
+    ConfigField, ConfigSchema, ConfigValue, Encoding, InstanceModel, InstanceModelState,
+    MetricField, MetricKind,
+};
 pub use identity::{IdentityNode, IdentityOperator};
 pub use items::{Items, items};
 pub use metrics::Metrics;
+pub use models::InstanceModels;
 pub use policy::{
     Cell, CellChoice, CellPolicies, CellPolicy, CellRequest, CellState, ChoiceLease, Damped,
     HomeFirst, HomeFirstAt, Load, LoadSummary, NoCell, RoundRobin,

@@ -493,23 +493,22 @@ async fn instances<H: Register + Send + Sync + 'static>(
     assemble: &(dyn Fn(&Deployment) -> gdl::Result<H> + Sync),
 ) -> ModelCell<H> {
     let entries = cell.entries;
-    let config = settings(
+    let (public, control) = (
         public.unwrap_or(hub.public_addr().port()),
         hub.control_addr().port(),
-        5_000,
-        extra,
     );
     // Each instance's launch waits for the others of its class.
     let mut segments = vec!["d"];
     segments.extend(std::iter::repeat_n("f", entries));
-    let mut running = join_all(segments.into_iter().map(|segment| {
-        let config = &config;
-        async move {
-            let runtime = configure(segment, config.runtime.clone());
-            run_graph(config, segment, spec, runtime, assemble)
-                .await
-                .expect("a model instance serves")
-        }
+    let mut running = join_all(segments.into_iter().map(|segment| async move {
+        // The launch reads the runtime the deployment does, as a segment
+        // binary's does.
+        let mut config = settings(public, control, 5_000, extra);
+        config.runtime = configure(segment, config.runtime.clone());
+        let runtime = config.runtime.clone();
+        run_graph(&config, segment, spec, runtime, assemble)
+            .await
+            .expect("a model instance serves")
     }))
     .await;
     let entries = running.split_off(1);

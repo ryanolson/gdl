@@ -3,7 +3,11 @@
 
 use std::time::Duration;
 
-use gdl_cells::{CellRecord, CellState, DirectoryError, LoadSummary, Version, Withdrawal};
+use gdl_cells::{
+    CellRecord, CellState, DirectoryError, LoadSummary, ModelEntry, ModelState, Presence, Version,
+    Withdrawal,
+};
+use serde::Deserialize;
 
 fn record() -> CellRecord {
     CellRecord {
@@ -25,6 +29,22 @@ fn record() -> CellRecord {
             refusals: 1,
             period_ms: 10_000,
         }),
+        presence: Presence::Serving,
+        models: vec![
+            ModelEntry {
+                model: "llama-70b".into(),
+                routing_key: None,
+                state: ModelState::Ready,
+                since: 2,
+            },
+            ModelEntry {
+                model: "qwen-32b".into(),
+                routing_key: Some("a".into()),
+                state: ModelState::Drained,
+                since: 3,
+            },
+        ],
+        models_version: 3,
     }
 }
 
@@ -232,4 +252,163 @@ fn a_publishable_record_keeps_its_lease_through_json() {
         let read: CellRecord = serde_json::from_str(&text).expect("a record");
         assert_eq!(read.lease, lease, "{text}");
     }
+}
+
+/// The record's presence and models, on the wire: a record with none of
+/// them leaves them out, and reads back the same.
+#[test]
+fn a_record_carries_its_presence_and_models() {
+    let text = serde_json::to_string(&record()).expect("json");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(value["presence"], "serving", "{text}");
+    assert_eq!(value["models_version"], 3, "{text}");
+    assert_eq!(
+        value["models"],
+        serde_json::json!([
+            {"model": "llama-70b", "state": "ready", "since": 2},
+            {"model": "qwen-32b", "routing_key": "a", "state": "drained", "since": 3},
+        ]),
+        "{text}"
+    );
+    let scaled = CellRecord {
+        presence: Presence::ScaledToZero,
+        models: Vec::new(),
+        models_version: 0,
+        ..record()
+    };
+    let text = serde_json::to_string(&scaled).expect("json");
+    assert!(text.contains(r#""presence":"scaled_to_zero""#), "{text}");
+    assert!(!text.contains("models"), "{text}");
+    assert_eq!(
+        serde_json::from_str::<CellRecord>(&text).expect("a record"),
+        scaled
+    );
+    for state in [
+        ModelState::Starting,
+        ModelState::Ready,
+        ModelState::Unavailable,
+        ModelState::Draining,
+        ModelState::Drained,
+    ] {
+        let text = serde_json::to_string(&state).expect("json");
+        assert_eq!(
+            serde_json::from_str::<ModelState>(&text).expect("a state"),
+            state
+        );
+    }
+}
+
+/// A record as a build from before presence and models writes it reads
+/// as a serving cell with no models.
+#[test]
+fn a_record_without_presence_or_models_reads_as_serving_with_none() {
+    let mut value = serde_json::to_value(record()).expect("json");
+    let fields = value.as_object_mut().expect("an object");
+    for field in ["presence", "models", "models_version"] {
+        fields.remove(field);
+    }
+    let read: CellRecord = serde_json::from_value(value).expect("a record");
+    assert_eq!(
+        read,
+        CellRecord {
+            presence: Presence::Serving,
+            models: Vec::new(),
+            models_version: 0,
+            ..record()
+        }
+    );
+}
+
+/// The record as a hub of the build before presence and models reads it:
+/// every field it knows, and nothing else. Frozen here, so that a change
+/// to the record that such a hub could not read fails this test.
+#[derive(Debug, Deserialize)]
+struct EarlierRecord {
+    name: String,
+    class: String,
+    region: String,
+    #[serde(default)]
+    home: Option<String>,
+    contract: u64,
+    placement: u64,
+    state: CellState,
+    epoch: u64,
+    seq: u64,
+    hub: String,
+    lease_ms: u64,
+    #[serde(default)]
+    load: Option<LoadSummary>,
+}
+
+/// A hub of the earlier build reads a record with presence and models,
+/// whatever they hold, as the record it was: builds roll cell by cell.
+#[test]
+fn an_earlier_reader_reads_a_record_with_presence_and_models() {
+    let published = CellRecord {
+        presence: Presence::ScaledToZero,
+        ..record()
+    };
+    let text = serde_json::to_string(&published).expect("json");
+    let read: EarlierRecord = serde_json::from_str(&text).expect("an earlier record");
+    let EarlierRecord {
+        name,
+        class,
+        region,
+        home,
+        contract,
+        placement,
+        state,
+        epoch,
+        seq,
+        hub,
+        lease_ms,
+        load,
+    } = read;
+    let earlier = CellRecord {
+        name,
+        class,
+        region,
+        home,
+        contract,
+        placement,
+        state,
+        epoch,
+        seq,
+        hub,
+        lease: Duration::from_millis(lease_ms),
+        load,
+        ..published.clone()
+    };
+    assert_eq!(earlier, published, "{text}");
+}
+
+/// The lease is a heartbeat's: a cell scaled to 0 on purpose sends none,
+/// so its record never lapses on a reader's clock.
+#[test]
+fn only_a_serving_record_has_a_lease() {
+    assert!(record().leased());
+    assert!(
+        !CellRecord {
+            presence: Presence::ScaledToZero,
+            ..record()
+        }
+        .leased()
+    );
+}
+
+/// The models are not checked with the record: a parent that refused a
+/// record for one malformed model would drop the whole cell.
+#[test]
+fn a_record_is_not_refused_for_its_models() {
+    CellRecord {
+        models: vec![ModelEntry {
+            model: String::new(),
+            routing_key: Some(String::new()),
+            state: ModelState::Ready,
+            since: 1,
+        }],
+        ..record()
+    }
+    .check()
+    .expect("a record with a malformed model");
 }

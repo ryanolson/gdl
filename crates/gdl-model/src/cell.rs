@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Layout, Problem, Problems, check_layout_name};
+use crate::{Layout, ModelKey, Problem, Problems, check_layout_name};
 
 /// A cell's own settings: the `[cell]` table of a segment's settings
 /// (`GDL_CELL__NAME`, `GDL_CELL__READY__<SEGMENT>`, and so on), which tells
@@ -36,6 +36,13 @@ use crate::{Layout, Problem, Problems, check_layout_name};
 /// e = 4
 /// [requires]                   # optional: ready cells of each class it sends to that its health needs; 1 of each when unsaid
 /// model_y = 1
+/// ```
+///
+/// A cell whose instances report no models of their own declares, for its
+/// hub alone, the models it serves:
+///
+/// ```toml
+/// models = [{ model = "llama-70b" }, { model = "qwen-32b", routing_key = "a" }]
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Table", into = "Table")]
@@ -93,6 +100,10 @@ pub struct CellSettings {
     /// and how many watches it serves at once. Only the cell's hub reads
     /// it.
     pub timing: HubTiming,
+    /// The models the cell serves when its entry instances report none of
+    /// their own (`models`): each usable entry instance that reports no
+    /// list serves them. Only the cell's hub reads it.
+    pub models: Vec<ModelKey>,
 }
 
 /// How a cell's hub paces its judgment, its record, and its watches, and
@@ -448,10 +459,19 @@ impl CellSettings {
                 )),
                 _ => None,
             };
+            let models = (!self.models.is_empty() && sent_to(layout, class).is_none()).then(|| {
+                at(
+                    "models".into(),
+                    format!(
+                        "no class sends to class `{class}`, so its cell serves no models to another"
+                    ),
+                )
+            });
             own.into_iter()
                 .chain(strays)
                 .chain(requires)
                 .chain(reports)
+                .chain(models)
                 .collect()
         }
     }
@@ -640,6 +660,8 @@ struct Table {
     watch_caps: Caps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     keyed_capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    models: Vec<ModelKey>,
 }
 
 /// The `[watch_caps]` table as written: each cap that is set.
@@ -749,6 +771,16 @@ impl TryFrom<Table> for CellSettings {
         }
         let summary = Duration::from_millis(table.summary_ms);
         check_summary(summary).map_err(|why| at("summary_ms", why))?;
+        let mut declared = BTreeSet::new();
+        for model in &table.models {
+            model.check().map_err(|why| at("models", why))?;
+            if !declared.insert(model) {
+                return Err(at(
+                    "models",
+                    format!("model `{}` is declared twice", model.model),
+                ));
+            }
+        }
         Ok(Self {
             name: table.name,
             layout: table.layout,
@@ -761,6 +793,7 @@ impl TryFrom<Table> for CellSettings {
             hub: table.hub,
             summary,
             timing,
+            models: table.models,
         })
     }
 }
@@ -918,6 +951,7 @@ impl From<CellSettings> for Table {
                 settings.timing.keyed_capacity,
                 HubTiming::DEFAULT_KEYED_CAPACITY,
             ),
+            models: settings.models,
         }
     }
 }

@@ -17,7 +17,7 @@ use super::{
     RELEASE_ROUTE, REPORT_ROUTE, RelayWatcher, Report, ReportRefusal, ReportReply, UnknownEvent,
     UnknownFollowEvent, WATCH_ROUTE, WatchFailure, WatchLimits, Watched,
 };
-use gdl_cells::DirectoryError;
+use gdl_cells::{CellRecord, DirectoryError};
 use serde::Serialize;
 
 /// One item of a watch: an event, or why the watch ended, its last item.
@@ -170,6 +170,41 @@ impl CellWatcher {
         match serde_json::from_slice::<ReportRefusal>(&body) {
             Ok(refusal) if status.is_client_error() => Err(refusal.into_error(class, cell)),
             _ => Err(unavailable(&status)),
+        }
+    }
+
+    /// The record the parent cell's hub at `hub`, `host:port`, holds for
+    /// the cell `cell` of `class` ([`crate::HELD_ROUTE`]): `None` when it
+    /// holds none. A parent that cannot be reached, or answers anything
+    /// else, is [`DirectoryError::Unavailable`].
+    pub async fn held(
+        &self,
+        hub: &str,
+        class: &str,
+        cell: &str,
+    ) -> Result<Option<CellRecord>, DirectoryError> {
+        gdl_model::check_hub_address(hub).map_err(DirectoryError::Unavailable)?;
+        let url = format!(
+            "http://{hub}/v1/ext/{EXTENSION}{}",
+            crate::held_path(class, cell)
+        );
+        let unavailable =
+            |e: &dyn std::fmt::Display| DirectoryError::Unavailable(format!("GET {url}: {e}"));
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| unavailable(&e))?;
+        match response.status() {
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            status if status.is_success() => {
+                let body = response.bytes().await.map_err(|e| unavailable(&e))?;
+                serde_json::from_slice(&body)
+                    .map(Some)
+                    .map_err(|e| unavailable(&e))
+            }
+            status => Err(unavailable(&status)),
         }
     }
 

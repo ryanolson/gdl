@@ -61,6 +61,9 @@ fn relay() -> Arc<Relay> {
 
 fn record(hub: String) -> CellRecord {
     CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "m".into(),
         class: "model_x".into(),
         region: "r".into(),

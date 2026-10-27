@@ -49,6 +49,22 @@ pub struct CellRecord {
     /// was when the record was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load: Option<LoadSummary>,
+    /// Whether the cell sends a heartbeat, or was scaled to 0 on purpose
+    /// and sends none. `serving` when a record does not say.
+    #[serde(default)]
+    pub presence: Presence,
+    /// The models the cell serves, each with its state. An entry stays
+    /// until the cell withdraws, unless it is `drained`: at most
+    /// [`CellRecord::MAX_DRAINED`] of those are kept, the oldest dropped
+    /// first. Not checked with the record, so that one malformed model
+    /// never costs the cell its record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelEntry>,
+    /// Raised on every change of `models`, and never lowered, also across
+    /// a restart of the cell's hub, which counts from its epoch in the high
+    /// bits: a reader that holds this version holds this list.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub models_version: u64,
 }
 
 impl CellRecord {
@@ -56,12 +72,22 @@ impl CellRecord {
     /// lease, three of its default heartbeats.
     pub const DEFAULT_LEASE: Duration = gdl_model::HubTiming::DEFAULT_LEASE;
 
+    /// The most `drained` model entries a record keeps.
+    pub const MAX_DRAINED: usize = 1_000;
+
     /// The record's place in its writer's order of writes.
     pub fn version(&self) -> Version {
         Version {
             epoch: self.epoch,
             seq: self.seq,
         }
+    }
+
+    /// Whether a reader applies the record's lease: only to a cell that
+    /// is `serving`, since a cell scaled to 0 sends no heartbeat, and its
+    /// record stays until it serves again or withdraws.
+    pub fn leased(&self) -> bool {
+        self.presence == Presence::Serving
     }
 
     /// Whether the record can be published: its cell, parent, region, and
@@ -103,6 +129,63 @@ pub enum CellState {
     Unavailable,
     /// The cell is draining: no new work.
     Draining,
+}
+
+/// Whether a cell is expected to answer: the distinction between a cell
+/// scaled to 0 on purpose and one that is expected but silent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Presence {
+    /// The cell's hub sends a heartbeat: a reader that sees none for the
+    /// lease holds the cell missing.
+    #[default]
+    Serving,
+    /// The cell was scaled to 0 on purpose, and sends no heartbeat.
+    ScaledToZero,
+}
+
+/// One model a cell serves, in its record.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelEntry {
+    /// The name a client sends.
+    pub model: String,
+    /// The serving partition, when the cell has more than one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_key: Option<String>,
+    /// What the cell can do with the model, with its history.
+    pub state: ModelState,
+    /// The record's `models_version` at which the entry took its state:
+    /// it orders the `drained` entries, oldest first.
+    pub since: u64,
+}
+
+impl ModelEntry {
+    /// The entry's key.
+    pub fn key(&self) -> gdl_model::ModelKey {
+        gdl_model::ModelKey {
+            model: self.model.clone(),
+            routing_key: self.routing_key.clone(),
+        }
+    }
+}
+
+/// What a cell can do with one model, as its hub computes it from its
+/// entry instances: a state keeps what came before it, so that a model
+/// that served once never reads as one that never did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelState {
+    /// Registered, and never `ready` in this cell.
+    Starting,
+    /// A usable entry instance can serve it now.
+    Ready,
+    /// Was `ready`, and no usable entry instance can serve it now. Never
+    /// back to `starting`.
+    Unavailable,
+    /// Being removed on purpose: no new work.
+    Draining,
+    /// Removed on purpose.
+    Drained,
 }
 
 /// The load of a cell's entry segments, as the cell's hub makes it once a
@@ -197,6 +280,10 @@ fn refuse(problems: Vec<String>) -> Result<(), DirectoryError> {
     } else {
         Err(DirectoryError::Malformed(problems.join("; ")))
     }
+}
+
+fn is_zero(version: &u64) -> bool {
+    *version == 0
 }
 
 fn default_lease() -> Duration {

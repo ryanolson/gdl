@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use gdl_cells::{CellDirectory, CellRecord, CellState, LoadSummary};
+use gdl_cells::{CellDirectory, CellRecord, CellState, LoadSummary, Presence};
 use gdl_model::{CellSettings, DeploymentSpec};
 use serde::Deserialize;
 use tokio::sync::watch;
@@ -41,6 +41,7 @@ mod followers;
 mod health;
 mod judge;
 mod load;
+mod models;
 mod publish;
 mod retiring;
 mod timing;
@@ -98,7 +99,8 @@ pub use timing::{CellTiming, RefusedWatches};
 /// each class it sends to, it watches `directory`, and follows each child
 /// of its cell in the class (a cell whose record names this cell as its
 /// parent, `home`, has this deployment's contract and placement hashes,
-/// and is `ready` or `degraded`, whatever its region) over the cell's
+/// is `ready` or `degraded`, and is not scaled to 0, whatever its region)
+/// over the cell's
 /// watch, one link per cell. It
 /// relays what it follows on `GET follows`, server-sent events, each one
 /// [`gdl_watch::FollowEvent`] as JSON, with the same keep-alive and buffer as
@@ -158,6 +160,20 @@ pub use timing::{CellTiming, RefusedWatches};
 /// watch sends it as a `load` event every period while there is one,
 /// changed or not, so that a watcher's age of it says how fresh it is,
 /// and once when there is none; the record carries it on its next write.
+/// A report may carry the instance's models
+/// ([`gdl_watch::LoadReport::models`]): from what its usable entry
+/// instances last said, or the models its settings declare
+/// (`[cell] models`) for one that says none, the hub makes the record's
+/// model entries, each with a state that keeps its history, and writes the
+/// record on each change of them.
+///
+/// The record says whether the cell serves or is scaled to 0 on purpose
+/// (`POST presence` on the control listener, a
+/// [`gdl_watch::SetPresence`], or [`CellReadiness::set_presence`] in
+/// process), answered once the directory has stored a record that says
+/// so. Before its first write, the hub reads the cell's last record, from
+/// its parent's hub under the `relay` backend, so that a restart keeps the
+/// models' history.
 ///
 /// The cell drains when asked, on the control listener: `POST drain`, or
 /// [`CellReadiness::drain`] in process. From then its state is `draining`
@@ -236,8 +252,12 @@ pub struct CellReadiness<D: CellDirectory> {
     watcher: OnceLock<CellWatcher>,
     /// The cell's drain.
     drain: Arc<Drain>,
-    /// The state of the cell's record last stored in the directory.
-    stored: watch::Sender<Option<CellState>>,
+    /// The state and presence of the cell's record last stored in the
+    /// directory.
+    stored: watch::Sender<Option<publish::Stored>>,
+    /// Whether the cell serves, or was scaled to 0 on purpose, as the hub
+    /// was last told.
+    presence: watch::Sender<publish::Asked>,
     /// A number drawn as the hub starts, which the watches it follows
     /// cells by carry, so that a cell's hub tells them from those of an
     /// earlier run of this hub.
@@ -253,6 +273,9 @@ pub struct CellReadiness<D: CellDirectory> {
     cadence: Option<watch::Receiver<Option<Duration>>>,
     /// The class that sends to the cell's class, whose cell is its parent.
     sender: Option<String>,
+    /// Under the `relay` backend, the directory that reads the cell's last
+    /// record from its parent's hub, which alone holds it.
+    parent: Option<HubDirectory>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -311,6 +334,9 @@ impl<D: CellDirectory> CellReadiness<D> {
             .map(|boundary| boundary.from.clone());
         let entered = sender.is_some();
         let record = CellRecord {
+            presence: gdl_cells::Presence::Serving,
+            models: Vec::new(),
+            models_version: 0,
             name: cell.name.clone(),
             class: cell.class.clone(),
             region: cell.region.clone(),
@@ -348,6 +374,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             cell.summary,
             timing.watch_buffer,
             timing.lease,
+            cell.models.clone(),
         );
         let sends: BTreeSet<String> = layout
             .boundaries()
@@ -383,11 +410,16 @@ impl<D: CellDirectory> CellReadiness<D> {
             watcher: OnceLock::new(),
             drain: Arc::new(Drain::new(class_segments)),
             stored: watch::Sender::new(None),
+            presence: watch::Sender::new(publish::Asked {
+                presence: Presence::Serving,
+                request: 0,
+            }),
             run: velo_hub::velo::InstanceId::new_v4().as_u128() as u64,
             released: Mutex::new(Some(released)),
             reports: None,
             cadence: None,
             sender,
+            parent: None,
             tasks: Mutex::default(),
         })
     }
@@ -399,10 +431,12 @@ impl<D: CellDirectory> CellReadiness<D> {
     /// [`gdl_watch::Report`]), whether or not the cell is healthy, since
     /// its health waits for its children; and it writes its record at the
     /// cadence its parent answers with, from the first answer on, rather
-    /// than at its own heartbeat. Its children's reports carry no
-    /// credential: the route trusts the private network, as registration
-    /// and velo's traffic do, and writes only what it verifies
-    /// ([`crate::VerifiedReport`]).
+    /// than at its own heartbeat. It answers the record it holds for a
+    /// child (`GET /v1/ext/gdl-cell/report/{class}/{cell}`), and reads its
+    /// own cell's last record from its parent the same way as it starts.
+    /// Its children's reports carry no credential: the route trusts the
+    /// private network, as registration and velo's traffic do, and writes
+    /// only what it verifies ([`crate::VerifiedReport`]).
     ///
     /// Refuses a lease shorter than [`gdl_model::HubTiming::MIN_RELAY_LEASE`]:
     /// the parent asks for a report no more often than every
@@ -428,6 +462,7 @@ impl<D: CellDirectory> CellReadiness<D> {
             self.timing.heartbeat,
         )));
         self.cadence = Some(directory.cadence());
+        self.parent = Some(directory.clone());
         Ok(self)
     }
 
@@ -493,12 +528,43 @@ impl<D: CellDirectory> CellReadiness<D> {
                 .wait_for(|health| health.state == CellState::Draining)
                 .await;
             let _ = stored
-                .wait_for(|state| *state == Some(CellState::Draining))
+                .wait_for(|stored| stored.is_some_and(|stored| stored.state == CellState::Draining))
                 .await;
         })
         .await;
         let health = shown.borrow().clone();
         Ok(health)
+    }
+
+    /// Say whether the cell serves, or is scaled to 0 on purpose, as
+    /// `POST presence` on the control listener does, and return once the
+    /// directory has stored a record that says so. A cell is told
+    /// `scaled_to_zero` before its instances stop, so that its readers
+    /// never hold it missing, and `serving` as it scales up again. A hub
+    /// starts `serving`. Refused when the directory has not stored such a
+    /// record within 5 s, or the hub has stopped: the presence holds all
+    /// the same, and its next write carries it.
+    pub async fn set_presence(&self, presence: Presence) -> Result<(), CellError> {
+        let mut request = 0;
+        self.presence.send_modify(|asked| {
+            asked.presence = presence;
+            asked.request += 1;
+            request = asked.request;
+        });
+        // Only a record stored with this request or a later one answers
+        // it: one stored before it may say the same, while a write of
+        // another presence has landed and waits for its answer.
+        let mut stored = self.stored.subscribe();
+        let wait = stored.wait_for(|stored| stored.is_some_and(|stored| stored.request >= request));
+        match tokio::time::timeout(SETTLE, wait).await {
+            Ok(Ok(stored)) if stored.is_some_and(|stored| stored.presence == presence) => Ok(()),
+            Ok(Ok(_)) => Err(CellError::new(format!(
+                "a later request replaced presence {presence:?} before it was stored"
+            ))),
+            _ => Err(CellError::new(format!(
+                "the directory has not stored the cell's record with presence {presence:?} in time"
+            ))),
+        }
     }
 
     /// How many watches of what the hub follows are open, as it changes.
@@ -591,8 +657,17 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                 feed: Arc::clone(&self.feed),
                 drain: Arc::clone(&self.drain),
                 stored: self.stored.clone(),
+                parent: self.parent.clone(),
             }
-            .run(written, summaries, cancel.clone()),
+            .run(
+                publish::Sources {
+                    states: written,
+                    presence: self.presence.subscribe(),
+                    loads: summaries,
+                    models: self.feed.models(),
+                },
+                cancel.clone(),
+            ),
         );
         let mut tasks = vec![counting, judging, publishing];
         // A class no hop enters has no entry instance to report, and so
@@ -683,22 +758,37 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
         let relaying = Arc::clone(&self.places.relay);
         let following = Arc::clone(&self.places.follow);
         let reports = self.reports.clone().map_or_else(Router::new, |reports| {
-            Router::new().route(
-                gdl_watch::REPORT_ROUTE,
-                post(move |Json(report): Json<gdl_watch::Report>| async move {
-                    match reports.take(report).await {
-                        Ok(reply) => Json(reply).into_response(),
-                        Err(refused) => {
-                            let status = match refused {
-                                gdl_cells::DirectoryError::Malformed(_) => StatusCode::BAD_REQUEST,
-                                _ => StatusCode::CONFLICT,
-                            };
-                            let refusal = gdl_watch::ReportRefusal::of(refused);
-                            (status, Json(refusal)).into_response()
+            let holding = Arc::clone(&reports);
+            Router::new()
+                .route(
+                    gdl_watch::HELD_ROUTE,
+                    get(
+                        move |Path((class, cell)): Path<(String, String)>| async move {
+                            match holding.held(&class, &cell) {
+                                Some(record) => Json(record).into_response(),
+                                None => StatusCode::NOT_FOUND.into_response(),
+                            }
+                        },
+                    ),
+                )
+                .route(
+                    gdl_watch::REPORT_ROUTE,
+                    post(move |Json(report): Json<gdl_watch::Report>| async move {
+                        match reports.take(report).await {
+                            Ok(reply) => Json(reply).into_response(),
+                            Err(refused) => {
+                                let status = match refused {
+                                    gdl_cells::DirectoryError::Malformed(_) => {
+                                        StatusCode::BAD_REQUEST
+                                    }
+                                    _ => StatusCode::CONFLICT,
+                                };
+                                let refusal = gdl_watch::ReportRefusal::of(refused);
+                                (status, Json(refusal)).into_response()
+                            }
                         }
-                    }
-                }),
-            )
+                    }),
+                )
         });
         Router::new()
             .merge(reports)
@@ -793,6 +883,7 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
 
     fn control_routes(self: Arc<Self>) -> Router {
         let draining = Arc::clone(&self);
+        let scaling = Arc::clone(&self);
         let relay = Arc::clone(&self.relay);
         let declared = Arc::clone(&self.relay);
         let avoiding = Arc::clone(&self.relay);
@@ -840,6 +931,17 @@ impl<D: CellDirectory> Extension for CellReadiness<D> {
                         .await
                         .map(|health| (StatusCode::ACCEPTED, Json(health)))
                         .map_err(|refused| HubError::new(ErrorCode::Conflict, refused.to_string()))
+                }),
+            )
+            .route(
+                gdl_watch::PRESENCE_ROUTE,
+                post(move |Json(change): Json<gdl_watch::SetPresence>| async move {
+                    match scaling.set_presence(change.presence).await {
+                        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                        Err(error) => {
+                            (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()
+                        }
+                    }
                 }),
             )
             .route(

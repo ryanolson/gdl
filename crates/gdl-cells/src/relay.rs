@@ -23,7 +23,8 @@ use crate::{
 /// that no newer write has renewed for its lease is left out of a watch
 /// that begins after that, its snapshot or the changes it resumes from, as
 /// a reader that had watched all along would have dropped it
-/// ([`crate::CellView`]). Nothing is sent when a record expires, since
+/// ([`crate::CellView`]). A record scaled to 0 has no lease, and never
+/// expires ([`CellRecord::leased`]). Nothing is sent when a record expires, since
 /// silence is not a withdrawal, and its version stays held, so an older
 /// write is still refused.
 ///
@@ -73,6 +74,12 @@ impl RelayDirectory {
         self.lock()
             .get(&(class.to_owned(), cell.to_owned()))
             .map(|written| written.version)
+    }
+
+    /// The record the directory holds for `cell` of `class`, expired or
+    /// not: a restarted child reads its cell's history from it.
+    pub fn record(&self, class: &str, cell: &str) -> Option<CellRecord> {
+        self.records.record(class, cell)
     }
 
     /// Whether the latest write the directory took for `cell` of `class`
@@ -132,12 +139,13 @@ impl CellDirectory for RelayDirectory {
 
     async fn publish(&self, record: CellRecord) -> Result<(), DirectoryError> {
         record.check()?;
-        self.take(
-            &record.class,
-            &record.name,
-            record.version(),
-            Some(record.lease),
-        )?;
+        // A record with no lease is held as one whose lease never ends.
+        let lease = if record.leased() {
+            record.lease
+        } else {
+            Duration::MAX
+        };
+        self.take(&record.class, &record.name, record.version(), Some(lease))?;
         self.records.publish(record).await
     }
 

@@ -188,8 +188,18 @@ trait Events: Stream<Item = Result<CellEvent, DirectoryError>> + Unpin {}
 
 impl<S: Stream<Item = Result<CellEvent, DirectoryError>> + Unpin> Events for S {}
 
+/// A record with a model, so that a backend is held to keeping a record
+/// whole, its models with it.
 fn record(class: &str, cell: &str, epoch: u64, seq: u64) -> CellRecord {
     CellRecord {
+        presence: crate::Presence::Serving,
+        models: vec![crate::ModelEntry {
+            model: format!("{cell}-model"),
+            routing_key: Some("a".into()),
+            state: crate::ModelState::Ready,
+            since: seq,
+        }],
+        models_version: seq,
         name: cell.into(),
         class: class.into(),
         region: "us-east-1".into(),
@@ -843,6 +853,9 @@ async fn a_watch_sees_every_record_of_its_class<B: Backend>(backend: &B) {
 /// version with the rest of another equals neither.
 fn whole(seq: u64) -> CellRecord {
     CellRecord {
+        presence: crate::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: "m1".into(),
         class: MODEL.into(),
         region: format!("region-{seq}"),

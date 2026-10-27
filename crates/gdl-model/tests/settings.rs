@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use gdl_model::{
-    CellSettings, DirectoryBackend, HopInfo, HubTiming, Layout, Manifest, NodeInfo, Placement,
-    Role, TypeInfo, WatchCaps, layout,
+    CellSettings, DirectoryBackend, HopInfo, HubTiming, Layout, Manifest, ModelKey, NodeInfo,
+    Placement, Role, TypeInfo, WatchCaps, layout,
 };
 
 /// `S => F { D }`: F's own hop crosses from `global` into `model_x`.
@@ -85,6 +85,7 @@ fn a_cells_settings_are_read_whole() {
             hub: Some("model-x-01-hub:1337".into()),
             summary: Duration::from_secs(10),
             timing: Default::default(),
+            models: Vec::new(),
         }
     );
     let text = toml::to_string(&settings(MODEL)).expect("toml");
@@ -211,6 +212,11 @@ fn a_cells_hub_checks_its_settings_against_the_class() {
             "name = 'm'\nclass = 'model_x'\nregion = 'r'\ndirectory = 'memory'\nready = { d = 1, a = 2, b = 1 }\n",
             "[cell] ready.a: not a segment of class `model_x`\n\
              [cell] ready.b: not a segment of class `model_x`",
+        ),
+        (
+            classed(),
+            "name = 'g'\nclass = 'global'\nregion = 'r'\nmodels = [{ model = 'x' }]\n",
+            "[cell] models: no class sends to class `global`, so its cell serves no models to another",
         ),
     ];
     for (layout, text, expected) in cases {
@@ -669,5 +675,51 @@ fn a_relay_cell_refuses_a_lease_its_reports_cannot_cover() {
             std::time::Duration::from_millis(200),
             "{backend}"
         );
+    }
+}
+
+/// A cell whose instances report no models declares the models it
+/// serves: each a name, and a routing key when the cell has partitions.
+/// A model without a name, an empty routing key, a model declared twice,
+/// and a key an entry does not have are refused, each naming `models`.
+#[test]
+fn a_cell_declares_the_models_it_serves() {
+    let base = "name = 'm'\nclass = 'model_x'\nregion = 'r'\n";
+    let declared = settings(&format!(
+        "{base}models = [{{ model = 'llama-70b' }}, {{ model = 'qwen-32b', routing_key = 'a' }}]\n"
+    ));
+    assert_eq!(
+        declared.models,
+        [
+            ModelKey::new("llama-70b"),
+            ModelKey {
+                model: "qwen-32b".into(),
+                routing_key: Some("a".into()),
+            },
+        ]
+    );
+    let text = toml::to_string(&declared).expect("toml");
+    assert_eq!(settings(&text), declared, "{text}");
+    assert!(settings(base).models.is_empty());
+    let unsaid = toml::to_string(&settings(base)).expect("toml");
+    assert!(!unsaid.contains("models"), "{unsaid}");
+
+    for (bad, why) in [
+        ("models = [{ model = '' }]", "name is empty"),
+        (
+            "models = [{ model = 'x', routing_key = '' }]",
+            "routing key is empty",
+        ),
+        (
+            "models = [{ model = 'x' }, { model = 'x' }]",
+            "declared twice",
+        ),
+        ("models = [{ model = 'x', weight = 2 }]", "unknown field"),
+    ] {
+        let text = format!("{base}{bad}\n");
+        let table: toml::Value = toml::from_str(&text).expect("toml");
+        let refused = CellSettings::read(table).expect_err(&text).to_string();
+        assert!(refused.contains("models"), "{text}: {refused}");
+        assert!(refused.contains(why), "{text}: {refused}");
     }
 }

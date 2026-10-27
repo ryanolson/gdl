@@ -313,8 +313,9 @@ impl Relay {
 /// their parent (`home`) with its contract and placement hashes, once
 /// their record says they take work (`ready` or `degraded`), whatever
 /// their region. It does not follow a cell whose parent is another global,
-/// one with no parent, one with another contract or placement hash, or
-/// one that is `unavailable`. The follower decides on each record in the
+/// one with no parent, one with another contract or placement hash, one
+/// that is `unavailable`, or one scaled to 0, whose record never lapses
+/// though its hub may be gone. The follower decides on each record in the
 /// order the directory gives them, so once it follows a cell whose record
 /// came last, it has decided on every record before it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -350,7 +351,11 @@ async fn a_global_follows_its_children_that_take_work() {
         placement: published.placement ^ 1,
         ..written(&published, "model-x-05-us-east-1", &nowhere())
     };
-    for record in [elsewhere, cousin, orphan, foreign, replaced] {
+    let scaled = CellRecord {
+        presence: gdl_cells::Presence::ScaledToZero,
+        ..written(&published, "model-x-06-us-east-1", &nowhere())
+    };
+    for record in [elsewhere, cousin, orphan, foreign, replaced, scaled] {
         directory.inner.publish(record).await.expect("stored");
     }
     let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
@@ -364,7 +369,7 @@ async fn a_global_follows_its_children_that_take_work() {
     assert_eq!(
         cells.keys().collect::<Vec<_>>(),
         ["model-x-01-us-west-2", "model-x-08-us-east-1"],
-        "another region's child, and not another global's, an orphan, another deployment's, or an unavailable cell"
+        "another region's child, and not another global's, an orphan, another deployment's, an unavailable cell, or one scaled to 0"
     );
 
     let (_instances, _) = meet_the_quorum(&model_hub).await;
@@ -383,6 +388,73 @@ async fn a_global_follows_its_children_that_take_work() {
         .expect("the extension lives");
     global_hub.shutdown().await.expect("the hub stops");
     model_hub.shutdown().await.expect("the hub stops");
+}
+
+/// A scale-to-zero record must also stop a follow opened while serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_followed_cell_scaled_to_zero_is_no_longer_offered() {
+    let directory = Resolving::new();
+    let (model_hub, model_cell) = serve_cell(
+        model(CELL, "us-east-1", "model-x-01-hub:1337"),
+        &directory,
+        timing(),
+    )
+    .await;
+    let (_instances, _) = meet_the_quorum(&model_hub).await;
+    let mut records = Records::new(&directory.inner);
+    let (ready, _) = records.until(CellState::Ready).await;
+    let (global_hub, global_cell) = serve_cell(global_default(), &directory, timing()).await;
+    following(&global_cell, "the serving child", |cells| {
+        cells.contains_key(CELL)
+    })
+    .await;
+    let mut watchers = model_cell.watchers();
+    tokio::time::timeout(WAIT, watchers.wait_for(|count| *count == 1))
+        .await
+        .expect("the parent opens the child's watch")
+        .expect("the child runs");
+    let mut events = global_cell.follows();
+    until(
+        &mut events,
+        &mut Relay::default(),
+        "the child's entry",
+        |relay| {
+            relay
+                .follows
+                .get(CELL)
+                .is_some_and(|cell| !cell.exposed.is_empty())
+        },
+    )
+    .await;
+
+    model_cell
+        .set_presence(gdl_cells::Presence::ScaledToZero)
+        .await
+        .expect("the scale-to-zero record is stored");
+    let marker = "model-x-09-us-east-1";
+    directory
+        .inner
+        .publish(written(&ready, marker, &nowhere()))
+        .await
+        .expect("the marker follows the scale-to-zero record");
+    // The directory orders records, so seeing this follow proves the
+    // parent processed the scale-to-zero record first.
+    let cells = following(&global_cell, "the marker", |cells| {
+        cells.contains_key(marker)
+    })
+    .await;
+    let events = snapshot(&mut global_cell.follows()).await;
+    let offered = events.iter().any(|event| {
+        matches!(event, FollowEvent::Follow { cell, state, .. } if cell == CELL && exposes(*state))
+    }) && !events.iter().any(|event| {
+        matches!(event, FollowEvent::Offering { cell, offered: false, .. } if cell == CELL)
+    });
+    global_hub.shutdown().await.expect("the parent stops");
+    model_hub.shutdown().await.expect("the child stops");
+    assert!(
+        !offered,
+        "the parent still offers the cell after its scale-to-zero record: follows={cells:?}, events={events:?}"
+    );
 }
 
 /// Through the relay, a followed cell appears with its state before any

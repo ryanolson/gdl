@@ -20,6 +20,20 @@ use serde::{Deserialize, Serialize};
 /// placement hash is not its own, or that is not newer than what it holds.
 pub const REPORT_ROUTE: &str = "/report";
 
+/// The route of what a parent cell's hub holds for one child, under the
+/// extension's, on its public listener: `GET` answers `200 OK` with the
+/// [`gdl_cells::CellRecord`] it holds for the cell `cell` of `class`,
+/// expired or not, or `404 Not Found` when it holds none. A child's hub
+/// that restarts reads its cell's last record here before its first
+/// report, so that its models keep their history. Like the report, it
+/// trusts the private network.
+pub const HELD_ROUTE: &str = "/report/{class}/{cell}";
+
+/// [`HELD_ROUTE`]'s path for the cell `cell` of `class`.
+pub fn held_path(class: &str, cell: &str) -> String {
+    format!("/report/{class}/{cell}")
+}
+
 /// What a child cell's hub reports to its parent's hub: its record, on
 /// each change of state and on its heartbeat, or, once its drain has
 /// ended, its withdrawal.

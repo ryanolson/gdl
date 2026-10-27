@@ -90,6 +90,9 @@ fn temp() -> TempDir {
 
 fn record(cell: &str, epoch: u64, seq: u64) -> CellRecord {
     CellRecord {
+        presence: gdl_cells::Presence::Serving,
+        models: Vec::new(),
+        models_version: 0,
         name: cell.into(),
         class: MODEL.into(),
         region: "us-east-1".into(),
@@ -647,4 +650,29 @@ async fn a_directory_it_cannot_use_is_an_error() {
         "a watch of a path"
     );
     assert!(next(&mut seen).await.is_none());
+}
+
+/// A record's presence and models are stored with it: another process
+/// reads them back whole.
+#[tokio::test]
+async fn a_record_keeps_its_presence_and_models_in_its_file() {
+    let root = temp();
+    let (writer, reader) = (
+        DirDirectory::new(root.path()),
+        DirDirectory::new(root.path()),
+    );
+    let published = CellRecord {
+        presence: gdl_cells::Presence::ScaledToZero,
+        models: vec![gdl_cells::ModelEntry {
+            model: "llama-70b".into(),
+            routing_key: Some("a".into()),
+            state: gdl_cells::ModelState::Unavailable,
+            since: 4,
+        }],
+        models_version: 4,
+        ..record("m1", 1, 1)
+    };
+    writer.publish(published.clone()).await.expect("a record");
+    let mut watch = watch(&reader, None);
+    assert_eq!(event(&mut watch).await, CellEvent::Current(published));
 }

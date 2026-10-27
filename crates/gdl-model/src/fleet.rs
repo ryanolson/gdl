@@ -479,6 +479,7 @@ impl Fleet {
             .unwrap_or_default();
         ready.extend(cell.ready.iter().map(|(s, n)| (s.clone(), *n)));
         Some(CellSettings {
+            models: Vec::new(),
             name: name.to_string(),
             layout: cell.layout.clone(),
             class: cell.class.clone(),

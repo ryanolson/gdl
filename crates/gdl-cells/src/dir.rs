@@ -183,7 +183,8 @@ impl CellDirectory for DirDirectory {
         // Before any path is made of its names.
         record.check()?;
         let (class, cell) = (record.class.clone(), record.name.clone());
-        self.write(class, cell, Held::Record(record)).await
+        self.write(class, cell, Held::Record(Box::new(record)))
+            .await
     }
 
     async fn withdraw(&self, withdrawal: Withdrawal) -> Result<(), DirectoryError> {
