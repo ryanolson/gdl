@@ -116,3 +116,27 @@ pub mod nested {
 /// An alias of an argument the reader cannot name: left out, alone.
 #[gdl::export]
 pub type Shared = Carried<std::sync::Arc<Words>, Plain>;
+
+/// The relay's settings under another name.
+pub type Settings = RelaySettings;
+
+/// A node whose derive names its settings through an alias: a problem
+/// that names the alias.
+#[derive(gdl::Node)]
+#[gdl(config = Settings)]
+pub struct Renamed;
+
+impl gdl::Forward for Renamed {
+    type In = PlainCarried;
+    type Out = Words;
+}
+
+/// A node whose port carries the carrier with a tuple argument: a problem
+/// that names the tuple.
+#[derive(gdl::Node)]
+pub struct Paired;
+
+impl gdl::Forward for Paired {
+    type In = Carried<(Words, Words), Plain>;
+    type Out = Words;
+}

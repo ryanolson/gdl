@@ -194,7 +194,7 @@ These are the limits a user can run into today. Each entry says what happens, wh
 ### Configuration and metrics come only from their derives
 - **What:** `gdl::ConfigSchema` is implemented only by `derive(gdl::Config)`, and `gdl::Metrics` only by `derive(gdl::Metrics)`. A hand-written implementation does not build.
 - **Why:** the source reader takes a config type's fields, and a metrics type's definitions, from the derive's attributes.
-- **Also:** the reader recognizes the derive by its last path segment. A derive imported under another name (`use gdl::Metrics as Measure`) builds, and the reader then refuses the node with "metrics type must derive Metrics". See [Define node metrics](../guides/node-metrics.md).
+- **Also:** the reader recognizes the derive by its last path segment. A derive imported under another name (`use gdl::Metrics as Measure`) builds, and the reader then refuses the node with "metrics type must derive Metrics". The reader also does not follow a type alias that the node's derive names (`#[gdl(config = Settings)]` with `type Settings = RelaySettings;`). That node builds, and the reader refuses it with an error that names the alias. Name the type itself. See [Define node metrics](../guides/node-metrics.md).
 
 ### A crate that uses a derive depends on `gdl` itself
 - **What:** the derives (`Node`, `Message`, `Config`, `Metrics`, `Endpoints`, `export`) expand to `::gdl::...`. A crate that depends on `gdl-runtime` alone can name `gdl_runtime::gdl::Node`, but the expansion fails with `could not find gdl in the list of imported crates`.

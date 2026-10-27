@@ -773,9 +773,31 @@ fn an_alias_offers_an_instantiation_of_a_generic_type() {
             "{expected:?} missing from:\n{problems}"
         );
     }
-    assert_eq!(extraction.problems.len(), 2, "{problems}");
+    // And the two of `a_problem_names_its_real_cause`.
+    assert_eq!(extraction.problems.len(), 4, "{problems}");
     let skipped: Vec<&str> = offer.skipped.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(skipped, ["Shared"]);
+}
+
+/// A config named through an alias, and a port whose message has an
+/// argument the reader cannot name, are each a problem that names the
+/// alias or the argument, not only the type the node or port names.
+#[test]
+fn a_problem_names_its_real_cause() {
+    let extraction = workspace().extract("read-generic").expect("package");
+    let problems = extraction.problems.join("\n");
+    for expected in [
+        "config type `Settings` is a type alias, which the reader does not follow: name the type it aliases",
+        "node `Paired`: port `In`: `(Words , Words)`: the reader names a crate's own types",
+    ] {
+        assert!(
+            problems.contains(expected),
+            "{expected:?} missing from:\n{problems}"
+        );
+    }
+    for wrong in ["must derive Config", "names no type that derives `Message`"] {
+        assert!(!problems.contains(wrong), "{wrong:?} in:\n{problems}");
+    }
 }
 
 /// An instantiation is one message by its type, not its spelling: another

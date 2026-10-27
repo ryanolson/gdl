@@ -386,8 +386,12 @@ fn node(
                 ty.to_token_stream()
             )
         };
+        // A type the reader cannot read is a problem with the reason
+        // `canonical` gives, which names the part it cannot read.
+        let unread =
+            |problem: String| format!("{port_at}: node `{name}`: port `{port}`: {problem}");
         let read = |resolver: &mut Resolver<'_>, ty: &syn::Type| {
-            canonical(resolver, krate, impl_module, ty, &env).map_err(|_| unresolved(ty))
+            canonical(resolver, krate, impl_module, ty, &env).map_err(unread)
         };
         // The head and the item, with the impl's parameters bound, each
         // with the syntax a problem names it by. gdl's `Streamed`, written
@@ -407,7 +411,7 @@ fn node(
                 (read(resolver, head)?, head),
                 Some((read(resolver, item)?, item)),
             ),
-            (Err(_), None) => return Err(unresolved(port_ty)),
+            (Err(problem), None) => return Err(unread(problem)),
         };
         let message = |resolver: &mut Resolver<'_>, (ty, written): (Ty, &syn::Type)| {
             offered(resolver, &ty)
@@ -556,6 +560,14 @@ fn derived_struct(
         return Err(format!("{at}: {what} cannot be resolved"));
     };
     let definition = &resolver.crates[c].modules[m].types[i];
+    // An alias carries no derives, so the derive check below would say
+    // that a type which derives the trait does not.
+    if definition.alias.is_some() {
+        return Err(format!(
+            "{at}: {what} `{}` is a type alias, which the reader does not follow: name the type it aliases",
+            ty.to_token_stream()
+        ));
+    }
     if !derives(definition, derive) {
         return Err(format!("{at}: {what} must derive {derive}"));
     }
