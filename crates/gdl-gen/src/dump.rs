@@ -34,6 +34,7 @@ pub fn manifest(contract: &Contract, target: &Path) -> Result<gdl_model::Manifes
         "the contract's manifest",
         &dependencies,
         &main,
+        None,
     )?;
     gdl_model::Manifest::from_toml(&text)
         .map_err(|e| Error::new(format!("reading the manifest: {e}")))
@@ -50,13 +51,15 @@ pub(crate) fn hash(value: &impl std::hash::Hash) -> u64 {
 
 /// Write the program `name` with these `[dependencies]` lines and this
 /// `main.rs`, then build and run it, and return what it printed. `what` the
-/// program prints names it in a failure.
+/// program prints names it in a failure. `seed` is the lock file the
+/// program starts from ([`write_program`]); `name` must change with it.
 pub(crate) fn run(
     target: &Path,
     name: &str,
     what: &str,
     dependencies: &str,
     main: &str,
+    seed: Option<&str>,
 ) -> Result<String, Error> {
     // Every run of `name` in `target` builds the same program at the same
     // path. Holding the directory's lock from writing the program until it
@@ -64,25 +67,7 @@ pub(crate) fn run(
     // make this one print the other's output.
     let _lock = lock(target)?;
     let work = target.join("gdl-gen").join(name);
-    let setup = || {
-        std::fs::create_dir_all(work.join("src")).map_err(|e| io(&work, e))?;
-        let manifest = format!(
-            "[package]\n\
-             name = \"{name}\"\n\
-             version = \"0.0.0\"\n\
-             edition = \"2024\"\n\
-             publish = false\n\
-             \n\
-             # Its own workspace, wherever the target directory is.\n\
-             [workspace]\n\
-             \n\
-             [dependencies]\n\
-             {dependencies}"
-        );
-        write(&work.join("Cargo.toml"), &manifest)?;
-        write(&work.join("src/main.rs"), main)
-    };
-    setup()?;
+    write_program(&work, name, dependencies, main, seed)?;
     // Built, then run, so that a failure says which of the two it was.
     // Cargo runs it: it knows where the target and the profile put the
     // program, and what it needs at run time (a dynamically linked standard
@@ -91,6 +76,45 @@ pub(crate) fn run(
         .map_err(|e| Error::new(format!("building {what} failed:\n{e}")))?;
     cargo(&work, target, &["run", "--quiet"])
         .map_err(|e| Error::new(format!("reading {what} failed:\n{e}")))
+}
+
+/// Write the program's files into `work`.
+///
+/// `seed` is the text of a lock file, when the program's dependencies come
+/// from a workspace that has one. Cargo then builds them at the versions
+/// that workspace builds, and reads no registry index for crates the lock
+/// pins: with no lock, Cargo resolves the program anew and reads crates.io
+/// even when every crate is in its cache. It is written only when the
+/// program has no lock yet: Cargo adds the program's own package to it, so
+/// a seed written again on every run would differ from what Cargo left.
+fn write_program(
+    work: &Path,
+    name: &str,
+    dependencies: &str,
+    main: &str,
+    seed: Option<&str>,
+) -> Result<(), Error> {
+    std::fs::create_dir_all(work.join("src")).map_err(|e| io(work, e))?;
+    let manifest = format!(
+        "[package]\n\
+         name = \"{name}\"\n\
+         version = \"0.0.0\"\n\
+         edition = \"2024\"\n\
+         publish = false\n\
+         \n\
+         # Its own workspace, wherever the target directory is.\n\
+         [workspace]\n\
+         \n\
+         [dependencies]\n\
+         {dependencies}"
+    );
+    write(&work.join("Cargo.toml"), &manifest)?;
+    if let Some(seed) = seed
+        && !work.join("Cargo.lock").exists()
+    {
+        write(&work.join("Cargo.lock"), seed)?;
+    }
+    write(&work.join("src/main.rs"), main)
 }
 
 /// Run `cargo <args>` on the program in `work`, and return its output.
@@ -189,6 +213,37 @@ mod tests {
             .and_then(|(_, v)| v)
             .expect("target");
         assert_eq!(Path::new(target), here.join("target/x"));
+    }
+
+    /// A program starts from the lock it is given, and keeps the lock
+    /// Cargo wrote from it on the next run: written again, the seed would
+    /// drop the program's own package, and the program would be resolved
+    /// again for nothing.
+    #[test]
+    fn a_program_starts_from_its_seed_and_keeps_its_lock() {
+        let dir = tempfile::Builder::new()
+            .prefix("gdl-gen-seed-")
+            .tempdir()
+            .expect("dir");
+        let work = dir.path().join("program");
+        let main = "fn main() {}\n";
+        write_program(&work, "program", "", main, Some("# the seed\n")).expect("written");
+        let lock = work.join("Cargo.lock");
+        assert_eq!(
+            std::fs::read_to_string(&lock).expect("lock"),
+            "# the seed\n"
+        );
+
+        std::fs::write(&lock, "# what cargo wrote\n").expect("lock");
+        write_program(&work, "program", "", main, Some("# the seed\n")).expect("written");
+        assert_eq!(
+            std::fs::read_to_string(&lock).expect("lock"),
+            "# what cargo wrote\n"
+        );
+
+        let unseeded = dir.path().join("unseeded");
+        write_program(&unseeded, "unseeded", "", main, None).expect("written");
+        assert!(!unseeded.join("Cargo.lock").exists());
     }
 
     /// Every dump of one contract in a target directory builds and runs

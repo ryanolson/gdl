@@ -236,9 +236,12 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<Vec<String>, Error
     );
     let main = "use gdl_verified as _;\n\n\
                 fn main() {\n    print!(\"{}\", gdl_message::Catalogue::linked().to_toml());\n}\n";
+    // The lock of the resolve the reader read: the program builds the
+    // versions the reader saw, and Cargo needs no registry index for them.
+    let lock = std::fs::read_to_string(extracted.workspace.root().join("Cargo.lock")).ok();
     let name = format!(
         "gdl-verify-{:016x}",
-        crate::dump::hash(&(&dependencies, main))
+        crate::dump::hash(&(&dependencies, main, &lock))
     );
     let text = crate::dump::run(
         target,
@@ -246,6 +249,7 @@ pub fn verify(extracted: &Extracted, target: &Path) -> Result<Vec<String>, Error
         "the crate's registrations",
         &dependencies,
         main,
+        lock.as_deref(),
     )?;
     let registered = gdl_message::Catalogue::from_toml(&text)
         .map_err(|e| Error::new(format!("reading the crate's registrations: {e}")))?;

@@ -208,6 +208,9 @@ fn the_manifest_program_runs_as_cargo_built_it() {
         .arg(target().with_file_name("gdl-gen-tests-target"))
         .env("CARGO_BUILD_TARGET", host)
         .env("RUSTFLAGS", "-C prefer-dynamic")
+        // The manifest program has no lock, so online Cargo would read
+        // crates.io's index to resolve it.
+        .env("CARGO_NET_OFFLINE", "true")
         .output()
         .expect("gdl-gen");
     assert!(

@@ -303,6 +303,12 @@ impl Workspace {
         Some(self.located(self.graph.package_in(dir)?))
     }
 
+    /// The workspace's root directory, where `cargo metadata` wrote the
+    /// lock file of this resolve.
+    pub fn root(&self) -> &Path {
+        &self.graph.workspace_root
+    }
+
     /// Where every resolved package is, the workspace's own included.
     pub fn located_all(&self) -> impl Iterator<Item = Located> + '_ {
         (0..self.graph.packages.len()).map(|package| self.located(package))
