@@ -737,6 +737,7 @@ name = "gdl-extract"
 version = "0.1.0"
 dependencies = [
  "gdl-extract",
+ "gdl-message",
  "gdl-model",
  "gdl-syntax",
  "proc-macro2",

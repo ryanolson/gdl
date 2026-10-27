@@ -26,6 +26,9 @@ count-reads = []
 [dev-dependencies]
 # Itself, with the read count on for `tests/cost.rs`.
 gdl-extract = { path = ".", features = ["count-reads"] }
+# The derive, for `tests/spelling.rs`: what a build records for an
+# instantiation, against what the reader writes.
+gdl-message = { path = "../gdl-message" }
 tempfile.workspace = true
 
 [lints]
