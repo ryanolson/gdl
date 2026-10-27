@@ -174,14 +174,14 @@ Within the tier it draws two cells at random and takes the one with the lower ra
 
 ### A registered policy
 
-A registered policy implements `gdl::CellPolicy`. It runs in the chooser, once per attempt: for the first offer, and again after each decline. It is not `async`. It gets:
+A registered policy implements `gdl::CellPolicy`. It runs in the chooser, once per attempt: for the first offer, and again after each decline but an instance's own ([An instance that cannot serve the request](#an-instance-that-cannot-serve-the-request)). It is not `async`. It gets:
 
 - the request's context, and its head as the policy's `Head` reads it: the edge's type, `gdl::Encoded` bytes, or a `gdl::Projected` part that decodes only the fields it declares;
 - the class's followed cells: each cell's name, region, state, load summary, and number of entry instances;
 - the chooser's region, the clock, the cells that declined this request, and the cells the chooser damps or holds gone;
 - the attempt's turn, and a random draw made from it when the policy asks.
 
-It returns a choice of one cell, by its index, or a `gdl::NoCell`, which fails the request with `Routing`. A `NoCell` may carry a short reason, such as the model that no cell serves, and the error then gives it after the policy's name, the class, and the entry segment. Only the first attempt's reason reaches the error: a request that a cell declined fails with the last refusal, which names that cell. A choice may carry a lease (`gdl::ChoiceLease`), which learns whether that cell took the request. The runtime calls the lease's `accepted` when the cell accepts the offer, and holds the lease while it holds the request. It drops the lease without telling it when the cell declines, when the offer never left, and when the outcome is unknown. A choice without a lease allocates nothing. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no cell is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`. Its fields are checked against the edge type before the segment starts: their Rust names and types when it builds, and the names each type's `Deserialize` reads when the policy is registered ([Write a cell policy](../guides/write-a-cell-policy.md#1-read-only-what-you-route-by)).
+It returns a choice of one cell, by its index, or a `gdl::NoCell`, which fails the request with `Routing`. A `NoCell` may carry a short reason, such as the model that no cell serves, and the error then gives it after the policy's name, the class, and the entry segment. Only the first attempt's reason reaches the error: a request that a cell declined fails with the last refusal, which names that cell. A choice may carry a lease (`gdl::ChoiceLease`), which learns whether that cell took the request. The runtime calls the lease's `accepted` when the cell accepts the offer, and holds the lease while it holds the request. It drops the lease without telling it when the cell declines, when the offer never left, and when the outcome is unknown. An instance's own decline is not the cell's: the lease passes to the offer to the cell's next instance, and learns of its acceptance. A choice without a lease allocates nothing. The head is read once per attempt, from the bytes the sender encoded. A head the policy cannot read fails the request with `Codec`, and no cell is offered it. When the segment starts, the runtime checks the policy's `Head` against the edge, as for a selector. A projection must name the edge's type, and its edge must not be encoded as `msgpack_array`. Its fields are checked against the edge type before the segment starts: their Rust names and types when it builds, and the names each type's `Deserialize` reads when the policy is registered ([Write a cell policy](../guides/write-a-cell-policy.md#1-read-only-what-you-route-by)).
 
 The inputs are plain `gdl` types (`Cell`, `CellRequest`, `Damped`, `Load`), so a policy crate builds them in its own tests, with no hub or runtime. `home_first` and `round_robin` (`gdl::HomeFirst`, `gdl::RoundRobin`) implement the same trait, and take the same inputs.
 
@@ -189,13 +189,13 @@ A registered policy can run either of them over only the cells it keeps, with `c
 
 ### Damping
 
-Under every policy, the chooser damps a cell that declined a request. `round_robin` and `home_first` pass a damped cell over as this section says. A registered policy sees the damped cells and decides for itself. It is not chosen for the first window, 1 s by default (`[runtime] cell_damping_first_ms`). Each further decline after its window has passed doubles the window, up to the longest, 30 s by default (`cell_damping_max_ms`). An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.
+Under every policy, the chooser damps a cell that declined a request as full. `round_robin` and `home_first` pass a damped cell over as this section says. A registered policy sees the damped cells and decides for itself. It is not chosen for the first window, 1 s by default (`[runtime] cell_damping_first_ms`). Each further decline after its window has passed doubles the window, up to the longest, 30 s by default (`cell_damping_max_ms`). An offer it accepts ends the damping. A decline that lands while a window lasts belongs to the event that began it and does not extend the window.
 
 At most half of the otherwise eligible cells, rounded down, are damped at once. When more are, the cells whose windows end soonest are chosen as if they were not damped. So a lone cell is never damped out.
 
 ### A cell that is gone
 
-An entry's refusal says why: its cell is full, or its cell is gone. A full cell is damped, as above. A gone cell is passed over until the relay changes its follow: a new generation, a new state, or a new offered state. Time alone does not end it, and neither does a new load summary. An offer the cell accepts ends it too. A draining cell's entry says gone ([Draining a cell](#draining-a-cell)). So does a segment that declines as gone by its own policy ([A cell's own refusal](#a-cells-own-refusal)). Every other refusal says full: admission or egress full, a retired instance, or a hand-off of another deployment.
+An entry's refusal says why: its cell is full, its cell is gone, or the instance cannot serve the request ([below](#an-instance-that-cannot-serve-the-request)). A full cell is damped, as above. A gone cell is passed over until the relay changes its follow: a new generation, a new state, or a new offered state. Time alone does not end it, and neither does a new load summary. An offer the cell accepts ends it too. A draining cell's entry says gone ([Draining a cell](#draining-a-cell)). So does a segment that declines as gone by its own policy ([A cell's own refusal](#a-cells-own-refusal)). Every other refusal says full: admission or egress full, a retired instance, or a hand-off of another deployment.
 
 - `round_robin` and `home_first` never choose a gone cell, and a gone cell does not count in the cap on damping. So a lone gone cell is not chosen, and a request with no other cell fails with `Routing`, not `Overloaded`.
 - A registered policy sees gone cells through `request.is_excluded(cell)`, which is true for them, and `request.damped().is_gone(cell)`. `choose_where` skips them.
@@ -204,7 +204,19 @@ An entry's refusal says why: its cell is full, or its cell is gone. A full cell 
 - The follower counts the relay's changes to a follow's state and offered state. A cell that leaves a state and comes back to it has changed, so it is not gone again. A new watch of the relay also ends every mark: its snapshot cannot show what changed while no watch was open. Such a cell is offered one more request, and is marked again if it still refuses.
 - `FollowedCell::gone` shows the mark. A node that reads `gdl::FollowedCells` sees a gone cell as it sees a damped one: by its state and entries alone.
 
-The reason crosses in the entry's reply, after the refusal. A build without it reads the refusal and stops there, so it takes every refusal as a full cell's, and so does this build for a reply that carries no reason.
+The reason crosses in the entry's reply, after the refusal. A build without it reads the refusal and stops there, so it takes every refusal as a full cell's, and so does this build for a reply that carries no reason, or a reason it does not know.
+
+### An instance that cannot serve the request
+
+An entry instance can decline an offer as its own: it cannot serve this request, and another entry instance of its cell may. For example, it does not have the request's model. The chooser then offers the request to the cell's other entry instances, each once, before it offers it to another cell.
+
+- The other instances are offered it in the order of the cell's table when the decline landed, from the instance after the one that declined, around to the one before it. The chooser keeps only its place in that order and a count, so the walk allocates nothing, whatever the cell's size. An instance that joined the cell after the decline is not offered the request.
+- Each instance is offered it only while the chooser's current table still offers it, and the cell policy still takes the cell (`CellPolicy::eligible`). The cell policy does not choose again, since the cell is still its choice. Its lease on the choice passes to the offer to the next instance.
+- Under a selector, the selector is asked for each instance, with that instance alone to choose from. So it holds its lease, and gives its metadata, for the instance the request is offered to. It does not rank the instances that are left.
+- A walk's offers use none of `cell_failovers`. When every instance declines as its own, the request leaves the cell and the chooser offers it to another cell. Any other miss from an instance, full, gone, or a send that never left, leaves the cell at once, as it does for the first offer.
+- The cell is neither damped nor held gone, and the instance's load report does not count the decline as a refusal, which `home_first` would read as a saturated cell. The decline says nothing of the cell's room, and its other instances still serve requests they can.
+
+A chooser built before this reason reads it as unknown, so as full: it damps the cell for one window, and offers the request to another cell. That is the old behaviour, so a fleet can roll its choosers in any order.
 
 ## A hand-off is an offer
 
@@ -213,12 +225,13 @@ A child cell may decline the hand-off. The chooser then offers the request to an
 | What happens | Outcome |
 |---|---|
 | The entry answers `Overloaded` before it takes the request: admission or egress refused, the instance retired, or the cell declines offers (a drain, or its own policy) | another cell is offered the request |
+| The entry answers `Overloaded` as its own decline: it cannot serve the request | the cell's next entry instance is offered the request, then another cell |
 | The entry answers `Placement`: the hand-off is not of its deployment | another cell is offered the request |
 | velo refuses the send before it leaves: the instance is not registered, or its handshake fails | another cell is offered the request |
 | No answer within the setup timeout, or the send fails after velo took it | the request fails at once with `OutcomeUnknown`; no other cell is offered it |
 | The entry accepted, then failed | the request's error; a retry is the operator's |
 
-The chooser offers to at most `[runtime] cell_failovers` more cells (2 by default). With 0, each request is offered to one cell. When every offered cell declines, the request fails with the last refusal, so a full fleet answers `Overloaded`. A refusal is not remembered past its request, except through damping.
+The chooser offers to at most `[runtime] cell_failovers` more cells (2 by default). With 0, each request is offered to one cell, and to each of that cell's entry instances when they decline as their own. When every offered cell declines, the request fails with the last refusal, so a full fleet answers `Overloaded`. A refusal is not remembered past its request, except through damping.
 
 A chooser that records metrics counts each offer under its cell and the row of this table it ended in, and each offer after a request's first as a failover ([A chooser's cell families](../appendix/metrics.md#a-choosers-cell-families)). The counts are kept by the cell's name, so a new generation of the cell goes on counting into the same series.
 
@@ -251,10 +264,11 @@ A drain cannot be cancelled.
 
 ## A cell's own refusal
 
-A segment can decline offers from other cells by its own policy, before it admits them. The program that runs the segment calls `Segment::decline_offers_as(Decline::Gone)` or `Segment::decline_offers_as(Decline::Full)` on its running segment, and `Segment::take_offers()` to take offers again. It works on an entry segment: the hand-offs inside the cell are still taken. Each offer reads the refusal in the one atomic load it already makes, so the request path gains no allocation and no lock.
+A segment can decline offers from other cells by its own policy, before it admits them. The program that runs the segment calls `Segment::decline_offers_as(Decline::Gone)`, `Segment::decline_offers_as(Decline::Full)`, or `Segment::decline_offers_as(Decline::Instance)` on its running segment, and `Segment::take_offers()` to take offers again. It works on an entry segment: the hand-offs inside the cell are still taken. Each offer reads the refusal in the one atomic load it already makes, so the request path gains no allocation and no lock.
 
 - `Decline::Gone` says that this cell takes no work from other cells until its state changes: for example, when it cannot serve the model its class serves. Each chooser that hears it passes the whole cell over, every entry instance of it, until the relay changes its follow. `take_offers` does not bring them back. Call it on every entry instance, for a reason that holds for the cell.
 - `Decline::Full` says that the cell has no room now. Choosers damp the cell, and offer it work again after the window.
+- `Decline::Instance` says that this instance cannot serve work from other cells now, and the cell's other entry instances may. Choosers offer each request it declines to the cell's other entry instances ([An instance that cannot serve the request](#an-instance-that-cannot-serve-the-request)), and the cell is not damped. It is one switch for the instance, not a choice per request.
 - A drain's refusal (`Segment::decline_offers`) outlasts the segment's own. `decline_offers_as` does not replace it, and `take_offers` does not end it.
 
 ## When a cell fails

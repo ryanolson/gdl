@@ -1,6 +1,8 @@
 //! A chooser's hand-off into another class is an offer, as every routed
 //! hand-off is ([`crate::dist::offers`]): the cell chosen for it may
-//! decline it, and then another cell is chosen inside the same call. Only
+//! decline it, and then another cell is chosen inside the same call. An
+//! entry instance that declines as its own leaves it in its cell, whose
+//! other entry instances are offered it first. Only
 //! a proven refusal moves the request on. Anything else after the send
 //! may have run the request there, so it is the request's error, and is
 //! not tried again.
@@ -14,14 +16,16 @@
 //! chooser's damping of a cell that declined ([`super::damping`]), written
 //! only when a cell declines, or when a damped cell accepts.
 
+use gdl::__runtime::ChoiceHeld;
 use gdl::{Cx, NoCell, Result};
 use velo::InstanceId;
 
+use super::crossing::Walk;
 use super::meter::Outcome;
 use super::{CellLease, Crossing};
 use crate::dist::envelope::{Forward, WireCx};
 use crate::dist::fabric::Offered;
-use crate::dist::offers::{Answer, Missed, delivered};
+use crate::dist::offers::{Answer, Decline, Missed, delivered};
 use crate::dist::runtime::{Handed, Held, Runtime, Within};
 
 /// What became of an offer, as `crossing` sent it to the cell `cell`
@@ -84,16 +88,23 @@ impl Runtime {
         }
     }
 
-    /// After the cell `cell` did not take `envelope` (`missed`), offer it
-    /// to the cells not yet offered it, as the first was chosen, until one
-    /// takes it, the request fails, or `cell_failovers` more were offered
-    /// it. When no cell may take it any more, or no failover is left, the
-    /// request fails with the last refusal, or, when no cell refused it,
-    /// with the last hand-off that never left. Each choice starts from the
-    /// request's own context, `cx`, which `envelope`'s was made from, so a
-    /// declined selector's meta is not sent to the next cell; a declined
-    /// choice's leases, its selector's and its cell's, end before the next
-    /// choice. It borrows the envelope from `send_forward`'s future.
+    /// After the first offer of `envelope` missed (`declined`), offer it
+    /// again, as the first was chosen, until a cell takes it, the request
+    /// fails, or `cell_failovers` more cells were offered it. An entry
+    /// instance that declined it as its own ([`Decline::Instance`]) leaves
+    /// the request in its cell: each other entry instance of the cell is
+    /// offered it once ([`Crossing::walk`]), before the chooser offers it
+    /// to another cell, and those offers use none of `cell_failovers`.
+    /// The cell policy's lease on the choice of that cell passes to each
+    /// of those offers, so that it learns of an acceptance by any of them.
+    /// Any other miss leaves the cell at once. When no cell may take it
+    /// any more, or no failover is left, the request fails with the last
+    /// refusal, or, when no cell refused it, with the last hand-off that
+    /// never left. Each choice starts from the request's own context,
+    /// `cx`, which `envelope`'s was made from, so a declined selector's
+    /// meta is not sent to the next instance; a declined choice's leases,
+    /// its selector's and its cell's, end before the next choice. It
+    /// borrows the envelope from `send_forward`'s future.
     ///
     /// A chooser never chooses itself: the entry segment is in another
     /// class, so the hand-off always crosses velo.
@@ -103,24 +114,55 @@ impl Runtime {
         cx: &Cx,
         envelope: &mut Forward,
         timed: bool,
-        cell: u64,
-        missed: Missed,
+        declined: Declined,
     ) -> Result<Handed> {
-        let mut offered = vec![cell];
-        let mut missed = missed;
-        while offered.len() <= self.config.cell_failovers {
+        let Declined {
+            mut cell,
+            mut instance,
+            mut choice,
+            mut missed,
+        } = declined;
+        let mut own = is_own(&missed);
+        let mut offered = Vec::new();
+        let mut walk: Option<Walk> = None;
+        loop {
             if let Within::Selector { .. } = crossing.within() {
                 envelope.cx = WireCx::of(cx);
             }
-            // A policy's reason for no cell is dropped here: the last
-            // refusal says more about this request than the policy can.
-            let Ok((instance, cell, mut held)) =
-                self.choose_cell(crossing, cx, envelope, &offered).await?
-            else {
-                break;
+            let mut next = None;
+            if own {
+                if walk.is_none() {
+                    walk = crossing.walk(cell, instance);
+                }
+                if let Some(walk) = &mut walk {
+                    next = self
+                        .choose_in(crossing, cx, envelope, walk, &mut choice)
+                        .await?;
+                }
+            }
+            let (to, at, mut held) = match next {
+                Some(chosen) => chosen,
+                None => {
+                    // The request leaves the cell, and the cell policy's
+                    // lease on it ends before the next choice.
+                    walk = None;
+                    drop(choice.take());
+                    offered.push(cell);
+                    if offered.len() > self.config.cell_failovers {
+                        break;
+                    }
+                    // A policy's reason for no cell is dropped here: the
+                    // last refusal says more about this request than the
+                    // policy can.
+                    let Ok(chosen) = self.choose_cell(crossing, cx, envelope, &offered).await?
+                    else {
+                        break;
+                    };
+                    chosen
+                }
             };
-            let (offering, sent) = self.deliver(instance, envelope, timed)?;
-            let answer = answer(offering.await, crossing, cell, &mut held);
+            let (offering, sent) = self.deliver(to, envelope, timed)?;
+            let answer = answer(offering.await, crossing, at, &mut held);
             // Counted with the answer, so that an offer whose answer is
             // never read counts nothing.
             if let Some(figures) = held.cell_lease().and_then(CellLease::figures) {
@@ -136,14 +178,64 @@ impl Runtime {
                 }
                 Answer::Failed(error) => return Err(error),
                 Answer::Missed(then) => {
-                    offered.push(cell);
+                    own = is_own(&then);
+                    choice = held.take_choice();
+                    drop(held);
+                    (cell, instance) = (at, to);
                     missed = missed.then(then);
                 }
             }
         }
         Err(missed.into_error())
     }
+
+    /// The next instance of `walk`, chosen as the first offer's was, with
+    /// the cell's id and what the offer holds, `choice` among it; `None`
+    /// once the walk has offered every instance of its cell.
+    async fn choose_in(
+        &self,
+        crossing: &Crossing,
+        cx: &Cx,
+        envelope: &mut Forward,
+        walk: &mut Walk,
+        choice: &mut Option<ChoiceHeld>,
+    ) -> Result<Option<(InstanceId, u64, Held)>> {
+        match crossing.within() {
+            Within::Policy(_) => Ok(crossing
+                .pick_in(walk, choice)
+                .map(|(instance, cell, lease)| (instance, cell, Held::cell(None, lease)))),
+            Within::Selector {
+                selector, encoding, ..
+            } => {
+                let chosen = crossing
+                    .choose_in(walk, &**selector, cx, &envelope.payload, *encoding, choice)
+                    .await?;
+                Ok(chosen.map(|(instance, cell, picked, lease)| {
+                    envelope.cx.add_meta(picked.meta);
+                    (instance, cell, Held::cell(picked.lease, lease))
+                }))
+            }
+        }
+    }
 }
+
+/// What a chooser's first offer into another class came to, when it
+/// missed: the cell and the instance it went to, the cell policy's lease
+/// on the choice of that cell, if it gave one, and the miss.
+pub(crate) struct Declined {
+    pub(crate) cell: u64,
+    pub(crate) instance: InstanceId,
+    pub(crate) choice: Option<ChoiceHeld>,
+    pub(crate) missed: Missed,
+}
+
+/// Whether `missed` is an entry instance's decline as its own.
+fn is_own(missed: &Missed) -> bool {
+    matches!(missed, Missed::Declined(_, Decline::Instance))
+}
+
+#[cfg(test)]
+mod instances;
 
 #[cfg(test)]
 mod tests {
@@ -182,12 +274,12 @@ mod tests {
     }
 
     /// `S => D`, with `S` in `a` of `global` and `D` in `d` of `model_x`.
-    fn layout() -> gdl_model::Layout {
+    pub(super) fn layout() -> gdl_model::Layout {
         layout_under(gdl_model::CellPolicy::default())
     }
 
     /// [`layout`], choosing a cell of `model_x` by `policy`.
-    fn layout_under(policy: gdl_model::CellPolicy) -> gdl_model::Layout {
+    pub(super) fn layout_under(policy: gdl_model::CellPolicy) -> gdl_model::Layout {
         let manifest = gdl_model::Manifest {
             name: "cells".into(),
             schema: 1,
@@ -641,6 +733,7 @@ mod tests {
             "accepted",
             "declined_full",
             "declined_gone",
+            "declined_instance",
             "unsent",
             "outcome_unknown",
             "failed",
@@ -777,6 +870,7 @@ mod tests {
             "accepted",
             "declined_full",
             "declined_gone",
+            "declined_instance",
             "unsent",
             "outcome_unknown",
             "failed",

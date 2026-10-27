@@ -226,6 +226,26 @@ cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_c
 
 Counting an outcome costs 4.6 ns, in every run, with one thread. The picks run none of the change's code, so their 0.8 ns comes from where the code is placed ([A reason for no cell](#a-reason-for-no-cell)). The offers vary from run to run, the roster's as much as the cells', so they show no change. The runs are sequential, so they cannot show contention between threads.
 
+### An instance's own decline
+
+An entry instance that declines as its own leaves the request in its cell, and the chooser offers it to the cell's other entry instances ([An instance that cannot serve the request](../concepts/cell-routing.md#an-instance-that-cannot-serve-the-request)). The walk runs only after such a decline, in the boxed failover, and keeps a place and a count, so it allocates nothing. The first offer keeps the declining instance's id across its wait for the answer, which grows `send_forward`'s future from 848 to 864 bytes (`a_first_offer_is_no_larger_than_a_hand_off_was`). An accepted first offer allocates what it did (`an_accepted_first_offer_allocates_what_a_roster_hand_off_does`).
+
+On the gb300 runner (aarch64 Neoverse-V2, rustc 1.93.1), core 9, load average 3.4 to 3.9, three runs each. Base `30ec442d`, change `68cc6bc9`:
+
+```bash
+cargo test --release -p gdl-runtime --lib dist::cells::offer::tests::cost_of_a_cell_choice_and_an_offer -- --ignored --nocapture --exact
+```
+
+| Measure | Base | Change |
+|---|---|---|
+| pick, `round_robin`, four idle cells | 122.8 ns | 126.1 to 126.3 ns |
+| pick, `home_first`, four idle cells | 164.1 to 164.2 ns | 165.1 to 165.7 ns |
+| count an outcome | 4.6 ns | 4.6 ns |
+| accepted first offer over loopback, cells | 28.4 to 32.0 us | 25.9 to 29.0 us |
+| accepted first offer over loopback, roster | 28.1 to 31.3 us | 25.6 to 29.7 us |
+
+A pick runs none of the change's code. It costs 3.4 ns more under `round_robin` and 1.0 ns more under `home_first`, the same in every run. This measurement does not split code placement from the rest. The offers vary from run to run, the roster's as much as the cells', so they show no change.
+
 ## Reading the followed cells
 
 A node reads the cells its chooser follows through `gdl::FollowedCells::read` ([What a node reads](../concepts/cell-routing.md#what-a-node-reads)): a class looked up by name, one load of the table the chooser routes by, then, in the bench, one cell found by name among four and one withdrawal looked up. The bench's source has the shape of the runtime's (`gdl_runtime::Cells`). A read allocates nothing (`reading_allocates_nothing`).

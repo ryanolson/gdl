@@ -100,6 +100,12 @@ impl CellLease {
         self.follow.1
     }
 
+    /// The cell policy's lease on the choice, taken out of this lease, so
+    /// that an offer to another instance of the same cell holds it.
+    pub(crate) fn take_choice(&mut self) -> Option<ChoiceHeld> {
+        self.choice.take()
+    }
+
     /// The cell accepted the offer: tell the cell policy's lease, if it
     /// gave one.
     #[inline]

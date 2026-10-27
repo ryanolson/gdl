@@ -14,7 +14,8 @@
 //! reading of an answer.
 //!
 //! An entry that declines says why, as a chooser in another class reads
-//! it ([`Decline`]): its cell is full, or its cell is gone. The reason
+//! it ([`Decline`]): its cell is full, its cell is gone, or this instance
+//! cannot serve the request and another of its cell may. The reason
 //! follows the refusal in the reply, where a build that does not know it
 //! never reads it ([`refusal`]).
 //!
@@ -87,9 +88,10 @@ pub(crate) fn declines(error: &Error) -> bool {
 }
 
 /// Why an entry declined an offer, for a chooser that sent it from
-/// another class: whether to damp only this cell, or to pass it over
-/// until its follow changes. A segment declines offers by its own policy
-/// with [`Segment::decline_offers_as`](super::Segment::decline_offers_as).
+/// another class: whether to damp only this cell, to pass it over until
+/// its follow changes, or to offer the request to the cell's other entry
+/// instances. A segment declines offers by its own policy with
+/// [`Segment::decline_offers_as`](super::Segment::decline_offers_as).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Decline {
     /// The cell has no room now, or this instance retired: the chooser
@@ -100,20 +102,31 @@ pub enum Decline {
     /// as a draining cell does: the chooser passes it over until its
     /// follow changes.
     Gone,
+    /// This instance cannot serve the request, and another entry instance
+    /// of its cell may: for example, it does not have the request's model.
+    /// The chooser offers the request to each other entry instance of the
+    /// cell once, and to another cell only when every one declined. It
+    /// damps nothing, since the decline says nothing of the cell's room.
+    Instance,
 }
 
-/// The reason as it follows a refusal in the reply.
+/// The reasons as they follow a refusal in the reply.
 const GONE: &str = "gone";
+const INSTANCE: &str = "instance";
 
 /// What an entry that declined a forward hand-off answers: the refusal,
-/// encoded as every build reads it, then, for [`Decline::Gone`], the
-/// reason. A build that does not know the reason reads the refusal and
-/// stops there, as `rmp_serde` reads one value and leaves the bytes after
-/// it, so it takes the refusal as a full cell's.
+/// encoded as every build reads it, then, for any reason but
+/// [`Decline::Full`], the reason. A build that does not know the reason
+/// reads the refusal and stops there, as `rmp_serde` reads one value and
+/// leaves the bytes after it, so it takes the refusal as a full cell's:
+/// a chooser before [`Decline::Instance`] damps the cell for one window
+/// and offers the request to another cell.
 pub(crate) fn refusal(error: &Error, decline: Decline) -> Result<Vec<u8>> {
     let mut reply = envelope::encode(&Err::<Accepted, &Error>(error))?;
-    if decline == Decline::Gone {
-        reply.extend(envelope::encode(&GONE)?);
+    match decline {
+        Decline::Full => {}
+        Decline::Gone => reply.extend(envelope::encode(&GONE)?),
+        Decline::Instance => reply.extend(envelope::encode(&INSTANCE)?),
     }
     Ok(reply)
 }
@@ -129,6 +142,7 @@ fn decline(reply: &[u8]) -> Decline {
     }
     match rmp_serde::from_slice::<&str>(after) {
         Ok(GONE) => Decline::Gone,
+        Ok(INSTANCE) => Decline::Instance,
         _ => Decline::Full,
     }
 }
@@ -482,24 +496,45 @@ mod tests {
         }
     }
 
-    /// A refusal as gone carries its reason after the refusal. A build
-    /// before the reason reads the refusal alone, as the full cell's it
-    /// always read, and so does this build when no reason follows, or one
-    /// it does not know, or bytes it cannot read. A full cell's refusal is
-    /// sent byte for byte as before the reason.
+    /// A refusal as gone, or as the instance's, carries its reason after
+    /// the refusal. A build before the reason reads the refusal alone, as
+    /// the full cell's it always read, and so does this build when no
+    /// reason follows, or one it does not know, or bytes it cannot read. A
+    /// build that knows gone but not the instance's reason reads the
+    /// latter as full. A full cell's refusal is sent byte for byte as
+    /// before the reason.
     #[test]
     fn a_reason_after_a_refusal_is_read_here_and_skipped_by_an_older_build() {
         let error = Error::new(ErrorKind::Overloaded, "draining");
         let before = encode(&Err::<Accepted, Error>(error.clone())).expect("encode");
         let full = refusal(&error, Decline::Full).expect("encode");
         let gone = refusal(&error, Decline::Gone).expect("encode");
+        let instance = refusal(&error, Decline::Instance).expect("encode");
         assert_eq!(full, before, "a full cell's refusal changed on the wire");
         assert!(gone.starts_with(&before) && gone.len() > before.len());
+        assert!(instance.starts_with(&before) && instance.len() > before.len());
         // How every build before the reason reads a reply.
-        for reply in [&full, &gone] {
+        for reply in [&full, &gone, &instance] {
             let older: Result<Accepted, Error> = decode(reply).expect("an older build reads it");
             assert_eq!(older.expect_err("a refusal"), error);
         }
+        // How a build that knows gone, and not the instance's reason,
+        // reads each: an unknown reason is a full cell's.
+        let known = |reply: &[u8]| {
+            let mut after = reply;
+            rmp_serde::decode::from_read::<_, serde::de::IgnoredAny>(&mut after)
+                .expect("the refusal");
+            match rmp_serde::from_slice::<&str>(after) {
+                Ok("gone") => Decline::Gone,
+                _ => Decline::Full,
+            }
+        };
+        assert_eq!(known(&instance), Decline::Full);
+        assert_eq!(known(&gone), Decline::Gone);
+        assert_eq!(
+            declined(read(instance)),
+            (ErrorKind::Overloaded, Decline::Instance)
+        );
         assert_eq!(declined(read(gone)), (ErrorKind::Overloaded, Decline::Gone));
         assert_eq!(declined(read(full)), (ErrorKind::Overloaded, Decline::Full));
         let mut later = before.clone();

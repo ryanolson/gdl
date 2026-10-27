@@ -509,11 +509,13 @@ pub(crate) struct Runtime {
 }
 
 /// [`Runtime::declining`]: a drain declines offers, as gone.
-const DRAINED: u8 = 0b100;
+const DRAINED: u8 = 0b1000;
 /// The segment's own refusal, as gone.
-const GONE: u8 = 0b010;
+const GONE: u8 = 0b0100;
+/// The segment's own refusal, as this instance's alone.
+const INSTANCE: u8 = 0b0010;
 /// The segment's own refusal, as full.
-const FULL: u8 = 0b001;
+const FULL: u8 = 0b0001;
 
 /// Velo handler names for one deployment.
 pub(crate) struct Names {
@@ -642,6 +644,7 @@ impl Runtime {
         let policy = match decline {
             Decline::Full => FULL,
             Decline::Gone => GONE,
+            Decline::Instance => INSTANCE,
         };
         self.set_policy(policy);
     }
@@ -686,6 +689,11 @@ impl Runtime {
             (
                 "the instance's segment takes no work from another cell by its own policy",
                 Decline::Gone,
+            )
+        } else if declining & INSTANCE != 0 {
+            (
+                "the instance cannot serve work from another cell by its own policy; another instance of its cell may",
+                Decline::Instance,
             )
         } else {
             (
@@ -851,9 +859,16 @@ impl Runtime {
                         Answer::Failed(error) => Err(error),
                         // Boxed, and only here, as for an instance.
                         Answer::Missed(missed) => {
+                            let choice = held.take_choice();
                             drop(held);
+                            let declined = super::cells::Declined {
+                                cell,
+                                instance,
+                                choice,
+                                missed,
+                            };
                             let failover =
-                                self.fail_over(crossing, cx, &mut envelope, timed, cell, missed);
+                                self.fail_over(crossing, cx, &mut envelope, timed, declined);
                             Box::pin(failover).await
                         }
                     };
@@ -1039,6 +1054,15 @@ impl Held {
         self.cell.as_ref()
     }
 
+    /// The cell policy's lease on the choice of the cell this offer went
+    /// to, taken out, if it gave one.
+    #[cfg(feature = "hub")]
+    pub(crate) fn take_choice(&mut self) -> Option<gdl::__runtime::ChoiceHeld> {
+        self.cell
+            .as_mut()
+            .and_then(super::cells::CellLease::take_choice)
+    }
+
     /// The cell this offer went to accepted it: tell the cell policy's
     /// lease, if it gave one.
     #[cfg(feature = "hub")]
@@ -1081,8 +1105,9 @@ pub(crate) struct Served {
     pub(crate) runs: AtomicUsize,
     pub(crate) inputs: AtomicUsize,
     /// Forward hand-offs declined with no room (admission or egress
-    /// refused, or the instance retired): what a load report counts as
-    /// refusals. Only a refusal touches it.
+    /// refused, or the instance retired), or declined for the cell by its
+    /// own policy: what a load report counts as refusals. An instance's
+    /// own decline is not counted. Only a refusal touches it.
     pub(crate) declined: AtomicUsize,
     /// Forward hand-offs that arrived, refused ones too: what a test
     /// counts to see where a request was offered.

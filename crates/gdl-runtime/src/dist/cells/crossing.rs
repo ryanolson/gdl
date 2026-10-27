@@ -188,13 +188,20 @@ impl Crossing {
 
     /// The cell `cell` declined an offer, made under `lease`, for
     /// `decline`: the chooser damps it, or, when it said it is gone,
-    /// passes it over until its follow changes. Gone holds the follow as
+    /// passes it over until its follow changes. An instance's own decline
+    /// changes neither. Gone holds the follow as
     /// the cell's current table shows it, and only while that table is of
     /// the follow the offer was made under: a decline that lands after a
     /// newer generation replaced it says nothing of the newer one, which
     /// is damped instead, as for a full cell. A full decline leaves a cell
     /// that is gone in its current follow gone. Read only on a decline.
     pub(crate) fn declined(&self, cell: u64, decline: Decline, lease: Option<&CellLease>) {
+        // An instance's own decline says nothing of its cell's room or
+        // state: damping the cell would turn away requests its other
+        // instances serve.
+        if decline == Decline::Instance {
+            return;
+        }
         let damping = &self.target.damping;
         let now = tokio::time::Instant::now();
         let table = self.target.table.load();
@@ -221,6 +228,102 @@ impl Crossing {
     /// load and a search of the damped cells, with no allocation.
     pub(crate) fn accepted(&self, cell: u64) {
         self.target.damping.accept(cell);
+    }
+
+    /// The walk over the other entry instances of the cell `cell`, after
+    /// `declined`, one of them, declined a request as its own: from the
+    /// instance after it, in the order of the cell's current table, to
+    /// the one before it. Every instance of that table when `declined` is
+    /// no longer in it. `None` when the chooser no longer follows the
+    /// cell. Made only once an instance declined: one load of the table,
+    /// a search of its cells and of the cell's instances, and a clone of
+    /// an `Arc`.
+    pub(crate) fn walk(&self, cell: u64, declined: InstanceId) -> Option<Walk> {
+        let table = self.target.table.load();
+        let shown = table.cells.iter().find(|shown| shown.id == cell)?;
+        let count = shown.eligible.len();
+        let (at, left) = match shown.eligible.iter().position(|id| *id == declined) {
+            Some(at) => (at, count - 1),
+            None => (count.saturating_sub(1), count),
+        };
+        Some(Walk {
+            cell: Arc::clone(shown),
+            at,
+            left,
+        })
+    }
+
+    /// The next instance of `walk` that the cell's current table still
+    /// offers, and its cell policy still takes, with the cell's
+    /// [`id`](CellTable::id) and a lease on its follow that holds
+    /// `choice`, the cell policy's lease on the choice of the cell, if it
+    /// gave one. `None` once the walk has offered every instance: the
+    /// request then leaves the cell. The cell policy is not asked again:
+    /// the decline was the instance's, and the cell is still its choice.
+    pub(crate) fn pick_in(
+        &self,
+        walk: &mut Walk,
+        choice: &mut Option<ChoiceHeld>,
+    ) -> Option<(InstanceId, u64, CellLease)> {
+        while let Some(chosen) = walk.next() {
+            if let Some(lease) = self.lease_in(walk, chosen) {
+                return Some((chosen, walk.cell.id, lease.with_choice(choice.take())));
+            }
+        }
+        None
+    }
+
+    /// [`Crossing::pick_in`], asking `selector` for each instance, with
+    /// that instance alone to choose from, so that it holds its lease and
+    /// gives its meta for the instance the request is offered to. A
+    /// selector may wait, so the instance is checked again when it
+    /// returns. A request that ended while its selector chose is not
+    /// handed on.
+    pub(crate) async fn choose_in(
+        &self,
+        walk: &mut Walk,
+        selector: &dyn Erased,
+        cx: &Cx,
+        head: &[u8],
+        encoding: gdl_model::Encoding,
+        choice: &mut Option<ChoiceHeld>,
+    ) -> Result<Option<Chosen>> {
+        while let Some(chosen) = walk.next() {
+            if self.lease_in(walk, chosen).is_none() {
+                continue;
+            }
+            let alone = &walk.cell.offered[walk.at..=walk.at];
+            let picked = selector
+                .select(
+                    cx,
+                    head,
+                    encoding,
+                    &[],
+                    Instances::new(&self.target.segment, alone),
+                )
+                .await?;
+            cx.check()?;
+            if let Some(lease) = self.lease_in(walk, chosen) {
+                return Ok(Some((
+                    chosen,
+                    walk.cell.id,
+                    picked,
+                    lease.with_choice(choice.take()),
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A lease on the follow of `walk`'s cell, if its current table still
+    /// offers `chosen` and the cell policy still takes the cell.
+    fn lease_in(&self, walk: &Walk, chosen: InstanceId) -> Option<CellLease> {
+        let target = &self.target;
+        let now = tokio::time::Instant::now();
+        let policy = |current: &gdl::Cell| target.policy.eligible(current, &target.region, now);
+        let current = target.table.load();
+        still_eligible(&current, &walk.cell, chosen, policy)
+            .and_then(|now| CellLease::take(&now.leases))
     }
 
     /// The cell the policy chooses from `table` for one attempt of the
@@ -324,6 +427,29 @@ fn still_eligible<'t>(
 /// [`id`](CellTable::id), what the selector picked, and the lease on the
 /// cell's follow.
 pub(crate) type Chosen = (InstanceId, u64, Picked, CellLease);
+
+/// The entry instances of one cell that a request is offered to in turn
+/// after one of them declined it as its own ([`Decline::Instance`]): the
+/// cell's table when the decline landed, the place in its instances of
+/// the last one offered, and how many are left. A counter over the
+/// table's order rather than a set of the instances tried: it is three
+/// words for a cell of any size, it offers each instance of the table at
+/// most once, and it allocates nothing. An instance that joined the cell
+/// after the decline is not offered the request.
+pub(crate) struct Walk {
+    cell: Arc<CellTable>,
+    at: usize,
+    left: usize,
+}
+
+impl Walk {
+    /// The next instance to offer, or `None` once every one was.
+    fn next(&mut self) -> Option<InstanceId> {
+        self.left = self.left.checked_sub(1)?;
+        self.at = (self.at + 1) % self.cell.eligible.len();
+        Some(self.cell.eligible[self.at])
+    }
+}
 
 /// A cell policy's choice: the chosen cell's table, and the policy's lease
 /// on the choice, if it gave one.

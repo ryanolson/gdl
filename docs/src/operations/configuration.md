@@ -59,7 +59,7 @@ The `gdl-hub` binary serves on 1337 and 8337, unless `GDL_HUB__PUBLIC_PORT` and 
 | `clock_skew_ms` | 50 | the assumed largest clock difference between segments |
 | `drain_ms` | `default_deadline_ms` | the bound on a stopped instance's drain |
 | `instance_failovers` | 2 | how many more times a router chooses after a declined hand-off. 0 makes each refusal final |
-| `cell_failovers` | 2 | how many other cells a chooser offers a request to after the first declines |
+| `cell_failovers` | 2 | how many other cells a chooser offers a request to after the first declines; an instance's own decline, which goes to the cell's other instances, uses none |
 | `cell_damping_first_ms` | 1000 | how long a chooser passes over a cell after its first decline. At least 1 |
 | `cell_damping_max_ms` | 30000 | the longest a chooser passes over a cell that keeps declining. From `cell_damping_first_ms` to 3600000 |
 | `cell_fresh_periods` | 3 | how many of its periods a cell's load summary stays fresh after it reached the chooser's hub (a summary the hub relayed late counts from then). From 1 to 100 |

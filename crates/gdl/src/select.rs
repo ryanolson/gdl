@@ -17,7 +17,9 @@
 //! into another class is the exception: when the cell chosen for it
 //! declines, another cell is chosen, at most `[runtime] cell_failovers`
 //! times, and the selector chooses within that cell with nothing
-//! declined.
+//! declined. When an entry instance of the cell declines as its own, the
+//! selector is asked about each other instance of the cell in turn, with
+//! that instance alone to choose from.
 
 use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
@@ -55,7 +57,9 @@ pub use least::LeastLoaded;
 /// wait), and, inside a class, again each time the chosen instance
 /// declines the hand-off or the hand-off to it never left, up to
 /// `[runtime] instance_failovers` more times (a hand-off into another
-/// class is offered to other cells, up to `cell_failovers`). Each
+/// class is offered to other cells, up to `cell_failovers`, and to each
+/// other instance of the cell, one at a time, after an instance declines
+/// it as its own). Each
 /// choice's lease is its own, and a choice that is not sent to drops its
 /// lease before the next. Nothing else runs for it.
 pub trait Selector: Send + Sync + 'static {

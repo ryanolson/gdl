@@ -93,11 +93,12 @@ dynamo's `request_duration_seconds` spans the whole handler, its stream included
 
 ## Reading a chooser's cell choices
 
-A chooser counts each offer to a cell of another class under the cell and how it ended: `accepted`, `declined_full`, `declined_gone`, `unsent`, `outcome_unknown`, or `failed`. It counts an offer after another cell missed the request as a failover too.
+A chooser counts each offer to a cell of another class under the cell and how it ended: `accepted`, `declined_full`, `declined_gone`, `declined_instance`, `unsent`, `outcome_unknown`, or `failed`. It counts each offer after a request's first as a failover too: after another cell missed it, or after another instance of the same cell declined it as its own.
 
 - **Where requests go:** the rate of `cell_offers_total{outcome="accepted"}` by `cell`.
 - **A full cell:** its `declined_full` rises, and `cell_failovers_total` rises on the other cells.
 - **A draining cell:** its `declined_gone` rises, then stops until the relay changes the follow.
+- **Instances that serve different requests:** a cell's `declined_instance` rises with its `cell_failovers_total`, and its other series do not change. Each such decline costs the request one round trip.
 - **A transport fault:** `unsent` says velo refused to send. `outcome_unknown` says the request may have run, and failed for its caller.
 
 The counts are sharded by thread as the runtime's figures are. Counting one offer is one relaxed add, with no lock and no allocation ([Runtime feature costs](feature-costs.md#counting-a-choosers-offers)).

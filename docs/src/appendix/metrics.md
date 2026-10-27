@@ -59,23 +59,24 @@ A chooser registers two more families: what became of each offer it made to a ce
 | Name | Type | Extra labels | Meaning |
 |---|---|---|---|
 | `cell_offers_total` | counter | `class`, `cell`, `outcome` | Offers this chooser made to the cell, by how each ended. |
-| `cell_failovers_total` | counter | `class`, `cell` | Offers this chooser made to the cell after another cell did not take the request. |
+| `cell_failovers_total` | counter | `class`, `cell` | Offers this chooser made to the cell after another offer of the request missed: another cell's, or another of this cell's instances' own decline. |
 
-`outcome` has one series for each of these six values:
+`outcome` has one series for each of these seven values:
 
 | `outcome` | The answer |
 |---|---|
 | `accepted` | The cell's entry took the request. |
 | `declined_full` | The entry declined it, saying that its cell is full. |
 | `declined_gone` | The entry declined it, saying that its cell is gone. |
+| `declined_instance` | The entry declined it as its own: it cannot serve the request, and another entry instance of its cell may. |
 | `unsent` | velo refused to send it. No entry said anything. |
 | `outcome_unknown` | The send failed after velo took it, or no answer came within the setup timeout. The request fails with `OutcomeUnknown`. |
 | `failed` | The entry answered with another error of the request's own, or with an answer the chooser could not read. |
 
-- Each offer counts once, under the cell it went to. So a cell's six series add up to the offers made to it. Each request's first offer is not a failover, so over all cells, `cell_failovers_total` is the sum of `cell_offers_total` less the requests that reached an offer.
+- Each offer counts once, under the cell it went to. So a cell's seven series add up to the offers made to it. Each request's first offer is not a failover, so over all cells, `cell_failovers_total` is the sum of `cell_offers_total` less the requests that reached an offer.
 - An offer counts only when the chooser reads its answer. A request that no cell may take (`Routing`), a request whose cell policy or selector fails, and a request dropped while it waits for the answer count nothing.
 - A cell's series appear at zero when the chooser first follows the cell. They are kept by the cell's name, not its follow, so every generation of the cell counts into the same series. They stay for the life of the process, also after the cell's follow is dropped ([limitations](../operations/limitations.md#a-choosers-cell-series-stay-for-the-life-of-its-process)).
-- The cells bound the series: six and one for each cell of each class the chooser sends to that its hub followed.
+- The cells bound the series: seven and one for each cell of each class the chooser sends to that its hub followed.
 - The chooser counts the decline that the entry gave, not what it did with it. A gone decline of an offer made under an earlier generation of the cell damps the cell, and still counts as `declined_gone`.
 
 ## Buckets

@@ -112,7 +112,7 @@ The lease is a duration, not an instant. Each reader measures a record's age on 
 
 ### Load reports and the load summary
 
-Each usable entry instance reports its admission to its hub once a summary period: the roots it holds admitted, its admission limit, and the hand-offs it declined since its last report (`POST /v1/ext/gdl-cell/instances/{id}/load`, with its own credential). A report from any other instance is refused with 409. The period is `summary_ms`: 10 s by default, at least 1 s. The hub and its instances read the same setting.
+Each usable entry instance reports its admission to its hub once a summary period: the roots it holds admitted, its admission limit, and the hand-offs it declined since its last report, except those it declined as its own ([An instance that cannot serve the request](cell-routing.md#an-instance-that-cannot-serve-the-request)) (`POST /v1/ext/gdl-cell/instances/{id}/load`, with its own credential). A report from any other instance is refused with 409. The period is `summary_ms`: 10 s by default, at least 1 s. The hub and its instances read the same setting.
 
 Once a period, the hub sums the latest report of each usable entry instance into the cell's load summary, and drops a report older than three periods. `admitted`, `limit`, and `refusals` are summed over the counted reports. `instances` is the number of usable entry instances. `period_ms` is the summary period, so that a reader can tell when the summary is stale.
 

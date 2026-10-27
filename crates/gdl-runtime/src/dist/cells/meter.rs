@@ -35,7 +35,7 @@ const OFFERS_HELP: &str = "Offers this chooser made to the cell, by how each end
 /// The family of the offers made after another cell missed the request.
 pub(crate) const FAILOVERS: &str = "cell_failovers_total";
 const FAILOVERS_HELP: &str =
-    "Offers this chooser made to the cell after another cell did not take the request.";
+    "Offers this chooser made to the cell after another offer of the request missed.";
 
 /// How an offer to a cell ended, as the chooser read its answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +46,9 @@ pub(crate) enum Outcome {
     DeclinedFull,
     /// The entry declined it, saying its cell is gone.
     DeclinedGone,
+    /// The entry declined it, saying that it cannot serve it and another
+    /// entry instance of its cell may.
+    DeclinedInstance,
     /// velo refused to send it: no entry said anything.
     Unsent,
     /// The send failed after velo took it, or no answer came in time: the
@@ -58,10 +61,11 @@ pub(crate) enum Outcome {
 
 impl Outcome {
     /// Every outcome, in the order of their counts in a shard.
-    const ALL: [Outcome; 6] = [
+    const ALL: [Outcome; 7] = [
         Outcome::Accepted,
         Outcome::DeclinedFull,
         Outcome::DeclinedGone,
+        Outcome::DeclinedInstance,
         Outcome::Unsent,
         Outcome::Unknown,
         Outcome::Failed,
@@ -73,6 +77,7 @@ impl Outcome {
             Answer::Accepted(_) => Outcome::Accepted,
             Answer::Missed(Missed::Declined(_, Decline::Full)) => Outcome::DeclinedFull,
             Answer::Missed(Missed::Declined(_, Decline::Gone)) => Outcome::DeclinedGone,
+            Answer::Missed(Missed::Declined(_, Decline::Instance)) => Outcome::DeclinedInstance,
             Answer::Missed(Missed::Unsent(_)) => Outcome::Unsent,
             Answer::Failed(error) if error.kind() == ErrorKind::OutcomeUnknown => Outcome::Unknown,
             Answer::Failed(_) => Outcome::Failed,
@@ -85,6 +90,7 @@ impl Outcome {
             Outcome::Accepted => "accepted",
             Outcome::DeclinedFull => "declined_full",
             Outcome::DeclinedGone => "declined_gone",
+            Outcome::DeclinedInstance => "declined_instance",
             Outcome::Unsent => "unsent",
             Outcome::Unknown => "outcome_unknown",
             Outcome::Failed => "failed",
@@ -353,6 +359,13 @@ pub(crate) mod tests {
                     Decline::Gone,
                 )),
                 Outcome::DeclinedGone,
+            ),
+            (
+                Answer::Missed(Missed::Declined(
+                    error(ErrorKind::Overloaded),
+                    Decline::Instance,
+                )),
+                Outcome::DeclinedInstance,
             ),
             (
                 Answer::Missed(Missed::Unsent(error(ErrorKind::Transport))),

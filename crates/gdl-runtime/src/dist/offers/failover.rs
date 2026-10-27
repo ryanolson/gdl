@@ -983,9 +983,9 @@ async fn an_address_another_deployment_holds_is_not_offered_to() {
     assert_eq!(error.kind(), ErrorKind::Transport, "{error}");
 }
 
-/// A segment declines offers by its own policy as full or gone, and takes
-/// them again; a drain's refusal says gone, and outlasts the segment's
-/// own, which neither replaces nor undoes it.
+/// A segment declines offers by its own policy as full, gone, or the
+/// instance's own, and takes them again; a drain's refusal says gone, and
+/// outlasts the segment's own, which neither replaces nor undoes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_drains_refusal_outlasts_the_segments_own() {
     use crate::dist::offers::Decline;
@@ -998,10 +998,12 @@ async fn a_drains_refusal_outlasts_the_segments_own() {
     assert_eq!(declined(), Some(Decline::Full));
     rt.decline_offers_as(Decline::Gone);
     assert_eq!(declined(), Some(Decline::Gone));
+    rt.decline_offers_as(Decline::Instance);
+    assert_eq!(declined(), Some(Decline::Instance));
     rt.take_offers();
     assert_eq!((declined(), rt.declines_offers()), (None, false));
 
-    rt.decline_offers_as(Decline::Full);
+    rt.decline_offers_as(Decline::Instance);
     rt.decline_offers();
     let refusal = rt.check_offer().expect_err("declined");
     assert_eq!(refusal.decline, Decline::Gone);

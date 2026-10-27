@@ -11,7 +11,7 @@ use futures::{Future, Stream, StreamExt};
 use super::admission::{EgressPermit, Share};
 use super::envelope::{Accepted, Forward, Open, VERSION, WireCx};
 use super::fabric::{Canceller, EncodedItem, Frame, Inbound, Outbound, Outgoing, ReplyTo, Retirer};
-use super::offers::{Refusal, Refused};
+use super::offers::{Decline, Refusal, Refused};
 use super::runtime::{Entries, Handed, Held, Router, Runtime};
 use super::stages::{BwdExit, DBackward, DForward, DInner, FwdExit};
 use gdl::__runtime as meter;
@@ -451,8 +451,11 @@ where
                         let hop = Arc::clone(&hop);
                         Box::pin(async move {
                             let accepted = hop.accept_forward(envelope).await;
+                            // An instance's own decline says nothing of its
+                            // cell's room, so its load does not report it.
                             if let Err(refused) = &accepted
                                 && refused.error.kind() == ErrorKind::Overloaded
+                                && refused.decline != Decline::Instance
                             {
                                 hop.rt
                                     .served

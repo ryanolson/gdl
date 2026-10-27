@@ -4,7 +4,8 @@
 //! they took, and announce that they have drained; its interior instances
 //! serve until every entry instance has drained or left, then drain; and
 //! once every instance has left, the hub withdraws the cell's record. An
-//! entry instance can also decline offers by its own policy, with no drain.
+//! entry instance can also decline offers by its own policy, with no drain:
+//! for its cell, or as its own, which leaves the request in its cell.
 //!
 //! Every hub and instance runs in this process on OS-assigned ports,
 //! sharing one directory; every wait is bounded and for something
@@ -628,7 +629,7 @@ async fn a_draining_cells_decline_keeps_a_stale_chooser_away() {
 }
 
 /// An entry instance declines offers by its segment's own policy, as gone
-/// or as full, with no drain. A chooser passes a gone cell over, also once
+/// or as full, with no drain, and counts each as a refusal in its load. A chooser passes a gone cell over, also once
 /// the entry takes offers again, since its follow has not changed. It
 /// damps a full cell, and a lone full cell takes the request again once
 /// the entry takes offers again.
@@ -650,6 +651,11 @@ async fn an_entry_declines_by_its_own_policy_as_gone_or_full() {
         .expect("the other cell answered");
     assert_eq!((offers(&m1), offers(&m2)), (1, 1));
     assert_eq!((m1.forwards(), m2.forwards()), (0, 1));
+    assert_eq!(
+        m1.entries[0].segment.load().declined,
+        1,
+        "a refusal to report"
+    );
     let m = followed(&cells, "f", M1).expect("followed");
     assert!(m.gone && m.state == CellState::Ready, "{m:?}");
     m1.entries[0].segment.take_offers();
@@ -678,6 +684,71 @@ async fn an_entry_declines_by_its_own_policy_as_gone_or_full() {
         .expect("the lone full cell answered");
     assert_eq!((m1.forwards(), m2.forwards()), (0, 5));
     assert_eq!(followed(&cells, "f", M2).expect("followed").damped, None);
+    for hub in [hub, m1.hub, m2.hub] {
+        hub.shutdown().await.expect("valid test fixture");
+    }
+}
+
+/// An entry instance declines offers as its own, by its segment's own
+/// policy: each request it is offered goes to the other entry instance of
+/// its cell, which takes it, and never to the other cell. Its cell is
+/// neither damped nor held gone, and the instance's load report counts no
+/// refusal, which would read as a saturated cell under `home_first`. Once
+/// the instance takes offers again, round robin offers it requests again,
+/// and it takes them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_that_declines_as_its_own_leaves_the_request_in_its_cell() {
+    let spec = spec_of(placement());
+    let directory = Resolving::new();
+    let quiet = Events::quiet();
+    let hub = global_hub_of(&spec, &directory).await;
+    let chooser = chooser(&spec, &hub).await;
+    let m1 = cell(
+        &spec,
+        &directory,
+        Model {
+            entries: 2,
+            ..ready(M1, "m1-hub:1337")
+        },
+        &quiet,
+    )
+    .await;
+    let m2 = cell(&spec, &directory, degraded(M2, "m2-hub:1337"), &quiet).await;
+    let cells = tables(&chooser);
+    until(&cells, "the model cells followed", |cells| {
+        followed(cells, "f", M1)
+            .is_some_and(|m| m.state == CellState::Ready && m.eligible.len() == 2)
+            && followed(cells, "f", M2).is_some_and(|m| m.state == CellState::Degraded)
+    })
+    .await;
+
+    let (own, other) = (&m1.entries[0], &m1.entries[1]);
+    own.segment.decline_offers_as(Decline::Instance);
+    for _ in 0..4 {
+        ask(&chooser.segment)
+            .await
+            .expect("the other instance answered");
+    }
+    assert_eq!((own.forwards(), other.forwards(), m2.forwards()), (0, 4, 0));
+    assert_eq!(
+        own.offered(),
+        2,
+        "round robin offers the declining instance every other request first"
+    );
+    assert_eq!(offers(&m2), 0, "the other cell was offered a request");
+    let m = followed(&cells, "f", M1).expect("followed");
+    assert!(!m.gone && m.damped.is_none(), "{m:?}");
+    assert_eq!(
+        own.segment.load().declined,
+        0,
+        "the instance's own declines count as its cell's refusals in its load report"
+    );
+
+    own.segment.take_offers();
+    for _ in 0..4 {
+        ask(&chooser.segment).await.expect("the cell answered");
+    }
+    assert_eq!((own.forwards(), other.forwards(), m2.forwards()), (2, 6, 0));
     for hub in [hub, m1.hub, m2.hub] {
         hub.shutdown().await.expect("valid test fixture");
     }

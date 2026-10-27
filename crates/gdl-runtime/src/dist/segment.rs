@@ -273,8 +273,10 @@ impl<H> Segment<H> {
     /// about the whole cell, since a chooser chooses cells: a chooser that
     /// hears gone from one entry instance offers no entry instance of the
     /// cell more work. So decline as gone on every entry instance, for a
-    /// reason that holds for the cell. A call replaces the reason an
-    /// earlier one gave. Costs nothing per request beyond the one load an
+    /// reason that holds for the cell. [`Decline::Instance`] is about this
+    /// instance alone: a chooser that hears it offers the request to the
+    /// cell's other entry instances, each once, before another cell, and
+    /// damps nothing. A call replaces the reason an earlier one gave. Costs nothing per request beyond the one load an
     /// offer already makes.
     pub fn decline_offers_as(&self, decline: Decline) {
         self.rt.decline_offers_as(decline);

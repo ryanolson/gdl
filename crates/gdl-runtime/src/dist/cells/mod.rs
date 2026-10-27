@@ -30,7 +30,7 @@ mod tests;
 pub(crate) use crossing::{Crossing, Target, targets};
 pub(crate) use lease::CellLease;
 pub(crate) use meter::CellMeters;
-pub(crate) use offer::answer;
+pub(crate) use offer::{Declined, answer};
 pub(crate) use task::{REWATCH, REWATCH_CAP, follow, hub_address};
 // The membership's tests drive the follower beside their own.
 #[cfg(test)]
