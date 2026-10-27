@@ -1,13 +1,15 @@
 //! Container deployment output contains an ordered hub and one image per segment.
 use std::path::Path;
 
+mod common;
+
 #[path = "deployment/relay.rs"]
 mod relay;
 
 #[test]
 fn compose_starts_segments_only_after_hub_health() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let spec = portable_spec(&root).expect("valid test fixture");
+    let mirror = Mirror::new();
+    let spec = portable_spec(&mirror).expect("valid test fixture");
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-test-")
         .tempdir()
@@ -16,7 +18,7 @@ fn compose_starts_segments_only_after_hub_health() {
         &spec,
         None,
         temp.path(),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("valid test fixture");
@@ -55,12 +57,10 @@ fn compose_starts_segments_only_after_hub_health() {
     }
     assert!(
         files[Path::new("hub/Dockerfile")]
-            .contains("cargo install --git 'https://github.com/ryanolson/gdl'")
+            .contains(&format!("cargo install --git '{}'", mirror.url))
     );
     assert!(files.values().all(|text| !text.contains("COPY sources")));
-    assert!(
-        files[Path::new("front/Cargo.toml")].contains("git = \"https://github.com/ryanolson/gdl\"")
-    );
+    assert!(files[Path::new("front/Cargo.toml")].contains(&format!("git = \"{}\"", mirror.url)));
     assert!(files.contains_key(Path::new("deployment.json")));
     // Instances join and retire while the others serve, and the README
     // says when Compose can add them.
@@ -78,12 +78,13 @@ fn compose_starts_segments_only_after_hub_health() {
 
 #[test]
 fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
+    let mirror = Mirror::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let text =
         std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("valid test fixture");
     let graph =
         std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("valid test fixture");
-    let text = portable_text(&text);
+    let text = mirror.portable(&text);
     let text = format!(
         "{text}\n[deployment]\nbase_image = \"ubuntu:24.04\"\nbuild_image = \"rust:1.93-bookworm\"\nhub_image = \"debian:bookworm-slim\"\n[deployment.segment.engine]\nbase_image = \"nvcr.io/nvidia/cuda:12.8.1-runtime-ubuntu24.04\"\n[deployment.segment.engine.config.runtime]\ndrain_ms = 90000\n"
     );
@@ -93,7 +94,7 @@ fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
         &spec,
         None,
         &root.join("target/deployment-test"),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("valid test fixture");
@@ -116,6 +117,7 @@ fn each_image_can_override_the_runtime_base_without_changing_the_builder() {
 /// is built from, so that the binary finds the glibc it was linked against.
 #[test]
 fn the_default_images_are_distroless_and_the_pinned_toolchain() {
+    let mirror = Mirror::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let toolchain: toml::Table = toml::from_str(
         &std::fs::read_to_string(root.join("rust-toolchain.toml")).expect("the toolchain"),
@@ -124,7 +126,7 @@ fn the_default_images_are_distroless_and_the_pinned_toolchain() {
     let channel = toolchain["toolchain"]["channel"]
         .as_str()
         .expect("a channel");
-    let spec = portable_spec(&root).expect("valid test fixture");
+    let spec = portable_spec(&mirror).expect("valid test fixture");
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-defaults-")
         .tempdir()
@@ -133,7 +135,7 @@ fn the_default_images_are_distroless_and_the_pinned_toolchain() {
         &spec,
         None,
         temp.path(),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("a bundle");
@@ -152,11 +154,11 @@ fn the_default_images_are_distroless_and_the_pinned_toolchain() {
 
 #[test]
 fn preview_files_are_the_exact_downloaded_snapshot() {
+    let mirror = Mirror::new();
     use std::io::Read;
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let spec = portable_spec(&root).expect("valid deployment fixture");
+    let spec = portable_spec(&mirror).expect("valid deployment fixture");
     let bundle =
-        gdl_gen::compose_bundle(&spec, &root.join("target")).expect("valid deployment fixture");
+        gdl_gen::compose_bundle(&spec, &mirror.target()).expect("valid deployment fixture");
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bundle.archive.as_slice()));
     let mut matched = 0;
     for entry in archive.entries().expect("valid deployment fixture") {
@@ -201,36 +203,27 @@ fn deployment_rejects_local_node_and_message_crates() {
     );
 }
 
-/// The chat example with its crates from the mirror commit the api
-/// deployment pins: a source with no pinned frontend, whose binary reads
-/// JSON requests on stdin.
-fn chat_spec() -> gdl_gen::Spec {
+/// The chat example with its crates from the mirror at the pinned
+/// commit: a source with no pinned frontend, whose binary reads JSON
+/// requests on stdin.
+fn chat_spec(mirror: &Mirror) -> gdl_gen::Spec {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let rev = pinned_rev();
-    let git = |package: &str| {
-        format!(
-            "{{ package = \"{package}\", git = \"https://github.com/ryanolson/gdl\", rev = \"{rev}\" }}"
-        )
-    };
     let text = std::fs::read_to_string(root.join("examples/chat/gdl.toml"))
         .expect("the chat spec")
         .replace(
             "crates = [\"protocols\"]",
-            &format!("crates = [{}]", git("chat-protocols")),
+            &format!("crates = [{}]", mirror.dep("chat-protocols")),
         )
         .replace(
             "crates = [\"front-nodes\", \"engine-mock\", \"post-nodes\"]",
             &format!(
                 "crates = [{}, {}, {}]",
-                git("chat-front-nodes"),
-                git("chat-engine-mock"),
-                git("chat-post-nodes")
+                mirror.dep("chat-front-nodes"),
+                mirror.dep("chat-engine-mock"),
+                mirror.dep("chat-post-nodes")
             ),
         )
-        .replace(
-            "path = \"../../crates/gdl-runtime\"",
-            &format!("git = \"https://github.com/ryanolson/gdl\"\nrev = \"{rev}\""),
-        );
+        .replace("path = \"../../crates/gdl-runtime\"", &mirror.gdl());
     let graph = std::fs::read_to_string(root.join("examples/chat/chat.gdl")).expect("the graph");
     gdl_gen::Spec::from_text(&text, &graph, &root.join("examples/chat")).expect("a spec")
 }
@@ -241,16 +234,16 @@ fn chat_spec() -> gdl_gen::Spec {
 /// end of its input and stopping. It still waits for the hub alone.
 #[test]
 fn a_source_that_reads_stdin_keeps_it_open() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mirror = Mirror::new();
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-stdin-")
         .tempdir()
         .expect("a directory");
     let files = gdl_gen::compose_files(
-        &chat_spec(),
+        &chat_spec(&mirror),
         None,
         temp.path(),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("a bundle");
@@ -290,18 +283,267 @@ fn pinned_rev() -> String {
     spec["gdl"]["rev"].as_str().expect("[gdl] rev").to_string()
 }
 
-fn portable_text(text: &str) -> String {
-    let rev = pinned_rev();
-    text.replace("crates = [\".\"]", &format!("crates = [{{ package = \"api-frontend\", git = \"https://github.com/ryanolson/gdl\", rev = \"{rev}\" }}]"))
-        .replace("path = \"../../crates/gdl-runtime\"", &format!("git = \"https://github.com/ryanolson/gdl\"\nrev = \"{rev}\""))
+/// A stand-in for the mirror that `examples/api/deploy.toml` names, so
+/// that no test reaches GitHub (`docs/src/development/testing.md`): a Git
+/// repository built from this repository's history, and a target
+/// directory of the test's own for the fetches from it.
+///
+/// The repository is built once per pinned commit, under the cargo target
+/// directory ([`mirror_repo`]), and every test fetches from it. Cargo keeps
+/// a checkout in its home for each repository URL and commit it fetches,
+/// and the checkout outlives the test: with a repository of its own, each
+/// test would add one, 34 MiB per run of these tests.
+struct Mirror {
+    dir: tempfile::TempDir,
+    url: String,
+    rev: String,
+}
+
+impl Mirror {
+    fn new() -> Self {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let repo = mirror_repo(&common::target("gdl-test-mirrors"), &pinned_rev());
+        let mirror = Self {
+            url: format!("file://{}", repo.display()),
+            rev: head(&repo),
+            dir: tempfile::Builder::new()
+                .prefix("gdl-mirror-target-")
+                .tempdir()
+                .expect("a directory"),
+        };
+        // A fetch resolves its package in a manifest of its own, which has
+        // no lock, so Cargo would read crates.io's index. Each starts from
+        // its example's lock, which pins every crate the package needs:
+        // the fetch keeps a lock it finds.
+        for (packages, lock) in [
+            (&["api-frontend"][..], "examples/api/Cargo.lock"),
+            (
+                &[
+                    "chat-protocols",
+                    "chat-front-nodes",
+                    "chat-engine-mock",
+                    "chat-post-nodes",
+                ],
+                "examples/chat/Cargo.lock",
+            ),
+        ] {
+            for package in packages {
+                let scratch = gdl_extract::Workspace::git_scratch(
+                    package,
+                    &mirror.url,
+                    &mirror.rev,
+                    &mirror.target(),
+                );
+                std::fs::create_dir_all(&scratch).expect("the fetch's directory");
+                std::fs::copy(root.join(lock), scratch.join("Cargo.lock"))
+                    .expect("the example's lock");
+            }
+        }
+        mirror
+    }
+
+    /// The target directory the tests fetch into.
+    fn target(&self) -> std::path::PathBuf {
+        self.dir.path().join("target")
+    }
+
+    /// `package` from the mirror, as a spec lists a crate.
+    fn dep(&self, package: &str) -> String {
+        format!(
+            "{{ package = \"{package}\", git = \"{}\", rev = \"{}\" }}",
+            self.url, self.rev
+        )
+    }
+
+    /// gdl from the mirror, as `[gdl]` names it.
+    fn gdl(&self) -> String {
+        format!("git = \"{}\"\nrev = \"{}\"", self.url, self.rev)
+    }
+
+    /// `text`, the api example's spec, with its crate and gdl from the
+    /// mirror, as `examples/api/deploy.toml` takes them from GitHub.
+    fn portable(&self, text: &str) -> String {
+        text.replace(
+            "crates = [\".\"]",
+            &format!("crates = [{}]", self.dep("api-frontend")),
+        )
+        .replace("path = \"../../crates/gdl-runtime\"", &self.gdl())
+    }
+}
+
+/// A relative `CARGO_TARGET_DIR`, which Cargo accepts, still gives the
+/// mirror an absolute `file://` URL, which Cargo can fetch. The child runs
+/// the hub-health test with the suite's target directory named relative
+/// to its working directory.
+#[test]
+fn a_relative_cargo_target_directory_can_fetch_the_mirror() {
+    let target = common::target("")
+        .canonicalize()
+        .expect("the Cargo target directory");
+    // Reuse the suite's target so this check adds no repository URL to Cargo's cache.
+    let output = std::process::Command::new("timeout")
+        .arg(common::CARGO_LIMIT)
+        .arg(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--exact",
+            "compose_starts_segments_only_after_hub_health",
+            "--nocapture",
+        ])
+        .current_dir(target.parent().expect("the target's parent"))
+        .env(
+            "CARGO_TARGET_DIR",
+            target.file_name().expect("the target's name"),
+        )
+        .env("CARGO_NET_RETRY", "0")
+        .output()
+        .expect("the deployment test");
+    assert!(
+        output.status.success(),
+        "relative CARGO_TARGET_DIR could not fetch the mirror:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
+        "the child must run the deployment test: {output:?}"
+    );
+}
+
+/// Test processes that start together build the mirror once between
+/// them: each builds its own copy beside the mirror's path and renames it
+/// into place, and a process whose rename finds the mirror there uses
+/// that one. The commit has a fixed date, so a mirror built again, after
+/// the target directory is cleaned, has the same commit, of which Cargo
+/// already keeps a checkout.
+#[test]
+fn processes_that_start_together_share_one_mirror() {
+    let pinned = pinned_rev();
+    let parent = tempfile::Builder::new()
+        .prefix("gdl-mirrors-")
+        .tempdir()
+        .expect("a directory");
+    let built: Vec<(std::path::PathBuf, String)> = std::thread::scope(|scope| {
+        let builders: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    let repo = mirror_repo(parent.path(), &pinned);
+                    let rev = head(&repo);
+                    (repo, rev)
+                })
+            })
+            .collect();
+        builders
+            .into_iter()
+            .map(|builder| builder.join().expect("a builder"))
+            .collect()
+    });
+    assert!(built.iter().all(|one| *one == built[0]), "{built:?}");
+    let left: Vec<_> = std::fs::read_dir(parent.path())
+        .expect("the mirrors")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    assert_eq!(left, [built[0].0.clone()], "one mirror and no copy left");
+
+    // Git dates a commit to the second: two builds a second apart would
+    // differ without the fixed date.
+    assert_eq!(
+        run_git(
+            &built[0].0,
+            &["show", "--no-patch", "--format=%at %ct", "HEAD"]
+        ),
+        "1767225600 1767225600"
+    );
+}
+
+/// The paths of the pinned commit that the mirror holds.
+const MIRRORED: [&str; 8] = [
+    "Cargo.toml",
+    "crates/gdl",
+    "crates/gdl-macros",
+    "crates/gdl-message",
+    "crates/gdl-model",
+    "crates/gdl-syntax",
+    "examples/api",
+    "examples/chat",
+];
+
+/// The mirror's repository for the pinned commit `pinned`, in `parent`.
+/// Its one commit holds what a fetch of the examples' packages reads from
+/// the pinned commit ([`MIRRORED`]): not the whole pinned tree, 9 MB, of
+/// which Cargo would keep a checkout. It is built beside its path and
+/// renamed into place, so a test never reads one half built, and tests
+/// that build it at once agree on one.
+fn mirror_repo(parent: &Path, pinned: &str) -> std::path::PathBuf {
+    use std::hash::{Hash, Hasher};
+    // Named for what it holds, so that a change to it builds a new one.
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    MIRRORED.hash(&mut hash);
+    // The mirror's URL names its path, which must be absolute, where
+    // `CARGO_TARGET_DIR` may be relative.
+    let parent = std::path::absolute(parent).expect("an absolute path");
+    let repo = parent.join(format!("{pinned}-{:016x}", hash.finish()));
+    if repo.exists() {
+        return repo;
+    }
+    std::fs::create_dir_all(&parent).expect("the mirrors' directory");
+    let building = tempfile::Builder::new()
+        .prefix(".building-")
+        .tempdir_in(&parent)
+        .expect("a directory");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let git = |args: &[&str]| run_git(building.path(), args);
+    git(&["init", "--quiet"]);
+    // The pinned commit alone, from this repository's history.
+    let origin = format!("file://{}", root.display());
+    git(&["fetch", "--quiet", "--depth", "1", &origin, pinned]);
+    git(&["checkout", "--quiet", pinned, "--"]
+        .into_iter()
+        .chain(MIRRORED)
+        .collect::<Vec<_>>());
+    git(&["commit", "--quiet", "--message", "the pinned examples"]);
+    match std::fs::rename(building.path(), &repo) {
+        // Its path is gone: nothing is left to remove.
+        Ok(()) => {
+            let _ = building.keep();
+        }
+        // Another test renamed its copy into place first.
+        Err(_) if repo.exists() => {}
+        Err(e) => panic!("{}: {e}", repo.display()),
+    }
+    repo
+}
+
+/// The commit `repo` has checked out.
+fn head(repo: &Path) -> String {
+    run_git(repo, &["rev-parse", "HEAD"])
+}
+
+/// Run `git args` in `dir`, and return what it printed. Its commits have a
+/// fixed author and date, so one tree always makes one commit.
+fn run_git(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=gdl", "-c", "user.email=gdl@localhost"])
+        .args(["-c", "commit.gpgsign=false"])
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 /// The pinned commit carries what generated crates depend on, and the
 /// example package comes from the same commit. A pin that predates
 /// `gdl-runtime` compiles here, where only text is compared, and fails
 /// when cargo resolves the generated manifests in the image build. This
-/// reads the local repository. A pin that was never pushed to the mirror
-/// fails the tests above, which fetch the example package at the pin.
+/// reads the local repository. No test fetches from the mirror itself
+/// ([`Mirror`]), so none fails for a pin that was never pushed to it.
 #[test]
 fn the_deployment_pin_carries_the_runtime() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -325,10 +567,47 @@ fn the_deployment_pin_carries_the_runtime() {
     assert!(show.success(), "{rev} has no crates/gdl-runtime");
 }
 
-fn portable_spec(root: &Path) -> Result<gdl_gen::Spec, gdl_gen::Error> {
+/// The pin is on the public mirror that `examples/api/deploy.toml` names,
+/// which every other test here replaces with [`Mirror`]: the example
+/// package and `gdl-runtime`, which the generated segments take from it,
+/// resolve there at the pin. Run it after moving the pin, with
+/// `cargo nextest run -p gdl-gen --test deployment --run-ignored only -E 'test(=the_pin_is_on_the_public_mirror)'`.
+#[test]
+#[ignore = "needs network"]
+fn the_pin_is_on_the_public_mirror() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join("examples/api/deploy.toml")).expect("deploy spec");
+    let spec: toml::Table = toml::from_str(&text).expect("deploy spec");
+    let url = spec["gdl"]["git"].as_str().expect("[gdl] git");
+    let rev = pinned_rev();
+    let target = tempfile::Builder::new()
+        .prefix("gdl-public-mirror-")
+        .tempdir()
+        .expect("a directory");
+    for package in ["api-frontend", "gdl-runtime"] {
+        let workspace = gdl_extract::Workspace::fetch_git(
+            package,
+            url,
+            &rev,
+            target.path(),
+            &gdl_extract::Cargo::trusted(),
+        )
+        .unwrap_or_else(|e| panic!("{package} at {rev} from {url}: {e}"));
+        let located = workspace.locate(package).expect("the package");
+        assert!(
+            located.source.starts_with(&format!("git+{url}"))
+                && located.source.ends_with(&format!("#{rev}")),
+            "{package}: {}",
+            located.source
+        );
+    }
+}
+
+fn portable_spec(mirror: &Mirror) -> Result<gdl_gen::Spec, gdl_gen::Error> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
     let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
-    gdl_gen::Spec::from_text(&portable_text(&text), &graph, &root.join("examples/api"))
+    gdl_gen::Spec::from_text(&mirror.portable(&text), &graph, &root.join("examples/api"))
 }
 
 /// Only a spec that deploys asks for `gdl-runtime`'s `hub` feature, which
@@ -336,10 +615,11 @@ fn portable_spec(root: &Path) -> Result<gdl_gen::Spec, gdl_gen::Error> {
 /// generates segments that build without them.
 #[test]
 fn only_a_spec_with_deployment_turns_on_the_hub_feature() {
+    let mirror = Mirror::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
     let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
-    let text = portable_text(&text);
+    let text = mirror.portable(&text);
     assert!(!text.contains("[deployment]"), "{text}");
     for (text, hub) in [(text.clone(), false), (text + "[deployment]\n", true)] {
         let spec =
@@ -348,7 +628,7 @@ fn only_a_spec_with_deployment_turns_on_the_hub_feature() {
             .prefix("gdl-hub-feature-")
             .tempdir()
             .expect("a directory");
-        let files = gdl_gen::render(&spec, temp.path(), &root.join("target")).expect("rendered");
+        let files = gdl_gen::render(&spec, temp.path(), &mirror.target()).expect("rendered");
         for segment in ["front", "engine"] {
             let manifest: toml::Table =
                 toml::from_str(&files[&Path::new(segment).join("Cargo.toml")]).expect("toml");
@@ -369,13 +649,14 @@ fn only_a_spec_with_deployment_turns_on_the_hub_feature() {
 /// with classes is composed with its fleet.
 #[test]
 fn a_classed_bundle_agrees_on_the_placement_hash() {
+    let mirror = Mirror::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
     let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
     let classes =
         "\n[class.global]\nsegments = [\"front\"]\n[class.model_x]\nsegments = [\"engine\"]\n";
     let spec = gdl_gen::Spec::from_text(
-        &format!("{}{classes}", portable_text(&text)),
+        &format!("{}{classes}", mirror.portable(&text)),
         &graph,
         &root.join("examples/api"),
     )
@@ -394,7 +675,7 @@ fn a_classed_bundle_agrees_on_the_placement_hash() {
         &spec,
         Some(&fleet),
         temp.path(),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("a bundle");
@@ -415,16 +696,17 @@ fn a_classed_bundle_agrees_on_the_placement_hash() {
 }
 
 /// `files`, every file of a bundle, as one text: each file under a line
-/// that names it, with the pinned commit, which moves, as `<rev>`.
-fn pinned(files: &gdl_gen::Files) -> String {
-    let rev = pinned_rev();
+/// that names it, with the mirror's URL and commit, which move, as `<url>`
+/// and `<rev>`.
+fn pinned(mirror: &Mirror, files: &gdl_gen::Files) -> String {
     files
         .iter()
         .map(|(path, text)| {
             format!(
                 "==> {} <==\n{}\n",
                 path.display(),
-                text.replace(&rev, "<rev>")
+                text.replace(&mirror.url, "<url>")
+                    .replace(&mirror.rev, "<rev>")
             )
         })
         .collect()
@@ -435,8 +717,8 @@ fn pinned(files: &gdl_gen::Files) -> String {
 /// nothing of one without them.
 #[test]
 fn a_bundle_without_classes_is_pinned() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let spec = portable_spec(&root).expect("valid test fixture");
+    let mirror = Mirror::new();
+    let spec = portable_spec(&mirror).expect("valid test fixture");
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-pin-")
         .tempdir()
@@ -445,7 +727,7 @@ fn a_bundle_without_classes_is_pinned() {
         &spec,
         None,
         temp.path(),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("a bundle");
@@ -453,7 +735,7 @@ fn a_bundle_without_classes_is_pinned() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bundle/api.txt"),
     )
     .expect("the pinned bundle");
-    let found = pinned(&files);
+    let found = pinned(&mirror, &files);
     for (found, expected) in found.lines().zip(expected.lines()) {
         assert_eq!(found, expected, "the bundle differs from the pin");
     }
@@ -496,8 +778,8 @@ fn assert_liveness(compose: &serde_json::Value, hub_of: impl Fn(&str) -> String)
 
 #[test]
 fn a_bundle_without_classes_waits_only_on_liveness() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let spec = portable_spec(&root).expect("valid test fixture");
+    let mirror = Mirror::new();
+    let spec = portable_spec(&mirror).expect("valid test fixture");
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-live-")
         .tempdir()
@@ -506,7 +788,7 @@ fn a_bundle_without_classes_waits_only_on_liveness() {
         &spec,
         None,
         temp.path(),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("a bundle");
@@ -551,11 +833,11 @@ fn nest(name: &str, text: &str) -> String {
 }
 
 /// The api example on the pinned commit, placed as `placement` says.
-fn placed(placement: &str) -> gdl_gen::Spec {
+fn placed(mirror: &Mirror, placement: &str) -> gdl_gen::Spec {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
     let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
-    let text = portable_text(&text);
+    let text = mirror.portable(&text);
     assert!(text.contains(SEGMENTS), "{text}");
     gdl_gen::Spec::from_text(
         &text.replace(SEGMENTS, placement),
@@ -566,16 +848,16 @@ fn placed(placement: &str) -> gdl_gen::Spec {
 }
 
 /// [`SPLIT`] as layout `split` and [`WHOLE`] as layout `whole`.
-fn two_layouts() -> gdl_gen::Spec {
-    placed(&(nest("split", SPLIT) + &nest("whole", WHOLE)))
+fn two_layouts(mirror: &Mirror) -> gdl_gen::Spec {
+    placed(mirror, &(nest("split", SPLIT) + &nest("whole", WHOLE)))
 }
 
 /// The bundle of `spec` for `fleet`: its files and its `compose.yaml`.
 fn fleet_bundle(
+    mirror: &Mirror,
     spec: &gdl_gen::Spec,
     fleet: &gdl_model::Fleet,
 ) -> (gdl_gen::Files, serde_json::Value) {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-fleet-")
         .tempdir()
@@ -584,7 +866,7 @@ fn fleet_bundle(
         spec,
         Some(fleet),
         temp.path(),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("a bundle");
@@ -633,14 +915,15 @@ fn running<'a>(compose: &'a serde_json::Value, image: &str) -> (Vec<&'a str>, Ve
 /// where it keeps its children's records across its restart.
 #[test]
 fn each_parent_hub_keeps_its_childrens_records_in_a_volume_of_its_own() {
+    let mirror = Mirror::new();
     for (spec, fleet, parents) in [
-        (placed(SPLIT), ONE_FLEET, &["global-us"][..]),
+        (placed(&mirror, SPLIT), ONE_FLEET, &["global-us"][..]),
         // `global-eu` runs layout `whole`, in which no class sends to
         // another, so it has no children.
-        (two_layouts(), TWO_FLEET, &["global-us"][..]),
+        (two_layouts(&mirror), TWO_FLEET, &["global-us"][..]),
     ] {
         let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
-        let (files, compose) = fleet_bundle(&spec, &fleet);
+        let (files, compose) = fleet_bundle(&mirror, &spec, &fleet);
         // The hub's image has the directory, writable by any user, so
         // that a new volume mounted on it is too
         // (`relay::a_parent_can_store_a_record_in_its_new_volume`).
@@ -690,8 +973,9 @@ fn each_parent_hub_keeps_its_childrens_records_in_a_volume_of_its_own() {
 /// model cells run.
 #[test]
 fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
+    let mirror = Mirror::new();
     let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
-    let (files, compose) = fleet_bundle(&placed(SPLIT), &fleet);
+    let (files, compose) = fleet_bundle(&mirror, &placed(&mirror, SPLIT), &fleet);
     let services = compose["services"].as_object().expect("services");
     assert_eq!(
         services.keys().collect::<Vec<_>>(),
@@ -781,8 +1065,9 @@ fn a_fleet_of_one_layout_deploys_each_cell_with_its_own_hub() {
 /// segments and its own layout's hub.
 #[test]
 fn a_fleet_of_two_layouts_builds_each_layouts_images_once() {
+    let mirror = Mirror::new();
     let fleet = gdl_model::Fleet::from_toml(TWO_FLEET).expect("a fleet");
-    let (files, compose) = fleet_bundle(&two_layouts(), &fleet);
+    let (files, compose) = fleet_bundle(&mirror, &two_layouts(&mirror), &fleet);
     let services = compose["services"].as_object().expect("services");
     assert_eq!(
         services.keys().collect::<Vec<_>>(),
@@ -875,9 +1160,13 @@ fn a_fleet_of_two_layouts_builds_each_layouts_images_once() {
 /// has one writer.
 #[test]
 fn no_hub_can_be_scaled() {
-    for (spec, fleet) in [(placed(SPLIT), ONE_FLEET), (two_layouts(), TWO_FLEET)] {
+    let mirror = Mirror::new();
+    for (spec, fleet) in [
+        (placed(&mirror, SPLIT), ONE_FLEET),
+        (two_layouts(&mirror), TWO_FLEET),
+    ] {
         let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
-        let (files, compose) = fleet_bundle(&spec, &fleet);
+        let (files, compose) = fleet_bundle(&mirror, &spec, &fleet);
         let services = compose["services"].as_object().expect("services");
         let mut names = Vec::new();
         for (name, service) in services {
@@ -916,9 +1205,13 @@ fn no_hub_can_be_scaled() {
 /// no network of the bundle's own, and no service on another.
 #[test]
 fn a_fleets_hubs_publish_no_host_port_and_share_the_default_network() {
-    for (spec, fleet) in [(placed(SPLIT), ONE_FLEET), (two_layouts(), TWO_FLEET)] {
+    let mirror = Mirror::new();
+    for (spec, fleet) in [
+        (placed(&mirror, SPLIT), ONE_FLEET),
+        (two_layouts(&mirror), TWO_FLEET),
+    ] {
         let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
-        let (_, compose) = fleet_bundle(&spec, &fleet);
+        let (_, compose) = fleet_bundle(&mirror, &spec, &fleet);
         // Only these change the project's name or its network; other
         // top-level keys, such as a local bundle's `x-gdl-local-sources`,
         // do not.
@@ -946,20 +1239,22 @@ fn a_fleets_hubs_publish_no_host_port_and_share_the_default_network() {
 /// parent's: the `relay` backend, which needs no shared volume.
 #[test]
 fn each_hub_reads_its_cells_settings_as_the_fleet_gives_them() {
-    assert_each_hub_reads_its_cell(&placed(SPLIT), ONE_FLEET);
-    assert_each_hub_reads_its_cell(&two_layouts(), TWO_FLEET);
+    let mirror = Mirror::new();
+    assert_each_hub_reads_its_cell(&mirror, &placed(&mirror, SPLIT), ONE_FLEET);
+    assert_each_hub_reads_its_cell(&mirror, &two_layouts(&mirror), TWO_FLEET);
 }
 
 /// A segment's name may hold `__`, which the environment's keys use
 /// between nested keys: its quorum still reads back as the fleet gives it.
 #[test]
 fn a_quorum_of_a_segment_whose_name_holds_a_separator_reads_back() {
+    let mirror = Mirror::new();
     let split = SPLIT
         .replace("[segment.engine]", "[segment.engine__work]")
         .replace("\"engine\"", "\"engine__work\"");
     let fleet = ONE_FLEET.replace("engine =", "engine__work =");
     assert!(split.contains("engine__work") && fleet.contains("engine__work"));
-    assert_each_hub_reads_its_cell(&placed(&split), &fleet);
+    assert_each_hub_reads_its_cell(&mirror, &placed(&mirror, &split), &fleet);
 }
 
 /// A name that reads as another type when it is written bare, such as a
@@ -967,17 +1262,18 @@ fn a_quorum_of_a_segment_whose_name_holds_a_separator_reads_back() {
 /// variables and in its segments' `GDL_HUB__HOST`.
 #[test]
 fn a_name_that_reads_as_another_type_reads_back_as_written() {
+    let mirror = Mirror::new();
     let fleet = ONE_FLEET.replace("global-us", "true");
     assert!(fleet.contains("[cell.true]") && fleet.contains("home = \"true\""));
-    assert_each_hub_reads_its_cell(&placed(SPLIT), &fleet);
+    assert_each_hub_reads_its_cell(&mirror, &placed(&mirror, SPLIT), &fleet);
 }
 
 /// The check of [`each_hub_reads_its_cells_settings_as_the_fleet_gives_them`]
 /// for `spec` and the fleet `fleet`. A segment's `GDL_HUB__HOST` is its
 /// hub's name, written as the hub's own `GDL_CELL__NAME` is.
-fn assert_each_hub_reads_its_cell(spec: &gdl_gen::Spec, fleet: &str) {
+fn assert_each_hub_reads_its_cell(mirror: &Mirror, spec: &gdl_gen::Spec, fleet: &str) {
     let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
-    let (files, compose) = fleet_bundle(spec, &fleet);
+    let (files, compose) = fleet_bundle(mirror, spec, &fleet);
     for cell in fleet.cells() {
         let deployment = cell
             .layout
@@ -1033,10 +1329,13 @@ fn assert_each_hub_reads_its_cell(spec: &gdl_gen::Spec, fleet: &str) {
 /// classes or with several layouts, and says that it needs the fleet.
 #[test]
 fn compose_without_a_fleet_refuses_a_spec_that_deploys_by_cell() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mirror = Mirror::new();
     for (spec, why) in [
-        (placed(SPLIT), "with classes"),
-        (two_layouts(), "of several layouts, `split` and `whole`,"),
+        (placed(&mirror, SPLIT), "with classes"),
+        (
+            two_layouts(&mirror),
+            "of several layouts, `split` and `whole`,",
+        ),
     ] {
         let temp = tempfile::Builder::new()
             .prefix("gdl-compose-unfleeted-")
@@ -1047,7 +1346,7 @@ fn compose_without_a_fleet_refuses_a_spec_that_deploys_by_cell() {
             &spec,
             None,
             &out,
-            &root.join("target"),
+            &mirror.target(),
             gdl_gen::Sources::Fetched,
         )
         .expect_err("a spec that deploys by cell")
@@ -1066,7 +1365,7 @@ fn compose_without_a_fleet_refuses_a_spec_that_deploys_by_cell() {
 /// and `compose` writes nothing.
 #[test]
 fn compose_refuses_a_fleet_that_check_refuses_and_writes_nothing() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mirror = Mirror::new();
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-refused-")
         .tempdir()
@@ -1082,10 +1381,10 @@ fn compose_refuses_a_fleet_that_check_refuses_and_writes_nothing() {
     ] {
         let fleet = gdl_model::Fleet::from_toml(fleet).expect("a fleet");
         let error = gdl_gen::compose(
-            &placed(SPLIT),
+            &placed(&mirror, SPLIT),
             Some(&fleet),
             &out,
-            &root.join("target"),
+            &mirror.target(),
             gdl_gen::Sources::Fetched,
         )
         .expect_err("a refused fleet")
@@ -1099,9 +1398,12 @@ fn compose_refuses_a_fleet_that_check_refuses_and_writes_nothing() {
 /// host: the second container could not bind them.
 #[test]
 fn a_segment_that_publishes_ports_runs_in_one_cell() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mirror = Mirror::new();
     let ports = "[deployment.segment.front]\nports = [\"8082:8082\"]\n";
-    let spec = placed(&(nest("split", SPLIT) + &nest("whole", WHOLE) + ports));
+    let spec = placed(
+        &mirror,
+        &(nest("split", SPLIT) + &nest("whole", WHOLE) + ports),
+    );
     let fleet = gdl_model::Fleet::from_toml(TWO_FLEET).expect("a fleet");
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-ports-")
@@ -1111,7 +1413,7 @@ fn a_segment_that_publishes_ports_runs_in_one_cell() {
         &spec,
         Some(&fleet),
         temp.path(),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect_err("two cells publish one port")
@@ -1127,7 +1429,7 @@ fn a_segment_that_publishes_ports_runs_in_one_cell() {
         "[cell.global-eu]\nlayout = \"whole\"\nclass = \"global\"\nregion = \"eu-west-1\"\n",
     )
     .expect("a fleet");
-    let (_, compose) = fleet_bundle(&spec, &one);
+    let (_, compose) = fleet_bundle(&mirror, &spec, &one);
     assert_eq!(
         compose["services"]["global-eu_front"]["ports"],
         serde_json::json!(["8082:8082"])
@@ -1139,11 +1441,12 @@ fn a_segment_that_publishes_ports_runs_in_one_cell() {
 /// cells, each container with its own host port.
 #[test]
 fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
+    let mirror = Mirror::new();
     let ports =
         "[deployment.segment.engine]\nports = [\"9000\", \"127.0.0.1::9001\", \"9002/udp\"]\n";
-    let spec = placed(&format!("{SPLIT}{ports}"));
+    let spec = placed(&mirror, &format!("{SPLIT}{ports}"));
     let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
-    let (_, compose) = fleet_bundle(&spec, &fleet);
+    let (_, compose) = fleet_bundle(&mirror, &spec, &fleet);
     for service in ["model-x-01_engine", "model-x-02_engine"] {
         assert_eq!(
             compose["services"][service]["ports"],
@@ -1152,10 +1455,9 @@ fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
         );
     }
     // A fixed host port among them is still refused.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for fixed in ["9000:9000", "127.0.0.1:9000:9000", "[::1]:9000:9000/tcp"] {
         let ports = format!("[deployment.segment.engine]\nports = [\"9001\", \"{fixed}\"]\n");
-        let spec = placed(&format!("{SPLIT}{ports}"));
+        let spec = placed(&mirror, &format!("{SPLIT}{ports}"));
         let temp = tempfile::Builder::new()
             .prefix("gdl-compose-ports-")
             .tempdir()
@@ -1164,7 +1466,7 @@ fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
             &spec,
             Some(&fleet),
             temp.path(),
-            &root.join("target"),
+            &mirror.target(),
             gdl_gen::Sources::Fetched,
         )
         .expect_err("two cells bind one host port")
@@ -1182,10 +1484,11 @@ fn a_segment_that_publishes_only_dynamic_host_ports_runs_in_several_cells() {
 /// port does, so it too runs in several cells.
 #[test]
 fn a_host_port_of_zero_lets_docker_choose() {
+    let mirror = Mirror::new();
     let ports = "[deployment.segment.engine]\nports = [\"0:9000\", \"127.0.0.1:0:9000\", \"[::1]:0:9000/tcp\"]\n";
-    let spec = placed(&format!("{SPLIT}{ports}"));
+    let spec = placed(&mirror, &format!("{SPLIT}{ports}"));
     let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
-    let (_, compose) = fleet_bundle(&spec, &fleet);
+    let (_, compose) = fleet_bundle(&mirror, &spec, &fleet);
     for service in ["model-x-01_engine", "model-x-02_engine"] {
         assert_eq!(
             compose["services"][service]["ports"],
@@ -1198,13 +1501,14 @@ fn a_host_port_of_zero_lets_docker_choose() {
 /// `cargo gdl compose --fleet` checks the fleet, then writes its bundle.
 #[test]
 fn the_cli_composes_a_fleet() {
+    let mirror = Mirror::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-cli-")
         .tempdir()
         .expect("a directory");
     let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
-    let text = portable_text(&text).replace(SEGMENTS, SPLIT);
+    let text = mirror.portable(&text).replace(SEGMENTS, SPLIT);
     std::fs::write(temp.path().join("gdl.toml"), text).expect("the spec");
     std::fs::copy(
         root.join("examples/api/api.gdl"),
@@ -1221,7 +1525,7 @@ fn the_cli_composes_a_fleet() {
         .arg("--out")
         .arg(&out)
         .arg("--target-dir")
-        .arg(root.join("target"))
+        .arg(mirror.target())
         .output()
         .expect("cargo gdl");
     assert!(output.status.success(), "{output:?}");
@@ -1270,6 +1574,7 @@ fn holding(files: &gdl_gen::Files, text: &str) -> Vec<String> {
 /// as a variable, so the path writes it `$$`.
 #[test]
 fn a_segment_mounts_the_secrets_it_names() {
+    let mirror = Mirror::new();
     let keys = tempfile::Builder::new()
         .prefix("gdl-secrets-")
         .tempdir()
@@ -1280,20 +1585,22 @@ fn a_segment_mounts_the_secrets_it_names() {
     // The guide's recipe: the node reads the file where the secret is
     // mounted.
     let setting = "[deployment.segment.front.config.node.Fingerprint]\nsecret_file = \"/run/secrets/fingerprint\"\n";
-    let spec = placed(&format!(
-        "{SEGMENTS}{}{setting}",
-        secrets("front", &fingerprint, &other)
-    ));
+    let spec = placed(
+        &mirror,
+        &format!(
+            "{SEGMENTS}{}{setting}",
+            secrets("front", &fingerprint, &other)
+        ),
+    );
     let out = tempfile::Builder::new()
         .prefix("gdl-secrets-out-")
         .tempdir()
         .expect("a directory");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let files = gdl_gen::compose_files(
         &spec,
         None,
         &out.path().join("bundle"),
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("a bundle");
@@ -1330,20 +1637,24 @@ fn a_segment_mounts_the_secrets_it_names() {
 /// segment's secrets, and the bundle declares them beside its volumes.
 #[test]
 fn each_cells_segment_mounts_its_secrets() {
+    let mirror = Mirror::new();
     let keys = tempfile::Builder::new()
         .prefix("gdl-secrets-")
         .tempdir()
         .expect("a directory");
-    let spec = placed(&format!(
-        "{SPLIT}{}",
-        secrets(
-            "engine",
-            &keys.path().join("fingerprint"),
-            &keys.path().join("other")
-        )
-    ));
+    let spec = placed(
+        &mirror,
+        &format!(
+            "{SPLIT}{}",
+            secrets(
+                "engine",
+                &keys.path().join("fingerprint"),
+                &keys.path().join("other")
+            )
+        ),
+    );
     let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
-    let (_, compose) = fleet_bundle(&spec, &fleet);
+    let (_, compose) = fleet_bundle(&mirror, &spec, &fleet);
     for service in ["model-x-01_engine", "model-x-02_engine"] {
         assert_eq!(
             compose["services"][service]["secrets"],
@@ -1378,6 +1689,7 @@ fn each_cells_segment_mounts_its_secrets() {
 /// as long as several of them.
 #[test]
 fn a_secret_that_cannot_be_mounted_safely_is_refused() {
+    let mirror = Mirror::new();
     let keys = tempfile::Builder::new()
         .prefix("gdl-secrets-")
         .tempdir()
@@ -1420,7 +1732,7 @@ fn a_secret_that_cannot_be_mounted_safely_is_refused() {
         let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
         let graph = std::fs::read_to_string(root.join("examples/api/api.gdl")).expect("graph");
         let spec = gdl_gen::Spec::from_text(
-            &format!("{}{secrets}", portable_text(&text)),
+            &format!("{}{secrets}", mirror.portable(&text)),
             &graph,
             &root.join("examples/api"),
         );
@@ -1430,7 +1742,7 @@ fn a_secret_that_cannot_be_mounted_safely_is_refused() {
                 &spec,
                 None,
                 &bundle,
-                &root.join("target"),
+                &mirror.target(),
                 gdl_gen::Sources::Fetched,
             )
             .expect_err(&format!("refused: {secrets}")),
@@ -1444,6 +1756,7 @@ fn a_secret_that_cannot_be_mounted_safely_is_refused() {
 /// opens the file.
 #[test]
 fn the_cli_never_prints_or_writes_a_secret() {
+    let mirror = Mirror::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let temp = tempfile::Builder::new()
         .prefix("gdl-compose-cli-")
@@ -1454,7 +1767,7 @@ fn the_cli_never_prints_or_writes_a_secret() {
     let text = std::fs::read_to_string(root.join("examples/api/gdl.toml")).expect("spec");
     let text = format!(
         "{}{}",
-        portable_text(&text),
+        mirror.portable(&text),
         secrets("front", &fingerprint, &temp.path().join("other"))
     );
     std::fs::write(temp.path().join("gdl.toml"), text).expect("the spec");
@@ -1470,7 +1783,7 @@ fn the_cli_never_prints_or_writes_a_secret() {
         .arg("--out")
         .arg(&out)
         .arg("--target-dir")
-        .arg(root.join("target"))
+        .arg(mirror.target())
         .output()
         .expect("cargo gdl");
     assert!(output.status.success(), "{output:?}");
@@ -1511,6 +1824,7 @@ fn the_cli_never_prints_or_writes_a_secret() {
 #[test]
 #[ignore = "needs docker; run with --ignored"]
 fn a_container_reads_its_secret() {
+    let mirror = Mirror::new();
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
@@ -1525,7 +1839,6 @@ fn a_container_reads_its_secret() {
         }
     }
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let keys = tempfile::Builder::new()
         .prefix("gdl-secrets-")
         .tempdir()
@@ -1534,10 +1847,13 @@ fn a_container_reads_its_secret() {
     std::fs::write(&fingerprint, SENTINEL).expect("the secret");
     std::fs::set_permissions(&fingerprint, std::fs::Permissions::from_mode(0o600))
         .expect("owner only");
-    let spec = placed(&format!(
-        "{SEGMENTS}{}",
-        secrets("front", &fingerprint, &keys.path().join("other"))
-    ));
+    let spec = placed(
+        &mirror,
+        &format!(
+            "{SEGMENTS}{}",
+            secrets("front", &fingerprint, &keys.path().join("other"))
+        ),
+    );
     let temp = tempfile::Builder::new()
         .prefix("gdl-secrets-out-")
         .tempdir()
@@ -1547,7 +1863,7 @@ fn a_container_reads_its_secret() {
         &spec,
         None,
         &out,
-        &root.join("target"),
+        &mirror.target(),
         gdl_gen::Sources::Fetched,
     )
     .expect("a bundle");

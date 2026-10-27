@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use super::{ONE_FLEET, SPLIT, fleet_bundle, placed};
+use super::{Mirror, ONE_FLEET, SPLIT, fleet_bundle, placed};
 
 /// A parent's hub, as the bundle builds it, runs as the base image's
 /// user, which by default is not root, and must still store a child's
@@ -13,8 +13,9 @@ use super::{ONE_FLEET, SPLIT, fleet_bundle, placed};
 #[test]
 #[ignore = "needs docker; run with --ignored"]
 fn a_parent_can_store_a_record_in_its_new_volume() {
+    let mirror = Mirror::new();
     let fleet = gdl_model::Fleet::from_toml(ONE_FLEET).expect("a fleet");
-    let (files, mut compose) = fleet_bundle(&placed(SPLIT), &fleet);
+    let (files, mut compose) = fleet_bundle(&mirror, &placed(&mirror, SPLIT), &fleet);
     let temp = tempfile::Builder::new()
         .prefix("gdl-relay-volume-")
         .tempdir()

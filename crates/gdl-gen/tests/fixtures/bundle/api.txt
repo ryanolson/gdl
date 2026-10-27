@@ -90,8 +90,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gdl-runtime = { git = "https://github.com/ryanolson/gdl", rev = "<rev>" }
-api-frontend = { git = "https://github.com/ryanolson/gdl", rev = "<rev>" }
+gdl-runtime = { git = "<url>", rev = "<rev>" }
+api-frontend = { git = "<url>", rev = "<rev>" }
 
 # Its own workspace, wherever the tarball is expanded.
 [workspace]
@@ -189,9 +189,9 @@ name = "api-engine"
 path = "src/main.rs"
 
 [dependencies]
-gdl-runtime = { git = "https://github.com/ryanolson/gdl", rev = "<rev>", features = ["hub"] }
+gdl-runtime = { git = "<url>", rev = "<rev>", features = ["hub"] }
 api-contract = { path = "../contract" }
-api-frontend = { git = "https://github.com/ryanolson/gdl", rev = "<rev>" }
+api-frontend = { git = "<url>", rev = "<rev>" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros"] }
 toml = "0.9"
@@ -421,9 +421,9 @@ name = "api-front"
 path = "src/main.rs"
 
 [dependencies]
-gdl-runtime = { git = "https://github.com/ryanolson/gdl", rev = "<rev>", features = ["hub"] }
+gdl-runtime = { git = "<url>", rev = "<rev>", features = ["hub"] }
 api-contract = { path = "../contract" }
-api-frontend = { git = "https://github.com/ryanolson/gdl", rev = "<rev>" }
+api-frontend = { git = "<url>", rev = "<rev>" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros"] }
 toml = "0.9"
@@ -754,7 +754,7 @@ FROM rust:1.93.1-slim-bookworm AS build
 WORKDIR /app
 COPY . /app
 ENV CARGO_TARGET_DIR=/build
-RUN cargo install --git 'https://github.com/ryanolson/gdl' --rev '<rev>' --locked --root /build-tools gdl-hub
+RUN cargo install --git '<url>' --rev '<rev>' --locked --root /build-tools gdl-hub
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /build-tools/bin/gdl-hub /usr/local/bin/segment
 COPY ["./deployment.json", "/etc/gdl/config"]
