@@ -846,4 +846,74 @@ mod tests {
             Offered::Answered(_) => panic!("the neighbour answered"),
         }
     }
+
+    /// A node whose minted tickets wait `window` for their sender.
+    async fn node_with_window(window: Duration) -> Velo {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+        let tcp = velo::transports::tcp::TcpTransportBuilder::new()
+            .from_listener(listener)
+            .expect("a listener")
+            .build()
+            .expect("a transport");
+        let mut reservations = velo::streaming::ReservationConfig::default();
+        reservations.prebind_timeout = window;
+        Velo::builder()
+            .add_transport(Arc::new(tcp))
+            .mux_only()
+            .reservation_config(reservations)
+            .build()
+            .await
+            .expect("a velo node")
+    }
+
+    /// Whether `fabric` holds at most `left` anchors within `wait`.
+    async fn released(fabric: &Fabric, left: usize, wait: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + wait;
+        while fabric.active_anchors() > left {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
+    }
+
+    /// A minted anchor's ticket pauses its unattached timeout: an anchor
+    /// that nobody attaches to outlives that timeout while its ticket waits,
+    /// and one with no ticket does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_ticket_pauses_the_unattached_timeout() {
+        let timeout = Duration::from_millis(50);
+        let node = node().await;
+        let fabric = Fabric::new(node.clone(), Some(timeout), None, Duration::from_secs(30));
+        let (inbound, reply) = fabric.mint();
+        assert!(reply.ticket.is_some(), "a ticket");
+        let bare = node
+            .anchor_manager()
+            .create_anchor_with_config::<Bytes>(AnchorConfig {
+                unattached_timeout: Some(timeout),
+                heartbeat_interval: None,
+            });
+        assert!(released(&fabric, 1, WAIT).await, "the bare anchor ends");
+        assert!(
+            !released(&fabric, 0, timeout * 10).await,
+            "the ticketed one stays"
+        );
+        drop((inbound, bare));
+    }
+
+    /// A ticket nobody opens ends at its window, which gdl does not renew
+    /// for an input anchor: velo removes the anchor though its owner still
+    /// holds it. 120 s is the unattached timeout this node keeps.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unopened_ticket_ends_its_anchor_at_its_window() {
+        let node = node_with_window(Duration::from_millis(200)).await;
+        let fabric = fabric(&node);
+        let (inbound, reply) = fabric.mint();
+        assert!(reply.ticket.is_some(), "a ticket");
+        // No count before the wait: a stalled test thread can see the
+        // window end first. With the default 180 s window this fails.
+        assert!(released(&fabric, 0, WAIT).await, "the window removes it");
+        drop(inbound);
+    }
 }

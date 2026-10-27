@@ -1328,10 +1328,12 @@ async fn send_input(
     pump(input, out, cx, upstream, stops, None).await;
 }
 
-/// Retires a run's input anchor when the run ends, however it ends. Nothing
-/// else bounds that anchor: a ticket pauses its unattached timeout, a
-/// sender whose acknowledgement was lost never attaches, and a node may hold
-/// its input unread.
+/// Retires a run's input anchor when the run ends, however it ends. velo
+/// alone holds an anchor nobody attaches to for minutes: its ticket pauses
+/// the unattached timeout, and the ticket's own window (180 s by default)
+/// ends it, since gdl renews only the replies it holds. A sender whose
+/// acknowledgement was lost never attaches, and a node may hold its input
+/// unread.
 struct InputGuard {
     retirer: Retirer,
     /// Dropped once the input is retired, for a test whose stop watcher
@@ -1628,7 +1630,9 @@ struct Watch<'a, S, D> {
 
 /// How long a stage tries to deliver its terminal failure. A consumer that is
 /// not reading would otherwise hold the stage forever; past this, the stage
-/// drops its sender and the consumer sees the stream break instead.
+/// drops its sender and the consumer sees the stream break instead. It takes
+/// no egress permit: behind live traffic, a permit would hold the failure
+/// until the consumer's deadline.
 const FAIL_DELIVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 async fn finish_failed(out: Outbound, error: Error) {

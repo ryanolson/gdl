@@ -175,8 +175,9 @@ async fn an_input_held_past_its_run_is_retired_when_the_run_ends() {
     let nodes = nodes(3).await;
     let events = Events::new();
     // The acknowledgement is lost, so the sender never attaches, and the
-    // anchor's ticket pauses velo's unattached timeout. D hands the input to
-    // a task of its own: only its run's end can release the anchor.
+    // anchor's ticket pauses velo's unattached timeout until the ticket's
+    // own window ends, 180 s on. D hands the input to a task of its own:
+    // within this test's wait, only its run's end can release the anchor.
     let config = |_: &str| RuntimeConfig {
         setup_timeout: ms(300),
         faults: Faults {

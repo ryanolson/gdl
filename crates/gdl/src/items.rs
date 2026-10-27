@@ -191,6 +191,11 @@ impl<T> Stream for Fuse<T> {
 /// waiting after it reported an error) must stop even while the consumer
 /// keeps the ended stream. Dropping the stream drops `guard` too. `guard`
 /// is `cx`'s own ([`Cx::cancel_on_drop`]).
+///
+/// The boundary checks the deadline only when the stream is polled. A
+/// caller that holds the stream unread keeps its local scopes past the
+/// deadline until it reads or drops the stream. Watching the deadline
+/// without a read would take a task per attempt.
 pub(crate) fn bound<T: Send + 'static>(cx: &Cx, guard: DropGuard, inner: Items<T>) -> Items<T> {
     bound_measured(cx, guard, inner, None)
 }
