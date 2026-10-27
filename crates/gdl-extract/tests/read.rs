@@ -1605,3 +1605,144 @@ fn the_reader_tells_another_crates_items_by_how_they_are_written() {
         .collect();
     assert_eq!(items, [Some("spelled::Words"), None]);
 }
+
+/// What the reader makes of impls and exports written through aliases,
+/// at each edge where the impl index and `canonical` once walked aliases
+/// apart: an alias of an alias, a parenthesized argument or target, a
+/// lifetime or const parameter, swapped parameters, a projection, a
+/// `crate::` path, a raw parameter, an impl's own parameter, chains about
+/// as deep as the reader goes, a reference, a wrong count, and defaults
+/// left out. The whole extraction is pinned, so a change to how either
+/// walks aliases shows here.
+#[test]
+fn aliases_walk_as_they_always_have() {
+    let temp = tempfile::Builder::new()
+        .prefix("gdl-alias-walk-")
+        .tempdir()
+        .expect("dir");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("src")).expect("dir");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"walk\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+    )
+    .expect("manifest");
+    let mut source = String::from(
+        "#[derive(gdl_message::Message)]\npub struct Words;\n\
+         pub mod tr {\n    pub trait Tr { type Out; }\n}\n\
+         pub type Identity<T> = T;\n\
+         pub type Twice<T> = Identity<Identity<T>>;\n\
+         pub type Life<'a, T> = T;\n\
+         pub type Counted<T, const N: usize> = T;\n\
+         pub type Swap<X, Y> = F<Y, X>;\n\
+         pub type ParenC = (C<u8>);\n\
+         pub type Q = <G<u8> as tr::Tr>::Out;\n\
+         pub type Raw<r#T> = r#T;\n\
+         pub type Defaulted<T, U = u8> = P<T, U>;\n",
+    );
+    for (node, params) in [
+        ("A", "<B>(B)"),
+        ("B", "<B>(B)"),
+        ("C", "<B>(B)"),
+        ("D", "<B>(B)"),
+        ("E", "<B>(B)"),
+        ("F", "<X, Y>(X, Y)"),
+        ("G", "<B>(B)"),
+        ("H", "<B>(B)"),
+        ("I", "<B>(B)"),
+        ("J", "<B>(B)"),
+        ("K", "<B>(B)"),
+        ("L", "<B>(B)"),
+        ("M", "<B>(B)"),
+        ("N", "<B>(B)"),
+        ("O", "<B>(B)"),
+        ("P", "<T, U = u8>(T, U)"),
+    ] {
+        source.push_str(&format!(
+            "#[derive(gdl::Node)]\npub struct {node}{params};\n"
+        ));
+    }
+    // Chains of aliases, 62, 63, and 64 deep.
+    for (chain, depth) in [("K", 62), ("L", 63), ("M", 64)] {
+        source.push_str(&format!("pub type {chain}0 = {chain}<u8>;\n"));
+        for at in 1..=depth {
+            source.push_str(&format!("pub type {chain}{at} = {chain}{};\n", at - 1));
+        }
+    }
+    let sink = "{ type Req = Words; type Item = Words; }";
+    for written in [
+        "Twice<A<u8>>",
+        "Identity<(B<u8>)>",
+        "ParenC",
+        "Life<'static, D<u8>>",
+        "Counted<E<u8>, 3>",
+        "Swap<u16, u8>",
+        "Q",
+        "crate::Identity<H<u8>>",
+        "Raw<I<u8>>",
+        "K62",
+        "L63",
+        "M64",
+        "Identity<&'static N<u8>>",
+        "Identity<O<u8>, u8>",
+    ] {
+        source.push_str(&format!("impl gdl::Sink for {written} {sink}\n"));
+    }
+    source.push_str(&format!("impl<X> gdl::Sink for Identity<J<X>> {sink}\n"));
+    source.push_str("impl tr::Tr for G<u8> { type Out = G<u8>; }\n");
+    for node in [
+        "A", "B", "C", "D", "E", "G", "H", "I", "J", "K", "L", "M", "N", "O",
+    ] {
+        source.push_str(&format!("#[gdl::export]\npub type N{node} = {node}<u8>;\n"));
+    }
+    source.push_str(
+        "#[gdl::export]\npub type NF = F<u8, u16>;\n\
+         #[gdl::export]\npub type NP = P<std::sync::Arc<u8>>;\n\
+         #[gdl::export]\npub type NP2 = Identity<P<std::sync::Arc<u8>>>;\n\
+         #[gdl::export]\npub type NP3 = Defaulted<std::sync::Arc<u8>>;\n",
+    );
+    std::fs::write(dir.join("src/lib.rs"), source).expect("source");
+    let workspace =
+        Workspace::load(&dir.join("Cargo.toml"), &Cargo::trusted()).expect("cargo metadata");
+    let extraction = workspace.extract("walk").expect("the package");
+    let dir = dir.to_str().expect("a UTF-8 path");
+    let mut read = String::new();
+    for node in &extraction.offer.nodes {
+        read.push_str(&format!("node {}: {}\n", node.name, node.role));
+    }
+    for skipped in &extraction.offer.skipped {
+        read.push_str(&format!("skipped {}: {}\n", skipped.name, skipped.problem));
+    }
+    for problem in &extraction.problems {
+        read.push_str(&format!("problem: {problem}\n"));
+    }
+    let read = read.replace(dir, "DIR");
+    assert_eq!(read, WALKED, "{read}");
+}
+
+/// What [`aliases_walk_as_they_always_have`] reads: sinks through an
+/// alias of an alias, swapped parameters, a `crate::` path, a raw
+/// parameter, an impl's own parameter, and a chain 62 deep; no role through
+/// a parenthesized argument or target, a lifetime or const parameter, a
+/// projection, a chain 63 or 64 deep, a reference, or a wrong count; and
+/// an argument the reader cannot name, which it reports before the count
+/// a default leaves short.
+const WALKED: &str = r#"node NA: sink
+node NF: sink
+node NH: sink
+node NI: sink
+node NJ: sink
+node NK: sink
+skipped NP: DIR/src/lib.rs:286:10: `std :: sync :: Arc < u8 >`: the reader names a crate's own types, primitives, `()`, and of the standard library's `String`, `Vec`, `VecDeque`, `Option`, `Box`, `HashMap`, and `BTreeMap`
+skipped NP2: DIR/src/lib.rs:288:10: `std :: sync :: Arc < u8 >`: the reader names a crate's own types, primitives, `()`, and of the standard library's `String`, `Vec`, `VecDeque`, `Option`, `Box`, `HashMap`, and `BTreeMap`
+skipped NP3: DIR/src/lib.rs:290:10: `std :: sync :: Arc < u8 >`: the reader names a crate's own types, primitives, `()`, and of the standard library's `String`, `Vec`, `VecDeque`, `Option`, `Box`, `HashMap`, and `BTreeMap`
+problem: DIR/src/lib.rs:258:10: node `NB`: the crate implements no role trait for it
+problem: DIR/src/lib.rs:260:10: node `NC`: the crate implements no role trait for it
+problem: DIR/src/lib.rs:262:10: node `ND`: the crate implements no role trait for it
+problem: DIR/src/lib.rs:264:10: node `NE`: the crate implements no role trait for it
+problem: DIR/src/lib.rs:266:10: node `NG`: the crate implements no role trait for it
+problem: DIR/src/lib.rs:276:10: node `NL`: the crate implements no role trait for it
+problem: DIR/src/lib.rs:278:10: node `NM`: the crate implements no role trait for it
+problem: DIR/src/lib.rs:280:10: node `NN`: the crate implements no role trait for it
+problem: DIR/src/lib.rs:282:10: node `NO`: the crate implements no role trait for it
+"#;

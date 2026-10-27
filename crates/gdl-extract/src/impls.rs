@@ -3,11 +3,8 @@
 //! instantiation its self type matches.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
-use syn::ext::IdentExt as _;
-
-use crate::canon::{DEPTH, Env, Ty, canonical, unify};
+use crate::canon::{Env, Ty, canonical, head, unify};
 use crate::external::{Item, Known, known_trait, named};
 use crate::reads::Counted;
 use crate::resolve::{Def, Resolver, segments};
@@ -84,10 +81,10 @@ fn index(resolver: &mut Resolver<'_>, krate: usize, traits: Traits) -> ByType {
             } else {
                 // A qualified path names an associated type, not a type
                 // the reader can index under.
-                let syn::Type::Path(path @ syn::TypePath { qself: None, .. }) = &self_ty else {
+                let syn::Type::Path(syn::TypePath { qself: None, .. }) = &self_ty else {
                     continue;
                 };
-                head(resolver, krate, module, &path.path)
+                head(resolver, krate, module, &self_ty)
             };
             let Some(target) = target else {
                 continue;
@@ -100,100 +97,6 @@ fn index(resolver: &mut Resolver<'_>, krate: usize, traits: Traits) -> ByType {
         }
     }
     by_type
-}
-
-/// The type an impl's self type `path`, written in module `module`, is
-/// for: its head, through aliases, since an impl for an alias is an impl
-/// for the type it names. An argument is resolved only where an alias
-/// names its parameter as its own head, so that `Identity<Stage<u8>>`,
-/// with `type Identity<T> = T`, is `Stage`, and `Wrapper<dep::Payload>` is
-/// `Wrapper` without reading `dep`.
-///
-/// It walks aliases as `canon::canonical` does, apart from `canonical`
-/// because `canonical` resolves every argument as it goes, and so reads
-/// each crate an argument names: the index holds every impl of a crate,
-/// most of them for types nothing asks about (`tests/cost.rs` guards it).
-/// Matching reads the self type whole with `canonical`, for the types it
-/// is asked about. So that the two agree, it refuses, of the types it
-/// follows, what `canonical` refuses: a type with a lifetime or const
-/// parameter, a const argument, a count of type arguments other than the
-/// type's, which leaves an argument to its default, and an alias that
-/// names itself deeper than `canon::DEPTH`.
-fn head(resolver: &mut Resolver<'_>, krate: usize, module: usize, path: &syn::Path) -> Option<Def> {
-    let (mut krate, mut module, mut path) = (krate, module, path.clone());
-    let mut scope = Scope::default();
-    for _ in 0..=DEPTH {
-        if let Some(ident) = path.get_ident()
-            && let Some(bound) = scope.get(&ident.unraw().to_string())
-        {
-            let bound = bound.clone();
-            (krate, module, path, scope) = (bound.krate, bound.module, bound.path, bound.scope);
-            continue;
-        }
-        let (names, absolute) = segments(&path);
-        let def = resolver.resolve(krate, module, &names, absolute)?;
-        let Def::Type(c, m, i) = def else {
-            return Some(def);
-        };
-        let mut written: Vec<&syn::Type> = Vec::new();
-        if let Some(syn::PathArguments::AngleBracketed(bracketed)) =
-            path.segments.last().map(|s| &s.arguments)
-        {
-            for arg in &bracketed.args {
-                match arg {
-                    syn::GenericArgument::Type(t) => written.push(t),
-                    syn::GenericArgument::Lifetime(_) => {}
-                    _ => return None,
-                }
-            }
-        }
-        let alias = &resolver.crates[c].modules[m].types[i];
-        if alias.other_params || alias.params.len() != written.len() {
-            return None;
-        }
-        let Some(aliased) = alias.kind.alias().cloned() else {
-            return Some(def);
-        };
-        let syn::Type::Path(aliased @ syn::TypePath { qself: None, .. }) = aliased else {
-            return None;
-        };
-        // An argument that is not a path names no type to index under, so
-        // a parameter it is written for stays unbound, and resolves to
-        // nothing if the alias names it.
-        let bound: HashMap<String, Bound> = alias
-            .params
-            .iter()
-            .zip(written)
-            .filter_map(|(param, arg)| match arg {
-                syn::Type::Path(arg @ syn::TypePath { qself: None, .. }) => Some((
-                    param.clone(),
-                    Bound {
-                        path: arg.path.clone(),
-                        krate,
-                        module,
-                        scope: scope.clone(),
-                    },
-                )),
-                _ => None,
-            })
-            .collect();
-        (krate, module, path, scope) = (c, m, aliased.path, Rc::new(bound));
-    }
-    None
-}
-
-/// The alias parameters in scope where a path is written, each with the
-/// argument written for it.
-type Scope = Rc<HashMap<String, Bound>>;
-
-/// The argument written for an alias's parameter: its path, where it is
-/// written, and the parameters in scope there.
-#[derive(Clone)]
-struct Bound {
-    path: syn::Path,
-    krate: usize,
-    module: usize,
-    scope: Scope,
 }
 
 /// The self type of impl `index` of module `module`, read by `canonical`

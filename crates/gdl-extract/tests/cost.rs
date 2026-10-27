@@ -564,3 +564,70 @@ fn the_policy_scan_does_not_expand_a_shared_import_prefix_per_name() {
         "doubling a shared import prefix and its names multiplies allocated bytes by {ratio:.2}:\n  n: {small:?}\n  2n: {large:?}"
     );
 }
+
+/// The role index reads this impl head without matching its arguments.
+/// Alias depth and argument size must not multiply its peak memory.
+#[test]
+fn alias_walk_releases_intermediate_arguments() {
+    let shape = |n: usize| {
+        let payload = std::iter::repeat_n("u8", 128 * n)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let nested = format!(
+            "{}Wrapper<({payload},)>{}",
+            "Identity<".repeat(n),
+            ">".repeat(n)
+        );
+        let source = format!(
+            "pub type Identity<T> = T;\npub struct Wrapper<T>(T);\n\
+             #[derive(gdl_message::Message, serde::Serialize, serde::Deserialize)]\npub struct Words;\n\
+             #[derive(gdl::Node)]\npub struct Trigger;\n\
+             impl gdl::Sink for Trigger {{ type Req = Words; type Item = Words; }}\n\
+             impl gdl::Sink for {nested} {{ type Req = Words; type Item = Words; }}\n"
+        );
+        vec![("lib.rs".to_string(), source)]
+    };
+    let (small, problems) = read("alias-peak-small", &shape(8));
+    assert!(problems.is_empty(), "{problems:?}");
+    let (large, problems) = read("alias-peak-large", &shape(16));
+    assert!(problems.is_empty(), "{problems:?}");
+    let ratio = large.peak as f64 / small.peak as f64;
+    eprintln!("alias peak: n {small:?}; 2n {large:?}; peak {ratio:.2}x");
+    assert!(
+        ratio < 3.0,
+        "doubling alias depth and argument size multiplies peak memory by {ratio:.2}: {small:?} then {large:?}"
+    );
+}
+
+/// Reusing an alias body must not keep a copy live for every visit.
+#[test]
+fn alias_head_releases_repeated_targets() {
+    let shape = |depth: usize| {
+        let width = 64;
+        let mut source: String = (0..width).map(|i| format!("pub mod m{i} {{\n")).collect();
+        source.push_str("pub type Identity<T> = T;\n");
+        source.push_str(&"}\n".repeat(width));
+        let path: String = (0..width).map(|i| format!("m{i}::")).collect();
+        source.push_str(&format!(
+            "pub type Hop<T> = {path}Identity<T>;\npub struct Wrapper<T>(T);\n\
+             #[derive(gdl_message::Message, serde::Serialize, serde::Deserialize)]\npub struct Words;\n\
+             #[derive(gdl::Node)]\npub struct Trigger;\n\
+             impl gdl::Sink for Trigger {{ type Req = Words; type Item = Words; }}\n"
+        ));
+        let nested = format!("{}Wrapper<u8>{}", "Hop<".repeat(depth), ">".repeat(depth));
+        source.push_str(&format!(
+            "impl gdl::Sink for {nested} {{ type Req = Words; type Item = Words; }}\n"
+        ));
+        vec![("lib.rs".to_string(), source)]
+    };
+    let (once, problems) = read("alias-target-once", &shape(1));
+    assert!(problems.is_empty(), "{problems:?}");
+    let (repeated, problems) = read("alias-target-repeated", &shape(16));
+    assert!(problems.is_empty(), "{problems:?}");
+    let ratio = repeated.peak as f64 / once.peak as f64;
+    eprintln!("alias target reuse: once {once:?}; repeated {repeated:?}; peak {ratio:.2}x");
+    assert!(
+        ratio < 1.2,
+        "reusing an alias target multiplies peak memory by {ratio:.2}: once {once:?}; repeated {repeated:?}"
+    );
+}

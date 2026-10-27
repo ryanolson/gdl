@@ -88,17 +88,15 @@ pub(crate) struct TypeDef {
 }
 
 /// Which of the four a [`TypeDef`] is.
-// Unboxed: it is smaller than the two options it replaced, and a box would
-// cost an allocation per alias.
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub(crate) enum Kind {
     /// A struct, with its fields.
     Struct(syn::Fields),
     Enum,
     Union,
-    /// A type alias, with the type it names.
-    Alias(syn::Type),
+    /// A type alias, with the type it names: shared, so that a walk
+    /// through aliases holds each one it is inside without a copy.
+    Alias(Rc<syn::Type>),
 }
 
 impl Kind {
@@ -666,7 +664,7 @@ impl Reader<'_> {
                     at: at(u.ident.span()),
                 }),
                 Item::Type(t) => krate.modules[module].add_type(TypeDef {
-                    kind: Kind::Alias((*t.ty).clone()),
+                    kind: Kind::Alias(Rc::new((*t.ty).clone())),
                     members: Vec::new(),
                     variants: Vec::new(),
                     params: params(&t.generics),

@@ -10,12 +10,14 @@
 //! `, `. `extract --verify` compares the two.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use quote::ToTokens as _;
 use syn::ext::IdentExt as _;
 
 use crate::external::{Std, standard};
 use crate::resolve::{Def, Resolver, segments};
+use crate::tree::Kind;
 
 /// A type, resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +91,67 @@ pub(crate) fn canonical(
     ty: &syn::Type,
     env: &Env,
 ) -> Result<Ty, String> {
-    of(resolver, krate, module, ty, env, 0)
+    of(resolver, krate, module, ty, Params::Read(env), 0)
+}
+
+/// The type an impl's self type `ty`, written in module `module`, is for:
+/// its head, through aliases, since an impl for an alias is an impl for
+/// the type it names. An argument is read only where an alias names its
+/// parameter as its own head, so that `Identity<Stage<u8>>`, with `type
+/// Identity<T> = T`, is `Stage`, and `Wrapper<dep::Payload>` is `Wrapper`
+/// without reading `dep`: the impl index holds every impl of a crate, most
+/// of them for types nothing asks about (`tests/cost.rs` guards it).
+///
+/// It walks as [`canonical`] does, and so refuses what `canonical`
+/// refuses, apart from the arguments it does not read. It follows plain
+/// paths alone: a parenthesized type, as an argument or as an alias's
+/// target, it does not read through, and a parameter written for one is
+/// left unbound. Matching reads an impl's self type whole, with
+/// `canonical`, for the types it is asked about.
+pub(crate) fn head(
+    resolver: &mut Resolver<'_>,
+    krate: usize,
+    module: usize,
+    ty: &syn::Type,
+) -> Option<Def> {
+    match of(
+        resolver,
+        krate,
+        module,
+        ty,
+        Params::Unread(&Unread::new()),
+        0,
+    ) {
+        Ok(Ty::Def(def, _)) => Some(def),
+        _ => None,
+    }
+}
+
+/// What the parameters in scope stand for, which sets how far a walk
+/// reads a type.
+#[derive(Clone, Copy)]
+enum Params<'e> {
+    /// Each one's type: the walk reads a type whole, each argument where
+    /// it is written, as [`canonical`] does.
+    Read(&'e Env),
+    /// Each one's argument as written: the walk reads a type's head alone,
+    /// as [`head`] does.
+    Unread(&'e Unread<'e>),
+}
+
+/// The arguments written for an alias's parameters, read only if the
+/// walk reaches them: each with the module it is written in and what the
+/// parameters there stand for. Each borrows from the walk's frames, which
+/// hold the types it is written in, so that a nested argument is never
+/// copied once per alias around it.
+type Unread<'a> = HashMap<String, Written<'a>>;
+
+/// An argument written for an alias's parameter, and where.
+struct Written<'a> {
+    ty: &'a syn::Type,
+    krate: usize,
+    module: usize,
+    params: &'a Unread<'a>,
 }
 
 fn of(
@@ -97,26 +159,56 @@ fn of(
     krate: usize,
     module: usize,
     ty: &syn::Type,
-    env: &Env,
+    params: Params<'_>,
     depth: usize,
 ) -> Result<Ty, String> {
+    // The head walk discards why it refuses, so it writes no reason.
+    let refuse = |reason: &dyn Fn() -> String| match params {
+        Params::Read(_) => reason(),
+        Params::Unread(_) => String::new(),
+    };
     if depth > DEPTH {
-        return Err(format!("`{}` nests too deep to read", ty.to_token_stream()));
+        return Err(refuse(&|| {
+            format!("`{}` nests too deep to read", ty.to_token_stream())
+        }));
     }
     let path = match ty {
-        syn::Type::Tuple(t) if t.elems.is_empty() => return Ok(Ty::Unit),
-        syn::Type::Paren(p) => return of(resolver, krate, module, &p.elem, env, depth + 1),
-        syn::Type::Group(g) => return of(resolver, krate, module, &g.elem, env, depth + 1),
         syn::Type::Path(p) if p.qself.is_none() => &p.path,
+        _ if matches!(params, Params::Unread(_)) => return Err(String::new()),
+        syn::Type::Tuple(t) if t.elems.is_empty() => return Ok(Ty::Unit),
+        syn::Type::Paren(p) => return of(resolver, krate, module, &p.elem, params, depth + 1),
+        syn::Type::Group(g) => return of(resolver, krate, module, &g.elem, params, depth + 1),
         _ => return Err(unnamed(ty)),
     };
-    if let (Some(param), true) = (path.get_ident(), path.leading_colon.is_none())
-        && let Some(bound) = env.get(&param.unraw().to_string())
-    {
-        return Ok(bound.clone());
+    if let (Some(param), true) = (path.get_ident(), path.leading_colon.is_none()) {
+        let name = param.unraw().to_string();
+        match params {
+            Params::Read(env) => {
+                if let Some(bound) = env.get(&name) {
+                    return Ok(bound.clone());
+                }
+            }
+            Params::Unread(unread) => {
+                if let Some(written) = unread.get(&name) {
+                    let params = Params::Unread(written.params);
+                    return of(
+                        resolver,
+                        written.krate,
+                        written.module,
+                        written.ty,
+                        params,
+                        depth + 1,
+                    );
+                }
+            }
+        }
     }
     let (names, absolute) = segments(path);
     let Some(def) = resolver.resolve(krate, module, &names, absolute) else {
+        // The head walk asks for a crate's own types alone.
+        if let Params::Unread(_) = params {
+            return Err(String::new());
+        }
         if let ([name], false) = (names.as_slice(), absolute)
             && PRIMITIVES.contains(&name.as_str())
         {
@@ -132,7 +224,7 @@ fn of(
             for arg in &bracketed.args {
                 match arg {
                     syn::GenericArgument::Type(t) => {
-                        args.push(of(resolver, krate, module, t, env, depth + 1)?);
+                        args.push(of(resolver, krate, module, t, params, depth + 1)?);
                     }
                     _ => return Err(unnamed(ty)),
                 }
@@ -146,43 +238,78 @@ fn of(
         return Ok(Ty::Std(std, args));
     };
     let Def::Type(c, m, i) = def else {
-        return Err(unnamed(ty));
+        return Err(refuse(&|| unnamed(ty)));
     };
-    let mut args = Vec::new();
+    // Read where they are written, in the order written, so that the
+    // first argument the reader cannot name is the problem reported,
+    // before a count a default leaves short; or, by the head walk, kept
+    // as written.
+    let (mut args, mut written) = (Vec::new(), Vec::new());
     if let Some(syn::PathArguments::AngleBracketed(bracketed)) =
         path.segments.last().map(|s| &s.arguments)
     {
         for arg in &bracketed.args {
-            match arg {
-                syn::GenericArgument::Type(t) => {
-                    args.push(of(resolver, krate, module, t, env, depth + 1)?);
+            match (arg, params) {
+                (syn::GenericArgument::Type(t), Params::Read(_)) => {
+                    args.push(of(resolver, krate, module, t, params, depth + 1)?);
                 }
-                syn::GenericArgument::Lifetime(_) => {}
-                _ => return Err(unnamed(ty)),
+                (syn::GenericArgument::Type(t), Params::Unread(_)) => written.push(t),
+                (syn::GenericArgument::Lifetime(_), _) => {}
+                _ => return Err(refuse(&|| unnamed(ty))),
             }
         }
     }
     let definition = &resolver.crates[c].modules[m].types[i];
     if definition.other_params {
-        return Err(format!(
-            "`{}`: the reader names types with type parameters only",
-            ty.to_token_stream()
-        ));
+        return Err(refuse(&|| {
+            format!(
+                "`{}`: the reader names types with type parameters only",
+                ty.to_token_stream()
+            )
+        }));
     }
-    if definition.params.len() != args.len() {
-        return Err(format!(
-            "`{}`: `{}` takes {} type arguments; write each, as the reader does not read defaults",
-            ty.to_token_stream(),
-            definition.name,
-            definition.params.len()
-        ));
+    if definition.params.len() != args.len() + written.len() {
+        return Err(refuse(&|| {
+            format!(
+                "`{}`: `{}` takes {} type arguments; write each, as the reader does not read defaults",
+                ty.to_token_stream(),
+                definition.name,
+                definition.params.len()
+            )
+        }));
     }
-    match definition.kind.alias().cloned() {
-        Some(target) => {
+    let Kind::Alias(target) = &definition.kind else {
+        return Ok(Ty::Def(def, args));
+    };
+    let target = Rc::clone(target);
+    match params {
+        Params::Read(_) => {
             let env: Env = definition.params.iter().cloned().zip(args).collect();
-            of(resolver, c, m, &target, &env, depth + 1)
+            of(resolver, c, m, &target, Params::Read(&env), depth + 1)
         }
-        None => Ok(Ty::Def(def, args)),
+        Params::Unread(scope) => {
+            // An argument that is not a plain path names no type to index
+            // under, so a parameter it is written for stays unbound, and
+            // resolves to nothing if the alias names it.
+            let unread: Unread = definition
+                .params
+                .iter()
+                .zip(written)
+                .filter_map(|(param, arg)| match arg {
+                    syn::Type::Path(syn::TypePath { qself: None, .. }) => Some((
+                        param.clone(),
+                        Written {
+                            ty: arg,
+                            krate,
+                            module,
+                            params: scope,
+                        },
+                    )),
+                    _ => None,
+                })
+                .collect();
+            of(resolver, c, m, &target, Params::Unread(&unread), depth + 1)
+        }
     }
 }
 
