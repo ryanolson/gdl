@@ -129,7 +129,7 @@ A deployment-wide stop, such as `docker compose down`, takes the same path. Once
 
 ### The bound
 
-The drain bound is `[runtime] drain_ms`, which defaults to the runtime's `default_deadline` (600 s). It bounds every wait: the serving body, the wait for (A) and its `setup_timeout`, (B), and the ledger. A request whose own deadline is longer than the bound is cut at the bound. The exit can pass the bound by up to about 6 s: velo's shutdown takes at least 1 s, and leaving the hub takes up to 5 s.
+The drain bound is `[runtime] drain_ms`, which defaults to the runtime's `default_deadline` (600 s). It bounds every wait: the serving body, the wait for (A) and its `setup_timeout`, (B), and the ledger. A request whose own deadline is longer than the bound is cut at the bound. The exit can pass the bound by up to about 8.5 s. velo's shutdown gets what is left of the bound, but at least 1 s, to finish its requests. Then velo closes its TCP connections: up to 1.5 s to write what is already queued, and up to 1 s to close its listener. Leaving a hub that does not answer takes up to 5 s. An idle node whose hub answers stops at once.
 
 A stop during the barrier retires the instance too, without running the serving body. The instance has already said that it serves, so peers may route to it.
 

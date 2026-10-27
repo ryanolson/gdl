@@ -1061,13 +1061,15 @@ async fn a_lease_lost_while_draining_ends_the_wait() {
 
 /// A source and a sink launched at `hub` through proxies, each a process of
 /// its own, both serving: the source's body never finishes, the sink's
-/// returns at its stop. The source's process, the sink's, and the sink's
-/// serving task.
+/// returns at its stop, or, if `sink_holds`, never, so that its drain runs
+/// to its bound. The source's process, the sink's, and the sink's serving
+/// task.
 async fn proxied_pair(
     hub: &velo_hub::Hub,
     public: &Proxy,
     control: &Proxy,
     drain_ms: u64,
+    sink_holds: bool,
 ) -> (
     gdl_runtime::Process,
     gdl_runtime::Process,
@@ -1105,8 +1107,11 @@ async fn proxied_pair(
         Ok(())
     }));
     let (sink_running, sink_runs) = tokio::sync::oneshot::channel();
-    let sink_served = tokio::spawn(sink.serve(common::Idle, |_, shutdown| async move {
+    let sink_served = tokio::spawn(sink.serve(common::Idle, move |_, shutdown| async move {
         let _ = sink_running.send(());
+        if sink_holds {
+            std::future::pending::<()>().await;
+        }
         shutdown.cancelled().await;
         Ok(())
     }));
@@ -1130,7 +1135,7 @@ async fn a_silent_hub_does_not_hold_a_drain_past_its_bound() {
         Proxy::new(hub.control_addr()).await,
     );
     let (_front, sink, _front_served, sink_served) =
-        proxied_pair(&hub, &public, &control, 2_000).await;
+        proxied_pair(&hub, &public, &control, 2_000, false).await;
     public.set(Mode::Silent);
     control.set(Mode::Silent);
     let stopped = tokio::time::Instant::now();
@@ -1148,6 +1153,47 @@ async fn a_silent_hub_does_not_hold_a_drain_past_its_bound() {
     );
 }
 
+/// A hub whose control port stops answering, while its public port still
+/// answers, holds a stopped instance past its drain's bound by the leave's
+/// limit (5 s). The sink's body ignores the stop, so its drain runs to the
+/// bound; then the hub never answers the leave, which waits out its own
+/// limit. That limit is what this test measures, so it runs for about six
+/// seconds. velo here has nothing queued, so its shutdown adds no more
+/// than its 1 s allowance.
+#[tokio::test]
+async fn a_silent_control_port_holds_the_exit_at_most_six_seconds_past_the_bound() {
+    const DRAIN: Duration = Duration::from_millis(1_000);
+    let hub = hub(Duration::from_secs(30)).await;
+    let (public, control) = (
+        Proxy::new(hub.public_addr()).await,
+        Proxy::new(hub.control_addr()).await,
+    );
+    let (_front, sink, _front_served, sink_served) =
+        proxied_pair(&hub, &public, &control, DRAIN.as_millis() as u64, true).await;
+    control.set(Mode::Silent);
+    let stopped = tokio::time::Instant::now();
+    sink.stop();
+    let served = tokio::time::timeout(Duration::from_secs(20), sink_served)
+        .await
+        .expect("the sink left within twenty seconds")
+        .expect("the sink's task");
+    let took = stopped.elapsed();
+    let error = served.expect_err("the bound cut the sink's body");
+    assert_eq!(error.kind(), gdl::ErrorKind::Cancelled, "{error}");
+    // The leave waited out its limit: the hub never answered it, so the
+    // time past the bound is the case this test is about.
+    assert!(
+        took >= DRAIN + Duration::from_millis(4_500),
+        "the sink left {took:?} after its stop, before the leave's limit"
+    );
+    // The bound, at most a second for an idle velo, at most five for the
+    // leave, and two of slack.
+    assert!(
+        took < DRAIN + Duration::from_secs(6) + Duration::from_secs(2),
+        "a {DRAIN:?} drain took {took:?}"
+    );
+}
+
 /// The hub takes the retirement, then stops answering at the withdrawal of
 /// `ready` that follows, on both its ports. The lease is lost meanwhile,
 /// and the instance stops waiting for the hub then, in the withdrawal and
@@ -1160,7 +1206,7 @@ async fn a_lease_lost_while_withdrawing_a_retirement_ends_the_wait() {
         Proxy::new(hub.control_addr()).await,
     );
     let (_front, sink, _front_served, sink_served) =
-        proxied_pair(&hub, &public, &control, 20_000).await;
+        proxied_pair(&hub, &public, &control, 20_000, false).await;
     control.set(Mode::SilentAtDelete);
     let stopped = tokio::time::Instant::now();
     sink.stop();
@@ -1193,7 +1239,7 @@ async fn a_refused_drained_announcement_is_retried() {
         Proxy::new(hub.control_addr()).await,
     );
     let (front, sink, front_served, sink_served) =
-        proxied_pair(&hub, &public, &control, 20_000).await;
+        proxied_pair(&hub, &public, &control, 20_000, false).await;
     // Briefer than the lease's grace (five heartbeats of 200 ms), so the
     // leases survive it.
     public.set(Mode::Refuse);
