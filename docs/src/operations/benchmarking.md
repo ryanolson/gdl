@@ -360,6 +360,15 @@ At 16 B the gdl crossing costs 464 Ir per item more than velo alone, beyond both
 
 - **Two segments: live rosters add 1,937 Ir (+0.70%)**, with the change median above the base range.
 - **Three segments: inside the spread.** Its rounds spread over ±3% under callgrind, wider than any other setup here, so this row cannot show the 2% that gb300 measured. A guard on this host reads the two-segment row first.
+- **Larger counts do not settle three segments.** A second job ran three segments only, at 400 and 800 requests, with the same three builds and seven rounds. The load average was 3.5 falling to 1.6. The base rounds fall in two groups, 481k to 483k and 492k to 494k, so the base still spreads ±1.4%:
+
+| Three segments, 400 and 800 requests | Median (range) |
+|---|---|
+| `1ca7eba`, before live rosters | 482,911 (481,204 to 494,329) |
+| `83e9588`, live rosters | 491,334 (481,078 to 498,085) |
+| main `8b182e3` | 476,780 (474,781 to 484,613) |
+
+Live rosters move the median by +8,423 (+1.74%), inside the base range. The two-segment row stays the guard on this host, because its spread is about ±0.6%.
 - **One segment, the control: −1,240 (−1.3%)**, below the base range.
 
 Wall time for the same three commits (`request/reference-<n>-segments`, five runs each on cores 4 to 7, load average 1.7 to 2.8) is not a gate on this host. Base to rosters moved +1.0% on two segments and +4.6% on three, inside base ranges of 221 to 243 us and 488 to 522 us. The rosters runs on three segments alone ranged from 404 to 538 us.
